@@ -107,7 +107,12 @@ pub const Resolution = struct {
 pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
     var name_buf: [64]u8 = undefined;
     const name = tempName(io, &name_buf, "relic_tres_");
-    const file = dir.createFile(io, name, .{ .exclusive = true }) catch return .nanosecond;
+    // The handle is opened for reading as well as writing because the stat
+    // below is taken through it: Windows grants a write-only handle no right
+    // to read the file's attributes, so `stat` there is `AccessDenied` and
+    // the measurement never happens.
+    const file = dir.createFile(io, name, .{ .exclusive = true, .read = true }) catch
+        return .nanosecond;
     defer {
         file.close(io);
         dir.deleteFile(io, name) catch {};
@@ -117,6 +122,10 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
     var samples: u8 = 0;
     for (0..3) |_| {
         file.writeStreamingAll(io, "relic") catch break;
+        // Windows does not put a write's time on the file while the handle
+        // that made it is still open: without this every sample would be the
+        // time the file was created and the answer would be of nothing.
+        if (builtin.os.tag == .windows) file.sync(io) catch {};
         const s = file.stat(io) catch break;
         const nsec: u64 = @intCast(@mod(s.mtime.toNanoseconds(), std.time.ns_per_s));
         divisor = std.math.gcd(divisor, nsec);
@@ -124,8 +133,8 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
     }
     if (samples == 0) return .nanosecond;
     // Every sample reported zero: the filesystem keeps seconds and nothing
-    // below them.
-    if (divisor == 0) return .second;
+    // below them. That is a measurement and not an assumption, so it says so.
+    if (divisor == 0) return .{ .ns = std.time.ns_per_s, .measured = true };
 
     var unit: u64 = std.time.ns_per_s;
     while (unit > 1 and divisor % unit != 0) unit /= 10;
