@@ -180,11 +180,11 @@ pub fn permissionsFor(executable: bool) Io.File.Permissions {
 
 /// Whether directory entries are made durable after a rename.
 ///
-/// git does not do this: its `lockfile.c` calls `fsync` nowhere, and the four
-/// `fsync_component` calls in its tree are all on file descriptors. libgit2
-/// does, and it is a no-op on Windows. The choice is stated here rather than
-/// assumed: off by default, because the guarantee it adds is one git itself
-/// does not make, and on by request for a caller who wants it.
+/// git does not do this: its lock file code calls `fsync` nowhere, and every
+/// `fsync` in its tree is on a file descriptor. The choice is stated here
+/// rather than assumed: off by default, because the guarantee it adds is one
+/// git itself does not make, and on by request for a caller who wants it. It
+/// is a no-op on Windows, which has no equivalent.
 pub const sync_directories_default = false;
 
 /// `fsync` on a directory, so a name that was created or renamed is durable.
@@ -227,7 +227,7 @@ pub const OnContention = union(enum) {
     fail,
     /// Retry with a quadratic backoff starting at one millisecond and capped
     /// at a thousandfold, for up to this many milliseconds in total. git's
-    /// own constants, and the ones gitoxide independently chose.
+    /// own constants.
     wait_ms: u32,
 };
 
@@ -413,9 +413,8 @@ fn backoffMs(attempt: u32) i64 {
 /// Rename, retrying briefly on Windows.
 ///
 /// Antivirus and the search indexer hold a handle between the write and the
-/// rename; libgit2 retries ten times at five milliseconds and gitoxide chose
-/// the same constants independently. Elsewhere the first attempt is the only
-/// one.
+/// rename, and ten attempts at five milliseconds apart is what the field has
+/// settled on. Elsewhere the first attempt is the only one.
 pub fn renameWithRetry(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {
     if (builtin.os.tag != .windows) {
         return dir.rename(old_name, dir, new_name, io);

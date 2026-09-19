@@ -1,11 +1,12 @@
 //! What a path from a tree, an index or a ref name is allowed to be.
 //!
 //! A tree entry's name is written by whoever wrote the tree and becomes a
-//! filesystem path on checkout. Three of libgit2's published advisories are
-//! about exactly that, and two of the three are refused on every platform
-//! rather than on Windows only: an NTFS 8.3 alias reached `.git` past a
-//! long-name check and also fired under WSL on a mounted NTFS volume, and an
-//! alternate data stream spelled the same directory `.git::$INDEX_ALLOCATION`.
+//! filesystem path on checkout. Three published advisories against one widely
+//! used implementation are about exactly that, and two of the three have to be
+//! refused on every platform rather than on Windows only: an NTFS 8.3 alias
+//! reached `.git` past a long-name check and also fired under a Linux
+//! subsystem reading a mounted NTFS volume, and an alternate data stream
+//! spelled the same directory `.git::$INDEX_ALLOCATION`.
 //!
 //! So every rule here applies everywhere. A name that is harmless on the
 //! machine writing it is not harmless on the machine reading it.
