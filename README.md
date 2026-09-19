@@ -233,10 +233,11 @@ build. Three thousand files over sixty directories:
 
 | | |
 |---|---|
-| `addAll`, nothing staged yet | 453 ms |
-| `addAll`, nothing changed | 9.5 ms |
+| `addAll`, nothing staged yet | 450 ms |
+| `addAll`, nothing changed | 10 ms |
 | `writeTree`, cache tree invalid | 10 ms |
 | `writeTree`, cache tree valid | under a millisecond |
+| `status`, one file in ten changed | 12 ms |
 
 The warm numbers are what the stat shortcut and the `TREE` extension are for:
 an entry whose recorded stat still matches is neither opened nor hashed, and a
