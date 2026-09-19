@@ -169,6 +169,8 @@ pub const Stats = struct {
     /// exist, so a batch of any size makes at most that many, however many
     /// objects it writes.
     fan_out_created: u64 = 0,
+    /// Objects written into a pack rather than as loose files.
+    packed_written: u64 = 0,
 };
 
 /// The object database.
@@ -1234,8 +1236,35 @@ pub const Odb = struct {
                 }
             }
         }
+        try odb.assignHints(io, arena, entries.items);
         collected.entries = try arena.dupe(PackEntry, entries.items);
         return collected;
+    }
+
+    /// Give every object a delta hint by reading the trees that name it.
+    ///
+    /// A loose object on its own says nothing about where it came from, and
+    /// the delta search orders by exactly that: without a hint, two versions
+    /// of one file sort next to two versions of a different file of the same
+    /// length, and the window looks at the wrong base. One read per tree
+    /// buys the whole ordering.
+    fn assignHints(odb: *Odb, io: Io, arena: Allocator, entries: []PackEntry) Error!void {
+        var hints: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty;
+        defer hints.deinit(odb.gpa);
+        for (entries) |entry| {
+            const head = odb.readHeader(io, entry.oid) catch continue;
+            if (head.type != .tree) continue;
+            const found = odb.read(io, entry.oid) catch continue;
+            defer odb.gpa.free(found.bytes);
+            var it = object.Tree.parse(odb.kind, found.bytes).iterate();
+            while (it.next() catch null) |child| {
+                if (hints.contains(child.oid)) continue;
+                try hints.put(odb.gpa, child.oid, try arena.dupe(u8, child.name));
+            }
+        }
+        for (entries) |*entry| {
+            if (hints.get(entry.oid)) |name| entry.hint = name;
+        }
     }
 
     fn findPackByName(odb: *Odb, base: []const u8) ?*pack.Pack {
@@ -1401,6 +1430,79 @@ pub const Odb = struct {
         odb.cache.clear();
         odb.generation +%= 1;
         try odb.scanPacks(io, source_index);
+    }
+
+    /// A pack this database is filling, and the directory it lives in.
+    pub const OpenPack = struct {
+        writer: *pack.Writer,
+        dir: Io.Dir,
+    };
+
+    /// Begin a pack in this database's own `objects/pack`, for a caller
+    /// about to write many objects at once.
+    ///
+    /// The count is not stated, because the caller that wants this -- one
+    /// staging a working tree -- does not know it until the walk is over.
+    /// `finishPack` is what closes it; `abortPack` leaves nothing behind.
+    pub fn beginPack(odb: *Odb, io: Io, options: PackOptions) Error!OpenPack {
+        const source = odb.writableSource();
+        source.dir.createDir(io, "pack", .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => |e| return e,
+        };
+        const dir = try source.dir.openDir(io, "pack", .{ .iterate = true });
+        errdefer dir.close(io);
+        const writer = try pack.Writer.initCounting(odb.gpa, io, dir, odb.kind, .{
+            .sync = options.sync,
+            .compression = options.compression,
+        });
+        return .{ .writer = writer, .dir = dir };
+    }
+
+    /// Write an object into an open pack rather than as a loose file.
+    ///
+    /// An object the database already holds, or that this pack already
+    /// holds, is not written again -- which is the same rule `write`
+    /// follows, and what keeps a tree staged twice from being two entries.
+    pub fn writeInto(odb: *Odb, io: Io, filling: OpenPack, t: object.Type, bytes: []const u8) Error!Oid {
+        const named = hash.Hasher.nameObject(odb.kind, odb.hashOptions(), t.name(), bytes);
+        if (named.collision_attack) return error.CollisionAttack;
+        const oid = named.oid;
+        if (filling.writer.holds(oid) or try odb.exists(io, oid)) {
+            odb.stats.loose_present += 1;
+            return oid;
+        }
+        _ = try filling.writer.add(oid, t, bytes);
+        odb.stats.packed_written += 1;
+        return oid;
+    }
+
+    /// Close a pack begun with `beginPack` and make this database able to
+    /// read it.
+    ///
+    /// A pack with nothing in it is not written at all: `null` comes back
+    /// and the directory is as it was.
+    pub fn finishPack(odb: *Odb, io: Io, filling: OpenPack) Error!?pack.WriteReport {
+        defer {
+            filling.writer.deinit(io);
+            filling.dir.close(io);
+        }
+        if (filling.writer.count() == 0) {
+            filling.writer.abort(io);
+            return null;
+        }
+        const report = try filling.writer.finish(io);
+        if (filling.writer.options.sync == .batch) try fs.syncBarrier(io, filling.dir);
+        try odb.refresh(io);
+        return report;
+    }
+
+    /// Give up on a pack begun with `beginPack`, leaving nothing behind.
+    pub fn abortPack(odb: *Odb, io: Io, filling: OpenPack) void {
+        _ = odb;
+        filling.writer.abort(io);
+        filling.writer.deinit(io);
+        filling.dir.close(io);
     }
 
     /// How many packs are open. A caller measuring a repository asks here.

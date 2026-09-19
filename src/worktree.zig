@@ -19,6 +19,7 @@ const ignore = @import("ignore.zig");
 const attributes = @import("attributes.zig");
 const sparse = @import("sparse.zig");
 const dirscan = @import("dirscan.zig");
+const pack_mod = @import("pack.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -88,6 +89,9 @@ pub const AddOutcome = struct {
     racy_checked: u32 = 0,
     /// How many times a file was opened and hashed.
     hashed: u32 = 0,
+    /// The pack the new blobs went into, when `AddOptions.new_blobs` asked
+    /// for one and there was anything to write.
+    pack: ?pack_mod.WriteReport = null,
     /// Directories holding their own `.git`, which are neither descended
     /// into nor staged unless the index already has a gitlink for them.
     nested_repositories: u32 = 0,
@@ -98,9 +102,31 @@ pub const AddOutcome = struct {
     unsafe_paths: u32 = 0,
 };
 
+/// Where the blobs a staging pass writes are put.
+pub const NewBlobs = enum {
+    /// One loose object per blob, which is what git writes.
+    loose,
+    /// One pack for the whole call.
+    ///
+    /// A loose object costs two filesystem calls nothing can avoid -- the
+    /// exclusive create of its temporary and the rename that finishes it --
+    /// and on a staging pass over a few thousand new files those two are most
+    /// of the time. A pack is one file, so it costs them once.
+    ///
+    /// What it gives up is what a pack gives up: the objects are not
+    /// visible to a reader until the pass is over, and nothing is deltified,
+    /// because a delta wants the object before it and a walk hands them over
+    /// one at a time. `Odb.repack` is what deltifies.
+    pack,
+};
+
 /// How `addAll` behaves.
 pub const AddOptions = struct {
     rules: Rules = .{},
+    /// Where new blobs go.
+    new_blobs: NewBlobs = .loose,
+    /// How the pack is written, where `new_blobs` asks for one.
+    pack: odb_mod.PackOptions = .{ .delta = .none },
     /// Whether to stage deletions for index entries whose file is gone.
     /// `git add -A` does; `git add .` without `-A` does not.
     stage_deletions: bool = true,
@@ -141,6 +167,14 @@ pub fn addAll(
     var fresh: std.ArrayList(index_mod.Entry) = .empty;
     defer fresh.deinit(gpa);
 
+    // One pack for the whole call, where the caller asked for one. It is
+    // opened before the walk so that an object written early in it is in
+    // the same file as one written late, and finished after, so that a
+    // reader sees all of them or none.
+    var filling: ?Odb.OpenPack = null;
+    errdefer if (filling) |open| db.abortPack(io, open);
+    if (options.new_blobs == .pack) filling = try db.beginPack(io, options.pack);
+
     var walker: Walker = .{
         .gpa = gpa,
         .arena = &arena_instance,
@@ -153,8 +187,15 @@ pub fn addAll(
         .outcome = &outcome,
         .seen = &seen,
         .fresh = &fresh,
+        .filling = filling,
     };
     try walker.walk(options.prefix, 0);
+    if (filling) |open| {
+        // Out of the errdefer's reach before it is closed, because closing
+        // it releases it whether it succeeded or not.
+        filling = null;
+        outcome.pack = try db.finishPack(io, open);
+    }
     // New entries go in once, sorted once. A walk produces paths in tree
     // order and the index is in path order, so inserting them one at a time
     // would move the tail of the list on almost every file.
@@ -198,6 +239,8 @@ const Walker = struct {
     /// Entries for paths the index did not have, added in one sorted pass
     /// at the end. Their paths live in `arena`.
     fresh: *std.ArrayList(index_mod.Entry),
+    /// The pack the blobs go into, where the caller asked for one.
+    filling: ?Odb.OpenPack = null,
 
     fn walk(w: *Walker, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return;
@@ -368,7 +411,7 @@ const Walker = struct {
         if (found.kind == .sym_link) {
             var buf: [4096]u8 = undefined;
             const len = try w.wt.readLink(w.io, path, &buf);
-            return w.db.write(w.io, .blob, buf[0..len]);
+            return w.store(buf[0..len]);
         }
 
         const bytes = try fs.readFileSized(a, w.io, w.wt, path, found.stat.size, 1 << 31);
@@ -378,8 +421,14 @@ const Walker = struct {
                 return error.UnsupportedAttribute;
             }
             const converted = try attributes.toGit(a, bytes, applied, w.options.rules.core);
-            return w.db.write(w.io, .blob, converted.bytes);
+            return w.store(converted.bytes);
         }
+        return w.store(bytes);
+    }
+
+    /// Put a blob where this pass puts them.
+    fn store(w: *Walker, bytes: []const u8) Error!Oid {
+        if (w.filling) |open| return w.db.writeInto(w.io, open, .blob, bytes);
         return w.db.write(w.io, .blob, bytes);
     }
 };

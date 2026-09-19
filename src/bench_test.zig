@@ -335,3 +335,138 @@ test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
         try std.testing.expect(ref_ms > mine_ms * floor);
     }
 }
+
+test "benchmark: a staging pass into a pack, and writing one" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+
+    // The same tree staged twice: once as one loose object per blob, which
+    // is what git writes, and once as one pack for the whole pass. The two
+    // must produce the same tree, and the difference between them is the
+    // two filesystem calls a loose object costs.
+    var ms: [2]f64 = undefined;
+    var trees: [2]hash.Oid = undefined;
+    var packed_report: ?@import("pack.zig").WriteReport = null;
+
+    for ([_]worktree.NewBlobs{ .loose, .pack }, 0..) |where, pass| {
+        var repo_git = try testgit.Repo.init(gpa, io, &.{});
+        defer repo_git.deinit();
+        var content: [96]u8 = undefined;
+        for (0..file_count) |i| {
+            var path_buf: [64]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buf, "d{d}/f{d}.txt", .{ i % directory_count, i });
+            const text = try std.fmt.bufPrint(&content, "file {d}\nsome contents that are not all the same\n", .{i});
+            try repo_git.writeFile(io, path, text);
+        }
+
+        var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
+        defer repo.deinit(io);
+        var rules = try repo.loadIgnore(io);
+        defer rules.deinit();
+        var wt_rules = repo.worktreeRules();
+        wt_rules.ignore = &rules;
+        var index = try repo.openIndex(io);
+        defer index.deinit();
+
+        const start = Io.Clock.awake.now(io);
+        const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+            .rules = wt_rules,
+            .new_blobs = where,
+        });
+        ms[pass] = elapsedMs(io, start);
+        try std.testing.expectEqual(@as(u32, @intCast(file_count)), outcome.added);
+        if (where == .pack) packed_report = outcome.pack;
+        trees[pass] = try worktree.writeTree(gpa, io, &index, &repo.odb);
+    }
+    try std.testing.expect(trees[0].eql(trees[1]));
+    try std.testing.expect(packed_report != null);
+
+    // And writing a pack out of a repository that already has one commit's
+    // worth of history, which is where the delta window earns its keep.
+    var repo_git = try testgit.Repo.init(gpa, io, &.{});
+    defer repo_git.deinit();
+    const rounds: usize = switch (builtin.mode) {
+        .Debug => 3,
+        else => 6,
+    };
+    for (0..rounds) |round| {
+        for (0..20) |i| {
+            var path_buf: [64]u8 = undefined;
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(gpa);
+            for (0..(round + 1) * 80) |line| try body.print(gpa, "file {d} line {d} of text\n", .{ i, line });
+            try repo_git.writeFile(io, try std.fmt.bufPrint(&path_buf, "src/f{d}.txt", .{i}), body.items);
+        }
+        try repo_git.exec(io, &.{ "add", "-A" });
+        var msg: [32]u8 = undefined;
+        try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{round}) });
+    }
+
+    const git_dir = try repo_git.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    // With the path hints the trees give, which is what puts two versions
+    // of one file next to each other in the delta search.
+    var collected = try db.collectLoose(io, .{});
+    defer collected.deinit();
+    var loose_bytes: u64 = 0;
+    for (collected.entries) |entry| {
+        const head = try db.readHeader(io, entry.oid);
+        loose_bytes += head.size;
+    }
+
+    var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+
+    const whole_start = Io.Clock.awake.now(io);
+    const whole = try db.writePack(io, pack_dir, collected.entries, .{ .delta = .none });
+    const whole_ms = elapsedMs(io, whole_start);
+
+    const delta_start = Io.Clock.awake.now(io);
+    const deltified = try db.writePack(io, pack_dir, collected.entries, .{});
+    const delta_ms = elapsedMs(io, delta_start);
+
+    const seconds = @max(delta_ms, 0.001) / 1000.0;
+    const megabytes = @as(f64, @floatFromInt(loose_bytes)) / (1024.0 * 1024.0);
+    std.debug.print(
+        \\
+        \\  relic benchmark ({s}, {d} files staged, {d} objects packed)
+        \\    add -A       loose {d: >8.1} ms   into a pack {d: >8.1} ms
+        \\    write pack   whole {d: >8.1} ms   deltified {d: >8.1} ms
+        \\                 {d: >8.0} objects/s  {d: >6.1} MiB/s in  {d: >5.1}% of the bytes
+        \\    deltas       {d} of {d}
+        \\
+    , .{
+        @tagName(builtin.mode),
+        file_count,
+        deltified.objects,
+        ms[0],
+        ms[1],
+        whole_ms,
+        delta_ms,
+        @as(f64, @floatFromInt(deltified.objects)) / seconds,
+        megabytes / seconds,
+        100.0 * @as(f64, @floatFromInt(deltified.pack_bytes)) / @as(f64, @floatFromInt(whole.pack_bytes)),
+        deltified.deltas,
+        deltified.objects,
+    });
+
+    // The window has to find something: these files are each other's
+    // neighbours a few lines apart.
+    try std.testing.expect(deltified.deltas > 0);
+    // And what it finds has to be worth having.
+    try std.testing.expect(deltified.pack_bytes < whole.pack_bytes);
+    // A pack is one file where loose objects are one file each, so a staging
+    // pass into a pack cannot be the slower of the two by any margin worth
+    // the name. A ratio, because a busy runner moves both.
+    try std.testing.expect(ms[1] < ms[0] * 1.5 + 5.0);
+
+    const budget_ms: f64 = switch (builtin.mode) {
+        .Debug => 120_000,
+        else => 40_000,
+    };
+    try std.testing.expect(delta_ms < budget_ms);
+    try std.testing.expect(whole_ms < budget_ms);
+}

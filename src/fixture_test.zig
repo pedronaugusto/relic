@@ -1589,3 +1589,70 @@ test "loose objects move into a pack and the pack is the only copy" {
     }
     try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
+
+const worktree_mod = @import("worktree.zig");
+const repo_mod2 = @import("repo.zig");
+
+test "a staging pass that writes a pack stages what one that writes loose objects does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+
+    // The same tree twice, staged both ways, and the two must come out with
+    // the same name -- and git must read either of them.
+    var trees: [2]Oid = undefined;
+    for ([_]worktree_mod.NewBlobs{ .loose, .pack }, 0..) |where, pass| {
+        var repo_git = try testgit.Repo.init(gpa, io, &.{});
+        defer repo_git.deinit();
+        for (0..40) |i| {
+            var name_buf: [64]u8 = undefined;
+            var body: [128]u8 = undefined;
+            try repo_git.writeFile(
+                io,
+                try std.fmt.bufPrint(&name_buf, "d{d}/f{d}.txt", .{ i % 5, i }),
+                try std.fmt.bufPrint(&body, "file {d}\nwith a line or two of content\n", .{i}),
+            );
+        }
+        // Two files with the same bytes, so the pack meets a name twice.
+        try repo_git.writeFile(io, "same-a.txt", "identical\n");
+        try repo_git.writeFile(io, "same-b.txt", "identical\n");
+
+        var repo = try repo_mod2.Repository.open(gpa, io, repo_git.dir, .{});
+        defer repo.deinit(io);
+        var rules = try repo.loadIgnore(io);
+        defer rules.deinit();
+        var wt_rules = repo.worktreeRules();
+        wt_rules.ignore = &rules;
+
+        var index = try repo.openIndex(io);
+        defer index.deinit();
+        const outcome = try worktree_mod.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+            .rules = wt_rules,
+            .new_blobs = where,
+        });
+        try std.testing.expectEqual(@as(u32, 42), outcome.added);
+        if (where == .pack) {
+            try std.testing.expect(outcome.pack != null);
+            // Forty-one distinct blobs: the two identical files are one
+            // object, and a pack cannot hold a name twice.
+            try std.testing.expectEqual(@as(u32, 41), outcome.pack.?.objects);
+            try std.testing.expectEqual(@as(usize, 1), repo.odb.packCount());
+        } else {
+            try std.testing.expect(outcome.pack == null);
+        }
+
+        trees[pass] = try worktree_mod.writeTree(gpa, io, &index, &repo.odb);
+        try index.write(io, repo.git_dir, "index", .{});
+
+        // git reads what was written, whichever way it was written.
+        var hex: [hash.max_hex_len]u8 = undefined;
+        const listed = try repo_git.run(io, &.{ "ls-tree", "-r", "--name-only", trees[pass].hex(&hex) });
+        defer gpa.free(listed);
+        try std.testing.expect(std.mem.indexOf(u8, listed, "same-b.txt") != null);
+        try repo_git.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+
+        const status = try repo_git.run(io, &.{ "status", "--porcelain" });
+        defer gpa.free(status);
+        try std.testing.expect(std.mem.indexOf(u8, status, "A  same-a.txt") != null);
+    }
+    try std.testing.expect(trees[0].eql(trees[1]));
+}
