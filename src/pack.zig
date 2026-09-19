@@ -1566,11 +1566,23 @@ pub const Writer = struct {
         var idx_name_buf: [64]u8 = undefined;
         const idx_name = std.fmt.bufPrint(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
 
-        const index_bytes = try w.writeIndex(io, checksum, idx_name);
+        // The index goes to a temporary of its own, because the order the two
+        // become visible in is not free to choose: a reader finds a pack by
+        // its `.idx`, so an index that is there before its pack is a reader
+        // opening a file that does not exist. Pack first, index second, which
+        // is git's order too.
+        var idx_temp_buf: [64]u8 = undefined;
+        const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
+        const index_bytes = try w.writeIndex(io, checksum, idx_temp);
+        errdefer w.dir.deleteFile(io, idx_temp) catch {};
 
         fs.renameWithRetry(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
             w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
-            w.dir.deleteFile(io, idx_name) catch {};
+            w.dir.deleteFile(io, idx_temp) catch {};
+            return err;
+        };
+        fs.renameWithRetry(io, w.dir, idx_temp, idx_name) catch |err| {
+            w.dir.deleteFile(io, idx_temp) catch {};
             return err;
         };
 

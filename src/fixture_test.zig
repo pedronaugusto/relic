@@ -1414,3 +1414,178 @@ test "a deltified pack is read back by git and by this, object for object" {
     // picks, and fsck is silent about all three packs at once.
     try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
+
+test "reachability from the tips is the object set git lists" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    for (0..3) |round| {
+        try repo.writeFile(io, "a.txt", "a\n");
+        var name_buf: [64]u8 = undefined;
+        try repo.writeFile(io, try std.fmt.bufPrint(&name_buf, "deep/dir{d}/b.txt", .{round}), "b\n");
+        try repo.exec(io, &.{ "add", "-A" });
+        var msg: [32]u8 = undefined;
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{round}) });
+    }
+    try repo.exec(io, &.{ "tag", "-a", "v1", "-m", "a tag" });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    const head_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head_text);
+    const tag_text = try repo.line(io, &.{ "rev-parse", "v1" });
+    defer gpa.free(tag_text);
+    const tips = [_]Oid{
+        try Oid.parse(.sha1, head_text),
+        try Oid.parse(.sha1, tag_text),
+    };
+
+    var collected = try db.collectReachable(io, &tips, .{});
+    defer collected.deinit();
+
+    var mine: Oid.Set = .empty;
+    defer mine.deinit(gpa);
+    var with_hint: usize = 0;
+    for (collected.entries) |entry| {
+        try mine.put(gpa, entry.oid, {});
+        if (entry.hint.len != 0) with_hint += 1;
+    }
+    // Blobs and trees below the root carry the path they were found at.
+    try std.testing.expect(with_hint > 0);
+
+    const listed = try repo.run(io, &.{ "rev-list", "--objects", "--all" });
+    defer gpa.free(listed);
+    var theirs: Oid.Set = .empty;
+    defer theirs.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, listed, '\n');
+    while (lines.next()) |line| {
+        if (line.len < 40) continue;
+        try theirs.put(gpa, try Oid.parse(.sha1, line[0..40]), {});
+    }
+    // `rev-list --objects` does not list the tag object itself, so it is the
+    // one name this has and that does not.
+    try std.testing.expectEqual(theirs.count(), mine.count());
+    var it = theirs.keyIterator();
+    while (it.next()) |oid| try std.testing.expect(mine.contains(oid.*));
+    // The tag object itself, which `rev-list --objects --all` also lists.
+    try std.testing.expect(mine.contains(tips[1]));
+
+    // Naming a pack leaves its objects out, which is what an incremental
+    // pack is.
+    try repo.exec(io, &.{ "gc", "-q" });
+    var packed_db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer packed_db.deinit(io);
+    var pack_names: std.ArrayList([]const u8) = .empty;
+    defer pack_names.deinit(gpa);
+    var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |n| gpa.free(n);
+        names.deinit(gpa);
+    }
+    var dir_it = pack_dir.iterate();
+    while (try dir_it.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        try names.append(gpa, try gpa.dupe(u8, entry.name[0 .. entry.name.len - 4]));
+    }
+    for (names.items) |n| try pack_names.append(gpa, n);
+    try std.testing.expect(pack_names.items.len >= 1);
+
+    var incremental = try packed_db.collectReachable(io, &tips, .{ .exclude_packs = pack_names.items });
+    defer incremental.deinit();
+    try std.testing.expectEqual(@as(usize, 0), incremental.entries.len);
+}
+
+test "loose objects move into a pack and the pack is the only copy" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    for (0..5) |round| {
+        for (0..4) |i| {
+            var name_buf: [64]u8 = undefined;
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(gpa);
+            for (0..(round + 1) * 50) |line| try body.print(gpa, "file {d} line {d}\n", .{ i, line });
+            try repo.writeFile(io, try std.fmt.bufPrint(&name_buf, "src/f{d}.txt", .{i}), body.items);
+        }
+        try repo.exec(io, &.{ "add", "-A" });
+        var msg: [32]u8 = undefined;
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{round}) });
+    }
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{ .sync = .batch });
+    defer db.deinit(io);
+
+    var before = try db.listObjects(io);
+    defer before.deinit(gpa);
+    try std.testing.expect(before.count() > 10);
+
+    const report = try db.packLoose(io, .{});
+    try std.testing.expect(report.written != null);
+    try std.testing.expectEqual(before.count(), report.written.?.objects);
+    try std.testing.expectEqual(@as(u32, @intCast(before.count())), report.loose_removed);
+
+    // Nothing is loose any more, and every name still reads -- through the
+    // same database, which had the loose files taken from under it.
+    var after = try db.listObjects(io);
+    defer after.deinit(gpa);
+    try std.testing.expectEqual(before.count(), after.count());
+    var it = before.keyIterator();
+    while (it.next()) |oid| {
+        try std.testing.expect(after.contains(oid.*));
+        const found = try db.read(io, oid.*);
+        gpa.free(found.bytes);
+    }
+    try std.testing.expectEqual(@as(usize, 1), db.packCount());
+
+    // git agrees the repository is whole.
+    try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+    const shown = try repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(shown);
+    try std.testing.expectEqual(@as(usize, 40), shown.len);
+
+    // A second call has nothing to do.
+    const again = try db.packLoose(io, .{});
+    try std.testing.expect(again.written == null);
+
+    // A repack of the same objects with the same settings writes the same
+    // bytes, so it is the same pack under the same name: nothing is removed
+    // and nothing is lost.
+    const same = try db.repack(io, .{ .remove_packs = true });
+    try std.testing.expect(same.written != null);
+    try std.testing.expect(same.written.?.name.eql(report.written.?.name));
+    try std.testing.expectEqual(@as(u32, 0), same.packs_removed);
+    try std.testing.expectEqual(@as(usize, 1), db.packCount());
+
+    // A repack that writes different bytes is a different pack, and that one
+    // does replace the pack it was built from.
+    const repacked = try db.repack(io, .{
+        .remove_packs = true,
+        .pack = .{ .delta = .none, .sync = .batch },
+    });
+    try std.testing.expect(repacked.written != null);
+    try std.testing.expectEqual(before.count(), repacked.written.?.objects);
+    try std.testing.expectEqual(@as(u32, 1), repacked.packs_removed);
+    try std.testing.expectEqual(@as(usize, 1), db.packCount());
+
+    var final = try db.listObjects(io);
+    defer final.deinit(gpa);
+    try std.testing.expectEqual(before.count(), final.count());
+    var check = before.keyIterator();
+    while (check.next()) |oid| {
+        try std.testing.expect(final.contains(oid.*));
+        const found = try db.read(io, oid.*);
+        gpa.free(found.bytes);
+    }
+    try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+}

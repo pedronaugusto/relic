@@ -85,7 +85,8 @@ pub const Error = error{
     /// `objects/info/alternates` pointed at itself, or the chain was deeper
     /// than `Options.max_alternate_depth`.
     AlternatesTooDeep,
-} || pack.Error || pack.WriteError || object.HeaderParseError || Allocator.Error ||
+} || pack.Error || pack.WriteError || object.HeaderParseError ||
+    object.ParseError || object.TreeParseError || Allocator.Error ||
     Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error ||
     Io.File.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirError || Io.Dir.ReadFileAllocError || Io.Dir.Iterator.Error;
@@ -1035,6 +1036,371 @@ pub const Odb = struct {
         }
 
         return try writer.finish(io);
+    }
+
+    /// What `collectReachable` and `collectLoose` leave out.
+    pub const CollectOptions = struct {
+        /// Names to leave out whatever else says they belong.
+        exclude: []const Oid = &.{},
+        /// Packs, by the base name a directory listing gives -- `pack-<name>`
+        /// -- whose objects are left out. This is what makes a pack
+        /// incremental: it names the packs it is being added to, and holds
+        /// only what they do not.
+        exclude_packs: []const []const u8 = &.{},
+    };
+
+    /// A set of objects to pack, and the hints that came with them.
+    ///
+    /// Everything is owned by the arena, so releasing it is one call.
+    pub const Collected = struct {
+        arena: std.heap.ArenaAllocator,
+        entries: []PackEntry,
+
+        pub fn deinit(c: *Collected) void {
+            c.arena.deinit();
+            c.* = undefined;
+        }
+    };
+
+    /// Every object reachable from `tips`: the commits behind them, the trees
+    /// those name, and the blobs under the trees.
+    ///
+    /// Each object carries the path it was found at, which is the hint the
+    /// delta search orders by. A commit or a tag carries none, because
+    /// neither has a path.
+    pub fn collectReachable(
+        odb: *Odb,
+        io: Io,
+        tips: []const Oid,
+        options: CollectOptions,
+    ) Error!Collected {
+        var collected: Collected = .{ .arena = .init(odb.gpa), .entries = &.{} };
+        errdefer collected.arena.deinit();
+        const arena = collected.arena.allocator();
+
+        var skip: Oid.Set = .empty;
+        defer skip.deinit(odb.gpa);
+        for (options.exclude) |oid| try skip.put(odb.gpa, oid, {});
+        for (options.exclude_packs) |base| {
+            const p = odb.findPackByName(base) orelse continue;
+            var it = p.index.iterate();
+            while (try it.next()) |found| try skip.put(odb.gpa, found.oid, {});
+        }
+
+        var seen: Oid.Set = .empty;
+        defer seen.deinit(odb.gpa);
+        var entries: std.ArrayList(PackEntry) = .empty;
+        defer entries.deinit(odb.gpa);
+
+        // Commits and tags first, so that every tree is reached through the
+        // commit that names it and a path is known by the time a blob is.
+        var commits: std.ArrayList(Oid) = .empty;
+        defer commits.deinit(odb.gpa);
+        var trees: std.ArrayList(struct { oid: Oid, path: []const u8 }) = .empty;
+        defer trees.deinit(odb.gpa);
+
+        for (tips) |tip| try commits.append(odb.gpa, tip);
+        var at: usize = 0;
+        while (at < commits.items.len) : (at += 1) {
+            const oid = commits.items[at];
+            if (seen.contains(oid)) continue;
+            const found = odb.read(io, oid) catch |err| switch (err) {
+                error.ObjectNotFound => continue,
+                else => |e| return e,
+            };
+            defer odb.gpa.free(found.bytes);
+            try seen.put(odb.gpa, oid, {});
+            switch (found.type) {
+                .commit => {
+                    var commit = try object.Commit.parse(odb.gpa, odb.kind, found.bytes);
+                    defer commit.deinit();
+                    try trees.append(odb.gpa, .{ .oid = commit.tree, .path = "" });
+                    for (commit.parents) |parent| try commits.append(odb.gpa, parent);
+                    if (!skip.contains(oid)) try entries.append(odb.gpa, .{ .oid = oid });
+                },
+                .tag => {
+                    var tag = try object.Tag.parse(odb.gpa, odb.kind, found.bytes);
+                    defer tag.deinit();
+                    try commits.append(odb.gpa, tag.target);
+                    if (!skip.contains(oid)) try entries.append(odb.gpa, .{ .oid = oid });
+                },
+                .tree => try trees.append(odb.gpa, .{ .oid = oid, .path = "" }),
+                .blob => if (!skip.contains(oid)) try entries.append(odb.gpa, .{ .oid = oid }),
+            }
+        }
+
+        var tree_at: usize = 0;
+        while (tree_at < trees.items.len) : (tree_at += 1) {
+            const node = trees.items[tree_at];
+            if (seen.contains(node.oid)) continue;
+            const found = odb.read(io, node.oid) catch |err| switch (err) {
+                error.ObjectNotFound => continue,
+                else => |e| return e,
+            };
+            defer odb.gpa.free(found.bytes);
+            if (found.type != .tree) continue;
+            try seen.put(odb.gpa, node.oid, {});
+            if (!skip.contains(node.oid)) {
+                try entries.append(odb.gpa, .{ .oid = node.oid, .hint = node.path });
+            }
+
+            var it = object.Tree.parse(odb.kind, found.bytes).iterate();
+            while (try it.next()) |entry| {
+                const path = if (node.path.len == 0)
+                    try arena.dupe(u8, entry.name)
+                else
+                    try std.fmt.allocPrint(arena, "{s}/{s}", .{ node.path, entry.name });
+                switch (entry.mode) {
+                    .tree => try trees.append(odb.gpa, .{ .oid = entry.oid, .path = path }),
+                    // A gitlink names a commit in another repository, which
+                    // this one does not hold and must not be asked for.
+                    .gitlink => {},
+                    else => {
+                        if (seen.contains(entry.oid)) continue;
+                        try seen.put(odb.gpa, entry.oid, {});
+                        if (!skip.contains(entry.oid)) {
+                            try entries.append(odb.gpa, .{ .oid = entry.oid, .hint = path });
+                        }
+                    },
+                }
+            }
+        }
+
+        collected.entries = try arena.dupe(PackEntry, entries.items);
+        return collected;
+    }
+
+    /// Every object that is loose in the writable object directory.
+    ///
+    /// No hints: a loose object on its own says nothing about where it came
+    /// from. `collectReachable` is the one that knows.
+    pub fn collectLoose(odb: *Odb, io: Io, options: CollectOptions) Error!Collected {
+        return odb.collectWritable(io, options, false);
+    }
+
+    /// Every object the writable object directory holds, loose and packed.
+    ///
+    /// An alternate's objects are not here: they belong to the repository
+    /// that holds them, and packing them into this one would make a second
+    /// copy rather than move anything.
+    pub fn collectAll(odb: *Odb, io: Io, options: CollectOptions) Error!Collected {
+        return odb.collectWritable(io, options, true);
+    }
+
+    fn collectWritable(odb: *Odb, io: Io, options: CollectOptions, packed_too: bool) Error!Collected {
+        var collected: Collected = .{ .arena = .init(odb.gpa), .entries = &.{} };
+        errdefer collected.arena.deinit();
+        const arena = collected.arena.allocator();
+
+        var skip: Oid.Set = .empty;
+        defer skip.deinit(odb.gpa);
+        for (options.exclude) |oid| try skip.put(odb.gpa, oid, {});
+        for (options.exclude_packs) |base| {
+            const p = odb.findPackByName(base) orelse continue;
+            var it = p.index.iterate();
+            while (try it.next()) |found| try skip.put(odb.gpa, found.oid, {});
+        }
+
+        var entries: std.ArrayList(PackEntry) = .empty;
+        defer entries.deinit(odb.gpa);
+        const source = odb.writableSource();
+        var top = source.dir.iterate();
+        while (try top.next(io)) |entry| {
+            if (entry.kind != .directory or entry.name.len != 2) continue;
+            if (hexPair(entry.name) == null) continue;
+            const sub = source.dir.openDir(io, entry.name, .{ .iterate = true }) catch continue;
+            defer sub.close(io);
+            var it = sub.iterate();
+            while (try it.next(io)) |file| {
+                if (file.name.len != odb.kind.hexLen() - 2) continue;
+                var full: [hash.max_hex_len]u8 = undefined;
+                @memcpy(full[0..2], entry.name);
+                @memcpy(full[2..][0..file.name.len], file.name);
+                const oid = Oid.parse(odb.kind, full[0 .. 2 + file.name.len]) catch continue;
+                if (skip.contains(oid)) continue;
+                try entries.append(odb.gpa, .{ .oid = oid });
+            }
+        }
+        if (packed_too) {
+            var seen: Oid.Set = .empty;
+            defer seen.deinit(odb.gpa);
+            for (entries.items) |e| try seen.put(odb.gpa, e.oid, {});
+            for (source.packs.items) |*p| {
+                var it = p.index.iterate();
+                while (try it.next()) |found| {
+                    if (skip.contains(found.oid) or seen.contains(found.oid)) continue;
+                    try seen.put(odb.gpa, found.oid, {});
+                    try entries.append(odb.gpa, .{ .oid = found.oid });
+                }
+            }
+        }
+        collected.entries = try arena.dupe(PackEntry, entries.items);
+        return collected;
+    }
+
+    fn findPackByName(odb: *Odb, base: []const u8) ?*pack.Pack {
+        for (odb.sources.items) |*source| {
+            for (source.pack_names.items, 0..) |name, i| {
+                if (std.mem.eql(u8, name, base)) return &source.packs.items[i];
+            }
+        }
+        return null;
+    }
+
+    /// How a repack behaves.
+    pub const RepackOptions = struct {
+        /// How the pack itself is built.
+        pack: PackOptions = .{ .sync = .batch },
+        /// Whether the loose objects the new pack now holds are removed.
+        remove_loose: bool = true,
+        /// Whether the packs the new one replaces are removed.
+        ///
+        /// Off, and not because it is hard: removing a pack a *second*
+        /// process has open is safe on one platform and refused on another,
+        /// and this package cannot tell whether one has. A caller that knows
+        /// nothing else is reading the repository turns it on.
+        remove_packs: bool = false,
+    };
+
+    /// What a repack did.
+    pub const RepackReport = struct {
+        /// The pack that was written, or `null` when there was nothing to
+        /// write.
+        written: ?pack.WriteReport = null,
+        /// How many loose object files were removed.
+        loose_removed: u32 = 0,
+        /// How many packs the new one replaced and took away.
+        packs_removed: u32 = 0,
+    };
+
+    /// Put every loose object into a pack and take the loose files away.
+    ///
+    /// The order is the one a running git has to survive: the pack is
+    /// written and made durable, the index beside it likewise, this database
+    /// re-scans so that it can read the new pack itself, and only then are
+    /// the loose files removed -- and only the ones the new pack is confirmed
+    /// to hold. At no point is an object in neither place.
+    ///
+    /// A reader that misses an object re-scans the pack directory once before
+    /// it gives up, which is what closes the remaining window: a git that
+    /// listed the packs before this ran and looked for a loose object after
+    /// it finished finds the pack on its second look.
+    pub fn packLoose(odb: *Odb, io: Io, options: RepackOptions) Error!RepackReport {
+        var collected = try odb.collectLoose(io, .{});
+        defer collected.deinit();
+        return odb.packCollected(io, collected.entries, options, false);
+    }
+
+    /// Put every object the writable directory holds, loose and packed, into
+    /// one pack.
+    ///
+    /// The same order as `packLoose`, and the same rule: nothing is taken
+    /// away until the new pack is written, durable and readable here.
+    pub fn repack(odb: *Odb, io: Io, options: RepackOptions) Error!RepackReport {
+        var collected = try odb.collectAll(io, .{});
+        defer collected.deinit();
+        return odb.packCollected(io, collected.entries, options, options.remove_packs);
+    }
+
+    fn packCollected(
+        odb: *Odb,
+        io: Io,
+        entries: []const PackEntry,
+        options: RepackOptions,
+        remove_packs: bool,
+    ) Error!RepackReport {
+        if (entries.len == 0) return .{};
+        const collected: struct { entries: []const PackEntry } = .{ .entries = entries };
+
+        const source = odb.writableSource();
+        source.dir.createDir(io, "pack", .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => |e| return e,
+        };
+        var pack_dir = try source.dir.openDir(io, "pack", .{ .iterate = true });
+        defer pack_dir.close(io);
+
+        // Which packs were there before, so that the ones this replaces can
+        // be named afterwards.
+        var old_packs: std.ArrayList([]u8) = .empty;
+        defer {
+            for (old_packs.items) |name| odb.gpa.free(name);
+            old_packs.deinit(odb.gpa);
+        }
+        if (remove_packs) {
+            for (source.pack_names.items) |name| try old_packs.append(odb.gpa, try odb.gpa.dupe(u8, name));
+        }
+
+        const written = try odb.writePack(io, pack_dir, collected.entries, options.pack);
+        if (options.pack.sync == .batch) try fs.syncBarrier(io, pack_dir);
+
+        // The new pack has to be readable here before anything is taken
+        // away, because it is this database that will be asked for those
+        // objects next.
+        try odb.refresh(io);
+
+        var report: RepackReport = .{ .written = written };
+        var hex: [hash.max_hex_len]u8 = undefined;
+        var base_buf: [hash.max_hex_len + 8]u8 = undefined;
+        const base = std.fmt.bufPrint(&base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch unreachable;
+        const opened = odb.findPackByName(base) orelse return report;
+
+        if (options.remove_loose) for (collected.entries) |entry| {
+            // Never remove a loose object the pack does not hold. The pack
+            // was written from this list, so this is a belt on top of a
+            // brace -- and it is the one that makes a mistake here a wasted
+            // syscall rather than a lost object.
+            if ((try opened.index.find(entry.oid)) == null) continue;
+            var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+            const path = odb.loosePath(entry.oid, &path_buf);
+            source.dir.deleteFile(io, path) catch continue;
+            report.loose_removed += 1;
+        };
+
+        if (remove_packs and old_packs.items.len != 0) {
+            // The old packs are closed here first, because a file this
+            // process still holds open is one Windows will not let it
+            // remove.
+            try odb.reopenPacks(io, 0);
+            for (old_packs.items) |old_base| {
+                // A repack of the same objects with the same settings writes
+                // the same bytes, which gives the same checksum and so the
+                // same name: the new pack *is* the old one, and removing it
+                // would remove the repository.
+                if (std.mem.eql(u8, old_base, base)) continue;
+                var name_buf: [128]u8 = undefined;
+                var removed = false;
+                for ([_][]const u8{ ".idx", ".pack", ".rev", ".bitmap" }) |extension| {
+                    const name = std.fmt.bufPrint(&name_buf, "{s}{s}", .{ old_base, extension }) catch continue;
+                    if (pack_dir.deleteFile(io, name)) {
+                        if (std.mem.eql(u8, extension, ".pack")) removed = true;
+                    } else |_| {}
+                }
+                if (removed) report.packs_removed += 1;
+            }
+            try odb.reopenPacks(io, 0);
+        }
+        return report;
+    }
+
+    /// Close and re-open every pack of one source, so that a pack removed
+    /// from the disk is gone from here too.
+    fn reopenPacks(odb: *Odb, io: Io, source_index: usize) Error!void {
+        const source = &odb.sources.items[source_index];
+        for (source.packs.items) |*p| p.deinit(io);
+        source.packs.clearRetainingCapacity();
+        for (source.pack_names.items) |name| odb.gpa.free(name);
+        source.pack_names.clearRetainingCapacity();
+        if (source.midx) |*m| {
+            m.deinit();
+            source.midx = null;
+        }
+        source.midx_packs.clearRetainingCapacity();
+        // The delta base cache is keyed on which pack an offset was in, and
+        // the packs have just been renumbered.
+        odb.cache.clear();
+        odb.generation +%= 1;
+        try odb.scanPacks(io, source_index);
     }
 
     /// How many packs are open. A caller measuring a repository asks here.
