@@ -1221,3 +1221,103 @@ test "a repository with a multi-pack index looks objects up through it" {
     }
     try std.testing.expectEqual(@as(u64, 0), plain.stats.midx_hits);
 }
+
+test "a pack this wrote is a pack git verifies, object for object" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    // A few commits, so there are commits, trees and blobs of several sizes.
+    for (0..4) |round| {
+        for (0..6) |i| {
+            var name_buf: [64]u8 = undefined;
+            const path = try std.fmt.bufPrint(&name_buf, "dir{d}/file{d}.txt", .{ i % 2, i });
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(gpa);
+            for (0..(round + 1) * 40) |line| try body.print(gpa, "line {d} of file {d}\n", .{ line, i });
+            try repo.writeFile(io, path, body.items);
+        }
+        var msg: [32]u8 = undefined;
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "round {d}", .{round}) });
+    }
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    var names = try db.listObjects(io);
+    defer names.deinit(gpa);
+    try std.testing.expect(names.count() > 20);
+
+    try git_dir.createDirPath(io, "objects/pack");
+    var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+
+    var w = try pack.Writer.init(gpa, io, pack_dir, .sha1, @intCast(names.count()), .{});
+    defer w.deinit(io);
+    var it = names.keyIterator();
+    while (it.next()) |oid| {
+        const found = try db.read(io, oid.*);
+        defer gpa.free(found.bytes);
+        _ = try w.add(oid.*, found.type, found.bytes);
+    }
+    const report = try w.finish(io);
+    try std.testing.expectEqual(@as(u32, @intCast(names.count())), report.objects);
+
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const text = report.name.hex(&hex);
+    var idx_path: [96]u8 = undefined;
+    const idx = try std.fmt.bufPrint(&idx_path, ".git/objects/pack/pack-{s}.idx", .{text});
+    var pack_path: [96]u8 = undefined;
+    const pack_file = try std.fmt.bufPrint(&pack_path, ".git/objects/pack/pack-{s}.pack", .{text});
+
+    // git's own two checkers: one walks the index and the pack together, the
+    // other rebuilds the index from the pack and compares.
+    const listing = try repo.run(io, &.{ "verify-pack", "-v", idx });
+    defer gpa.free(listing);
+    try std.testing.expect(std.mem.indexOf(u8, listing, "chain length") != null or
+        std.mem.indexOf(u8, listing, "non delta") != null);
+    try repo.exec(io, &.{ "index-pack", "--verify", pack_file });
+
+    // Every object in it reads back through git, as the type and the length
+    // this wrote.
+    var check = names.keyIterator();
+    while (check.next()) |oid| {
+        const shown = try repo.line(io, &.{ "cat-file", "-s", oid.hex(&hex) });
+        defer gpa.free(shown);
+        const found = try db.read(io, oid.*);
+        defer gpa.free(found.bytes);
+        try std.testing.expectEqual(found.bytes.len, try std.fmt.parseInt(usize, shown, 10));
+    }
+
+    // And with the loose objects taken away, the pack is the only copy and
+    // git is still silent about the repository.
+    var top = git_dir.openDir(io, "objects", .{ .iterate = true }) catch unreachable;
+    defer top.close(io);
+    var dirs = top.iterate();
+    var removed: usize = 0;
+    while (try dirs.next(io)) |entry| {
+        if (entry.kind != .directory or entry.name.len != 2) continue;
+        var sub = try top.openDir(io, entry.name, .{ .iterate = true });
+        var files: std.ArrayList([]u8) = .empty;
+        defer {
+            for (files.items) |f| gpa.free(f);
+            files.deinit(gpa);
+        }
+        var inner = sub.iterate();
+        while (try inner.next(io)) |file| try files.append(gpa, try gpa.dupe(u8, file.name));
+        for (files.items) |name| {
+            try sub.deleteFile(io, name);
+            removed += 1;
+        }
+        sub.close(io);
+    }
+    try std.testing.expect(removed > 0);
+    try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+    const head_tree = try repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(head_tree);
+    try std.testing.expectEqual(@as(usize, 40), head_tree.len);
+}

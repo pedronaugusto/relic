@@ -1224,3 +1224,645 @@ test "an offset delta pointing forwards is refused" {
     defer p.deinit(io);
     try std.testing.expectError(error.BadDeltaOffset, p.readAt(io, at, null, 0));
 }
+
+//=====================================================================
+// Writing a pack
+//
+// A pack is a header, its entries in the order the writer chose, and a
+// trailing checksum over everything before it; the `.idx` beside it is the
+// names sorted, a fanout over the first byte, a CRC per entry and the
+// offsets. Nothing here decides *which* objects go in or *what order* they
+// go in -- that is a policy, and it lives with the object database.
+//
+// The pack is written straight to a temporary file as the entries arrive, so
+// what is held in memory is one object's bytes, the deflate state, and
+// twenty-eight bytes per object for the index. Nothing is threaded.
+//=====================================================================
+
+/// Errors from writing a pack.
+pub const WriteError = error{
+    /// More objects were added than `init` was told to expect, or fewer.
+    /// The count goes in the header, which is written first.
+    ObjectCountMismatch,
+    /// More objects than the format's count field can hold.
+    TooManyObjects,
+    /// An offset delta whose base is not already in this pack. An offset
+    /// delta may only point backwards.
+    DeltaBaseNotWritten,
+} || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
+    Io.File.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
+    Io.Dir.CreateDirError;
+
+/// How hard a pack's entries are compressed.
+///
+/// git's `pack.compression` falls back to `core.compression`, which is
+/// zlib's default. A pack is written once and read many times, which is why
+/// the default here is that one rather than the level a loose object gets.
+pub const Compression = enum {
+    /// zlib's level 1, which is what a loose object gets here.
+    fast,
+    /// zlib's level 6, which is git's own default for a pack.
+    default,
+    /// zlib's level 9.
+    best,
+
+    fn options(c: Compression) flate.Compress.Options {
+        return switch (c) {
+            .fast => .level_1,
+            .default => .level_6,
+            .best => .level_9,
+        };
+    }
+};
+
+/// How a pack is written.
+pub const WriteOptions = struct {
+    /// How hard the two files are pushed towards the disk before they are
+    /// renamed into place. A pack that a loose object is about to be deleted
+    /// for wants `batch` at least.
+    sync: fs.Sync = .none,
+    /// How hard the entries are compressed.
+    compression: Compression = .default,
+};
+
+/// What a finished pack turned out to be.
+pub const WriteReport = struct {
+    /// The pack's own trailing checksum, which is the name both files carry:
+    /// `pack-<name>.pack` and `pack-<name>.idx`. It is what git names a pack
+    /// after too.
+    name: Oid,
+    /// How many objects the pack holds.
+    objects: u32,
+    /// The size of the `.pack`, its trailer included.
+    pack_bytes: u64,
+    /// The size of the `.idx`.
+    index_bytes: u64,
+    /// How many of the entries are deltas.
+    deltas: u32,
+};
+
+/// One entry, as the index will need it.
+const WrittenEntry = struct {
+    oid: Oid,
+    offset: u64,
+    crc: u32,
+};
+
+/// A writer for a packfile and its index.
+///
+/// `init` states how many objects will be added, because that number goes in
+/// the header and the header is written first. Every `add` streams straight
+/// to the file; `finish` writes the index and renames both into place under
+/// the name the pack's checksum gives it.
+pub const Writer = struct {
+    gpa: Allocator,
+    kind: Kind,
+    dir: Io.Dir,
+    options: WriteOptions,
+    expected: u32,
+
+    temp: [64]u8,
+    temp_len: usize,
+    file: Io.File,
+    file_writer: Io.File.Writer,
+    file_buffer: []u8,
+
+    sink: Sink,
+    window: []u8,
+    compress: *flate.Compress,
+
+    entries: std.ArrayList(WrittenEntry),
+    deltas: u32 = 0,
+    finished: bool = false,
+
+    /// How many bytes of the file are buffered before a write.
+    const file_buffer_len = 64 * 1024;
+    /// The buffer the compressor drains through on its way to the sink.
+    const sink_buffer_len = 16 * 1024;
+
+    /// Everything written to the pack goes through here, so the pack's own
+    /// checksum, the CRC of the entry being written and the offset of the
+    /// next one are all kept without a second pass over the bytes.
+    const Sink = struct {
+        out: *Io.Writer,
+        hasher: hash.Hasher,
+        crc: std.hash.Crc32,
+        count: u64,
+        writer: Io.Writer,
+        buffer: [sink_buffer_len]u8,
+
+        fn emit(s: *Sink, bytes: []const u8) Io.Writer.Error!void {
+            if (bytes.len == 0) return;
+            s.hasher.update(bytes);
+            s.crc.update(bytes);
+            s.count += bytes.len;
+            try s.out.writeAll(bytes);
+        }
+
+        fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+            const s: *Sink = @alignCast(@fieldParentPtr("writer", w));
+            if (w.end != 0) {
+                try s.emit(w.buffer[0..w.end]);
+                w.end = 0;
+            }
+            var consumed: usize = 0;
+            for (data[0 .. data.len - 1]) |slice| {
+                try s.emit(slice);
+                consumed += slice.len;
+            }
+            const pattern = data[data.len - 1];
+            for (0..splat) |_| try s.emit(pattern);
+            return consumed + pattern.len * splat;
+        }
+    };
+
+    /// Begin a pack in `dir` holding exactly `object_count` objects.
+    ///
+    /// `dir` is where `pack-<name>.pack` and `pack-<name>.idx` will land,
+    /// which in a repository is `objects/pack`. Nothing is visible under
+    /// either name until `finish`.
+    pub fn init(
+        gpa: Allocator,
+        io: Io,
+        dir: Io.Dir,
+        kind: Kind,
+        object_count: u32,
+        options: WriteOptions,
+    ) WriteError!*Writer {
+        const w = try gpa.create(Writer);
+        errdefer gpa.destroy(w);
+
+        var name_buf: [64]u8 = undefined;
+        const temp = fs.tempName(io, &name_buf, "tmp_pack_");
+        const file = try dir.createFile(io, temp, .{ .exclusive = true });
+        errdefer {
+            file.close(io);
+            dir.deleteFile(io, temp) catch {};
+        }
+
+        const file_buffer = try gpa.alloc(u8, file_buffer_len);
+        errdefer gpa.free(file_buffer);
+        const window = try gpa.alloc(u8, flate.max_window_len);
+        errdefer gpa.free(window);
+        const compress = try gpa.create(flate.Compress);
+        errdefer gpa.destroy(compress);
+
+        w.* = .{
+            .gpa = gpa,
+            .kind = kind,
+            .dir = dir,
+            .options = options,
+            .expected = object_count,
+            .temp = undefined,
+            .temp_len = temp.len,
+            .file = file,
+            .file_writer = undefined,
+            .file_buffer = file_buffer,
+            .sink = undefined,
+            .window = window,
+            .compress = compress,
+            .entries = .empty,
+        };
+        @memcpy(w.temp[0..temp.len], temp);
+        w.file_writer = file.writer(io, file_buffer);
+        w.sink = .{
+            .out = &w.file_writer.interface,
+            .hasher = .init(kind),
+            .crc = .init(),
+            .count = 0,
+            .writer = .{ .buffer = &w.sink.buffer, .vtable = &.{ .drain = Sink.drain } },
+            .buffer = undefined,
+        };
+        // The buffer field has to point at the struct's own storage, which
+        // only exists once the struct does.
+        w.sink.writer.buffer = &w.sink.buffer;
+
+        var header: [12]u8 = undefined;
+        @memcpy(header[0..4], "PACK");
+        std.mem.writeInt(u32, header[4..8], 2, .big);
+        std.mem.writeInt(u32, header[8..12], object_count, .big);
+        try w.sink.emit(&header);
+        return w;
+    }
+
+    /// Release everything. Safe after `finish` and after `abort`.
+    pub fn deinit(w: *Writer, io: Io) void {
+        if (!w.finished) w.abort(io);
+        w.entries.deinit(w.gpa);
+        w.gpa.free(w.file_buffer);
+        w.gpa.free(w.window);
+        w.gpa.destroy(w.compress);
+        const gpa = w.gpa;
+        gpa.destroy(w);
+    }
+
+    /// Give up, leaving the directory as it was.
+    pub fn abort(w: *Writer, io: Io) void {
+        if (w.finished) return;
+        w.file.close(io);
+        w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
+        w.finished = true;
+    }
+
+    /// How many objects have been added.
+    pub fn count(w: *const Writer) u32 {
+        return @intCast(w.entries.items.len);
+    }
+
+    /// Where the next entry will begin.
+    pub fn offset(w: *const Writer) u64 {
+        return w.sink.count;
+    }
+
+    /// Add a whole object. Returns the offset the entry begins at, which is
+    /// what an offset delta against it needs.
+    pub fn add(w: *Writer, oid: Oid, t: object.Type, bytes: []const u8) WriteError!u64 {
+        const bits: u3 = switch (t) {
+            .commit => 1,
+            .tree => 2,
+            .blob => 3,
+            .tag => 4,
+        };
+        return w.addEntry(oid, bits, bytes.len, &.{}, bytes);
+    }
+
+    /// Add an object stored as a delta against one already in this pack.
+    ///
+    /// `base_offset` must be the offset an earlier `add` returned: the format
+    /// only allows an offset delta to point backwards, and a reader that met
+    /// one pointing forwards would be reading an object that is not there
+    /// yet.
+    pub fn addOfsDelta(w: *Writer, oid: Oid, base_offset: u64, delta_bytes: []const u8) WriteError!u64 {
+        const at = w.sink.count;
+        if (base_offset >= at) return error.DeltaBaseNotWritten;
+        var buf: [16]u8 = undefined;
+        const encoded = encodeBackOffset(&buf, at - base_offset);
+        w.deltas += 1;
+        return w.addEntry(oid, 6, delta_bytes.len, encoded, delta_bytes);
+    }
+
+    /// Add an object stored as a delta against a name, which need not be in
+    /// this pack. A reader resolves it through the database.
+    pub fn addRefDelta(w: *Writer, oid: Oid, base: Oid, delta_bytes: []const u8) WriteError!u64 {
+        w.deltas += 1;
+        return w.addEntry(oid, 7, delta_bytes.len, base.raw(), delta_bytes);
+    }
+
+    fn addEntry(
+        w: *Writer,
+        oid: Oid,
+        type_bits: u3,
+        payload_len: u64,
+        extra: []const u8,
+        payload: []const u8,
+    ) WriteError!u64 {
+        if (w.entries.items.len >= w.expected) return error.ObjectCountMismatch;
+        const at = w.sink.count;
+        w.sink.crc = .init();
+
+        var head: [16]u8 = undefined;
+        const head_len = encodeTypeAndSize(&head, type_bits, payload_len);
+        try w.sink.emit(head[0..head_len]);
+        if (extra.len != 0) try w.sink.emit(extra);
+
+        w.compress.* = try flate.Compress.init(
+            &w.sink.writer,
+            w.window,
+            .zlib,
+            w.options.compression.options(),
+        );
+        try w.compress.writer.writeAll(payload);
+        try w.compress.writer.flush();
+        try w.compress.finish();
+        try w.sink.writer.flush();
+
+        try w.entries.append(w.gpa, .{ .oid = oid, .offset = at, .crc = w.sink.crc.final() });
+        return at;
+    }
+
+    /// Close the pack, write its index, and rename both into place.
+    ///
+    /// The name both files carry is the pack's own trailing checksum, which
+    /// is what git names a pack after.
+    pub fn finish(w: *Writer, io: Io) WriteError!WriteReport {
+        if (w.entries.items.len != w.expected) return error.ObjectCountMismatch;
+        if (w.entries.items.len > std.math.maxInt(u32)) return error.TooManyObjects;
+
+        const checksum = w.sink.hasher.final();
+        try w.sink.out.writeAll(checksum.raw());
+        const pack_bytes = w.sink.count + w.kind.rawLen();
+        try w.file_writer.interface.flush();
+        switch (w.options.sync) {
+            .none => {},
+            .batch, .per_file => try w.file.sync(io),
+        }
+        w.file.close(io);
+        w.finished = true;
+
+        var hex: [hash.max_hex_len]u8 = undefined;
+        const text = checksum.hex(&hex);
+        var pack_name_buf: [64]u8 = undefined;
+        const pack_name = std.fmt.bufPrint(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
+        var idx_name_buf: [64]u8 = undefined;
+        const idx_name = std.fmt.bufPrint(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
+
+        const index_bytes = try w.writeIndex(io, checksum, idx_name);
+
+        fs.renameWithRetry(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
+            w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
+            w.dir.deleteFile(io, idx_name) catch {};
+            return err;
+        };
+
+        return .{
+            .name = checksum,
+            .objects = @intCast(w.entries.items.len),
+            .pack_bytes = pack_bytes,
+            .index_bytes = index_bytes,
+            .deltas = w.deltas,
+        };
+    }
+
+    /// The `.idx`, version 2: the magic, the fanout over the first byte of
+    /// each name, the names sorted, a CRC per entry, the offsets with the
+    /// 64-bit table for anything past two gigabytes, the pack's checksum and
+    /// the index's own.
+    fn writeIndex(w: *Writer, io: Io, pack_checksum: Oid, idx_name: []const u8) WriteError!u64 {
+        std.mem.sort(WrittenEntry, w.entries.items, {}, lessThanWritten);
+
+        const raw_len = w.kind.rawLen();
+
+        const buffer = try w.gpa.alloc(u8, file_buffer_len);
+        defer w.gpa.free(buffer);
+        const file = try w.dir.createFile(io, idx_name, .{ .exclusive = false, .truncate = true });
+        var failed = true;
+        defer if (failed) {
+            file.close(io);
+            w.dir.deleteFile(io, idx_name) catch {};
+        };
+        var fw = file.writer(io, buffer);
+        var hasher: hash.Hasher = .init(w.kind);
+        var written: u64 = 0;
+
+        const Emit = struct {
+            fn go(out: *Io.Writer, h: *hash.Hasher, total: *u64, bytes: []const u8) Io.Writer.Error!void {
+                h.update(bytes);
+                total.* += bytes.len;
+                try out.writeAll(bytes);
+            }
+        };
+        const out = &fw.interface;
+
+        var head: [8]u8 = undefined;
+        @memcpy(head[0..4], idx_magic);
+        std.mem.writeInt(u32, head[4..8], 2, .big);
+        try Emit.go(out, &hasher, &written, &head);
+
+        // The fanout: for each first byte, how many names are at or below it.
+        var fanout: [256]u32 = @splat(0);
+        for (w.entries.items) |e| fanout[e.oid.raw()[0]] += 1;
+        var running: u32 = 0;
+        for (&fanout) |*slot| {
+            running += slot.*;
+            slot.* = running;
+        }
+        for (fanout) |value| {
+            var bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &bytes, value, .big);
+            try Emit.go(out, &hasher, &written, &bytes);
+        }
+
+        for (w.entries.items) |e| try Emit.go(out, &hasher, &written, e.oid.raw()[0..raw_len]);
+        for (w.entries.items) |e| {
+            var bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &bytes, e.crc, .big);
+            try Emit.go(out, &hasher, &written, &bytes);
+        }
+
+        // Anything past two gigabytes goes in the 64-bit table, and its row
+        // in the 32-bit table is that row's position with the high bit set.
+        var large: std.ArrayList(u64) = .empty;
+        defer large.deinit(w.gpa);
+        for (w.entries.items) |e| {
+            var bytes: [4]u8 = undefined;
+            if (e.offset <= std.math.maxInt(u31)) {
+                std.mem.writeInt(u32, &bytes, @intCast(e.offset), .big);
+            } else {
+                std.mem.writeInt(u32, &bytes, 0x8000_0000 | @as(u32, @intCast(large.items.len)), .big);
+                try large.append(w.gpa, e.offset);
+            }
+            try Emit.go(out, &hasher, &written, &bytes);
+        }
+        for (large.items) |value| {
+            var bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &bytes, value, .big);
+            try Emit.go(out, &hasher, &written, &bytes);
+        }
+
+        try Emit.go(out, &hasher, &written, pack_checksum.raw()[0..raw_len]);
+        const own = hasher.final();
+        written += raw_len;
+        try out.writeAll(own.raw()[0..raw_len]);
+        try out.flush();
+        switch (w.options.sync) {
+            .none => {},
+            .batch, .per_file => try file.sync(io),
+        }
+        file.close(io);
+        failed = false;
+        return written;
+    }
+};
+
+test "a written pack and its index read back, entry kind for entry kind" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const blob_bytes = "a blob with some length to it, so the delta has something to copy\n";
+    const tree_bytes = "100644 a\x00" ++ ("\x01" ** 20);
+    const commit_bytes = "tree " ++ ("0" ** 40) ++ "\nsome header lines\n\nmessage\n";
+
+    const blob_oid = hash.Hasher.nameObject(.sha1, .{}, "blob", blob_bytes).oid;
+    const tree_oid = hash.Hasher.nameObject(.sha1, .{}, "tree", tree_bytes).oid;
+    const commit_oid = hash.Hasher.nameObject(.sha1, .{}, "commit", commit_bytes).oid;
+    // Two objects that really are the blob with something on the end, so
+    // that the names in the index are the names their content gives them and
+    // `verify` has something to check.
+    const ofs_target = blob_bytes ++ "one\n";
+    const ref_target = blob_bytes ++ "two\n";
+    const ofs_oid = hash.Hasher.nameObject(.sha1, .{}, "blob", ofs_target).oid;
+    const ref_oid = hash.Hasher.nameObject(.sha1, .{}, "blob", ref_target).oid;
+
+    const ofs_delta_bytes = try copyThenInsert(gpa, blob_bytes.len, "one\n");
+    defer gpa.free(ofs_delta_bytes);
+    const ref_delta_bytes = try copyThenInsert(gpa, blob_bytes.len, "two\n");
+    defer gpa.free(ref_delta_bytes);
+
+    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 5, .{});
+    defer w.deinit(io);
+    const blob_at = try w.add(blob_oid, .blob, blob_bytes);
+    _ = try w.add(tree_oid, .tree, tree_bytes);
+    _ = try w.add(commit_oid, .commit, commit_bytes);
+    _ = try w.addOfsDelta(ofs_oid, blob_at, ofs_delta_bytes);
+    _ = try w.addRefDelta(ref_oid, blob_oid, ref_delta_bytes);
+    const report = try w.finish(io);
+
+    try std.testing.expectEqual(@as(u32, 5), report.objects);
+    try std.testing.expectEqual(@as(u32, 2), report.deltas);
+
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var base_buf: [64]u8 = undefined;
+    const base = try std.fmt.bufPrint(&base_buf, "pack-{s}", .{report.name.hex(&hex)});
+
+    var p = try Pack.open(gpa, io, tmp.dir, base, .sha1, .{});
+    defer p.deinit(io);
+    try std.testing.expectEqual(@as(u32, 5), p.index.count);
+    try std.testing.expectEqual(@as(u32, 5), p.count);
+    try std.testing.expect(p.index.pack_checksum.eql(report.name));
+
+    // Every name the index carries resolves, and every object comes back as
+    // what went in.
+    const wanted: []const struct { oid: Oid, t: object.Type, bytes: []const u8 } = &.{
+        .{ .oid = blob_oid, .t = .blob, .bytes = blob_bytes },
+        .{ .oid = tree_oid, .t = .tree, .bytes = tree_bytes },
+        .{ .oid = commit_oid, .t = .commit, .bytes = commit_bytes },
+        .{ .oid = ofs_oid, .t = .blob, .bytes = ofs_target },
+        .{ .oid = ref_oid, .t = .blob, .bytes = ref_target },
+    };
+    for (wanted) |want| {
+        const found = (try p.index.find(want.oid)).?;
+        const got = try p.readAt(io, found.offset, null, 0);
+        defer gpa.free(got.bytes);
+        try std.testing.expectEqual(want.t, got.type);
+        try std.testing.expectEqualSlices(u8, want.bytes, got.bytes);
+    }
+
+    // And the pack checks out against its own trailer and every CRC.
+    try p.verifyChecksum(io);
+    const checked = try p.verify(io, null, 0);
+    try std.testing.expectEqual(@as(u32, 5), checked.objects);
+}
+
+test "a pack with no objects is still a pack" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 0, .{});
+    defer w.deinit(io);
+    const report = try w.finish(io);
+    try std.testing.expectEqual(@as(u32, 0), report.objects);
+    try std.testing.expectEqual(@as(u64, 12 + 20), report.pack_bytes);
+
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var base_buf: [64]u8 = undefined;
+    var p = try Pack.open(gpa, io, tmp.dir, try std.fmt.bufPrint(&base_buf, "pack-{s}", .{report.name.hex(&hex)}), .sha1, .{});
+    defer p.deinit(io);
+    try std.testing.expectEqual(@as(u32, 0), p.index.count);
+}
+
+test "a writer that is given the wrong count refuses rather than lying in the header" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 1, .{});
+    defer w.deinit(io);
+    try std.testing.expectError(error.ObjectCountMismatch, w.finish(io));
+    _ = try w.add(testName(1), .blob, "x");
+    try std.testing.expectError(error.ObjectCountMismatch, w.add(testName(2), .blob, "y"));
+
+    // An offset delta may only point backwards.
+    var w2 = try Writer.init(gpa, io, tmp.dir, .sha1, 1, .{});
+    defer w2.deinit(io);
+    const identity = try identityDelta(gpa, 1);
+    defer gpa.free(identity);
+    try std.testing.expectError(error.DeltaBaseNotWritten, w2.addOfsDelta(testName(3), 1 << 20, identity));
+}
+
+test "an aborted pack leaves the directory as it was" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    {
+        var w = try Writer.init(gpa, io, tmp.dir, .sha1, 2, .{});
+        defer w.deinit(io);
+        _ = try w.add(testName(7), .blob, "abandoned");
+    }
+    var it = tmp.dir.iterate();
+    try std.testing.expect((try it.next(io)) == null);
+}
+
+/// A delta that copies the whole base and then inserts `suffix`, by hand:
+/// the two sizes, one copy command with a one-byte offset and a one-byte
+/// size, and one insert command. Good for a base under 256 bytes and a
+/// suffix under 128, which is what these tests use.
+fn copyThenInsert(gpa: Allocator, base_len: usize, suffix: []const u8) ![]u8 {
+    std.debug.assert(base_len < 256 and suffix.len < 128 and suffix.len > 0);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.append(gpa, @intCast(base_len));
+    const target_len = base_len + suffix.len;
+    var value = target_len;
+    while (true) {
+        var byte: u8 = @truncate(value & 0x7f);
+        value >>= 7;
+        if (value != 0) byte |= 0x80;
+        try out.append(gpa, byte);
+        if (value == 0) break;
+    }
+    // Copy: the command byte says which offset and size bytes follow.
+    try out.append(gpa, 0x80 | 0x01 | 0x10);
+    try out.append(gpa, 0);
+    try out.append(gpa, @intCast(base_len));
+    // Insert: the command byte is the length.
+    try out.append(gpa, @intCast(suffix.len));
+    try out.appendSlice(gpa, suffix);
+    return out.toOwnedSlice(gpa);
+}
+
+fn lessThanWritten(_: void, a: WrittenEntry, b: WrittenEntry) bool {
+    return std.mem.order(u8, a.oid.raw(), b.oid.raw()) == .lt;
+}
+
+/// The type-and-size byte string a pack entry begins with: three type bits
+/// and four size bits in the first byte, then seven size bits per byte after
+/// it. Returns how many bytes it took.
+fn encodeTypeAndSize(buf: []u8, type_bits: u3, size: u64) usize {
+    var value = size;
+    var i: usize = 0;
+    var first: u8 = (@as(u8, type_bits) << 4) | @as(u8, @truncate(value & 0x0f));
+    value >>= 4;
+    if (value != 0) first |= 0x80;
+    buf[i] = first;
+    i += 1;
+    while (value != 0) {
+        var byte: u8 = @truncate(value & 0x7f);
+        value >>= 7;
+        if (value != 0) byte |= 0x80;
+        buf[i] = byte;
+        i += 1;
+    }
+    return i;
+}
+
+/// The biased offset varint an offset delta carries, which is a different
+/// encoding from the size varint a few bytes earlier in the same entry.
+fn encodeBackOffset(buf: []u8, back: u64) []const u8 {
+    var pos: usize = buf.len - 1;
+    var value = back;
+    buf[pos] = @intCast(value & 0x7f);
+    while (value >> 7 != 0) {
+        value >>= 7;
+        value -= 1;
+        pos -= 1;
+        buf[pos] = 0x80 | @as(u8, @intCast(value & 0x7f));
+    }
+    return buf[pos..];
+}
