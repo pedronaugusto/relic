@@ -366,7 +366,7 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Sixteen fuzz tests cover every parser: the loose object header, a tree, a
+Fifteen fuzz tests cover every parser: the loose object header, a tree, a
 commit, a tag, an identity line, a mode, the pack index, a delta, the index
 file, `packed-refs`, the reflog, the config file, `.gitignore`,
 `.gitattributes`, the glob matcher, the commit-graph, the multi-pack index and
