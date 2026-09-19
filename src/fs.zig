@@ -73,18 +73,31 @@ pub const Stat = struct {
     /// Take the fields `std.Io` reports, and the three it does not from the
     /// platform.
     pub fn fromIo(s: Io.File.Stat, extra: platstat.Extra) Stat {
-        const mtime = s.mtime.toNanoseconds();
-        const ctime = s.ctime.toNanoseconds();
+        return fromParts(
+            s.mtime.toNanoseconds(),
+            s.ctime.toNanoseconds(),
+            @bitCast(@as(i64, @intCast(s.inode))),
+            s.size,
+            extra,
+        );
+    }
+
+    /// Take every field from one platform stat.
+    pub fn fromFull(f: platstat.Full) Stat {
+        return fromParts(@intCast(f.mtime_ns), @intCast(f.ctime_ns), f.inode, f.size, f.extra);
+    }
+
+    fn fromParts(mtime: i96, ctime: i96, inode: u64, size: u64, extra: platstat.Extra) Stat {
         return .{
             .ctime_sec = splitSec(ctime),
             .ctime_nsec = splitNsec(ctime),
             .mtime_sec = splitSec(mtime),
             .mtime_nsec = splitNsec(mtime),
             .dev = extra.dev,
-            .ino = @truncate(@as(u64, @bitCast(@as(i64, @intCast(s.inode))))),
+            .ino = @truncate(inode),
             .uid = extra.uid,
             .gid = extra.gid,
-            .size = @truncate(s.size),
+            .size = @truncate(size),
         };
     }
 
@@ -149,7 +162,22 @@ pub const StatError = Io.File.OpenError || Io.File.StatError;
 ///
 /// Symlinks are not followed: a symlink is a symlink, which is what a tree
 /// entry with mode 120000 means.
+///
+/// One call where the platform reports all of it, two where it does not. A
+/// walk over a working tree asks this once per entry, so the difference is a
+/// syscall per file.
 pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) StatError!?Entry {
+    switch (platstat.full(dir, sub_path)) {
+        .absent => return null,
+        .found => |f| return .{
+            .stat = .fromFull(f),
+            .kind = f.kind,
+            .executable = f.mode & 0o100 != 0,
+        },
+        // Either the platform has no such call, or it failed for a reason the
+        // caller should see named rather than guessed at. `std.Io` names it.
+        .unavailable => {},
+    }
     const s = dir.statFile(io, sub_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return null,
         else => |e| return e,
@@ -557,6 +585,42 @@ pub fn tempName(io: Io, buf: []u8, prefix: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}{s}", .{ prefix, hex }) catch unreachable;
 }
 
+/// Errors from reading a file whose length is already known.
+pub const ReadSizedError = Io.File.OpenError || Io.File.ReadPositionalError ||
+    Io.Dir.ReadFileAllocError || Allocator.Error;
+
+/// Read a file a stat has already measured.
+///
+/// The walk that found the file already knows how long it is, so the `fstat`
+/// a general read does to find that out is one syscall per file that a cold
+/// pass over a working tree pays for nothing. The size is a hint and not a
+/// promise: a file that shrank gives back what is there, and a file that grew
+/// is read again the general way.
+///
+/// The bytes are the caller's.
+pub fn readFileSized(
+    gpa: Allocator,
+    io: Io,
+    dir: Io.Dir,
+    sub_path: []const u8,
+    size: u64,
+    max_bytes: usize,
+) ReadSizedError![]u8 {
+    if (size > max_bytes) return error.StreamTooLong;
+    const file = try dir.openFile(io, sub_path, .{});
+    defer file.close(io);
+    const buf = try gpa.alloc(u8, @intCast(size));
+    errdefer gpa.free(buf);
+    const n = try file.readPositionalAll(io, buf, 0);
+    if (n < buf.len) return gpa.realloc(buf, n);
+    // The file is at least as long as the stat said. One byte past the end
+    // says whether it is longer, which is the only case this cannot finish.
+    var probe: [1]u8 = undefined;
+    if (try file.readPositional(io, &.{&probe}, size) == 0) return buf;
+    gpa.free(buf);
+    return dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes));
+}
+
 /// Read a whole file, or `null` if it is not there.
 ///
 /// The returned bytes are the caller's. `max_bytes` bounds the allocation, so
@@ -599,6 +663,79 @@ pub fn join(gpa: Allocator, parts: []const []const u8) Allocator.Error![]u8 {
         first = false;
     }
     return out;
+}
+
+test "one stat and two stats describe a path the same way" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = tmp.dir;
+
+    try dir.writeFile(io, .{ .sub_path = "plain", .data = "some bytes\n" });
+    try dir.createDir(io, "sub", .default_dir);
+    var has_link = true;
+    dir.symLink(io, "plain", "link", .{}) catch {
+        has_link = false;
+    };
+
+    const names: []const []const u8 = if (has_link)
+        &.{ "plain", "sub", "link" }
+    else
+        &.{ "plain", "sub" };
+    for (names) |name| {
+        const one = (try statAt(io, dir, name)).?;
+        // The two-call path, which is what a platform without a full stat
+        // takes. Both must agree, or a walk would see a different working
+        // tree depending on the platform.
+        const s = try dir.statFile(io, name, .{ .follow_symlinks = false });
+        const two: Entry = .{
+            .stat = .fromIo(s, platstat.statAt(dir, name)),
+            .kind = s.kind,
+            .executable = isExecutable(s.permissions),
+        };
+        try std.testing.expectEqual(two.kind, one.kind);
+        try std.testing.expectEqual(two.executable, one.executable);
+        try std.testing.expectEqual(two.stat.size, one.stat.size);
+        try std.testing.expectEqual(two.stat.ino, one.stat.ino);
+        try std.testing.expectEqual(two.stat.dev, one.stat.dev);
+        try std.testing.expectEqual(two.stat.uid, one.stat.uid);
+        try std.testing.expectEqual(two.stat.gid, one.stat.gid);
+        try std.testing.expectEqual(two.stat.mtime_sec, one.stat.mtime_sec);
+        try std.testing.expectEqual(two.stat.mtime_nsec, one.stat.mtime_nsec);
+    }
+    try std.testing.expect((try statAt(io, dir, "not-there")) == null);
+}
+
+test "a sized read gives the whole file whatever the size said" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = tmp.dir;
+
+    try dir.writeFile(io, .{ .sub_path = "f", .data = "twelve bytes" });
+
+    // The size a stat reported.
+    const exact = try readFileSized(gpa, io, dir, "f", 12, 1 << 20);
+    defer gpa.free(exact);
+    try std.testing.expectEqualStrings("twelve bytes", exact);
+
+    // A file that grew after the stat: the read is started again rather than
+    // cut short at the length the stat gave.
+    const grown = try readFileSized(gpa, io, dir, "f", 4, 1 << 20);
+    defer gpa.free(grown);
+    try std.testing.expectEqualStrings("twelve bytes", grown);
+
+    // A file that shrank: what is there is what comes back.
+    const shrunk = try readFileSized(gpa, io, dir, "f", 64, 1 << 20);
+    defer gpa.free(shrunk);
+    try std.testing.expectEqualStrings("twelve bytes", shrunk);
+
+    const empty = try readFileSized(gpa, io, dir, "f", 0, 1 << 20);
+    defer gpa.free(empty);
+    try std.testing.expectEqualStrings("twelve bytes", empty);
+
+    try std.testing.expectError(error.StreamTooLong, readFileSized(gpa, io, dir, "f", 12, 4));
 }
 
 test "a lock is refused, not broken, and says who holds it" {

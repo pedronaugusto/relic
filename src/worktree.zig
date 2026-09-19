@@ -360,7 +360,7 @@ const Walker = struct {
             return w.db.write(w.io, .blob, buf[0..len]);
         }
 
-        const bytes = try w.wt.readFileAlloc(w.io, path, a, .limited(1 << 31));
+        const bytes = try fs.readFileSized(a, w.io, w.wt, path, found.stat.size, 1 << 31);
         if (w.options.rules.attrs) |attrs| {
             const applied = try attrs.lookup(a, path, false);
             if (attributes.unsupported(applied, w.options.rules.required_filters)) |_| {

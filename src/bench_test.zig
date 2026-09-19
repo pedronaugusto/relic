@@ -80,6 +80,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     const cold_start = Io.Clock.awake.now(io);
     const cold = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = wt_rules });
     const cold_add_ms = elapsedMs(io, cold_start);
+    const cold_stats = repo.odb.stats;
 
     const cold_tree_start = Io.Clock.awake.now(io);
     const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
@@ -120,6 +121,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
         \\    write-tree   cold {d: >8.1} ms   warm {d: >8.1} ms
         \\    status       dirty {d: >7.1} ms
         \\    hashed       cold {d: >8}      warm {d: >8}
+        \\    objects written {d: >5}      fan-out directories made {d: >4}
         \\
     , .{
         @tagName(builtin.mode),
@@ -132,7 +134,17 @@ test "benchmark: add, write-tree and status stay inside the budget" {
         status_ms,
         cold.hashed,
         warm.hashed,
+        cold_stats.loose_written,
+        cold_stats.fan_out_created,
     });
+
+    // What a cold pass costs the filesystem, which is the part of the number
+    // above a busy runner cannot move. Every file is one object written, and
+    // the fan-out directories are made once each rather than once per object:
+    // two hundred and fifty-six is every directory that can exist, so this
+    // bound holds whatever the tree looks like.
+    try std.testing.expectEqual(@as(u64, file_count), cold_stats.loose_written);
+    try std.testing.expect(cold_stats.fan_out_created <= 256);
 
     // The stat shortcut: a warm pass opens nothing.
     try std.testing.expectEqual(@as(u32, @intCast(file_count)), cold.hashed);

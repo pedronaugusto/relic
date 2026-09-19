@@ -128,14 +128,37 @@ const Source = struct {
     }
 };
 
-/// Counters saying how lookups resolved. Nothing depends on them; they are
-/// how a caller, or a test, sees that an accelerator is being used.
+/// How many bytes of an object's compressed form are gathered before the
+/// first write. Sixty-four kilobytes is one write for anything a working tree
+/// holds by the thousand, and a bound rather than a promise for the rest.
+const deflate_output_buffer_len = 64 * 1024;
+
+/// The deflate state a writing database keeps. `flate.Compress` is two
+/// hundred and twenty-four kilobytes, which is why it is here and not on the
+/// stack of every `write`.
+const DeflateState = struct {
+    compress: *flate.Compress,
+    buffer: []u8,
+};
+
+/// Counters saying how lookups resolved and what writing cost. Nothing
+/// depends on them; they are how a caller, or a test, sees that an
+/// accelerator is being used and that a batch of writes stayed cheap.
 pub const Stats = struct {
     /// Lookups a multi-pack index narrowed to one pack.
     midx_hits: u64 = 0,
     /// Lookups that asked every pack in turn, because there was no
     /// multi-pack index, or it did not name the object.
     pack_scans: u64 = 0,
+    /// Objects written to the disk: a temporary created, deflated, closed
+    /// and renamed.
+    loose_written: u64 = 0,
+    /// Writes that found the object already there and did nothing.
+    loose_present: u64 = 0,
+    /// Fan-out directories made. At most two hundred and fifty-six of them
+    /// exist, so a batch of any size makes at most that many, however many
+    /// objects it writes.
+    fan_out_created: u64 = 0,
 };
 
 /// The object database.
@@ -152,6 +175,10 @@ pub const Odb = struct {
     /// and an `add -A` writes one object per changed file; allocating it per
     /// object is a measurable share of the cost of a cold pass.
     deflate_window: []u8 = &.{},
+    /// The deflate state and the buffer an object's compressed bytes are
+    /// gathered in, allocated on the first object written and reused by every
+    /// one after it. `null` in a database nothing has written to.
+    deflate_state: ?DeflateState = null,
     /// How lookups resolved. Read it; nothing in the package does.
     stats: Stats = .{},
 
@@ -334,6 +361,10 @@ pub const Odb = struct {
         }
         odb.sources.deinit(odb.gpa);
         if (odb.deflate_window.len != 0) odb.gpa.free(odb.deflate_window);
+        if (odb.deflate_state) |state| {
+            odb.gpa.destroy(state.compress);
+            odb.gpa.free(state.buffer);
+        }
         odb.cache.deinit();
         odb.* = undefined;
     }
@@ -529,33 +560,55 @@ pub const Odb = struct {
         const named = hash.Hasher.nameObject(odb.kind, odb.hashOptions(), t.name(), bytes);
         if (named.collision_attack) return error.CollisionAttack;
         const oid = named.oid;
-        if (try odb.exists(io, oid)) return oid;
+        if (try odb.exists(io, oid)) {
+            odb.stats.loose_present += 1;
+            return oid;
+        }
 
         const source = odb.writableSource();
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
-        source.dir.createDir(io, text[0..2], .default_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
+
+        // The temporary and the object it becomes are both named relative to
+        // the `objects` directory, so the fan-out directory is never opened
+        // and never closed. What the old shape paid per object -- a `mkdir`
+        // that almost always answers that the directory is already there, an
+        // `opendir` and a `close` -- a batch now pays once per fan-out
+        // directory: the create that lands in one that is not there yet is
+        // the signal to make it.
+        var name_buf: [hash.max_hex_len + 32]u8 = undefined;
+        const temp = tempObjectName(io, &name_buf, text[0..2]);
+        var final_buf: [hash.max_hex_len + 2]u8 = undefined;
+        const final = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
+
+        var file = source.dir.createFile(io, temp, .{ .exclusive = true }) catch |err| switch (err) {
+            error.FileNotFound => blk: {
+                source.dir.createDir(io, text[0..2], .default_dir) catch |e| switch (e) {
+                    error.PathAlreadyExists => {},
+                    else => |other| return other,
+                };
+                odb.stats.fan_out_created += 1;
+                break :blk try source.dir.createFile(io, temp, .{ .exclusive = true });
+            },
             else => |e| return e,
         };
-        var sub = try source.dir.openDir(io, text[0..2], .{});
-        defer sub.close(io);
-
-        var name_buf: [128]u8 = undefined;
-        const temp = fs.tempName(io, &name_buf, "tmp_obj_");
-        var file = try sub.createFile(io, temp, .{ .exclusive = true });
         var failed = true;
         defer if (failed) {
             file.close(io);
-            sub.deleteFile(io, temp) catch {};
+            source.dir.deleteFile(io, temp) catch {};
         };
 
-        var out_buf: [16 * 1024]u8 = undefined;
-        var file_writer = file.writer(io, &out_buf);
+        // The deflate state and the file's own buffer belong to the database
+        // rather than to this frame. The state is two hundred and twenty-four
+        // kilobytes and is built from scratch for every object; a stack that
+        // large per call is not what a cold `addAll` should stand on.
+        const state = try odb.deflateState();
+        var file_writer = file.writer(io, state.buffer);
         // Level 1, which is what git's own `core.looseCompression` defaults
         // to. The library default is level 6: three times the processor time
         // for twenty per cent smaller objects, paid on every blob written.
-        var compress = try flate.Compress.init(&file_writer.interface, odb.deflate_window, .zlib, .level_1);
+        const compress = state.compress;
+        compress.* = try flate.Compress.init(&file_writer.interface, odb.deflate_window, .zlib, .level_1);
         var header_buf: [64]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
         try compress.writer.writeAll(header);
@@ -574,12 +627,40 @@ pub const Odb = struct {
 
         // An object's name is the hash of its content, so a rename over an
         // object that is already there replaces it with the same bytes.
-        fs.renameWithRetry(io, sub, temp, text[2..]) catch |err| {
-            sub.deleteFile(io, temp) catch {};
+        fs.renameWithRetry(io, source.dir, temp, final) catch |err| {
+            source.dir.deleteFile(io, temp) catch {};
             return err;
         };
-        if (odb.options.sync_directories) try fs.syncDir(io, sub);
+        if (odb.options.sync_directories) {
+            const sub = try source.dir.openDir(io, text[0..2], .{});
+            defer sub.close(io);
+            try fs.syncDir(io, sub);
+        }
+        odb.stats.loose_written += 1;
         return oid;
+    }
+
+    /// `<xx>/tmp_obj_<random>`, written into `buf`.
+    ///
+    /// The temporary lies beside the object it becomes, so the rename that
+    /// finishes it stays inside one directory and needs no handle on it.
+    fn tempObjectName(io: Io, buf: []u8, fan_out: []const u8) []const u8 {
+        var raw: [12]u8 = undefined;
+        io.random(&raw);
+        return std.fmt.bufPrint(buf, "{s}/tmp_obj_{x}", .{ fan_out, &raw }) catch unreachable;
+    }
+
+    /// The deflate state, allocated on the first object this database writes.
+    ///
+    /// A database that is only read never pays for it; one that writes pays
+    /// once rather than once per object.
+    fn deflateState(odb: *Odb) Allocator.Error!DeflateState {
+        if (odb.deflate_state) |state| return state;
+        const compress = try odb.gpa.create(flate.Compress);
+        errdefer odb.gpa.destroy(compress);
+        const buffer = try odb.gpa.alloc(u8, deflate_output_buffer_len);
+        odb.deflate_state = .{ .compress = compress, .buffer = buffer };
+        return odb.deflate_state.?;
     }
 
     /// The naming options every name this database takes is given.
