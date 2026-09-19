@@ -1311,6 +1311,32 @@ test "an index written is an index read" {
     try std.testing.expect(!back.hasDirectory("a"));
 }
 
+test "the trailer index.skipHash asks for is zeros, and reads back as skipped" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    const oid = try Oid.parse(.sha1, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+    try index.add(.{ .path = "a.txt", .oid = oid, .mode = .file });
+
+    const skipped = try index.toBytes(.{ .skip_hash = true });
+    defer gpa.free(skipped);
+    const raw_len = Kind.sha1.rawLen();
+    try std.testing.expect(std.mem.allEqual(u8, skipped[skipped.len - raw_len ..], 0));
+
+    var back = try Index.parse(gpa, .sha1, skipped);
+    defer back.deinit();
+    try std.testing.expect(back.hash_was_skipped);
+    try std.testing.expectEqualStrings("a.txt", back.entries.items[0].path);
+
+    // And the default is still a real hash, which the reader checks.
+    const hashed = try index.toBytes(.{});
+    defer gpa.free(hashed);
+    try std.testing.expect(!std.mem.allEqual(u8, hashed[hashed.len - raw_len ..], 0));
+    var checked = try Index.parse(gpa, .sha1, hashed);
+    defer checked.deinit();
+    try std.testing.expect(!checked.hash_was_skipped);
+}
+
 test "version 4 prefix compression round trips" {
     const gpa = std.testing.allocator;
     var index: Index = .initEmpty(gpa, .sha1);

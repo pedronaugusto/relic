@@ -142,6 +142,8 @@ pub const Repo = struct {
 
 var git_checked: bool = false;
 var git_present: bool = false;
+var git_major: u32 = 0;
+var git_minor: u32 = 0;
 
 /// `error.SkipZigTest` unless a usable `git` is on the path.
 pub fn requireGit(gpa: Allocator, io: Io) !void {
@@ -157,6 +159,38 @@ pub fn requireGit(gpa: Allocator, io: Io) !void {
             .exited => |code| code == 0,
             else => false,
         };
+        if (git_present) parseVersion(result.stdout);
     }
     if (!git_present) return error.SkipZigTest;
+}
+
+/// `error.SkipZigTest` unless the `git` on the path is at least `major.minor`.
+///
+/// For a fixture whose subject is something git gained in a named release.
+/// An older git writes what it always wrote, and a comparison against that
+/// proves nothing about the thing being tested — so the test says which
+/// release it needs and stands aside on anything older, rather than
+/// asserting a shape that git was never asked to produce.
+pub fn requireGitVersion(gpa: Allocator, io: Io, major: u32, minor: u32) !void {
+    try requireGit(gpa, io);
+    if (git_major > major) return;
+    if (git_major == major and git_minor >= minor) return;
+    return error.SkipZigTest;
+}
+
+/// The two leading numbers of `git version 2.43.0`, which is the shape every
+/// build of git prints — including the ones that add their own suffix, such
+/// as `2.39.5 (Apple Git-154)` and `2.45.1.windows.1`. A line that does not
+/// parse leaves the version at zero, which is older than anything asked for.
+fn parseVersion(line: []const u8) void {
+    const prefix = "git version ";
+    const at = std.mem.indexOf(u8, line, prefix) orelse return;
+    var numbers = std.mem.splitScalar(u8, line[at + prefix.len ..], '.');
+    const major_text = numbers.next() orelse return;
+    const minor_text = numbers.next() orelse return;
+    git_major = std.fmt.parseUnsigned(u32, std.mem.trim(u8, major_text, " \t\r\n"), 10) catch return;
+    git_minor = std.fmt.parseUnsigned(u32, std.mem.trim(u8, minor_text, " \t\r\n"), 10) catch {
+        git_major = 0;
+        return;
+    };
 }

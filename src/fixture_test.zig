@@ -381,6 +381,13 @@ test "a version 4 index git wrote is written back byte for byte" {
 test "an index written with index.skipHash round trips" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
+    // `index.skipHash` is git 2.40 and newer. An older git does not know the
+    // setting, ignores it, and writes the trailing hash it has always
+    // written — there is no zero-trailer index on that machine for this
+    // one to read. What this fixture adds over `index.zig`'s own
+    // zero-trailer test is that git and relic agree on the bytes, and that
+    // is only a question where git can write them.
+    try testgit.requireGitVersion(gpa, io, 2, 40);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     try repo.exec(io, &.{ "config", "index.skipHash", "true" });
