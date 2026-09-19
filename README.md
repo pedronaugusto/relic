@@ -365,13 +365,18 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Fuzz tests cover every parser: the loose object header, the pack index, a pack
-entry and its delta, the index file, `packed-refs`, the reflog, the config
-file, `.gitignore`, `.gitattributes`, the glob matcher, the commit-graph, the
-multi-pack index and the EWAH bitmaps. The rule is that any input either
-parses to a value or returns a named error. The diff fuzzer additionally
-applies the edit script it produced and checks that it reproduces the other
-side, which is the property that catches an off-by-one nothing else would.
+Sixteen fuzz tests cover every parser: the loose object header, a tree, a
+commit, a tag, an identity line, a mode, the pack index, a delta, the index
+file, `packed-refs`, the reflog, the config file, `.gitignore`,
+`.gitattributes`, the glob matcher, the commit-graph, the multi-pack index and
+the EWAH bitmaps. The rule is that any input either parses to a value or
+returns a named error. The diff fuzzer additionally applies the edit script it
+produced and checks that it reproduces the other side, which is the property
+that catches an off-by-one nothing else would.
+
+Two pack shapes cannot be made with `git repack`, so the suite writes the
+packs itself: two reference deltas naming each other, and a chain a thousand
+deep. The first is a named error and the second resolves without recursing.
 
 ## Requirements
 
