@@ -58,7 +58,7 @@ pub fn statAt(dir: Io.Dir, sub_path: []const u8) Extra {
                 mask,
                 &statx,
             );
-            if (linux.E.init(rc) != .SUCCESS) return .{};
+            if (linux.errno(rc) != .SUCCESS) return .{};
             // git stores the whole `st_dev`, which on Linux packs the major
             // and minor the way `makedev` does.
             const dev = (@as(u64, statx.dev_major) << 8) | (statx.dev_minor & 0xff) |

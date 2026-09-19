@@ -81,7 +81,7 @@ pub const Stat = struct {
             .mtime_sec = splitSec(mtime),
             .mtime_nsec = splitNsec(mtime),
             .dev = extra.dev,
-            .ino = @truncate(s.inode),
+            .ino = @truncate(@as(u64, @bitCast(@as(i64, @intCast(s.inode))))),
             .uid = extra.uid,
             .gid = extra.gid,
             .size = @truncate(s.size),
@@ -488,7 +488,7 @@ fn processAlive(pid: u32) ?bool {
             // process at all; the file was written by something else.
             const narrowed = std.math.cast(std.posix.pid_t, pid) orelse return false;
             const rc = if (builtin.os.tag == .linux)
-                std.os.linux.kill(narrowed, 0)
+                std.os.linux.kill(narrowed, @enumFromInt(0))
             else
                 @as(usize, @bitCast(@as(isize, std.c.kill(narrowed, @enumFromInt(0)))));
             const e = std.posix.errno(rc);

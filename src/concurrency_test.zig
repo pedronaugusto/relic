@@ -81,11 +81,14 @@ test "a lock a second process holds is refused, and left exactly as it was" {
     defer holder.release(io);
 
     // git itself refuses the same lock, which is the point: this behaves the
-    // way the other writer expects.
+    // way the other writer expects. The refusal is expected, so it is not
+    // reported.
+    repo.report_failures = false;
     try std.testing.expectError(
         error.GitFailed,
         repo.exec(io, &.{ "add", "-A" }),
     );
+    repo.report_failures = true;
     try std.testing.expectError(
         error.LockHeld,
         index.write(io, git_dir, "index", .{}),

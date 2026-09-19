@@ -41,6 +41,10 @@ pub const Repo = struct {
     /// The `-c` settings every invocation carries. A test may replace this
     /// with a shorter list to let a repository's own config decide.
     defaults: []const []const u8 = &default_settings,
+    /// Whether to print what git said when it exits non-zero. A test that
+    /// expects the failure — the one that holds `index.lock` while git tries
+    /// to take it — turns this off, so a passing run says nothing.
+    report_failures: bool = true,
 
     /// Make a temporary directory and run `git init` in it.
     ///
@@ -84,7 +88,9 @@ pub const Repo = struct {
         defer r.gpa.free(result.stderr);
         switch (result.term) {
             .exited => |code| if (code != 0) {
-                std.debug.print("git {s} failed ({d}):\n{s}\n", .{ args[0], code, result.stderr });
+                if (r.report_failures) {
+                    std.debug.print("git {s} failed ({d}):\n{s}\n", .{ args[0], code, result.stderr });
+                }
                 r.gpa.free(result.stdout);
                 return error.GitFailed;
             },
