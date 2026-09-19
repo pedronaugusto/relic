@@ -271,52 +271,6 @@ pub const Hasher = struct {
     }
 };
 
-/// A `std.Io.Writer` that hashes everything written through it and passes it
-/// on to another writer, so an object may be named while it streams.
-pub const HashingWriter = struct {
-    writer: std.Io.Writer,
-    hasher: Hasher,
-    out: *std.Io.Writer,
-
-    /// Wrap `out`. `buffer` is this writer's own; a few kilobytes is plenty.
-    pub fn init(out: *std.Io.Writer, k: Kind, buffer: []u8) HashingWriter {
-        return .{
-            .writer = .{ .vtable = &.{ .drain = drain }, .buffer = buffer },
-            .hasher = .init(k),
-            .out = out,
-        };
-    }
-
-    /// The name of everything written so far. Flush first.
-    pub fn final(hw: *HashingWriter) Oid {
-        return hw.hasher.final();
-    }
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const hw: *HashingWriter = @fieldParentPtr("writer", w);
-        const buffered = w.buffered();
-        if (buffered.len != 0) {
-            hw.hasher.update(buffered);
-            try hw.out.writeAll(buffered);
-            w.end = 0;
-            return 0;
-        }
-        var written: usize = 0;
-        for (data[0 .. data.len - 1]) |bytes| {
-            hw.hasher.update(bytes);
-            try hw.out.writeAll(bytes);
-            written += bytes.len;
-        }
-        const last = data[data.len - 1];
-        for (0..splat) |_| {
-            hw.hasher.update(last);
-            try hw.out.writeAll(last);
-            written += last.len;
-        }
-        return written;
-    }
-};
-
 test "oid parse and format round trip" {
     const hex = "0123456789abcdef0123456789abcdef01234567";
     const oid = try Oid.parse(.sha1, hex);

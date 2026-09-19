@@ -6,6 +6,9 @@ pub const fs = @import("fs.zig");
 pub const delta = @import("delta.zig");
 pub const pack = @import("pack.zig");
 pub const odb = @import("odb.zig");
+pub const index = @import("index.zig");
+pub const varint = @import("varint.zig");
+pub const ewah = @import("ewah.zig");
 
 const builtin = @import("builtin");
 

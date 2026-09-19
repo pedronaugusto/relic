@@ -213,3 +213,189 @@ test "a loose object this writes is one git reads" {
     // And fsck is silent about everything written.
     try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
+
+const index_mod = @import("index.zig");
+
+/// Read the index git wrote, write it back, and compare the bytes.
+fn expectIndexRoundTrip(
+    gpa: std.mem.Allocator,
+    io: Io,
+    repo: *testgit.Repo,
+    kind: hash.Kind,
+    version: index_mod.WriteOptions.Version,
+    skip_hash: bool,
+) !void {
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    const original = try repo.readFile(io, ".git/index");
+    defer gpa.free(original);
+
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, kind);
+    defer index.deinit();
+
+    const written = try index.toBytes(.{ .version = version, .skip_hash = skip_hash });
+    defer gpa.free(written);
+    try std.testing.expectEqualSlices(u8, original, written);
+}
+
+test "a version 2 index git wrote is written back byte for byte" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    for (0..12) |i| {
+        var name_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&name_buf, "dir{d}/file{d}.txt", .{ i % 3, i });
+        try repo.writeFile(io, path, "contents\n");
+    }
+    try repo.writeFile(io, "top.txt", "top\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try expectIndexRoundTrip(gpa, io, &repo, .sha1, .auto, false);
+
+    // After a commit the index carries a TREE extension, which must also
+    // come back byte for byte.
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    try expectIndexRoundTrip(gpa, io, &repo, .sha1, .auto, false);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    defer index.deinit();
+    try std.testing.expect(index.cache_tree != null);
+    const root = index.cache_tree.?.get("").?;
+    try std.testing.expect(root.isValid());
+    try std.testing.expectEqual(@as(i64, 13), root.entry_count);
+
+    // And the cache tree's root is the tree git wrote.
+    const tree_text = try repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(tree_text);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    try std.testing.expectEqualStrings(tree_text, root.oid.?.hex(&hex));
+}
+
+test "a version 3 index git wrote is written back byte for byte" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.writeFile(io, "a.txt", "a\n");
+    try repo.writeFile(io, "b.txt", "b\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    // skip-worktree is what forces the extended flag, and so version 3.
+    try repo.exec(io, &.{ "update-index", "--skip-worktree", "b.txt" });
+    try expectIndexRoundTrip(gpa, io, &repo, .sha1, .auto, false);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    defer index.deinit();
+    try std.testing.expectEqual(@as(u32, 3), index.version);
+    try std.testing.expect(index.find("b.txt").?.skip_worktree);
+}
+
+test "a version 4 index git wrote is written back byte for byte" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.exec(io, &.{ "config", "index.version", "4" });
+    // feature.manyFiles also turns on index.skipHash, so the two are set
+    // apart here and both arms are exercised.
+    for (0..30) |i| {
+        var name_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&name_buf, "deep/nest{d}/file{d}.txt", .{ i % 4, i });
+        try repo.writeFile(io, path, "x\n");
+    }
+    try repo.exec(io, &.{ "add", "-A" });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    defer index.deinit();
+    try std.testing.expectEqual(@as(u32, 4), index.version);
+    try expectIndexRoundTrip(gpa, io, &repo, .sha1, .v4, false);
+
+    // Every path git lists is a path this read, in the same order.
+    const listed = try repo.run(io, &.{"ls-files"});
+    defer gpa.free(listed);
+    var lines = std.mem.splitScalar(u8, listed, '\n');
+    var i: usize = 0;
+    while (lines.next()) |path| {
+        if (path.len == 0) continue;
+        try std.testing.expectEqualStrings(path, index.entries.items[i].path);
+        i += 1;
+    }
+    try std.testing.expectEqual(i, index.entries.items.len);
+}
+
+test "an index written with index.skipHash round trips" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.exec(io, &.{ "config", "index.skipHash", "true" });
+    try repo.writeFile(io, "a.txt", "a\n");
+    try repo.exec(io, &.{ "add", "-A" });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    defer index.deinit();
+    try std.testing.expect(index.hash_was_skipped);
+    try expectIndexRoundTrip(gpa, io, &repo, .sha1, .auto, true);
+}
+
+test "a split index is read whole and loses no entry" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.exec(io, &.{ "config", "core.splitIndex", "true" });
+
+    try repo.writeFile(io, "a.txt", "a\n");
+    try repo.writeFile(io, "b.txt", "b\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.writeFile(io, "c.txt", "c\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.writeFile(io, "a.txt", "a changed\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "rm", "-q", "--cached", "b.txt" });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    defer index.deinit();
+    try std.testing.expect(index.was_split);
+
+    // git's own listing is the truth: every path and every object name.
+    const listed = try repo.run(io, &.{ "ls-files", "-s" });
+    defer gpa.free(listed);
+    var lines = std.mem.splitScalar(u8, listed, '\n');
+    var seen: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.splitAny(u8, line, " \t");
+        _ = fields.next().?;
+        const oid_text = fields.next().?;
+        _ = fields.next().?;
+        const path = fields.rest();
+        const entry = index.find(path) orelse {
+            std.debug.print("missing from split index: {s}\n", .{path});
+            return error.TestUnexpectedResult;
+        };
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try std.testing.expectEqualStrings(oid_text, entry.oid.hex(&hex));
+        seen += 1;
+    }
+    try std.testing.expectEqual(seen, index.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 2), seen);
+
+    // Written back as one complete index, which git reads as the same set.
+    var write_dir = try repo.gitDir(io);
+    defer write_dir.close(io);
+    try index.write(io, write_dir, "index", .{});
+    const after = try repo.run(io, &.{ "ls-files", "-s" });
+    defer gpa.free(after);
+    try std.testing.expectEqualStrings(listed, after);
+}
