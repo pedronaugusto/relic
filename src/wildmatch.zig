@@ -23,6 +23,7 @@ pub const Options = struct {
     case_fold: bool = false,
 };
 
+/// Errors from the glob matcher.
 pub const Error = error{
     /// A `[` with no `]`, or a bracket expression naming an unknown class.
     InvalidPattern,

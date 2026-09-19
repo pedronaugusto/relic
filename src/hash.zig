@@ -183,11 +183,13 @@ pub const Oid = struct {
     /// A hash map context keyed on the raw digest. The kind takes part, so a
     /// map may hold names from two repositories without colliding.
     pub const MapContext = struct {
+        /// The map's hash of a name: the raw digest, seeded with the kind.
         pub fn hash(_: MapContext, oid: Oid) u64 {
             var h: std.hash.Wyhash = .init(@intFromEnum(oid.kind));
             h.update(oid.raw());
             return h.final();
         }
+        /// Whether two keys are the same name, kind included.
         pub fn eql(_: MapContext, a: Oid, b: Oid) bool {
             return a.eql(b);
         }

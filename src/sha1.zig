@@ -26,8 +26,12 @@ const builtin = @import("builtin");
 
 /// SHA-1 as FIPS 180-4 defines it.
 pub const Sha1 = struct {
+    /// The compression function's input width, in bytes.
     pub const block_length = 64;
+    /// The digest's width, in bytes.
     pub const digest_length = 20;
+    /// SHA-1 takes no parameters; the field is here because
+    /// `std.crypto.hash` hashers have one and this is a drop-in for them.
     pub const Options = struct {};
 
     /// The five chaining words, `H0` to `H4`.

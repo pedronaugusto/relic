@@ -419,8 +419,14 @@ pub const CoreSettings = struct {
     /// `core.safecrlf`: whether an irreversible conversion is reported.
     safecrlf: SafeCrlf = .false,
 
+    /// What `core.autocrlf` may be: carriage returns removed on the way in
+    /// and put back on the way out, removed on the way in only, or neither.
     pub const AutoCrlf = enum { false, true, input };
+    /// What `core.eol` and the `eol` attribute may be: the line ending a
+    /// text file is written with in the working tree.
     pub const Eol = enum { native, lf, crlf };
+    /// What `core.safecrlf` may be: what happens when a conversion would not
+    /// round-trip.
     pub const SafeCrlf = enum { false, true, warn };
 
     /// The native line ending, which is CRLF on Windows and LF elsewhere.

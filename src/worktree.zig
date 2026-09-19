@@ -465,6 +465,9 @@ pub const StatusOptions = struct {
     /// Whether to list ignored files too.
     include_ignored: bool = false,
 
+    /// How much of an untracked directory `status` reports: nothing, the
+    /// directory itself, or every file under it. These are what `git status`
+    /// takes in `--untracked-files`.
     pub const Untracked = enum { no, normal, all };
 };
 

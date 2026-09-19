@@ -20,14 +20,13 @@ breaking one.
   processor rather than by what the compiler was told**, because a package
   built for a baseline target is the normal case and a compile-time gate would
   hand every such build the slow path on a machine that has the instructions.
-  **Both arms assemble on a baseline target** — aarch64 through
-  `.arch_extension crypto` in the assembly itself, x86-64 because its
-  assembler does not gate these — so nothing has to be added to a consumer's
-  build graph for the choice to exist.
-
-  Both arms are assembly, which the self-hosted x86-64 code generator has no
-  encoding for; a build that uses it — a Debug x86-64 build, in practice —
-  takes the software rounds rather than failing to compile.
+  **The target does not take the choice away either** — aarch64 asks for the
+  extension inside the assembly and x86-64's assembler does not gate these —
+  so nothing has to be added to a consumer's build graph. One thing does take
+  it away: both arms are assembly, and the self-hosted x86-64 code generator
+  has no encoding for these instructions, so a build that uses it — a Debug
+  x86-64 build, in practice — takes the software rounds rather than failing to
+  compile.
 
   `hash.Hasher` is unchanged in shape; `hash.Hasher.sha1Backend()` says which
   arm a measurement was taken on.
@@ -51,6 +50,12 @@ breaking one.
   reference. Checked both directions: the published pair is detected, both
   halves and across every split of the feed, and nothing in the fixture
   repositories — text, a deltified file, a binary blob — is flagged.
+
+  `hash.Hasher.Options` carries the choice, `hash.Hasher.initOptions` takes
+  it, `hash.Hasher.collisionAttack` reads the answer, and
+  `hash.Hasher.nameObject` does both in one call and returns a `Named`.
+  `sha1dc.collision_test_vector_a` and `_b` are the published pair, for a
+  caller that wants to prove the wiring in its own suite.
 
 - **The multi-pack index is wired into lookup.** It was read and consulted by
   nothing; now `read`, `readHeader` and `exists` ask it which pack holds an
@@ -80,6 +85,10 @@ breaking one.
   runner's path. What it costs is the return trace under a failing test; the
   error and the test's name are still printed. Sixteen fuzz tests build, run
   until stopped, and keep a corpus each under `.zig-cache/f`.
+
+- **`odb.Error` gained `CollisionAttack`.** Breaking for a caller that
+  switches exhaustively on the error set; nothing returns it unless
+  `Odb.Options.detect_sha1_collisions` is on.
 
 - **`hash.Hasher`'s SHA-1 is this package's rather than the standard
   library's.** The digest is the same digest — the suite checks it against

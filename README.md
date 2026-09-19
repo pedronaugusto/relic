@@ -125,7 +125,7 @@ this processor has, asked once.
 
 | Module | |
 |---|---|
-| `hash` | `Kind` (`sha1`, `sha256`), `Oid`, `Hasher`. The hash is a parameter from the first line, not a width bolted on later. |
+| `hash` | `Kind` (`sha1`, `sha256`), `Oid`, `Hasher` with `Options` and `nameObject`. The hash is a parameter from the first line, not a width bolted on later. |
 | `sha1` | SHA-1 over the processor's own instructions, with the eighty rounds as the fallback and the choice made at run time. |
 | `sha1dc` | SHA-1 that checks each block for the signature of a collision attack. Off unless asked for. |
 | `object` | `Type`, `Mode`, `Tree` and `Tree.Builder`, `Commit`, `Tag`, `Signature`, `ExtraHeader`. Parsing and writing, with git's tree sort rule and header order. |
@@ -275,18 +275,21 @@ machine:
 | SHA-256, from the standard library | 2.30 GiB/s |
 
 Which arm runs is decided by asking the processor and not by what the compiler
-was told, so a binary built for a baseline target uses the instructions on a
-machine that has them. Both arms assemble on a baseline target, so the choice
-is never taken away at build time. The benchmark's budget is a ratio against
-the software rounds timed in the same run, which is what makes it survive a
-runner under load and still fail if the hardware arm is lost.
+was told, so a binary built for a baseline target — which is what anything
+distributed is built for — uses the instructions on a machine that has them.
+The target does not take that choice away either: the aarch64 assembly asks
+for the extension itself and the x86-64 assembler does not gate these. One
+thing does take it away. Both arms are assembly, and the self-hosted x86-64
+code generator has no encoding for these instructions, so a build that uses
+it — a Debug x86-64 build, in practice — takes the software rounds.
+
+The benchmark's budget is a ratio against the software rounds timed in the
+same run, which is what makes it survive a runner under load and still fail if
+the hardware arm is lost.
 
 The aarch64 arm is what the number above was measured on. The x86-64 arm is
 checked against the software rounds under emulation, on every length to eight
-kilobytes; it has not been timed on that hardware. Both are written as
-assembly, which the self-hosted x86-64 code generator has no encoding for, so
-a Debug x86-64 build takes the software rounds and an optimised one takes the
-instructions.
+kilobytes; it has not been timed on that hardware.
 
 Packs are read with positional reads by default. `Odb.Options.map_packs` asks
 for a memory map instead, which is faster on a cold cache and costs two
@@ -325,11 +328,13 @@ fixture repository is.
 ### Memory
 
 Each public operation runs on an arena fed from the caller's allocator, so the
-peak is bounded by the operation and the free is one call. Two things outlive
-an operation and both are named in `Odb.Options`: the pack indexes, which are
-read whole at open so a lookup costs no syscall, and the delta base cache,
-which is a direct-mapped table on the pack offset with a byte budget. There is
-no object cache; a returned slice's doc comment says who owns it.
+peak is bounded by the operation and the free is one call. What outlives an
+operation is held by the object database: the pack indexes, read whole at open
+so a lookup costs no syscall; the multi-pack index, when there is one, for the
+same reason; the delta base cache, a direct-mapped table on the pack offset
+with a byte budget named in `Odb.Options`; and one deflate window, because a
+window is sixty-four kilobytes and a cold `addAll` writes one object per file.
+There is no object cache; a returned slice's doc comment says who owns it.
 
 ### The index
 

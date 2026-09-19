@@ -43,8 +43,11 @@ const std = @import("std");
 /// near-collision pair. A caller that asked for the check is expected to read
 /// that and refuse, which is what `odb` does.
 pub const Sha1Dc = struct {
+    /// The compression function's input width, in bytes.
     pub const block_length = 64;
+    /// The digest's width, in bytes, which is SHA-1's.
     pub const digest_length = 20;
+    /// No parameters, for the same reason `sha1.Sha1` has none.
     pub const Options = struct {};
 
     ihv: [5]u32,
@@ -53,6 +56,7 @@ pub const Sha1Dc = struct {
     total_len: u64,
     found: bool,
 
+    /// A hasher with nothing fed to it yet, and nothing found.
     pub fn init(options: Options) Sha1Dc {
         _ = options;
         return .{
