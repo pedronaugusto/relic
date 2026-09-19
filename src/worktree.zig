@@ -17,6 +17,7 @@ const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
 const ignore = @import("ignore.zig");
 const attributes = @import("attributes.zig");
+const sparse = @import("sparse.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -1012,6 +1013,90 @@ fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
         wt.deleteDir(io, current) catch return;
         current = std.fs.path.dirnamePosix(current) orelse return;
     }
+}
+
+/// What `applySparse` changed.
+pub const SparseOutcome = struct {
+    /// Entries that left the working tree.
+    skipped: u32 = 0,
+    /// Entries that came back into it.
+    restored: u32 = 0,
+    /// Entries left alone because the file on the disk does not match the
+    /// index, so removing it would lose work.
+    kept_dirty: u32 = 0,
+};
+
+/// Make the working tree hold exactly the paths the sparse patterns
+/// include.
+///
+/// A path that leaves gets `skip-worktree` and its file is removed; a path
+/// that returns loses the flag and its file is written. A file whose
+/// content differs from the index is left where it is and counted, because
+/// removing it would throw away work nobody asked to throw away.
+pub fn applySparse(
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    index: *Index,
+    db: *Odb,
+    patterns: *const sparse.Patterns,
+    options: CheckoutOptions,
+) Error!SparseOutcome {
+    var outcome: SparseOutcome = .{};
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+
+    for (index.entries.items) |*entry| {
+        if (entry.stage != 0) continue;
+        const included = patterns.includes(entry.path, false);
+        if (!included and !entry.skip_worktree) {
+            if (try fs.statAt(io, wt, entry.path)) |found| {
+                if (!entry.stat.matches(found.stat, options.rules.check_stat)) {
+                    outcome.kept_dirty += 1;
+                    continue;
+                }
+                wt.deleteFile(io, entry.path) catch |err| switch (err) {
+                    error.FileNotFound, error.NotDir, error.IsDir => {},
+                    else => |e| return e,
+                };
+                if (options.remove_empty_directories) {
+                    if (std.fs.path.dirnamePosix(entry.path)) |parent| {
+                        removeEmptyDirectories(io, wt, parent);
+                    }
+                }
+            }
+            entry.skip_worktree = true;
+            outcome.skipped += 1;
+            continue;
+        }
+        if (included and entry.skip_worktree) {
+            if (safepath.check(entry.path, .worktree) != null) {
+                if (options.refusal) |out| out.set(.git_directory, entry.path);
+                return error.UnsafePath;
+            }
+            _ = scratch.reset(.retain_capacity);
+            const a = scratch.allocator();
+            if (std.fs.path.dirnamePosix(entry.path)) |parent| {
+                wt.createDirPath(io, parent) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => |e| return e,
+                };
+            }
+            const found = try db.read(io, entry.oid);
+            defer gpa.free(found.bytes);
+            var bytes: []const u8 = found.bytes;
+            if (options.rules.attrs) |attrs| {
+                const applied = try attrs.lookup(a, entry.path, false);
+                const converted = try attributes.toWorktree(a, found.bytes, applied, options.rules.core);
+                bytes = converted.bytes;
+            }
+            try writeFile(io, wt, entry.path, bytes, entry.mode == .exec and options.rules.file_mode);
+            if (try fs.statAt(io, wt, entry.path)) |after| entry.stat = after.stat;
+            entry.skip_worktree = false;
+            outcome.restored += 1;
+        }
+    }
+    return outcome;
 }
 
 /// What `list` found.

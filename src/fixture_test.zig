@@ -399,3 +399,237 @@ test "a split index is read whole and loses no entry" {
     defer gpa.free(after);
     try std.testing.expectEqualStrings(listed, after);
 }
+
+test "fsmonitor and untracked-cache extensions survive a round trip" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    // `core.untrackedCache` makes git write `UNTR`. `core.fsmonitor` set to
+    // a hook path makes it write `FSMN` — the token is opaque and a file
+    // watcher will supply it later, so what matters now is that neither is
+    // lost when this rewrites the index.
+    try repo.exec(io, &.{ "config", "core.untrackedCache", "true" });
+    for (0..8) |i| {
+        var buf: [32]u8 = undefined;
+        try repo.writeFile(io, try std.fmt.bufPrint(&buf, "d{d}/f{d}.txt", .{ i % 3, i }), "x\n");
+    }
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "update-index", "--untracked-cache" });
+    try repo.exec(io, &.{ "status", "--porcelain" });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    const original = try repo.readFile(io, ".git/index");
+    defer gpa.free(original);
+
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    defer index.deinit();
+
+    var saw_untracked_cache = false;
+    for (index.unknown.items) |extension| {
+        if (std.mem.eql(u8, &extension.signature, "UNTR")) saw_untracked_cache = true;
+    }
+    if (!saw_untracked_cache) return error.SkipZigTest;
+
+    const written = try index.toBytes(.{});
+    defer gpa.free(written);
+    try std.testing.expectEqualSlices(u8, original, written);
+}
+
+test "an annotated tag written is one git reads, and its gpgsig header survives" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.writeFile(io, "a.txt", "hello\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const commit_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(commit_text);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    const signature = "-----BEGIN SSH SIGNATURE-----\n\nnot a real signature\n-----END SSH SIGNATURE-----";
+    const bytes = try object.Tag.build(gpa, .sha1, .{
+        .target = try Oid.parse(.sha1, commit_text),
+        .target_type = .commit,
+        .name = "v1.0",
+        .tagger = .{
+            .name = "Fixture",
+            .email = "fixture@example.com",
+            .when_secs = 1_700_000_000,
+            .offset_minutes = 0,
+        },
+        .extra = &.{.{ .name = "gpgsig", .value = signature }},
+        .message = "the first release\n",
+    });
+    defer gpa.free(bytes);
+    const tag_oid = try db.write(io, .tag, bytes);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const tag_text = try gpa.dupe(u8, tag_oid.hex(&hex));
+    defer gpa.free(tag_text);
+
+    try repo.exec(io, &.{ "update-ref", "refs/tags/v1.0", tag_text });
+
+    const shown = try repo.run(io, &.{ "cat-file", "tag", tag_text });
+    defer gpa.free(shown);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "tag v1.0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "gpgsig -----BEGIN SSH SIGNATURE-----\n \n") != null);
+
+    const peeled = try repo.line(io, &.{ "rev-parse", "v1.0^{commit}" });
+    defer gpa.free(peeled);
+    try std.testing.expectEqualStrings(commit_text, peeled);
+    try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+
+    // And the header comes back unfolded, which is what a verifier needs.
+    const found = try db.read(io, tag_oid);
+    defer gpa.free(found.bytes);
+    var tag = try object.Tag.parse(gpa, .sha1, found.bytes);
+    defer tag.deinit();
+    try std.testing.expectEqualStrings(signature, tag.extraHeader("gpgsig").?);
+    try std.testing.expectEqualStrings("v1.0", tag.name);
+}
+
+test "a commit's gpgsig header is read back exactly as git stores it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.writeFile(io, "a.txt", "hello\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    const head_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head_text);
+    const head = try Oid.parse(.sha1, head_text);
+    const found = try db.read(io, head);
+    defer gpa.free(found.bytes);
+    var original = try object.Commit.parse(gpa, .sha1, found.bytes);
+    defer original.deinit();
+
+    const signature = "-----BEGIN PGP SIGNATURE-----\n\nline one\n\nline three\n-----END PGP SIGNATURE-----";
+    const signed = try object.Commit.build(gpa, .sha1, .{
+        .tree = original.tree,
+        .parents = original.parents,
+        .author = original.author,
+        .committer = original.committer,
+        .extra = &.{.{ .name = "gpgsig", .value = signature }},
+        .message = original.message,
+    });
+    defer gpa.free(signed);
+    const signed_oid = try db.write(io, .commit, signed);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const signed_text = try gpa.dupe(u8, signed_oid.hex(&hex));
+    defer gpa.free(signed_text);
+
+    // git prints the header with every continuation line carrying a space,
+    // the empty ones included.
+    const raw = try repo.run(io, &.{ "cat-file", "commit", signed_text });
+    defer gpa.free(raw);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "gpgsig -----BEGIN PGP SIGNATURE-----\n \n line one\n \n line three\n") != null);
+
+    const back = try db.read(io, signed_oid);
+    defer gpa.free(back.bytes);
+    var parsed = try object.Commit.parse(gpa, .sha1, back.bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(signature, parsed.extraHeader("gpgsig").?);
+    try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+}
+
+test "includeIf reads the file git reads" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    try repo.writeFile(io, "extra.config", "[core]\n\tautocrlf = input\n[fixture]\n\tvalue = included\n");
+    // The condition names the repository's own git directory, so it holds.
+    try repo.dir.writeFile(io, .{
+        .sub_path = ".git/config",
+        .data = "[core]\n\trepositoryformatversion = 0\n[includeIf \"gitdir:**/\"]\n\tpath = ../extra.config\n",
+    });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+
+    var abs: [4096]u8 = undefined;
+    const abs_len = try git_dir.realPath(io, &abs);
+
+    var cfg = try config_mod.Config.open(gpa, io, .{
+        .local = .{ .dir = git_dir, .sub_path = "config" },
+    }, .{ .git_dir = abs[0..abs_len] });
+    defer cfg.deinit();
+
+    try std.testing.expectEqualStrings("input", cfg.get("core.autocrlf").?);
+    try std.testing.expectEqualStrings("included", cfg.get("fixture.value").?);
+
+    // git agrees that the include applies. The key is one the fixture
+    // harness does not set on the command line, where a `-c` would win.
+    const theirs = try repo.line(io, &.{ "config", "--get", "fixture.value" });
+    defer gpa.free(theirs);
+    try std.testing.expectEqualStrings("included", theirs);
+}
+
+const config_mod = @import("config.zig");
+
+test "sparse checkout takes paths out of the working tree and puts them back" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    try repo.writeFile(io, "top.txt", "top\n");
+    try repo.writeFile(io, "src/main.zig", "main\n");
+    try repo.writeFile(io, "docs/page.md", "docs\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    defer index.deinit();
+
+    try git_dir.createDirPath(io, "info");
+    try git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n!/docs/\n" });
+    var patterns = (try sparse_mod.Patterns.load(gpa, io, git_dir, false)).?;
+    defer patterns.deinit();
+
+    const out = try worktree.applySparse(gpa, io, repo.dir, &index, &db, &patterns, .{});
+    try std.testing.expectEqual(@as(u32, 1), out.skipped);
+    try std.testing.expectError(error.FileNotFound, repo.dir.access(io, "docs/page.md", .{}));
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("main\n", try repo.dir.readFile(io, "src/main.zig", &buf));
+    try std.testing.expect(index.find("docs/page.md").?.skip_worktree);
+
+    // git reads the index and calls the working tree clean, because the
+    // missing file is marked as not wanted there.
+    try index.write(io, git_dir, "index", .{});
+    try repo.exec(io, &.{ "config", "core.sparseCheckout", "true" });
+    const status = try repo.run(io, &.{ "status", "--porcelain" });
+    defer gpa.free(status);
+    try std.testing.expectEqualStrings("", status);
+
+    // Widening the patterns brings it back.
+    try git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n" });
+    var wider = (try sparse_mod.Patterns.load(gpa, io, git_dir, false)).?;
+    defer wider.deinit();
+    const back = try worktree.applySparse(gpa, io, repo.dir, &index, &db, &wider, .{});
+    try std.testing.expectEqual(@as(u32, 1), back.restored);
+    try std.testing.expectEqualStrings("docs\n", try repo.dir.readFile(io, "docs/page.md", &buf));
+    try std.testing.expect(!index.find("docs/page.md").?.skip_worktree);
+}
+
+const sparse_mod = @import("sparse.zig");
+const worktree = @import("worktree.zig");
