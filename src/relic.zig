@@ -24,6 +24,8 @@ pub const revwalk = @import("revwalk.zig");
 pub const merge = @import("merge.zig");
 pub const commitgraph = @import("commitgraph.zig");
 pub const midx = @import("midx.zig");
+pub const textdiff = @import("textdiff.zig");
+pub const diff = @import("diff.zig");
 
 const builtin = @import("builtin");
 
@@ -36,5 +38,6 @@ test {
         _ = @import("repo_test.zig");
         _ = @import("concurrency_test.zig");
         _ = @import("bench_test.zig");
+        _ = @import("diff_test.zig");
     }
 }
