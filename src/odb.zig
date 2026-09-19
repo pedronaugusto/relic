@@ -12,6 +12,7 @@ const flate = std.compress.flate;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const pack = @import("pack.zig");
+const midx_mod = @import("midx.zig");
 const fs = @import("fs.zig");
 
 const Oid = hash.Oid;
@@ -88,6 +89,53 @@ const Source = struct {
     pack_names: std.ArrayList([]u8),
     /// Whether objects may be written here. Only the first source is.
     writable: bool,
+    /// `pack/multi-pack-index`, when there is one.
+    midx: ?midx_mod.Index,
+    /// For each pack the multi-pack index names, its position in `packs`, or
+    /// `null` when that pack is not open here. The index names packs by file
+    /// name and this database holds them in directory order, so the two have
+    /// to be matched up once rather than on every lookup.
+    midx_packs: std.ArrayList(?u32),
+
+    /// Which pack holds `oid`, asking the multi-pack index first.
+    ///
+    /// The index narrows the search to one pack; that pack's own index is
+    /// still what gives the offset. Doing it the other way round would make
+    /// a stale or wrong index a read at a wrong offset rather than a miss,
+    /// and the answer is the same either way, which is the property the whole
+    /// accelerator is allowed to have.
+    fn findPack(source: *Source, oid: Oid, stats: *Stats) Error!?struct { at: usize, offset: u64 } {
+        if (source.midx) |*index| {
+            // A multi-pack index that misanswers is a miss and not an error:
+            // it is an accelerator, and the scan below is the same answer.
+            if (index.find(oid) catch null) |located| {
+                if (located.pack < source.midx_packs.items.len) {
+                    if (source.midx_packs.items[located.pack]) |position| {
+                        const p = &source.packs.items[position];
+                        if (try p.index.find(oid)) |found| {
+                            stats.midx_hits += 1;
+                            return .{ .at = position, .offset = found.offset };
+                        }
+                    }
+                }
+            }
+        }
+        stats.pack_scans += 1;
+        for (source.packs.items, 0..) |*p, position| {
+            if (try p.index.find(oid)) |found| return .{ .at = position, .offset = found.offset };
+        }
+        return null;
+    }
+};
+
+/// Counters saying how lookups resolved. Nothing depends on them; they are
+/// how a caller, or a test, sees that an accelerator is being used.
+pub const Stats = struct {
+    /// Lookups a multi-pack index narrowed to one pack.
+    midx_hits: u64 = 0,
+    /// Lookups that asked every pack in turn, because there was no
+    /// multi-pack index, or it did not name the object.
+    pack_scans: u64 = 0,
 };
 
 /// The object database.
@@ -104,6 +152,8 @@ pub const Odb = struct {
     /// and an `add -A` writes one object per changed file; allocating it per
     /// object is a measurable share of the cost of a cold pass.
     deflate_window: []u8 = &.{},
+    /// How lookups resolved. Read it; nothing in the package does.
+    stats: Stats = .{},
 
     /// Open the object database under `git_dir`.
     ///
@@ -166,6 +216,8 @@ pub const Odb = struct {
             .packs = .empty,
             .pack_names = .empty,
             .writable = writable,
+            .midx = null,
+            .midx_packs = .empty,
         });
         try odb.scanPacks(io, odb.sources.items.len - 1);
         try odb.readAlternates(io, dir, depth);
@@ -224,6 +276,40 @@ pub const Odb = struct {
             };
             source.pack_names.append(odb.gpa, name_copy) catch return error.OutOfMemory;
         }
+        try odb.loadMidx(io, source_index);
+    }
+
+    /// Read `pack/multi-pack-index` and match its pack names to the packs
+    /// open here.
+    ///
+    /// Re-read on every scan, because a `gc` replaces it along with the packs
+    /// it names. An index that does not parse is left out: it is an
+    /// accelerator, and a repository reads the same without one.
+    fn loadMidx(odb: *Odb, io: Io, source_index: usize) Error!void {
+        const source = &odb.sources.items[source_index];
+        if (source.midx) |*old| old.deinit();
+        source.midx = null;
+        source.midx_packs.clearRetainingCapacity();
+
+        const pack_dir = source.pack_dir orelse return;
+        var index = (midx_mod.Index.open(odb.gpa, io, pack_dir, odb.kind) catch return) orelse return;
+        errdefer index.deinit();
+
+        var position: u32 = 0;
+        while (position < index.pack_count) : (position += 1) {
+            const name = index.packName(position);
+            var at: ?u32 = null;
+            if (name) |text| {
+                for (source.pack_names.items, 0..) |open_name, i| {
+                    if (std.mem.eql(u8, open_name, text)) {
+                        at = @intCast(i);
+                        break;
+                    }
+                }
+            }
+            source.midx_packs.append(odb.gpa, at) catch return error.OutOfMemory;
+        }
+        source.midx = index;
     }
 
     /// Re-scan every pack directory, picking up packs written since the last
@@ -241,6 +327,8 @@ pub const Odb = struct {
             for (source.pack_names.items) |name| odb.gpa.free(name);
             source.packs.deinit(odb.gpa);
             source.pack_names.deinit(odb.gpa);
+            if (source.midx) |*index| index.deinit();
+            source.midx_packs.deinit(odb.gpa);
             if (source.pack_dir) |d| d.close(io);
             source.dir.close(io);
         }
@@ -282,14 +370,13 @@ pub const Odb = struct {
 
     fn tryRead(odb: *Odb, io: Io, oid: Oid) Error!?Read {
         if (try odb.readLoose(io, oid)) |found| return found;
-        var pack_id: u32 = 0;
+        var base: u32 = 0;
         for (odb.sources.items) |*source| {
-            for (source.packs.items) |*p| {
-                defer pack_id += 1;
-                const located = (try p.index.find(oid)) orelse continue;
-                const obj = try p.readAt(io, located.offset, &odb.cache, pack_id);
-                return .{ .type = obj.type, .bytes = obj.bytes };
-            }
+            defer base += @intCast(source.packs.items.len);
+            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
+            const p = &source.packs.items[located.at];
+            const obj = try p.readAt(io, located.offset, &odb.cache, base + @as(u32, @intCast(located.at)));
+            return .{ .type = obj.type, .bytes = obj.bytes };
         }
         return null;
     }
@@ -360,13 +447,9 @@ pub const Odb = struct {
             const parsed = object.parseHeader(head[0..got]) catch return error.CorruptLooseObject;
             return parsed.header;
         }
-        var pack_id: u32 = 0;
         for (odb.sources.items) |*source| {
-            for (source.packs.items) |*p| {
-                defer pack_id += 1;
-                const located = (try p.index.find(oid)) orelse continue;
-                return try p.headerAt(io, located.offset);
-            }
+            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
+            return try source.packs.items[located.at].headerAt(io, located.offset);
         }
         return null;
     }
@@ -383,9 +466,7 @@ pub const Odb = struct {
             return true;
         }
         for (odb.sources.items) |*source| {
-            for (source.packs.items) |*p| {
-                if ((try p.index.find(oid)) != null) return true;
-            }
+            if ((try source.findPack(oid, &odb.stats)) != null) return true;
         }
         return false;
     }
@@ -740,6 +821,14 @@ pub const Odb = struct {
     pub fn packCount(odb: *const Odb) usize {
         var n: usize = 0;
         for (odb.sources.items) |*s| n += s.packs.items.len;
+        return n;
+    }
+
+    /// How many of this database's object directories have a multi-pack
+    /// index that parsed.
+    pub fn multiPackIndexCount(odb: *const Odb) usize {
+        var n: usize = 0;
+        for (odb.sources.items) |*s| n += @intFromBool(s.midx != null);
         return n;
     }
 };

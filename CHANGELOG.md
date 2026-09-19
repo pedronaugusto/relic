@@ -52,6 +52,24 @@ breaking one.
   halves and across every split of the feed, and nothing in the fixture
   repositories — text, a deltified file, a binary blob — is flagged.
 
+- **The multi-pack index is wired into lookup.** It was read and consulted by
+  nothing; now `read`, `readHeader` and `exists` ask it which pack holds an
+  object before asking the packs one at a time. It is read at open and
+  re-read on every pack scan, because a `gc` replaces it along with the packs
+  it names.
+
+  It says which pack, and that pack's own index still gives the offset.
+  Trusting the offset would make a stale index a read at a wrong position
+  rather than a miss, and the two-step costs one binary search against the
+  one per pack it replaces. An index that does not parse, or that names a
+  pack this database has not opened, is a miss.
+
+- **`Odb.stats`** — `midx_hits` and `pack_scans`, counting how lookups
+  resolved. Nothing in the package reads them.
+
+- **`Odb.multiPackIndexCount`** — how many of the database's object
+  directories have one.
+
 ### Changed
 
 - **`hash.Hasher`'s SHA-1 is this package's rather than the standard

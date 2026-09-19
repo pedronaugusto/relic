@@ -131,7 +131,7 @@ this processor has, asked once.
 | `object` | `Type`, `Mode`, `Tree` and `Tree.Builder`, `Commit`, `Tag`, `Signature`, `ExtraHeader`. Parsing and writing, with git's tree sort rule and header order. |
 | `pack` | `Index` (`.idx` v2), `Pack`, `Cache`. Both delta kinds, the 64-bit offset table, a bounded chain, and `verify`. |
 | `delta` | `apply`, with the copy and insert opcodes. |
-| `odb` | `Odb.open`, `read`, `readHeader`, `exists`, `findPrefix`, `write`, `writeStream`, `listObjects`, `verify`, `refresh`, `syncBatch`. Loose objects, the packs, and `objects/info/alternates`. |
+| `odb` | `Odb.open`, `read`, `readHeader`, `exists`, `findPrefix`, `write`, `writeStream`, `listObjects`, `verify`, `refresh`, `syncBatch`, `stats`. Loose objects, the packs, `objects/info/alternates` and the multi-pack index. |
 | `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
 | `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. |
 | `reflog` | `append`, `read`, `Log.at` for `HEAD@{n}`, `Policy` for `core.logAllRefUpdates`. |
@@ -146,7 +146,7 @@ this processor has, asked once.
 | `textdiff` | `diffLines`, `hunks`, `stat`, `similarity`, `Algorithm` (`myers`, `histogram`). |
 | `revwalk` | `Walk`, `mergeBase`, `mergeBases`, `isAncestor`. |
 | `merge` | `trees` — a three-way tree merge producing index stages 1 to 3. |
-| `commitgraph`, `midx` | The two accelerators, read. A `revwalk.Walk` takes parents and times from a commit-graph when it is given one and reads the object when it is not, so the answers do not change either way. |
+| `commitgraph`, `midx` | The two accelerators, read. A `revwalk.Walk` takes parents and times from a commit-graph when it is given one and reads the object when it is not; a lookup asks a multi-pack index which pack to open before it asks the packs one by one. Neither changes an answer. |
 | `safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
 | `repo` | `Repository.open`, `init`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. |
 
@@ -200,6 +200,15 @@ git's own backoff.
 
 On a miss, the object database re-scans the pack directory once and tries
 again, because a `git gc` may have packed the object away between the two.
+
+A repository with many packs has one binary search per pack on every lookup
+unless something narrows it, and `pack/multi-pack-index` is what git writes to
+narrow it. It is read at open and consulted first: it says which pack holds
+the object, and that pack's own index is still what gives the offset. Doing it
+the other way round would turn a stale index into a read at a wrong offset
+rather than a miss. An index that does not parse, or that names a pack this
+database has not opened, is a miss and the packs are asked in turn.
+`Odb.stats` counts both, so a caller can see which happened.
 
 ### Durability
 

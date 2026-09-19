@@ -1081,3 +1081,95 @@ test "the collision check does not change a name a database takes" {
         try std.testing.expectEqualStrings(name.hex(&hex), std.mem.trimEnd(u8, said, "\n"));
     }
 }
+
+test "a repository with a multi-pack index looks objects up through it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    // Several packs, so that the index has something to narrow: a commit,
+    // a `gc` to pack what is there, and round again. `gc` would fold the
+    // packs back into one, so `repack -d` is not used after the first.
+    for (0..4) |round| {
+        for (0..6) |i| {
+            var path_buf: [64]u8 = undefined;
+            var body_buf: [128]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buf, "r{d}f{d}.txt", .{ round, i });
+            const body = try std.fmt.bufPrint(&body_buf, "round {d} file {d}\n", .{ round, i });
+            try repo.writeFile(io, path, body);
+        }
+        try repo.exec(io, &.{ "add", "-A" });
+        var msg_buf: [32]u8 = undefined;
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg_buf, "round {d}", .{round}) });
+        // Pack what is loose without touching the packs already there.
+        try repo.exec(io, &.{ "repack", "-q", "-d" });
+        if (round == 0) continue;
+        // And make one more pack that keeps the previous ones, so the count
+        // grows rather than being folded away.
+        try repo.exec(io, &.{ "repack", "-q" });
+    }
+    repo.exec(io, &.{ "multi-pack-index", "write" }) catch return;
+
+    const git_dir = try repo.gitDir(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    // git only writes one when there is something to write; a version of it
+    // that declined leaves this test with nothing to prove.
+    if (db.multiPackIndexCount() == 0) return;
+    try std.testing.expect(db.packCount() >= 1);
+
+    const listing = try repo.run(io, &.{ "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype) %(objectsize)" });
+    defer gpa.free(listing);
+
+    var packed_objects: usize = 0;
+    var lines = std.mem.splitScalar(u8, listing, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, ' ');
+        const oid = try Oid.parse(.sha1, fields.next().?);
+        const expected_type = try object.Type.parse(fields.next().?);
+        const expected_size = try std.fmt.parseInt(u64, fields.next().?, 10);
+
+        const before = db.stats.midx_hits;
+        const found = try db.read(io, oid);
+        defer gpa.free(found.bytes);
+        try std.testing.expectEqual(expected_type, found.type);
+        try std.testing.expectEqual(expected_size, found.bytes.len);
+        try std.testing.expect(hash.Hasher.object(.sha1, found.type.name(), found.bytes).eql(oid));
+        if (db.stats.midx_hits != before) packed_objects += 1;
+
+        // The header and the existence check go the same way.
+        const header = try db.readHeader(io, oid);
+        try std.testing.expectEqual(expected_type, header.type);
+        try std.testing.expect(try db.exists(io, oid));
+    }
+
+    // Most objects are packed here, so most lookups went through the index
+    // rather than round the packs one at a time.
+    try std.testing.expect(packed_objects > 0);
+    try std.testing.expect(db.stats.midx_hits > 0);
+
+    // And the repository reads the same with the index taken away, which is
+    // the only promise an accelerator is allowed to make.
+    try repo.exec(io, &.{ "multi-pack-index", "--object-dir=.git/objects", "expire" });
+    var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    pack_dir.deleteFile(io, "multi-pack-index") catch {};
+
+    var plain = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer plain.deinit(io);
+    try std.testing.expectEqual(@as(usize, 0), plain.multiPackIndexCount());
+
+    lines = std.mem.splitScalar(u8, listing, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, ' ');
+        const oid = try Oid.parse(.sha1, fields.next().?);
+        const found = try plain.read(io, oid);
+        defer gpa.free(found.bytes);
+        try std.testing.expect(hash.Hasher.object(.sha1, found.type.name(), found.bytes).eql(oid));
+    }
+    try std.testing.expectEqual(@as(u64, 0), plain.stats.midx_hits);
+}
