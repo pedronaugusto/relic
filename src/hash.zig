@@ -8,6 +8,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const sha1_impl = @import("sha1.zig");
+
 /// A repository's hash function.
 ///
 /// git's transition document states there is no interoperability between the
@@ -219,9 +221,22 @@ pub const Hasher = struct {
     state: State,
 
     const State = union(Kind) {
-        sha1: std.crypto.hash.Sha1,
+        sha1: sha1_impl.Sha1,
         sha256: std.crypto.hash.sha2.Sha256,
     };
+
+    /// Which instructions SHA-1 is running on here.
+    ///
+    /// SHA-256 always takes the standard library's, which has a hardware arm
+    /// on both architectures already; SHA-1 has this package's, which has
+    /// one too. A caller printing a benchmark wants the name; nothing else
+    /// needs it.
+    pub const Sha1Backend = sha1_impl.Backend;
+
+    /// The SHA-1 instructions this processor turned out to have.
+    pub fn sha1Backend() Sha1Backend {
+        return sha1_impl.backend();
+    }
 
     /// A hasher over `kind`, with nothing fed to it yet. Feed the header
     /// first if you are naming an object; `Hasher` itself makes no header,

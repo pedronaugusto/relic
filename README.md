@@ -112,18 +112,21 @@ const relic_dep = b.dependency("relic", .{ .target = target, .optimize = optimiz
 exe.root_module.addImport("relic", relic_dep.module("relic"));
 ```
 
-One module and no dependencies: zlib comes from `std.compress.flate` and the
-two hashes from `std.crypto`, so there is nothing to link and no build option
-to forward. Every function that allocates takes the allocator as its first
-argument and every function that touches the disk takes a `std.Io`; the
-package holds no global state, starts no threads, spawns no process, and
-never reads a clock — the caller passes the time and the identity.
+One module and no dependencies: zlib comes from `std.compress.flate`, SHA-256
+from `std.crypto`, and SHA-1 is in the package, so there is nothing to link and
+no build option to forward. Every function that allocates takes the allocator
+as its first argument and every function that touches the disk takes a
+`std.Io`; the package starts no threads, spawns no process, and never reads a
+clock — the caller passes the time and the identity. One word outlives a call
+without a caller holding it, and it is the answer to which SHA-1 instructions
+this processor has, asked once.
 
 ## The API
 
 | Module | |
 |---|---|
 | `hash` | `Kind` (`sha1`, `sha256`), `Oid`, `Hasher`. The hash is a parameter from the first line, not a width bolted on later. |
+| `sha1` | SHA-1 over the processor's own instructions, with the eighty rounds as the fallback and the choice made at run time. |
 | `object` | `Type`, `Mode`, `Tree` and `Tree.Builder`, `Commit`, `Tag`, `Signature`, `ExtraHeader`. Parsing and writing, with git's tree sort rule and header order. |
 | `pack` | `Index` (`.idx` v2), `Pack`, `Cache`. Both delta kinds, the 64-bit offset table, a bounded chain, and `verify`. |
 | `delta` | `apply`, with the copy and insert opcodes. |
@@ -243,13 +246,36 @@ The warm numbers are what the stat shortcut and the `TREE` extension are for:
 an entry whose recorded stat still matches is neither opened nor hashed, and a
 cache-tree node that is still valid is used as it stands.
 
-The cold number is dominated by hashing, and there is a measured reason it is
-not faster. On this machine Zig's SHA-256 runs at 2.30 GiB/s and its SHA-1 at
-0.99 GiB/s: the standard library has hardware paths for SHA-256 on both
-aarch64 and x86-64 and none for SHA-1, so a SHA-1 repository pays about 2.3
-times what a SHA-256 one does for the same bytes. That is a gap in the
-standard library rather than in this package, and closing it upstream is worth
-more than anything that could be done here.
+The cold number is three thousand loose objects written, which is a directory
+made, a temporary file created, deflated, closed and renamed, once each.
+Naming those files is under a millisecond of it, so it did not move when the
+hash got faster and it is not the number to read the hash by.
+
+The hash is the floor under a repository whose files have size. Both
+architectures carry SHA-1 instructions, and this package uses them: aarch64's
+`sha1c`, `sha1p`, `sha1m`, `sha1h`, `sha1su0` and `sha1su1`, x86-64's
+`sha1rnds4`, `sha1nexte`, `sha1msg1` and `sha1msg2`. Over 64 MiB on the same
+machine:
+
+| | |
+|---|---|
+| SHA-1, the eighty rounds in software | 1.01 GiB/s |
+| SHA-1, the aarch64 instructions | 2.56 GiB/s |
+| SHA-256, from the standard library | 2.30 GiB/s |
+
+Which arm runs is decided by asking the processor and not by what the compiler
+was told, so a binary built for a baseline target uses the instructions on a
+machine that has them. Both arms assemble on a baseline target, so the choice
+is never taken away at build time. The benchmark's budget is a ratio against
+the software rounds timed in the same run, which is what makes it survive a
+runner under load and still fail if the hardware arm is lost.
+
+The aarch64 arm is what the number above was measured on. The x86-64 arm is
+checked against the software rounds under emulation, on every length to eight
+kilobytes; it has not been timed on that hardware. Both are written as
+assembly, which the self-hosted x86-64 code generator has no encoding for, so
+a Debug x86-64 build takes the software rounds and an optimised one takes the
+instructions.
 
 Packs are read with positional reads by default. `Odb.Options.map_packs` asks
 for a memory map instead, which is faster on a cold cache and costs two

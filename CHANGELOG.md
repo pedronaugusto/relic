@@ -7,6 +7,39 @@ breaking one.
 
 ## Unreleased
 
+### Added
+
+- **`sha1`** — SHA-1 over the instructions the processor has for it: aarch64's
+  `sha1c`, `sha1p`, `sha1m`, `sha1h`, `sha1su0` and `sha1su1`, x86-64's
+  `sha1rnds4`, `sha1nexte`, `sha1msg1` and `sha1msg2`, with the eighty rounds
+  written out as the fallback. Measured over 64 MiB on an Apple M3 Max: 1.01
+  GiB/s before, 2.56 GiB/s after, which puts SHA-1 past the standard library's
+  hardware SHA-256 at 2.30 GiB/s rather than 2.3 times behind it.
+
+  Two decisions are worth the reason. **The arm is chosen by asking the
+  processor rather than by what the compiler was told**, because a package
+  built for a baseline target is the normal case and a compile-time gate would
+  hand every such build the slow path on a machine that has the instructions.
+  **Both arms assemble on a baseline target** — aarch64 through
+  `.arch_extension crypto` in the assembly itself, x86-64 because its
+  assembler does not gate these — so nothing has to be added to a consumer's
+  build graph for the choice to exist.
+
+  Both arms are assembly, which the self-hosted x86-64 code generator has no
+  encoding for; a build that uses it — a Debug x86-64 build, in practice —
+  takes the software rounds rather than failing to compile.
+
+  `hash.Hasher` is unchanged in shape; `hash.Hasher.sha1Backend()` says which
+  arm a measurement was taken on.
+
+### Changed
+
+- **`hash.Hasher`'s SHA-1 is this package's rather than the standard
+  library's.** The digest is the same digest — the suite checks it against
+  `std.crypto.hash.Sha1` on every length from zero to four kilobytes, on
+  several large inputs, and against the object names in the git-generated
+  fixtures — so nothing a caller stored changes.
+
 ## 0.1.0
 
 The first release. It reads and writes a repository the way git leaves one on

@@ -232,3 +232,76 @@ test "benchmark: a packed object with a delta chain reads inside the budget" {
     };
     try std.testing.expect(ms < budget_ms);
 }
+
+test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+
+    // Enough bytes that the measurement is the compression function and not
+    // the call around it, and few enough that a Debug build still finishes.
+    const bytes: usize = switch (builtin.mode) {
+        .Debug => 4 * 1024 * 1024,
+        else => 64 * 1024 * 1024,
+    };
+    const buf = try gpa.alloc(u8, bytes);
+    defer gpa.free(buf);
+    var prng: std.Random.DefaultPrng = .init(0x5ec0_0d1e);
+    prng.random().bytes(buf);
+
+    const gib: f64 = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0);
+
+    // relic's SHA-1, on whichever arm this processor turned out to have.
+    const mine_start = Io.Clock.awake.now(io);
+    var mine: hash.Hasher = .init(.sha1);
+    mine.update(buf);
+    const mine_oid = mine.final();
+    const mine_ms = elapsedMs(io, mine_start);
+
+    // The library's SHA-1, which is the same eighty rounds relic falls back
+    // to. Measured in the same run on the same machine, so the ratio below
+    // says something a busy runner cannot move.
+    var reference: [20]u8 = undefined;
+    const ref_start = Io.Clock.awake.now(io);
+    std.crypto.hash.Sha1.hash(buf, &reference, .{});
+    const ref_ms = elapsedMs(io, ref_start);
+
+    // SHA-256, which the library already has a hardware arm for, as the
+    // scale the SHA-1 number is read against.
+    const sha256_start = Io.Clock.awake.now(io);
+    var sha256: hash.Hasher = .init(.sha256);
+    sha256.update(buf);
+    _ = sha256.final();
+    const sha256_ms = elapsedMs(io, sha256_start);
+
+    std.debug.print(
+        \\
+        \\  relic benchmark ({s}, {d} MiB hashed, SHA-1 arm: {s})
+        \\    SHA-1        relic {d: >6.2} GiB/s   library {d: >6.2} GiB/s
+        \\    SHA-256      {d: >6.2} GiB/s
+        \\
+    , .{
+        @tagName(builtin.mode),
+        bytes / (1024 * 1024),
+        @tagName(hash.Hasher.sha1Backend()),
+        gib / (mine_ms / 1000.0),
+        gib / (ref_ms / 1000.0),
+        gib / (sha256_ms / 1000.0),
+    });
+
+    // The name is the name whichever arm produced it.
+    try std.testing.expectEqualSlices(u8, &reference, mine_oid.raw());
+
+    // A processor with the instructions must actually be using them. The
+    // guard is a ratio against the software rounds timed in the same run,
+    // because an absolute figure would fail on a slow runner and pass on a
+    // fast one that had quietly lost the hardware arm. ReleaseSmall compiles
+    // the software rounds as a loop rather than unrolled, which moves the
+    // denominator, so the margin there is the loose one.
+    if (hash.Hasher.sha1Backend() != .software and builtin.mode != .Debug) {
+        const floor: f64 = switch (builtin.mode) {
+            .ReleaseSmall => 1.2,
+            else => 1.5,
+        };
+        try std.testing.expect(ref_ms > mine_ms * floor);
+    }
+}
