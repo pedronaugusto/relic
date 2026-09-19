@@ -47,6 +47,14 @@ pub const Options = struct {
     max_alternate_depth: u8 = 5,
     /// The largest loose object this will read into memory.
     max_object_bytes: usize = 1 << 31,
+    /// Whether to measure, at open, how fine a modification time the
+    /// filesystem under `objects` records.
+    ///
+    /// On, because the answer decides whether a stat shortcut may believe an
+    /// entry's nanoseconds, and neither answer is safe to assume. It costs
+    /// one file created, written to three times and removed. Off for a
+    /// caller that will not have anything written into that directory.
+    probe_timestamp_resolution: bool = true,
     /// Whether every SHA-1 name this database takes is additionally checked
     /// for the signature of a collision attack, which is
     /// `error.CollisionAttack`.
@@ -181,6 +189,11 @@ pub const Odb = struct {
     deflate_state: ?DeflateState = null,
     /// How lookups resolved. Read it; nothing in the package does.
     stats: Stats = .{},
+    /// How fine a modification time this repository's filesystem records,
+    /// measured at open unless `Options.probe_timestamp_resolution` said not
+    /// to. `Repository.worktreeRules` hands it to the working tree, which is
+    /// what makes a stat shortcut believe exactly as much as it should.
+    timestamp_resolution: fs.Resolution = .nanosecond,
 
     /// Open the object database under `git_dir`.
     ///
@@ -206,6 +219,9 @@ pub const Odb = struct {
         odb.deflate_window = try gpa.alloc(u8, flate.max_window_len);
         const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
         try odb.addSource(io, objects, true, 0);
+        if (options.probe_timestamp_resolution) {
+            odb.timestamp_resolution = fs.probeTimestampResolution(io, objects);
+        }
         return odb;
     }
 
@@ -228,6 +244,9 @@ pub const Odb = struct {
         errdefer odb.deinit(io);
         odb.deflate_window = try gpa.alloc(u8, flate.max_window_len);
         try odb.addSource(io, objects_dir, true, 0);
+        if (options.probe_timestamp_resolution) {
+            odb.timestamp_resolution = fs.probeTimestampResolution(io, objects_dir);
+        }
         return odb;
     }
 

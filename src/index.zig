@@ -467,6 +467,10 @@ pub const Index = struct {
     /// cutoff. Zero for an index that has never been on a disk.
     racy_cutoff_sec: u32 = 0,
     racy_cutoff_nsec: u32 = 0,
+    /// How fine a modification time the filesystem holding this index
+    /// records, measured when it was read. It decides how much of an entry's
+    /// nanosecond field the racy rule is allowed to believe.
+    timestamp_resolution: fs.Resolution = .nanosecond,
     /// The shared index a split index was built from, when there was one.
     split_base: ?Oid = null,
     /// Whether the file read was a split index. What is written back is
@@ -522,6 +526,11 @@ pub const Index = struct {
             index.racy_cutoff_sec = s.mtime_sec;
             index.racy_cutoff_nsec = s.mtime_nsec;
         } else |_| {}
+        // How much of that cutoff's nanoseconds means anything is a property
+        // of the filesystem, and it is measured rather than assumed. It is
+        // measured here because this is where the cutoff is taken and
+        // because it is the filesystem the cutoff came from.
+        index.timestamp_resolution = fs.probeTimestampResolution(io, dir);
 
         if (index.split_base) |base| {
             try index.mergeShared(gpa, io, git_dir, base);
@@ -966,11 +975,15 @@ pub const Index = struct {
         if (index.racy_cutoff_sec == 0 and index.racy_cutoff_nsec == 0) return false;
         if (entry.stat.mtime_sec > index.racy_cutoff_sec) return true;
         if (entry.stat.mtime_sec < index.racy_cutoff_sec) return false;
-        // Equal seconds: compare nanoseconds where both sides have them, and
-        // treat the entry as racy where either side reports zero, because a
-        // filesystem with second resolution cannot tell them apart.
+        // Equal seconds. A filesystem that keeps nothing below a second
+        // cannot put the two in order at all, so everything written in the
+        // index's own second is racy -- which is the measurement earning its
+        // keep, because assuming nanoseconds here is how a file rewritten
+        // inside one second goes unnoticed.
+        if (!index.timestamp_resolution.hasSubsecond()) return true;
         if (entry.stat.mtime_nsec == 0 or index.racy_cutoff_nsec == 0) return true;
-        return entry.stat.mtime_nsec >= index.racy_cutoff_nsec;
+        const unit = index.timestamp_resolution.ns;
+        return entry.stat.mtime_nsec / unit >= index.racy_cutoff_nsec / unit;
     }
 
     /// The version `write` would use under `options`.
@@ -1241,6 +1254,62 @@ test "a bad checksum is a named error" {
     defer gpa.free(bytes);
     bytes[bytes.len - 1] ^= 0xff;
     try std.testing.expectError(error.ChecksumMismatch, Index.parse(gpa, .sha1, bytes));
+}
+
+test "the racy rule uses the resolution the filesystem was measured to have" {
+    var index: Index = .initEmpty(std.testing.allocator, .sha1);
+    defer index.deinit();
+    index.racy_cutoff_sec = 1000;
+    index.racy_cutoff_nsec = 500_000_000;
+    const entry: Entry = .{
+        .path = "",
+        .oid = undefined,
+        .mode = .file,
+        .stat = .{ .mtime_sec = 1000, .mtime_nsec = 100_000_000 },
+    };
+
+    // Nanoseconds kept: the entry is a tenth of a second older than the index
+    // and the filesystem can say so, so it is not racy.
+    index.timestamp_resolution = .nanosecond;
+    try std.testing.expect(!index.isRacy(entry));
+
+    // Seconds kept: the filesystem cannot put the two in order at all, so
+    // anything written in the index's own second has to be read.
+    index.timestamp_resolution = .second;
+    try std.testing.expect(index.isRacy(entry));
+
+    // Tenths of a second kept: the two still fall in different units, so the
+    // entry is still older.
+    index.timestamp_resolution = .{ .ns = 100_000_000, .measured = true };
+    try std.testing.expect(!index.isRacy(entry));
+
+    // An entry inside the same unit as the cutoff is racy whatever the unit,
+    // because the filesystem cannot say which came first.
+    const close: Entry = .{
+        .path = "",
+        .oid = undefined,
+        .mode = .file,
+        .stat = .{ .mtime_sec = 1000, .mtime_nsec = 540_000_000 },
+    };
+    index.timestamp_resolution = .{ .ns = 100_000_000, .measured = true };
+    try std.testing.expect(index.isRacy(close));
+}
+
+test "an index read from a disk measures the filesystem it was read from" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var written: Index = .initEmpty(gpa, .sha1);
+    defer written.deinit();
+    try written.write(io, tmp.dir, "index", .{});
+
+    var index = try Index.read(gpa, io, tmp.dir, "index", tmp.dir, .sha1);
+    defer index.deinit();
+    try std.testing.expect(index.timestamp_resolution.measured);
+    try std.testing.expect(index.timestamp_resolution.ns >= 1);
+    try std.testing.expect(index.timestamp_resolution.ns <= std.time.ns_per_s);
 }
 
 test "the racy rule marks an entry whose time is not older than the index" {

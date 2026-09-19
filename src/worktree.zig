@@ -61,6 +61,11 @@ pub const Rules = struct {
     ignore_case: bool = false,
     /// How much of a cached stat to believe, from `core.checkStat`.
     check_stat: fs.Stat.Check = .full,
+    /// How fine a modification time the working tree's filesystem records.
+    /// `Repository.worktreeRules` fills it in from what the object database
+    /// measured at open; the default believes every nanosecond, which is
+    /// what this package assumed before it measured.
+    timestamp_resolution: fs.Resolution = .nanosecond,
     /// Whether the filesystem records an executable bit, from
     /// `core.fileMode`. When false the index's mode is preserved rather
     /// than taken from the disk.
@@ -315,7 +320,7 @@ const Walker = struct {
             const racy = w.index.isRacy(entry.*);
             if (!racy and !entry.intent_to_add and
                 entry.mode == mode and
-                entry.stat.matches(found.stat, w.options.rules.check_stat))
+                entry.stat.matches(found.stat, w.options.rules.check_stat, w.options.rules.timestamp_resolution))
             {
                 w.outcome.unchanged += 1;
                 return;
@@ -688,7 +693,7 @@ const StatusScan = struct {
             return .type_changed;
         }
         if (entry.mode != mode) return .modified;
-        if (!s.index.isRacy(entry.*) and entry.stat.matches(found.stat, s.options.rules.check_stat)) {
+        if (!s.index.isRacy(entry.*) and entry.stat.matches(found.stat, s.options.rules.check_stat, s.options.rules.timestamp_resolution)) {
             return .unmodified;
         }
         // The stat says it may have changed; the content says whether it
@@ -974,7 +979,7 @@ pub fn checkout(
 
         if (existing) |entry| {
             if (entry.oid.eql(want.oid) and entry.mode == want.mode and on_disk != null and
-                !index.isRacy(entry.*) and entry.stat.matches(on_disk.?.stat, options.rules.check_stat))
+                !index.isRacy(entry.*) and entry.stat.matches(on_disk.?.stat, options.rules.check_stat, options.rules.timestamp_resolution))
             {
                 outcome.unchanged += 1;
                 continue;
@@ -1153,7 +1158,7 @@ pub fn applySparse(
         const included = patterns.includes(entry.path, false);
         if (!included and !entry.skip_worktree) {
             if (try fs.statAt(io, wt, entry.path)) |found| {
-                if (!entry.stat.matches(found.stat, options.rules.check_stat)) {
+                if (!entry.stat.matches(found.stat, options.rules.check_stat, options.rules.timestamp_resolution)) {
                     outcome.kept_dirty += 1;
                     continue;
                 }

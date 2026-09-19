@@ -117,7 +117,8 @@ test "benchmark: add, write-tree and status stay inside the budget" {
 
     std.debug.print(
         \\
-        \\  relic benchmark ({s}, {d} files over {d} directories, walk: {s})
+        \\  relic benchmark ({s}, {d} files over {d} directories)
+        \\    walk {s}, timestamps to {d} ns
         \\    add -A       cold {d: >8.1} ms   warm {d: >8.1} ms
         \\    write-tree   cold {d: >8.1} ms   warm {d: >8.1} ms
         \\    status       dirty {d: >7.1} ms
@@ -129,6 +130,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
         file_count,
         directory_count,
         dirscan.armFor(gpa, io, repo.work_dir.?),
+        repo.odb.timestamp_resolution.ns,
         cold_add_ms,
         warm_add_ms,
         cold_tree_ms,

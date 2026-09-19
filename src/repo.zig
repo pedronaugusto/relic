@@ -426,6 +426,7 @@ pub const Repository = struct {
                 (if (std.ascii.eqlIgnoreCase(text, "minimal")) .minimal else .full)
             else
                 .full,
+            .timestamp_resolution = repo.odb.timestamp_resolution,
             .file_mode = repo.config.getBool("core.filemode", Io.File.Permissions.has_executable_bit) catch true,
             .symlinks = repo.config.getBool("core.symlinks", @import("builtin").os.tag != .windows) catch true,
         };

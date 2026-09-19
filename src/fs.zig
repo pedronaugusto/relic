@@ -50,6 +50,88 @@ pub const Sync = enum {
 /// gives once per batch.
 pub const macos_fsync_is_writeout_only = builtin.os.tag == .macos;
 
+/// How fine a modification time a filesystem records.
+///
+/// The old assumption here was that a nanosecond reported is a nanosecond
+/// kept. It is not: APFS and ext4 keep nanoseconds, HFS+ and most network
+/// filesystems keep whole seconds, and several keep something between. Both
+/// ends of that are wrong to assume. Believing nanoseconds a filesystem does
+/// not keep makes every entry look changed; ignoring nanoseconds a
+/// filesystem does keep throws away the precision that tells a rewritten
+/// file from an untouched one inside the same second.
+///
+/// So it is measured, once, where the file being compared lives.
+pub const Resolution = struct {
+    /// The smallest unit every modification time seen was a multiple of.
+    /// One means every nanosecond is kept.
+    ns: u64 = 1,
+    /// Whether this was measured or assumed. An unmeasured resolution is
+    /// what a directory nothing could be written into leaves behind.
+    measured: bool = false,
+
+    /// Every nanosecond kept, which is what this package assumed before it
+    /// measured.
+    pub const nanosecond: Resolution = .{ .ns = 1 };
+    /// Whole seconds only, which is what a filesystem that reports zero
+    /// nanoseconds has.
+    pub const second: Resolution = .{ .ns = std.time.ns_per_s };
+
+    /// Whether the filesystem keeps anything below a second.
+    pub fn hasSubsecond(r: Resolution) bool {
+        return r.ns < std.time.ns_per_s;
+    }
+
+    /// Two nanosecond fields, as the filesystem can tell them apart.
+    fn sameSubsecond(r: Resolution, a: u32, b: u32) bool {
+        if (!r.hasSubsecond()) return true;
+        return a / r.ns == b / r.ns;
+    }
+};
+
+/// Measure how fine a modification time `dir`'s filesystem records.
+///
+/// One file is created there, written to three times, and stat'd after each
+/// write; the answer is the largest power of ten that divides every
+/// nanosecond field reported, capped at a second. A filesystem that keeps
+/// whole seconds reports zero every time and is a second; one that keeps
+/// milliseconds reports multiples of a million; one that keeps nanoseconds
+/// reports three values whose only common divisor is one.
+///
+/// Three samples is what makes the answer trustworthy: a filesystem that
+/// keeps nanoseconds would have to report three times that are all multiples
+/// of the same round number for this to say otherwise.
+///
+/// A directory nothing can be written into gives `Resolution.nanosecond`
+/// with `measured` false, which is the assumption this replaces and the
+/// lenient answer of the two.
+pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
+    var name_buf: [64]u8 = undefined;
+    const name = tempName(io, &name_buf, "relic_tres_");
+    const file = dir.createFile(io, name, .{ .exclusive = true }) catch return .nanosecond;
+    defer {
+        file.close(io);
+        dir.deleteFile(io, name) catch {};
+    }
+
+    var divisor: u64 = 0;
+    var samples: u8 = 0;
+    for (0..3) |_| {
+        file.writeStreamingAll(io, "relic") catch break;
+        const s = file.stat(io) catch break;
+        const nsec: u64 = @intCast(@mod(s.mtime.toNanoseconds(), std.time.ns_per_s));
+        divisor = std.math.gcd(divisor, nsec);
+        samples += 1;
+    }
+    if (samples == 0) return .nanosecond;
+    // Every sample reported zero: the filesystem keeps seconds and nothing
+    // below them.
+    if (divisor == 0) return .second;
+
+    var unit: u64 = std.time.ns_per_s;
+    while (unit > 1 and divisor % unit != 0) unit /= 10;
+    return .{ .ns = unit, .measured = true };
+}
+
 /// The fields git's index carries about a file, and the ones a stat shortcut
 /// compares.
 pub const Stat = struct {
@@ -119,10 +201,17 @@ pub const Stat = struct {
     /// The status-change time is never compared. git compares it only under
     /// `core.trustCtime`, and a machine running a desktop search indexer
     /// changes it without the content changing.
-    pub fn matches(cached: Stat, current: Stat, check: Check) bool {
+    ///
+    /// `resolution` is how fine a modification time the filesystem keeps,
+    /// which decides how much of the nanosecond field means anything. A
+    /// recorded zero on either side is still treated as "no nanoseconds
+    /// here", because that is what an index written by an implementation
+    /// without them looks like and re-hashing a whole working tree over it
+    /// would be a poor trade.
+    pub fn matches(cached: Stat, current: Stat, check: Check, resolution: Resolution) bool {
         if (cached.mtime_sec != current.mtime_sec) return false;
         if (cached.mtime_nsec != 0 and current.mtime_nsec != 0 and
-            cached.mtime_nsec != current.mtime_nsec) return false;
+            !resolution.sameSubsecond(cached.mtime_nsec, current.mtime_nsec)) return false;
         if (cached.size != current.size) return false;
         if (check == .minimal) return true;
         if (cached.ino != 0 and current.ino != 0 and cached.ino != current.ino) return false;
@@ -663,6 +752,50 @@ pub fn join(gpa: Allocator, parts: []const []const u8) Allocator.Error![]u8 {
         first = false;
     }
     return out;
+}
+
+test "the filesystem's timestamp resolution is measured, not assumed" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const measured = probeTimestampResolution(io, tmp.dir);
+    try std.testing.expect(measured.measured);
+    // A round unit, no finer than a nanosecond and no coarser than a second.
+    try std.testing.expect(measured.ns >= 1);
+    try std.testing.expect(measured.ns <= std.time.ns_per_s);
+    var unit: u64 = 1;
+    while (unit < measured.ns) unit *= 10;
+    try std.testing.expectEqual(unit, measured.ns);
+    try std.testing.expectEqual(measured.ns < std.time.ns_per_s, measured.hasSubsecond());
+
+    // The probe leaves nothing behind.
+    var dir = try tmp.parent_dir.openDir(io, &tmp.sub_path, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        try std.testing.expect(!std.mem.startsWith(u8, entry.name, "relic_tres_"));
+    }
+}
+
+test "a stat shortcut believes exactly as many nanoseconds as were measured" {
+    const a: Stat = .{ .mtime_sec = 1000, .mtime_nsec = 1_000_000, .size = 7 };
+    const b: Stat = .{ .mtime_sec = 1000, .mtime_nsec = 1_000_500, .size = 7 };
+    const c: Stat = .{ .mtime_sec = 1000, .mtime_nsec = 2_500_000, .size = 7 };
+
+    // Every nanosecond kept: half a microsecond apart is a different file.
+    try std.testing.expect(!a.matches(b, .full, .nanosecond));
+    // Milliseconds kept: half a microsecond is below what the filesystem
+    // records, a millisecond and a half is not.
+    const millisecond: Resolution = .{ .ns = 1_000_000, .measured = true };
+    try std.testing.expect(a.matches(b, .full, millisecond));
+    try std.testing.expect(!a.matches(c, .full, millisecond));
+    // Seconds kept: the nanosecond field says nothing at all.
+    try std.testing.expect(a.matches(b, .full, .second));
+    try std.testing.expect(a.matches(c, .full, .second));
+    // And the size still decides, whatever the resolution.
+    const bigger: Stat = .{ .mtime_sec = 1000, .mtime_nsec = 1_000_000, .size = 8 };
+    try std.testing.expect(!a.matches(bigger, .full, .second));
 }
 
 test "one stat and two stats describe a path the same way" {
