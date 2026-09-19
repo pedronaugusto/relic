@@ -86,6 +86,10 @@ pub const Odb = struct {
     /// Bumped whenever the pack directories are re-scanned, so a caller can
     /// tell that a miss was already retried.
     generation: u32 = 0,
+    /// One deflate window, allocated once. A window is sixty-four kilobytes
+    /// and an `add -A` writes one object per changed file; allocating it per
+    /// object is a measurable share of the cost of a cold pass.
+    deflate_window: []u8 = &.{},
 
     /// Open the object database under `git_dir`.
     ///
@@ -108,6 +112,7 @@ pub const Odb = struct {
         };
         errdefer odb.deinit(io);
 
+        odb.deflate_window = try gpa.alloc(u8, flate.max_window_len);
         const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
         try odb.addSource(io, objects, true, 0);
         return odb;
@@ -130,6 +135,7 @@ pub const Odb = struct {
             .cache = try .init(gpa, options.delta_cache_bytes),
         };
         errdefer odb.deinit(io);
+        odb.deflate_window = try gpa.alloc(u8, flate.max_window_len);
         try odb.addSource(io, objects_dir, true, 0);
         return odb;
     }
@@ -225,6 +231,7 @@ pub const Odb = struct {
             source.dir.close(io);
         }
         odb.sources.deinit(odb.gpa);
+        if (odb.deflate_window.len != 0) odb.gpa.free(odb.deflate_window);
         odb.cache.deinit();
         odb.* = undefined;
     }
@@ -448,12 +455,10 @@ pub const Odb = struct {
 
         var out_buf: [16 * 1024]u8 = undefined;
         var file_writer = file.writer(io, &out_buf);
-        const window = try odb.gpa.alloc(u8, flate.max_window_len);
-        defer odb.gpa.free(window);
         // Level 1, which is what git's own `core.looseCompression` defaults
         // to. The library default is level 6: three times the processor time
         // for twenty per cent smaller objects, paid on every blob written.
-        var compress = try flate.Compress.init(&file_writer.interface, window, .zlib, .level_1);
+        var compress = try flate.Compress.init(&file_writer.interface, odb.deflate_window, .zlib, .level_1);
         var header_buf: [64]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
         try compress.writer.writeAll(header);

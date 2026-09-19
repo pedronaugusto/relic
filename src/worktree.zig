@@ -128,9 +128,16 @@ pub fn addAll(
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(gpa);
 
+    var scratch_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch_instance.deinit();
+
+    var fresh: std.ArrayList(index_mod.Entry) = .empty;
+    defer fresh.deinit(gpa);
+
     var walker: Walker = .{
         .gpa = gpa,
         .arena = &arena_instance,
+        .scratch = &scratch_instance,
         .io = io,
         .wt = wt,
         .index = index,
@@ -138,28 +145,30 @@ pub fn addAll(
         .options = options,
         .outcome = &outcome,
         .seen = &seen,
+        .fresh = &fresh,
     };
     try walker.walk(options.prefix, 0);
+    // New entries go in once, sorted once. A walk produces paths in tree
+    // order and the index is in path order, so inserting them one at a time
+    // would move the tail of the list on almost every file.
+    try index.addMany(fresh.items);
 
     if (options.stage_deletions) {
-        var i: usize = 0;
-        while (i < index.entries.items.len) {
-            const entry = index.entries.items[i];
+        var gone: std.ArrayList([]const u8) = .empty;
+        defer gone.deinit(gpa);
+        for (index.entries.items) |entry| {
             const under_prefix = options.prefix.len == 0 or
                 (std.mem.startsWith(u8, entry.path, options.prefix) and
                     entry.path.len > options.prefix.len and
                     entry.path[options.prefix.len] == '/');
-            if (!under_prefix or entry.skip_worktree or seen.contains(entry.path)) {
-                i += 1;
-                continue;
-            }
+            if (!under_prefix or entry.skip_worktree or seen.contains(entry.path)) continue;
             // The file is gone from the working tree: stage its removal.
             const tree = try index.cacheTree();
             tree.invalidate(entry.path);
-            gpa.free(entry.path);
-            _ = index.entries.orderedRemove(i);
+            try gone.append(gpa, entry.path);
             outcome.removed += 1;
         }
+        index.removeMany(gone.items);
     }
     try db.syncBatch(io);
     return outcome;
@@ -167,7 +176,11 @@ pub fn addAll(
 
 const Walker = struct {
     gpa: Allocator,
+    /// Lives for the whole walk: the paths `seen` holds.
     arena: *std.heap.ArenaAllocator,
+    /// Reset after every file, so one file's temporary bytes do not
+    /// accumulate over three thousand of them.
+    scratch: *std.heap.ArenaAllocator,
     io: Io,
     wt: Io.Dir,
     index: *Index,
@@ -175,6 +188,9 @@ const Walker = struct {
     options: AddOptions,
     outcome: *AddOutcome,
     seen: *std.StringHashMapUnmanaged(void),
+    /// Entries for paths the index did not have, added in one sorted pass
+    /// at the end. Their paths live in `arena`.
+    fresh: *std.ArrayList(index_mod.Entry),
 
     fn walk(w: *Walker, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return;
@@ -316,20 +332,26 @@ const Walker = struct {
 
         const tree = try w.index.cacheTree();
         tree.invalidate(path);
-        const was_tracked = tracked != null;
-        try w.index.add(.{
-            .path = path,
-            .oid = blob,
-            .mode = mode,
-            .stat = found.stat,
-        });
-        if (was_tracked) w.outcome.modified += 1 else w.outcome.added += 1;
+        if (tracked) |entry| {
+            entry.oid = blob;
+            entry.mode = mode;
+            entry.stat = found.stat;
+            entry.intent_to_add = false;
+            w.outcome.modified += 1;
+        } else {
+            try w.fresh.append(w.gpa, .{
+                .path = try w.arena.allocator().dupe(u8, path),
+                .oid = blob,
+                .mode = mode,
+                .stat = found.stat,
+            });
+            w.outcome.added += 1;
+        }
     }
 
     fn hashAndStore(w: *Walker, path: []const u8, found: fs.Entry) Error!Oid {
-        var scratch: std.heap.ArenaAllocator = .init(w.gpa);
-        defer scratch.deinit();
-        const a = scratch.allocator();
+        _ = w.scratch.reset(.retain_capacity);
+        const a = w.scratch.allocator();
 
         if (found.kind == .sym_link) {
             var buf: [4096]u8 = undefined;

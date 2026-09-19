@@ -869,6 +869,61 @@ pub const Index = struct {
         try index.entries.insert(index.gpa, at, copy);
     }
 
+    /// Add many entries at once, sorting once at the end.
+    ///
+    /// Inserting into a sorted list one entry at a time is quadratic in the
+    /// number of entries, and a working-tree walk produces paths in tree
+    /// order rather than index order, so it hits that every time. Each
+    /// `path` is copied; an entry whose path and stage are already there is
+    /// replaced.
+    pub fn addMany(index: *Index, entries: []const Entry) Allocator.Error!void {
+        if (entries.len == 0) return;
+        try index.entries.ensureUnusedCapacity(index.gpa, entries.len);
+        for (entries) |entry| {
+            var copy = entry;
+            copy.path = try index.gpa.dupe(u8, entry.path);
+            index.entries.appendAssumeCapacity(copy);
+        }
+        // A stable sort keeps a later duplicate after the earlier one, so
+        // the last one added wins, which is what `add` does too.
+        std.mem.sortUnstable(Entry, index.entries.items, {}, lessThan);
+        var write_at: usize = 0;
+        var read_at: usize = 0;
+        while (read_at < index.entries.items.len) {
+            const current = index.entries.items[read_at];
+            var last = read_at;
+            while (last + 1 < index.entries.items.len and
+                Entry.order(index.entries.items[last + 1], current) == .eq) last += 1;
+            // Free every duplicate but the one kept.
+            var i = read_at;
+            while (i < last) : (i += 1) index.gpa.free(index.entries.items[i].path);
+            index.entries.items[write_at] = index.entries.items[last];
+            write_at += 1;
+            read_at = last + 1;
+        }
+        index.entries.shrinkRetainingCapacity(write_at);
+    }
+
+    /// Remove every entry whose path is in `paths`, which must be sorted.
+    ///
+    /// One pass rather than one removal each, because removing from the
+    /// middle of a sorted list is linear and doing it per path is quadratic.
+    pub fn removeMany(index: *Index, paths: []const []const u8) void {
+        if (paths.len == 0) return;
+        var write_at: usize = 0;
+        for (index.entries.items) |entry| {
+            var drop = false;
+            if (std.sort.binarySearch([]const u8, paths, entry.path, orderPath) != null) drop = true;
+            if (drop) {
+                index.gpa.free(entry.path);
+                continue;
+            }
+            index.entries.items[write_at] = entry;
+            write_at += 1;
+        }
+        index.entries.shrinkRetainingCapacity(write_at);
+    }
+
     /// Remove `path` at every stage. Returns how many entries went.
     pub fn remove(index: *Index, path: []const u8) usize {
         var removed: usize = 0;
@@ -1081,6 +1136,10 @@ pub const Index = struct {
         return &index.cache_tree.?;
     }
 };
+
+fn orderPath(key: []const u8, item: []const u8) std.math.Order {
+    return std.mem.order(u8, key, item);
+}
 
 fn commonPrefixLen(a: []const u8, b: []const u8) usize {
     const n = @min(a.len, b.len);
