@@ -9,6 +9,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const sha1_impl = @import("sha1.zig");
+const sha1dc = @import("sha1dc.zig");
 
 /// A repository's hash function.
 ///
@@ -220,9 +221,32 @@ fn hexDigit(c: u8) Oid.ParseError!u8 {
 pub const Hasher = struct {
     state: State,
 
-    const State = union(Kind) {
+    const State = union(enum) {
         sha1: sha1_impl.Sha1,
+        sha1_checked: sha1dc.Sha1Dc,
         sha256: std.crypto.hash.sha2.Sha256,
+    };
+
+    /// How a name is taken, beyond which hash takes it.
+    pub const Options = struct {
+        /// Whether SHA-1 additionally checks every block for the signature
+        /// of a collision attack.
+        ///
+        /// Off, because it costs about five times the hash and defends
+        /// against something a repository is only exposed to if someone is
+        /// attacking it. It is the caller's decision, so it is the caller's
+        /// option; `Odb.Options` carries it for a whole database. SHA-256
+        /// ignores it, there being no such attack on SHA-256.
+        detect_collisions: bool = false,
+    };
+
+    /// An object's name, and whether the bytes it was taken over carried the
+    /// signature of a collision attack.
+    ///
+    /// `collision_attack` is only ever true when the check was asked for.
+    pub const Named = struct {
+        oid: Oid,
+        collision_attack: bool,
     };
 
     /// Which instructions SHA-1 is running on here.
@@ -242,15 +266,35 @@ pub const Hasher = struct {
     /// first if you are naming an object; `Hasher` itself makes no header,
     /// because it is also how a pack's trailing checksum is computed.
     pub fn init(k: Kind) Hasher {
+        return initOptions(k, .{});
+    }
+
+    /// A hasher over `kind`, with the options a caller chose.
+    pub fn initOptions(k: Kind, options: Options) Hasher {
         return .{ .state = switch (k) {
-            .sha1 => .{ .sha1 = .init(.{}) },
+            .sha1 => if (options.detect_collisions)
+                .{ .sha1_checked = .init(.{}) }
+            else
+                .{ .sha1 = .init(.{}) },
             .sha256 => .{ .sha256 = .init(.{}) },
         } };
     }
 
     /// The hash this hasher computes.
     pub fn kind(h: *const Hasher) Kind {
-        return std.meta.activeTag(h.state);
+        return switch (h.state) {
+            .sha1, .sha1_checked => .sha1,
+            .sha256 => .sha256,
+        };
+    }
+
+    /// Whether any block fed to this hasher carried the signature of a
+    /// collision attack. Always false unless the check was asked for.
+    pub fn collisionAttack(h: *const Hasher) bool {
+        return switch (h.state) {
+            .sha1_checked => |*s| s.foundCollision(),
+            else => false,
+        };
     }
 
     /// Feed bytes.
@@ -267,9 +311,10 @@ pub const Hasher = struct {
         h.update(header);
     }
 
-    /// The name. The hasher must not be used afterwards.
+    /// The name. The hasher must not be used afterwards; `collisionAttack`
+    /// may still be read.
     pub fn final(h: *Hasher) Oid {
-        var oid: Oid = .zero(std.meta.activeTag(h.state));
+        var oid: Oid = .zero(h.kind());
         switch (h.state) {
             inline else => |*s| s.final(oid.bytes[0..@TypeOf(s.*).digest_length]),
         }
@@ -279,10 +324,21 @@ pub const Hasher = struct {
     /// The name of an object of `type_name` whose content is `content`, in
     /// one call.
     pub fn object(k: Kind, type_name: []const u8, content: []const u8) Oid {
-        var h: Hasher = .init(k);
+        return nameObject(k, .{}, type_name, content).oid;
+    }
+
+    /// The name of an object, and whether naming it met a collision attack.
+    pub fn nameObject(
+        k: Kind,
+        options: Options,
+        type_name: []const u8,
+        content: []const u8,
+    ) Named {
+        var h: Hasher = .initOptions(k, options);
         h.updateHeader(type_name, content.len);
         h.update(content);
-        return h.final();
+        const oid = h.final();
+        return .{ .oid = oid, .collision_attack = h.collisionAttack() };
     }
 };
 
@@ -329,4 +385,44 @@ test "a name from one hash never equals a name from another" {
     a.bytes[0] = 1;
     b.bytes[0] = 1;
     try std.testing.expect(!a.eql(b));
+}
+
+test "the collision check is a hasher option, and the object header moves the message" {
+    // The published pair, as the two byte strings it is: one name, and both
+    // halves recognised.
+    const a = sha1dc.collision_test_vector_a;
+    const b = sha1dc.collision_test_vector_b;
+
+    var ha: Hasher = .initOptions(.sha1, .{ .detect_collisions = true });
+    ha.update(a);
+    const a_name = ha.final();
+    var hb: Hasher = .initOptions(.sha1, .{ .detect_collisions = true });
+    hb.update(b);
+    const b_name = hb.final();
+
+    try std.testing.expect(a_name.eql(b_name));
+    try std.testing.expect(ha.collisionAttack());
+    try std.testing.expect(hb.collisionAttack());
+    try std.testing.expectEqual(Kind.sha1, ha.kind());
+
+    // The same two as git objects are two objects. `"blob 320\0"` goes in
+    // front, which moves every block of the message, so the pair is no
+    // longer a pair -- the published collision is a collision of those files
+    // and not of the objects git would make of them.
+    const object_a = Hasher.nameObject(.sha1, .{ .detect_collisions = true }, "blob", a);
+    const object_b = Hasher.nameObject(.sha1, .{ .detect_collisions = true }, "blob", b);
+    try std.testing.expect(!object_a.oid.eql(object_b.oid));
+    try std.testing.expect(!object_a.collision_attack);
+    try std.testing.expect(!object_b.collision_attack);
+
+    // And the option changes nothing about an ordinary name.
+    const plain = Hasher.object(.sha1, "blob", "hello\n");
+    const checked = Hasher.nameObject(.sha1, .{ .detect_collisions = true }, "blob", "hello\n");
+    try std.testing.expect(plain.eql(checked.oid));
+    try std.testing.expect(!checked.collision_attack);
+
+    // SHA-256 has no such attack and ignores the option.
+    const wide = Hasher.nameObject(.sha256, .{ .detect_collisions = true }, "blob", a);
+    try std.testing.expectEqual(Kind.sha256, wide.oid.kind);
+    try std.testing.expect(!wide.collision_attack);
 }

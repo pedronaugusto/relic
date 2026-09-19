@@ -32,6 +32,26 @@ breaking one.
   `hash.Hasher` is unchanged in shape; `hash.Hasher.sha1Backend()` says which
   arm a measurement was taken on.
 
+- **`sha1dc`** — SHA-1 with collision detection, as an arm of `hash.Hasher`
+  and an option on the object database. `Odb.Options.detect_sha1_collisions`,
+  which both `Repository.open` and `Repository.init` forward, makes every
+  SHA-1 name the database takes carry the check; bytes that look like half of
+  a near-collision pair are `error.CollisionAttack` with nothing written.
+
+  Off, for three reasons that belong together. It costs about six times the
+  hash, because the method needs the expanded message and the intermediate
+  states and so cannot use the processor's SHA-1 instructions. It reports
+  rather than repairs, so a caller gets a named error instead of a name
+  nothing else in the world agrees with. And what it guards is git's object
+  format: the published colliding documents are not colliding objects, since
+  `"blob <size>\0"` goes in front of the content and moves every block, which
+  is why git stores both of them today under two names.
+
+  The table and the bit conditions are transcribed from the published
+  reference. Checked both directions: the published pair is detected, both
+  halves and across every split of the feed, and nothing in the fixture
+  repositories — text, a deltified file, a binary blob — is flagged.
+
 ### Changed
 
 - **`hash.Hasher`'s SHA-1 is this package's rather than the standard

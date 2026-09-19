@@ -127,6 +127,7 @@ this processor has, asked once.
 |---|---|
 | `hash` | `Kind` (`sha1`, `sha256`), `Oid`, `Hasher`. The hash is a parameter from the first line, not a width bolted on later. |
 | `sha1` | SHA-1 over the processor's own instructions, with the eighty rounds as the fallback and the choice made at run time. |
+| `sha1dc` | SHA-1 that checks each block for the signature of a collision attack. Off unless asked for. |
 | `object` | `Type`, `Mode`, `Tree` and `Tree.Builder`, `Commit`, `Tag`, `Signature`, `ExtraHeader`. Parsing and writing, with git's tree sort rule and header order. |
 | `pack` | `Index` (`.idx` v2), `Pack`, `Cache`. Both delta kinds, the 64-bit offset table, a bounded chain, and `verify`. |
 | `delta` | `apply`, with the copy and insert opcodes. |
@@ -261,6 +262,7 @@ machine:
 |---|---|
 | SHA-1, the eighty rounds in software | 1.01 GiB/s |
 | SHA-1, the aarch64 instructions | 2.56 GiB/s |
+| SHA-1, with the collision check | 0.41 GiB/s |
 | SHA-256, from the standard library | 2.30 GiB/s |
 
 Which arm runs is decided by asking the processor and not by what the compiler
@@ -282,6 +284,34 @@ for a memory map instead, which is faster on a cold cache and costs two
 things: on macOS a pack replaced underneath a mapping is a signal rather than
 an error value, and on Windows a live mapping stops the `gc` that wants to
 replace the file.
+
+### Collision detection
+
+A SHA-1 collision is public and buildable, so two different objects can be
+made to carry one name. `Odb.Options.detect_sha1_collisions`, which
+`Repository.open` and `Repository.init` both forward, turns on the check the
+counter-cryptanalysis paper describes: the identical-prefix attacks all follow
+one of thirty-two known disturbance vectors, and a block that could have come
+from such a pair is recognisable from the block alone. Per block it is a few
+dozen masked comparisons that reject nearly everything; a block that survives
+them has its sibling message reconstructed and the compression function re-run
+from the step the vector is anchored at.
+
+It is off, and there are three things to know before turning it on. It costs
+about six times the hash, because the method needs the expanded message and the
+intermediate states, which the processor's SHA-1 instructions do not hand back.
+It reports rather than repairs: `error.CollisionAttack`, with nothing written,
+rather than a quietly different name. And what it guards is git's object
+format rather than a file on the disk — the published colliding documents are
+not colliding *objects*, because `"blob <size>\0"` goes in front of the
+content and moves every block of the message, so git stores both of them
+today under two names. The check is there for an attack mounted at the object
+and not at the document.
+
+The disturbance-vector table and the bit conditions are transcribed from the
+reference implementation, and the transcription is checked two ways: the
+published colliding pair is detected, both halves, and no object in any
+fixture repository is.
 
 ### Memory
 

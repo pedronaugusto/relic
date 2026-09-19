@@ -1,6 +1,7 @@
 //! relic — read and write a git repository from Zig.
 
 pub const sha1 = @import("sha1.zig");
+pub const sha1dc = @import("sha1dc.zig");
 pub const hash = @import("hash.zig");
 pub const object = @import("object.zig");
 pub const fs = @import("fs.zig");

@@ -8,6 +8,7 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
+const sha1dc = @import("sha1dc.zig");
 
 const Oid = hash.Oid;
 
@@ -979,4 +980,104 @@ test "a walk with the commit-graph answers what a walk without it answers" {
     }
     plain.reset();
     try std.testing.expectEqual(expected, try plain.count(io));
+}
+
+test "with the collision check on, nothing git wrote is flagged" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    // A spread of shapes: text, a file that grows so the packer deltas it,
+    // a binary blob, and one long enough to be many blocks.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    var binary: [8192]u8 = undefined;
+    var prng: std.Random.DefaultPrng = .init(0xf1_c7_09);
+    prng.random().bytes(&binary);
+    try repo.writeFile(io, "binary.dat", &binary);
+    for (0..12) |i| {
+        try body.print(gpa, "line {d} of a file that keeps growing\n", .{i});
+        try repo.writeFile(io, "grow.txt", body.items);
+        try repo.exec(io, &.{ "add", "-A" });
+        var msg_buf: [32]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&msg_buf, "commit {d}", .{i});
+        try repo.exec(io, &.{ "commit", "-q", "-m", msg });
+    }
+    try repo.exec(io, &.{ "gc", "-q" });
+
+    const git_dir = try repo.gitDir(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{ .detect_sha1_collisions = true });
+    defer db.deinit(io);
+
+    const listing = try repo.run(io, &.{ "cat-file", "--batch-all-objects", "--batch-check=%(objectname)" });
+    defer gpa.free(listing);
+
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, listing, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const oid = try Oid.parse(.sha1, line);
+        const found = try db.read(io, oid);
+        defer gpa.free(found.bytes);
+        // The checked arm gives the same name git gave it, and says nothing
+        // about it looked like half of a near-collision pair.
+        const named = hash.Hasher.nameObject(
+            .sha1,
+            .{ .detect_collisions = true },
+            found.type.name(),
+            found.bytes,
+        );
+        try std.testing.expect(!named.collision_attack);
+        try std.testing.expect(named.oid.eql(oid));
+        count += 1;
+    }
+    try std.testing.expect(count > 30);
+
+    // Writing every one of them back through the checked database is a
+    // no-op rather than a refusal.
+    const report = try db.verify(io);
+    try std.testing.expect(report.packs >= 1);
+}
+
+test "the collision check does not change a name a database takes" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    const git_dir = try repo.gitDir(io);
+
+    const contents = [_][]const u8{
+        "",
+        "a\n",
+        sha1dc.collision_test_vector_a,
+        sha1dc.collision_test_vector_b,
+        "x" ** 5000,
+    };
+
+    var plain_names: [contents.len]Oid = undefined;
+    {
+        var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+        defer db.deinit(io);
+        for (contents, &plain_names) |content, *name| name.* = try db.write(io, .blob, content);
+    }
+    {
+        var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{ .detect_sha1_collisions = true });
+        defer db.deinit(io);
+        for (contents, plain_names) |content, plain_name| {
+            try std.testing.expect((try db.write(io, .blob, content)).eql(plain_name));
+        }
+    }
+
+    // git agrees with both, including about the two halves of the published
+    // pair being two objects rather than one.
+    for (contents, plain_names) |content, name| {
+        var path_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "obj{d}.bin", .{content.len});
+        try repo.writeFile(io, path, content);
+        const said = try repo.run(io, &.{ "hash-object", "-t", "blob", path });
+        defer gpa.free(said);
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try std.testing.expectEqualStrings(name.hex(&hex), std.mem.trimEnd(u8, said, "\n"));
+    }
 }

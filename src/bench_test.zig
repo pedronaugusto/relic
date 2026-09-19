@@ -20,6 +20,7 @@ const builtin = @import("builtin");
 
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
+const sha1dc = @import("sha1dc.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const worktree = @import("worktree.zig");
@@ -273,10 +274,18 @@ test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
     _ = sha256.final();
     const sha256_ms = elapsedMs(io, sha256_start);
 
+    // And SHA-1 with the collision check, which is what turning it on costs.
+    const checked_start = Io.Clock.awake.now(io);
+    var checked: hash.Hasher = .initOptions(.sha1, .{ .detect_collisions = true });
+    checked.update(buf);
+    const checked_oid = checked.final();
+    const checked_ms = elapsedMs(io, checked_start);
+
     std.debug.print(
         \\
         \\  relic benchmark ({s}, {d} MiB hashed, SHA-1 arm: {s})
         \\    SHA-1        relic {d: >6.2} GiB/s   library {d: >6.2} GiB/s
+        \\    SHA-1 checked {d: >5.2} GiB/s
         \\    SHA-256      {d: >6.2} GiB/s
         \\
     , .{
@@ -285,8 +294,13 @@ test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
         @tagName(hash.Hasher.sha1Backend()),
         gib / (mine_ms / 1000.0),
         gib / (ref_ms / 1000.0),
+        gib / (checked_ms / 1000.0),
         gib / (sha256_ms / 1000.0),
     });
+
+    // The check does not change the name, and finds nothing in noise.
+    try std.testing.expect(checked_oid.eql(mine_oid));
+    try std.testing.expect(!checked.collisionAttack());
 
     // The name is the name whichever arm produced it.
     try std.testing.expectEqualSlices(u8, &reference, mine_oid.raw());

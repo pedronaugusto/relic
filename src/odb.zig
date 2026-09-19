@@ -46,6 +46,16 @@ pub const Options = struct {
     max_alternate_depth: u8 = 5,
     /// The largest loose object this will read into memory.
     max_object_bytes: usize = 1 << 31,
+    /// Whether every SHA-1 name this database takes is additionally checked
+    /// for the signature of a collision attack, which is
+    /// `error.CollisionAttack`.
+    ///
+    /// Off. It costs about five times the hash, and what it guards is git's
+    /// object format rather than a file on the disk: the published colliding
+    /// documents are not colliding objects, because `"blob <size>\0"` goes
+    /// in front of the content and moves every block of the message. A
+    /// SHA-256 repository ignores it.
+    detect_sha1_collisions: bool = false,
 };
 
 /// Errors from the object database.
@@ -56,6 +66,10 @@ pub const Error = error{
     CorruptLooseObject,
     /// A loose object whose content does not hash to its own name.
     ObjectNameMismatch,
+    /// Bytes carrying the signature of a SHA-1 collision attack, from a
+    /// database opened with `Options.detect_sha1_collisions`. The object is
+    /// not written.
+    CollisionAttack,
     /// An object read back as a type the caller did not ask for.
     UnexpectedObjectType,
     /// `objects/info/alternates` pointed at itself, or the chain was deeper
@@ -431,7 +445,9 @@ pub const Odb = struct {
     /// An object already in the database is not written again, which is what
     /// git does and what keeps `addAll` from rewriting a tree every frame.
     pub fn write(odb: *Odb, io: Io, t: object.Type, bytes: []const u8) Error!Oid {
-        const oid = hash.Hasher.object(odb.kind, t.name(), bytes);
+        const named = hash.Hasher.nameObject(odb.kind, odb.hashOptions(), t.name(), bytes);
+        if (named.collision_attack) return error.CollisionAttack;
+        const oid = named.oid;
         if (try odb.exists(io, oid)) return oid;
 
         const source = odb.writableSource();
@@ -483,6 +499,11 @@ pub const Odb = struct {
         };
         if (odb.options.sync_directories) try fs.syncDir(io, sub);
         return oid;
+    }
+
+    /// The naming options every name this database takes is given.
+    fn hashOptions(odb: *const Odb) hash.Hasher.Options {
+        return .{ .detect_collisions = odb.options.detect_sha1_collisions };
     }
 
     fn writableSource(odb: *Odb) *Source {
@@ -538,6 +559,7 @@ pub const Odb = struct {
             s.finished = true;
 
             const oid = s.hasher.final();
+            if (s.hasher.collisionAttack()) return error.CollisionAttack;
             var hex: [hash.max_hex_len]u8 = undefined;
             const text = oid.hex(&hex);
             s.dir.createDir(io, text[0..2], .default_dir) catch |err| switch (err) {
@@ -601,7 +623,7 @@ pub const Odb = struct {
             .file = file,
             .file_writer = undefined,
             .compress = undefined,
-            .hasher = .init(odb.kind),
+            .hasher = .initOptions(odb.kind, odb.hashOptions()),
             .window = window,
             .out_buffer = out_buffer,
             .remaining = size,
@@ -648,8 +670,9 @@ pub const Odb = struct {
                     const oid = Oid.parse(odb.kind, full[0 .. 2 + file_entry.name.len]) catch continue;
                     const found = (try odb.readLoose(io, oid)) orelse continue;
                     defer odb.gpa.free(found.bytes);
-                    const name = hash.Hasher.object(odb.kind, found.type.name(), found.bytes);
-                    if (!name.eql(oid)) return error.ObjectNameMismatch;
+                    const named = hash.Hasher.nameObject(odb.kind, odb.hashOptions(), found.type.name(), found.bytes);
+                    if (named.collision_attack) return error.CollisionAttack;
+                    if (!named.oid.eql(oid)) return error.ObjectNameMismatch;
                     report.loose += 1;
                     report.bytes += found.bytes.len;
                 }

@@ -66,6 +66,9 @@ pub const InitOptions = struct {
     /// Whether `core.filemode` is recorded as true. The caller decides,
     /// because probing means writing a file.
     file_mode: bool = Io.File.Permissions.has_executable_bit,
+    /// What the object database is opened with, including whether every
+    /// SHA-1 name it takes is checked for a collision attack.
+    odb: odb_mod.Options = .{},
 };
 
 /// An open repository.
@@ -372,7 +375,7 @@ pub const Repository = struct {
             .work_dir = work_dir,
             .common_is_separate = false,
         };
-        return finish(gpa, io, discovered, .{ .discover = false });
+        return finish(gpa, io, discovered, .{ .discover = false, .odb = options.odb });
     }
 
     /// Close everything the repository holds.
