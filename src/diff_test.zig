@@ -65,8 +65,12 @@ fn setupMixed(repo: *testgit.Repo, io: Io) anyerror!void {
     try repo.dir.deleteFile(io, "deleted.txt");
     try repo.writeFile(io, "added.txt", "brand new\n");
     try repo.writeFile(io, "binary.bin", "after\x00binary\n");
-    try repo.dir.setFilePermissions(io, "exec.sh", @enumFromInt(@as(std.posix.mode_t, 0o755)), .{});
     try repo.exec(io, &.{ "add", "-A" });
+    // The mode change is made in the index and not on the disk. What is
+    // being compared here is two trees, so where the 100755 came from does
+    // not matter, and a filesystem with no executable bit — Windows — has
+    // no other way to put one in a tree. It is git's own way of doing it.
+    try repo.exec(io, &.{ "update-index", "--chmod=+x", "exec.sh" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
 }
 

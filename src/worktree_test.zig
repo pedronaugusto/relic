@@ -73,8 +73,20 @@ test "addAll then writeTree equals git add -A and git write-tree" {
     try h.repo.writeFile(io, "a0", "after the tree\n");
     try h.repo.writeFile(io, "deep/one/two/three.txt", "deep\n");
     try h.repo.writeFile(io, "run.sh", "#!/bin/sh\necho hi\n");
-    try h.repo.dir.setFilePermissions(io, "run.sh", @enumFromInt(@as(std.posix.mode_t, 0o755)), .{});
-    try h.repo.dir.symLink(io, "a.c", "link.c", .{});
+    // Neither an executable bit nor a symlink is a thing a Windows working
+    // tree has: there is no POSIX mode, and a link needs a privilege the
+    // runner does not hand out. git turns `core.fileMode` and
+    // `core.symlinks` off there for the same reason. The two entries are
+    // left out of the shape rather than asserted, and everything else in
+    // the tree is compared as it is everywhere else.
+    const has_exec_bit = Io.File.Permissions.has_executable_bit;
+    if (has_exec_bit) {
+        try h.repo.dir.setFilePermissions(io, "run.sh", @enumFromInt(@as(std.posix.mode_t, 0o755)), .{});
+    }
+    var has_link = true;
+    h.repo.dir.symLink(io, "a.c", "link.c", .{}) catch {
+        has_link = false;
+    };
     try h.repo.writeFile(io, ".gitignore", "*.log\n");
     try h.repo.writeFile(io, "skip.log", "ignored\n");
 
@@ -98,8 +110,8 @@ test "addAll then writeTree equals git add -A and git write-tree" {
     defer gpa.free(listed);
     try std.testing.expect(std.mem.indexOf(u8, listed, "skip.log") == null);
     try std.testing.expect(h.index.find("skip.log") == null);
-    try std.testing.expect(h.index.find("link.c").?.mode == .symlink);
-    try std.testing.expect(h.index.find("run.sh").?.mode == .exec);
+    if (has_link) try std.testing.expect(h.index.find("link.c").?.mode == .symlink);
+    if (has_exec_bit) try std.testing.expect(h.index.find("run.sh").?.mode == .exec);
 
     // And git reads the index this wrote back to the same entries.
     try h.index.write(io, h.git_dir, "index", .{});
