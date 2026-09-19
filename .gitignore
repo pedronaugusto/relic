@@ -5,7 +5,6 @@ zig-out/
 zig-pkg/
 
 # Editor and tool directories.
-.claude/
 
 # macOS.
 .DS_Store
