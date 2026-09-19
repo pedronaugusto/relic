@@ -127,9 +127,10 @@ instructions this processor has, asked once.
 | `sha1` | SHA-1 over the processor's own instructions, with the eighty rounds as the fallback and the choice made at run time. |
 | `sha1dc` | SHA-1 that checks each block for the signature of a collision attack. Off unless asked for. |
 | `object` | `Type`, `Mode`, `Tree` and `Tree.Builder`, `Commit`, `Tag`, `Signature`, `ExtraHeader`. Parsing and writing, with git's tree sort rule and header order. |
-| `pack` | `Index` (`.idx` v2), `Pack`, `Cache`. Both delta kinds, the 64-bit offset table, a bounded chain, and `verify`. |
-| `delta` | `apply`, with the copy and insert opcodes. |
+| `pack` | `Index` (`.idx` v2), `Pack`, `Cache`, `Writer`. Both delta kinds, the 64-bit offset table, a bounded chain, `verify`, and writing a pack and its index. |
+| `delta` | `apply` and `encode`, with the copy and insert opcodes. |
 | `odb` | `Odb.open`, `read`, `readHeader`, `exists`, `findPrefix`, `write`, `writeStream`, `listObjects`, `verify`, `refresh`, `syncBatch`, and the `stats` counters. Loose objects, the packs, `objects/info/alternates` and the multi-pack index. |
+| `odb`, writing packs | `collectReachable`, `collectLoose`, `collectAll`, `writePack`, `packLoose`, `repack`, and `beginPack` / `writeInto` / `finishPack` for a caller filling one as it goes. |
 | `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
 | `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. |
 | `reflog` | `append`, `read`, `Log.at` for `HEAD@{n}`, `Policy` for `core.logAllRefUpdates`. |
@@ -247,10 +248,12 @@ directories and 64 MiB hashed:
 | | |
 |---|---|
 | `addAll`, nothing staged yet | 426 ms |
+| `addAll`, nothing staged yet, into one pack | 68 ms |
 | `addAll`, nothing changed | 5 ms |
 | `writeTree`, cache tree invalid | 9 ms |
 | `writeTree`, cache tree valid | under a millisecond |
 | `status`, one file in ten changed | 8 ms |
+| writing a deltified pack | 7 200 objects/s, 41 MiB/s |
 | SHA-1, the eighty rounds in software | 0.99 GiB/s |
 | SHA-1, the aarch64 instructions | 2.47 GiB/s |
 | SHA-1, with the collision check | 0.41 GiB/s |
@@ -260,9 +263,9 @@ The warm numbers are what the stat shortcut and the `TREE` extension are for:
 an entry whose recorded stat still matches is neither opened nor hashed, and a
 cache-tree node that is still valid is used as it stands.
 
-The cold number is three thousand loose objects written, and it was profiled
-before it was worked on. Naming them is under a millisecond, so it is not the
-number to read the hash by. Two calls are three quarters of it: the
+The first cold number is three thousand loose objects written, and it was
+profiled before it was worked on. Naming them is under a millisecond, so it
+is not the number to read the hash by. Two calls are three quarters of it: the
 `O_CREAT|O_EXCL` that makes each temporary, at 35 µs, and the `rename` that
 finishes it, at 54 µs. Those are the filesystem's own figures — the same two
 calls straight through libc cost the same, so nothing is lost in a layer — and
@@ -275,11 +278,53 @@ without asking again. The benchmark asserts on the counts rather than the
 clock for that first one: three thousand objects written, at most two hundred
 and fifty-six directories made.
 
+A pack is one file where loose objects are one file each, which is the whole
+of the second row: the same three thousand files staged into one pack rather
+than three thousand loose objects is 392 ms against 68 ms, measured in one run
+of the same test, and the tree that comes out is the same tree. What it gives
+up is that another reader sees nothing until the pass is over, and that
+nothing is deltified — a delta wants the object before it and a walk hands
+them over one at a time. `Odb.repack` is what deltifies.
+
+The pack figures are a repository of twenty files each grown over six
+commits, 138 objects: the deltified pack is 29 692 bytes where the same
+objects written whole are 84 871, and git's own packer makes 28 557 of it.
+
 What the suite holds to elsewhere is not these figures but two ratios timed in
 the same run — the warm pass against the cold one, and the hardware arm
 against the software rounds — which is what survives a runner under load and
 still fails if the shortcut or the hardware arm is lost. There is a ceiling on
 the walk as well, but it is a ceiling and not a budget.
+
+**A pack is written in git's order, and nothing is taken away until it is
+there.** `pack.Writer` streams the entries into a temporary and writes the
+index beside it; what is held is one object, the deflate state, and
+twenty-eight bytes per object for the index. `Odb.writePack` is the policy on
+top: the objects are ordered by type, then by git's own hash of the tail of
+the path they were found at, then by size descending, and each is tried
+against a sliding window of the ones already written — ten of them, a chain no
+deeper than fifty, and a delta kept only if it is at most half the object it
+stands in for. `PackOptions.window_bytes` bounds that window by weight as well
+as by count, so a few large objects cannot become the high-water mark, and an
+object past `big_file_bytes` is written whole and never enters it.
+
+The order the two files become visible in is not free to choose. A reader
+finds a pack by its `.idx`, so the pack is renamed into place first and the
+index second, which is git's order too. `Odb.packLoose` and `Odb.repack`
+extend that to the objects they replace: the pack is written and made durable,
+the index likewise, the database re-scans so it can read the new pack itself,
+and only then are the loose files removed — and only the ones the new index is
+asked about and confirms. At no point is an object in neither place, and a
+reader that listed the packs before all this and looks for a loose object
+after it finds the pack on its second look, because a miss re-scans once
+before it is a miss.
+
+Removing the packs a repack replaces is off by default: a pack a second
+process has open can be removed on one platform and not on another, and
+nothing here can tell whether one has. A repack of the same objects with the
+same settings writes the same bytes, so it has the same checksum and the same
+name — the new pack *is* the old one, and that is the one name the removal
+pass skips.
 
 **Packs are read with positional reads by default.**
 `Odb.Options.map_packs` asks for a memory map instead, which is faster on a
@@ -318,8 +363,11 @@ for the same reason; the delta base cache, a direct-mapped table on the pack
 offset with a byte budget named in `Odb.Options`; and, once a database has
 written anything, one deflate state and one output buffer, because the state
 is two hundred and twenty-four kilobytes and a cold `addAll` writes one object
-per file. A database that is only read allocates neither. There is no object
-cache; a returned slice's doc comment says who owns it.
+per file. A database that is only read allocates neither. Writing a pack adds
+the delta window on top, which `PackOptions.window_bytes` bounds by weight as
+well as by count, and twenty-eight bytes per object for the index that has to
+be sorted before it is written. There is no object cache; a returned slice's
+doc comment says who owns it.
 
 **The index is read at three versions and written at two.** Versions 2, 3 and
 4 are read; version 2 or 3 is written, 3 only when an entry needs an extended
@@ -345,15 +393,14 @@ measured rather than assumed — a file written into the directory, stat'd three
 times, and the largest round unit every reported time is a multiple of is the
 answer — because a filesystem that keeps whole seconds and one that keeps
 nanoseconds need opposite answers here, and guessing either way is a bug.
-`dev`, `uid` and `gid` come
-from the platform where it reports them — writing zeros there is what makes
-the next `git status` treat every entry as needing a refresh and re-hash the
-whole working tree.
+`dev`, `uid` and `gid` come from the platform where it reports them — writing
+zeros there is what makes the next `git status` treat every entry as needing a
+refresh and re-hash the whole working tree.
 
 ## Scope
 
 - **No network.** Fetch, push and clone are a wire protocol and a different discipline.
-- **No pack writing.** Loose objects that a later `git gc` packs are correct and complete.
+- **No pack bitmaps and no multi-pack index written.** Both are read; neither is produced, and a pack without them is a pack git reads.
 - **No hooks are run.** The caller has the path and may run one itself.
 - **No named clean or smudge filters.** A repository whose attributes require one is a named refusal.
 - **No content-level merge.** The three-way merge is at tree level and leaves a conflict at index stages 1 to 3.
@@ -409,8 +456,12 @@ once with offset deltas, once with reference deltas, and once under SHA-256;
 `core.autocrlf` with `* text=auto`; `status` against `status --porcelain`;
 `list` against `ls-files`; name-status, numstat and the unified patch against
 `diff-tree` and `diff`, with the `@@` header checked at four context widths;
-`worktree list` before and after an add, a lock, a prune and a remove; and
-`git fsck` silent about everything written.
+`worktree list` before and after an add, a lock, a prune and a remove; a pack
+this wrote against `git verify-pack -v` and `git index-pack --verify`, with
+and without deltas and with either delta kind; the reachable object set
+against `git rev-list --objects --all`; a repository whose loose objects have
+all moved into a pack read back object for object; and `git fsck` silent about
+everything written.
 
 Concurrency is tested rather than hoped for. A second process takes
 `index.lock` exactly as a running git does; the same test shows git refusing
@@ -418,19 +469,22 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Sixteen fuzz tests cover every parser: the loose object header, the tree, the
+Eighteen fuzz tests cover every parser: the loose object header, the tree, the
 commit and the tag, a delta, the pack index, the index file, `packed-refs`,
 the reflog, the config file, `.gitignore`, `.gitattributes`, the glob matcher,
 a path from a tree, the commit-graph, the multi-pack index and the EWAH
 bitmaps. The rule is that any input either parses to a value or returns a
-named error. Two of them check more than that: the diff fuzzer applies the
+named error. Four of them check more than that. The diff fuzzer applies the
 edit script it produced and checks that it reproduces the other side, which is
-the property that catches an off-by-one nothing else would; and the
+the property that catches an off-by-one nothing else would. The
 collision-check fuzzer asserts both that the name is SHA-1's name and that
-nothing reached by chance is flagged. `zig build test --fuzz` builds the suite
-a second time with the instrumentation on and runs those sixteen until
-stopped, keeping a corpus per property under `.zig-cache/f` and printing a web
-address where the coverage is.
+nothing reached by chance is flagged. The delta fuzzer decodes every delta it
+encodes and compares it with what it was encoded from. And the pack fuzzer
+writes a pack of random objects, some of them deltas, then reads it back and
+rehashes every one against the name its index gives it. `zig build test
+--fuzz` builds the suite a second time with the instrumentation on and runs
+them until stopped, keeping a corpus per property under `.zig-cache/f` and
+printing a web address where the coverage is.
 
 Two pack shapes cannot be made with `git repack`, so the suite writes the
 packs itself: two reference deltas naming each other, and a chain a thousand

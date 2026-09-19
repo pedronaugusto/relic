@@ -436,7 +436,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
         \\    add -A       loose {d: >8.1} ms   into a pack {d: >8.1} ms
         \\    write pack   whole {d: >8.1} ms   deltified {d: >8.1} ms
         \\                 {d: >8.0} objects/s  {d: >6.1} MiB/s in  {d: >5.1}% of the bytes
-        \\    deltas       {d} of {d}
+        \\    deltas       {d} of {d}, {d} bytes against {d} undeltified
         \\
     , .{
         @tagName(builtin.mode),
@@ -451,6 +451,8 @@ test "benchmark: a staging pass into a pack, and writing one" {
         100.0 * @as(f64, @floatFromInt(deltified.pack_bytes)) / @as(f64, @floatFromInt(whole.pack_bytes)),
         deltified.deltas,
         deltified.objects,
+        deltified.pack_bytes,
+        whole.pack_bytes,
     });
 
     // The window has to find something: these files are each other's

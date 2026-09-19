@@ -8,6 +8,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Packs are written.** `pack.Writer` takes objects one at a time and streams
+  them into a temporary; `finish` writes the `.idx` beside it and renames both
+  into place under the name the pack's own trailing checksum gives them, which
+  is what git names a pack after. All three entry kinds: a whole object, an
+  offset delta against an entry already in the pack, and a reference delta
+  against a name that need not be. The index is version 2 throughout —
+  fanout, sorted names, a CRC per entry, the 64-bit offset table — and the
+  hash is the repository's, so a SHA-256 repository gets a SHA-256 pack. What
+  is held is one object, the deflate state, and twenty-eight bytes per object
+  for the index; nothing is threaded.
+
+  `Writer.init` is told the object count, because it goes in the header and
+  the header is written first. `Writer.initCounting` is for a caller that does
+  not know it: the header is patched at the end and the checksum taken again
+  over one sequential pass across the file, which is what not knowing costs.
+
+  The order the two files become visible in is not free to choose. A reader
+  finds a pack by its `.idx`, so the pack is renamed into place first and the
+  index second, which is git's order too.
+
+- **`delta.encode`** — the copy and insert commands that turn one object into
+  another. The base is indexed by its sixteen-byte blocks and the longest run
+  is taken; `EncodeOptions.max_bytes` gives up as soon as the delta has grown
+  past what would be worth writing. The suite decodes every delta it writes,
+  over seven shapes of change and under the fuzzer.
+
+- **`Odb.writePack`, `packLoose` and `repack`.** The objects are ordered the
+  way git's packer orders them — type, then git's own hash of the tail of the
+  path hint, then size descending — and each is tried against a sliding window
+  of the ones already written: ten, a chain no deeper than fifty, and a delta
+  kept only if it is at most half the object it stands in for and beats the
+  best so far. `PackOptions.window_bytes` bounds the window by weight as well
+  as by count.
+
+  `packLoose` and `repack` take the loose files away afterwards, in the order
+  a running git has to survive: pack, then index, then a re-scan so this
+  database can read the new pack itself, and only then the loose files — and
+  only the ones the new index confirms. At no point is an object in neither
+  place. Removing the packs a repack replaces is off by default, because a
+  pack a second process has open can be removed on one platform and not on
+  another.
+
+  On a repository of twenty files each grown over six commits, 138 objects:
+  the deltified pack is 29 692 bytes where the same objects written whole are
+  84 871, and git's own packer makes 28 557 of it.
+
+- **`Odb.collectReachable`, `collectLoose` and `collectAll`** — which objects
+  to put in one. `collectReachable` walks commits, their parents, the trees
+  those name and the blobs under the trees, and gives each object the path it
+  was found at, which is the hint the delta search orders by; the other two
+  read the trees they collected to get the same thing. Without a hint two
+  versions of one file sort next to two versions of a different file of the
+  same length and the window looks at the wrong base — 108 per cent of the
+  undeltified pack rather than 35. `CollectOptions.exclude_packs` names packs
+  whose objects to leave out, which is what makes a pack incremental.
+
+- **`worktree.AddOptions.new_blobs`** — a staging pass can write one pack
+  instead of one loose object per blob. Measured on an Apple M3 Max over three
+  thousand files in sixty directories: 392 ms as loose objects, 68 ms as one
+  pack, and the tree that comes out is the same tree. What it gives up is that
+  another reader sees nothing until the pass is over, and that nothing is
+  deltified, because a delta wants the object before it and a walk hands them
+  over one at a time.
+
+- **`Odb.beginPack`, `writeInto` and `finishPack`** — the seam that makes the
+  above possible, for any caller writing many objects at once.
+
 - **`dirscan`** — a directory's entries with the stat of each, in as few calls
   as the platform has. macOS has `getattrlistbulk(2)`, which returns, for a
   whole batch of directory entries, the name and the modification and change
@@ -37,8 +104,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nanosecond field reported, capped at a second. It runs at `Odb.open` and at
   `Index.read`, and `odb.Options.probe_timestamp_resolution` turns it off.
 
-- **`Odb.Stats` gained `loose_written`, `loose_present` and
-  `fan_out_created`.** The benchmark asserts on the last two rather than on a
+- **`Odb.Stats` gained `loose_written`, `loose_present`, `fan_out_created` and
+  `packed_written`.** The benchmark asserts on the last two rather than on a
   wall-clock figure, because a count is what a busy runner cannot move.
 
 - **`index.WriteOptions.end_of_index_entries` and `.entry_offset_blocks`**,
@@ -96,6 +163,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `worktree.Rules` carries it and `Repository.worktreeRules` fills it in from
   what the object database measured, so a caller going through the front door
   passes nothing new.
+
+- **Breaking: `odb.Error` grew.** Writing a pack can fail in ways reading one
+  cannot — `ObjectCountMismatch`, `TooManyObjects`, `DeltaBaseNotWritten`,
+  `DuplicateObject` — and enumerating objects parses commits, tags and trees,
+  so `object.ParseError` and `object.TreeParseError` are in it now too.
+  Breaking for a caller that switches exhaustively on it; nothing returns any
+  of them unless a pack is being written or a set of objects collected.
 
 - **Breaking: `worktree.Rules` gained `timestamp_resolution`** and
   `odb.Options` gained `probe_timestamp_resolution`. Both default to the
