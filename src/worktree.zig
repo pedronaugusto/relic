@@ -751,6 +751,88 @@ pub fn flatten(
     return out;
 }
 
+/// What `resetIndex` changed.
+pub const ResetOutcome = struct {
+    /// Entries whose object name or mode came from the tree.
+    updated: u32 = 0,
+    /// Entries the tree does not have, which left the index.
+    removed: u32 = 0,
+    /// Entries that were already what the tree says.
+    unchanged: u32 = 0,
+};
+
+/// Make the index describe `tree`, and leave the working tree alone.
+///
+/// This is `git reset` with no paths and no `--hard`: what is staged goes
+/// back to what the commit says, and the files on the disk are not touched.
+/// An entry that keeps its object name and mode keeps its cached stat too,
+/// so the next `addAll` still takes the stat shortcut over it.
+pub fn resetIndex(
+    gpa: Allocator,
+    io: Io,
+    index: *Index,
+    db: *Odb,
+    tree_oid: Oid,
+) Error!ResetOutcome {
+    var outcome: ResetOutcome = .{};
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+
+    var wanted = try flatten(arena, io, db, tree_oid);
+
+    var gone: std.ArrayList([]const u8) = .empty;
+    defer gone.deinit(gpa);
+    for (index.entries.items) |entry| {
+        if (entry.stage != 0) {
+            // A conflict's stages are not part of any tree; a reset drops
+            // them, which is what makes the result clean.
+            try gone.append(gpa, entry.path);
+            continue;
+        }
+        if (!wanted.contains(entry.path)) try gone.append(gpa, entry.path);
+    }
+    outcome.removed = @intCast(gone.items.len);
+    index.removeMany(gone.items);
+
+    var fresh: std.ArrayList(index_mod.Entry) = .empty;
+    defer fresh.deinit(gpa);
+    var it = wanted.iterator();
+    while (it.next()) |pair| {
+        const path = pair.key_ptr.*;
+        const want = pair.value_ptr.*;
+        if (index.find(path)) |entry| {
+            if (entry.oid.eql(want.oid) and entry.mode == want.mode) {
+                outcome.unchanged += 1;
+                continue;
+            }
+            entry.oid = want.oid;
+            entry.mode = want.mode;
+            // The file on the disk is untouched and no longer matches, so
+            // the cached stat must not be trusted against it.
+            entry.stat = .none;
+            entry.intent_to_add = false;
+            outcome.updated += 1;
+            continue;
+        }
+        try fresh.append(gpa, .{
+            .path = try arena.dupe(u8, path),
+            .oid = want.oid,
+            .mode = want.mode,
+            .stat = .none,
+        });
+        outcome.updated += 1;
+    }
+    try index.addMany(fresh.items);
+
+    // The index now describes exactly this tree.
+    const cache_tree = try index.cacheTree();
+    cache_tree.invalidateAll();
+    cache_tree.root.entry_count = @intCast(index.entries.items.len);
+    cache_tree.root.oid = tree_oid;
+    return outcome;
+}
+
 /// What `checkout` did.
 pub const CheckoutOutcome = struct {
     written: u32 = 0,

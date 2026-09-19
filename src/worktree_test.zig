@@ -430,3 +430,46 @@ test "a tree naming .git is refused rather than written" {
     ));
     try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "git~1/config", .{}));
 }
+
+test "resetIndex puts the index back and leaves the files alone" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+
+    try h.repo.writeFile(io, "kept.txt", "one\n");
+    try h.repo.writeFile(io, "changed.txt", "one\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const head_tree_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(head_tree_text);
+
+    // Stage a change and a new file, then put the index back.
+    try h.repo.writeFile(io, "changed.txt", "two\n");
+    try h.repo.writeFile(io, "added.txt", "new\n");
+    try h.reload(gpa, io);
+    _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+
+    const outcome = try worktree.resetIndex(gpa, io, &h.index, &h.db, try Oid.parse(.sha1, head_tree_text));
+    try std.testing.expectEqual(@as(u32, 1), outcome.removed);
+    try std.testing.expectEqual(@as(u32, 1), outcome.updated);
+    try h.index.write(io, h.git_dir, "index", .{});
+
+    // The files are exactly where they were.
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("two\n", try h.repo.dir.readFile(io, "changed.txt", &buf));
+    try std.testing.expectEqualStrings("new\n", try h.repo.dir.readFile(io, "added.txt", &buf));
+
+    // And git says the same thing it says after `git reset`.
+    const ours = try h.repo.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
+    defer gpa.free(ours);
+    try h.repo.exec(io, &.{ "reset", "-q" });
+    const theirs = try h.repo.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
+    defer gpa.free(theirs);
+    try std.testing.expectEqualStrings(theirs, ours);
+
+    // The cache tree is the tree that was reset to, so write-tree is free.
+    const written = try worktree.writeTree(gpa, io, &h.index, &h.db);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    try std.testing.expectEqualStrings(head_tree_text, written.hex(&hex));
+}

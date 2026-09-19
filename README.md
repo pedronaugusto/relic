@@ -135,7 +135,7 @@ never reads a clock — the caller passes the time and the identity.
 | `ignore` | `Rules.load` / `addDirectory` / `match` / `matchPath`, with the pattern that decided. |
 | `attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
 | `wildmatch` | `match` — git's own glob, which is not `fnmatch`. |
-| `worktree` | `addAll`, `writeTree`, `checkout`, `status`, `list`, `applySparse`. |
+| `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
 | `worktrees` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`. |
 | `sparse` | `Patterns` for `info/sparse-checkout`. |
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`, rename and copy detection. |

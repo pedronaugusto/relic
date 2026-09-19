@@ -49,7 +49,8 @@ What is here:
   and written, and a log line for every ref the policy names.
 - **`worktree`** — `addAll` with the stat shortcut and the racy rule,
   `writeTree` through the cache tree, `checkout` as `read-tree --reset -u`
-  with `HEAD` untouched, structured `status`, `list`, and sparse checkout.
+  with `HEAD` untouched, `resetIndex` as `git reset` with the files left
+  alone, structured `status`, `list`, and sparse checkout.
 - **`worktrees`** — add, remove, prune, lock, unlock, move and repair, with
   the administrative directory and the `.git` file git writes.
 - **`diff`** and **`textdiff`** — tree to tree, added and removed counts with
