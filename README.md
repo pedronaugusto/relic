@@ -146,7 +146,8 @@ instructions this processor has, asked once.
 | `merge` | `trees` — a three-way tree merge producing index stages 1 to 3. |
 | `commitgraph`, `midx` | The two accelerators, read. A `revwalk.Walk` takes parents and times from a commit-graph when it is given one and reads the object when it is not; a lookup asks a multi-pack index which pack to open before it asks the packs one by one. Neither changes an answer. |
 | `safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
-| `fs` | `Sync`, `OnContention`, `staleReport` — the lock and durability policies every writer here goes through. |
+| `dirscan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
+| `fs` | `Sync`, `OnContention`, `staleReport`, `Resolution` — the lock, durability and timestamp policies every writer and every stat comparison here goes through. |
 | `repo` | `Repository.open`, `init`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. |
 
 Every public declaration carries a doc comment stating its contract, and every
@@ -245,11 +246,11 @@ directories and 64 MiB hashed:
 
 | | |
 |---|---|
-| `addAll`, nothing staged yet | 467 ms |
-| `addAll`, nothing changed | 10 ms |
-| `writeTree`, cache tree invalid | 10 ms |
+| `addAll`, nothing staged yet | 426 ms |
+| `addAll`, nothing changed | 5 ms |
+| `writeTree`, cache tree invalid | 9 ms |
 | `writeTree`, cache tree valid | under a millisecond |
-| `status`, one file in ten changed | 12 ms |
+| `status`, one file in ten changed | 8 ms |
 | SHA-1, the eighty rounds in software | 0.99 GiB/s |
 | SHA-1, the aarch64 instructions | 2.47 GiB/s |
 | SHA-1, with the collision check | 0.41 GiB/s |
@@ -257,16 +258,28 @@ directories and 64 MiB hashed:
 
 The warm numbers are what the stat shortcut and the `TREE` extension are for:
 an entry whose recorded stat still matches is neither opened nor hashed, and a
-cache-tree node that is still valid is used as it stands. The cold number is
-three thousand loose objects written, which is a directory made, a temporary
-file created, deflated, closed and renamed, once each; naming those files is
-under a millisecond of it, so it did not move when the hash got faster and it
-is not the number to read the hash by. What the suite holds to is not these
-figures but two ratios timed in the same run — the warm pass against the cold
-one, and the hardware arm against the software rounds — which is what survives
-a runner under load and still fails if the shortcut or the hardware arm is
-lost. There is a ceiling on the walk as well, but it is a ceiling and not a
-budget.
+cache-tree node that is still valid is used as it stands.
+
+The cold number is three thousand loose objects written, and it was profiled
+before it was worked on. Naming them is under a millisecond, so it is not the
+number to read the hash by. Two calls are three quarters of it: the
+`O_CREAT|O_EXCL` that makes each temporary, at 35 µs, and the `rename` that
+finishes it, at 54 µs. Those are the filesystem's own figures — the same two
+calls straight through libc cost the same, so nothing is lost in a layer — and
+they are what one file per object costs on APFS. What was around them has
+gone: a `mkdir`, an `opendir` and a `close` per object became one `mkdir` per
+fan-out directory, of which at most two hundred and fifty-six exist; the walk
+asks the filesystem once per entry instead of twice, and on macOS once per
+*directory*; and a file whose length a stat has already reported is read
+without asking again. The benchmark asserts on the counts rather than the
+clock for that first one: three thousand objects written, at most two hundred
+and fifty-six directories made.
+
+What the suite holds to elsewhere is not these figures but two ratios timed in
+the same run — the warm pass against the cold one, and the hardware arm
+against the software rounds — which is what survives a runner under load and
+still fails if the shortcut or the hardware arm is lost. There is a ceiling on
+the walk as well, but it is a ceiling and not a budget.
 
 **Packs are read with positional reads by default.**
 `Odb.Options.map_packs` asks for a memory map instead, which is faster on a
@@ -302,10 +315,11 @@ the peak is bounded by the operation and the free is one call. What outlives
 an operation is held by the object database: the pack indexes, read whole at
 open so a lookup costs no syscall; the multi-pack index, when there is one,
 for the same reason; the delta base cache, a direct-mapped table on the pack
-offset with a byte budget named in `Odb.Options`; and one deflate window,
-because a window is sixty-four kilobytes and a cold `addAll` writes one object
-per file. There is no object cache; a returned slice's doc comment says who
-owns it.
+offset with a byte budget named in `Odb.Options`; and, once a database has
+written anything, one deflate state and one output buffer, because the state
+is two hundred and twenty-four kilobytes and a cold `addAll` writes one object
+per file. A database that is only read allocates neither. There is no object
+cache; a returned slice's doc comment says who owns it.
 
 **The index is read at three versions and written at two.** Versions 2, 3 and
 4 are read; version 2 or 3 is written, 3 only when an entry needs an extended
@@ -317,13 +331,21 @@ entries. `link` — the split index — is understood: both of its bitmaps are
 decoded and the shared file is merged, so nothing is invisible, and what is
 written back is one complete index rather than a split one, which git
 re-splits on its next write if `core.splitIndex` is still set. `EOIE` and
-`IEOT` are dropped rather than copied, because both are caches of byte offsets
-into the very file being rewritten and copying one into a file whose entries
-have moved points it at the wrong place; git reads an index without them and
-rebuilds them itself. git's racy rule is implemented: an entry whose
-modification time is not older than the index file's own is content-checked
-rather than trusted, and a racily-clean entry's recorded size is written as
-zero so the mismatch survives into the next index. `dev`, `uid` and `gid` come
+`IEOT` are caches of byte offsets into the very file being rewritten, so what
+is copied is nothing and what is kept is that they were there: the offsets are
+taken again from the file being written. An index that carried them gets them
+back, one that did not gets neither — which is what stock git writes, since it
+writes them only when `index.threads` asks for a reader that can use them.
+`WriteOptions` says so outright for a caller writing for a particular reader.
+git's racy rule is implemented: an entry whose modification time is not older
+than the index file's own is content-checked rather than trusted, and a
+racily-clean entry's recorded size is written as zero so the mismatch survives
+into the next index. How much of a modification time means anything is
+measured rather than assumed — a file written into the directory, stat'd three
+times, and the largest round unit every reported time is a multiple of is the
+answer — because a filesystem that keeps whole seconds and one that keeps
+nanoseconds need opposite answers here, and guessing either way is a bug.
+`dev`, `uid` and `gid` come
 from the platform where it reports them — writing zeros there is what makes
 the next `git status` treat every entry as needing a refresh and re-hash the
 whole working tree.
@@ -341,8 +363,8 @@ whole working tree.
 
 | Platform | What it uses there | Tested |
 |---|---|---|
-| Linux | The executable bit, symlinks, and `statx` for the index's `dev`, `uid` and `gid` | `ubuntu-latest` in CI, four optimize modes |
-| macOS | The same, through `fstatat`; `fsync` is writeout-only, which is git's own default here | `macos-latest` in CI, four optimize modes |
+| Linux | The executable bit, symlinks, and one `statx` per entry for the index's `dev`, `uid` and `gid` alongside everything `std.Io` reports | `ubuntu-latest` in CI, four optimize modes |
+| macOS | The same through `fstatat`, and `getattrlistbulk(2)` for a whole directory at once where the volume has it, which the walk falls back from on `ENOTSUP`; `fsync` is writeout-only, which is git's own default here | `macos-latest` in CI, four optimize modes |
 | Windows | No executable bit and no `dev`, `uid` or `gid`, so the index's mode is preserved rather than invented and those three are zero; symlinks may be refused, in which case the link target is written as file content and the outcome says so; renames retry on a sharing violation | `windows-latest` in CI, four optimize modes |
 
 Paths in trees and in the index are always `/`-separated byte strings; the

@@ -4,6 +4,103 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`dirscan`** — a directory's entries with the stat of each, in as few calls
+  as the platform has. macOS has `getattrlistbulk(2)`, which returns, for a
+  whole batch of directory entries, the name and the modification and change
+  times, the file id, the owner, the group, the access mask, the device and
+  the data length — every field git's index compares, including the `dev`,
+  `ino`, `uid` and `gid` that `std.Io.File.Stat` does not carry. The ordinary
+  shape is a directory read and then one `lstat` per name. `dirscan.Scan` is
+  both arms behind one iterator and `addAll`, `status` and `list` all take it.
+
+  Measured on an Apple M3 Max over three thousand files in sixty directories,
+  minimum of ten alternating runs: a warm `addAll`, which is the walk and
+  nothing else, 9.4 ms to 4.8 ms; `status` over a tree with one file in ten
+  changed, 11.9 ms to 7.8 ms. On one directory on its own the call is 2.1 to
+  2.5 times the read-then-stat shape, and two syscalls rather than one per
+  file.
+
+  A volume that refuses it answers on the first call, before anything has been
+  handed out, so the fallback is clean. `Scan.initPlain` takes the ordinary
+  arm on purpose, which is what the suite compares against; a volume that
+  refuses the batch call skips that test rather than passing it, because
+  comparing the ordinary arm with itself proves nothing.
+
+- **`fs.Resolution` and `fs.probeTimestampResolution`** — how fine a
+  modification time a filesystem records, measured instead of assumed. One
+  file is created in the directory, written to three times and stat'd after
+  each write; the answer is the largest power of ten that divides every
+  nanosecond field reported, capped at a second. It runs at `Odb.open` and at
+  `Index.read`, and `odb.Options.probe_timestamp_resolution` turns it off.
+
+- **`Odb.Stats` gained `loose_written`, `loose_present` and
+  `fan_out_created`.** The benchmark asserts on the last two rather than on a
+  wall-clock figure, because a count is what a busy runner cannot move.
+
+- **`index.WriteOptions.end_of_index_entries` and `.entry_offset_blocks`**,
+  and **`Index.had_end_of_index_entries` and `Index.entry_offset_blocks`**.
+
+### Changed
+
+- **A cold `addAll` no longer opens a directory per object.** Profiled first,
+  on an Apple M3 Max over three thousand files: of 475 ms, the loose-object
+  write was 390 and inside it the two irreducible calls — the
+  `O_CREAT|O_EXCL` that makes the temporary, at 35 µs, and the `rename` that
+  finishes it, at 54 µs — were 105 and 155. Everything else the write did per
+  object is gone.
+
+  The temporary and the object it becomes are now both named relative to the
+  `objects` directory, so a `mkdir`, an `opendir` and a `close` per object
+  became one `mkdir` per fan-out directory, made by the write that first lands
+  in one that is not there yet. The deflate state, two hundred and twenty-four
+  kilobytes of it, and the output buffer beside it moved off the stack of
+  every object written and onto the database, allocated on the first object it
+  writes; a database that is only read allocates neither. A walk asks the
+  platform for a path's stat once rather than twice, because the call that
+  fetches the three fields `std.Io` leaves out already reports the ones it
+  carries. And a file whose length a stat has already reported is read without
+  asking again.
+
+  Minimum of ten alternating runs: 475 ms to 426 ms cold, 9.4 ms to 4.8 ms
+  warm. The two calls that remain are what one file per object costs on this
+  filesystem: the same two straight through libc cost the same, so nothing is
+  being lost in a layer.
+
+- **`EOIE` and `IEOT` are written again rather than dropped.** Both are caches
+  of byte offsets into the index file itself, so copying one into a file whose
+  entries have moved points it at the wrong place — which was right about the
+  numbers and wrong about the conclusion. The numbers are now taken again from
+  the file being written. `EOIE` carries the offset of the first extension and
+  a hash over the signature and size of every extension header before it;
+  `IEOT` divides the entries into blocks and is written first, and at version
+  4 the first entry of each block has its path written whole, because a reader
+  that decodes the blocks independently has no entry before it.
+
+  How many blocks is a reader's business: the count comes from the index that
+  was read, and stock git writes neither extension unless `index.threads` asks
+  for a reader that can use them. The fixture test therefore asks for one and
+  compares the bytes.
+
+- **git's racy rule uses the filesystem's measured timestamp resolution.** On
+  a filesystem that keeps nothing below a second, every entry in the index's
+  own second is racy, because the filesystem cannot put the two in order. On a
+  finer one the comparison is at the unit that was measured. The old rule
+  believed a reported nanosecond was a kept nanosecond, which is wrong in both
+  directions.
+
+- **Breaking: `fs.Stat.matches` takes a fourth argument**, the resolution.
+  `worktree.Rules` carries it and `Repository.worktreeRules` fills it in from
+  what the object database measured, so a caller going through the front door
+  passes nothing new.
+
+- **Breaking: `worktree.Rules` gained `timestamp_resolution`** and
+  `odb.Options` gained `probe_timestamp_resolution`. Both default to the
+  behaviour that was there before measuring was possible.
+
 ## [0.1.0] - 2026-09-19
 
 The first release. It reads and writes a repository the way git leaves one on
