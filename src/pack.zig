@@ -1249,9 +1249,13 @@ pub const WriteError = error{
     /// An offset delta whose base is not already in this pack. An offset
     /// delta may only point backwards.
     DeltaBaseNotWritten,
+    /// A name this pack already holds. An index's names must rise, so a
+    /// pack cannot hold one twice; `Writer.holds` says whether it does.
+    DuplicateObject,
 } || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
     Io.File.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
-    Io.Dir.CreateDirError;
+    Io.Dir.CreateDirError || Io.File.WritePositionalError ||
+    Io.File.ReadPositionalError;
 
 /// How hard a pack's entries are compressed.
 ///
@@ -1319,7 +1323,13 @@ pub const Writer = struct {
     kind: Kind,
     dir: Io.Dir,
     options: WriteOptions,
-    expected: u32,
+    /// How many objects the header was written with, or `null` when the
+    /// count was not known and the header will be patched at the end.
+    expected: ?u32,
+    /// The names already written, so that a caller feeding objects it has
+    /// not de-duplicated cannot put one in twice -- which an index, whose
+    /// names must rise, cannot hold.
+    seen: Oid.Set,
 
     temp: [64]u8,
     temp_len: usize,
@@ -1389,12 +1399,44 @@ pub const Writer = struct {
         object_count: u32,
         options: WriteOptions,
     ) WriteError!*Writer {
+        return initMaybeCounted(gpa, io, dir, kind, object_count, options);
+    }
+
+    /// Begin a pack whose object count is not known yet.
+    ///
+    /// The count goes in the header and the header goes first, so a pack
+    /// written this way has its header patched when it is finished and its
+    /// checksum taken over a second pass across the file. That pass is
+    /// sequential and one read per buffer, and it is what a caller pays for
+    /// not knowing how many objects it is about to write. `init` is the one
+    /// to use when it does.
+    pub fn initCounting(
+        gpa: Allocator,
+        io: Io,
+        dir: Io.Dir,
+        kind: Kind,
+        options: WriteOptions,
+    ) WriteError!*Writer {
+        return initMaybeCounted(gpa, io, dir, kind, null, options);
+    }
+
+    fn initMaybeCounted(
+        gpa: Allocator,
+        io: Io,
+        dir: Io.Dir,
+        kind: Kind,
+        object_count: ?u32,
+        options: WriteOptions,
+    ) WriteError!*Writer {
         const w = try gpa.create(Writer);
         errdefer gpa.destroy(w);
 
         var name_buf: [64]u8 = undefined;
         const temp = fs.tempName(io, &name_buf, "tmp_pack_");
-        const file = try dir.createFile(io, temp, .{ .exclusive = true });
+        // Readable as well as writable, because a pack whose object count
+        // was not known when it began has its header patched and its
+        // checksum taken again over the file it has just written.
+        const file = try dir.createFile(io, temp, .{ .exclusive = true, .read = true });
         errdefer {
             file.close(io);
             dir.deleteFile(io, temp) catch {};
@@ -1422,6 +1464,7 @@ pub const Writer = struct {
             .window = window,
             .compress = compress,
             .entries = .empty,
+            .seen = .empty,
         };
         @memcpy(w.temp[0..temp.len], temp);
         w.file_writer = file.writer(io, file_buffer);
@@ -1440,7 +1483,7 @@ pub const Writer = struct {
         var header: [12]u8 = undefined;
         @memcpy(header[0..4], "PACK");
         std.mem.writeInt(u32, header[4..8], 2, .big);
-        std.mem.writeInt(u32, header[8..12], object_count, .big);
+        std.mem.writeInt(u32, header[8..12], object_count orelse 0, .big);
         try w.sink.emit(&header);
         return w;
     }
@@ -1449,6 +1492,7 @@ pub const Writer = struct {
     pub fn deinit(w: *Writer, io: Io) void {
         if (!w.finished) w.abort(io);
         w.entries.deinit(w.gpa);
+        w.seen.deinit(w.gpa);
         w.gpa.free(w.file_buffer);
         w.gpa.free(w.window);
         w.gpa.destroy(w.compress);
@@ -1472,6 +1516,14 @@ pub const Writer = struct {
     /// Where the next entry will begin.
     pub fn offset(w: *const Writer) u64 {
         return w.sink.count;
+    }
+
+    /// Whether this pack already holds an object by that name.
+    ///
+    /// An index's names must rise, so a pack cannot hold one twice. A caller
+    /// feeding objects it has not de-duplicated asks here first.
+    pub fn holds(w: *const Writer, oid: Oid) bool {
+        return w.seen.contains(oid);
     }
 
     /// Add a whole object. Returns the offset the entry begins at, which is
@@ -1516,7 +1568,10 @@ pub const Writer = struct {
         extra: []const u8,
         payload: []const u8,
     ) WriteError!u64 {
-        if (w.entries.items.len >= w.expected) return error.ObjectCountMismatch;
+        if (w.expected) |expected| {
+            if (w.entries.items.len >= expected) return error.ObjectCountMismatch;
+        }
+        if (w.seen.contains(oid)) return error.DuplicateObject;
         const at = w.sink.count;
         w.sink.crc = .init();
 
@@ -1537,6 +1592,7 @@ pub const Writer = struct {
         try w.sink.writer.flush();
 
         try w.entries.append(w.gpa, .{ .oid = oid, .offset = at, .crc = w.sink.crc.final() });
+        try w.seen.put(w.gpa, oid, {});
         return at;
     }
 
@@ -1545,10 +1601,15 @@ pub const Writer = struct {
     /// The name both files carry is the pack's own trailing checksum, which
     /// is what git names a pack after.
     pub fn finish(w: *Writer, io: Io) WriteError!WriteReport {
-        if (w.entries.items.len != w.expected) return error.ObjectCountMismatch;
+        if (w.expected) |expected| {
+            if (w.entries.items.len != expected) return error.ObjectCountMismatch;
+        }
         if (w.entries.items.len > std.math.maxInt(u32)) return error.TooManyObjects;
 
-        const checksum = w.sink.hasher.final();
+        const checksum = if (w.expected != null)
+            w.sink.hasher.final()
+        else
+            try w.patchCountAndRehash(io);
         try w.sink.out.writeAll(checksum.raw());
         const pack_bytes = w.sink.count + w.kind.rawLen();
         try w.file_writer.interface.flush();
@@ -1593,6 +1654,31 @@ pub const Writer = struct {
             .index_bytes = index_bytes,
             .deltas = w.deltas,
         };
+    }
+
+    /// Put the real object count in the header and take the checksum again.
+    ///
+    /// The trailing checksum is over every byte before it, the header
+    /// included, so a header that changes changes it. One sequential pass
+    /// over the file is what that costs, and it is only paid by a caller who
+    /// did not know the count when it began.
+    fn patchCountAndRehash(w: *Writer, io: Io) WriteError!Oid {
+        try w.file_writer.interface.flush();
+        var header: [4]u8 = undefined;
+        std.mem.writeInt(u32, &header, @intCast(w.entries.items.len), .big);
+        _ = try w.file.writePositionalAll(io, &header, 8);
+
+        var hasher: hash.Hasher = .init(w.kind);
+        var at: u64 = 0;
+        const buffer = w.file_buffer;
+        while (at < w.sink.count) {
+            const want: usize = @intCast(@min(buffer.len, w.sink.count - at));
+            const n = try w.file.readPositionalAll(io, buffer[0..want], at);
+            if (n == 0) break;
+            hasher.update(buffer[0..n]);
+            at += n;
+        }
+        return hasher.final();
     }
 
     /// The `.idx`, version 2: the magic, the fanout over the first byte of
@@ -1755,6 +1841,66 @@ test "a written pack and its index read back, entry kind for entry kind" {
     try p.verifyChecksum(io);
     const checked = try p.verify(io, null, 0);
     try std.testing.expectEqual(@as(u32, 5), checked.objects);
+}
+
+test "fuzz: a pack this writes is a pack this reads" {
+    try std.testing.fuzz({}, fuzzWriter, .{});
+}
+
+fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const count = smith.valueRangeAtMost(u8, 1, 7);
+    var bodies: [7][]u8 = undefined;
+    var names: [7]Oid = undefined;
+    var kinds: [7]object.Type = undefined;
+    var written: usize = 0;
+    defer for (bodies[0..written]) |b| gpa.free(b);
+
+    var w = try Writer.initCounting(gpa, io, tmp.dir, .sha1, .{});
+    defer w.deinit(io);
+
+    for (0..count) |i| {
+        var scratch: [256]u8 = undefined;
+        const body = scratch[0..smith.slice(&scratch)];
+        kinds[i] = switch (smith.valueRangeAtMost(u8, 0, 3)) {
+            0 => .blob,
+            1 => .tree,
+            2 => .commit,
+            else => .tag,
+        };
+        bodies[i] = try gpa.dupe(u8, body);
+        written += 1;
+        names[i] = hash.Hasher.nameObject(.sha1, .{}, kinds[i].name(), bodies[i]).oid;
+        if (w.holds(names[i])) continue;
+
+        // Sometimes a delta against the entry before it, which is the other
+        // way an object can be in a pack.
+        if (i != 0 and w.count() != 0 and smith.valueRangeAtMost(u8, 0, 1) == 0) {
+            const base = bodies[i - 1];
+            const encoded = (try delta.encode(gpa, base, bodies[i], .{})) orelse continue;
+            defer gpa.free(encoded);
+            const base_offset = w.entries.items[w.count() - 1].offset;
+            if (kinds[i] != kinds[i - 1]) continue;
+            _ = try w.addOfsDelta(names[i], base_offset, encoded);
+            continue;
+        }
+        _ = try w.add(names[i], kinds[i], bodies[i]);
+    }
+
+    const report = try w.finish(io);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var base_buf: [64]u8 = undefined;
+    const base = try std.fmt.bufPrint(&base_buf, "pack-{s}", .{report.name.hex(&hex)});
+    var p = try Pack.open(gpa, io, tmp.dir, base, .sha1, .{});
+    defer p.deinit(io);
+    // Rehashes every object against the name the index gives it, deltas
+    // resolved, and checks every CRC and the trailer.
+    const checked = try p.verify(io, null, 0);
+    if (checked.objects != report.objects) return error.PackDidNotRoundTrip;
 }
 
 test "a pack with no objects is still a pack" {
