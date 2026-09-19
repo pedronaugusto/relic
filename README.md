@@ -142,7 +142,7 @@ never reads a clock — the caller passes the time and the identity.
 | `textdiff` | `diffLines`, `hunks`, `stat`, `similarity`, `Algorithm` (`myers`, `histogram`). |
 | `revwalk` | `Walk`, `mergeBase`, `mergeBases`, `isAncestor`. |
 | `merge` | `trees` — a three-way tree merge producing index stages 1 to 3. |
-| `commitgraph`, `midx` | The two accelerators, read. Correctness never depends on either. |
+| `commitgraph`, `midx` | The two accelerators, read. A `revwalk.Walk` takes parents and times from a commit-graph when it is given one and reads the object when it is not, so the answers do not change either way. |
 | `safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
 | `repo` | `Repository.open`, `init`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. |
 

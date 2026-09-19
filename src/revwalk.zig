@@ -12,6 +12,7 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
+const commitgraph = @import("commitgraph.zig");
 
 const Oid = hash.Oid;
 
@@ -52,6 +53,11 @@ pub const Walk = struct {
     /// A bound on how many commits will be loaded, so a hostile or
     /// enormous history cannot be walked without the caller asking for it.
     max_commits: usize = 1 << 22,
+    /// A commit-graph to take parents and times from, when the caller has
+    /// one open. A commit the graph does not hold is read from the object
+    /// database, so the answers do not depend on it — which is what an
+    /// accelerator has to mean.
+    graph: ?*const commitgraph.Graph = null,
 
     roots: std.ArrayList(Oid) = .empty,
     hidden: std.ArrayList(Oid) = .empty,
@@ -131,6 +137,15 @@ pub const Walk = struct {
     }
 
     fn load(walk: *Walk, io: Io, oid: Oid) Error!Commit {
+        if (walk.graph) |graph| {
+            if (graph.find(oid)) |position| {
+                if (graph.commitAt(position)) |entry| {
+                    if (graph.parentsOf(walk.gpa, position)) |parents| {
+                        return .{ .oid = oid, .parents = parents, .time = entry.time };
+                    } else |_| {}
+                } else |_| {}
+            }
+        }
         const found = try walk.db.read(io, oid);
         defer walk.gpa.free(found.bytes);
         if (found.type != .commit) return error.NotACommit;

@@ -914,3 +914,69 @@ test "a worktree that moved is repaired and git follows it" {
     defer gpa.free(again);
     try std.testing.expectEqualStrings(listed, again);
 }
+
+test "a walk with the commit-graph answers what a walk without it answers" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    // A history with a merge in it, so the graph's second-parent encoding is
+    // exercised rather than assumed.
+    for (0..6) |i| {
+        var buf: [32]u8 = undefined;
+        try repo.writeFile(io, try std.fmt.bufPrint(&buf, "main{d}.txt", .{i}), "x\n");
+        try repo.exec(io, &.{ "add", "-A" });
+        var msg: [32]u8 = undefined;
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "m{d}", .{i}) });
+    }
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side", "HEAD~3" });
+    try repo.writeFile(io, "side.txt", "y\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "side" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.exec(io, &.{ "merge", "--no-edit", "-q", "side" });
+    try repo.exec(io, &.{ "commit-graph", "write", "--reachable" });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+    var graph = (try commitgraph_mod.Graph.open(gpa, io, objects, .sha1)) orelse return error.SkipZigTest;
+    defer graph.deinit();
+
+    const head_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head_text);
+    const head = try Oid.parse(.sha1, head_text);
+
+    var plain: revwalk.Walk = .init(gpa, &db);
+    defer plain.deinit();
+    try plain.push(head);
+    var accelerated: revwalk.Walk = .init(gpa, &db);
+    defer accelerated.deinit();
+    accelerated.graph = &graph;
+    try accelerated.push(head);
+
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var other_hex: [hash.max_hex_len]u8 = undefined;
+    while (try plain.next(io)) |a| {
+        const b = (try accelerated.next(io)).?;
+        try std.testing.expectEqualStrings(a.oid.hex(&hex), b.oid.hex(&other_hex));
+        try std.testing.expectEqual(a.time, b.time);
+        try std.testing.expectEqual(a.parents.len, b.parents.len);
+    }
+    try std.testing.expect((try accelerated.next(io)) == null);
+
+    // And the walk covers exactly what git lists.
+    const listed = try repo.run(io, &.{ "rev-list", "HEAD" });
+    defer gpa.free(listed);
+    var expected: usize = 0;
+    var lines = std.mem.splitScalar(u8, listed, '\n');
+    while (lines.next()) |line| {
+        if (line.len != 0) expected += 1;
+    }
+    plain.reset();
+    try std.testing.expectEqual(expected, try plain.count(io));
+}
