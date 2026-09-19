@@ -633,3 +633,284 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
 
 const sparse_mod = @import("sparse.zig");
 const worktree = @import("worktree.zig");
+
+const commitgraph_mod = @import("commitgraph.zig");
+const midx_mod = @import("midx.zig");
+const merge_mod = @import("merge.zig");
+const revwalk = @import("revwalk.zig");
+const worktrees_mod = @import("worktrees.zig");
+const repo_mod = @import("repo.zig");
+
+test "the commit-graph and the multi-pack index read what git wrote" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    for (0..12) |i| {
+        var buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buf, "f{d}.txt", .{i});
+        try repo.writeFile(io, name, "x\n");
+        try repo.exec(io, &.{ "add", "-A" });
+        var msg: [32]u8 = undefined;
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{i}) });
+        // A second pack each time, so the multi-pack index has something to
+        // do.
+        if (i % 4 == 3) try repo.exec(io, &.{ "repack", "-q", "-d" });
+    }
+    try repo.exec(io, &.{ "commit-graph", "write", "--reachable" });
+    repo.exec(io, &.{ "multi-pack-index", "write" }) catch {};
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+
+    var graph = (try commitgraph_mod.Graph.open(gpa, io, objects, .sha1)) orelse return error.SkipZigTest;
+    defer graph.deinit();
+
+    // Every commit git lists is in the graph, with the parents the object
+    // itself carries.
+    const listed = try repo.run(io, &.{ "rev-list", "--all" });
+    defer gpa.free(listed);
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, listed, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const oid = try Oid.parse(.sha1, line);
+        const position = graph.find(oid) orelse {
+            std.debug.print("commit missing from the graph: {s}\n", .{line});
+            return error.TestUnexpectedResult;
+        };
+        const from_graph = try graph.parentsOf(gpa, position);
+        defer gpa.free(from_graph);
+
+        const found = try db.read(io, oid);
+        defer gpa.free(found.bytes);
+        var commit = try object.Commit.parse(gpa, .sha1, found.bytes);
+        defer commit.deinit();
+        try std.testing.expectEqual(commit.parents.len, from_graph.len);
+        for (commit.parents, from_graph) |a, b| try std.testing.expect(a.eql(b));
+
+        const entry = (try graph.commitAt(position));
+        try std.testing.expect(entry.tree.eql(commit.tree));
+        try std.testing.expectEqual(commit.committer.when_secs, entry.time);
+        count += 1;
+    }
+    try std.testing.expect(count >= 12);
+
+    // The multi-pack index, when git wrote one, points every object at a
+    // pack this has open.
+    const pack_dir = objects.openDir(io, "pack", .{ .iterate = true }) catch return;
+    defer pack_dir.close(io);
+    var index = (try midx_mod.Index.open(gpa, io, pack_dir, .sha1)) orelse return;
+    defer index.deinit();
+    try std.testing.expect(index.count > 0);
+    try std.testing.expect(index.packName(0) != null);
+
+    var i: u32 = 0;
+    while (i < @min(index.count, 50)) : (i += 1) {
+        const oid = index.nameAt(i);
+        const located = (try index.find(oid)).?;
+        try std.testing.expect(located.pack < index.pack_count);
+        // And the object really is readable, which is the only thing the
+        // accelerator is allowed to change the speed of.
+        const found = try db.read(io, oid);
+        defer gpa.free(found.bytes);
+        try std.testing.expect(hash.Hasher.object(.sha1, found.type.name(), found.bytes).eql(oid));
+    }
+}
+
+test "a three-way tree merge agrees with git merge-tree" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    try repo.writeFile(io, "shared.txt", "base\n");
+    try repo.writeFile(io, "ours-only.txt", "base\n");
+    try repo.writeFile(io, "theirs-only.txt", "base\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    const base_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(base_text);
+
+    try repo.writeFile(io, "ours-only.txt", "ours\n");
+    try repo.writeFile(io, "added-by-us.txt", "ours\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "ours" });
+    const ours_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(ours_text);
+
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "theirs", base_text });
+    try repo.writeFile(io, "theirs-only.txt", "theirs\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "theirs" });
+    const theirs_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(theirs_text);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    const ours = try Oid.parse(.sha1, ours_text);
+    const theirs = try Oid.parse(.sha1, theirs_text);
+
+    // The merge base this computes is the one git computes.
+    const base = (try revwalk.mergeBase(gpa, io, &db, ours, theirs)).?;
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const merge_base_text = try repo.line(io, &.{ "merge-base", ours_text, theirs_text });
+    defer gpa.free(merge_base_text);
+    try std.testing.expectEqualStrings(merge_base_text, base.hex(&hex));
+
+    var result = try merge_mod.trees(
+        gpa,
+        io,
+        &db,
+        try treeOf(gpa, io, &db, base),
+        try treeOf(gpa, io, &db, ours),
+        try treeOf(gpa, io, &db, theirs),
+    );
+    defer result.deinit();
+    try std.testing.expect(result.isClean());
+
+    const merged = try merge_mod.tree(io, &db, &result);
+    const theirs_merged = repo.line(io, &.{ "merge-tree", "--write-tree", ours_text, theirs_text }) catch
+        return error.SkipZigTest;
+    defer gpa.free(theirs_merged);
+    try std.testing.expectEqualStrings(theirs_merged, merged.hex(&hex));
+}
+
+fn treeOf(gpa: std.mem.Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid) !Oid {
+    const found = try db.read(io, commit_oid);
+    defer gpa.free(found.bytes);
+    var commit = try object.Commit.parse(gpa, .sha1, found.bytes);
+    defer commit.deinit();
+    return commit.tree;
+}
+
+test "a conflicting three-way merge leaves stages 1, 2 and 3" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    try repo.writeFile(io, "both.txt", "base\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    const base_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(base_text);
+
+    try repo.writeFile(io, "both.txt", "ours\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "ours" });
+    const ours_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(ours_text);
+
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "theirs", base_text });
+    try repo.writeFile(io, "both.txt", "theirs\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "theirs" });
+    const theirs_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(theirs_text);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    var result = try merge_mod.trees(
+        gpa,
+        io,
+        &db,
+        try treeOf(gpa, io, &db, try Oid.parse(.sha1, base_text)),
+        try treeOf(gpa, io, &db, try Oid.parse(.sha1, ours_text)),
+        try treeOf(gpa, io, &db, try Oid.parse(.sha1, theirs_text)),
+    );
+    defer result.deinit();
+
+    try std.testing.expect(!result.isClean());
+    try std.testing.expectEqual(@as(usize, 1), result.conflicts.len);
+    try std.testing.expectEqualStrings("both.txt", result.conflicts[0].path);
+    try std.testing.expectEqual(merge_mod.Conflict.Kind.both_modified, result.conflicts[0].kind);
+
+    // The index carries the three sides, exactly where git puts them.
+    try std.testing.expect(result.index.find("both.txt") == null);
+    for ([_]u2{ 1, 2, 3 }) |stage| {
+        const entry = result.index.findStage("both.txt", stage).?;
+        const found = try db.read(io, entry.oid);
+        defer gpa.free(found.bytes);
+        const expected: []const u8 = switch (stage) {
+            1 => "base\n",
+            2 => "ours\n",
+            else => "theirs\n",
+        };
+        try std.testing.expectEqualStrings(expected, found.bytes);
+    }
+    try std.testing.expectError(error.MergeConflict, merge_mod.tree(io, &db, &result));
+
+    // And git writes an index with the same three stages, which this reads
+    // back to the same entries.
+    try repo.exec(io, &.{ "checkout", "-q", ours_text });
+    repo.report_failures = false;
+    _ = repo.run(io, &.{ "merge", "--no-edit", theirs_text }) catch {};
+    repo.report_failures = true;
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+    defer index.deinit();
+    if (index.findStage("both.txt", 2)) |ours_entry| {
+        try std.testing.expect(ours_entry.oid.eql(result.index.findStage("both.txt", 2).?.oid));
+        try std.testing.expect(index.findStage("both.txt", 1) != null);
+        try std.testing.expect(index.findStage("both.txt", 3) != null);
+    }
+}
+
+test "a worktree that moved is repaired and git follows it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+
+    try git.writeFile(io, "a.txt", "hello\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const commit_text = try git.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(commit_text);
+
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+
+    try git.dir.createDirPath(io, "trees/before");
+    var dest = try git.dir.openDir(io, "trees/before", .{ .iterate = true });
+    var added = try worktrees_mod.add(gpa, io, repo.common_dir, "moving", dest, "trees/before", .{
+        .detach_at = try Oid.parse(.sha1, commit_text),
+    });
+    added.admin_dir.close(io);
+    dest.close(io);
+
+    var parent = try git.dir.openDir(io, "trees", .{ .iterate = true });
+    defer parent.close(io);
+    try worktrees_mod.move(gpa, io, repo.common_dir, "moving", parent, "after");
+
+    try std.testing.expectError(error.FileNotFound, git.dir.access(io, "trees/before", .{}));
+    var moved = try git.dir.openDir(io, "trees/after", .{ .iterate = true });
+    defer moved.close(io);
+
+    const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
+    defer gpa.free(listed);
+    try std.testing.expect(std.mem.indexOf(u8, listed, "trees/after") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed, "trees/before") == null);
+
+    // Opening the moved worktree still finds the repository behind it.
+    var linked = try repo_mod.Repository.open(gpa, io, moved, .{ .discover = false });
+    defer linked.deinit(io);
+    try std.testing.expect(linked.common_is_separate);
+
+    // And repair on its own is idempotent.
+    try worktrees_mod.repair(io, repo.common_dir, "moving", moved);
+    const again = try git.run(io, &.{ "worktree", "list", "--porcelain" });
+    defer gpa.free(again);
+    try std.testing.expectEqualStrings(listed, again);
+}

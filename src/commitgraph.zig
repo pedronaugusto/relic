@@ -200,16 +200,22 @@ pub const Graph = struct {
         // version one generation, which this deliberately does not read.
         const time: i64 = @intCast(packed_time & ((@as(u64, 1) << 34) - 1));
 
-        const no_parent: u32 = 0x7fff_ffff;
+        // `0x70000000` is the format's "no parent", not `0x7fffffff`; the
+        // latter is the mask an edge index is taken under.
+        const no_parent: u32 = 0x7000_0000;
         const extra_bit: u32 = 0x8000_0000;
         var parents: [2]?u32 = .{ null, null };
         var has_extra = false;
-        if (first != no_parent) parents[0] = first;
+        if (first != no_parent) {
+            if (first >= graph.count) return error.CorruptCommitGraph;
+            parents[0] = first;
+        }
         if (second != no_parent) {
             if (second & extra_bit != 0) {
                 has_extra = true;
                 parents[1] = second & ~extra_bit;
             } else {
+                if (second >= graph.count) return error.CorruptCommitGraph;
                 parents[1] = second;
             }
         }
@@ -251,9 +257,15 @@ pub const Graph = struct {
         const found = try graph.commitAt(position);
         var out: std.ArrayList(Oid) = .empty;
         errdefer out.deinit(gpa);
-        if (found.parents[0]) |at| try out.append(gpa, graph.nameAt(at));
+        if (found.parents[0]) |at| {
+            if (at >= graph.count) return error.CorruptCommitGraph;
+            try out.append(gpa, graph.nameAt(at));
+        }
         if (!found.has_extra_parents) {
-            if (found.parents[1]) |at| try out.append(gpa, graph.nameAt(at));
+            if (found.parents[1]) |at| {
+                if (at >= graph.count) return error.CorruptCommitGraph;
+                try out.append(gpa, graph.nameAt(at));
+            }
             return out.toOwnedSlice(gpa);
         }
         const edges_at = graph.edges_at orelse return error.CorruptCommitGraph;

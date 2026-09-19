@@ -23,7 +23,8 @@ pub const Error = error{
     NotATree,
     /// The trees nest deeper than the walk will go.
     TreeTooDeep,
-} || Allocator.Error || odb_mod.Error || object.TreeParseError || index_mod.ReadError;
+} || Allocator.Error || odb_mod.Error || object.TreeParseError ||
+    object.Tree.Builder.AddError || index_mod.ReadError;
 
 /// One side's view of a path.
 pub const Side = struct {
