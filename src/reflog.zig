@@ -136,12 +136,16 @@ pub fn append(
     }
     w.writeByte('\n') catch return error.OutOfMemory;
 
-    const file = git_dir.openFile(io, path, .{ .mode = .write_only }) catch |err| switch (err) {
-        error.FileNotFound => try git_dir.createFile(io, path, .{ .truncate = false }),
+    // Opened for reading as well as writing because the end of the file is
+    // asked for through this handle: Windows gives a write-only handle no
+    // right to read the file's attributes, and the length that came back as
+    // zero there would put the second entry on top of the first.
+    const file = git_dir.openFile(io, path, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => try git_dir.createFile(io, path, .{ .truncate = false, .read = true }),
         else => |e| return e,
     };
     defer file.close(io);
-    const end = file.length(io) catch 0;
+    const end = try file.length(io);
     try file.writePositionalAll(io, line.written(), end);
 }
 
