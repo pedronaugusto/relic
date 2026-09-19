@@ -261,7 +261,7 @@ pub fn atomicWrite(
     prefix: []const u8,
 ) AtomicWriteError!void {
     var name_buf: [max_name]u8 = undefined;
-    const temp = tempName(&name_buf, prefix);
+    const temp = tempName(io, &name_buf, prefix);
     var file = try dir.createFile(io, temp, .{ .exclusive = true });
     errdefer {
         file.close(io);
@@ -284,9 +284,9 @@ pub fn atomicWrite(
 ///
 /// Randomness comes from the operating system, not from a clock: rule 5 holds
 /// even here.
-pub fn tempName(buf: []u8, prefix: []const u8) []const u8 {
+pub fn tempName(io: Io, buf: []u8, prefix: []const u8) []const u8 {
     var raw: [12]u8 = undefined;
-    std.crypto.random.bytes(&raw);
+    io.random(&raw);
     var hex: [24]u8 = undefined;
     _ = std.fmt.bufPrint(&hex, "{x}", .{&raw}) catch unreachable;
     return std.fmt.bufPrint(buf, "{s}{s}", .{ prefix, hex }) catch unreachable;

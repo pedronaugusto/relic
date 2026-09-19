@@ -2,7 +2,7 @@
     .name = .relic,
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
-    .fingerprint = 0x6d2a1f7c94b30e58,
+    .fingerprint = 0x688191cb6037a69f,
     .paths = .{
         "build.zig",
         "build.zig.zon",
