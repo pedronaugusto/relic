@@ -879,3 +879,41 @@ test "a loose object header parses and refuses a padded size" {
     try std.testing.expectError(error.UnknownObjectType, parseHeader("blub 1\x00"));
     try std.testing.expectError(error.MissingHeaderTerminator, parseHeader("blob 1"));
 }
+
+test "fuzz: any bytes are an object or a named error" {
+    try std.testing.fuzz({}, fuzzObject, .{});
+}
+
+fn fuzzObject(_: void, smith: *std.testing.Smith) anyerror!void {
+    const gpa = std.testing.allocator;
+    var scratch: [2048]u8 = undefined;
+    const input = scratch[0..smith.slice(&scratch)];
+
+    if (parseHeader(input)) |parsed| {
+        std.debug.assert(parsed.len <= input.len);
+    } else |_| {}
+
+    for ([_]Kind{ .sha1, .sha256 }) |kind| {
+        const tree: Tree = .parse(kind, input);
+        var it = tree.iterate();
+        while (it.next() catch null) |entry| {
+            std.debug.assert(entry.name.len != 0);
+        }
+        _ = tree.find("a") catch {};
+
+        if (Commit.parse(gpa, kind, input)) |parsed| {
+            var commit = parsed;
+            defer commit.deinit();
+            _ = commit.extraHeader("gpgsig");
+        } else |_| {}
+
+        if (Tag.parse(gpa, kind, input)) |parsed| {
+            var tag = parsed;
+            defer tag.deinit();
+            _ = tag.extraHeader("gpgsig");
+        } else |_| {}
+    }
+
+    _ = Signature.parse(input) catch {};
+    _ = Mode.parse(input[0..@min(input.len, 6)]) catch {};
+}

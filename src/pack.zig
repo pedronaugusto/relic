@@ -938,3 +938,289 @@ fn fuzzIndex(_: void, smith: *std.testing.Smith) anyerror!void {
     _ = index.find(Oid.zero(.sha1)) catch {};
     _ = index.findPrefix("ab") catch {};
 }
+
+/// A pack written by hand, for the entries a real packer will not produce.
+///
+/// Test-only. A hostile pack is a file like any other, and the two shapes
+/// that hang a careless reader — a reference-delta cycle and a chain a
+/// thousand deep — cannot be made with `git repack`.
+const TestPack = struct {
+    gpa: Allocator,
+    body: std.ArrayList(u8) = .empty,
+    names: std.ArrayList(Oid) = .empty,
+    offsets: std.ArrayList(u64) = .empty,
+    crcs: std.ArrayList(u32) = .empty,
+
+    fn deinit(p: *TestPack) void {
+        p.body.deinit(p.gpa);
+        p.names.deinit(p.gpa);
+        p.offsets.deinit(p.gpa);
+        p.crcs.deinit(p.gpa);
+    }
+
+    fn init(gpa: Allocator) !TestPack {
+        var p: TestPack = .{ .gpa = gpa };
+        try p.body.appendSlice(gpa, "PACK");
+        var header: [8]u8 = undefined;
+        std.mem.writeInt(u32, header[0..4], 2, .big);
+        std.mem.writeInt(u32, header[4..8], 0, .big);
+        try p.body.appendSlice(gpa, &header);
+        return p;
+    }
+
+    fn writeTypeAndSize(p: *TestPack, type_bits: u3, size: u64) !void {
+        var value = size;
+        var first: u8 = (@as(u8, type_bits) << 4) | @as(u8, @truncate(value & 0x0f));
+        value >>= 4;
+        if (value != 0) first |= 0x80;
+        try p.body.append(p.gpa, first);
+        while (value != 0) {
+            var byte: u8 = @truncate(value & 0x7f);
+            value >>= 7;
+            if (value != 0) byte |= 0x80;
+            try p.body.append(p.gpa, byte);
+        }
+    }
+
+    fn deflate(p: *TestPack, bytes: []const u8) !void {
+        const window = try p.gpa.alloc(u8, flate.max_window_len);
+        defer p.gpa.free(window);
+        // The compressor needs somewhere to put its output; an allocating
+        // writer starts with no buffer at all and it asserts against that.
+        var out: std.Io.Writer.Allocating = try .initCapacity(p.gpa, 4096);
+        defer out.deinit();
+        var compress = try flate.Compress.init(&out.writer, window, .zlib, .level_1);
+        try compress.writer.writeAll(bytes);
+        try compress.writer.flush();
+        try compress.finish();
+        try p.body.appendSlice(p.gpa, out.written());
+    }
+
+    fn finishEntry(p: *TestPack, start: usize, name: Oid) !void {
+        try p.names.append(p.gpa, name);
+        try p.offsets.append(p.gpa, start);
+        try p.crcs.append(p.gpa, std.hash.Crc32.hash(p.body.items[start..]));
+    }
+
+    /// A whole object, with the name the caller chooses rather than the one
+    /// its content would give it: these packs are about the entry headers.
+    fn addObject(p: *TestPack, name: Oid, bytes: []const u8) !u64 {
+        const start = p.body.items.len;
+        try p.writeTypeAndSize(3, bytes.len);
+        try p.deflate(bytes);
+        try p.finishEntry(start, name);
+        return start;
+    }
+
+    /// A delta against an entry `back` bytes earlier, in the biased offset
+    /// encoding.
+    fn addOfsDelta(p: *TestPack, name: Oid, back: u64, delta_bytes: []const u8) !u64 {
+        const start = p.body.items.len;
+        try p.writeTypeAndSize(6, delta_bytes.len);
+        var buf: [16]u8 = undefined;
+        var pos: usize = buf.len - 1;
+        var value = back;
+        buf[pos] = @intCast(value & 0x7f);
+        while (value >> 7 != 0) {
+            value >>= 7;
+            value -= 1;
+            pos -= 1;
+            buf[pos] = 0x80 | @as(u8, @intCast(value & 0x7f));
+        }
+        try p.body.appendSlice(p.gpa, buf[pos..]);
+        try p.deflate(delta_bytes);
+        try p.finishEntry(start, name);
+        return start;
+    }
+
+    /// A delta against the object with `base`'s name.
+    fn addRefDelta(p: *TestPack, name: Oid, base: Oid, delta_bytes: []const u8) !u64 {
+        const start = p.body.items.len;
+        try p.writeTypeAndSize(7, delta_bytes.len);
+        try p.body.appendSlice(p.gpa, base.raw());
+        try p.deflate(delta_bytes);
+        try p.finishEntry(start, name);
+        return start;
+    }
+
+    /// Write `<base>.pack` and `<base>.idx` into `dir`.
+    fn write(p: *TestPack, io: Io, dir: Io.Dir, base: []const u8) !void {
+        std.mem.writeInt(u32, p.body.items[8..12], @intCast(p.names.items.len), .big);
+        var hasher: hash.Hasher = .init(.sha1);
+        hasher.update(p.body.items);
+        const checksum = hasher.final();
+
+        var pack_name: [64]u8 = undefined;
+        var pack_bytes: std.ArrayList(u8) = .empty;
+        defer pack_bytes.deinit(p.gpa);
+        try pack_bytes.appendSlice(p.gpa, p.body.items);
+        try pack_bytes.appendSlice(p.gpa, checksum.raw());
+        try dir.writeFile(io, .{
+            .sub_path = try std.fmt.bufPrint(&pack_name, "{s}.pack", .{base}),
+            .data = pack_bytes.items,
+        });
+
+        // The index's names must rise, so the entries are sorted here and
+        // the offsets follow them.
+        const order = try p.gpa.alloc(u32, p.names.items.len);
+        defer p.gpa.free(order);
+        for (order, 0..) |*slot, i| slot.* = @intCast(i);
+        const Ctx = struct {
+            names: []const Oid,
+            fn lessThan(ctx: @This(), a: u32, b: u32) bool {
+                return ctx.names[a].order(ctx.names[b]) == .lt;
+            }
+        };
+        std.mem.sort(u32, order, Ctx{ .names = p.names.items }, Ctx.lessThan);
+
+        var idx: std.ArrayList(u8) = .empty;
+        defer idx.deinit(p.gpa);
+        try idx.appendSlice(p.gpa, idx_magic);
+        var version: [4]u8 = undefined;
+        std.mem.writeInt(u32, &version, 2, .big);
+        try idx.appendSlice(p.gpa, &version);
+        var bucket: usize = 0;
+        while (bucket < 256) : (bucket += 1) {
+            var count: u32 = 0;
+            for (order) |position| {
+                if (p.names.items[position].raw()[0] <= bucket) count += 1;
+            }
+            var value: [4]u8 = undefined;
+            std.mem.writeInt(u32, &value, count, .big);
+            try idx.appendSlice(p.gpa, &value);
+        }
+        for (order) |position| try idx.appendSlice(p.gpa, p.names.items[position].raw());
+        for (order) |position| {
+            var value: [4]u8 = undefined;
+            std.mem.writeInt(u32, &value, p.crcs.items[position], .big);
+            try idx.appendSlice(p.gpa, &value);
+        }
+        for (order) |position| {
+            var value: [4]u8 = undefined;
+            std.mem.writeInt(u32, &value, @intCast(p.offsets.items[position]), .big);
+            try idx.appendSlice(p.gpa, &value);
+        }
+        try idx.appendSlice(p.gpa, checksum.raw());
+        var idx_hasher: hash.Hasher = .init(.sha1);
+        idx_hasher.update(idx.items);
+        try idx.appendSlice(p.gpa, idx_hasher.final().raw());
+
+        var idx_name: [64]u8 = undefined;
+        try dir.writeFile(io, .{
+            .sub_path = try std.fmt.bufPrint(&idx_name, "{s}.idx", .{base}),
+            .data = idx.items,
+        });
+    }
+};
+
+fn testName(n: u32) Oid {
+    var oid: Oid = .zero(.sha1);
+    std.mem.writeInt(u32, oid.bytes[0..4], n *% 2_654_435_761, .big);
+    std.mem.writeInt(u32, oid.bytes[16..20], n, .big);
+    return oid;
+}
+
+/// A delta that copies its whole base, which is the smallest valid delta.
+fn identityDelta(gpa: Allocator, size: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var value = size;
+    while (true) {
+        var byte: u8 = @truncate(value & 0x7f);
+        value >>= 7;
+        if (value != 0) byte |= 0x80;
+        try out.append(gpa, byte);
+        if (value == 0) break;
+    }
+    const header_len = out.items.len;
+    try out.appendSlice(gpa, out.items[0..header_len]);
+    // Copy from offset 0 for `size` bytes, with one offset byte and one
+    // size byte, which is enough for the sizes these tests use.
+    try out.append(gpa, 0x80 | 0x01 | 0x10);
+    try out.append(gpa, 0);
+    try out.append(gpa, @intCast(size));
+    return out.toOwnedSlice(gpa);
+}
+
+test "two reference deltas naming each other are a named error, not a hang" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const a = testName(1);
+    const b = testName(2);
+    const patch = try identityDelta(gpa, 8);
+    defer gpa.free(patch);
+
+    var builder = try TestPack.init(gpa);
+    defer builder.deinit();
+    const a_at = try builder.addRefDelta(a, b, patch);
+    _ = try builder.addRefDelta(b, a, patch);
+    try builder.write(io, tmp.dir, "cycle");
+
+    var p = try Pack.open(gpa, io, tmp.dir, "cycle", .sha1, .{});
+    defer p.deinit(io);
+    try std.testing.expectError(error.DeltaCycle, p.readAt(io, a_at, null, 0));
+}
+
+test "a chain deeper than the cap is refused, and one inside it resolves" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const content = "abcdefgh";
+    const patch = try identityDelta(gpa, content.len);
+    defer gpa.free(patch);
+
+    var builder = try TestPack.init(gpa);
+    defer builder.deinit();
+    var base_at = try builder.addObject(testName(0), content);
+    var i: u32 = 1;
+    // A thousand deep: far past anything a packer writes, and the shape
+    // that turns a recursive reader into a stack overflow.
+    while (i < 1000) : (i += 1) {
+        const back = builder.body.items.len - base_at;
+        base_at = try builder.addOfsDelta(testName(i), back, patch);
+    }
+    const last = base_at;
+    try builder.write(io, tmp.dir, "deep");
+
+    {
+        // Inside the format's own limit, so it resolves — iteratively, with
+        // no recursion to overflow.
+        var p = try Pack.open(gpa, io, tmp.dir, "deep", .sha1, .{});
+        defer p.deinit(io);
+        const found = try p.readAt(io, last, null, 0);
+        defer gpa.free(found.bytes);
+        try std.testing.expectEqualStrings(content, found.bytes);
+    }
+    {
+        // And a caller that sets a smaller cap gets the refusal rather than
+        // the work.
+        var p = try Pack.open(gpa, io, tmp.dir, "deep", .sha1, .{ .max_depth = 16 });
+        defer p.deinit(io);
+        try std.testing.expectError(error.DeltaChainTooDeep, p.readAt(io, last, null, 0));
+    }
+}
+
+test "an offset delta pointing forwards is refused" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const patch = try identityDelta(gpa, 4);
+    defer gpa.free(patch);
+    var builder = try TestPack.init(gpa);
+    defer builder.deinit();
+    // A back-reference larger than the entry's own offset points before the
+    // header, which no pack may do.
+    const at = try builder.addOfsDelta(testName(7), 1 << 20, patch);
+    try builder.write(io, tmp.dir, "forward");
+
+    var p = try Pack.open(gpa, io, tmp.dir, "forward", .sha1, .{});
+    defer p.deinit(io);
+    try std.testing.expectError(error.BadDeltaOffset, p.readAt(io, at, null, 0));
+}
