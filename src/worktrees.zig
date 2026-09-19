@@ -7,6 +7,7 @@
 //! the destination whose only line is `gitdir: <absolute path>`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -229,8 +230,7 @@ pub fn add(
     try writeLine(io, admin, "commondir", "../..");
 
     var abs_buf: [4096]u8 = undefined;
-    const dest_abs_len = try dest_dir.realPath(io, &abs_buf);
-    const dest_abs = abs_buf[0..dest_abs_len];
+    const dest_abs = try absolutePath(io, dest_dir, &abs_buf);
     var gitdir_buf: [4200]u8 = undefined;
     const gitfile_path = std.fmt.bufPrint(&gitdir_buf, "{s}/.git", .{dest_abs}) catch
         return error.InvalidWorktreeName;
@@ -261,9 +261,9 @@ pub fn add(
     // And the `.git` file in the destination, which is what makes the
     // directory a worktree at all.
     var admin_abs_buf: [4096]u8 = undefined;
-    const admin_abs_len = try admin.realPath(io, &admin_abs_buf);
+    const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
     var pointer_buf: [4200]u8 = undefined;
-    const pointer = std.fmt.bufPrint(&pointer_buf, "gitdir: {s}\n", .{admin_abs_buf[0..admin_abs_len]}) catch
+    const pointer = std.fmt.bufPrint(&pointer_buf, "gitdir: {s}\n", .{admin_abs}) catch
         return error.InvalidWorktreeName;
     try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
 
@@ -276,6 +276,21 @@ fn writeLine(io: Io, dir: Io.Dir, name: []const u8, text: []const u8) Error!void
     var buf: [4300]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s}\n", .{text}) catch return error.InvalidWorktreeName;
     try dir.writeFile(io, .{ .sub_path = name, .data = line });
+}
+
+/// The absolute path of `dir`, written the way git writes a path: with `/`
+/// between the components whatever the platform underneath.
+///
+/// Windows hands back `D:\a\tree`, and a `gitdir` file holding that is one
+/// git prints back with the backslashes still in it and one another
+/// implementation has to guess about. git itself stores `D:/a/tree`. The
+/// separator is only rewritten there, because on a POSIX filesystem a
+/// backslash is an ordinary character in a name.
+fn absolutePath(io: Io, dir: Io.Dir, buf: []u8) Error![]const u8 {
+    const len = try dir.realPath(io, buf);
+    const out = buf[0..len];
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, out, '\\', '/');
+    return out;
 }
 
 /// How `remove` behaves.
@@ -399,16 +414,16 @@ pub fn repair(
     defer admin.close(io);
 
     var abs_buf: [4096]u8 = undefined;
-    const dest_len = try dest_dir.realPath(io, &abs_buf);
+    const dest_abs = try absolutePath(io, dest_dir, &abs_buf);
     var gitdir_buf: [4200]u8 = undefined;
-    const gitfile_path = std.fmt.bufPrint(&gitdir_buf, "{s}/.git", .{abs_buf[0..dest_len]}) catch
+    const gitfile_path = std.fmt.bufPrint(&gitdir_buf, "{s}/.git", .{dest_abs}) catch
         return error.InvalidWorktreeName;
     try writeLine(io, admin, "gitdir", gitfile_path);
 
     var admin_abs_buf: [4096]u8 = undefined;
-    const admin_len = try admin.realPath(io, &admin_abs_buf);
+    const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
     var pointer_buf: [4200]u8 = undefined;
-    const pointer = std.fmt.bufPrint(&pointer_buf, "gitdir: {s}\n", .{admin_abs_buf[0..admin_len]}) catch
+    const pointer = std.fmt.bufPrint(&pointer_buf, "gitdir: {s}\n", .{admin_abs}) catch
         return error.InvalidWorktreeName;
     try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
 }
