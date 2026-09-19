@@ -25,7 +25,13 @@ pub const default_settings = [_][]const u8{
     "-c", "core.autocrlf=false",
     "-c", "core.safecrlf=false",
     "-c", "core.excludesFile=",
-    "-c", "core.fsmonitor=false",
+    // Empty and not `false`: `core.fsmonitor` only became a boolean in git
+    // 2.36, and before that its value is the command to run. `false` names a
+    // hook there, which turns the file system monitor on rather than off —
+    // and a git with one enabled writes no split index at all, so the
+    // split-index fixture was measuring a git that never split anything. An
+    // empty value is what every version of git reads as off.
+    "-c", "core.fsmonitor=",
     "-c", "core.hooksPath=relic-no-hooks",
     "-c", "advice.detachedHead=false",
     "-c", "protocol.file.allow=always",
