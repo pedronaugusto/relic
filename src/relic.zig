@@ -13,6 +13,7 @@ pub const varint = @import("varint.zig");
 pub const ewah = @import("ewah.zig");
 pub const safepath = @import("safepath.zig");
 pub const platstat = @import("platstat.zig");
+pub const dirscan = @import("dirscan.zig");
 pub const refs = @import("refs.zig");
 pub const reflog = @import("reflog.zig");
 pub const config = @import("config.zig");

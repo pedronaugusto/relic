@@ -27,6 +27,7 @@ const worktree = @import("worktree.zig");
 const repo_mod = @import("repo.zig");
 const ignore = @import("ignore.zig");
 const attributes = @import("attributes.zig");
+const dirscan = @import("dirscan.zig");
 
 /// How many files the generated tree holds.
 ///
@@ -116,7 +117,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
 
     std.debug.print(
         \\
-        \\  relic benchmark ({s}, {d} files over {d} directories)
+        \\  relic benchmark ({s}, {d} files over {d} directories, walk: {s})
         \\    add -A       cold {d: >8.1} ms   warm {d: >8.1} ms
         \\    write-tree   cold {d: >8.1} ms   warm {d: >8.1} ms
         \\    status       dirty {d: >7.1} ms
@@ -127,6 +128,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
         @tagName(builtin.mode),
         file_count,
         directory_count,
+        dirscan.armFor(gpa, io, repo.work_dir.?),
         cold_add_ms,
         warm_add_ms,
         cold_tree_ms,

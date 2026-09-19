@@ -18,6 +18,7 @@ const safepath = @import("safepath.zig");
 const ignore = @import("ignore.zig");
 const attributes = @import("attributes.zig");
 const sparse = @import("sparse.zig");
+const dirscan = @import("dirscan.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -206,31 +207,36 @@ const Walker = struct {
         if (w.options.rules.attrs) |attrs| try attrs.addDirectory(w.io, w.wt, dir_path, depth);
         defer if (w.options.rules.attrs) |attrs| attrs.popTo(depth + 1);
 
-        // The names are collected first so the directory handle is not held
-        // open across the work each entry causes, which matters on Windows.
-        var names: std.ArrayList([]const u8) = .empty;
+        // The entries are collected first so the directory handle is not held
+        // open across the work each one causes, which matters on Windows. The
+        // stat comes with the name where the platform has a call that gives
+        // both, and from a stat of its own where it does not.
+        var entries: std.ArrayList(Found) = .empty;
         defer {
-            for (names.items) |name| w.gpa.free(name);
-            names.deinit(w.gpa);
+            for (entries.items) |e| w.gpa.free(e.name);
+            entries.deinit(w.gpa);
         }
-        var it = dir.iterate();
-        while (try it.next(w.io)) |entry| {
-            if (std.mem.eql(u8, entry.name, ".git")) continue;
-            try names.append(w.gpa, try w.gpa.dupe(u8, entry.name));
+        var scan = try dirscan.Scan.init(w.gpa, w.io, dir);
+        defer scan.deinit();
+        while (try scan.next()) |item| {
+            if (std.mem.eql(u8, item.name, ".git")) continue;
+            try entries.append(w.gpa, .{
+                .name = try w.gpa.dupe(u8, item.name),
+                .entry = item.entry,
+            });
         }
-        std.mem.sort([]const u8, names.items, {}, lessThanName);
+        std.mem.sort(Found, entries.items, {}, lessThanFound);
 
-        for (names.items) |name| {
+        for (entries.items) |e| {
             const path = if (dir_path.len == 0)
-                try w.gpa.dupe(u8, name)
+                try w.gpa.dupe(u8, e.name)
             else
-                try std.fmt.allocPrint(w.gpa, "{s}/{s}", .{ dir_path, name });
+                try std.fmt.allocPrint(w.gpa, "{s}/{s}", .{ dir_path, e.name });
             defer w.gpa.free(path);
 
-            const found = (try fs.statAt(w.io, w.wt, path)) orelse continue;
-            switch (found.kind) {
-                .directory => try w.enterDirectory(path, depth, found),
-                .sym_link, .file => try w.stageFile(path, found),
+            switch (e.entry.kind) {
+                .directory => try w.enterDirectory(path, depth, e.entry),
+                .sym_link, .file => try w.stageFile(path, e.entry),
                 // A socket, a fifo or a device is not something a tree can
                 // hold, and git skips it silently.
                 else => {},
@@ -372,6 +378,16 @@ const Walker = struct {
         return w.db.write(w.io, .blob, bytes);
     }
 };
+
+/// One entry of a directory, kept while the rest of it is read.
+const Found = struct {
+    name: []const u8,
+    entry: fs.Entry,
+};
+
+fn lessThanFound(_: void, a: Found, b: Found) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
 
 fn lessThanName(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
@@ -606,15 +622,16 @@ const StatusScan = struct {
         if (s.options.rules.attrs) |attrs| try attrs.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.options.rules.attrs) |attrs| attrs.popTo(depth + 1);
 
-        var it = dir.iterate();
-        while (try it.next(s.io)) |entry| {
-            if (std.mem.eql(u8, entry.name, ".git")) continue;
+        var scan = try dirscan.Scan.init(s.gpa, s.io, dir);
+        defer scan.deinit();
+        while (try scan.next()) |item| {
+            if (std.mem.eql(u8, item.name, ".git")) continue;
             const path = if (dir_path.len == 0)
-                try s.arena.dupe(u8, entry.name)
+                try s.arena.dupe(u8, item.name)
             else
-                try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dir_path, entry.name });
+                try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dir_path, item.name });
 
-            const found = (try fs.statAt(s.io, s.wt, path)) orelse continue;
+            const found = item.entry;
             if (found.kind == .directory) {
                 const tracked_below = s.index.hasDirectory(path);
                 if (s.options.rules.ignore) |rules| {
@@ -1272,14 +1289,15 @@ const ListScan = struct {
         if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.rules.ignore) |rules| rules.popTo(depth + 2);
 
-        var it = dir.iterate();
-        while (try it.next(s.io)) |entry| {
-            if (std.mem.eql(u8, entry.name, ".git")) continue;
+        var scan = try dirscan.Scan.init(s.gpa, s.io, dir);
+        defer scan.deinit();
+        while (try scan.next()) |item| {
+            if (std.mem.eql(u8, item.name, ".git")) continue;
             const path = if (dir_path.len == 0)
-                try s.arena.dupe(u8, entry.name)
+                try s.arena.dupe(u8, item.name)
             else
-                try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dir_path, entry.name });
-            const found = (try fs.statAt(s.io, s.wt, path)) orelse continue;
+                try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dir_path, item.name });
+            const found = item.entry;
             if (found.kind == .directory) {
                 if (s.rules.ignore) |rules| {
                     if (rules.match(path, true).excluded and !s.index.hasDirectory(path)) continue;
