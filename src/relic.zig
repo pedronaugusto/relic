@@ -18,6 +18,8 @@ pub const wildmatch = @import("wildmatch.zig");
 pub const ignore = @import("ignore.zig");
 pub const attributes = @import("attributes.zig");
 pub const worktree = @import("worktree.zig");
+pub const worktrees = @import("worktrees.zig");
+pub const repo = @import("repo.zig");
 
 const builtin = @import("builtin");
 
@@ -27,5 +29,6 @@ test {
         _ = @import("testgit.zig");
         _ = @import("fixture_test.zig");
         _ = @import("worktree_test.zig");
+        _ = @import("repo_test.zig");
     }
 }
