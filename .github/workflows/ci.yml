@@ -68,8 +68,27 @@ jobs:
     steps:
       - name: Install git and the toolchain
         run: |
+          # bullseye has reached its end of life, and an end-of-life Debian
+          # moves to archive.debian.org. The mirrors the image ships with
+          # still serve its package lists and no longer serve the packages
+          # those lists name, so every fetch is a 404. The security pool is
+          # gone from every host that carries it, so that suite is dropped
+          # rather than pointed somewhere else, and the archive is what is
+          # left. It still has this job's reason for existing: git 2.30.2.
+          #
+          # The image was built with a handful of packages from the security
+          # suite that the archive does not have, and `perl-base` is one git
+          # depends on an exact version of. The pin is above 1000, which is
+          # what lets apt move a package back to the version the only
+          # remaining source has.
+          printf '%s\n' 'deb http://archive.debian.org/debian bullseye main' \
+            > /etc/apt/sources.list
+          rm -f /etc/apt/sources.list.d/*
+          printf 'Package: *\nPin: release n=bullseye\nPin-Priority: 1001\n' \
+            > /etc/apt/preferences.d/archive
           apt-get update
-          apt-get install -y --no-install-recommends git curl xz-utils ca-certificates
+          apt-get install -y --no-install-recommends --allow-downgrades \
+            git curl xz-utils ca-certificates
           curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
           mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
           echo /opt/zig >> "$GITHUB_PATH"
