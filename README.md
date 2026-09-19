@@ -399,7 +399,7 @@ running it. CI does that for `x86_64-linux-gnu`, `aarch64-linux-gnu`,
 zig build test          # the suite, and the examples, which are run
 zig build examples      # the examples on their own
 zig build check         # compile everything, including the tests, run nothing
-zig build test --fuzz   # the fuzz tests, without a time limit
+zig build test --fuzz   # the fuzz tests, until stopped
 zig fmt --check src examples build.zig build.zig.zon
 ci/linux.sh             # the suite on Linux, in Docker, from any machine
 ```
@@ -431,14 +431,21 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Fifteen fuzz tests cover every parser: the loose object header, a tree, a
-commit, a tag, an identity line, a mode, the pack index, a delta, the index
-file, `packed-refs`, the reflog, the config file, `.gitignore`,
-`.gitattributes`, the glob matcher, the commit-graph, the multi-pack index and
-the EWAH bitmaps. The rule is that any input either parses to a value or
-returns a named error. The diff fuzzer additionally applies the edit script it
+Sixteen fuzz tests cover every parser: the loose object header and the four
+object types, a delta, the pack index, the index file, `packed-refs`, the
+reflog, the config file, `.gitignore`, `.gitattributes`, the glob matcher, a
+path from a tree, the commit-graph, the multi-pack index and the EWAH bitmaps.
+The rule is that any input either parses to a value or returns a named error.
+Two of them check more than that: the diff fuzzer applies the edit script it
 produced and checks that it reproduces the other side, which is the property
-that catches an off-by-one nothing else would.
+that catches an off-by-one nothing else would; and the collision-check fuzzer
+asserts both that the name is SHA-1's name and that nothing reached by chance
+is flagged.
+
+`zig build test --fuzz` builds the suite a second time with the instrumentation
+on and runs those sixteen until stopped, keeping a corpus per property under
+`.zig-cache/f`. It prints a web address while it runs, which is where the
+coverage is.
 
 Two pack shapes cannot be made with `git repack`, so the suite writes the
 packs itself: two reference deltas naming each other, and a chain a thousand

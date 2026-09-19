@@ -41,10 +41,20 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
 
+    // Error return traces are off for the test binary, and the reason is
+    // `zig build test --fuzz`. Building the suite with fuzzing instrumented
+    // recompiles it against the fuzzing test runner, and on 0.16.0 that
+    // runner hands `@errorReturnTrace()`'s `std.builtin.StackTrace` to a
+    // function taking `std.debug.StackTrace` -- two structs of the same
+    // shape and different identity -- which is one compile error per fuzz
+    // test. With tracing off nothing in the runner asks for a trace, and the
+    // fuzzers build and run. What it costs is the return trace under a
+    // failing test; the error and the test's name are still printed.
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/relic.zig"),
         .target = target,
         .optimize = optimize,
+        .error_tracing = false,
     });
     test_module.addOptions("build_options", build_options);
 

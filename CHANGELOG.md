@@ -72,6 +72,15 @@ breaking one.
 
 ### Changed
 
+- **`zig build test --fuzz` builds and runs.** It did not: the fuzzing test
+  runner on 0.16.0 hands `@errorReturnTrace()`'s `std.builtin.StackTrace` to a
+  function taking `std.debug.StackTrace`, two structs of the same shape and
+  different identity, which is one compile error per fuzz test. The test
+  module now sets `error_tracing = false`, which takes the trace out of the
+  runner's path. What it costs is the return trace under a failing test; the
+  error and the test's name are still printed. Sixteen fuzz tests build, run
+  until stopped, and keep a corpus each under `.zig-cache/f`.
+
 - **`hash.Hasher`'s SHA-1 is this package's rather than the standard
   library's.** The digest is the same digest — the suite checks it against
   `std.crypto.hash.Sha1` on every length from zero to four kilobytes, on
