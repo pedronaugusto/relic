@@ -1321,3 +1321,96 @@ test "a pack this wrote is a pack git verifies, object for object" {
     defer gpa.free(head_tree);
     try std.testing.expectEqual(@as(usize, 40), head_tree.len);
 }
+
+test "a deltified pack is read back by git and by this, object for object" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    // Files that grow a line at a time give the packer real deltas to find,
+    // and several of them keep the window busy.
+    const files = 5;
+    for (0..8) |round| {
+        for (0..files) |i| {
+            var name_buf: [64]u8 = undefined;
+            const path = try std.fmt.bufPrint(&name_buf, "src/file{d}.txt", .{i});
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(gpa);
+            for (0..(round + 1) * 60) |line| {
+                try body.print(gpa, "file {d} line {d} with enough text to be worth copying\n", .{ i, line });
+            }
+            try repo.writeFile(io, path, body.items);
+        }
+        var msg: [32]u8 = undefined;
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "round {d}", .{round}) });
+    }
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    var names = try db.listObjects(io);
+    defer names.deinit(gpa);
+
+    var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
+    defer entries.deinit(gpa);
+    var it = names.keyIterator();
+    while (it.next()) |oid| try entries.append(gpa, .{ .oid = oid.*, .hint = "src/file.txt" });
+
+    try git_dir.createDirPath(io, "objects/pack");
+    var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+
+    const report = try db.writePack(io, pack_dir, entries.items, .{});
+    try std.testing.expectEqual(@as(u32, @intCast(entries.items.len)), report.objects);
+    // The blobs here are each other's neighbours a line apart, so the window
+    // must find something.
+    try std.testing.expect(report.deltas > 0);
+
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const text = report.name.hex(&hex);
+    var base_buf: [64]u8 = undefined;
+    const base = try std.fmt.bufPrint(&base_buf, "pack-{s}", .{text});
+    var path_buf: [96]u8 = undefined;
+
+    // git's checkers, and its own report of the chain lengths.
+    try repo.exec(io, &.{ "index-pack", "--verify", try std.fmt.bufPrint(&path_buf, ".git/objects/pack/{s}.pack", .{base}) });
+    const listing = try repo.run(io, &.{ "verify-pack", "-v", try std.fmt.bufPrint(&path_buf, ".git/objects/pack/{s}.idx", .{base}) });
+    defer gpa.free(listing);
+    try std.testing.expect(std.mem.indexOf(u8, listing, "chain length = 1") != null);
+
+    // And this reads every one of them back: `verify` rehashes each object
+    // against the name the index gives it, which is the whole delta chain
+    // reconstructed and checked.
+    {
+        var p = try pack.Pack.open(gpa, io, pack_dir, base, .sha1, .{});
+        defer p.deinit(io);
+        const checked = try p.verify(io, null, 0);
+        try std.testing.expectEqual(report.objects, checked.objects);
+    }
+
+    // A pack written with reference deltas holds the same objects.
+    const ref_report = try db.writePack(io, pack_dir, entries.items, .{ .delta = .reference });
+    try std.testing.expect(ref_report.deltas > 0);
+    var ref_base_buf: [64]u8 = undefined;
+    const ref_base = try std.fmt.bufPrint(&ref_base_buf, "pack-{s}", .{ref_report.name.hex(&hex)});
+    try repo.exec(io, &.{ "index-pack", "--verify", try std.fmt.bufPrint(&path_buf, ".git/objects/pack/{s}.pack", .{ref_base}) });
+    {
+        var p = try pack.Pack.open(gpa, io, pack_dir, ref_base, .sha1, .{});
+        defer p.deinit(io);
+        const checked = try p.verify(io, null, 0);
+        try std.testing.expectEqual(ref_report.objects, checked.objects);
+    }
+
+    // A pack written with no deltas at all holds them too, and is larger.
+    const whole = try db.writePack(io, pack_dir, entries.items, .{ .delta = .none });
+    try std.testing.expectEqual(@as(u32, 0), whole.deltas);
+    try std.testing.expect(whole.pack_bytes > report.pack_bytes);
+
+    // Every object still reads back through git, from whichever copy it
+    // picks, and fsck is silent about all three packs at once.
+    try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
+}

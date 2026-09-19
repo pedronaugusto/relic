@@ -12,6 +12,7 @@ const flate = std.compress.flate;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const pack = @import("pack.zig");
+const delta_mod = @import("delta.zig");
 const midx_mod = @import("midx.zig");
 const fs = @import("fs.zig");
 
@@ -84,7 +85,7 @@ pub const Error = error{
     /// `objects/info/alternates` pointed at itself, or the chain was deeper
     /// than `Options.max_alternate_depth`.
     AlternatesTooDeep,
-} || pack.Error || object.HeaderParseError || Allocator.Error ||
+} || pack.Error || pack.WriteError || object.HeaderParseError || Allocator.Error ||
     Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error ||
     Io.File.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirError || Io.Dir.ReadFileAllocError || Io.Dir.Iterator.Error;
@@ -917,6 +918,125 @@ pub const Odb = struct {
         try fs.syncBarrier(io, source.dir);
     }
 
+    /// Write a pack holding exactly these objects, into `pack_dir`.
+    ///
+    /// The objects are ordered the way git's packer orders them -- type,
+    /// then the tail of the path hint, then size descending -- and each is
+    /// tried against a sliding window of the ones already written. What is
+    /// held at once is the window, which `PackOptions.window_bytes` bounds,
+    /// and one object being written. Nothing is threaded.
+    ///
+    /// `pack_dir` is where `pack-<name>.pack` and `pack-<name>.idx` land, and
+    /// in a repository that is `objects/pack`. Nothing is visible under
+    /// either name until both are written.
+    ///
+    /// This does not add the pack to this database; `refresh` does, and
+    /// `repack` does both.
+    pub fn writePack(
+        odb: *Odb,
+        io: Io,
+        pack_dir: Io.Dir,
+        entries: []const PackEntry,
+        options: PackOptions,
+    ) Error!pack.WriteReport {
+        const gpa = odb.gpa;
+
+        // Every object's type and length, which is what the order is by. A
+        // header is all this needs, and for a packed object that is no
+        // inflation at all.
+        var ordered = try gpa.alloc(Ordered, entries.len);
+        defer gpa.free(ordered);
+        for (entries, 0..) |entry, i| {
+            const head = try odb.readHeader(io, entry.oid);
+            ordered[i] = .{
+                .oid = entry.oid,
+                .type = head.type,
+                .size = head.size,
+                .name_hash = nameHash(entry.hint),
+            };
+        }
+        std.mem.sort(Ordered, ordered, {}, beforeInPackOrder);
+
+        var writer = try pack.Writer.init(gpa, io, pack_dir, odb.kind, @intCast(entries.len), .{
+            .sync = options.sync,
+            .compression = options.compression,
+        });
+        defer writer.deinit(io);
+
+        var window: std.ArrayList(WindowSlot) = .empty;
+        defer {
+            for (window.items) |slot| gpa.free(slot.bytes);
+            window.deinit(gpa);
+        }
+        var window_bytes: usize = 0;
+
+        for (ordered) |item| {
+            const found = try odb.read(io, item.oid);
+            var bytes = found.bytes;
+            var keep = false;
+            defer if (!keep) gpa.free(bytes);
+
+            const deltifiable = options.delta != .none and options.window != 0 and
+                bytes.len < options.big_file_bytes;
+
+            var chosen: ?struct { slot: usize, bytes: []u8 } = null;
+            defer if (chosen) |c| gpa.free(c.bytes);
+            if (deltifiable) {
+                // git's rule for what is worth writing: a delta must be at
+                // most half the object it stands in for, and each one after
+                // the first must beat the one before it.
+                var limit: usize = bytes.len / 2;
+                if (limit > odb.kind.rawLen()) limit -= odb.kind.rawLen() else limit = 0;
+                var at = window.items.len;
+                while (at != 0 and limit != 0) {
+                    at -= 1;
+                    const slot = &window.items[at];
+                    if (slot.type != found.type) continue;
+                    if (slot.depth + 1 > options.depth) continue;
+                    const candidate = try delta_mod.encode(gpa, slot.bytes, bytes, .{ .max_bytes = limit }) orelse continue;
+                    if (chosen) |c| gpa.free(c.bytes);
+                    chosen = .{ .slot = at, .bytes = candidate };
+                    limit = candidate.len - 1;
+                }
+            }
+
+            var depth: u32 = 0;
+            const offset = if (chosen) |c| blk: {
+                const slot = window.items[c.slot];
+                depth = slot.depth + 1;
+                break :blk switch (options.delta) {
+                    .offset => try writer.addOfsDelta(item.oid, slot.offset, c.bytes),
+                    .reference => try writer.addRefDelta(item.oid, slot.oid, c.bytes),
+                    .none => unreachable,
+                };
+            } else try writer.add(item.oid, found.type, bytes);
+
+            if (deltifiable) {
+                keep = true;
+                try window.append(gpa, .{
+                    .oid = item.oid,
+                    .type = found.type,
+                    .bytes = bytes,
+                    .offset = offset,
+                    .depth = depth,
+                });
+                window_bytes += bytes.len;
+                // The oldest go first, by count and then by weight, so the
+                // window is a bound on memory and not only on work.
+                while (window.items.len > options.window or
+                    (window.items.len > 1 and window_bytes > options.window_bytes))
+                {
+                    const oldest = window.orderedRemove(0);
+                    window_bytes -= oldest.bytes.len;
+                    gpa.free(oldest.bytes);
+                }
+                bytes = &.{};
+            }
+        }
+
+        return try writer.finish(io);
+    }
+
     /// How many packs are open. A caller measuring a repository asks here.
     pub fn packCount(odb: *const Odb) usize {
         var n: usize = 0;
@@ -932,6 +1052,95 @@ pub const Odb = struct {
         return n;
     }
 };
+
+/// One object to put in a pack.
+pub const PackEntry = struct {
+    oid: Oid,
+    /// The path the object was found at, or empty where there is none.
+    ///
+    /// It is a hint for the delta search and nothing else: objects whose
+    /// paths end the same way are usually versions of one file and so delta
+    /// well against each other, which is the whole of git's ordering
+    /// heuristic. A wrong hint costs compression and nothing else.
+    hint: []const u8 = &.{},
+};
+
+/// Which delta encoding a pack is written with.
+pub const DeltaEncoding = enum {
+    /// A delta against an entry earlier in the same pack, named by how far
+    /// back it is. Smaller, and what git writes by default.
+    offset,
+    /// A delta against a name. Larger by the width of a hash, and readable
+    /// by a reader that cannot seek within the pack.
+    reference,
+    /// No deltas. Every object is written whole.
+    none,
+};
+
+/// How a pack is built out of a set of objects.
+pub const PackOptions = struct {
+    /// How many objects already written each new one is tried against.
+    /// git's default is ten. Zero writes no deltas.
+    window: u32 = 10,
+    /// How long a delta chain may get. git's default is fifty.
+    depth: u32 = 50,
+    /// Which delta encoding to write.
+    delta: DeltaEncoding = .offset,
+    /// How many bytes of window objects to hold at once. The window is
+    /// emptied from the oldest end until it fits, so this is the bound on
+    /// what building a pack costs in memory whatever the objects are.
+    window_bytes: usize = 32 << 20,
+    /// An object this large or larger is written whole and never enters the
+    /// window. git's `core.bigFileThreshold`, and the same default.
+    big_file_bytes: u64 = 512 << 20,
+    /// How hard the two files are pushed towards the disk before they are
+    /// renamed into place.
+    sync: fs.Sync = .none,
+    /// How hard the entries are compressed.
+    compression: pack.Compression = .default,
+};
+
+/// One object held in the delta window.
+const WindowSlot = struct {
+    oid: Oid,
+    type: object.Type,
+    bytes: []u8,
+    offset: u64,
+    depth: u32,
+};
+
+/// What a sort puts the objects in order by.
+const Ordered = struct {
+    oid: Oid,
+    type: object.Type,
+    size: u64,
+    name_hash: u32,
+};
+
+/// git's own name hash: the last sixteen non-blank characters of a path,
+/// weighted so that the last ones count most, which makes paths that end the
+/// same way sort together.
+fn nameHash(name: []const u8) u32 {
+    var value: u32 = 0;
+    for (name) |c| {
+        if (std.ascii.isWhitespace(c)) continue;
+        value = (value >> 2) +% (@as(u32, c) << 24);
+    }
+    return value;
+}
+
+/// git's delta-search order: type descending, then the name hash
+/// descending, then size descending. Objects of one type end up together,
+/// files with the same ending next to each other, and the largest first, so
+/// that what follows is a delta against something at least as big.
+fn beforeInPackOrder(_: void, a: Ordered, b: Ordered) bool {
+    const at = @intFromEnum(a.type);
+    const bt = @intFromEnum(b.type);
+    if (at != bt) return at > bt;
+    if (a.name_hash != b.name_hash) return a.name_hash > b.name_hash;
+    if (a.size != b.size) return a.size > b.size;
+    return std.mem.order(u8, a.oid.raw(), b.oid.raw()) == .lt;
+}
 
 fn hexPair(name: []const u8) ?u8 {
     if (name.len != 2) return null;
