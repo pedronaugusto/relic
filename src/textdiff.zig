@@ -1629,6 +1629,38 @@ test "minimal and the give-up heuristics can part company" {
     try std.testing.expect(stat(exact).plus <= stat(heuristic).plus);
 }
 
+test "a noisy file keeps its shared lines as context" {
+    const gpa = std.testing.allocator;
+    var text_old: std.Io.Writer.Allocating = .init(gpa);
+    defer text_old.deinit();
+    var text_new: std.Io.Writer.Allocating = .init(gpa);
+    defer text_new.deinit();
+    // Every third line is blank and shared; the rest match nothing on the
+    // other side. git reports twenty small changes rather than one block,
+    // and it only does so because the blank lines survive the pruning that
+    // sets aside lines with no counterpart.
+    for (0..60) |i| {
+        if (i % 3 == 0) {
+            try text_old.writer.writeAll("\n");
+            try text_new.writer.writeAll("\n");
+        } else {
+            try text_old.writer.print("{s}\n", .{if (i % 2 == 1) "a" else "b"});
+            try text_new.writer.print("{s}\n", .{if (i % 2 == 1) "x" else "y"});
+        }
+    }
+    const old = try splitLines(gpa, text_old.written());
+    defer gpa.free(old);
+    const new = try splitLines(gpa, text_new.written());
+    defer gpa.free(new);
+    const changes = try diffLines(gpa, old, new, .{});
+    defer gpa.free(changes);
+    try std.testing.expectEqual(@as(usize, 20), changes.len);
+    for (changes) |c| {
+        try std.testing.expectEqual(@as(usize, 2), c.old_count);
+        try std.testing.expectEqual(@as(usize, 2), c.new_count);
+    }
+}
+
 test "max_work falls back to one delete and one insert" {
     const gpa = std.testing.allocator;
     var text_old: std.Io.Writer.Allocating = .init(gpa);

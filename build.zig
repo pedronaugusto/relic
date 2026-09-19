@@ -24,18 +24,10 @@ pub fn build(b: *std.Build) void {
     // machine with no `git` skips those tests rather than failing them.
     //=====================================================================
 
-    const tests = b.addTest(.{
-        .name = "relic-tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/relic.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-
     // A second process is the only honest way to prove that a lock a
     // running git holds is refused rather than broken, so the suite spawns
-    // one. A test binary run without it skips that test.
+    // one. Its path is compiled into the test binary rather than passed in
+    // the environment, because nothing in this package reads one.
     const lock_helper = b.addExecutable(.{
         .name = "relic-lock-helper",
         .root_module = b.createModule(.{
@@ -46,12 +38,23 @@ pub fn build(b: *std.Build) void {
     });
     const install_lock_helper = b.addInstallArtifact(lock_helper, .{});
 
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
+
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("src/relic.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_module.addOptions("build_options", build_options);
+
+    const tests = b.addTest(.{
+        .name = "relic-tests",
+        .root_module = test_module,
+    });
+
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&install_lock_helper.step);
-    run_tests.setEnvironmentVariable(
-        "RELIC_LOCK_HELPER",
-        b.getInstallPath(.bin, lock_helper.out_filename),
-    );
 
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);

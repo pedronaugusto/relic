@@ -484,10 +484,13 @@ fn processAlive(pid: u32) ?bool {
         .windows, .wasi => return null,
         else => {
             if (!builtin.link_libc and builtin.os.tag != .linux) return null;
+            // A pid that does not fit the platform's own type names no
+            // process at all; the file was written by something else.
+            const narrowed = std.math.cast(std.posix.pid_t, pid) orelse return false;
             const rc = if (builtin.os.tag == .linux)
-                std.os.linux.kill(@intCast(pid), 0)
+                std.os.linux.kill(narrowed, 0)
             else
-                @as(usize, @bitCast(@as(isize, std.c.kill(@intCast(pid), @enumFromInt(0)))));
+                @as(usize, @bitCast(@as(isize, std.c.kill(narrowed, @enumFromInt(0)))));
             const e = std.posix.errno(rc);
             return switch (e) {
                 .SUCCESS => true,
