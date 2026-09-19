@@ -9,6 +9,8 @@ pub const odb = @import("odb.zig");
 pub const index = @import("index.zig");
 pub const varint = @import("varint.zig");
 pub const ewah = @import("ewah.zig");
+pub const safepath = @import("safepath.zig");
+pub const platstat = @import("platstat.zig");
 
 const builtin = @import("builtin");
 

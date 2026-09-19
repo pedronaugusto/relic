@@ -22,10 +22,20 @@ const Kind = hash.Kind;
 /// which is how the two are told apart.
 pub const idx_magic = "\xfftOc";
 
-/// How deep a delta chain may be before it is refused. git's own packer never
-/// writes deeper than 50; a file that claims more is either corrupt or
-/// hostile.
-pub const default_max_depth: u32 = 64;
+/// How deep a delta chain may be before it is refused.
+///
+/// git's own packer defaults to 50 and a real pack measured here had exactly
+/// one object at that depth, with a median of 3. But `pack.depth` is a
+/// setting and the format's own field allows 4 095, so the cap is the
+/// format's limit and the byte budget below is what actually bounds the work.
+pub const default_max_depth: u32 = 4095;
+
+/// How many bytes one delta chain may produce in total before it is refused.
+///
+/// The depth cap alone does not bound memory: a hundred-deep chain of
+/// hundred-megabyte objects is within every other limit. One gigabyte is far
+/// above anything a real pack asks for.
+pub const default_max_chain_bytes: u64 = 1 << 30;
 
 /// Errors from opening or reading a pack index.
 pub const IndexError = error{
@@ -336,11 +346,15 @@ pub const Object = struct {
 
 /// How a pack's bytes are reached.
 pub const Access = enum {
-    /// Positional reads. Every failure surfaces as an error.
+    /// Positional reads. The default, and the one that keeps two promises a
+    /// memory map cannot: an IO error arrives as an error value rather than
+    /// as a signal, and nothing holds the file open against a concurrent
+    /// `git gc` that wants to replace it. On macOS a mapped pack replaced
+    /// underneath gives `SIGBUS`, which no library can catch on the caller's
+    /// behalf; on Windows a live mapping stops the repack outright.
     read,
     /// A memory map where the platform has one, and positional reads where
-    /// it does not. Faster, and a memory map turns some IO errors into a
-    /// signal instead of an error value, which is the trade it is.
+    /// it does not. Faster on a cold cache, and the trade above is the price.
     map,
 };
 
@@ -357,6 +371,7 @@ pub const Pack = struct {
     count: u32,
     index: Index,
     max_depth: u32,
+    max_chain_bytes: u64,
     /// Scratch for one inflate at a time. The package starts no threads, and
     /// a delta chain is resolved one entry after another, so one window does.
     window: []u8,
@@ -373,8 +388,9 @@ pub const Pack = struct {
         base: []const u8,
         kind: Kind,
         options: struct {
-            access: Access = .map,
+            access: Access = .read,
             max_depth: u32 = default_max_depth,
+            max_chain_bytes: u64 = default_max_chain_bytes,
             max_index_bytes: usize = 1 << 30,
         },
     ) Error!Pack {
@@ -420,6 +436,8 @@ pub const Pack = struct {
 
         const window = try gpa.alloc(u8, flate.max_window_len);
         errdefer gpa.free(window);
+        // 64 KiB rather than the usual 8: a pack scan reads entry headers one
+        // after another and the larger buffer is several times faster.
         const input_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(input_buffer);
 
@@ -433,6 +451,7 @@ pub const Pack = struct {
             .count = count,
             .index = index,
             .max_depth = options.max_depth,
+            .max_chain_bytes = options.max_chain_bytes,
             .window = window,
             .input_buffer = input_buffer,
         };
@@ -574,6 +593,7 @@ pub const Pack = struct {
         defer visited.deinit(p.gpa);
 
         var current = offset;
+        var chain_bytes: u64 = 0;
         var base_bytes: []u8 = undefined;
         var base_type: object.Type = undefined;
 
@@ -606,6 +626,8 @@ pub const Pack = struct {
                 },
             }
             if (chain.items.len > p.max_depth) return error.DeltaChainTooDeep;
+            chain_bytes += header.size;
+            if (chain_bytes > p.max_chain_bytes) return error.DeltaChainTooDeep;
             for (visited.items) |seen| {
                 if (seen == current) return error.DeltaCycle;
             }
@@ -665,10 +687,13 @@ pub const Pack = struct {
         }
     }
 
-    /// Inflate at most the first 32 bytes of a stream — enough for a delta's
-    /// two sizes.
-    fn inflateHead(p: *Pack, io: Io, at: u64, size: u64) Error![32]u8 {
-        var out: [32]u8 = @splat(0);
+    /// Inflate at most the first twenty bytes of a stream.
+    ///
+    /// That is enough for a delta's two size varints — ten bytes each at the
+    /// widest — so the type and the true expanded size of a deltified object
+    /// come back with nothing materialised.
+    fn inflateHead(p: *Pack, io: Io, at: u64, size: u64) Error![20]u8 {
+        var out: [20]u8 = @splat(0);
         const want: usize = @intCast(@min(size, out.len));
         var fixed_reader: Io.Reader = undefined;
         var file_reader: Io.File.Reader = undefined;
@@ -764,69 +789,122 @@ pub const Pack = struct {
 /// A byte-capped store of resolved delta bases.
 ///
 /// Without it, every object in a chain re-resolves its whole chain and a walk
-/// over a pack is quadratic. Eviction is oldest first, which is what a cache
-/// whose only job is to hold a chain together needs; there is no other cache
-/// anywhere in this package.
+/// over a pack is quadratic. The table is direct-mapped on the low bits of
+/// the pack offset — no hashing, no search, and a collision simply
+/// overwrites — with a byte budget swept oldest-first. It is the cheapest
+/// shape in the field and it is also the fastest one. This is the only cache
+/// in the package apart from the pack indexes themselves.
 pub const Cache = struct {
     gpa: Allocator,
     limit_bytes: usize,
     bytes: usize = 0,
-    entries: std.AutoHashMapUnmanaged(Key, Value) = .empty,
-    order: std.ArrayList(Key) = .empty,
+    slots: []Slot,
+    /// Insertion order, for the byte sweep.
+    order: std.ArrayList(u32) = .empty,
+    clock: u32 = 0,
 
-    const Key = struct { pack: u32, offset: u64 };
-    const Value = struct { type: object.Type, bytes: []u8 };
+    /// How many slots the table has. A power of two so the index is a mask.
+    pub const slot_count = 1024;
+
+    const Slot = struct {
+        used: bool = false,
+        pack: u32 = 0,
+        offset: u64 = 0,
+        seq: u32 = 0,
+        type: object.Type = .blob,
+        bytes: []u8 = &.{},
+    };
 
     /// What `get` hands back. Borrowed until the next `put`.
     pub const Hit = struct { type: object.Type, bytes: []const u8 };
 
     /// A cache holding at most `limit_bytes` of resolved objects.
-    pub fn init(gpa: Allocator, limit_bytes: usize) Cache {
-        return .{ .gpa = gpa, .limit_bytes = limit_bytes };
+    pub fn init(gpa: Allocator, limit_bytes: usize) Allocator.Error!Cache {
+        const slots = try gpa.alloc(Slot, slot_count);
+        @memset(slots, .{});
+        return .{ .gpa = gpa, .limit_bytes = limit_bytes, .slots = slots };
     }
 
     /// Release everything held.
     pub fn deinit(c: *Cache) void {
-        var it = c.entries.valueIterator();
-        while (it.next()) |v| c.gpa.free(v.bytes);
-        c.entries.deinit(c.gpa);
+        for (c.slots) |slot| {
+            if (slot.used) c.gpa.free(slot.bytes);
+        }
+        c.gpa.free(c.slots);
         c.order.deinit(c.gpa);
         c.* = undefined;
     }
 
+    fn slotFor(pack_id: u32, offset: u64) u32 {
+        // The low bits of a pack offset are as good a spread as a hash and
+        // cost nothing; the pack id joins them so two packs do not collide
+        // systematically.
+        return @intCast((offset ^ (@as(u64, pack_id) << 24)) & (slot_count - 1));
+    }
+
     /// The object cached for `offset` in pack `pack_id`, or `null`.
     pub fn get(c: *Cache, pack_id: u32, offset: u64) ?Hit {
-        const v = c.entries.get(.{ .pack = pack_id, .offset = offset }) orelse return null;
-        return .{ .type = v.type, .bytes = v.bytes };
+        const slot = &c.slots[slotFor(pack_id, offset)];
+        if (!slot.used or slot.pack != pack_id or slot.offset != offset) return null;
+        return .{ .type = slot.type, .bytes = slot.bytes };
     }
 
     /// Keep a copy of `bytes`. An object larger than the whole cache is not
     /// kept, rather than emptying it.
     pub fn put(c: *Cache, pack_id: u32, offset: u64, t: object.Type, bytes: []const u8) Allocator.Error!void {
         if (c.limit_bytes == 0 or bytes.len > c.limit_bytes) return;
-        const key: Key = .{ .pack = pack_id, .offset = offset };
-        if (c.entries.contains(key)) return;
+        const index = slotFor(pack_id, offset);
+        const slot = &c.slots[index];
+        if (slot.used and slot.pack == pack_id and slot.offset == offset) return;
+
         while (c.bytes + bytes.len > c.limit_bytes and c.order.items.len > 0) {
             const oldest = c.order.orderedRemove(0);
-            if (c.entries.fetchRemove(oldest)) |removed| {
-                c.bytes -= removed.value.bytes.len;
-                c.gpa.free(removed.value.bytes);
+            const victim = &c.slots[oldest];
+            if (victim.used) {
+                c.bytes -= victim.bytes.len;
+                c.gpa.free(victim.bytes);
+                victim.* = .{};
             }
         }
+
         const copy = try c.gpa.dupe(u8, bytes);
         errdefer c.gpa.free(copy);
-        try c.order.append(c.gpa, key);
-        errdefer _ = c.order.pop();
-        try c.entries.put(c.gpa, key, .{ .type = t, .bytes = copy });
+        if (slot.used) {
+            c.bytes -= slot.bytes.len;
+            c.gpa.free(slot.bytes);
+            c.removeFromOrder(index);
+        }
+        try c.order.append(c.gpa, index);
+        c.clock += 1;
+        slot.* = .{
+            .used = true,
+            .pack = pack_id,
+            .offset = offset,
+            .seq = c.clock,
+            .type = t,
+            .bytes = copy,
+        };
         c.bytes += copy.len;
+    }
+
+    fn removeFromOrder(c: *Cache, index: u32) void {
+        for (c.order.items, 0..) |value, at| {
+            if (value == index) {
+                _ = c.order.orderedRemove(at);
+                return;
+            }
+        }
     }
 
     /// Forget everything. Used when a pack directory is re-scanned, because
     /// pack ids move.
     pub fn clear(c: *Cache) void {
-        var it = c.entries.valueIterator();
-        while (it.next()) |v| c.gpa.free(v.bytes);
-        c.entries.clearRetainingCapacity();
+        for (c.slots) |*slot| {
+            if (slot.used) {
+                c.gpa.free(slot.bytes);
+                slot.* = .{};
+            }
+        }
         c.order.clearRetainingCapacity();
         c.bytes = 0;
     }

@@ -25,9 +25,19 @@ pub const Options = struct {
     /// chain length and is almost never what you want.
     delta_cache_bytes: usize = 16 * 1024 * 1024,
     /// Whether packs are reached through a memory map where the platform has
-    /// one. A memory map is faster and turns some IO errors into a signal
-    /// rather than an error value.
-    map_packs: bool = true,
+    /// one. Off by default: a map is faster on a cold cache, and it turns an
+    /// IO error into a signal nobody can catch and holds the file open
+    /// against a `git gc` that wants to replace it. Both of those are the
+    /// property this package exists to keep.
+    map_packs: bool = false,
+    /// How hard a loose object is pushed towards the disk. git's own default
+    /// syncs neither loose objects nor the index; `batch` gives real
+    /// durability for one barrier per batch rather than one per object, and
+    /// `Odb.syncBatch` is that barrier.
+    sync: fs.Sync = .none,
+    /// Whether to make a directory entry durable after a rename. git does
+    /// not; the guarantee it adds is one git does not make.
+    sync_directories: bool = fs.sync_directories_default,
     /// The buffer size a streaming read uses.
     read_buffer_size: usize = 64 * 1024,
     /// How deep a delta chain may be before it is refused.
@@ -94,7 +104,7 @@ pub const Odb = struct {
             .kind = kind,
             .options = options,
             .sources = .empty,
-            .cache = .init(gpa, options.delta_cache_bytes),
+            .cache = try .init(gpa, options.delta_cache_bytes),
         };
         errdefer odb.deinit(io);
 
@@ -117,7 +127,7 @@ pub const Odb = struct {
             .kind = kind,
             .options = options,
             .sources = .empty,
-            .cache = .init(gpa, options.delta_cache_bytes),
+            .cache = try .init(gpa, options.delta_cache_bytes),
         };
         errdefer odb.deinit(io);
         try odb.addSource(io, objects_dir, true, 0);
@@ -440,6 +450,9 @@ pub const Odb = struct {
         var file_writer = file.writer(io, &out_buf);
         const window = try odb.gpa.alloc(u8, flate.max_window_len);
         defer odb.gpa.free(window);
+        // Level 1, which is what git's own `core.looseCompression` defaults
+        // to. The library default is level 6: three times the processor time
+        // for twenty per cent smaller objects, paid on every blob written.
         var compress = try flate.Compress.init(&file_writer.interface, window, .zlib, .level_1);
         var header_buf: [64]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
@@ -448,17 +461,22 @@ pub const Odb = struct {
         try compress.writer.flush();
         try compress.finish();
         try file_writer.interface.flush();
-        try file.sync(io);
+        switch (odb.options.sync) {
+            .none => {},
+            // Batch and per-file both flush the object's own descriptor; the
+            // difference is the single barrier `syncBatch` puts at the end.
+            .batch, .per_file => try file.sync(io),
+        }
         file.close(io);
         failed = false;
 
         // An object's name is the hash of its content, so a rename over an
         // object that is already there replaces it with the same bytes.
-        sub.rename(temp, sub, text[2..], io) catch |err| {
+        fs.renameWithRetry(io, sub, temp, text[2..]) catch |err| {
             sub.deleteFile(io, temp) catch {};
             return err;
         };
-        try fs.syncDir(io, sub);
+        if (odb.options.sync_directories) try fs.syncDir(io, sub);
         return oid;
     }
 
@@ -507,7 +525,10 @@ pub const Odb = struct {
             try s.compress.writer.flush();
             try s.compress.finish();
             try s.file_writer.interface.flush();
-            try s.file.sync(io);
+            switch (s.odb.options.sync) {
+                .none => {},
+                .batch, .per_file => try s.file.sync(io),
+            }
             s.file.close(io);
             s.finished = true;
 
@@ -520,11 +541,11 @@ pub const Odb = struct {
             };
             var final_buf: [hash.max_hex_len + 2]u8 = undefined;
             const final_path = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
-            s.dir.rename(s.temp[0..s.temp_len], s.dir, final_path, io) catch |err| {
+            fs.renameWithRetry(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
                 s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
                 return err;
             };
-            try fs.syncDir(io, s.dir);
+            if (s.odb.options.sync_directories) try fs.syncDir(io, s.dir);
             return oid;
         }
 
@@ -673,6 +694,18 @@ pub const Odb = struct {
             }
         }
         return set;
+    }
+
+    /// Put one durability barrier at the end of a batch of object writes.
+    ///
+    /// Under `Options.sync = .batch` this is what makes every object written
+    /// since the last barrier durable, for the cost of one sync rather than
+    /// one per object. Under the other two policies it is a no-op that costs
+    /// a file creation, so a caller may always call it.
+    pub fn syncBatch(odb: *Odb, io: Io) Error!void {
+        if (odb.options.sync != .batch) return;
+        const source = odb.writableSource();
+        try fs.syncBarrier(io, source.dir);
     }
 
     /// How many packs are open. A caller measuring a repository asks here.

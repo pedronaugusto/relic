@@ -12,6 +12,7 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const fs = @import("fs.zig");
+const safepath = @import("safepath.zig");
 const varint = @import("varint.zig");
 const ewah = @import("ewah.zig");
 const odb_mod = @import("odb.zig");
@@ -433,6 +434,9 @@ pub const WriteOptions = struct {
     /// Whether to keep the `TREE` extension. A caller that has invalidated
     /// it and does not want to rebuild may drop it.
     write_cache_tree: bool = true,
+    /// How the lock behaves: whether to wait for a contended one, and how
+    /// hard to push the bytes towards the disk before the rename.
+    lock: fs.LockFile.Options = .{},
 
     /// The version to write.
     pub const Version = union(enum) {
@@ -514,7 +518,7 @@ pub const Index = struct {
         errdefer index.deinit();
 
         if (dir.statFile(io, sub_path, .{})) |stat| {
-            const s = fs.Stat.fromIo(stat);
+            const s = fs.Stat.fromIo(stat, .{});
             index.racy_cutoff_sec = s.mtime_sec;
             index.racy_cutoff_nsec = s.mtime_nsec;
         } else |_| {}
@@ -766,7 +770,7 @@ pub const Index = struct {
 
         // An empty name is only legal in a split index's overlay, which is
         // checked once the extensions have been read.
-        if (path.len != 0 and (path[0] == '/' or !fs.isSafePath(path))) return error.InvalidEntryPath;
+        if (path.len != 0 and !safepath.isSafeStoredPath(path)) return error.InvalidEntryPath;
 
         const mode_raw = std.mem.readInt(u32, b[24..28], .big);
         const mode = object.Mode.fromRaw(mode_raw) catch return error.InvalidMode;
@@ -936,7 +940,7 @@ pub const Index = struct {
     pub fn write(index: *Index, io: Io, dir: Io.Dir, sub_path: []const u8, options: WriteOptions) WriteError!void {
         const buffer = try index.gpa.alloc(u8, 64 * 1024);
         defer index.gpa.free(buffer);
-        var lock = try fs.LockFile.open(index.gpa, io, dir, sub_path, buffer);
+        var lock = try fs.LockFile.open(index.gpa, io, dir, sub_path, buffer, options.lock);
         defer lock.deinit(io);
         try index.writeTo(lock.writer(), options);
         try lock.commit(io);
