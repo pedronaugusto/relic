@@ -13,6 +13,10 @@ pub const safepath = @import("safepath.zig");
 pub const platstat = @import("platstat.zig");
 pub const refs = @import("refs.zig");
 pub const reflog = @import("reflog.zig");
+pub const config = @import("config.zig");
+pub const wildmatch = @import("wildmatch.zig");
+pub const ignore = @import("ignore.zig");
+pub const attributes = @import("attributes.zig");
 
 const builtin = @import("builtin");
 
