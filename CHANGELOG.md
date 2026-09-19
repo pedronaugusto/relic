@@ -4,7 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-09-19
+
+The first release. It reads and writes a repository the way git leaves one on
+the disk: objects loose and packed, refs loose and packed, the index at
+versions 2, 3 and 4, the working tree, and diffs.
+
+### Breaking
+
+- **`fs.Stat.matches` takes a fourth argument**, the resolution.
+  `worktree.Rules` carries it and `Repository.worktreeRules` fills it in from
+  what the object database measured, so a caller going through the front door
+  passes nothing new.
+
+- **`odb.Error` grew.** Writing a pack can fail in ways reading one
+  cannot — `ObjectCountMismatch`, `TooManyObjects`, `DeltaBaseNotWritten`,
+  `DuplicateObject` — and enumerating objects parses commits, tags and trees,
+  so `object.ParseError` and `object.TreeParseError` are in it now too.
+  Breaking for a caller that switches exhaustively on it; nothing returns any
+  of them unless a pack is being written or a set of objects collected.
+
+- **`worktree.Rules` gained `timestamp_resolution`** and
+  `odb.Options` gained `probe_timestamp_resolution`. Both default to the
+  behaviour that was there before measuring was possible.
 
 ### Added
 
@@ -16,8 +38,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   against a name that need not be. The index is version 2 throughout —
   fanout, sorted names, a CRC per entry, the 64-bit offset table — and the
   hash is the repository's, so a SHA-256 repository gets a SHA-256 pack. What
-  is held is one object, the deflate state, and twenty-eight bytes per object
-  for the index; nothing is threaded.
+  is held is one object, the deflate state, and one index entry per object;
+  nothing is threaded.
 
   `Writer.init` is told the object count, because it goes in the header and
   the header is written first. `Writer.initCounting` is for a caller that does
@@ -52,7 +74,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   On a repository of twenty files each grown over six commits, 138 objects:
   the deltified pack is 29 692 bytes where the same objects written whole are
-  84 871, and git's own packer makes 28 557 of it.
+  84 871. What the suite asserts of the two is that the deltified one used
+  deltas and came out smaller.
 
 - **`Odb.collectReachable`, `collectLoose` and `collectAll`** — which objects
   to put in one. `collectReachable` walks commits, their parents, the trees
@@ -110,78 +133,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`index.WriteOptions.end_of_index_entries` and `.entry_offset_blocks`**,
   and **`Index.had_end_of_index_entries` and `Index.entry_offset_blocks`**.
-
-### Changed
-
-- **A cold `addAll` no longer opens a directory per object.** Profiled first,
-  on an Apple M3 Max over three thousand files: of 475 ms, the loose-object
-  write was 390 and inside it the two irreducible calls — the
-  `O_CREAT|O_EXCL` that makes the temporary, at 35 µs, and the `rename` that
-  finishes it, at 54 µs — were 105 and 155. Everything else the write did per
-  object is gone.
-
-  The temporary and the object it becomes are now both named relative to the
-  `objects` directory, so a `mkdir`, an `opendir` and a `close` per object
-  became one `mkdir` per fan-out directory, made by the write that first lands
-  in one that is not there yet. The deflate state, two hundred and twenty-four
-  kilobytes of it, and the output buffer beside it moved off the stack of
-  every object written and onto the database, allocated on the first object it
-  writes; a database that is only read allocates neither. A walk asks the
-  platform for a path's stat once rather than twice, because the call that
-  fetches the three fields `std.Io` leaves out already reports the ones it
-  carries. And a file whose length a stat has already reported is read without
-  asking again.
-
-  Minimum of ten alternating runs: 475 ms to 426 ms cold, 9.4 ms to 4.8 ms
-  warm. The two calls that remain are what one file per object costs on this
-  filesystem: the same two straight through libc cost the same, so nothing is
-  being lost in a layer.
-
-- **`EOIE` and `IEOT` are written again rather than dropped.** Both are caches
-  of byte offsets into the index file itself, so copying one into a file whose
-  entries have moved points it at the wrong place — which was right about the
-  numbers and wrong about the conclusion. The numbers are now taken again from
-  the file being written. `EOIE` carries the offset of the first extension and
-  a hash over the signature and size of every extension header before it;
-  `IEOT` divides the entries into blocks and is written first, and at version
-  4 the first entry of each block has its path written whole, because a reader
-  that decodes the blocks independently has no entry before it.
-
-  How many blocks is a reader's business: the count comes from the index that
-  was read, and stock git writes neither extension unless `index.threads` asks
-  for a reader that can use them. The fixture test therefore asks for one and
-  compares the bytes.
-
-- **git's racy rule uses the filesystem's measured timestamp resolution.** On
-  a filesystem that keeps nothing below a second, every entry in the index's
-  own second is racy, because the filesystem cannot put the two in order. On a
-  finer one the comparison is at the unit that was measured. The old rule
-  believed a reported nanosecond was a kept nanosecond, which is wrong in both
-  directions.
-
-- **Breaking: `fs.Stat.matches` takes a fourth argument**, the resolution.
-  `worktree.Rules` carries it and `Repository.worktreeRules` fills it in from
-  what the object database measured, so a caller going through the front door
-  passes nothing new.
-
-- **Breaking: `odb.Error` grew.** Writing a pack can fail in ways reading one
-  cannot — `ObjectCountMismatch`, `TooManyObjects`, `DeltaBaseNotWritten`,
-  `DuplicateObject` — and enumerating objects parses commits, tags and trees,
-  so `object.ParseError` and `object.TreeParseError` are in it now too.
-  Breaking for a caller that switches exhaustively on it; nothing returns any
-  of them unless a pack is being written or a set of objects collected.
-
-- **Breaking: `worktree.Rules` gained `timestamp_resolution`** and
-  `odb.Options` gained `probe_timestamp_resolution`. Both default to the
-  behaviour that was there before measuring was possible.
-
-## [0.1.0] - 2026-09-19
-
-The first release. It reads and writes a repository the way git leaves one on
-the disk: objects loose and packed, refs loose and packed, the index at
-versions 2, 3 and 4, the working tree, and diffs.
-
-### Added
 
 - **`hash`** — `Kind` is `sha1` or `sha256` and `Oid` carries it, so nothing
   assumes twenty bytes and a name from one repository cannot be compared with
@@ -318,6 +269,54 @@ versions 2, 3 and 4, the working tree, and diffs.
   trace under a failing test — the error and the test's name are still
   printed.
 
+### Changed
+
+- **A cold `addAll` no longer opens a directory per object.** Profiled first,
+  on an Apple M3 Max over three thousand files: of 475 ms, the loose-object
+  write was 390 and inside it the two irreducible calls — the
+  `O_CREAT|O_EXCL` that makes the temporary, at 35 µs, and the `rename` that
+  finishes it, at 54 µs — were 105 and 155. Everything else the write did per
+  object is gone.
+
+  The temporary and the object it becomes are now both named relative to the
+  `objects` directory, so a `mkdir`, an `opendir` and a `close` per object
+  became one `mkdir` per fan-out directory, made by the write that first lands
+  in one that is not there yet. The deflate state, two hundred and twenty-four
+  kilobytes of it, and the output buffer beside it moved off the stack of
+  every object written and onto the database, allocated on the first object it
+  writes; a database that is only read allocates neither. A walk asks the
+  platform for a path's stat once rather than twice, because the call that
+  fetches the three fields `std.Io` leaves out already reports the ones it
+  carries. And a file whose length a stat has already reported is read without
+  asking again.
+
+  Minimum of ten alternating runs: 475 ms to 426 ms cold, 9.4 ms to 4.8 ms
+  warm. The two calls that remain are what one file per object costs on this
+  filesystem: the same two straight through libc cost the same, so nothing is
+  being lost in a layer.
+
+- **`EOIE` and `IEOT` are written again rather than dropped.** Both are caches
+  of byte offsets into the index file itself, so copying one into a file whose
+  entries have moved points it at the wrong place — which was right about the
+  numbers and wrong about the conclusion. The numbers are now taken again from
+  the file being written. `EOIE` carries the offset of the first extension and
+  a hash over the signature and size of every extension header before it;
+  `IEOT` divides the entries into blocks and is written first, and at version
+  4 the first entry of each block has its path written whole, because a reader
+  that decodes the blocks independently has no entry before it.
+
+  How many blocks is a reader's business: the count comes from the index that
+  was read, and stock git writes neither extension unless `index.threads` asks
+  for a reader that can use them. The fixture test therefore asks for one and
+  compares the bytes.
+
+- **git's racy rule uses the filesystem's measured timestamp resolution.** On
+  a filesystem that keeps nothing below a second, every entry in the index's
+  own second is racy, because the filesystem cannot put the two in order. On a
+  finer one the comparison is at the unit that was measured. The old rule
+  believed a reported nanosecond was a kept nanosecond, which is wrong in both
+  directions.
+
 Decisions worth knowing before reading the source:
 
 - **A loose object's compressed bytes need not match git's.** An object's
@@ -333,10 +332,6 @@ Decisions worth knowing before reading the source:
 - **Packs are read positionally by default.** A memory map is faster on a
   cold cache and turns an IO error into a signal on macOS and a lock on the
   file on Windows; `Odb.Options.map_packs` opts in.
-
-- **`EOIE` and `IEOT` are dropped rather than preserved.** Both are caches of
-  byte offsets into the file being rewritten, so copying one points it at the
-  wrong place. git rebuilds them.
 
 - **A split index is read whole and written back as one complete index.** No
   entry is lost; the split is not recreated, and git re-splits on its next

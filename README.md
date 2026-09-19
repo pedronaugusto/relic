@@ -253,7 +253,7 @@ directories and 64 MiB hashed:
 | `writeTree`, cache tree invalid | 9 ms |
 | `writeTree`, cache tree valid | under a millisecond |
 | `status`, one file in ten changed | 8 ms |
-| writing a deltified pack | 7 200 objects/s, 41 MiB/s |
+| writing a deltified pack | 7 200 objects/s, 41 MiB/s of input |
 | SHA-1, the eighty rounds in software | 0.99 GiB/s |
 | SHA-1, the aarch64 instructions | 2.47 GiB/s |
 | SHA-1, with the collision check | 0.41 GiB/s |
@@ -288,7 +288,8 @@ them over one at a time. `Odb.repack` is what deltifies.
 
 The pack figures are a repository of twenty files each grown over six
 commits, 138 objects: the deltified pack is 29 692 bytes where the same
-objects written whole are 84 871, and git's own packer makes 28 557 of it.
+objects written whole are 84 871. What the test asserts of the two is that the
+deltified one used deltas and came out smaller.
 
 What the suite holds to elsewhere is not these figures but two ratios timed in
 the same run — the warm pass against the cold one, and the hardware arm
@@ -298,10 +299,10 @@ the walk as well, but it is a ceiling and not a budget.
 
 **A pack is written in git's order, and nothing is taken away until it is
 there.** `pack.Writer` streams the entries into a temporary and writes the
-index beside it; what is held is one object, the deflate state, and
-twenty-eight bytes per object for the index. `Odb.writePack` is the policy on
-top: the objects are ordered by type, then by git's own hash of the tail of
-the path they were found at, then by size descending, and each is tried
+index beside it; what is held is one object, the deflate state, and one index
+entry per object. `Odb.writePack` is the policy on top: the objects are
+ordered by type descending, then by git's own hash of the tail of the path
+they were found at, descending, then by size descending, and each is tried
 against a sliding window of the ones already written — ten of them, a chain no
 deeper than fifty, and a delta kept only if it is at most half the object it
 stands in for. `PackOptions.window_bytes` bounds that window by weight as well
@@ -360,13 +361,15 @@ the peak is bounded by the operation and the free is one call. What outlives
 an operation is held by the object database: the pack indexes, read whole at
 open so a lookup costs no syscall; the multi-pack index, when there is one,
 for the same reason; the delta base cache, a direct-mapped table on the pack
-offset with a byte budget named in `Odb.Options`; and, once a database has
-written anything, one deflate state and one output buffer, because the state
-is two hundred and twenty-four kilobytes and a cold `addAll` writes one object
-per file. A database that is only read allocates neither. Writing a pack adds
+offset with a byte budget named in `Odb.Options`; one deflate window, which
+is sixty-four kilobytes and is taken at `open` whether or not anything is
+written; and, once a database has written anything, one deflate state and one
+output buffer, the state being two hundred and twenty-four kilobytes, because
+a cold `addAll` writes one object per file. A database that is only read takes
+neither of those two. Writing a pack adds
 the delta window on top, which `PackOptions.window_bytes` bounds by weight as
-well as by count, and twenty-eight bytes per object for the index that has to
-be sorted before it is written. There is no object cache; a returned slice's
+well as by count, and one index entry per object — a name, an offset and a
+CRC — which has to be sorted before it is written. There is no object cache; a returned slice's
 doc comment says who owns it.
 
 **The index is read at three versions and written at two.** Versions 2, 3 and
@@ -400,7 +403,7 @@ refresh and re-hash the whole working tree.
 ## Scope
 
 - **No network.** Fetch, push and clone are a wire protocol and a different discipline.
-- **No pack bitmaps and no multi-pack index written.** Both are read; neither is produced, and a pack without them is a pack git reads.
+- **No pack bitmaps, no `.rev` and no multi-pack index written.** The multi-pack index is read, a bitmap is not read either, and a pack without any of them is a pack git reads.
 - **No hooks are run.** The caller has the path and may run one itself.
 - **No named clean or smudge filters.** A repository whose attributes require one is a named refusal.
 - **No content-level merge.** The three-way merge is at tree level and leaves a conflict at index stages 1 to 3.
@@ -469,12 +472,13 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Eighteen fuzz tests cover every parser: the loose object header, the tree, the
-commit and the tag, a delta, the pack index, the index file, `packed-refs`,
-the reflog, the config file, `.gitignore`, `.gitattributes`, the glob matcher,
-a path from a tree, the commit-graph, the multi-pack index and the EWAH
-bitmaps. The rule is that any input either parses to a value or returns a
-named error. Four of them check more than that. The diff fuzzer applies the
+Eighteen fuzz tests. Most of them take arbitrary bytes and hold a parser to
+one rule — any input either parses to a value or returns a named error — and
+between them they cover the loose object header, the tree, the commit and the
+tag, a delta, the pack index, the index file, `packed-refs`, the reflog, the
+config file, `.gitignore`, `.gitattributes`, the glob matcher, a path from a
+tree, the commit-graph, the multi-pack index and the EWAH bitmaps. Four check
+more than that. The diff fuzzer applies the
 edit script it produced and checks that it reproduces the other side, which is
 the property that catches an off-by-one nothing else would. The
 collision-check fuzzer asserts both that the name is SHA-1's name and that

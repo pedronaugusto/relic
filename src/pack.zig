@@ -1235,8 +1235,8 @@ test "an offset delta pointing forwards is refused" {
 // go in -- that is a policy, and it lives with the object database.
 //
 // The pack is written straight to a temporary file as the entries arrive, so
-// what is held in memory is one object's bytes, the deflate state, and
-// twenty-eight bytes per object for the index. Nothing is threaded.
+// what is held in memory is one object's bytes, the deflate state, and one
+// `WrittenEntry` per object for the index. Nothing is threaded.
 //=====================================================================
 
 /// Errors from writing a pack.
