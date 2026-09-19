@@ -20,6 +20,10 @@ pub const attributes = @import("attributes.zig");
 pub const worktree = @import("worktree.zig");
 pub const worktrees = @import("worktrees.zig");
 pub const repo = @import("repo.zig");
+pub const revwalk = @import("revwalk.zig");
+pub const merge = @import("merge.zig");
+pub const commitgraph = @import("commitgraph.zig");
+pub const midx = @import("midx.zig");
 
 const builtin = @import("builtin");
 
