@@ -423,6 +423,9 @@ pub const ResolveUndo = struct {
     }
 };
 
+/// The only version of `IEOT` there is.
+const ieot_version: u32 = 1;
+
 /// How an index is written.
 pub const WriteOptions = struct {
     /// Which version to write. `auto` is version 2, or version 3 when an
@@ -434,6 +437,19 @@ pub const WriteOptions = struct {
     /// Whether to keep the `TREE` extension. A caller that has invalidated
     /// it and does not want to rebuild may drop it.
     write_cache_tree: bool = true,
+    /// Whether to write `EOIE`, the offset of the first extension.
+    /// `null` writes one if the index that was read had one.
+    end_of_index_entries: ?bool = null,
+    /// How many blocks `IEOT` splits the entries into. Fewer than two writes
+    /// no `IEOT`, which is git's own rule: a table of one block accelerates
+    /// nothing. `null` uses as many blocks as the index that was read had.
+    ///
+    /// The number is a reader's business, not a writer's: it is how many
+    /// pieces a reader may decode at once, and this package decodes one at a
+    /// time whatever it says. It is here so that an index carrying a table
+    /// keeps one, and so that a caller writing for a particular reader can
+    /// say how many.
+    entry_offset_blocks: ?u32 = null,
     /// How the lock behaves: whether to wait for a contended one, and how
     /// hard to push the bytes towards the disk before the rename.
     lock: fs.LockFile.Options = .{},
@@ -480,6 +496,14 @@ pub const Index = struct {
     /// Whether the file read carried an all-zero trailer, which is what
     /// `index.skipHash` writes.
     hash_was_skipped: bool = false,
+    /// Whether the file read carried `EOIE`. Its contents are not kept:
+    /// both it and `IEOT` are offsets into the file they are written in, so
+    /// what survives a rewrite is that they were there and how the table was
+    /// divided, and the numbers are taken again.
+    had_end_of_index_entries: bool = false,
+    /// How many blocks the `IEOT` the file read carried was divided into, or
+    /// zero where there was none.
+    entry_offset_blocks: u32 = 0,
     /// The delete mask a split index carried, until it is merged.
     split_delete: ?ewah.Bits = null,
     /// The replace mask a split index carried, until it is merged.
@@ -598,11 +622,22 @@ pub const Index = struct {
                 index.resolve_undo = try ResolveUndo.parse(gpa, kind, data);
             } else if (std.mem.eql(u8, &signature, "link")) {
                 try index.parseLink(gpa, data);
-            } else if (std.mem.eql(u8, &signature, "EOIE") or std.mem.eql(u8, &signature, "IEOT")) {
-                // Both are caches of byte offsets into this very file.
-                // Copying one into a file whose entries have moved would
-                // point it at the wrong place, so they are recomputed on
-                // write rather than preserved.
+            } else if (std.mem.eql(u8, &signature, "EOIE")) {
+                // A cache of one byte offset into this very file. Copying it
+                // into a file whose entries have moved would point it at the
+                // wrong place, so what is kept is that it was there and the
+                // offset is taken again on write.
+                index.had_end_of_index_entries = true;
+            } else if (std.mem.eql(u8, &signature, "IEOT")) {
+                // The same, once per block of entries. How many blocks it
+                // named is kept, because that is a reader's choice and not
+                // something to invent; the offsets are taken again.
+                if (data.len >= 4) {
+                    const version_field = std.mem.readInt(u32, data[0..4], .big);
+                    if (version_field == ieot_version) {
+                        index.entry_offset_blocks = @intCast((data.len - 4) / 8);
+                    }
+                }
             } else if (signature[0] >= 'A' and signature[0] <= 'Z') {
                 const copy = try gpa.dupe(u8, data);
                 index.unknown.append(gpa, .{ .signature = signature, .data = copy }) catch |err| {
@@ -1036,9 +1071,37 @@ pub const Index = struct {
         std.mem.writeInt(u32, header[8..12], @intCast(index.entries.items.len), .big);
         try out.writeAll(&header);
 
+        // How the entries are divided for `IEOT`, and where each block
+        // starts. A block boundary is a byte offset into this file, so the
+        // table can only be built while the file is.
+        const blocks: u32 = blk: {
+            const want = options.entry_offset_blocks orelse index.entry_offset_blocks;
+            const count: u32 = @intCast(index.entries.items.len);
+            break :blk @min(want, count);
+        };
+        var table: std.ArrayList(OffsetBlock) = .empty;
+        defer table.deinit(index.gpa);
+        const per_block: usize = if (blocks > 1)
+            (index.entries.items.len + blocks - 1) / blocks
+        else
+            0;
+        var block_start: usize = body.written().len;
+        var block_count: u32 = 0;
+
         var previous_path: []const u8 = "";
-        for (index.entries.items) |entry| {
+        for (index.entries.items, 0..) |entry, i| {
             if (entry.path.len > std.math.maxInt(u16)) return error.PathTooLong;
+            // A new block starts here. Its first entry shares no prefix with
+            // the last entry of the block before it, so that a reader can
+            // decode the blocks independently -- which is the only reason
+            // the table exists.
+            var starts_block = false;
+            if (per_block != 0 and i != 0 and i % per_block == 0) {
+                try table.append(index.gpa, .{ .offset = @intCast(block_start), .count = block_count });
+                block_start = body.written().len;
+                block_count = 0;
+                starts_block = true;
+            }
             var fixed: [40 + hash.max_raw_len + 4]u8 = @splat(0);
 
             // git truncates a racily-clean entry's recorded size to zero, so
@@ -1076,7 +1139,7 @@ pub const Index = struct {
             try out.writeAll(fixed[0..fixed_len]);
 
             if (version >= 4) {
-                const shared = commonPrefixLen(previous_path, entry.path);
+                const shared = if (starts_block) 0 else commonPrefixLen(previous_path, entry.path);
                 var varint_buf: [16]u8 = undefined;
                 const strip = varint.writeOffset(&varint_buf, previous_path.len - shared);
                 try out.writeAll(strip);
@@ -1091,14 +1154,45 @@ pub const Index = struct {
                 try out.splatByteAll(0, padded - fixed_len - entry.path.len);
             }
             previous_path = entry.path;
+            block_count += 1;
+        }
+        if (per_block != 0 and block_count != 0) {
+            try table.append(index.gpa, .{ .offset = @intCast(block_start), .count = block_count });
         }
 
+        // Where the entries end and the extensions begin, which is the one
+        // number `EOIE` carries.
+        const extensions_at: u32 = @intCast(body.written().len);
+
+        // `EOIE` also carries a hash over the header of every extension
+        // written before it -- the four signature bytes and the four size
+        // bytes, and none of the contents. It is fed as they go out.
+        var ext_hasher: hash.Hasher = .init(index.kind);
+
+        // `IEOT` goes first, so that a reader looking for it has the least
+        // to walk past. It is git's own order.
+        if (table.items.len != 0) {
+            var ieot_body: Io.Writer.Allocating = .init(index.gpa);
+            defer ieot_body.deinit();
+            var version_bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &version_bytes, ieot_version, .big);
+            try ieot_body.writer.writeAll(&version_bytes);
+            for (table.items) |block| {
+                var pair: [8]u8 = undefined;
+                std.mem.writeInt(u32, pair[0..4], block.offset, .big);
+                std.mem.writeInt(u32, pair[4..8], block.count, .big);
+                try ieot_body.writer.writeAll(&pair);
+            }
+            try writeExtension(out, "IEOT", ieot_body.written());
+            hashExtensionHeader(&ext_hasher, "IEOT", ieot_body.written().len);
+        }
         if (options.write_cache_tree) {
             if (index.cache_tree) |*tree| {
                 var tree_body: Io.Writer.Allocating = .init(index.gpa);
                 defer tree_body.deinit();
                 try tree.write(&tree_body.writer);
                 try writeExtension(out, "TREE", tree_body.written());
+                hashExtensionHeader(&ext_hasher, "TREE", tree_body.written().len);
             }
         }
         if (index.resolve_undo) |*undo| {
@@ -1106,9 +1200,20 @@ pub const Index = struct {
             defer undo_body.deinit();
             try undo.write(&undo_body.writer);
             try writeExtension(out, "REUC", undo_body.written());
+            hashExtensionHeader(&ext_hasher, "REUC", undo_body.written().len);
         }
         for (index.unknown.items) |extension| {
             try writeExtension(out, &extension.signature, extension.data);
+            hashExtensionHeader(&ext_hasher, &extension.signature, extension.data.len);
+        }
+
+        // `EOIE` is last, and is not part of its own hash.
+        if (options.end_of_index_entries orelse index.had_end_of_index_entries) {
+            var eoie_body: [4 + hash.max_raw_len]u8 = undefined;
+            std.mem.writeInt(u32, eoie_body[0..4], extensions_at, .big);
+            const digest = ext_hasher.final();
+            @memcpy(eoie_body[4..][0..raw_len], digest.raw());
+            try writeExtension(out, "EOIE", eoie_body[0 .. 4 + raw_len]);
         }
 
         try w.writeAll(body.written());
@@ -1122,6 +1227,22 @@ pub const Index = struct {
             try w.writeAll(checksum.raw());
         }
         try w.flush();
+    }
+
+    /// One block of the index entry offset table: where it starts in the
+    /// file, and how many entries it holds.
+    const OffsetBlock = struct {
+        offset: u32,
+        count: u32,
+    };
+
+    /// Feed one extension's header -- signature and size, as they appear in
+    /// the file -- to the hash `EOIE` carries.
+    fn hashExtensionHeader(hasher: *hash.Hasher, signature: []const u8, size: usize) void {
+        hasher.update(signature);
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, @intCast(size), .big);
+        hasher.update(&bytes);
     }
 
     fn writeExtension(w: *Io.Writer, signature: []const u8, data: []const u8) Io.Writer.Error!void {
@@ -1209,6 +1330,71 @@ test "version 4 prefix compression round trips" {
     try std.testing.expectEqualStrings("dir/aab.txt", back.entries.items[1].path);
     try std.testing.expectEqualStrings("dir/sub/x", back.entries.items[2].path);
     try std.testing.expectEqualStrings("other", back.entries.items[3].path);
+}
+
+test "the offset caches are written on request, and kept by an index that had them" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    for (0..7) |i| {
+        var name: [32]u8 = undefined;
+        try index.addMany(&.{.{
+            .path = try std.fmt.bufPrint(&name, "dir/file{d}.txt", .{i}),
+            .oid = .zero(.sha1),
+            .mode = .file,
+            .stat = .{},
+        }});
+    }
+
+    // Nothing asked for, nothing written: this is what stock git writes.
+    const plain = try index.toBytes(.{});
+    defer gpa.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "EOIE") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "IEOT") == null);
+
+    const with = try index.toBytes(.{ .end_of_index_entries = true, .entry_offset_blocks = 3 });
+    defer gpa.free(with);
+
+    const ieot_at = std.mem.indexOf(u8, with, "IEOT").?;
+    const eoie_at = std.mem.indexOf(u8, with, "EOIE").?;
+    try std.testing.expect(ieot_at < eoie_at);
+
+    // `EOIE` says where the extensions begin, which is where `IEOT`'s own
+    // header is, and carries the hash of every extension header before it.
+    const eoie = with[eoie_at + 8 ..][0..24];
+    try std.testing.expectEqual(@as(u32, @intCast(ieot_at)), std.mem.readInt(u32, eoie[0..4], .big));
+    const ieot_size = std.mem.readInt(u32, with[ieot_at + 4 ..][0..4], .big);
+    var expected: hash.Hasher = .init(.sha1);
+    expected.update("IEOT");
+    var size_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &size_bytes, ieot_size, .big);
+    expected.update(&size_bytes);
+    try std.testing.expectEqualSlices(u8, expected.final().raw(), eoie[4..24]);
+
+    // Three blocks over seven entries: three, three and one, each starting
+    // where the table says.
+    const table = with[ieot_at + 8 ..][0..ieot_size];
+    try std.testing.expectEqual(ieot_version, std.mem.readInt(u32, table[0..4], .big));
+    try std.testing.expectEqual(@as(usize, 3), (table.len - 4) / 8);
+    try std.testing.expectEqual(@as(u32, 12), std.mem.readInt(u32, table[4..8], .big));
+    try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, table[8..12], .big));
+    try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, table[16..20], .big));
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, table[24..28], .big));
+
+    // An index read back from those bytes remembers that they were there and
+    // how the table was divided, and writes them again unasked.
+    var back = try Index.parse(gpa, .sha1, with);
+    defer back.deinit();
+    try std.testing.expect(back.had_end_of_index_entries);
+    try std.testing.expectEqual(@as(u32, 3), back.entry_offset_blocks);
+    const again = try back.toBytes(.{});
+    defer gpa.free(again);
+    try std.testing.expectEqualSlices(u8, with, again);
+
+    // And a caller that does not want them says so.
+    const dropped = try back.toBytes(.{ .end_of_index_entries = false, .entry_offset_blocks = 0 });
+    defer gpa.free(dropped);
+    try std.testing.expectEqualSlices(u8, plain, dropped);
 }
 
 test "an unknown optional extension survives a round trip byte for byte" {

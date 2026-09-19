@@ -239,6 +239,54 @@ fn expectIndexRoundTrip(
     try std.testing.expectEqualSlices(u8, original, written);
 }
 
+test "an index git wrote with the offset caches is written back byte for byte" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    for (0..14) |i| {
+        var name_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&name_buf, "dir{d}/file{d}.txt", .{ i % 3, i });
+        try repo.writeFile(io, path, "contents\n");
+    }
+
+    // Stock git writes neither extension. They appear when `index.threads`
+    // asks for a reader that can use them, which is what this asks for.
+    const threaded: []const []const u8 = &.{ "-c", "index.threads=4" };
+    try repo.exec(io, threaded ++ [_][]const u8{ "add", "-A" });
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    {
+        var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+        defer index.deinit();
+        try std.testing.expect(index.had_end_of_index_entries);
+        try std.testing.expectEqual(@as(u32, 4), index.entry_offset_blocks);
+    }
+    try expectIndexRoundTrip(gpa, io, &repo, .sha1, .auto, false);
+
+    // With a `TREE` extension in front of them, so the hash `EOIE` carries
+    // is over more than one extension header.
+    try repo.exec(io, threaded ++ [_][]const u8{ "commit", "-q", "-m", "one" });
+    try repo.writeFile(io, "dir0/file0.txt", "changed\n");
+    try repo.exec(io, threaded ++ [_][]const u8{ "add", "-A" });
+    {
+        var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
+        defer index.deinit();
+        try std.testing.expect(index.cache_tree != null);
+        try std.testing.expect(index.had_end_of_index_entries);
+        try std.testing.expectEqual(@as(u32, 4), index.entry_offset_blocks);
+    }
+    try expectIndexRoundTrip(gpa, io, &repo, .sha1, .auto, false);
+
+    // And at version 4, where the path of the first entry of every block is
+    // written whole rather than against the entry before it, so that a
+    // reader can take the blocks apart.
+    try repo.exec(io, threaded ++ [_][]const u8{ "-c", "index.version=4", "update-index", "--index-version", "4" });
+    try expectIndexRoundTrip(gpa, io, &repo, .sha1, .v4, false);
+}
+
 test "a version 2 index git wrote is written back byte for byte" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
