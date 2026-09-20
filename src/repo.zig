@@ -44,6 +44,9 @@ pub const Error = error{
     BrokenGitFile,
     /// `init` was given a path that already holds a repository.
     RepositoryExists,
+    /// Peeling crossed the maximum annotated-tag chain without reaching a
+    /// non-tag object.
+    TagDepthExceeded,
 } || object.ParseError || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
@@ -531,7 +534,7 @@ pub const Repository = struct {
             defer tag.deinit();
             current = tag.target;
         }
-        return current;
+        return error.TagDepthExceeded;
     }
 
     /// What `commit` needs from the caller: who, when, and what to say.

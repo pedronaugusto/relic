@@ -23,6 +23,31 @@ const fixture_who: object.Signature = .{
     .offset_minutes = 0,
 };
 
+test "peeling refuses an annotated tag chain beyond the limit" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+
+    var target = try repo.odb.write(io, .blob, "target\n");
+    var target_type: object.Type = .blob;
+    for (0..17) |i| {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "tag-{d}", .{i});
+        target = try repo.writeTag(io, .{
+            .target = target,
+            .target_type = target_type,
+            .name = name,
+            .message = "nested\n",
+        });
+        target_type = .tag;
+    }
+
+    try std.testing.expectError(error.TagDepthExceeded, repo.peel(io, target));
+}
+
 test "a repository this creates is one git uses" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
