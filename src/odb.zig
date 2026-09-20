@@ -947,7 +947,9 @@ pub const Odb = struct {
     /// then the tail of the path hint, then size descending -- and each is
     /// tried against a sliding window of the ones already written. What is
     /// held at once is the window, which `PackOptions.window_bytes` bounds,
-    /// and one object being written. Nothing is threaded.
+    /// and one object being written. Delta candidate searches use the
+    /// caller's concurrency executor only when `PackOptions.threads` is
+    /// greater than one.
     ///
     /// `pack_dir` is where `pack-<name>.pack` and `pack-<name>.idx` land, and
     /// in a repository that is `objects/pack`. Nothing is visible under
@@ -1005,7 +1007,7 @@ pub const Odb = struct {
             const deltifiable = options.delta != .none and options.window != 0 and
                 bytes.len < options.big_file_bytes;
 
-            var chosen: ?struct { slot: usize, bytes: []u8 } = null;
+            var chosen: ?ChosenDelta = null;
             defer if (chosen) |c| gpa.free(c.bytes);
             if (deltifiable) {
                 // git's rule for what is worth writing: a delta must be at
@@ -1013,17 +1015,7 @@ pub const Odb = struct {
                 // the first must beat the one before it.
                 var limit: usize = bytes.len / 2;
                 if (limit > odb.kind.rawLen()) limit -= odb.kind.rawLen() else limit = 0;
-                var at = window.items.len;
-                while (at != 0 and limit != 0) {
-                    at -= 1;
-                    const slot = &window.items[at];
-                    if (slot.type != found.type) continue;
-                    if (slot.depth + 1 > options.depth) continue;
-                    const candidate = try slot.encoder.encode(gpa, bytes, .{ .max_bytes = limit }) orelse continue;
-                    if (chosen) |c| gpa.free(c.bytes);
-                    chosen = .{ .slot = at, .bytes = candidate };
-                    limit = candidate.len - 1;
-                }
+                chosen = try findDelta(gpa, io, window.items, found.type, bytes, options, limit);
             }
 
             var depth: u32 = 0;
@@ -1574,6 +1566,11 @@ pub const DeltaEncoding = enum {
 
 /// How a pack is built out of a set of objects.
 pub const PackOptions = struct {
+    /// The most delta candidates searched concurrently through the caller's
+    /// `std.Io` executor. One starts no concurrent task and is exactly the
+    /// serial writer. Larger values do not change object order, delta choice,
+    /// or output bytes.
+    threads: u16 = 1,
     /// How many objects already written each new one is tried against.
     /// git's default is ten. Zero writes no deltas.
     window: u32 = 10,
@@ -1604,6 +1601,117 @@ const WindowSlot = struct {
     depth: u32,
     encoder: delta_mod.Encoder,
 };
+
+const DeltaJob = struct {
+    gpa: Allocator,
+    encoder: *const delta_mod.Encoder,
+    target: []const u8,
+    limit: usize,
+    slot: usize,
+    result: Result = .pending,
+
+    const Result = union(enum) {
+        pending,
+        failed: Allocator.Error,
+        none,
+        bytes: []u8,
+    };
+
+    fn run(job: *DeltaJob) Io.Cancelable!void {
+        const encoded = job.encoder.encode(job.gpa, job.target, .{ .max_bytes = job.limit }) catch |err| {
+            job.result = .{ .failed = err };
+            return;
+        };
+        job.result = if (encoded) |bytes| .{ .bytes = bytes } else .none;
+    }
+};
+
+const ChosenDelta = struct { slot: usize, bytes: []u8 };
+
+fn findDelta(
+    gpa: Allocator,
+    io: Io,
+    window: []WindowSlot,
+    object_type: object.Type,
+    target: []const u8,
+    options: PackOptions,
+    initial_limit: usize,
+) Error!?ChosenDelta {
+    var chosen: ?ChosenDelta = null;
+    errdefer if (chosen) |c| gpa.free(c.bytes);
+    var limit = initial_limit;
+
+    if (options.threads <= 1) {
+        var at = window.len;
+        while (at != 0 and limit != 0) {
+            at -= 1;
+            const slot = &window[at];
+            if (slot.type != object_type or slot.depth + 1 > options.depth) continue;
+            const candidate = try slot.encoder.encode(gpa, target, .{ .max_bytes = limit }) orelse continue;
+            if (chosen) |c| gpa.free(c.bytes);
+            chosen = .{ .slot = at, .bytes = candidate };
+            limit = candidate.len - 1;
+        }
+        return chosen;
+    }
+
+    const jobs = try gpa.alloc(DeltaJob, @min(@as(usize, options.threads), window.len));
+    defer gpa.free(jobs);
+    var at = window.len;
+    while (at != 0 and limit != 0) {
+        var count: usize = 0;
+        while (at != 0 and count < jobs.len) {
+            at -= 1;
+            const slot = &window[at];
+            if (slot.type != object_type or slot.depth + 1 > options.depth) continue;
+            jobs[count] = .{
+                .gpa = gpa,
+                .encoder = &slot.encoder,
+                .target = target,
+                .limit = limit,
+                .slot = at,
+            };
+            count += 1;
+        }
+        if (count == 0) break;
+
+        var group: Io.Group = .init;
+        for (jobs[0..count]) |*job| {
+            group.concurrent(io, DeltaJob.run, .{job}) catch try job.run();
+        }
+        group.await(io) catch |err| {
+            group.cancel(io);
+            for (jobs[0..count]) |completed| switch (completed.result) {
+                .bytes => |bytes| gpa.free(bytes),
+                else => {},
+            };
+            return err;
+        };
+
+        for (jobs[0..count]) |job| {
+            if (job.result == .failed) {
+                for (jobs[0..count]) |completed| switch (completed.result) {
+                    .bytes => |bytes| gpa.free(bytes),
+                    else => {},
+                };
+                return job.result.failed;
+            }
+        }
+        for (jobs[0..count]) |job| switch (job.result) {
+            .bytes => |candidate| {
+                if (candidate.len >= limit) {
+                    gpa.free(candidate);
+                    continue;
+                }
+                if (chosen) |c| gpa.free(c.bytes);
+                chosen = .{ .slot = job.slot, .bytes = candidate };
+                limit = candidate.len - 1;
+            },
+            else => {},
+        };
+    }
+    return chosen;
+}
 
 /// What a sort puts the objects in order by.
 const Ordered = struct {

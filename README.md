@@ -114,9 +114,11 @@ One module and no dependencies: zlib comes from `std.compress.flate`, SHA-256
 from `std.crypto`, and SHA-1 is in the package, so there is nothing to link
 and no build option to forward. Every function that allocates takes the
 allocator as its first argument and every function that touches the disk takes
-a `std.Io`; the package starts no threads, spawns no process, and never reads
-a clock — the caller passes the time and the identity. One word outlives a
-call without a caller holding it, and it is the answer to which SHA-1
+a `std.Io`; the package starts no threads by default, spawns no process, and
+never reads a clock — the caller passes the time and the identity.
+`PackOptions.threads` above one submits delta searches to the caller's
+concurrency executor. One word outlives a call without a caller holding it,
+and it is the answer to which SHA-1
 instructions this processor has, asked once.
 
 ## The API

@@ -1445,6 +1445,14 @@ test "a deltified pack is read back by git and by this, object for object" {
     // must find something.
     try std.testing.expect(report.deltas > 0);
 
+    // Candidate searches may run concurrently, but their results are
+    // consumed in the same order and therefore produce the same bytes.
+    const parallel = try db.writePack(io, pack_dir, entries.items, .{ .threads = 4 });
+    try std.testing.expect(parallel.name.eql(report.name));
+    try std.testing.expectEqual(report.pack_bytes, parallel.pack_bytes);
+    try std.testing.expectEqual(report.index_bytes, parallel.index_bytes);
+    try std.testing.expectEqual(report.deltas, parallel.deltas);
+
     var hex: [hash.max_hex_len]u8 = undefined;
     const text = report.name.hex(&hex);
     var base_buf: [64]u8 = undefined;

@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- `PackOptions.threads` opts into concurrent delta candidate searches through
+  the caller's `std.Io` executor. Its default of one submits no concurrent
+  work and every count writes the same pack bytes.
+
+### Changed
+
 - Packed inflates retain their positional read buffer across nearby delta
   entries instead of discarding it after every object.
 - Pack writing indexes each delta-window base once and reuses that index for
