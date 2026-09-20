@@ -633,13 +633,14 @@ pub const Config = struct {
                 else
                     try std.fmt.allocPrint(config.gpa, "[{s}]\n", .{split.section});
                 errdefer config.gpa.free(header);
+                const parsed_header = parseSectionHeader(std.mem.trim(u8, header, " \t\r\n")) catch unreachable;
                 try file.lines.append(config.gpa, .{
                     .kind = .section,
                     .text = header,
                     .owned = true,
-                    .section = split.section,
-                    .subsection = split.subsection orelse "",
-                    .has_subsection = split.subsection != null,
+                    .section = parsed_header.section,
+                    .subsection = parsed_header.subsection orelse "",
+                    .has_subsection = parsed_header.subsection != null,
                 });
                 try file.lines.append(config.gpa, new_line);
             }
@@ -1195,6 +1196,22 @@ test "a new value joins its section and a new section is appended" {
         "\tname = Ada Lovelace\n", after);
     try std.testing.expectEqualStrings("input", config.get("core.autocrlf").?);
     try std.testing.expectEqualStrings("Ada Lovelace", config.get("user.name").?);
+}
+
+test "a new section owns its parsed name" {
+    const gpa = std.testing.allocator;
+    var config = try Config.parseText(gpa, "[core]\n\tbare = false\n", .local);
+    defer config.deinit();
+    config.files.items[0].writable = true;
+    const full_name = try gpa.dupe(u8, "fresh.value");
+    try config.set(full_name, "kept");
+    @memset(full_name, 'x');
+    gpa.free(full_name);
+
+    try std.testing.expectEqualStrings("kept", config.get("fresh.value").?);
+    const rendered = try config.renderWritable();
+    defer gpa.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "[fresh]\n\tvalue = kept\n") != null);
 }
 
 test "unsetting removes only the matching lines" {
