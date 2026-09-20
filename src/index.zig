@@ -37,6 +37,9 @@ pub const ReadError = error{
     /// makes it mandatory, and which this release does not implement. The
     /// name is in `unsupported_extension` on the index that refused.
     UnsupportedExtension,
+    /// The `sdir` extension marks a sparse index, whose collapsed directory
+    /// entries this release does not implement.
+    SparseIndexUnsupported,
     /// An entry's mode was not one git writes.
     InvalidMode,
     /// A path that is empty, absolute, or holds a component a working tree
@@ -654,6 +657,9 @@ pub const Index = struct {
                         index.entry_offset_blocks = @intCast((data.len - 4) / 8);
                     }
                 }
+            } else if (std.mem.eql(u8, &signature, "sdir")) {
+                index.unsupported_extension = signature;
+                return error.SparseIndexUnsupported;
             } else if (signature[0] >= 'A' and signature[0] <= 'Z') {
                 const copy = try gpa.dupe(u8, data);
                 index.unknown.append(gpa, .{ .signature = signature, .data = copy }) catch |err| {
@@ -1513,6 +1519,20 @@ test "an unknown mandatory extension is refused by name" {
     const bytes = try index.toBytes(.{});
     defer gpa.free(bytes);
     try std.testing.expectError(error.UnsupportedExtension, Index.parse(gpa, .sha1, bytes));
+}
+
+test "the sparse index extension has its own refusal" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    try index.unknown.append(gpa, .{
+        .signature = "sdir".*,
+        .data = try gpa.dupe(u8, ""),
+    });
+    const fixture = try index.toBytes(.{});
+    defer gpa.free(fixture);
+
+    try std.testing.expectError(error.SparseIndexUnsupported, Index.parse(gpa, .sha1, fixture));
 }
 
 test "a bad checksum is a named error" {
