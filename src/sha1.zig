@@ -671,10 +671,10 @@ test "FIPS 180 test vectors" {
     try testing.expectEqualStrings("34aa973cd4c4daa4f61eeb2bdbad27316534016f", &text);
 }
 
-test "every length from nothing to four kilobytes agrees with the standard library" {
+test "every length from nothing to eight kilobytes agrees with the standard library" {
     var prng: std.Random.DefaultPrng = .init(0x5eed_51a1);
     const random = prng.random();
-    var buf: [4096]u8 = undefined;
+    var buf: [8 * 1024]u8 = undefined;
     random.bytes(&buf);
 
     for (0..buf.len + 1) |len| {

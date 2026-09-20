@@ -259,7 +259,7 @@ versions 2, 3 and 4, the working tree, and diffs.
 - **`repo`** — the front door, which refuses by name any repository extension
   it does not implement.
 
-- **Sixteen fuzz tests**, one per parser, built and run by `zig build test
+- **Eighteen fuzz tests**, one per parser, built and run by `zig build test
   --fuzz` and keeping a corpus each under `.zig-cache/f`. Zig 0.16.0's
   fuzzing test runner hands `@errorReturnTrace()`'s
   `std.builtin.StackTrace` to a function taking `std.debug.StackTrace`, two
