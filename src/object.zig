@@ -265,6 +265,8 @@ pub const Tree = struct {
             /// A name that is empty, holds `/` or NUL, or is one a working
             /// tree must never be asked to create.
             InvalidEntryName,
+            /// The object name uses a different hash format from the tree.
+            ObjectFormatMismatch,
         };
 
         /// A builder for a tree of `kind` object names.
@@ -281,6 +283,7 @@ pub const Tree = struct {
 
         /// Add one entry. `name` is copied.
         pub fn add(b: *Builder, mode: Mode, name: []const u8, oid: Oid) AddError!void {
+            if (oid.kind != b.kind) return error.ObjectFormatMismatch;
             if (name.len == 0) return error.InvalidEntryName;
             if (std.mem.indexOfScalar(u8, name, '/') != null) return error.InvalidEntryName;
             if (std.mem.indexOfScalar(u8, name, 0) != null) return error.InvalidEntryName;
@@ -414,6 +417,16 @@ test "a malformed timezone is not silently UTC" {
     try std.testing.expectError(
         error.InvalidSignatureTime,
         Signature.parse("Ada <a@b> 1 +0x00"),
+    );
+}
+
+test "a tree builder refuses an object name from another hash format" {
+    const gpa = std.testing.allocator;
+    var builder: Tree.Builder = .init(gpa, .sha256);
+    defer builder.deinit();
+    try std.testing.expectError(
+        error.ObjectFormatMismatch,
+        builder.add(.file, "file.txt", Oid.zero(.sha1)),
     );
 }
 
