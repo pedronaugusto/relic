@@ -988,7 +988,10 @@ pub const Odb = struct {
 
         var window: std.ArrayList(WindowSlot) = .empty;
         defer {
-            for (window.items) |slot| gpa.free(slot.bytes);
+            for (window.items) |*slot| {
+                slot.encoder.deinit(gpa);
+                gpa.free(slot.bytes);
+            }
             window.deinit(gpa);
         }
         var window_bytes: usize = 0;
@@ -1016,7 +1019,7 @@ pub const Odb = struct {
                     const slot = &window.items[at];
                     if (slot.type != found.type) continue;
                     if (slot.depth + 1 > options.depth) continue;
-                    const candidate = try delta_mod.encode(gpa, slot.bytes, bytes, .{ .max_bytes = limit }) orelse continue;
+                    const candidate = try slot.encoder.encode(gpa, bytes, .{ .max_bytes = limit }) orelse continue;
                     if (chosen) |c| gpa.free(c.bytes);
                     chosen = .{ .slot = at, .bytes = candidate };
                     limit = candidate.len - 1;
@@ -1035,22 +1038,26 @@ pub const Odb = struct {
             } else try writer.add(item.oid, found.type, bytes);
 
             if (deltifiable) {
-                keep = true;
+                var encoder = try delta_mod.Encoder.init(gpa, bytes);
+                errdefer encoder.deinit(gpa);
                 try window.append(gpa, .{
                     .oid = item.oid,
                     .type = found.type,
                     .bytes = bytes,
                     .offset = offset,
                     .depth = depth,
+                    .encoder = encoder,
                 });
+                keep = true;
                 window_bytes += bytes.len;
                 // The oldest go first, by count and then by weight, so the
                 // window is a bound on memory and not only on work.
                 while (window.items.len > options.window or
                     (window.items.len > 1 and window_bytes > options.window_bytes))
                 {
-                    const oldest = window.orderedRemove(0);
+                    var oldest = window.orderedRemove(0);
                     window_bytes -= oldest.bytes.len;
+                    oldest.encoder.deinit(gpa);
                     gpa.free(oldest.bytes);
                 }
                 bytes = &.{};
@@ -1595,6 +1602,7 @@ const WindowSlot = struct {
     bytes: []u8,
     offset: u64,
     depth: u32,
+    encoder: delta_mod.Encoder,
 };
 
 /// What a sort puts the objects in order by.

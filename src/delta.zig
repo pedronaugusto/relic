@@ -192,45 +192,76 @@ pub fn encode(
     target: []const u8,
     options: EncodeOptions,
 ) Allocator.Error!?[]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    try writeSizeTo(gpa, &out, base.len);
-    try writeSizeTo(gpa, &out, target.len);
+    var encoder = try Encoder.init(gpa, base);
+    defer encoder.deinit(gpa);
+    return encoder.encode(gpa, target, options);
+}
 
-    var index = try Index.build(gpa, base);
-    defer index.deinit(gpa);
+/// A base indexed once for several delta searches.
+///
+/// A pack window tries several targets against the same base. Keeping this
+/// value beside that base avoids rebuilding its sixteen-byte-block index for
+/// every comparison. `base` must outlive the encoder.
+pub const Encoder = struct {
+    base: []const u8,
+    index: Index,
 
-    var pending_at: usize = 0;
-    var at: usize = 0;
-    while (at < target.len) {
-        const found = index.longestAt(base, target, at);
-        if (found.len < match_len) {
-            at += 1;
-            continue;
+    /// Index `base` for later searches.
+    pub fn init(gpa: Allocator, base: []const u8) Allocator.Error!Encoder {
+        return .{ .base = base, .index = try .build(gpa, base) };
+    }
+
+    /// Release the base index. The base itself remains the caller's.
+    pub fn deinit(encoder: *Encoder, gpa: Allocator) void {
+        encoder.index.deinit(gpa);
+        encoder.* = undefined;
+    }
+
+    /// Encode `target` against the indexed base, or return `null` at the
+    /// configured size limit. The result is the caller's.
+    pub fn encode(
+        encoder: *const Encoder,
+        gpa: Allocator,
+        target: []const u8,
+        options: EncodeOptions,
+    ) Allocator.Error!?[]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        try writeSizeTo(gpa, &out, encoder.base.len);
+        try writeSizeTo(gpa, &out, target.len);
+
+        var pending_at: usize = 0;
+        var at: usize = 0;
+        while (at < target.len) {
+            const found = encoder.index.longestAt(encoder.base, target, at);
+            if (found.len < match_len) {
+                at += 1;
+                continue;
+            }
+            try flushInsert(gpa, &out, target[pending_at..at]);
+            var left = found.len;
+            var from = found.at;
+            while (left != 0) {
+                const chunk = @min(left, max_copy);
+                try emitCopy(gpa, &out, @intCast(from), @intCast(chunk));
+                from += chunk;
+                left -= chunk;
+            }
+            at += found.len;
+            pending_at = at;
+            if (options.max_bytes != 0 and out.items.len >= options.max_bytes) {
+                out.deinit(gpa);
+                return null;
+            }
         }
-        try flushInsert(gpa, &out, target[pending_at..at]);
-        var left = found.len;
-        var from = found.at;
-        while (left != 0) {
-            const chunk = @min(left, max_copy);
-            try emitCopy(gpa, &out, @intCast(from), @intCast(chunk));
-            from += chunk;
-            left -= chunk;
-        }
-        at += found.len;
-        pending_at = at;
+        try flushInsert(gpa, &out, target[pending_at..]);
         if (options.max_bytes != 0 and out.items.len >= options.max_bytes) {
             out.deinit(gpa);
             return null;
         }
+        return try out.toOwnedSlice(gpa);
     }
-    try flushInsert(gpa, &out, target[pending_at..]);
-    if (options.max_bytes != 0 and out.items.len >= options.max_bytes) {
-        out.deinit(gpa);
-        return null;
-    }
-    return try out.toOwnedSlice(gpa);
-}
+};
 
 fn writeSizeTo(gpa: Allocator, out: *std.ArrayList(u8), size: usize) Allocator.Error!void {
     var value = size;

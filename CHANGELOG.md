@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+- Pack writing indexes each delta-window base once and reuses that index for
+  every candidate search.
 - Packed reads keep resolved delta bases in a byte-bounded
   least-recently-used cache, so small bases no longer collide in a fixed-size
   table.
