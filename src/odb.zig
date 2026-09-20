@@ -1726,7 +1726,6 @@ test "a streamed object is the same object" {
 }
 
 test "a stream whose installation fails remains abortable" {
-    if (!Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -1736,17 +1735,22 @@ test "a stream whose installation fails remains abortable" {
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
 
+    // A regular file where the fan-out directory of `hello\n` (ce01...)
+    // has to go. The install then fails for every user on every platform:
+    // a read-only directory would not stop root, and CI runs the oldest
+    // git in a container as root.
+    try tmp.dir.writeFile(io, .{ .sub_path = "objects/ce", .data = "" });
+
     var stream: Odb.Stream = undefined;
     try odb.writeStream(io, .blob, 6, &stream);
+    // Released on every path: a stream that was installed after all must
+    // not leak its buffers on the way to the failure report.
+    defer stream.deinit(io);
     try stream.write("hello\n");
-    try tmp.dir.setFilePermissions(io, "objects", @enumFromInt(@as(std.posix.mode_t, 0o555)), .{});
-    const result = stream.finish(io);
-    try tmp.dir.setFilePermissions(io, "objects", @enumFromInt(@as(std.posix.mode_t, 0o755)), .{});
-    if (result) |_| return error.TestExpectedError else |err| switch (err) {
-        error.AccessDenied, error.PermissionDenied => {},
+    if (stream.finish(io)) |_| return error.TestExpectedError else |err| switch (err) {
+        error.NotDir, error.FileNotFound, error.PathAlreadyExists, error.AccessDenied, error.PermissionDenied => {},
         else => return err,
     }
-    stream.deinit(io);
 
     var it = odb.sources.items[0].dir.iterate();
     while (try it.next(io)) |entry| {
