@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
         .message = "first commit\n",
     });
 
-    // Move the branch and write the reflog, both or neither.
+    // Move the branch under its lock, then append the reflog.
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.update("refs/heads/main", .{ .direct = commit }, .must_not_exist);
