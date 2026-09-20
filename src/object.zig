@@ -392,7 +392,7 @@ pub const Signature = struct {
         if (space < rest.len) {
             var zone = rest[space + 1 ..];
             while (zone.len > 0 and zone[zone.len - 1] == ' ') zone = zone[0 .. zone.len - 1];
-            offset = parseOffset(zone) catch 0;
+            offset = try parseOffset(zone);
         }
         return .{ .name = name, .email = email, .when_secs = secs, .offset_minutes = offset };
     }
@@ -409,6 +409,13 @@ pub const Signature = struct {
         return sign * (hours * 60 + minutes);
     }
 };
+
+test "a malformed timezone is not silently UTC" {
+    try std.testing.expectError(
+        error.InvalidSignatureTime,
+        Signature.parse("Ada <a@b> 1 +0x00"),
+    );
+}
 
 /// A header a commit or a tag carries that this package does not interpret.
 ///
