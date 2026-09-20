@@ -797,30 +797,29 @@ pub const Pack = struct {
 /// A byte-capped store of resolved delta bases.
 ///
 /// Without it, every object in a chain re-resolves its whole chain and a walk
-/// over a pack is quadratic. The table is direct-mapped on the low bits of
-/// the pack offset — no hashing, no search, and a collision simply
-/// overwrites — with a byte budget swept oldest-first. It is the cheapest
-/// shape in the field and it is also the fastest one. This is the only cache
-/// in the package apart from the pack indexes themselves.
+/// over a pack is quadratic. Entries are keyed by pack and offset and kept in
+/// least-recently-used order, so the byte limit rather than a fixed slot count
+/// decides how many small bases survive. This is the only cache in the package
+/// apart from the pack indexes themselves.
 pub const Cache = struct {
     gpa: Allocator,
     limit_bytes: usize,
     bytes: usize = 0,
-    slots: []Slot,
-    /// Insertion order, for the byte sweep.
-    order: std.ArrayList(u32) = .empty,
-    clock: u32 = 0,
+    entries: std.AutoHashMapUnmanaged(Key, *Entry) = .empty,
+    oldest: ?*Entry = null,
+    newest: ?*Entry = null,
 
-    /// How many slots the table has. A power of two so the index is a mask.
-    pub const slot_count = 1024;
+    const Key = struct {
+        pack: u32,
+        offset: u64,
+    };
 
-    const Slot = struct {
-        used: bool = false,
-        pack: u32 = 0,
-        offset: u64 = 0,
-        seq: u32 = 0,
-        type: object.Type = .blob,
-        bytes: []u8 = &.{},
+    const Entry = struct {
+        key: Key,
+        type: object.Type,
+        bytes: []u8,
+        older: ?*Entry = null,
+        newer: ?*Entry = null,
     };
 
     /// What `get` hands back. Borrowed until the next `put`.
@@ -828,95 +827,109 @@ pub const Cache = struct {
 
     /// A cache holding at most `limit_bytes` of resolved objects.
     pub fn init(gpa: Allocator, limit_bytes: usize) Allocator.Error!Cache {
-        const slots = try gpa.alloc(Slot, slot_count);
-        @memset(slots, .{});
-        return .{ .gpa = gpa, .limit_bytes = limit_bytes, .slots = slots };
+        return .{ .gpa = gpa, .limit_bytes = limit_bytes };
     }
 
     /// Release everything held.
     pub fn deinit(c: *Cache) void {
-        for (c.slots) |slot| {
-            if (slot.used) c.gpa.free(slot.bytes);
+        var entry = c.oldest;
+        while (entry) |current| {
+            entry = current.newer;
+            c.gpa.free(current.bytes);
+            c.gpa.destroy(current);
         }
-        c.gpa.free(c.slots);
-        c.order.deinit(c.gpa);
+        c.entries.deinit(c.gpa);
         c.* = undefined;
-    }
-
-    fn slotFor(pack_id: u32, offset: u64) u32 {
-        // The low bits of a pack offset are as good a spread as a hash and
-        // cost nothing; the pack id joins them so two packs do not collide
-        // systematically.
-        return @intCast((offset ^ (@as(u64, pack_id) << 24)) & (slot_count - 1));
     }
 
     /// The object cached for `offset` in pack `pack_id`, or `null`.
     pub fn get(c: *Cache, pack_id: u32, offset: u64) ?Hit {
-        const slot = &c.slots[slotFor(pack_id, offset)];
-        if (!slot.used or slot.pack != pack_id or slot.offset != offset) return null;
-        return .{ .type = slot.type, .bytes = slot.bytes };
+        const entry = c.entries.get(.{ .pack = pack_id, .offset = offset }) orelse return null;
+        c.touch(entry);
+        return .{ .type = entry.type, .bytes = entry.bytes };
     }
 
     /// Keep a copy of `bytes`. An object larger than the whole cache is not
     /// kept, rather than emptying it.
     pub fn put(c: *Cache, pack_id: u32, offset: u64, t: object.Type, bytes: []const u8) Allocator.Error!void {
         if (c.limit_bytes == 0 or bytes.len > c.limit_bytes) return;
-        const index = slotFor(pack_id, offset);
-        const slot = &c.slots[index];
-        if (slot.used and slot.pack == pack_id and slot.offset == offset) return;
-
-        while (c.bytes + bytes.len > c.limit_bytes and c.order.items.len > 0) {
-            const oldest = c.order.orderedRemove(0);
-            const victim = &c.slots[oldest];
-            if (victim.used) {
-                c.bytes -= victim.bytes.len;
-                c.gpa.free(victim.bytes);
-                victim.* = .{};
-            }
+        const key: Key = .{ .pack = pack_id, .offset = offset };
+        if (c.entries.get(key)) |entry| {
+            c.touch(entry);
+            return;
         }
+
+        while (c.bytes + bytes.len > c.limit_bytes) c.evictOldest();
 
         const copy = try c.gpa.dupe(u8, bytes);
         errdefer c.gpa.free(copy);
-        if (slot.used) {
-            c.bytes -= slot.bytes.len;
-            c.gpa.free(slot.bytes);
-            c.removeFromOrder(index);
-        }
-        try c.order.append(c.gpa, index);
-        c.clock += 1;
-        slot.* = .{
-            .used = true,
-            .pack = pack_id,
-            .offset = offset,
-            .seq = c.clock,
+        const entry = try c.gpa.create(Entry);
+        errdefer c.gpa.destroy(entry);
+        entry.* = .{
+            .key = key,
             .type = t,
             .bytes = copy,
+            .older = c.newest,
         };
+        try c.entries.put(c.gpa, key, entry);
+        if (c.newest) |newest| newest.newer = entry else c.oldest = entry;
+        c.newest = entry;
         c.bytes += copy.len;
     }
 
-    fn removeFromOrder(c: *Cache, index: u32) void {
-        for (c.order.items, 0..) |value, at| {
-            if (value == index) {
-                _ = c.order.orderedRemove(at);
-                return;
-            }
-        }
+    fn touch(c: *Cache, entry: *Entry) void {
+        if (c.newest == entry) return;
+        if (entry.older) |older| older.newer = entry.newer else c.oldest = entry.newer;
+        if (entry.newer) |newer| newer.older = entry.older;
+        entry.older = c.newest;
+        entry.newer = null;
+        if (c.newest) |newest| newest.newer = entry else c.oldest = entry;
+        c.newest = entry;
+    }
+
+    fn evictOldest(c: *Cache) void {
+        const entry = c.oldest orelse return;
+        c.oldest = entry.newer;
+        if (c.oldest) |oldest| oldest.older = null else c.newest = null;
+        _ = c.entries.remove(entry.key);
+        c.bytes -= entry.bytes.len;
+        c.gpa.free(entry.bytes);
+        c.gpa.destroy(entry);
     }
 
     /// Forget everything. Used when a pack directory is re-scanned, because
     /// pack ids move.
     pub fn clear(c: *Cache) void {
-        for (c.slots) |*slot| {
-            if (slot.used) {
-                c.gpa.free(slot.bytes);
-                slot.* = .{};
-            }
+        var entry = c.oldest;
+        while (entry) |current| {
+            entry = current.newer;
+            c.gpa.free(current.bytes);
+            c.gpa.destroy(current);
         }
-        c.order.clearRetainingCapacity();
+        c.entries.clearRetainingCapacity();
+        c.oldest = null;
+        c.newest = null;
         c.bytes = 0;
     }
 };
+
+test "the delta cache is byte-bounded and least recently used" {
+    const gpa = std.testing.allocator;
+    var cache = try Cache.init(gpa, 6);
+    defer cache.deinit();
+
+    try cache.put(0, 10, .blob, "aa");
+    try cache.put(0, 20, .blob, "bb");
+    try cache.put(0, 30, .blob, "cc");
+    try std.testing.expectEqualStrings("aa", cache.get(0, 10).?.bytes);
+    try cache.put(0, 40, .blob, "dd");
+
+    try std.testing.expect(cache.get(0, 20) == null);
+    try std.testing.expectEqualStrings("aa", cache.get(0, 10).?.bytes);
+    try std.testing.expectEqualStrings("cc", cache.get(0, 30).?.bytes);
+    try std.testing.expectEqualStrings("dd", cache.get(0, 40).?.bytes);
+    try std.testing.expectEqual(@as(usize, 6), cache.bytes);
+}
 
 test "a version 1 index is refused by name" {
     const gpa = std.testing.allocator;

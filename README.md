@@ -366,10 +366,11 @@ fixture repository is.
 the peak is bounded by the operation and the free is one call. What outlives
 an operation is held by the object database: the pack indexes, read whole at
 open so a lookup costs no syscall; the multi-pack index, when there is one,
-for the same reason; the delta base cache, a direct-mapped table on the pack
-offset with a byte budget named in `Odb.Options`; one deflate window, which
-is sixty-four kilobytes and is taken at `open` whether or not anything is
-written; and, once a database has written anything, one deflate state and one
+for the same reason; the delta base cache, keyed by pack offset and kept in
+least-recently-used order under a byte budget named in `Odb.Options`; one
+deflate window, which is sixty-four kilobytes and is taken at `open` whether or
+not anything is written; and, once a database has written anything, one
+deflate state and one
 output buffer, the state being two hundred and twenty-four kilobytes, because
 a cold `addAll` writes one object per file. A database that is only read takes
 neither of those two. Writing a pack adds

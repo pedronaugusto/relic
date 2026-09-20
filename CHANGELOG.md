@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+- Packed reads keep resolved delta bases in a byte-bounded
+  least-recently-used cache, so small bases no longer collide in a fixed-size
+  table.
 - Sparse checkout preserves files whose matching stat is too recent to trust but whose content changed.
 - Checkout handles tracked directory/file transitions and refuses untracked collisions before changing the worktree.
 - Ref transactions document that commit-time I/O failure may leave an installed prefix that callers must reread.
