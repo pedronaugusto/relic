@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+- Packed inflates retain their positional read buffer across nearby delta
+  entries instead of discarding it after every object.
 - Pack writing indexes each delta-window base once and reuses that index for
   every candidate search.
 - Packed reads keep resolved delta bases in a byte-bounded

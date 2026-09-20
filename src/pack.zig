@@ -384,6 +384,7 @@ pub const Pack = struct {
     /// a delta chain is resolved one entry after another, so one window does.
     window: []u8,
     input_buffer: []u8,
+    file_reader: Io.File.Reader,
 
     /// Open `<base>.pack` and `<base>.idx` in `dir`.
     ///
@@ -449,7 +450,7 @@ pub const Pack = struct {
         const input_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(input_buffer);
 
-        return .{
+        var p: Pack = .{
             .gpa = gpa,
             .kind = kind,
             .file = file,
@@ -462,7 +463,10 @@ pub const Pack = struct {
             .max_chain_bytes = options.max_chain_bytes,
             .window = window,
             .input_buffer = input_buffer,
+            .file_reader = undefined,
         };
+        p.file_reader = file.reader(io, input_buffer);
+        return p;
     }
 
     /// Close the pack and release everything it holds.
@@ -567,21 +571,19 @@ pub const Pack = struct {
 
     /// Inflate `size` bytes of the zlib stream at `at`. The result is the
     /// caller's.
-    fn inflateAt(p: *Pack, io: Io, at: u64, size: u64) Error![]u8 {
+    fn inflateAt(p: *Pack, at: u64, size: u64) Error![]u8 {
         if (size > delta.max_result_bytes) return error.PackEntrySizeMismatch;
         const out = try p.gpa.alloc(u8, @intCast(size));
         errdefer p.gpa.free(out);
 
         var fixed_reader: Io.Reader = undefined;
-        var file_reader: Io.File.Reader = undefined;
         const input: *Io.Reader = if (p.memory) |mem| blk: {
             if (at > mem.len) return error.TruncatedPack;
             fixed_reader = .fixed(mem[@intCast(at)..]);
             break :blk &fixed_reader;
         } else blk: {
-            file_reader = p.file.reader(io, p.input_buffer);
-            file_reader.seekTo(at) catch return error.TruncatedPack;
-            break :blk &file_reader.interface;
+            p.file_reader.seekTo(at) catch return error.TruncatedPack;
+            break :blk &p.file_reader.interface;
         };
 
         var decompress: flate.Decompress = .init(input, .zlib, p.window);
@@ -616,7 +618,7 @@ pub const Pack = struct {
             const header = try p.entryHeaderAt(io, current);
             switch (header.kind) {
                 .object => |t| {
-                    base_bytes = try p.inflateAt(io, header.data_at, header.size);
+                    base_bytes = try p.inflateAt(header.data_at, header.size);
                     base_type = t;
                     break;
                 },
@@ -648,7 +650,7 @@ pub const Pack = struct {
             i -= 1;
             const delta_offset = chain.items[i];
             const header = try p.entryHeaderAt(io, delta_offset);
-            const delta_bytes = try p.inflateAt(io, header.data_at, header.size);
+            const delta_bytes = try p.inflateAt(header.data_at, header.size);
             defer p.gpa.free(delta_bytes);
             const applied = try delta.apply(p.gpa, base_bytes, delta_bytes);
             p.gpa.free(base_bytes);
@@ -675,7 +677,7 @@ pub const Pack = struct {
                 .object => |t| return .{ .type = t, .size = size orelse header.size },
                 .ofs_delta, .ref_delta => {
                     if (size == null) {
-                        const head = try p.inflateHead(io, header.data_at, header.size);
+                        const head = try p.inflateHead(header.data_at, header.size);
                         const sizes = try delta.header(&head);
                         size = sizes.target;
                     }
@@ -700,19 +702,17 @@ pub const Pack = struct {
     /// That is enough for a delta's two size varints — ten bytes each at the
     /// widest — so the type and the true expanded size of a deltified object
     /// come back with nothing materialised.
-    fn inflateHead(p: *Pack, io: Io, at: u64, size: u64) Error![20]u8 {
+    fn inflateHead(p: *Pack, at: u64, size: u64) Error![20]u8 {
         var out: [20]u8 = @splat(0);
         const want: usize = @intCast(@min(size, out.len));
         var fixed_reader: Io.Reader = undefined;
-        var file_reader: Io.File.Reader = undefined;
         const input: *Io.Reader = if (p.memory) |mem| blk: {
             if (at > mem.len) return error.TruncatedPack;
             fixed_reader = .fixed(mem[@intCast(at)..]);
             break :blk &fixed_reader;
         } else blk: {
-            file_reader = p.file.reader(io, p.input_buffer);
-            file_reader.seekTo(at) catch return error.TruncatedPack;
-            break :blk &file_reader.interface;
+            p.file_reader.seekTo(at) catch return error.TruncatedPack;
+            break :blk &p.file_reader.interface;
         };
         var decompress: flate.Decompress = .init(input, .zlib, p.window);
         decompress.reader.readSliceAll(out[0..want]) catch return error.CorruptPackEntry;
