@@ -1207,9 +1207,31 @@ pub fn applySparse(
         const included = patterns.includes(entry.path, false);
         if (!included and !entry.skip_worktree) {
             if (try fs.statAt(io, wt, entry.path)) |found| {
-                if (!entry.stat.matches(found.stat, options.rules.check_stat, options.rules.timestamp_resolution)) {
-                    outcome.kept_dirty += 1;
-                    continue;
+                const must_check_content = index.isRacy(entry.*) or
+                    !entry.stat.matches(found.stat, options.rules.check_stat, options.rules.timestamp_resolution);
+                if (must_check_content) {
+                    _ = scratch.reset(.retain_capacity);
+                    const a = scratch.allocator();
+                    const raw = if (found.kind == .sym_link) blk: {
+                        var buf: [4096]u8 = undefined;
+                        const len = try wt.readLink(io, entry.path, &buf);
+                        break :blk try a.dupe(u8, buf[0..len]);
+                    } else try fs.readFileSized(a, io, wt, entry.path, found.stat.size, 1 << 31);
+                    var content: []const u8 = raw;
+                    if (options.rules.attrs) |attrs| {
+                        if (found.kind != .sym_link) {
+                            const applied = try attrs.lookup(a, entry.path, false);
+                            if (attributes.unsupported(applied, options.rules.required_filters)) |_| {
+                                return error.UnsupportedAttribute;
+                            }
+                            const converted = try attributes.toGit(a, raw, applied, options.rules.core);
+                            content = converted.bytes;
+                        }
+                    }
+                    if (!hash.Hasher.object(db.kind, "blob", content).eql(entry.oid)) {
+                        outcome.kept_dirty += 1;
+                        continue;
+                    }
                 }
                 wt.deleteFile(io, entry.path) catch |err| switch (err) {
                     error.FileNotFound, error.NotDir, error.IsDir => {},

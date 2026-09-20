@@ -13,6 +13,7 @@ const worktree = @import("worktree.zig");
 const ignore = @import("ignore.zig");
 const attributes = @import("attributes.zig");
 const fs = @import("fs.zig");
+const sparse = @import("sparse.zig");
 
 const Oid = hash.Oid;
 
@@ -174,6 +175,35 @@ test "the racy rule notices a file rewritten inside one second" {
 
     const expected = hash.Hasher.object(.sha1, "blob", "BBBB\n");
     try std.testing.expect(after.eql(expected));
+}
+
+test "sparse checkout keeps a racily clean modified file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+
+    try h.repo.writeFile(io, "outside.txt", "AAAA\n");
+    _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    try h.index.write(io, h.git_dir, "index", .{});
+    try h.reload(gpa, io);
+
+    try h.repo.writeFile(io, "outside.txt", "BBBB\n");
+    const found = (try fs.statAt(io, h.repo.dir, "outside.txt")).?;
+    // Model the ambiguous same-size, same-timestamp observation which the
+    // racy-index rule requires callers to verify by content.
+    h.index.find("outside.txt").?.stat = found.stat;
+    h.index.racy_cutoff_sec = found.stat.mtime_sec;
+    h.index.racy_cutoff_nsec = found.stat.mtime_nsec;
+
+    var patterns = try sparse.Patterns.init(gpa, false);
+    defer patterns.deinit();
+    const out = try worktree.applySparse(gpa, io, h.repo.dir, &h.index, &h.db, &patterns, .{});
+
+    try std.testing.expectEqual(@as(u32, 1), out.kept_dirty);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("BBBB\n", try h.repo.dir.readFile(io, "outside.txt", &buf));
+    try std.testing.expect(!h.index.find("outside.txt").?.skip_worktree);
 }
 
 test "a deletion is staged and the cache tree stays true" {
