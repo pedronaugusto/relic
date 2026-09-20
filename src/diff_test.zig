@@ -144,6 +144,35 @@ test "the unified patch is byte for byte what git prints" {
     }
 }
 
+fn setupGitlink(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000," ++ "1" ** 40 ++ ",vendor/lib" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    try repo.exec(io, &.{ "update-index", "--cacheinfo", "160000," ++ "2" ** 40 ++ ",vendor/lib" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
+}
+
+test "gitlink counts and patch text agree with git" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(gpa, io, setupGitlink);
+    defer pair.deinit(io, gpa);
+    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    defer changes.deinit();
+    try std.testing.expectEqual(@as(usize, 1), changes.items.len);
+
+    const counts = try diff.numstat(gpa, io, &pair.db, changes.items, .{});
+    defer gpa.free(counts);
+    try std.testing.expectEqual(@as(u32, 1), counts[0].plus);
+    try std.testing.expectEqual(@as(u32, 1), counts[0].minus);
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try diff.unified(gpa, io, &out.writer, &pair.db, changes.items[0], .{});
+    const expected = try pair.repo.run(io, &.{ "diff", "--no-color", "-U3", pair.old_text, pair.new_text, "--", "vendor/lib" });
+    defer gpa.free(expected);
+    try std.testing.expectEqualStrings(expected, out.written());
+}
+
 fn setupSource(repo: *testgit.Repo, io: Io) anyerror!void {
     const before =
         "const std = @import(\"std\");\n" ++
