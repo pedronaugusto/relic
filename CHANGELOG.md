@@ -14,6 +14,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Clean status avoids materializing unchanged result entries, and repository
+  index reads reuse the timestamp resolution measured at open.
 - Packed inflates retain their positional read buffer across nearby delta
   entries instead of discarding it after every object.
 - Pack writing indexes each delta-window base once and reuses that index for

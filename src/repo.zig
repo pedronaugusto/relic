@@ -480,7 +480,15 @@ pub const Repository = struct {
 
     /// Open the repository's own index.
     pub fn openIndex(repo: *Repository, io: Io) index_mod.ReadError!index_mod.Index {
-        return index_mod.Index.read(repo.gpa, io, repo.git_dir, "index", repo.common_dir, repo.kind);
+        return index_mod.Index.readWithResolution(
+            repo.gpa,
+            io,
+            repo.git_dir,
+            "index",
+            repo.common_dir,
+            repo.kind,
+            repo.odb.timestamp_resolution,
+        );
     }
 
     /// Open an index anywhere.

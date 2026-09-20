@@ -557,6 +557,36 @@ pub const Index = struct {
         git_dir: Io.Dir,
         kind: Kind,
     ) ReadError!Index {
+        return readImpl(gpa, io, dir, sub_path, git_dir, kind, null);
+    }
+
+    /// Read an index using a timestamp resolution already measured for
+    /// `dir`'s filesystem.
+    ///
+    /// A repository uses this after its object database measured the same
+    /// filesystem at open. A caller without such a measurement uses `read`,
+    /// which takes one itself.
+    pub fn readWithResolution(
+        gpa: Allocator,
+        io: Io,
+        dir: Io.Dir,
+        sub_path: []const u8,
+        git_dir: Io.Dir,
+        kind: Kind,
+        timestamp_resolution: fs.Resolution,
+    ) ReadError!Index {
+        return readImpl(gpa, io, dir, sub_path, git_dir, kind, timestamp_resolution);
+    }
+
+    fn readImpl(
+        gpa: Allocator,
+        io: Io,
+        dir: Io.Dir,
+        sub_path: []const u8,
+        git_dir: Io.Dir,
+        kind: Kind,
+        timestamp_resolution: ?fs.Resolution,
+    ) ReadError!Index {
         const bytes = (try fs.readFileAlloc(gpa, io, dir, sub_path, 1 << 31)) orelse
             return initEmpty(gpa, kind);
         defer gpa.free(bytes);
@@ -573,7 +603,7 @@ pub const Index = struct {
         // of the filesystem, and it is measured rather than assumed. It is
         // measured here because this is where the cutoff is taken and
         // because it is the filesystem the cutoff came from.
-        index.timestamp_resolution = fs.probeTimestampResolution(io, dir);
+        index.timestamp_resolution = timestamp_resolution orelse fs.probeTimestampResolution(io, dir);
 
         if (index.split_base) |base| {
             try index.mergeShared(gpa, io, git_dir, base);

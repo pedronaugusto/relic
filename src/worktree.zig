@@ -601,6 +601,7 @@ pub fn status(
                 .type_changed;
             break :blk .unmodified;
         };
+        if (staged == .unmodified) continue;
         const slot = try entries.getOrPut(arena, try arena.dupe(u8, entry.path));
         slot.value_ptr.* = .{
             .path = slot.key_ptr.*,
