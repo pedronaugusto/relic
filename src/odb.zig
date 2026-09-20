@@ -716,6 +716,7 @@ pub const Odb = struct {
         window: []u8,
         out_buffer: []u8,
         remaining: u64,
+        file_open: bool = true,
         finished: bool = false,
 
         /// Where the object's bytes go.
@@ -758,7 +759,7 @@ pub const Odb = struct {
                 .batch, .per_file => try s.file.sync(io),
             }
             s.file.close(io);
-            s.finished = true;
+            s.file_open = false;
 
             const oid = s.hasher.final();
             if (s.hasher.collisionAttack()) return error.CollisionAttack;
@@ -774,6 +775,7 @@ pub const Odb = struct {
                 s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
                 return err;
             };
+            s.finished = true;
             if (s.odb.options.sync_directories) try fs.syncDir(io, s.dir);
             return oid;
         }
@@ -781,7 +783,7 @@ pub const Odb = struct {
         /// Give up, leaving the database as it was.
         pub fn abort(s: *Stream, io: Io) void {
             if (!s.finished) {
-                s.file.close(io);
+                if (s.file_open) s.file.close(io);
                 s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
                 s.finished = true;
             }
@@ -1721,4 +1723,33 @@ test "a streamed object is the same object" {
     const found = try odb.read(io, oid);
     defer gpa.free(found.bytes);
     try std.testing.expectEqualStrings("hello\n", found.bytes);
+}
+
+test "a stream whose installation fails remains abortable" {
+    if (!Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
+    defer odb.deinit(io);
+
+    var stream: Odb.Stream = undefined;
+    try odb.writeStream(io, .blob, 6, &stream);
+    try stream.write("hello\n");
+    try tmp.dir.setFilePermissions(io, "objects", @enumFromInt(@as(std.posix.mode_t, 0o555)), .{});
+    const result = stream.finish(io);
+    try tmp.dir.setFilePermissions(io, "objects", @enumFromInt(@as(std.posix.mode_t, 0o755)), .{});
+    if (result) |_| return error.TestExpectedError else |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => {},
+        else => return err,
+    }
+    stream.deinit(io);
+
+    var it = odb.sources.items[0].dir.iterate();
+    while (try it.next(io)) |entry| {
+        try std.testing.expect(!std.mem.startsWith(u8, entry.name, "tmp_obj_"));
+    }
 }
