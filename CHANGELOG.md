@@ -20,6 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entries instead of discarding it after every object.
 - Pack writing indexes each delta-window base once and reuses that index for
   every candidate search.
+- Single-thread pack delta search filters impossible size and depth candidates
+  before indexing a base and rolls its target hash forward one byte at a time.
+  On the 35,512-object pack fixture this moved 9.82 seconds to 9.36 seconds;
+  the resulting pack is 18,691,709 bytes.
 - Packed reads keep resolved delta bases in a byte-bounded
   least-recently-used cache, so small bases no longer collide in a fixed-size
   table.

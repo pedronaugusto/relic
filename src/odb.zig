@@ -994,7 +994,7 @@ pub const Odb = struct {
         var window: std.ArrayList(WindowSlot) = .empty;
         defer {
             for (window.items) |*slot| {
-                slot.encoder.deinit(gpa);
+                if (slot.encoder) |*encoder| encoder.deinit(gpa);
                 gpa.free(slot.bytes);
             }
             window.deinit(gpa);
@@ -1033,15 +1033,13 @@ pub const Odb = struct {
             } else try writer.add(item.oid, found.type, bytes);
 
             if (deltifiable) {
-                var encoder = try delta_mod.Encoder.init(gpa, bytes);
-                errdefer encoder.deinit(gpa);
                 try window.append(gpa, .{
                     .oid = item.oid,
                     .type = found.type,
                     .bytes = bytes,
                     .offset = offset,
                     .depth = depth,
-                    .encoder = encoder,
+                    .encoder = null,
                 });
                 keep = true;
                 window_bytes += bytes.len;
@@ -1052,7 +1050,7 @@ pub const Odb = struct {
                 {
                     var oldest = window.orderedRemove(0);
                     window_bytes -= oldest.bytes.len;
-                    oldest.encoder.deinit(gpa);
+                    if (oldest.encoder) |*encoder| encoder.deinit(gpa);
                     gpa.free(oldest.bytes);
                 }
                 bytes = &.{};
@@ -1602,7 +1600,14 @@ const WindowSlot = struct {
     bytes: []u8,
     offset: u64,
     depth: u32,
-    encoder: delta_mod.Encoder,
+    /// Built on the first candidate search that survives the cheap size and
+    /// depth filters, then reused for the rest of this slot's window life.
+    encoder: ?delta_mod.Encoder,
+
+    fn getEncoder(slot: *WindowSlot, gpa: Allocator) Allocator.Error!*delta_mod.Encoder {
+        if (slot.encoder == null) slot.encoder = try .init(gpa, slot.bytes);
+        return &slot.encoder.?;
+    }
 };
 
 const DeltaJob = struct {
@@ -1646,14 +1651,25 @@ fn findDelta(
 
     if (options.threads <= 1) {
         var at = window.len;
-        while (at != 0 and limit != 0) {
+        while (at != 0) {
             at -= 1;
             const slot = &window[at];
-            if (slot.type != object_type or slot.depth + 1 > options.depth) continue;
-            const candidate = try slot.encoder.encode(gpa, target, .{ .max_bytes = limit }) orelse continue;
-            if (chosen) |c| gpa.free(c.bytes);
+            // Types are contiguous in pack order, so the first mismatch also
+            // means every older window entry is the wrong type.
+            if (slot.type != object_type) break;
+            limit = deltaCandidateLimit(initial_limit, options.depth, slot.depth, chosen, window);
+            if (!worthTryingDelta(slot, target.len, options.depth, limit)) continue;
+            const encoder = try slot.getEncoder(gpa);
+            const candidate = try encoder.encode(gpa, target, .{ .max_bytes = limit }) orelse continue;
+            if (chosen) |c| {
+                const chosen_depth = window[c.slot].depth + 1;
+                if (candidate.len == c.bytes.len and slot.depth + 1 >= chosen_depth) {
+                    gpa.free(candidate);
+                    continue;
+                }
+                gpa.free(c.bytes);
+            }
             chosen = .{ .slot = at, .bytes = candidate };
-            limit = candidate.len - 1;
         }
         return chosen;
     }
@@ -1661,17 +1677,25 @@ fn findDelta(
     const jobs = try gpa.alloc(DeltaJob, @min(@as(usize, options.threads), window.len));
     defer gpa.free(jobs);
     var at = window.len;
-    while (at != 0 and limit != 0) {
+    while (at != 0) {
         var count: usize = 0;
         while (at != 0 and count < jobs.len) {
             at -= 1;
             const slot = &window[at];
-            if (slot.type != object_type or slot.depth + 1 > options.depth) continue;
+            if (slot.type != object_type) {
+                at = 0;
+                break;
+            }
+            if (slot.depth >= options.depth or target.len < slot.bytes.len / 32) continue;
+            const encoder = try slot.getEncoder(gpa);
             jobs[count] = .{
                 .gpa = gpa,
-                .encoder = &slot.encoder,
+                .encoder = encoder,
                 .target = target,
-                .limit = limit,
+                // Candidate bounds depend on earlier results in this batch.
+                // Search speculatively, then apply those bounds in window
+                // order below so every thread count makes the same choice.
+                .limit = 0,
                 .slot = at,
             };
             count += 1;
@@ -1702,18 +1726,57 @@ fn findDelta(
         }
         for (jobs[0..count]) |job| switch (job.result) {
             .bytes => |candidate| {
-                if (candidate.len >= limit) {
+                const slot = &window[job.slot];
+                limit = deltaCandidateLimit(initial_limit, options.depth, slot.depth, chosen, window);
+                if (!worthTryingDelta(slot, target.len, options.depth, limit) or candidate.len > limit) {
                     gpa.free(candidate);
                     continue;
                 }
-                if (chosen) |c| gpa.free(c.bytes);
+                if (chosen) |c| {
+                    const chosen_depth = window[c.slot].depth + 1;
+                    if (candidate.len == c.bytes.len and slot.depth + 1 >= chosen_depth) {
+                        gpa.free(candidate);
+                        continue;
+                    }
+                    gpa.free(c.bytes);
+                }
                 chosen = .{ .slot = job.slot, .bytes = candidate };
-                limit = candidate.len - 1;
             },
             else => {},
         };
     }
     return chosen;
+}
+
+/// The maximum delta worth asking the encoder for against one base. Besides
+/// tightening to the best delta so far, the bound prices in how much chain
+/// depth that base consumes: a shallower base may replace a same-sized deep
+/// delta, while a nearly exhausted chain must save more.
+fn deltaCandidateLimit(
+    initial_limit: usize,
+    max_depth: u32,
+    base_depth: u32,
+    chosen: ?ChosenDelta,
+    window: []const WindowSlot,
+) usize {
+    if (base_depth >= max_depth) return 0;
+    const best_size = if (chosen) |c| c.bytes.len else initial_limit;
+    const reference_depth = if (chosen) |c| window[c.slot].depth + 1 else 1;
+    if (reference_depth > max_depth) return 0;
+    const numerator = @as(u128, best_size) * (max_depth - base_depth);
+    const denominator = max_depth - reference_depth + 1;
+    const depth_limit: usize = @intCast(numerator / denominator);
+    return @min(best_size, depth_limit);
+}
+
+/// Filters whose answer needs only the sizes and chain depth, before a base
+/// is indexed or either byte slice is searched.
+fn worthTryingDelta(slot: *const WindowSlot, target_len: usize, max_depth: u32, limit: usize) bool {
+    if (slot.depth >= max_depth or limit == 0) return false;
+    const size_difference = if (slot.bytes.len < target_len) target_len - slot.bytes.len else 0;
+    if (size_difference >= limit) return false;
+    if (target_len < slot.bytes.len / 32) return false;
+    return true;
 }
 
 /// What a sort puts the objects in order by.
@@ -1747,6 +1810,13 @@ fn beforeInPackOrder(_: void, a: Ordered, b: Ordered) bool {
     if (a.name_hash != b.name_hash) return a.name_hash > b.name_hash;
     if (a.size != b.size) return a.size > b.size;
     return std.mem.order(u8, a.oid.raw(), b.oid.raw()) == .lt;
+}
+
+test "delta candidate bounds account for chain depth" {
+    const no_window: []const WindowSlot = &.{};
+    try std.testing.expectEqual(@as(usize, 100), deltaCandidateLimit(100, 50, 0, null, no_window));
+    try std.testing.expectEqual(@as(usize, 50), deltaCandidateLimit(100, 50, 25, null, no_window));
+    try std.testing.expectEqual(@as(usize, 0), deltaCandidateLimit(100, 50, 50, null, no_window));
 }
 
 fn hexPair(name: []const u8) ?u8 {

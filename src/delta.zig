@@ -232,10 +232,17 @@ pub const Encoder = struct {
 
         var pending_at: usize = 0;
         var at: usize = 0;
+        var window_hash: ?u64 = null;
         while (at < target.len) {
-            const found = encoder.index.longestAt(encoder.base, target, at);
+            if (target.len - at < match_len) break;
+            const current_hash = window_hash orelse Index.hashWindow(target[at..][0..match_len]);
+            const found = encoder.index.longestAt(encoder.base, target, at, current_hash);
             if (found.len < match_len) {
                 at += 1;
+                window_hash = if (target.len - at >= match_len)
+                    Index.rollWindow(current_hash, target[at - 1], target[at + match_len - 1])
+                else
+                    null;
                 continue;
             }
             try flushInsert(gpa, &out, target[pending_at..at]);
@@ -249,13 +256,14 @@ pub const Encoder = struct {
             }
             at += found.len;
             pending_at = at;
-            if (options.max_bytes != 0 and out.items.len >= options.max_bytes) {
+            window_hash = null;
+            if (options.max_bytes != 0 and out.items.len > options.max_bytes) {
                 out.deinit(gpa);
                 return null;
             }
         }
         try flushInsert(gpa, &out, target[pending_at..]);
-        if (options.max_bytes != 0 and out.items.len >= options.max_bytes) {
+        if (options.max_bytes != 0 and out.items.len > options.max_bytes) {
             out.deinit(gpa);
             return null;
         }
@@ -323,6 +331,12 @@ const Index = struct {
     mask: u32,
 
     const sentinel: u32 = std.math.maxInt(u32);
+    const hash_base: u64 = 0x9e37_79b1_85eb_ca87;
+    const outgoing_factor: u64 = blk: {
+        var factor: u64 = 1;
+        for (1..match_len) |_| factor *%= hash_base;
+        break :blk factor;
+    };
 
     fn build(gpa: Allocator, base: []const u8) Allocator.Error!Index {
         const blocks = base.len / match_len;
@@ -339,7 +353,7 @@ const Index = struct {
         var block: u32 = 0;
         while (block < blocks) : (block += 1) {
             const at = @as(usize, block) * match_len;
-            const bucket = index.bucketOf(base[at..][0..match_len]);
+            const bucket = index.bucketOfHash(hashWindow(base[at..][0..match_len]));
             index.chain[block] = index.head[bucket];
             index.head[bucket] = block;
         }
@@ -352,8 +366,19 @@ const Index = struct {
         index.* = undefined;
     }
 
-    fn bucketOf(index: *const Index, bytes: []const u8) u32 {
-        return @intCast(std.hash.Wyhash.hash(0, bytes) & index.mask);
+    fn hashWindow(bytes: *const [match_len]u8) u64 {
+        var value: u64 = 0;
+        for (bytes) |byte| value = value *% hash_base +% byte;
+        return value;
+    }
+
+    fn rollWindow(value: u64, outgoing: u8, incoming: u8) u64 {
+        return (value -% (@as(u64, outgoing) *% outgoing_factor)) *% hash_base +% incoming;
+    }
+
+    fn bucketOfHash(index: *const Index, value: u64) u32 {
+        const mixed = value ^ (value >> 32) ^ (value >> 17);
+        return @intCast(mixed & index.mask);
     }
 
     const Match = struct {
@@ -365,9 +390,8 @@ const Index = struct {
     };
 
     /// The longest run of `target` from `at` that the base also holds.
-    fn longestAt(index: *const Index, base: []const u8, target: []const u8, at: usize) Match {
-        if (target.len - at < match_len) return .{ .at = 0, .len = 0 };
-        const bucket = index.bucketOf(target[at..][0..match_len]);
+    fn longestAt(index: *const Index, base: []const u8, target: []const u8, at: usize, window_hash: u64) Match {
+        const bucket = index.bucketOfHash(window_hash);
         var best: Match = .{ .at = 0, .len = 0 };
         var block = index.head[bucket];
         var looked: u32 = 0;
@@ -455,9 +479,22 @@ test "a delta longer than the limit is given up on" {
     try std.testing.expect((try encode(gpa, base, target, .{ .max_bytes = 512 })) == null);
     const unlimited = (try encode(gpa, base, target, .{})).?;
     defer gpa.free(unlimited);
+    const exact = (try encode(gpa, base, target, .{ .max_bytes = unlimited.len })).?;
+    defer gpa.free(exact);
+    try std.testing.expectEqualSlices(u8, unlimited, exact);
+    try std.testing.expect((try encode(gpa, base, target, .{ .max_bytes = unlimited.len - 1 })) == null);
     const back = try apply(gpa, base, unlimited);
     defer gpa.free(back);
     try std.testing.expectEqualSlices(u8, target, back);
+}
+
+test "the delta index hash rolls one byte at a time" {
+    const bytes = "the quick brown fox jumps over the lazy dog";
+    var rolled = Index.hashWindow(bytes[0..match_len]);
+    for (1..bytes.len - match_len + 1) |at| {
+        rolled = Index.rollWindow(rolled, bytes[at - 1], bytes[at + match_len - 1]);
+        try std.testing.expectEqual(Index.hashWindow(bytes[at..][0..match_len]), rolled);
+    }
 }
 
 test "a copy longer than one command is split into several" {
