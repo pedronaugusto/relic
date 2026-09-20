@@ -62,7 +62,7 @@ const commit = try repo.writeCommit(io, .{
     .message = "first commit\n",
 });
 
-// Move the branch and write the reflog, both or neither.
+// Move the branch under its lock, then append the reflog.
 var tx = repo.beginRefs();
 defer tx.deinit(io);
 try tx.update("refs/heads/main", .{ .direct = commit }, .must_not_exist);
@@ -154,6 +154,12 @@ instructions this processor has, asked once.
 Every public declaration carries a doc comment stating its contract, and every
 operation has one named error set. A refusal is always a named error carrying
 the setting that caused it.
+
+A ref transaction acquires and validates every loose-ref lock before it writes
+any ref. Its commit is the same sequence of per-ref renames and reflog appends
+that git's files backend performs, not one filesystem transaction: an I/O
+error after commit starts may leave a prefix installed, and the caller must
+reread the affected refs before retrying.
 
 ## Design
 

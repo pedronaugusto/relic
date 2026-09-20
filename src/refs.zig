@@ -1,9 +1,10 @@
 //! Loose refs and `packed-refs`, with transactions.
 //!
 //! A transaction takes every `<ref>.lock` in its prepare step and rolls back
-//! completely if any one of them is held, so a failed update changes nothing.
-//! That is the shape a caller needs in order to move a branch and `HEAD`
-//! together without a window in which one has moved and the other has not.
+//! completely if any one of them is held. Once `commit` starts, loose refs
+//! are installed with separate renames and reflogs with separate appends, as
+//! they are in git: an I/O error can leave a committed prefix and the caller
+//! must reread the refs before deciding what happened.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -471,8 +472,10 @@ pub const LogMessage = struct {
 /// A set of ref updates applied together.
 ///
 /// `prepare` takes every lock; if any is held the whole thing rolls back and
-/// nothing on the disk has changed. `commit` then writes every new value and
-/// appends every log line.
+/// nothing on the disk has changed. `commit` then installs each new value and
+/// appends each log line. Those renames and appends are separate filesystem
+/// operations, so a commit-time error is indeterminate and may have installed
+/// a prefix; reread the affected refs before retrying.
 pub const Transaction = struct {
     store: *Store,
     gpa: Allocator,
@@ -602,7 +605,8 @@ pub const Transaction = struct {
     }
 
     /// Write every new value, and append a log line for each where the
-    /// policy asks for one.
+    /// policy asks for one. An error after installation begins may leave a
+    /// committed prefix; callers must reread every affected ref.
     ///
     /// A deletion also removes the ref from `packed-refs`, because a packed
     /// entry left behind is a ref that comes back.
