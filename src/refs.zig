@@ -587,7 +587,12 @@ pub const Transaction = struct {
                         }
                     },
                 }
-                edit.was_packed = (try tx.store.readLoose(tx.gpa, io, edit.name)) == null;
+                const loose = try tx.store.readLoose(tx.gpa, io, edit.name);
+                edit.was_packed = loose == null;
+                if (loose) |loose_value| switch (loose_value) {
+                    .symbolic => |target| tx.gpa.free(target),
+                    .direct => {},
+                };
             }
             edit.old = current_oid;
 
@@ -767,6 +772,26 @@ test "a loose ref is written, read and resolved" {
     var head_log = try reflog.read(gpa, io, tmp.dir, "HEAD", .sha1);
     defer head_log.deinit();
     try std.testing.expectEqual(@as(usize, 1), head_log.entries.len);
+}
+
+test "preparing an existing symbolic ref releases every parsed target" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "refs/heads");
+    try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/main\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = "1" ** 40 ++ "\n" });
+
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const gpa = debug_allocator.allocator();
+    {
+        var store: Store = .init(gpa, .sha1, tmp.dir, tmp.dir);
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        try tx.update("HEAD", .{ .symbolic = "refs/heads/next" }, .any);
+        try tx.prepare(io);
+    }
+    try std.testing.expectEqual(std.heap.Check.ok, debug_allocator.deinit());
 }
 
 test "an expected value that does not hold changes nothing" {
