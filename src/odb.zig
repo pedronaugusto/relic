@@ -449,8 +449,10 @@ pub const Odb = struct {
             const parsed = object.parseHeader(bytes) catch return error.CorruptLooseObject;
             const body = bytes[parsed.len..];
             if (body.len != parsed.header.size) return error.CorruptLooseObject;
-            const out = try odb.gpa.dupe(u8, body);
-            odb.gpa.free(bytes);
+            // The body moves to the front of the allocation it was inflated
+            // into, rather than into a second one.
+            std.mem.copyForwards(u8, bytes[0..body.len], body);
+            const out = try odb.gpa.realloc(bytes, body.len);
             return .{ .type = parsed.header.type, .bytes = out };
         }
         return null;
@@ -460,9 +462,8 @@ pub const Odb = struct {
         const input_buffer = try odb.gpa.alloc(u8, odb.options.read_buffer_size);
         defer odb.gpa.free(input_buffer);
         var file_reader = file.reader(io, input_buffer);
-        const window = try odb.gpa.alloc(u8, flate.max_window_len);
-        defer odb.gpa.free(window);
-        var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, window);
+        var window: [flate.max_window_len]u8 = undefined;
+        var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &window);
         return decompress.reader.allocRemaining(odb.gpa, .limited(odb.options.max_object_bytes)) catch
             return error.CorruptLooseObject;
     }
@@ -485,11 +486,13 @@ pub const Odb = struct {
                 else => |e| return e,
             };
             defer file.close(io);
+            // Both buffers live on the stack: a pack write asks for tens of
+            // thousands of headers in a row, and an allocation for each was
+            // a measurable share of it.
             var input_buffer: [1024]u8 = undefined;
             var file_reader = file.reader(io, &input_buffer);
-            const window = try odb.gpa.alloc(u8, flate.max_window_len);
-            defer odb.gpa.free(window);
-            var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, window);
+            var window: [flate.max_window_len]u8 = undefined;
+            var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &window);
             var head: [64]u8 = @splat(0);
             var got: usize = 0;
             while (got < head.len) {
