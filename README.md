@@ -417,6 +417,19 @@ refresh and re-hash the whole working tree.
 - **No named clean or smudge filters.** A repository whose attributes require one is a named refusal.
 - **No reftable and no sparse index.** Both are detected and refused by name rather than misread.
 
+## Ahead
+
+Planned, in the order they are likely to come; none is promised for a date.
+
+- **An inflate of its own.** Reading is bounded by the standard library's
+  inflate today. An owned one, fuzzed against the standard one, is the way
+  past that ceiling, and it comes when a reader needs it.
+- **Fetch and push.** The wire protocol, over a transport the caller opens.
+- **Clean and smudge filters** by name, so a repository that keeps large
+  files through one is read and written rather than refused.
+- **Locks.** A lock on a path held in the repository, for the workflows
+  where two people must not edit one binary file at once.
+
 ## Platforms
 
 | Platform | What it uses there | Tested |
