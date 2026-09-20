@@ -52,6 +52,8 @@ pub const IndexError = error{
     /// A 4-byte offset had its high bit set but the 8-byte table has no such
     /// row.
     BadLargeOffset,
+    /// The trailing digest did not match the index bytes before it.
+    ChecksumMismatch,
 } || Allocator.Error || Io.Dir.ReadFileAllocError;
 
 /// A packfile's `.idx`, version 2.
@@ -114,6 +116,12 @@ pub const Index = struct {
         const version = std.mem.readInt(u32, bytes[4..8], .big);
         if (version != 2) return error.UnknownIndexVersion;
         if (bytes.len < 8 + 1024 + 2 * raw_len) return error.TruncatedIndex;
+
+        var checksum_hasher: hash.Hasher = .init(kind);
+        checksum_hasher.update(bytes[0 .. bytes.len - raw_len]);
+        const computed_checksum = checksum_hasher.final();
+        const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;
+        if (!computed_checksum.eql(stored_checksum)) return error.ChecksumMismatch;
 
         const fanout_at: usize = 8;
         var previous: u32 = 0;
@@ -920,6 +928,22 @@ test "a version 1 index is refused by name" {
     @memcpy(bytes[0..4], idx_magic);
     std.mem.writeInt(u32, bytes[4..8], 7, .big);
     try std.testing.expectError(error.UnknownIndexVersion, Index.parse(gpa, .sha1, bytes));
+}
+
+test "a pack index with a bad trailing checksum is refused" {
+    const gpa = std.testing.allocator;
+    const raw_len = Kind.sha1.rawLen();
+    const bytes = try gpa.alloc(u8, 8 + 1024 + 2 * raw_len);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..4], idx_magic);
+    std.mem.writeInt(u32, bytes[4..8], 2, .big);
+    var hasher: hash.Hasher = .init(.sha1);
+    hasher.update(bytes[0 .. bytes.len - raw_len]);
+    const checksum = hasher.final();
+    @memcpy(bytes[bytes.len - raw_len ..], checksum.raw());
+    bytes[bytes.len - raw_len - 1] ^= 1;
+
+    try std.testing.expectError(error.ChecksumMismatch, Index.parse(gpa, .sha1, bytes));
 }
 
 test "fuzz: any bytes are an index or a named error" {
