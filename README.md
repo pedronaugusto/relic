@@ -144,7 +144,7 @@ instructions this processor has, asked once.
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`, rename and copy detection. |
 | `textdiff` | `diffLines`, `hunks`, `stat`, `similarity`, `Algorithm` (`myers`, `histogram`). |
 | `revwalk` | `Walk`, `mergeBase`, `mergeBases`, `isAncestor`. |
-| `merge` | `trees` — a three-way tree merge producing index stages 1 to 3. |
+| `merge` | `blobs` for xdiff-style content merging; `trees` for a stage-only tree merge and `treesWithOptions` to resolve regular text files. |
 | `commitgraph`, `midx` | The two accelerators, read. A `revwalk.Walk` takes parents and times from a commit-graph when it is given one and reads the object when it is not; a lookup asks a multi-pack index which pack to open before it asks the packs one by one. Neither changes an answer. |
 | `safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
 | `dirscan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
@@ -412,7 +412,6 @@ refresh and re-hash the whole working tree.
 - **No pack bitmaps, no `.rev` and no multi-pack index written.** The multi-pack index is read, a bitmap is not read either, and a pack without any of them is a pack git reads.
 - **No hooks are run.** The caller has the path and may run one itself.
 - **No named clean or smudge filters.** A repository whose attributes require one is a named refusal.
-- **No content-level merge.** The three-way merge is at tree level and leaves a conflict at index stages 1 to 3.
 - **No reftable and no sparse index.** Both are detected and refused by name rather than misread.
 
 ## Platforms
@@ -478,12 +477,12 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Eighteen fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Nineteen fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
 between them they cover the loose object header, the tree, the commit and the
 tag, a delta, the pack index, the index file, `packed-refs`, the reflog, the
 config file, `.gitignore`, `.gitattributes`, the glob matcher, a path from a
-tree, the commit-graph, the multi-pack index and the EWAH bitmaps. Four check
+tree, the commit-graph, the multi-pack index and the EWAH bitmaps. Five check
 more than that. The diff fuzzer applies the
 edit script it produced and checks that it reproduces the other side, which is
 the property that catches an off-by-one nothing else would. The
@@ -491,7 +490,9 @@ collision-check fuzzer asserts both that the name is SHA-1's name and that
 nothing reached by chance is flagged. The delta fuzzer decodes every delta it
 encodes and compares it with what it was encoded from. And the pack fuzzer
 writes a pack of random objects, some of them deltas, then reads it back and
-rehashes every one against the name its index gives it. `zig build test
+rehashes every one against the name its index gives it. The merge fuzzer
+merges three random blobs and proves that an unchanged theirs preserves ours
+byte for byte. `zig build test
 --fuzz` builds the suite a second time with the instrumentation on and runs
 them until stopped, keeping a corpus per property under `.zig-cache/f` and
 printing a web address where the coverage is.

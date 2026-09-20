@@ -923,6 +923,65 @@ test "a conflicting three-way merge leaves stages 1, 2 and 3" {
     }
 }
 
+test "a tree merge resolves independent text edits when asked" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    const base_bytes = "a\nb\nc\nd\n";
+    const our_bytes = "A\nb\nc\nd\n";
+    const their_bytes = "a\nb\nc\nD\n";
+    try repo.writeFile(io, "both.txt", base_bytes);
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    const base_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(base_text);
+
+    try repo.writeFile(io, "both.txt", our_bytes);
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "ours" });
+    const ours_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(ours_text);
+
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "theirs", base_text });
+    try repo.writeFile(io, "both.txt", their_bytes);
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "theirs" });
+    const theirs_text = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(theirs_text);
+
+    // Ask the machine's git for the byte-exact content result independently
+    // of its tree merge machinery.
+    try repo.writeFile(io, "merge-base", base_bytes);
+    try repo.writeFile(io, "merge-ours", our_bytes);
+    try repo.writeFile(io, "merge-theirs", their_bytes);
+    try repo.exec(io, &.{ "merge-file", "-L", "ours", "-L", "base", "-L", "theirs", "merge-ours", "merge-base", "merge-theirs" });
+    const expected = try repo.readFile(io, "merge-ours");
+    defer gpa.free(expected);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    var result = try merge_mod.treesWithOptions(
+        gpa,
+        io,
+        &db,
+        try treeOf(gpa, io, &db, try Oid.parse(.sha1, base_text)),
+        try treeOf(gpa, io, &db, try Oid.parse(.sha1, ours_text)),
+        try treeOf(gpa, io, &db, try Oid.parse(.sha1, theirs_text)),
+        .{ .content_merge = true },
+    );
+    defer result.deinit();
+    try std.testing.expect(result.isClean());
+    const entry = result.index.find("both.txt").?;
+    const found = try db.read(io, entry.oid);
+    defer gpa.free(found.bytes);
+    try std.testing.expectEqual(object.Type.blob, found.type);
+    try std.testing.expectEqualSlices(u8, expected, found.bytes);
+}
+
 test "a worktree that moved is repaired and git follows it" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
