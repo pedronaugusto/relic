@@ -471,7 +471,11 @@ pub const LockFile = struct {
         }
         lock.file.close(io);
         lock.finished = true;
-        try renameWithRetry(io, lock.dir, lock.lock_name, lock.target);
+        renameWithRetry(io, lock.dir, lock.lock_name, lock.target) catch |err| {
+            lock.dir.deleteFile(io, lock.lock_name) catch {};
+            lock.removePid(io);
+            return err;
+        };
         lock.removePid(io);
     }
 
@@ -941,6 +945,24 @@ test "a rolled-back lock changes nothing" {
     var read_buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("old\n", try dir.readFile(io, "thing", &read_buf));
     try std.testing.expect(!lockHeld(io, dir, "thing"));
+}
+
+test "a failed lock rename removes the closed lock file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = tmp.dir;
+    try dir.createDir(io, "thing", .default_dir);
+
+    var buf: [64]u8 = undefined;
+    var lock = try LockFile.open(gpa, io, dir, "thing", &buf, .{});
+    try lock.writer().writeAll("cannot replace a directory\n");
+    try std.testing.expectError(error.IsDir, lock.commit(io));
+    lock.deinit(io);
+
+    try std.testing.expectError(error.FileNotFound, dir.access(io, "thing.lock", .{}));
+    try std.testing.expectError(error.FileNotFound, dir.access(io, "thing~pid.lock", .{}));
 }
 
 test "waiting for a lock gives up with the same named error" {
