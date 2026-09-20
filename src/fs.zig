@@ -335,10 +335,14 @@ pub fn syncDir(io: Io, dir: Io.Dir) Io.File.SyncError!void {
 /// and remove it. Everything flushed into the same writeback cache before it
 /// is durable once it returns, at the cost of one sync instead of one per
 /// file. On macOS that is the difference between milliseconds and seconds.
-pub fn syncBarrier(io: Io, dir: Io.Dir) Io.File.SyncError!void {
+pub fn syncBarrier(io: Io, dir: Io.Dir) (Io.File.OpenError || Io.File.SyncError)!void {
     var name_buf: [64]u8 = undefined;
     const name = tempName(io, &name_buf, "relic_fsync_");
-    const file = dir.createFile(io, name, .{ .exclusive = true }) catch return;
+    return syncBarrierNamed(io, dir, name);
+}
+
+fn syncBarrierNamed(io: Io, dir: Io.Dir, name: []const u8) (Io.File.OpenError || Io.File.SyncError)!void {
+    const file = try dir.createFile(io, name, .{ .exclusive = true });
     defer {
         file.close(io);
         dir.deleteFile(io, name) catch {};
@@ -990,4 +994,15 @@ test "the batch barrier costs one sync and leaves nothing behind" {
     try syncBarrier(io, tmp.dir);
     var it = tmp.dir.iterate();
     try std.testing.expect((try it.next(io)) == null);
+}
+
+test "a batch barrier reports that its file could not be created" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "occupied", .data = "keep\n" });
+
+    try std.testing.expectError(error.PathAlreadyExists, syncBarrierNamed(io, tmp.dir, "occupied"));
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("keep\n", try tmp.dir.readFile(io, "occupied", &buf));
 }
