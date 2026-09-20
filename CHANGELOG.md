@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- Sparse checkout preserves files whose matching stat is too recent to trust but whose content changed.
+- Checkout handles tracked directory/file transitions and refuses untracked collisions before changing the worktree.
+- Ref transactions document that commit-time I/O failure may leave an installed prefix that callers must reread.
+- Concurrent relic reflog appenders serialize their writes so no entry is overwritten.
+- Lock sidecars record the process through the host system interface on every supported platform.
+- Commit-graphs reject fanout tables inconsistent with their sorted object names.
+- Cache trees reject roots and subtrees that do not account for the index entries beneath them.
+- Object stream writers hash and count bytes written through their advertised `writer` interface.
+- Breaking: staging can return `error.IrreversibleConversion`, and `AddOutcome` reports `safecrlf_warnings` for `core.safecrlf=warn`.
+- Failed lock-file installation removes both the lock and its process sidecar.
+- Batch durability barriers propagate failures to create their synchronization file.
+- Setting a previously bare config variable writes valid syntax that remains safe across later edits.
+- Breaking: typed config getters decode quoted values; `getBool` and `getInt` can return `OutOfMemory`, and `getPath` can return `MalformedValue`.
+- Relative config includes resolve beside the file containing each include, including nested includes.
+- Breaking: writing extended flags in index version 2 returns `error.ExtendedFlagsRequireVersion3` instead of dropping them.
+- Breaking: pack-index parsing can return `error.ChecksumMismatch` when its trailing hash is invalid.
+- Gitlink diffs count and print the synthetic `Subproject commit` lines git uses.
+- Ancestry queries propagate missing, corrupt, and non-commit history instead of answering false.
+- Signature parsing rejects malformed numeric timezone offsets instead of silently using UTC.
+- Breaking: tree builders return `error.ObjectFormatMismatch` when entries use another hash format.
+- Breaking: tag peeling returns `error.TagDepthExceeded` when sixteen hops still end at a tag.
+- Lock acquisition, symbolic-ref preparation, and config section creation release or own their memory on every path.
+- Added worktrees return an owned name and an independently opened worktree directory as documented.
+- Failed object-stream installation remains abortable and removes its temporary file.
+- Breaking: sparse indexes return `error.SparseIndexUnsupported` specifically for the mandatory `sdir` extension.
+- Blob merging composes independent edits, emits git-compatible merge or diff3 conflicts, refuses binary content, and can resolve tree conflicts when requested.
+
 ## [0.1.0] - 2026-09-19
 
 The first release. It reads and writes a repository the way git leaves one on
