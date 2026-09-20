@@ -378,7 +378,7 @@ well as by count, and one index entry per object — a name, an offset and a
 CRC — which has to be sorted before it is written. There is no object cache; a returned slice's
 doc comment says who owns it.
 
-**The index is read at three versions and written at two.** Versions 2, 3 and
+**The index is read and written at three versions.** Versions 2, 3 and
 4 are read; version 2 or 3 is written, 3 only when an entry needs an extended
 flag, and 4 on request. The `TREE` and `REUC` extensions are understood. An
 extension whose signature begins with an upper-case letter is optional and is
