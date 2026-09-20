@@ -600,8 +600,17 @@ fn currentPid() u32 {
     return switch (builtin.os.tag) {
         .windows => std.os.windows.GetCurrentProcessId(),
         .wasi => 0,
-        else => @intCast(std.os.linux.getpid()),
+        else => @intCast(std.posix.system.getpid()),
     };
+}
+
+test "currentPid uses the host process API" {
+    const expected: u32 = switch (builtin.os.tag) {
+        .windows => std.os.windows.GetCurrentProcessId(),
+        .wasi => 0,
+        else => @intCast(std.posix.system.getpid()),
+    };
+    try std.testing.expectEqual(expected, currentPid());
 }
 
 fn processAlive(pid: u32) ?bool {
