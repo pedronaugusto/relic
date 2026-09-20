@@ -24,6 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before indexing a base and rolls its target hash forward one byte at a time.
   On the 35,512-object pack fixture this moved 9.82 seconds to 9.36 seconds;
   the resulting pack is 18,691,709 bytes.
+- Pack ordering retains loose-object bodies within a configurable 64 MiB
+  default budget, so those objects are opened and inflated only once. On the
+  same fixture this moved 9.36 seconds to 8.83 seconds with identical pack
+  bytes.
 - Packed reads keep resolved delta bases in a byte-bounded
   least-recently-used cache, so small bases no longer collide in a fixed-size
   table.

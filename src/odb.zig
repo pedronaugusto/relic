@@ -471,13 +471,27 @@ pub const Odb = struct {
     /// The type and length of `oid`, with no body inflated where the object
     /// is packed and with only its header inflated where it is loose.
     pub fn readHeader(odb: *Odb, io: Io, oid: Oid) Error!object.Header {
-        if (try odb.tryReadHeader(io, oid)) |found| return found;
+        return (try odb.readHeaderForPack(io, oid, 0)).header;
+    }
+
+    const PackHeader = struct {
+        header: object.Header,
+        /// A loose body retained while reading its header, when it fit the
+        /// caller's remaining cache budget.
+        bytes: ?[]u8 = null,
+    };
+
+    /// The pack ordering pass has already opened a loose object. When its
+    /// body fits `cache_available`, finish that inflate and hand the body to
+    /// the write pass rather than opening and inflating it again.
+    fn readHeaderForPack(odb: *Odb, io: Io, oid: Oid, cache_available: usize) Error!PackHeader {
+        if (try odb.tryReadHeaderForPack(io, oid, cache_available)) |found| return found;
         try odb.refresh(io);
-        if (try odb.tryReadHeader(io, oid)) |found| return found;
+        if (try odb.tryReadHeaderForPack(io, oid, cache_available)) |found| return found;
         return error.ObjectNotFound;
     }
 
-    fn tryReadHeader(odb: *Odb, io: Io, oid: Oid) Error!?object.Header {
+    fn tryReadHeaderForPack(odb: *Odb, io: Io, oid: Oid, cache_available: usize) Error!?PackHeader {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.sources.items) |*source| {
@@ -502,11 +516,32 @@ pub const Odb = struct {
                 if (std.mem.indexOfScalar(u8, head[0..got], 0) != null) break;
             }
             const parsed = object.parseHeader(head[0..got]) catch return error.CorruptLooseObject;
-            return parsed.header;
+            if (cache_available == 0 or parsed.header.size > cache_available) {
+                return .{ .header = parsed.header };
+            }
+
+            const body_len: usize = @intCast(parsed.header.size);
+            const initial = head[parsed.len..got];
+            if (initial.len > body_len) return error.CorruptLooseObject;
+            const body = try odb.gpa.alloc(u8, body_len);
+            errdefer odb.gpa.free(body);
+            @memcpy(body[0..initial.len], initial);
+            var body_got = initial.len;
+            while (body_got < body.len) {
+                const n = decompress.reader.readSliceShort(body[body_got..]) catch
+                    return error.CorruptLooseObject;
+                if (n == 0) return error.CorruptLooseObject;
+                body_got += n;
+            }
+            var extra: [1]u8 = undefined;
+            if ((decompress.reader.readSliceShort(&extra) catch return error.CorruptLooseObject) != 0) {
+                return error.CorruptLooseObject;
+            }
+            return .{ .header = parsed.header, .bytes = body };
         }
         for (odb.sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
-            return try source.packs.items[located.at].headerAt(io, located.offset);
+            return .{ .header = try source.packs.items[located.at].headerAt(io, located.offset) };
         }
         return null;
     }
@@ -950,9 +985,10 @@ pub const Odb = struct {
     /// then the tail of the path hint, then size descending -- and each is
     /// tried against a sliding window of the ones already written. What is
     /// held at once is the window, which `PackOptions.window_bytes` bounds,
-    /// and one object being written. Delta candidate searches use the
-    /// caller's concurrency executor only when `PackOptions.threads` is
-    /// greater than one.
+    /// the loose-body cache bounded by `PackOptions.loose_cache_bytes`, and
+    /// one object being written. Delta candidate searches use the caller's
+    /// concurrency executor only when `PackOptions.threads` is greater than
+    /// one.
     ///
     /// `pack_dir` is where `pack-<name>.pack` and `pack-<name>.idx` land, and
     /// in a repository that is `objects/pack`. Nothing is visible under
@@ -973,15 +1009,24 @@ pub const Odb = struct {
         // header is all this needs, and for a packed object that is no
         // inflation at all.
         var ordered = try gpa.alloc(Ordered, entries.len);
-        defer gpa.free(ordered);
+        var ordered_filled: usize = 0;
+        defer {
+            for (ordered[0..ordered_filled]) |item| if (item.cached) |bytes| gpa.free(bytes);
+            gpa.free(ordered);
+        }
+        var cached_bytes: usize = 0;
         for (entries, 0..) |entry, i| {
-            const head = try odb.readHeader(io, entry.oid);
+            const available = options.loose_cache_bytes -| cached_bytes;
+            const found = try odb.readHeaderForPack(io, entry.oid, available);
+            if (found.bytes) |bytes| cached_bytes += bytes.len;
             ordered[i] = .{
                 .oid = entry.oid,
-                .type = head.type,
-                .size = head.size,
+                .type = found.header.type,
+                .size = found.header.size,
                 .name_hash = nameHash(entry.hint),
+                .cached = found.bytes,
             };
+            ordered_filled += 1;
         }
         std.mem.sort(Ordered, ordered, {}, beforeInPackOrder);
 
@@ -1001,8 +1046,11 @@ pub const Odb = struct {
         }
         var window_bytes: usize = 0;
 
-        for (ordered) |item| {
-            const found = try odb.read(io, item.oid);
+        for (ordered) |*item| {
+            const found = if (item.cached) |bytes| blk: {
+                item.cached = null;
+                break :blk Read{ .type = item.type, .bytes = bytes };
+            } else try odb.read(io, item.oid);
             var bytes = found.bytes;
             var keep = false;
             defer if (!keep) gpa.free(bytes);
@@ -1583,6 +1631,11 @@ pub const PackOptions = struct {
     /// emptied from the oldest end until it fits, so this is the bound on
     /// what building a pack costs in memory whatever the objects are.
     window_bytes: usize = 32 << 20,
+    /// How many bytes of loose-object bodies the ordering pass may retain for
+    /// the write pass. A retained object is opened and inflated once instead
+    /// of twice. Objects that do not fit the remaining budget take the old
+    /// two-read path; there is no eviction. Zero disables the cache.
+    loose_cache_bytes: usize = 64 << 20,
     /// An object this large or larger is written whole and never enters the
     /// window. git's `core.bigFileThreshold`, and the same default.
     big_file_bytes: u64 = 512 << 20,
@@ -1785,6 +1838,7 @@ const Ordered = struct {
     type: object.Type,
     size: u64,
     name_hash: u32,
+    cached: ?[]u8,
 };
 
 /// git's own name hash: the last sixteen non-blank characters of a path,
@@ -1858,6 +1912,12 @@ test "a loose object written is a loose object read" {
     const header = try odb.readHeader(io, oid);
     try std.testing.expectEqual(object.Type.blob, header.type);
     try std.testing.expectEqual(@as(u64, 6), header.size);
+
+    const cached = try odb.readHeaderForPack(io, oid, 6);
+    defer gpa.free(cached.bytes.?);
+    try std.testing.expectEqualStrings("hello\n", cached.bytes.?);
+    const too_large = try odb.readHeaderForPack(io, oid, 5);
+    try std.testing.expect(too_large.bytes == null);
 
     // Writing the same bytes again is the same name and no second file.
     const again = try odb.write(io, .blob, "hello\n");
