@@ -304,12 +304,19 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
 
     try git.dir.createDirPath(io, "trees/one");
     var dest = try git.dir.openDir(io, "trees/one", .{ .iterate = true });
-    defer dest.close(io);
+    const input_name = try gpa.dupe(u8, "one");
+    defer gpa.free(input_name);
 
-    var added = try worktrees.add(gpa, io, repo.common_dir, "one", dest, "trees/one", .{
+    var added = try worktrees.add(gpa, io, repo.common_dir, input_name, dest, "trees/one", .{
         .detach_at = commit,
     });
     defer added.admin_dir.close(io);
+    defer gpa.free(added.name);
+    defer added.work_dir.close(io);
+    dest.close(io);
+    @memset(input_name, 'x');
+    try std.testing.expectEqualStrings("one", added.name);
+    try added.work_dir.access(io, ".git", .{});
 
     // git sees it, and says it is detached at the right commit.
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
@@ -329,16 +336,16 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
 
     // Opening the destination follows its `.git` file.
     {
-        var linked = try repo_mod.Repository.open(gpa, io, dest, .{ .discover = false });
+        var linked = try repo_mod.Repository.open(gpa, io, added.work_dir, .{ .discover = false });
         defer linked.deinit(io);
         try std.testing.expect(linked.common_is_separate);
         var linked_index = try linked.openIndex(io);
         defer linked_index.deinit();
-        _ = try worktree.checkout(gpa, io, dest, &linked_index, &linked.odb, tree, .{});
+        _ = try worktree.checkout(gpa, io, added.work_dir, &linked_index, &linked.odb, tree, .{});
         try linked_index.write(io, linked.git_dir, "index", .{});
     }
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("hello\n", try dest.readFile(io, "a.txt", &buf));
+    try std.testing.expectEqualStrings("hello\n", try added.work_dir.readFile(io, "a.txt", &buf));
 
     // git calls the linked worktree clean.
     const linked_status = try git.run(io, &.{ "-C", "trees/one", "status", "--porcelain" });
@@ -391,6 +398,8 @@ test "worktree remove takes the tree and the admin directory with it" {
         .detach_at = try Oid.parse(.sha1, commit_text),
     });
     added.admin_dir.close(io);
+    gpa.free(added.name);
+    added.work_dir.close(io);
     dest.close(io);
 
     try worktrees.remove(gpa, io, repo.common_dir, "two", .{});

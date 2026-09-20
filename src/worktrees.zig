@@ -211,6 +211,11 @@ pub fn add(
     if (safepath.checkComponent(name, .stored) != null) return error.InvalidWorktreeName;
     _ = options.create_destination;
 
+    const owned_name = try gpa.dupe(u8, name);
+    errdefer gpa.free(owned_name);
+    const opened_work_dir = try dest_dir.openDir(io, ".", .{ .iterate = true });
+    errdefer opened_work_dir.close(io);
+
     common_dir.createDirPath(io, "worktrees") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => |e| return e,
@@ -267,9 +272,8 @@ pub fn add(
         return error.InvalidWorktreeName;
     try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
 
-    _ = gpa;
     _ = dest_path;
-    return .{ .name = name, .admin_dir = admin, .work_dir = dest_dir };
+    return .{ .name = owned_name, .admin_dir = admin, .work_dir = opened_work_dir };
 }
 
 fn writeLine(io: Io, dir: Io.Dir, name: []const u8, text: []const u8) Error!void {
