@@ -427,6 +427,10 @@ pub const LockFile = struct {
         errdefer gpa.free(lock_name);
 
         const file = try createExclusive(io, dir, lock_name, options.on_contention);
+        errdefer {
+            file.close(io);
+            dir.deleteFile(io, lock_name) catch {};
+        }
 
         var pid_name: ?[]u8 = null;
         if (options.write_pid) {
@@ -967,6 +971,21 @@ test "a failed lock rename removes the closed lock file" {
 
     try std.testing.expectError(error.FileNotFound, dir.access(io, "thing.lock", .{}));
     try std.testing.expectError(error.FileNotFound, dir.access(io, "thing~pid.lock", .{}));
+}
+
+test "PID-name allocation failure abandons no lock" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var buf: [64]u8 = undefined;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        LockFile.open(failing.allocator(), io, tmp.dir, "thing", &buf, .{}),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "thing.lock", .{}));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 test "waiting for a lock gives up with the same named error" {
