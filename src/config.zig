@@ -36,7 +36,7 @@ pub const ValueError = error{
     NotABoolean,
     /// The value was not a number, with or without a `k`, `m` or `g`.
     NotAnInteger,
-};
+} || Allocator.Error;
 
 /// One line of a configuration file, in the order the file holds them.
 ///
@@ -471,7 +471,12 @@ pub const Config = struct {
         // `=` and nothing after it is false. git makes that distinction and
         // `core.bare` in a bare repository relies on it.
         const raw = entry.value orelse return true;
-        return parseBool(raw);
+        const decoded = decodeValue(config.gpa, raw) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.MalformedValue => return error.NotABoolean,
+        };
+        defer config.gpa.free(decoded);
+        return parseBool(decoded);
     }
 
     /// The value of `full_name` as an integer, or `fallback`.
@@ -480,18 +485,25 @@ pub const Config = struct {
     /// what git accepts for a size.
     pub fn getInt(config: *const Config, full_name: []const u8, fallback: i64) ValueError!i64 {
         const raw = config.get(full_name) orelse return fallback;
-        return parseInt(raw);
+        const decoded = decodeValue(config.gpa, raw) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.MalformedValue => return error.NotAnInteger,
+        };
+        defer config.gpa.free(decoded);
+        return parseInt(decoded);
     }
 
     /// The value of `full_name` as a path, with a leading `~/` expanded
     /// against `Context.home`. The result is the caller's.
-    pub fn getPath(config: *const Config, gpa: Allocator, full_name: []const u8) Allocator.Error!?[]u8 {
+    pub fn getPath(config: *const Config, gpa: Allocator, full_name: []const u8) (Allocator.Error || error{MalformedValue})!?[]u8 {
         const raw = config.get(full_name) orelse return null;
-        if (std.mem.startsWith(u8, raw, "~/")) {
-            const home = config.context.home orelse return try gpa.dupe(u8, raw);
-            return try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, raw[2..] });
+        const decoded = try decodeValue(gpa, raw);
+        if (std.mem.startsWith(u8, decoded, "~/")) {
+            const home = config.context.home orelse return decoded;
+            defer gpa.free(decoded);
+            return try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, decoded[2..] });
         }
-        return try gpa.dupe(u8, raw);
+        return decoded;
     }
 
     /// Every subsection name under `section`, in order and without
@@ -960,6 +972,14 @@ fn parseVariableLine(raw: []const u8) ParseError!VariableLine {
 /// `get` hands back the raw text as the file spells it; this is what turns
 /// `"a\tb"` into a tab. A caller comparing a value against a literal wants
 /// this, and `getBool`, `getInt` and `getPath` apply it themselves.
+fn decodeValue(gpa: Allocator, raw: []const u8) (Allocator.Error || error{MalformedValue})![]u8 {
+    return unquote(gpa, raw) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.MalformedValue => error.MalformedValue,
+        else => unreachable,
+    };
+}
+
 pub fn unquote(gpa: Allocator, raw: []const u8) (Allocator.Error || ParseError)![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
@@ -1061,6 +1081,22 @@ test "integers take git's size suffixes" {
     try std.testing.expectEqual(@as(i64, 5 * 1024 * 1024), try parseInt("5M"));
     try std.testing.expectEqual(@as(i64, -7), try parseInt("-7"));
     try std.testing.expectError(error.NotAnInteger, parseInt("x"));
+}
+
+test "typed getters unquote values before parsing them" {
+    const gpa = std.testing.allocator;
+    var config = try Config.parseText(gpa, "[typed]\n" ++
+        "\tflag = \"true\"\n" ++
+        "\tsize = \"5k\"\n" ++
+        "\tpath = \"~/a b\"\n", .local);
+    defer config.deinit();
+    config.context.home = "/home/ada";
+
+    try std.testing.expect(try config.getBool("typed.flag", false));
+    try std.testing.expectEqual(@as(i64, 5 * 1024), try config.getInt("typed.size", 0));
+    const path = (try config.getPath(gpa, "typed.path")).?;
+    defer gpa.free(path);
+    try std.testing.expectEqualStrings("/home/ada/a b", path);
 }
 
 test "a full name splits at the first dot and the last" {
