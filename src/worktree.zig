@@ -35,6 +35,9 @@ pub const Error = error{
     UnsupportedAttribute,
     /// A tree entry named a type the working tree cannot hold here.
     UnsupportedEntry,
+    /// Line-ending normalization would not round-trip and `core.safecrlf`
+    /// requires staging to stop.
+    IrreversibleConversion,
     /// The same path appeared twice with different case on a filesystem
     /// that folds case, so one would silently overwrite the other.
     CaseCollision,
@@ -103,6 +106,9 @@ pub const AddOutcome = struct {
     /// component ending in a dot or a space. They are skipped rather than
     /// staged, and counted here so a caller can say so.
     unsafe_paths: u32 = 0,
+    /// Files staged after `core.safecrlf=warn` found a line-ending conversion
+    /// that would not round-trip.
+    safecrlf_warnings: u32 = 0,
 };
 
 /// Where the blobs a staging pass writes are put.
@@ -424,6 +430,11 @@ const Walker = struct {
                 return error.UnsupportedAttribute;
             }
             const converted = try attributes.toGit(a, bytes, applied, w.options.rules.core);
+            if (converted.irreversible) switch (w.options.rules.core.safecrlf) {
+                .false => {},
+                .true => return error.IrreversibleConversion,
+                .warn => w.outcome.safecrlf_warnings += 1,
+            };
             return w.store(converted.bytes);
         }
         return w.store(bytes);

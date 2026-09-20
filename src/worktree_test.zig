@@ -501,6 +501,28 @@ test "core.autocrlf with text=auto stores the blob git stores" {
     try std.testing.expect(index.find("lone.bin").?.oid.eql(kept));
 }
 
+test "core.safecrlf refuses irreversible staging and reports warnings" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    try h.attrs.addText("*.txt text\n", "", "info/attributes", attributes.info_precedence);
+    try h.repo.writeFile(io, "mixed.txt", "one\r\ntwo\n");
+
+    var rules = h.worktreeRules();
+    rules.core.safecrlf = .true;
+    try std.testing.expectError(
+        error.IrreversibleConversion,
+        worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = rules }),
+    );
+    try std.testing.expect(h.index.find("mixed.txt") == null);
+
+    rules.core.safecrlf = .warn;
+    const warned = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = rules });
+    try std.testing.expectEqual(@as(u32, 1), warned.safecrlf_warnings);
+    try std.testing.expect(h.index.find("mixed.txt") != null);
+}
+
 test "a tree naming .git is refused rather than written" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
