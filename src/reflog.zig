@@ -136,12 +136,13 @@ pub fn append(
     }
     w.writeByte('\n') catch return error.OutOfMemory;
 
-    // Opened for reading as well as writing because the end of the file is
-    // asked for through this handle: Windows gives a write-only handle no
-    // right to read the file's attributes, and the length that came back as
-    // zero there would put the second entry on top of the first.
-    const file = git_dir.openFile(io, path, .{ .mode = .read_write }) catch |err| switch (err) {
-        error.FileNotFound => try git_dir.createFile(io, path, .{ .truncate = false, .read = true }),
+    // Hold the file's exclusive advisory lock across the length query and
+    // the single positional write. Every relic appender therefore observes
+    // the prior line before choosing its offset instead of overwriting it.
+    // Opened for reading too because Windows does not let a write-only handle
+    // query the length.
+    const file = git_dir.openFile(io, path, .{ .mode = .read_write, .lock = .exclusive }) catch |err| switch (err) {
+        error.FileNotFound => try git_dir.createFile(io, path, .{ .truncate = false, .read = true, .lock = .exclusive }),
         else => |e| return e,
     };
     defer file.close(io);
