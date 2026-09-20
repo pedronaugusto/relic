@@ -711,6 +711,7 @@ pub const Odb = struct {
         file: Io.File,
         file_writer: Io.File.Writer,
         compress: flate.Compress,
+        input_writer: Io.Writer,
         hasher: hash.Hasher,
         window: []u8,
         out_buffer: []u8,
@@ -719,7 +720,23 @@ pub const Odb = struct {
 
         /// Where the object's bytes go.
         pub fn writer(s: *Stream) *Io.Writer {
-            return &s.compress.writer;
+            return &s.input_writer;
+        }
+
+        fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+            const s: *Stream = @alignCast(@fieldParentPtr("input_writer", w));
+            var total: usize = 0;
+            for (data[0 .. data.len - 1]) |slice| {
+                total = std.math.add(usize, total, slice.len) catch return error.WriteFailed;
+            }
+            const pattern = data[data.len - 1];
+            const repeated = std.math.mul(usize, pattern.len, splat) catch return error.WriteFailed;
+            total = std.math.add(usize, total, repeated) catch return error.WriteFailed;
+            if (total > s.remaining) return error.WriteFailed;
+
+            for (data[0 .. data.len - 1]) |slice| s.write(slice) catch return error.WriteFailed;
+            for (0..splat) |_| s.write(pattern) catch return error.WriteFailed;
+            return total;
         }
 
         /// Feed bytes, hashing as they go.
@@ -808,6 +825,7 @@ pub const Odb = struct {
             .file = file,
             .file_writer = undefined,
             .compress = undefined,
+            .input_writer = .{ .vtable = &.{ .drain = Stream.drain }, .buffer = &.{} },
             .hasher = .initOptions(odb.kind, odb.hashOptions()),
             .window = window,
             .out_buffer = out_buffer,
@@ -1693,8 +1711,8 @@ test "a streamed object is the same object" {
 
     var stream: Odb.Stream = undefined;
     try odb.writeStream(io, .blob, 6, &stream);
-    try stream.write("hel");
-    try stream.write("lo\n");
+    try stream.writer().writeAll("hel");
+    try stream.writer().writeAll("lo\n");
     const oid = try stream.finish(io);
     stream.deinit(io);
 
