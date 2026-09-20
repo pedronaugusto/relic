@@ -566,17 +566,32 @@ pub const Config = struct {
             const line = &file.lines.items[i];
             const escaped = try escapeValue(config.gpa, value);
             defer config.gpa.free(escaped);
-            const replacement = try std.fmt.allocPrint(config.gpa, "{s}{s}{s}", .{
-                line.text[0..line.value_start],
-                escaped,
-                line.text[line.value_end..],
-            });
-            const new_value_end = replacement.len - (line.text.len - line.value_end);
+            const replacement = if (line.has_value)
+                try std.fmt.allocPrint(config.gpa, "{s}{s}{s}", .{
+                    line.text[0..line.value_start],
+                    escaped,
+                    line.text[line.value_end..],
+                })
+            else blk: {
+                var name_start: usize = 0;
+                while (name_start < line.text.len and (line.text[name_start] == ' ' or line.text[name_start] == '\t')) {
+                    name_start += 1;
+                }
+                const name_end = name_start + line.name.len;
+                break :blk try std.fmt.allocPrint(config.gpa, "{s} = {s}{s}", .{
+                    line.text[0..name_end],
+                    escaped,
+                    line.text[name_end..],
+                });
+            };
+            const parsed = parseVariableLine(replacement) catch unreachable;
             if (line.owned) config.gpa.free(line.text);
             line.text = replacement;
             line.owned = true;
-            line.value_end = new_value_end;
-            line.has_value = true;
+            line.name = parsed.name;
+            line.value_start = parsed.value_start;
+            line.value_end = parsed.value_end;
+            line.has_value = parsed.has_value;
         } else {
             const escaped = try escapeValue(config.gpa, value);
             defer config.gpa.free(escaped);
@@ -1089,6 +1104,20 @@ test "setting a value rewrites one line and leaves the rest alone" {
         "\tname = Ada\n" ++
         "\n", after);
     try std.testing.expectEqualStrings("true", config.get("core.autocrlf").?);
+}
+
+test "setting a bare variable inserts an equals sign" {
+    const gpa = std.testing.allocator;
+    var config = try Config.parseText(gpa, "[core]\n\tbare  # repository kind\n", .local);
+    defer config.deinit();
+    config.files.items[0].writable = true;
+
+    try config.set("core.bare", "false");
+    try config.set("core.bare", "true");
+    const after = try config.renderWritable();
+    defer gpa.free(after);
+    try std.testing.expectEqualStrings("[core]\n\tbare = true  # repository kind\n", after);
+    try std.testing.expectEqualStrings("true", config.get("core.bare").?);
 }
 
 test "a new value joins its section and a new section is appended" {
