@@ -944,6 +944,8 @@ test "a worktree that moved is repaired and git follows it" {
         .detach_at = try Oid.parse(.sha1, commit_text),
     });
     added.admin_dir.close(io);
+    gpa.free(added.name);
+    added.work_dir.close(io);
     dest.close(io);
 
     var parent = try git.dir.openDir(io, "trees", .{ .iterate = true });
