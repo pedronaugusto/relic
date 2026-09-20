@@ -274,6 +274,7 @@ pub const CacheTree = struct {
     ) (ReadError || odb_mod.Error || object.Tree.Builder.AddError)!Oid {
         var consumed: usize = 0;
         const oid = try rebuildNode(t, io, &t.root, "", entries, &consumed, db);
+        if (consumed != entries.len) return error.CorruptCacheTree;
         return oid;
     }
 
@@ -288,7 +289,20 @@ pub const CacheTree = struct {
     ) (ReadError || odb_mod.Error || object.Tree.Builder.AddError)!Oid {
         // A valid node covers a known number of entries; skip over them.
         if (node.isValid()) {
-            consumed.* += @intCast(node.entry_count);
+            const count: usize = std.math.cast(usize, node.entry_count) orelse return error.CorruptCacheTree;
+            const end = std.math.add(usize, consumed.*, count) catch return error.CorruptCacheTree;
+            if (end > entries.len) return error.CorruptCacheTree;
+            if (prefix.len == 0) {
+                if (end != entries.len) return error.CorruptCacheTree;
+            } else {
+                for (entries[consumed.*..end]) |entry| {
+                    if (!std.mem.startsWith(u8, entry.path, prefix)) return error.CorruptCacheTree;
+                }
+                if (end < entries.len and std.mem.startsWith(u8, entries[end].path, prefix)) {
+                    return error.CorruptCacheTree;
+                }
+            }
+            consumed.* = end;
             return node.oid.?;
         }
 
@@ -1309,6 +1323,25 @@ test "an index written is an index read" {
     try std.testing.expect(back.find("nope") == null);
     try std.testing.expect(back.hasDirectory("b"));
     try std.testing.expect(!back.hasDirectory("a"));
+}
+
+test "a valid cache-tree root must cover every index entry" {
+    const gpa = std.testing.allocator;
+    var tree = try CacheTree.empty(gpa);
+    defer tree.deinit();
+    tree.root.entry_count = 0;
+    tree.root.oid = Oid.zero(.sha1);
+
+    const entries = [_]Entry{.{
+        .path = "tracked.txt",
+        .oid = Oid.zero(.sha1),
+        .mode = .file,
+    }};
+    var unused_db: odb_mod.Odb = undefined;
+    try std.testing.expectError(
+        error.CorruptCacheTree,
+        tree.rebuild(std.testing.io, &entries, &unused_db),
+    );
 }
 
 test "the trailer index.skipHash asks for is zeros, and reads back as skipped" {
