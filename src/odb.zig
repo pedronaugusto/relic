@@ -1735,11 +1735,13 @@ test "a stream whose installation fails remains abortable" {
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
 
-    // A regular file where the fan-out directory of `hello\n` (ce01...)
-    // has to go. The install then fails for every user on every platform:
-    // a read-only directory would not stop root, and CI runs the oldest
-    // git in a container as root.
-    try tmp.dir.writeFile(io, .{ .sub_path = "objects/ce", .data = "" });
+    // A directory where the object `hello\n` (ce0136...) has to land. The
+    // rename that installs it then fails for every user on every platform:
+    // a read-only objects directory would not stop root, and CI runs the
+    // oldest git in a container as root. (A file in the fan-out directory's
+    // place is not an option: the Windows rename reports that as a
+    // programmer bug rather than an error.)
+    try tmp.dir.createDirPath(io, "objects/ce/013625030ba8dba906f756967f9e9ca394464a");
 
     var stream: Odb.Stream = undefined;
     try odb.writeStream(io, .blob, 6, &stream);
@@ -1748,7 +1750,7 @@ test "a stream whose installation fails remains abortable" {
     defer stream.deinit(io);
     try stream.write("hello\n");
     if (stream.finish(io)) |_| return error.TestExpectedError else |err| switch (err) {
-        error.NotDir, error.FileNotFound, error.PathAlreadyExists, error.AccessDenied, error.PermissionDenied => {},
+        error.IsDir, error.PathAlreadyExists, error.AccessDenied, error.PermissionDenied => {},
         else => return err,
     }
 
