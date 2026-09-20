@@ -287,6 +287,69 @@ test "checkout sets the tree and leaves untracked and ignored files alone" {
     try std.testing.expectEqualStrings("", porcelain);
 }
 
+test "checkout replaces a tracked directory with a file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+
+    try h.repo.writeFile(io, "a/child.txt", "old\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "directory" });
+
+    try h.repo.dir.deleteFile(io, "a/child.txt");
+    try h.repo.dir.deleteDir(io, "a");
+    try h.repo.writeFile(io, "a", "new file\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "file" });
+    const target_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(target_text);
+    const target = try Oid.parse(.sha1, target_text);
+
+    try h.repo.exec(io, &.{ "reset", "-q", "--hard", "HEAD~1" });
+    try h.reload(gpa, io);
+    const out = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{});
+
+    try std.testing.expectEqual(@as(u32, 1), out.written);
+    try std.testing.expectEqual(@as(u32, 1), out.removed);
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("new file\n", try h.repo.dir.readFile(io, "a", &buf));
+    try std.testing.expect(h.index.find("a/child.txt") == null);
+    try std.testing.expect(h.index.find("a") != null);
+}
+
+test "checkout refuses a directory-to-file conflict before deleting tracked files" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+
+    try h.repo.writeFile(io, "a/child.txt", "tracked\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "directory" });
+    try h.repo.dir.deleteFile(io, "a/child.txt");
+    try h.repo.dir.deleteDir(io, "a");
+    try h.repo.writeFile(io, "a", "replacement\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "file" });
+    const target_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(target_text);
+    const target = try Oid.parse(.sha1, target_text);
+
+    try h.repo.exec(io, &.{ "reset", "-q", "--hard", "HEAD~1" });
+    try h.repo.writeFile(io, "a/mine.txt", "untracked\n");
+    try h.reload(gpa, io);
+    try std.testing.expectError(
+        error.UntrackedWouldBeOverwritten,
+        worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{}),
+    );
+
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("tracked\n", try h.repo.dir.readFile(io, "a/child.txt", &buf));
+    try std.testing.expectEqualStrings("untracked\n", try h.repo.dir.readFile(io, "a/mine.txt", &buf));
+    try std.testing.expect(h.index.find("a/child.txt") != null);
+}
+
 test "status agrees with git on every path" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

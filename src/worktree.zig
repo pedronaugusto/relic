@@ -38,6 +38,9 @@ pub const Error = error{
     /// The same path appeared twice with different case on a filesystem
     /// that folds case, so one would silently overwrite the other.
     CaseCollision,
+    /// A tree wants a file where the working tree has a directory containing
+    /// untracked content, which checkout must not discard.
+    UntrackedWouldBeOverwritten,
 } || Allocator.Error || odb_mod.Error || index_mod.ReadError ||
     index_mod.WriteError || fs.StatError || Io.Dir.Iterator.Error ||
     Io.Dir.OpenError || Io.Dir.DeleteFileError || Io.Dir.DeleteDirError ||
@@ -984,6 +987,22 @@ pub fn checkout(
         try refuseCaseCollisions(arena, &wanted);
     }
 
+    // A directory-to-file transition is safe only when everything below the
+    // directory is tracked and is about to leave the index. Prove that before
+    // deleting any old entry, so an untracked file cannot turn a checkout
+    // failure into a partially deleted working tree.
+    var conflict_it = wanted.iterator();
+    while (conflict_it.next()) |item| {
+        if (item.value_ptr.mode == .gitlink) continue;
+        if (try fs.statAt(io, wt, item.key_ptr.*)) |found| {
+            if (found.kind == .directory and
+                !try directoryIsReplaceable(arena, io, wt, item.key_ptr.*, index, &wanted))
+            {
+                return error.UntrackedWouldBeOverwritten;
+            }
+        }
+    }
+
     // Remove what the index has and the tree does not.
     var removed_dirs: std.StringHashMapUnmanaged(void) = .empty;
     var i: usize = 0;
@@ -1020,6 +1039,16 @@ pub fn checkout(
         n += 1;
     }
     std.mem.sort([]const u8, paths, {}, lessThanName);
+
+    // Tracked children have now gone. Remove the empty directories they
+    // occupied before attempting the atomic file replacements.
+    for (paths) |path| {
+        const want = wanted.get(path).?;
+        if (want.mode == .gitlink) continue;
+        if (try fs.statAt(io, wt, path)) |found| {
+            if (found.kind == .directory) try wt.deleteDir(io, path);
+        }
+    }
 
     for (paths) |path| {
         const want = wanted.get(path).?;
@@ -1113,6 +1142,29 @@ pub fn checkout(
     tree.root.oid = tree_oid;
 
     return outcome;
+}
+
+fn directoryIsReplaceable(
+    arena: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    dir_path: []const u8,
+    index: *const Index,
+    wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+) Error!bool {
+    var dir = try wt.openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    while (try iterator.next(io)) |item| {
+        const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, item.name });
+        if (item.kind == .directory) {
+            if (!try directoryIsReplaceable(arena, io, wt, path, index, wanted)) return false;
+            continue;
+        }
+        const tracked = index.find(path) != null;
+        if (!tracked or wanted.contains(path)) return false;
+    }
+    return true;
 }
 
 fn refuseCaseCollisions(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEntry)) Error!void {
