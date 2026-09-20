@@ -834,8 +834,15 @@ test "a three-way tree merge agrees with git merge-tree" {
     try std.testing.expect(result.isClean());
 
     const merged = try merge_mod.tree(io, &db, &result);
-    const theirs_merged = repo.line(io, &.{ "merge-tree", "--write-tree", ours_text, theirs_text }) catch
-        return error.SkipZigTest;
+
+    // `merge-tree --write-tree` arrived in git 2.38. An older git has no
+    // tree to compare against, so the comparison stands aside and says so;
+    // a git that has the mode and still fails is a failure.
+    testgit.requireGitVersion(gpa, io, 2, 38) catch |err| {
+        std.debug.print("skipping the merge-tree comparison: git merge-tree --write-tree needs git 2.38\n", .{});
+        return err;
+    };
+    const theirs_merged = try repo.line(io, &.{ "merge-tree", "--write-tree", ours_text, theirs_text });
     defer gpa.free(theirs_merged);
     try std.testing.expectEqualStrings(theirs_merged, merged.hex(&hex));
 }
