@@ -130,6 +130,23 @@ pub const Graph = struct {
         const data = data_at orelse return error.CorruptCommitGraph;
         if (names + @as(usize, count) * raw_len > bytes.len) return error.CorruptCommitGraph;
         if (data + @as(usize, count) * (raw_len + 16) > bytes.len) return error.CorruptCommitGraph;
+
+        var names_seen: u32 = 0;
+        var previous_name: ?[]const u8 = null;
+        for (0..256) |bucket| {
+            while (names_seen < count) : (names_seen += 1) {
+                const at = names + @as(usize, names_seen) * raw_len;
+                const name = bytes[at..][0..raw_len];
+                if (previous_name) |previous| {
+                    if (std.mem.order(u8, previous, name) != .lt) return error.CorruptCommitGraph;
+                }
+                if (name[0] > bucket) break;
+                if (name[0] < bucket) return error.CorruptCommitGraph;
+                previous_name = name;
+            }
+            const fanout_count = std.mem.readInt(u32, bytes[fanout + bucket * 4 ..][0..4], .big);
+            if (fanout_count != names_seen) return error.CorruptCommitGraph;
+        }
         if (generation_at) |at| {
             if (at + @as(usize, count) * 4 > bytes.len) return error.CorruptCommitGraph;
         }
@@ -288,6 +305,35 @@ test "a graph that is not one is refused by name" {
     const gpa = std.testing.allocator;
     const bytes = try gpa.dupe(u8, "not a graph at all");
     try std.testing.expectError(error.NotACommitGraph, Graph.parse(gpa, .sha1, bytes));
+}
+
+test "a non-monotonic commit-graph fanout is corrupt" {
+    const gpa = std.testing.allocator;
+    const fanout_at: usize = 56;
+    const names_at = fanout_at + 1024;
+    const data_at = names_at + 20;
+    const bytes = try gpa.alloc(u8, data_at + 36);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..4], magic);
+    bytes[4] = 1;
+    bytes[5] = 1;
+    bytes[6] = 3;
+    @memcpy(bytes[8..12], "OIDF");
+    std.mem.writeInt(u64, bytes[12..20], fanout_at, .big);
+    @memcpy(bytes[20..24], "OIDL");
+    std.mem.writeInt(u64, bytes[24..32], names_at, .big);
+    @memcpy(bytes[32..36], "CDAT");
+    std.mem.writeInt(u64, bytes[36..44], data_at, .big);
+    std.mem.writeInt(u64, bytes[48..56], bytes.len, .big);
+    std.mem.writeInt(u32, bytes[fanout_at..][0..4], std.math.maxInt(u32), .big);
+    std.mem.writeInt(u32, bytes[fanout_at + 255 * 4 ..][0..4], 1, .big);
+
+    var graph = Graph.parse(gpa, .sha1, bytes) catch |err| {
+        try std.testing.expectEqual(error.CorruptCommitGraph, err);
+        return;
+    };
+    graph.deinit();
+    return error.TestExpectedError;
 }
 
 test "fuzz: any bytes are a graph or a named error" {
