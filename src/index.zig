@@ -59,6 +59,8 @@ pub const WriteError = error{
     /// Version 4 was asked for but the entries are not in an order its
     /// prefix compression can express.
     UnsupportedIndexVersion,
+    /// Version 2 cannot encode skip-worktree or intent-to-add.
+    ExtendedFlagsRequireVersion3,
 } || fs.LockError || fs.CommitError || Allocator.Error;
 
 /// One tracked path.
@@ -1069,6 +1071,11 @@ pub const Index = struct {
     /// a test comparing them against git's, for instance.
     pub fn writeTo(index: *Index, w: *Io.Writer, options: WriteOptions) (Io.Writer.Error || WriteError)!void {
         const version = index.versionFor(options);
+        if (version == 2) {
+            for (index.entries.items) |entry| {
+                if (entry.needsExtendedFlags()) return error.ExtendedFlagsRequireVersion3;
+            }
+        }
         const raw_len = index.kind.rawLen();
 
         // The trailer is a hash of everything before it, so the body is
@@ -1323,6 +1330,23 @@ test "an index written is an index read" {
     try std.testing.expect(back.find("nope") == null);
     try std.testing.expect(back.hasDirectory("b"));
     try std.testing.expect(!back.hasDirectory("a"));
+}
+
+test "version 2 refuses entries whose extended flags would be lost" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    try index.add(.{
+        .path = "outside.txt",
+        .oid = Oid.zero(.sha1),
+        .mode = .file,
+        .skip_worktree = true,
+    });
+
+    try std.testing.expectError(
+        error.ExtendedFlagsRequireVersion3,
+        index.toBytes(.{ .version = .v2 }),
+    );
 }
 
 test "a valid cache-tree root must cover every index entry" {
