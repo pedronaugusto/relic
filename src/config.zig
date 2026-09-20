@@ -317,9 +317,12 @@ pub const Config = struct {
     }
 
     fn followIncludes(config: *Config, io: Io, dir: Io.Dir, level: Level, from: usize, depth: u8) ParseError!void {
+        if (from == config.entries.items.len) return;
+        const source_file_index = config.entries.items[from].file_index;
         var i = from;
         while (i < config.entries.items.len) : (i += 1) {
             const entry = config.entries.items[i];
+            if (entry.file_index != source_file_index) break;
             const value = entry.value orelse continue;
             var include_path: ?[]const u8 = null;
             if (std.ascii.eqlIgnoreCase(entry.section, "include") and
@@ -334,21 +337,24 @@ pub const Config = struct {
             const path = include_path orelse continue;
 
             var buf: [4096]u8 = undefined;
-            const resolved = config.resolveIncludePath(path, &buf) orelse continue;
-            const before = config.entries.items.len;
+            const including_path = config.files.items[entry.file_index].path;
+            const resolved = config.resolveIncludePath(path, including_path, &buf) orelse continue;
             config.addFile(io, .{ .dir = dir, .sub_path = resolved }, level, false, depth + 1) catch |err| switch (err) {
                 error.IncludeTooDeep => return err,
                 // git treats an unreadable or malformed include as absent.
                 else => continue,
             };
-            _ = before;
         }
     }
 
-    fn resolveIncludePath(config: *const Config, path: []const u8, buf: []u8) ?[]const u8 {
+    fn resolveIncludePath(config: *const Config, path: []const u8, including_path: []const u8, buf: []u8) ?[]const u8 {
         if (std.mem.startsWith(u8, path, "~/")) {
             const home = config.context.home orelse return null;
             return std.fmt.bufPrint(buf, "{s}/{s}", .{ home, path[2..] }) catch null;
+        }
+        if (std.fs.path.isAbsolute(path)) return path;
+        if (std.fs.path.dirname(including_path)) |parent| {
+            if (parent.len != 0) return std.fmt.bufPrint(buf, "{s}/{s}", .{ parent, path }) catch null;
         }
         return path;
     }
@@ -1097,6 +1103,21 @@ test "typed getters unquote values before parsing them" {
     const path = (try config.getPath(gpa, "typed.path")).?;
     defer gpa.free(path);
     try std.testing.expectEqualStrings("/home/ada/a b", path);
+}
+
+test "relative includes start beside the including file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "cfg", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "cfg/main", .data = "[include]\n\tpath = child\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "cfg/child", .data = "[fixture]\n\tvalue = nested\n" });
+
+    var config = try Config.openFile(gpa, io, .{ .dir = tmp.dir, .sub_path = "cfg/main" }, .local, .{});
+    defer config.deinit();
+    try std.testing.expectEqualStrings("nested", config.get("fixture.value").?);
+    try std.testing.expectEqualStrings("cfg/child", config.origin("fixture.value").?.path);
 }
 
 test "a full name splits at the first dot and the last" {
