@@ -166,7 +166,7 @@ pub const Walk = struct {
             const oid = queue.pop().?;
             if (out.contains(oid)) continue;
             try out.put(walk.gpa, oid, {});
-            const commit = walk.load(io, oid) catch continue;
+            const commit = try walk.load(io, oid);
             defer walk.gpa.free(commit.parents);
             for (commit.parents) |parent| try queue.append(walk.gpa, parent);
         }
@@ -335,10 +335,10 @@ fn reachable(gpa: Allocator, io: Io, db: *odb_mod.Odb, from: Oid, out: *Oid.Set)
         const oid = queue.pop().?;
         if (out.contains(oid)) continue;
         try out.put(gpa, oid, {});
-        const found = db.read(io, oid) catch continue;
+        const found = try db.read(io, oid);
         defer gpa.free(found.bytes);
-        if (found.type != .commit) continue;
-        var commit = object.Commit.parse(gpa, db.kind, found.bytes) catch continue;
+        if (found.type != .commit) return error.NotACommit;
+        var commit = try object.Commit.parse(gpa, db.kind, found.bytes);
         defer commit.deinit();
         for (commit.parents) |parent| try queue.append(gpa, parent);
     }
@@ -360,11 +360,26 @@ fn reachableExcluding(
         if (out.contains(oid)) continue;
         try out.put(gpa, oid, {});
         if (oid.eql(target)) continue;
-        const found = db.read(io, oid) catch continue;
+        const found = try db.read(io, oid);
         defer gpa.free(found.bytes);
-        if (found.type != .commit) continue;
-        var commit = object.Commit.parse(gpa, db.kind, found.bytes) catch continue;
+        if (found.type != .commit) return error.NotACommit;
+        var commit = try object.Commit.parse(gpa, db.kind, found.bytes);
         defer commit.deinit();
         for (commit.parents) |parent| try queue.append(gpa, parent);
     }
+}
+
+test "ancestry reports a missing commit instead of a negative answer" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    var db = try odb_mod.Odb.openAt(gpa, io, objects, .sha1, .{});
+    defer db.deinit(io);
+
+    const ancestor = try Oid.parse(.sha1, "1" ** 40);
+    const missing = try Oid.parse(.sha1, "2" ** 40);
+    try std.testing.expectError(error.ObjectNotFound, isAncestor(gpa, io, &db, ancestor, missing));
 }
