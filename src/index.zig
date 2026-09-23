@@ -3,7 +3,13 @@
 //! An extension whose signature begins with an upper-case letter is optional
 //! and is kept byte for byte and written back; a lower-case one is mandatory
 //! and is either understood or a named refusal, because quietly dissolving one
-//! is data loss. `TREE`, `REUC` and `link` are understood.
+//! is data loss. `TREE`, `REUC`, `link` and `sdir` are understood.
+//!
+//! `sdir` marks a sparse index: a directory the sparse cone leaves out may
+//! stand as one entry, its path ending in `/`, its mode `040000`, its name
+//! the tree's, and `skip-worktree` set. Such an entry is read, kept and
+//! written back as it is; `sparseindex` is what expands one into the files
+//! under it and collapses them again.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -37,9 +43,10 @@ pub const ReadError = error{
     /// makes it mandatory, and which this release does not implement. The
     /// name is in `unsupported_extension` on the index that refused.
     UnsupportedExtension,
-    /// The `sdir` extension marks a sparse index, whose collapsed directory
-    /// entries this release does not implement.
-    SparseIndexUnsupported,
+    /// A directory entry in an index without `sdir`, or one whose path does
+    /// not end in `/` or that is not at stage 0 -- or a path ending in `/`
+    /// that is not a directory entry.
+    InvalidSparseDirectory,
     /// An entry's mode was not one git writes.
     InvalidMode,
     /// A path that is empty, absolute, or holds a component a working tree
@@ -89,6 +96,12 @@ pub const Entry = struct {
     /// Whether the entry needs the version 3 extended flag word.
     pub fn needsExtendedFlags(e: Entry) bool {
         return e.skip_worktree or e.intent_to_add;
+    }
+
+    /// Whether the entry is a sparse directory: a whole directory outside
+    /// the sparse cone standing as one entry, named with a trailing `/`.
+    pub fn isSparseDirectory(e: Entry) bool {
+        return e.mode == .tree;
     }
 
     /// git's order: path as unsigned bytes, then stage.
@@ -142,6 +155,13 @@ pub const CacheTree = struct {
             for (n.children.items) |*sub| sub.deinit(gpa);
             n.children.deinit(gpa);
             gpa.free(n.name);
+        }
+
+        /// git's order for the children of a node: by length, then by
+        /// bytes.
+        pub fn lessThan(_: void, a: Node, b: Node) bool {
+            if (a.name.len != b.name.len) return a.name.len < b.name.len;
+            return std.mem.order(u8, a.name, b.name) == .lt;
         }
 
         fn child(n: *Node, name: []const u8) ?*Node {
@@ -311,6 +331,20 @@ pub const CacheTree = struct {
             return node.oid.?;
         }
 
+        // A sparse directory is its own tree: the entry names it, and the
+        // node covers the one entry, which is how git records it.
+        if (prefix.len != 0 and consumed.* < entries.len) {
+            const first = entries[consumed.*];
+            if (first.isSparseDirectory() and std.mem.eql(u8, first.path, prefix)) {
+                for (node.children.items) |*child| child.deinit(t.gpa);
+                node.children.clearRetainingCapacity();
+                consumed.* += 1;
+                node.entry_count = 1;
+                node.oid = first.oid;
+                return first.oid;
+            }
+        }
+
         var builder: object.Tree.Builder = .init(t.gpa, db.kind);
         defer builder.deinit();
         const start = consumed.*;
@@ -367,6 +401,9 @@ pub const CacheTree = struct {
 
         for (node.children.items) |*child| child.deinit(t.gpa);
         node.children.deinit(t.gpa);
+        // git keeps a node's children shortest name first, and by bytes
+        // among names of one length, and writes them in that order.
+        std.mem.sort(Node, kept.items, {}, Node.lessThan);
         node.children = kept;
 
         const bytes = try builder.build();
@@ -523,6 +560,10 @@ pub const Index = struct {
     /// How many blocks the `IEOT` the file read carried was divided into, or
     /// zero where there was none.
     entry_offset_blocks: u32 = 0,
+    /// Whether the index is sparse: it carries `sdir`, and may hold sparse
+    /// directory entries. `sparseindex.expand` clears it and
+    /// `sparseindex.collapse` sets it; it decides whether `sdir` is written.
+    sparse: bool = false,
     /// The delete mask a split index carried, until it is merged.
     split_delete: ?ewah.Bits = null,
     /// The replace mask a split index carried, until it is merged.
@@ -688,8 +729,8 @@ pub const Index = struct {
                     }
                 }
             } else if (std.mem.eql(u8, &signature, "sdir")) {
-                index.unsupported_extension = signature;
-                return error.SparseIndexUnsupported;
+                // It carries nothing; being there is what it says.
+                index.sparse = true;
             } else if (signature[0] >= 'A' and signature[0] <= 'Z') {
                 const copy = try gpa.dupe(u8, data);
                 index.unknown.append(gpa, .{ .signature = signature, .data = copy }) catch |err| {
@@ -705,6 +746,11 @@ pub const Index = struct {
         // A split index's overlay carries its replacements with empty names,
         // in the shared index's order rather than in path order, so both
         // checks wait until the `link` extension has been seen.
+        for (index.entries.items) |e| {
+            const trailing_slash = e.path.len != 0 and e.path[e.path.len - 1] == '/';
+            if (e.isSparseDirectory() != trailing_slash) return error.InvalidSparseDirectory;
+            if (e.isSparseDirectory() and (!index.sparse or e.stage != 0)) return error.InvalidSparseDirectory;
+        }
         if (!index.was_split) {
             for (index.entries.items) |e| {
                 if (e.path.len == 0) return error.InvalidEntryPath;
@@ -864,9 +910,11 @@ pub const Index = struct {
         }
         errdefer gpa.free(path);
 
-        // An empty name is only legal in a split index's overlay, which is
-        // checked once the extensions have been read.
-        if (path.len != 0 and !safepath.isSafeStoredPath(path)) return error.InvalidEntryPath;
+        // An empty name is only legal in a split index's overlay, and a
+        // trailing slash only on a sparse directory; both are checked once
+        // the extensions have been read.
+        const stored = if (path.len > 1 and path[path.len - 1] == '/') path[0 .. path.len - 1] else path;
+        if (stored.len != 0 and !safepath.isSafeStoredPath(stored)) return error.InvalidEntryPath;
 
         const mode_raw = std.mem.readInt(u32, b[24..28], .big);
         const mode = object.Mode.fromRaw(mode_raw) catch return error.InvalidMode;
@@ -1263,6 +1311,12 @@ pub const Index = struct {
             try writeExtension(out, &extension.signature, extension.data);
             hashExtensionHeader(&ext_hasher, &extension.signature, extension.data.len);
         }
+        // `sdir` is empty, and last of the ones that carry the index's
+        // content, which is where git writes it.
+        if (index.sparse) {
+            try writeExtension(out, "sdir", "");
+            hashExtensionHeader(&ext_hasher, "sdir", 0);
+        }
 
         // `EOIE` is last, and is not part of its own hash.
         if (options.end_of_index_entries orelse index.had_end_of_index_entries) {
@@ -1551,18 +1605,31 @@ test "an unknown mandatory extension is refused by name" {
     try std.testing.expectError(error.UnsupportedExtension, Index.parse(gpa, .sha1, bytes));
 }
 
-test "the sparse index extension has its own refusal" {
+test "a sparse directory entry reads and writes back, and needs sdir" {
     const gpa = std.testing.allocator;
     var index: Index = .initEmpty(gpa, .sha1);
     defer index.deinit();
-    try index.unknown.append(gpa, .{
-        .signature = "sdir".*,
-        .data = try gpa.dupe(u8, ""),
-    });
-    const fixture = try index.toBytes(.{});
-    defer gpa.free(fixture);
+    const oid = try Oid.parse(.sha1, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+    try index.add(.{ .path = "a.txt", .oid = oid, .mode = .file });
+    try index.add(.{ .path = "out/", .oid = oid, .mode = .tree, .skip_worktree = true });
+    index.sparse = true;
+    const bytes = try index.toBytes(.{});
+    defer gpa.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "sdir\x00\x00\x00\x00") != null);
 
-    try std.testing.expectError(error.SparseIndexUnsupported, Index.parse(gpa, .sha1, fixture));
+    var back = try Index.parse(gpa, .sha1, bytes);
+    defer back.deinit();
+    try std.testing.expect(back.sparse);
+    try std.testing.expect(back.find("out/").?.isSparseDirectory());
+    const again = try back.toBytes(.{});
+    defer gpa.free(again);
+    try std.testing.expectEqualSlices(u8, bytes, again);
+
+    // Without the extension the same entry is a corrupt index.
+    index.sparse = false;
+    const bare = try index.toBytes(.{});
+    defer gpa.free(bare);
+    try std.testing.expectError(error.InvalidSparseDirectory, Index.parse(gpa, .sha1, bare));
 }
 
 test "a bad checksum is a named error" {

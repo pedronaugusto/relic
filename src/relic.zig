@@ -24,6 +24,7 @@ pub const worktree = @import("worktree.zig");
 pub const worktrees = @import("worktrees.zig");
 pub const sparse = @import("sparse.zig");
 pub const sparsecheckout = @import("sparsecheckout.zig");
+pub const sparseindex = @import("sparseindex.zig");
 pub const repo = @import("repo.zig");
 pub const revwalk = @import("revwalk.zig");
 pub const merge = @import("merge.zig");

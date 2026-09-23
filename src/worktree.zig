@@ -18,6 +18,7 @@ const safepath = @import("safepath.zig");
 const ignore = @import("ignore.zig");
 const attributes = @import("attributes.zig");
 const sparse = @import("sparse.zig");
+const sparseindex = @import("sparseindex.zig");
 const dirscan = @import("dirscan.zig");
 const pack_mod = @import("pack.zig");
 const gitlink = @import("gitlink.zig");
@@ -62,7 +63,7 @@ pub const Error = error{
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.SymLinkError ||
     Io.Dir.ReadLinkError || Io.Writer.Error || Io.File.SyncError ||
     Io.File.SetPermissionsError || object.Tree.Builder.AddError ||
-    object.TreeParseError || convert.Error;
+    object.TreeParseError || convert.Error || sparseindex.Error;
 
 /// What the caller supplies so that a blob is hashed the way git would hash
 /// it, and so that ignore rules are the ones git would apply.
@@ -212,6 +213,10 @@ pub fn addAll(
     var fresh: std.ArrayList(index_mod.Entry) = .empty;
     defer fresh.deinit(gpa);
 
+    // A sparse directory the working tree has after all is expanded first,
+    // so that what is in it is compared and staged against its own entries.
+    if (index.sparse) try sparseindex.expandPresent(gpa, io, wt, index, db);
+
     // One pack for the whole call, where the caller asked for one. It is
     // opened before the walk so that an object written early in it is in
     // the same file as one written late, and finished after, so that a
@@ -268,7 +273,7 @@ pub fn addAll(
                 (std.mem.startsWith(u8, entry.path, options.prefix) and
                     entry.path.len > options.prefix.len and
                     entry.path[options.prefix.len] == '/');
-            if (!under_prefix or entry.skip_worktree or seen.contains(entry.path)) continue;
+            if (!under_prefix or entry.skip_worktree or entry.isSparseDirectory() or seen.contains(entry.path)) continue;
             // The file is gone from the working tree: stage its removal.
             const tree = try index.cacheTree();
             tree.invalidate(entry.path);
@@ -717,13 +722,39 @@ pub fn status(
 
     var entries: std.StringArrayHashMapUnmanaged(StatusEntry) = .empty;
 
-    // HEAD against the index.
+    // HEAD against the index. A sparse directory is a tree: where HEAD has
+    // the same tree there, nothing under it differs and neither side is
+    // flattened; where it does not, its files are flattened out of the
+    // index's tree and compared one by one, as a full index would be.
+    var sparse_dirs: std.StringHashMapUnmanaged(Oid) = .empty;
+    for (index.entries.items) |entry| {
+        if (entry.isSparseDirectory()) try sparse_dirs.put(arena, entry.path[0 .. entry.path.len - 1], entry.oid);
+    }
     var head_paths: std.StringHashMapUnmanaged(TreeEntry) = .empty;
     if (options.head_tree) |tree_oid| {
-        try flattenTree(arena, io, db, tree_oid, "", &head_paths, 0);
+        try flattenTree(arena, io, db, tree_oid, "", &head_paths, 0, &sparse_dirs);
+    }
+    var expanded: std.StringHashMapUnmanaged(TreeEntry) = .empty;
+    for (index.entries.items) |entry| {
+        if (!entry.isSparseDirectory()) continue;
+        const dir = entry.path[0 .. entry.path.len - 1];
+        if (options.head_tree) |head| {
+            if (try treeAt(io, db, head, dir)) |at| {
+                if (at.eql(entry.oid)) continue;
+            }
+        }
+        try flattenTree(arena, io, db, entry.oid, dir, &expanded, 1, null);
+    }
+    var expanded_it = expanded.iterator();
+    while (expanded_it.next()) |pair| {
+        const staged = compareToHead(&head_paths, pair.key_ptr.*, pair.value_ptr.mode, pair.value_ptr.oid);
+        if (staged == .unmodified) continue;
+        const slot = try entries.getOrPut(arena, pair.key_ptr.*);
+        slot.value_ptr.* = .{ .path = slot.key_ptr.*, .staged = staged, .unstaged = .unmodified };
     }
 
     for (index.entries.items) |entry| {
+        if (entry.isSparseDirectory()) continue;
         if (entry.stage != 0) {
             const slot = try entries.getOrPut(arena, try arena.dupe(u8, entry.path));
             if (!slot.found_existing) {
@@ -742,15 +773,7 @@ pub fn status(
                 if (entry.mode == .gitlink or was_gitlink) continue;
             }
         }
-        const staged: Change = blk: {
-            const in_head = head_paths.get(entry.path) orelse break :blk .added;
-            if (!in_head.oid.eql(entry.oid)) break :blk .modified;
-            if (in_head.mode != entry.mode) break :blk if (in_head.mode.isBlob() == entry.mode.isBlob())
-                .modified
-            else
-                .type_changed;
-            break :blk .unmodified;
-        };
+        const staged = compareToHead(&head_paths, entry.path, entry.mode, entry.oid);
         if (staged == .unmodified) continue;
         const slot = try entries.getOrPut(arena, try arena.dupe(u8, entry.path));
         slot.value_ptr.* = .{
@@ -762,7 +785,7 @@ pub fn status(
 
     var head_it = head_paths.iterator();
     while (head_it.next()) |pair| {
-        if (index.find(pair.key_ptr.*) != null) continue;
+        if (index.find(pair.key_ptr.*) != null or expanded.contains(pair.key_ptr.*)) continue;
         if (options.submodules) |probe| {
             if (probe.ignore_staged and pair.value_ptr.mode == .gitlink) continue;
         }
@@ -802,7 +825,7 @@ pub fn status(
     try scan.walk("", 0);
 
     for (index.entries.items) |entry| {
-        if (entry.stage != 0 or entry.skip_worktree) continue;
+        if (entry.stage != 0 or entry.skip_worktree or entry.isSparseDirectory()) continue;
         if (scan.seen.contains(entry.path)) continue;
         const slot = try entries.getOrPut(arena, try arena.dupe(u8, entry.path));
         if (!slot.found_existing) {
@@ -835,6 +858,31 @@ pub fn status(
     return .{ .gpa = gpa, .arena = arena_instance.state, .entries = out };
 }
 
+/// HEAD's side of one index path: what `status` calls a staged change.
+fn compareToHead(head_paths: *const std.StringHashMapUnmanaged(TreeEntry), path: []const u8, mode: object.Mode, oid: Oid) Change {
+    const in_head = head_paths.get(path) orelse return .added;
+    if (!in_head.oid.eql(oid)) return .modified;
+    if (in_head.mode != mode) return if (in_head.mode.isBlob() == mode.isBlob()) .modified else .type_changed;
+    return .unmodified;
+}
+
+/// The tree at the directory `dir` of `root`, or `null` where there is
+/// none.
+fn treeAt(io: Io, db: *Odb, root: Oid, dir: []const u8) Error!?Oid {
+    var current = root;
+    var parts = std.mem.splitScalar(u8, dir, '/');
+    while (parts.next()) |name| {
+        const found = try db.read(io, current);
+        defer db.gpa.free(found.bytes);
+        if (found.type != .tree) return null;
+        const tree: object.Tree = .parse(db.kind, found.bytes);
+        const entry = (try tree.find(name)) orelse return null;
+        if (entry.mode != .tree) return null;
+        current = entry.oid;
+    }
+    return current;
+}
+
 fn lessThanStatus(_: void, a: StatusEntry, b: StatusEntry) bool {
     return std.mem.order(u8, a.path, b.path) == .lt;
 }
@@ -850,6 +898,22 @@ const StatusScan = struct {
     options: StatusOptions,
     entries: *std.StringArrayHashMapUnmanaged(StatusEntry),
     seen: std.StringHashMapUnmanaged(void) = .empty,
+    /// The files of the sparse directories the walk has met on the disk,
+    /// which a full index would hold with `skip-worktree` set. In `arena`.
+    sparse_files: std.StringHashMapUnmanaged(TreeEntry) = .empty,
+    /// The sparse directories whose files are in `sparse_files`.
+    sparse_loaded: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// Whether `path`, which no index entry names, is a file of a sparse
+    /// directory, and so tracked and out of the working tree.
+    fn inSparseDirectory(s: *StatusScan, path: []const u8) Error!bool {
+        const dir_entry = sparseindex.containing(s.index, path) orelse return false;
+        if (!s.sparse_loaded.contains(dir_entry.path)) {
+            try s.sparse_loaded.put(s.arena, dir_entry.path, {});
+            try flattenTree(s.arena, s.io, s.db, dir_entry.oid, dir_entry.path[0 .. dir_entry.path.len - 1], &s.sparse_files, 1, null);
+        }
+        return s.sparse_files.contains(path);
+    }
 
     fn walk(s: *StatusScan, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return;
@@ -908,6 +972,10 @@ const StatusScan = struct {
 
             const tracked = s.index.find(path);
             if (tracked == null) {
+                // Tracked, in a sparse directory, and out of the working
+                // tree whatever the disk says: what a full index says of a
+                // `skip-worktree` entry.
+                if (try s.inSparseDirectory(path)) continue;
                 if (s.options.untracked == .no) continue;
                 if (s.excluded(path, false)) {
                     if (s.options.include_ignored) try s.record(path, .ignored);
@@ -1121,6 +1189,7 @@ fn flattenTree(
     prefix: []const u8,
     out: *std.StringHashMapUnmanaged(TreeEntry),
     depth: u32,
+    same: ?*const std.StringHashMapUnmanaged(Oid),
 ) Error!void {
     if (depth > 64) return error.UnsupportedEntry;
     const found = try db.read(io, tree_oid);
@@ -1134,7 +1203,14 @@ fn flattenTree(
         else
             try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
         if (entry.mode == .tree) {
-            try flattenTree(arena, io, db, entry.oid, path, out, depth + 1);
+            // A subtree a sparse directory already names, unchanged, has
+            // nothing in it to compare.
+            if (same) |dirs| {
+                if (dirs.get(path)) |oid| {
+                    if (oid.eql(entry.oid)) continue;
+                }
+            }
+            try flattenTree(arena, io, db, entry.oid, path, out, depth + 1, same);
             continue;
         }
         try out.put(arena, path, .{ .mode = entry.mode, .oid = entry.oid });
@@ -1153,7 +1229,7 @@ pub fn flatten(
     tree_oid: Oid,
 ) Error!std.StringHashMapUnmanaged(TreeEntry) {
     var out: std.StringHashMapUnmanaged(TreeEntry) = .empty;
-    try flattenTree(arena, io, db, tree_oid, "", &out, 0);
+    try flattenTree(arena, io, db, tree_oid, "", &out, 0, null);
     return out;
 }
 
@@ -1185,6 +1261,9 @@ pub fn resetIndex(
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
+    // The tree is compared path by path, so a sparse index is made full
+    // first; a caller that wants it sparse again collapses it.
+    try sparseindex.expand(gpa, io, index, db, null);
     var wanted = try flatten(arena, io, db, tree_oid);
 
     var gone: std.ArrayList([]const u8) = .empty;
@@ -1318,6 +1397,9 @@ pub fn checkout(
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
+    // Every path of the tree is written, so a sparse index is made full
+    // first, which is what this leaves behind anyway.
+    try sparseindex.expand(gpa, io, index, db, null);
     var wanted = try flatten(arena, io, db, tree_oid);
 
     const attrs_before = if (options.rules.attrs) |attrs| attrs.levels.items.len else 0;
@@ -1873,8 +1955,13 @@ pub fn applySparse(
     defer conv.deinit();
     defer if (options.rules.attrs) |attrs| attrs.leave();
 
+    // A sparse index is expanded as far as the new patterns reach into it,
+    // which for a cone is the directories it now includes and for anything
+    // else is everything. What stays collapsed stays out.
+    if (index.sparse) try sparseindex.expand(gpa, io, index, db, patterns);
+
     for (index.entries.items) |*entry| {
-        if (entry.stage != 0) continue;
+        if (entry.stage != 0 or entry.isSparseDirectory()) continue;
         const included = patterns.includes(entry.path, false);
         if (!included and !entry.skip_worktree) {
             if (try fs.statAt(io, wt, entry.path)) |found| {
@@ -1983,6 +2070,10 @@ pub const Listing = struct {
 /// what `git ls-files --cached --others --exclude-standard` lists. A
 /// repository inside the working tree that the index has nothing for is one
 /// untracked path ending in `/`.
+///
+/// A sparse directory is listed as itself, with its trailing slash, which
+/// is what `git ls-files --sparse` prints, and the walk for untracked paths
+/// does not go into one: what is there is outside the sparse checkout.
 pub fn list(
     gpa: Allocator,
     io: Io,
@@ -2066,6 +2157,12 @@ const ListScan = struct {
                     if (try gitlink.isRepository(s.gpa, s.io, s.wt, path)) {
                         try s.out.append(s.arena, try std.fmt.allocPrint(s.arena, "{s}/", .{path}));
                         continue;
+                    }
+                }
+                if (s.index.sparse) {
+                    const as_dir = try std.fmt.allocPrint(s.arena, "{s}/", .{path});
+                    if (s.index.find(as_dir)) |entry| {
+                        if (entry.isSparseDirectory()) continue;
                     }
                 }
                 try s.walk(path, depth + 1);

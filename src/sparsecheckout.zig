@@ -25,6 +25,7 @@ const fs = @import("fs.zig");
 const index_mod = @import("index.zig");
 const repo_mod = @import("repo.zig");
 const sparse = @import("sparse.zig");
+const sparseindex = @import("sparseindex.zig");
 const worktree = @import("worktree.zig");
 
 const Config = config_mod.Config;
@@ -49,7 +50,7 @@ pub const Error = error{
     PathOutsideWorktree,
     /// `add` found no pattern file to add to.
     PatternFileMissing,
-} || worktree.Error || Config.SetError || config_mod.ParseError || config_mod.ValueError ||
+} || worktree.Error || sparseindex.Error || Config.SetError || config_mod.ParseError || config_mod.ValueError ||
     fs.LockError || fs.CommitError || sparse.Error || repo_mod.Error;
 
 /// How an operation behaves. Each field is one of the command's options.
@@ -493,6 +494,14 @@ const Op = struct {
         rules.attrs = &attrs;
 
         const update = try worktree.applySparse(repo.gpa, io, repo.work_dir.?, &index, &repo.odb, patterns, .{ .rules = rules });
+
+        // git decides at every write whether the index may be sparse: sparse
+        // checkout on, in cone mode, with `index.sparse`, and patterns that
+        // really are a cone. Otherwise it is written full.
+        const may_collapse = op.state.enabled and op.state.cone and op.state.sparse_index and patterns.cone != null;
+        if (!may_collapse or !try sparseindex.collapse(repo.gpa, io, &index, &repo.odb, patterns)) {
+            try sparseindex.expand(repo.gpa, io, &index, &repo.odb, null);
+        }
         index.writeTo(lock.writer(), .{}) catch |err| switch (err) {
             error.WriteFailed => return error.WriteFailed,
             else => |e| return e,
@@ -1053,4 +1062,91 @@ test "a bare repository's core.bare moves where git moves it" {
             return err;
         };
     }
+}
+
+/// The two indexes entry for entry, leaving out the stat of a file that is
+/// in the working tree, which each side took from its own disk.
+fn expectSameIndex(gpa: Allocator, io: Io, t: *Twin) !void {
+    const a_bytes = try t.theirs.readFile(io, ".git/index");
+    defer gpa.free(a_bytes);
+    const b_bytes = try t.ours.readFile(io, ".git/index");
+    defer gpa.free(b_bytes);
+    var a = try index_mod.Index.parse(gpa, .sha1, a_bytes);
+    defer a.deinit();
+    var b = try index_mod.Index.parse(gpa, .sha1, b_bytes);
+    defer b.deinit();
+    try std.testing.expectEqual(a.sparse, b.sparse);
+    try std.testing.expectEqual(a.entries.items.len, b.entries.items.len);
+    for (a.entries.items, b.entries.items) |x, y| {
+        errdefer std.debug.print("at {s}\n", .{x.path});
+        try std.testing.expectEqualStrings(x.path, y.path);
+        try std.testing.expect(x.oid.eql(y.oid));
+        try std.testing.expectEqual(x.mode, y.mode);
+        try std.testing.expectEqual(x.skip_worktree, y.skip_worktree);
+        if (x.skip_worktree) try std.testing.expectEqual(x.stat, y.stat);
+    }
+    try std.testing.expectEqual(a.cache_tree != null, b.cache_tree != null);
+}
+
+test "a sparse index is written where git writes one, and made full where git makes it full" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var twin = try Twin.init(gpa, io, &.{}, setupTree);
+    defer twin.deinit();
+
+    try twin.git(io, &.{ "set", "--sparse-index", "A/B" });
+    {
+        var repo = try twin.open(io);
+        defer repo.deinit(io);
+        _ = try set(&repo, io, &.{"A/B"}, .{ .sparse_index = true });
+    }
+    try twin.expectSame(io);
+    try expectSameIndex(gpa, io, &twin);
+    try twin.ours.exec(io, &.{ "fsck", "--no-progress" });
+
+    try twin.git(io, &.{ "add", "D", "E/F" });
+    {
+        var repo = try twin.open(io);
+        defer repo.deinit(io);
+        _ = try add(&repo, io, &.{ "D", "E/F" }, .{});
+    }
+    try twin.expectSame(io);
+    try expectSameIndex(gpa, io, &twin);
+
+    try twin.git(io, &.{ "set", "A" });
+    {
+        var repo = try twin.open(io);
+        defer repo.deinit(io);
+        _ = try set(&repo, io, &.{"A"}, .{});
+    }
+    try twin.expectSame(io);
+    try expectSameIndex(gpa, io, &twin);
+
+    try twin.git(io, &.{ "reapply", "--no-sparse-index" });
+    {
+        var repo = try twin.open(io);
+        defer repo.deinit(io);
+        _ = try reapply(&repo, io, .{ .sparse_index = false });
+    }
+    try twin.expectSame(io);
+    try expectSameIndex(gpa, io, &twin);
+
+    try twin.git(io, &.{ "reapply", "--sparse-index" });
+    {
+        var repo = try twin.open(io);
+        defer repo.deinit(io);
+        _ = try reapply(&repo, io, .{ .sparse_index = true });
+    }
+    try twin.expectSame(io);
+    try expectSameIndex(gpa, io, &twin);
+
+    try twin.git(io, &.{"disable"});
+    {
+        var repo = try twin.open(io);
+        defer repo.deinit(io);
+        _ = try disable(&repo, io);
+    }
+    try twin.expectSame(io);
+    try expectSameIndex(gpa, io, &twin);
+    try twin.ours.exec(io, &.{ "fsck", "--no-progress" });
 }
