@@ -145,11 +145,25 @@ pub const Store = struct {
     format: Format = .files,
     /// How a reftable stack is written and compacted.
     reftable_options: reftablestack.Options = .{},
+    /// The reftable stacks as last read, kept between calls. `Repository`
+    /// makes one for a reftable repository and `deinit` releases it; a
+    /// store without one reads the stack afresh on every call.
+    reftable_cache: ?*reftablestack.Cache = null,
 
     /// Open over an already-opened pair of directories, which the store does
     /// not close.
     pub fn init(gpa: Allocator, kind: Kind, git_dir: Io.Dir, common_dir: Io.Dir) Store {
         return .{ .gpa = gpa, .kind = kind, .git_dir = git_dir, .common_dir = common_dir };
+    }
+
+    /// Release what the store keeps between calls: a reftable cache and
+    /// the tables it holds open. A store with nothing kept needs no call.
+    pub fn deinit(store: *Store) void {
+        if (store.reftable_cache) |c| {
+            c.deinit();
+            store.gpa.destroy(c);
+            store.reftable_cache = null;
+        }
     }
 
     /// Which directory a ref lives in.

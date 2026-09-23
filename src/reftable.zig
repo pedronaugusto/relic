@@ -91,7 +91,7 @@ pub const Error = error{
     UpdateIndexOutOfRange,
     /// One record that does not fit in a block of the configured size.
     RecordTooLarge,
-} || Allocator.Error;
+} || Allocator.Error || Io.File.ReadPositionalError || Io.File.LengthError;
 
 /// What a ref record holds.
 pub const RefValue = union(enum) {
@@ -143,9 +143,18 @@ pub const LogRecord = struct {
     value: LogValue,
 };
 
-/// A parsed table over bytes the caller owns and keeps alive.
-pub const Table = struct {
+/// Where a table's bytes come from.
+pub const Source = union(enum) {
+    /// The whole table in memory, kept alive by the caller.
     bytes: []const u8,
+    /// An open file, read a block at a time with positional reads, kept
+    /// open by the caller. Nothing is read that a lookup does not reach.
+    file: struct { file: Io.File, io: Io },
+};
+
+/// A parsed table: its header and footer, and where to read the rest.
+pub const Table = struct {
+    source: Source,
     kind: Kind,
     version: u8,
     block_size: u32,
@@ -163,17 +172,45 @@ pub const Table = struct {
     has_logs: bool,
     has_objs: bool,
 
-    /// Read a table's header and footer. Nothing past them is looked at
-    /// until a record is asked for.
+    /// Read a table's header and footer from bytes in memory. Nothing past
+    /// them is looked at until a record is asked for.
     pub fn parse(bytes: []const u8, kind: Kind) Error!Table {
         if (bytes.len < 5 or !std.mem.eql(u8, bytes[0..4], magic)) return error.NotAReftable;
         const version = bytes[4];
         if (version != 1 and version != 2) return error.UnsupportedReftableVersion;
-        const header_len = headerSize(version);
         const footer_len = footerSize(version);
-        if (bytes.len < header_len + footer_len) return error.NotAReftable;
-        const size = bytes.len - footer_len;
-        const footer = bytes[size..];
+        if (bytes.len < headerSize(version) + footer_len) return error.NotAReftable;
+        const head = bytes[0..@min(bytes.len, headerSize(2) + 1)];
+        return fromParts(.{ .bytes = bytes }, head, bytes[bytes.len - footer_len ..], bytes.len, kind);
+    }
+
+    /// Read a table's header and footer from an open file, which the caller
+    /// keeps open for as long as the table is used. Blocks are read as a
+    /// lookup reaches them.
+    pub fn open(io: Io, file: Io.File, kind: Kind) Error!Table {
+        const total = try file.length(io);
+        const len: usize = std.math.cast(usize, total) orelse return error.NotAReftable;
+        var head_buf: [29]u8 = undefined;
+        const head = head_buf[0..@min(len, head_buf.len)];
+        if (try file.readPositionalAll(io, head, 0) != head.len) return error.NotAReftable;
+        if (head.len < 5 or !std.mem.eql(u8, head[0..4], magic)) return error.NotAReftable;
+        const version = head[4];
+        if (version != 1 and version != 2) return error.UnsupportedReftableVersion;
+        const footer_len = footerSize(version);
+        if (len < headerSize(version) + footer_len) return error.NotAReftable;
+        var footer_buf: [72]u8 = undefined;
+        const footer = footer_buf[0..footer_len];
+        if (try file.readPositionalAll(io, footer, len - footer_len) != footer_len) return error.NotAReftable;
+        return fromParts(.{ .file = .{ .file = file, .io = io } }, head, footer, len, kind);
+    }
+
+    /// The table from its first bytes -- the header and the byte after it,
+    /// where the file has one -- and its footer.
+    fn fromParts(source: Source, bytes: []const u8, footer: []const u8, total: usize, kind: Kind) Error!Table {
+        const version = bytes[4];
+        const header_len = headerSize(version);
+        const size = total - footer.len;
+        if (bytes.len < header_len) return error.NotAReftable;
         if (!std.mem.eql(u8, footer[0..header_len], bytes[0..header_len])) return error.CorruptFooter;
 
         var at: usize = 5;
@@ -210,13 +247,13 @@ pub const Table = struct {
 
         // The type of the first block, which is what says whether there
         // are refs at all. An empty table's "first block" is its footer.
-        const first_type: u8 = if (size > header_len) bytes[header_len] else 0;
+        const first_type: u8 = if (size > header_len and bytes.len > header_len) bytes[header_len] else 0;
         const obj_offset = obj_field >> 5;
         const obj_id_len: u8 = @intCast(obj_field & 0x1f);
         const has_objs = obj_offset > 0;
         if (has_objs and obj_id_len == 0) return error.CorruptFooter;
         return .{
-            .bytes = bytes,
+            .source = source,
             .kind = kind,
             .version = version,
             .block_size = block_size,
@@ -322,12 +359,34 @@ pub const Table = struct {
         return it;
     }
 
+    /// `len` bytes from `off` of a file-backed table, or fewer where the
+    /// blocks end first. The caller's.
+    fn readAt(t: *const Table, gpa: Allocator, off: usize, len: usize) Error![]u8 {
+        const f = t.source.file;
+        const n = @min(len, t.size - off);
+        const buf = try gpa.alloc(u8, n);
+        errdefer gpa.free(buf);
+        if (try f.file.readPositionalAll(f.io, buf, off) != n) return error.CorruptBlock;
+        return buf;
+    }
+
     /// The block at `at`, or `null` past the last one.
     fn loadBlock(t: *const Table, gpa: Allocator, at: u64) Error!?Block {
         if (at >= t.size) return null;
         const off: usize = @intCast(at);
         const header_off: usize = if (off == 0) headerSize(t.version) else 0;
-        const data = t.bytes[off..t.size];
+        // From a file, the header first, then as much as the block says it
+        // is -- a byte more, to tell padding from the next block -- or, for
+        // a deflated log block, as much as its data could take to compress.
+        var raw: ?[]u8 = null;
+        defer if (raw) |r| gpa.free(r);
+        var data: []const u8 = switch (t.source) {
+            .bytes => |b| b[off..t.size],
+            .file => blk: {
+                raw = try t.readAt(gpa, off, @max(t.block_size, 64) + 1);
+                break :blk raw.?;
+            },
+        };
         if (data.len < header_off + 4) return error.CorruptBlock;
         const typ = data[header_off];
         switch (typ) {
@@ -337,6 +396,15 @@ pub const Table = struct {
         const len = std.mem.readInt(u24, data[header_off + 1 ..][0..3], .big);
         const skip = header_off + 4;
         if (len < skip + 2) return error.CorruptBlock;
+        if (t.source == .file) {
+            const want = if (typ == @intFromEnum(BlockType.log)) len + len / 256 + 64 else len + 1;
+            if (want > data.len and data.len < t.size - off) {
+                gpa.free(raw.?);
+                raw = null;
+                raw = try t.readAt(gpa, off, want);
+                data = raw.?;
+            }
+        }
 
         var block: Block = .{
             .typ = typ,
@@ -375,6 +443,11 @@ pub const Table = struct {
                 len
             else
                 t.block_size;
+            // A block read from a file keeps the buffer it was read into.
+            if (raw) |r| {
+                block.owned = r;
+                raw = null;
+            }
         }
         errdefer block.deinit(gpa);
         const count = std.mem.readInt(u16, block.data[len - 2 ..][0..2], .big);
@@ -1323,6 +1396,54 @@ test "a table written is a table read, record for record" {
     try std.testing.expect((try logs_it.nextLog()).?.value == .deletion);
     try std.testing.expectEqualStrings("refs/heads/main", (try logs_it.nextLog()).?.name);
     try std.testing.expect(try logs_it.nextLog() == null);
+}
+
+test "a table read from its file a block at a time reads what its bytes read" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var refs: [300]RefRecord = undefined;
+    var names: [300][32]u8 = undefined;
+    for (&refs, 0..) |*r, i| {
+        r.* = .{
+            .name = try std.fmt.bufPrint(&names[i], "refs/tags/t{d:0>4}", .{i}),
+            .update_index = 1,
+            .value = if (i % 5 == 0) .{ .symbolic = "refs/heads/main" } else .{ .direct = oidOf(@truncate(i)) },
+        };
+    }
+    const logs = [_]LogRecord{.{ .name = "HEAD", .update_index = 1, .value = .{ .update = .{
+        .old = oidOf(1),
+        .new = oidOf(2),
+        .name = "A",
+        .email = "a@example.com",
+        .time = 1,
+        .tz_offset = 0,
+        .message = "m\n",
+    } } }};
+    const bytes = try write(gpa, .sha1, .{ .block_size = 512 }, 1, 1, &refs, &logs);
+    defer gpa.free(bytes);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "t.ref", .data = bytes });
+    const file = try tmp.dir.openFile(io, "t.ref", .{});
+    defer file.close(io);
+
+    const in_memory = try Table.parse(bytes, .sha1);
+    const on_disk = try Table.open(io, file, .sha1);
+    try on_disk.verify(gpa);
+    try std.testing.expect(on_disk.ref_index_offset != 0);
+    for (refs) |want| {
+        var a = try in_memory.seek(gpa, .ref, want.name);
+        defer a.deinit();
+        var b = try on_disk.seek(gpa, .ref, want.name);
+        defer b.deinit();
+        const x = (try a.nextRef()).?;
+        const y = (try b.nextRef()).?;
+        try std.testing.expectEqualStrings(x.name, y.name);
+        try std.testing.expectEqual(std.meta.activeTag(x.value), std.meta.activeTag(y.value));
+    }
+    var log_it = try on_disk.iterate(gpa, .log);
+    defer log_it.deinit();
+    try std.testing.expectEqualStrings("m\n", (try log_it.nextLog()).?.value.update.message);
 }
 
 test "an empty table is a header and a footer" {

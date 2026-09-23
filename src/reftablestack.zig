@@ -54,33 +54,60 @@ pub const Options = struct {
 /// Errors from reading a stack.
 pub const Error = error{
     /// `tables.list` names a table that is not there, and still does after
-    /// reading it again.
+    /// reading it again; or it could not be looked at at all.
     ReftableMissing,
     /// A line of `tables.list` that is not a table's name.
     MalformedTablesList,
-} || reftable.Error || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError;
+} || reftable.Error || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Cancelable;
 
 /// How many times a reader goes back to `tables.list` when a table it names
 /// has gone, which only a compaction finishing in between can cause.
 const max_reload_attempts = 8;
 
-/// One stack, read: the list and every table it names.
+/// One stack, read: the list, and every table it names open.
+///
+/// A table is its footer and an open file; its blocks are read with
+/// positional reads as a lookup reaches them, through the table's index
+/// where it has one, so a lookup costs a few blocks and not the stack.
 pub const Stack = struct {
     gpa: Allocator,
+    io: Io,
     arena: std.heap.ArenaAllocator,
     kind: Kind,
     /// Oldest first, as `tables.list` has them.
     names: []const []const u8,
     tables: []reftable.Table,
+    files: []Io.File,
     /// `tables.list` as it was read.
     list: []const u8,
+
+    fn empty(gpa: Allocator, io: Io, kind: Kind) Stack {
+        return .{
+            .gpa = gpa,
+            .io = io,
+            .arena = .init(gpa),
+            .kind = kind,
+            .names = &.{},
+            .tables = &.{},
+            .files = &.{},
+            .list = "",
+        };
+    }
 
     /// Read the stack in `dir`, the `reftable` directory. A directory with
     /// no `tables.list` is an empty stack.
     pub fn load(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind) Error!Stack {
+        return loadReusing(gpa, io, dir, kind, null);
+    }
+
+    /// Read the stack again, keeping open every table the new list still
+    /// names -- a table never changes once written -- and closing the rest.
+    /// This is git's reload: after a transaction one table is new, and after
+    /// a compaction a few are replaced by one.
+    fn loadReusing(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind, old: ?*Stack) Error!Stack {
         var attempt: usize = 0;
         while (true) : (attempt += 1) {
-            if (tryLoad(gpa, io, dir, kind)) |stack| {
+            if (tryLoad(gpa, io, dir, kind, old)) |stack| {
                 return stack;
             } else |err| switch (err) {
                 error.FileNotFound => if (attempt + 1 >= max_reload_attempts) return error.ReftableMissing,
@@ -89,18 +116,14 @@ pub const Stack = struct {
         }
     }
 
-    fn tryLoad(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind) (Error || error{FileNotFound})!Stack {
-        var stack: Stack = .{
-            .gpa = gpa,
-            .arena = .init(gpa),
-            .kind = kind,
-            .names = &.{},
-            .tables = &.{},
-            .list = "",
-        };
+    fn tryLoad(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind, old: ?*Stack) (Error || error{FileNotFound})!Stack {
+        var stack: Stack = .empty(gpa, io, kind);
         errdefer stack.arena.deinit();
         const arena = stack.arena.allocator();
-        const text = (try fs.readFileAlloc(arena, io, dir, "tables.list", 1 << 24)) orelse return stack;
+        const text = (try fs.readFileAlloc(arena, io, dir, "tables.list", 1 << 24)) orelse {
+            if (old) |o| o.closeUnclaimed(&.{});
+            return stack;
+        };
         stack.list = text;
 
         var names: std.ArrayList([]const u8) = .empty;
@@ -111,20 +134,58 @@ pub const Stack = struct {
             try names.append(arena, line);
         }
         const tables = try arena.alloc(reftable.Table, names.items.len);
-        for (names.items, tables) |name, *table| {
-            const bytes = dir.readFileAlloc(io, name, arena, .limited(1 << 31)) catch |err| switch (err) {
+        const files = try arena.alloc(Io.File, names.items.len);
+        // Which tables this load opened itself, and so closes on failure.
+        const opened = try arena.alloc(bool, names.items.len);
+        @memset(opened, false);
+        errdefer for (files, opened) |f, mine| {
+            if (mine) f.close(io);
+        };
+        for (names.items, tables, files, opened) |name, *table, *file, *mine| {
+            if (old) |o| {
+                if (o.indexOf(name)) |at| {
+                    table.* = o.tables[at];
+                    file.* = o.files[at];
+                    continue;
+                }
+            }
+            file.* = dir.openFile(io, name, .{}) catch |err| switch (err) {
                 error.FileNotFound => return error.FileNotFound,
                 else => |e| return e,
             };
-            table.* = try reftable.Table.parse(bytes, kind);
+            mine.* = true;
+            table.* = try reftable.Table.open(io, file.*, kind);
         }
         stack.names = names.items;
         stack.tables = tables;
+        stack.files = files;
+        if (old) |o| o.closeUnclaimed(stack.names);
         return stack;
     }
 
-    /// Release the stack.
+    fn indexOf(s: *const Stack, name: []const u8) ?usize {
+        for (s.names, 0..) |n, i| {
+            if (std.mem.eql(u8, n, name)) return i;
+        }
+        return null;
+    }
+
+    /// Close the tables `keep` does not name, whose files a reload has not
+    /// taken over.
+    fn closeUnclaimed(s: *Stack, keep: []const []const u8) void {
+        for (s.names, s.files) |name, file| {
+            var kept = false;
+            for (keep) |k| {
+                if (std.mem.eql(u8, k, name)) kept = true;
+            }
+            if (!kept) file.close(s.io);
+        }
+        s.files = &.{};
+    }
+
+    /// Release the stack and close its tables.
     pub fn deinit(s: *Stack) void {
+        for (s.files) |f| f.close(s.io);
         s.arena.deinit();
         s.* = undefined;
     }
@@ -138,8 +199,9 @@ pub const Stack = struct {
     }
 
     /// The newest record for `name`, tombstone included, or `null` when no
-    /// table mentions it. Borrows the stack.
-    pub fn lookup(s: *const Stack, gpa: Allocator, name: []const u8) Error!?reftable.RefRecord {
+    /// table mentions it. The name is `name`; a symbolic target is copied
+    /// with `out`.
+    pub fn lookup(s: *const Stack, gpa: Allocator, out: Allocator, name: []const u8) Error!?reftable.RefRecord {
         var i = s.tables.len;
         while (i > 0) {
             i -= 1;
@@ -147,9 +209,9 @@ pub const Stack = struct {
             defer it.deinit();
             const found = (try it.nextRef()) orelse continue;
             if (!std.mem.eql(u8, found.name, name)) continue;
-            // The name borrowed the iterator; the value borrows the table.
             var record = found;
             record.name = name;
+            if (found.value == .symbolic) record.value = .{ .symbolic = try out.dupe(u8, found.value.symbolic) };
             return record;
         }
         return null;
@@ -293,6 +355,117 @@ fn tableName(buf: []u8, io: Io, min: u64, max: u64) []const u8 {
 // The ref store's side
 //=========================================================================
 
+/// The stacks a store has read, kept from one call to the next.
+///
+/// A daemon that holds a repository for days and reads its refs all the
+/// time should not read `tables.list` and open every table for each read.
+/// This keeps them, and on each read looks at `tables.list`'s stat: the same
+/// file, size and time means nothing changed; otherwise the list is read,
+/// and only when its text differs is the stack reloaded, keeping the tables
+/// it still names open. That is how git's stack decides to reload. The
+/// cache is behind a mutex, since a daemon reads from many tasks; a
+/// transaction reads its own stacks under its lock and does not touch it.
+pub const Cache = struct {
+    gpa: Allocator,
+    mutex: Io.Mutex = .init,
+    stacks: ?Stacks = null,
+    main_seen: ?Validity = null,
+    worktree_seen: ?Validity = null,
+    /// How many times a read found the stack changed and reloaded it, for
+    /// a caller or a test that wants to see the cache working.
+    reloads: u64 = 0,
+
+    /// An empty cache; nothing is read until the first lookup.
+    pub fn init(gpa: Allocator) Cache {
+        return .{ .gpa = gpa };
+    }
+
+    /// Close every table and release the cache.
+    pub fn deinit(c: *Cache) void {
+        if (c.stacks) |*st| st.deinit();
+        c.* = undefined;
+    }
+
+    /// Bring the stacks up to date with the disk.
+    fn refresh(c: *Cache, store: *const refs.Store, io: Io) Error!*const Stacks {
+        const main_now = try Validity.of(io, store.common_dir);
+        const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.git_dir) else null;
+        if (c.stacks) |*st| {
+            if (Validity.same(c.main_seen, main_now) and
+                (!isLinked(store) or Validity.same(c.worktree_seen, worktree_now)))
+            {
+                return st;
+            }
+            // The stat moved; the list may not have. Reload only what did.
+            c.reloads += 1;
+            if (!Validity.same(c.main_seen, main_now)) {
+                const fresh = try reloadIn(c.gpa, io, store.common_dir, store.kind, &st.main);
+                st.main.arena.deinit();
+                st.main = fresh;
+            }
+            if (isLinked(store) and !Validity.same(c.worktree_seen, worktree_now)) {
+                const fresh = try reloadIn(c.gpa, io, store.git_dir, store.kind, &st.worktree.?);
+                st.worktree.?.arena.deinit();
+                st.worktree = fresh;
+            }
+        } else {
+            c.stacks = try Stacks.open(store, c.gpa, io);
+        }
+        c.main_seen = main_now;
+        c.worktree_seen = worktree_now;
+        return &c.stacks.?;
+    }
+};
+
+/// What a stat of `tables.list` says: enough to tell that it was replaced.
+/// A list is only ever replaced by a rename, so the file's identity changes
+/// with every write; its size and time are checked as well, as git's are.
+const Validity = struct {
+    present: bool,
+    inode: Io.File.INode = 0,
+    size: u64 = 0,
+    mtime: i96 = 0,
+
+    fn of(io: Io, parent: Io.Dir) Error!Validity {
+        const st = parent.statFile(io, "reftable/tables.list", .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return .{ .present = false },
+            else => return error.ReftableMissing,
+        };
+        return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = st.mtime.nanoseconds };
+    }
+
+    fn same(seen: ?Validity, now: ?Validity) bool {
+        const a = seen orelse return false;
+        const b = now orelse return false;
+        return a.present == b.present and a.inode == b.inode and a.size == b.size and a.mtime == b.mtime;
+    }
+};
+
+/// The stacks one read works on: the cache's, under its mutex, or a set
+/// read for this call when the store has no cache.
+const View = struct {
+    cache: ?*Cache,
+    owned: ?Stacks,
+    stacks: *const Stacks,
+
+    fn acquire(store: *const refs.Store, gpa: Allocator, io: Io, owned: *?Stacks) Error!View {
+        if (store.reftable_cache) |c| {
+            c.mutex.lock(io) catch return error.Canceled;
+            errdefer c.mutex.unlock(io);
+            const st = try c.refresh(store, io);
+            return .{ .cache = c, .owned = null, .stacks = st };
+        }
+        owned.* = try Stacks.open(store, gpa, io);
+        return .{ .cache = null, .owned = null, .stacks = &owned.*.? };
+    }
+
+    fn release(v: *View, io: Io, owned: *?Stacks) void {
+        if (v.cache) |c| c.mutex.unlock(io);
+        if (owned.*) |*st| st.deinit();
+        owned.* = null;
+    }
+};
+
 /// The per-worktree stack and the shared one, for a store. In the main
 /// worktree they are one stack.
 const Stacks = struct {
@@ -320,19 +493,19 @@ const Stacks = struct {
 };
 
 fn loadIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind) Error!Stack {
+    return reloadIn(gpa, io, parent, kind, null);
+}
+
+fn reloadIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, old: ?*Stack) Error!Stack {
     var dir = parent.openDir(io, "reftable", .{}) catch |err| switch (err) {
-        error.FileNotFound => return .{
-            .gpa = gpa,
-            .arena = .init(gpa),
-            .kind = kind,
-            .names = &.{},
-            .tables = &.{},
-            .list = "",
+        error.FileNotFound => {
+            if (old) |o| o.closeUnclaimed(&.{});
+            return .empty(gpa, io, kind);
         },
         else => |e| return e,
     };
     defer dir.close(io);
-    return Stack.load(gpa, io, dir, kind);
+    return Stack.loadReusing(gpa, io, dir, kind, old);
 }
 
 fn isLinked(store: *const refs.Store) bool {
@@ -351,18 +524,19 @@ pub fn isSpecial(name: []const u8) bool {
 /// `Store.read` over reftable. The returned target of a symbolic ref is
 /// the caller's.
 pub fn read(store: *const refs.Store, gpa: Allocator, io: Io, name: []const u8) refs.ReadError!?refs.Ref {
-    var stacks = try Stacks.open(store, gpa, io);
-    defer stacks.deinit();
-    return readIn(&stacks, store, gpa, name);
+    var owned: ?Stacks = null;
+    var view = try View.acquire(store, gpa, io, &owned);
+    defer view.release(io, &owned);
+    return readIn(view.stacks, store, gpa, name);
 }
 
 fn readIn(stacks: *const Stacks, store: *const refs.Store, gpa: Allocator, name: []const u8) refs.ReadError!?refs.Ref {
-    const record = (try stacks.forName(store, name).lookup(gpa, name)) orelse return null;
+    const record = (try stacks.forName(store, name).lookup(gpa, gpa, name)) orelse return null;
     return switch (record.value) {
         .deletion => null,
         .direct => |oid| .{ .direct = oid },
         .peeled => |p| .{ .direct = p.value },
-        .symbolic => |target| .{ .symbolic = try gpa.dupe(u8, target) },
+        .symbolic => |target| .{ .symbolic = target },
     };
 }
 
@@ -407,8 +581,10 @@ fn resolveIn(stacks: *const Stacks, store: *const refs.Store, gpa: Allocator, na
 
 /// `Store.list` over reftable.
 pub fn list(store: *const refs.Store, gpa: Allocator, io: Io, prefix: []const u8) refs.ReadError!refs.Store.Listing {
-    var stacks = try Stacks.open(store, gpa, io);
-    defer stacks.deinit();
+    var owned: ?Stacks = null;
+    var view = try View.acquire(store, gpa, io, &owned);
+    defer view.release(io, &owned);
+    const stacks = view.stacks;
 
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
@@ -449,11 +625,12 @@ fn lessThanNamed(_: void, a: refs.Named, b: refs.Named) bool {
 /// backend's log is. An entry whose old and new names are both zero is the
 /// marker git writes to say a log exists, and is not an entry.
 pub fn readLog(store: *const refs.Store, gpa: Allocator, io: Io, name: []const u8) (refs.ReadError || reflog.ReadError)!reflog.Log {
-    var stacks = try Stacks.open(store, gpa, io);
-    defer stacks.deinit();
+    var owned: ?Stacks = null;
+    var view = try View.acquire(store, gpa, io, &owned);
+    defer view.release(io, &owned);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
-    const records = try stacks.forName(store, name).logsFor(gpa, arena_instance.allocator(), name);
+    const records = try view.stacks.forName(store, name).logsFor(gpa, arena_instance.allocator(), name);
 
     var total: usize = 0;
     var count: usize = 0;
@@ -505,11 +682,12 @@ fn put(bytes: []u8, at: *usize, text: []const u8) []const u8 {
 /// Whether a log for `name` exists: any entry at all, the existence marker
 /// included.
 pub fn logExists(store: *const refs.Store, gpa: Allocator, io: Io, name: []const u8) refs.ReadError!bool {
-    var stacks = try Stacks.open(store, gpa, io);
-    defer stacks.deinit();
+    var owned: ?Stacks = null;
+    var view = try View.acquire(store, gpa, io, &owned);
+    defer view.release(io, &owned);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
-    const records = try stacks.forName(store, name).logsFor(gpa, arena_instance.allocator(), name);
+    const records = try view.stacks.forName(store, name).logsFor(gpa, arena_instance.allocator(), name);
     return records.len != 0;
 }
 
@@ -645,7 +823,7 @@ fn checkNames(tx: *refs.Transaction, stacks: *const Stacks) refs.TransactionErro
             end = slash;
             const ancestor = edit.name[0..end];
             if (deletedHere(tx, ancestor)) continue;
-            const record = (try stack.lookup(gpa, ancestor)) orelse continue;
+            const record = (try stack.lookup(gpa, arena, ancestor)) orelse continue;
             if (record.value != .deletion) return error.RefNameConflict;
         }
         // Refs where this one's directory would be.
@@ -920,6 +1098,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     // before the rename may still be opening one, and goes back to the list
     // when it finds it gone. A platform that will not remove a file another
     // process has open leaves it for the next compaction to find.
+    stack.closeUnclaimed(&.{});
     for (stack.names[first .. last + 1]) |name| dir.deleteFile(io, name) catch {};
 }
 
@@ -1024,12 +1203,12 @@ pub fn headIn(gpa: Allocator, arena: Allocator, io: Io, git_dir: Io.Dir, kind: K
     defer dir.close(io);
     var stack = try Stack.load(gpa, io, dir, kind);
     defer stack.deinit();
-    const record = (try stack.lookup(gpa, "HEAD")) orelse return null;
+    const record = (try stack.lookup(gpa, arena, "HEAD")) orelse return null;
     return switch (record.value) {
         .deletion => null,
         .direct => |oid| .{ .direct = oid },
         .peeled => |p| .{ .direct = p.value },
-        .symbolic => |target| .{ .symbolic = try arena.dupe(u8, target) },
+        .symbolic => |target| .{ .symbolic = target },
     };
 }
 
@@ -1455,6 +1634,42 @@ test "git waits on the lock a prepared transaction holds, and reads the result" 
     defer gpa.free(ours);
     try std.testing.expectEqualStrings(tip_text, ours);
     try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/theirs") != null);
+}
+
+test "a repository's stack is kept between reads and read again only when it changes" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    try requireReftableGit(gpa, io);
+    var git = try testgit.Repo.init(gpa, io, &.{"--ref-format=reftable"});
+    defer git.deinit();
+    try git.writeFile(io, "a.txt", "a\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const cache = repo.refs.reftable_cache.?;
+    for (0..50) |_| {
+        const head = (try repo.head(io)).?;
+        gpa.free(head.name);
+    }
+    try std.testing.expectEqual(@as(u64, 0), cache.reloads);
+
+    // git adds a table, then compacts the stack away under the reader: the
+    // next read sees both.
+    try git.exec(io, &.{ "branch", "later" });
+    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/later") != null);
+    try std.testing.expectEqual(@as(u64, 1), cache.reloads);
+    try git.exec(io, &.{ "branch", "-D", "later" });
+    try git.exec(io, &.{"pack-refs"});
+    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/later") == null);
+    const main = (try repo.refs.read(gpa, io, "refs/heads/main")).?;
+    try std.testing.expect(main == .direct);
+    try std.testing.expect(cache.reloads >= 2);
+    const settled = cache.reloads;
+    var listing = try repo.refs.list(gpa, io, "refs/");
+    defer listing.deinit();
+    try std.testing.expectEqual(settled, cache.reloads);
 }
 
 /// `git refs verify`, where the git has it: 2.47 and later.

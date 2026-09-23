@@ -298,6 +298,9 @@ pub const Repository = struct {
                 if (std.ascii.eqlIgnoreCase(text, "reftable")) {
                     repo.refs.format = .reftable;
                     repo.refs.reftable_options = try repo.reftableOptions();
+                    const cache = try gpa.create(reftablestack.Cache);
+                    cache.* = .init(gpa);
+                    repo.refs.reftable_cache = cache;
                 }
             }
         }
@@ -542,6 +545,7 @@ pub const Repository = struct {
 
     /// Close everything the repository holds.
     pub fn deinit(repo: *Repository, io: Io) void {
+        repo.refs.deinit();
         repo.odb.deinit(io);
         repo.config.deinit();
         if (repo.common_is_separate) repo.common_dir.close(io);
