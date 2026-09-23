@@ -358,12 +358,10 @@ const Twin = struct {
         errdefer git.deinit();
         var relic = try testgit.Repo.init(gpa, io, &.{});
         errdefer relic.deinit();
-        var environ = try hooks.testEnviron(gpa);
+        var environ = try testgit.programEnviron(gpa);
         errdefer environ.deinit();
         try environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
         try environ.put("GIT_COMMITTER_DATE", "@1700000000 +0000");
-        _ = environ.orderedRemove("GIT_DIR");
-        _ = environ.orderedRemove("GIT_INDEX_FILE");
         return .{ .git = git, .relic = relic, .environ = environ };
     }
 

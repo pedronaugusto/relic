@@ -146,6 +146,18 @@ pub const Repo = struct {
     }
 };
 
+/// The environment a program the library starts runs in during a test: the
+/// machine's `PATH` and nothing else, so no setting of the person's reaches
+/// it. `error.SkipZigTest` where there is no `PATH`.
+pub fn programEnviron(gpa: Allocator) !std.process.Environ.Map {
+    var map: std.process.Environ.Map = .init(gpa);
+    errdefer map.deinit();
+    const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+    defer gpa.free(path);
+    try map.put("PATH", path);
+    return map;
+}
+
 var git_checked: bool = false;
 var git_present: bool = false;
 var git_major: u32 = 0;

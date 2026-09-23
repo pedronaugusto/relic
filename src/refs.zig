@@ -1012,10 +1012,8 @@ const HookTwin = struct {
         errdefer t.git.deinit();
         t.relic = try testgit.Repo.init(gpa, io, &.{});
         errdefer t.relic.deinit();
-        t.environ = try hooks.testEnviron(gpa);
+        t.environ = try testgit.programEnviron(gpa);
         errdefer t.environ.deinit();
-        _ = t.environ.orderedRemove("GIT_DIR");
-        _ = t.environ.orderedRemove("GIT_INDEX_FILE");
         try t.environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
         try t.environ.put("GIT_COMMITTER_DATE", "@1700000000 +0000");
         inline for (.{ &t.git, &t.relic }) |r| {

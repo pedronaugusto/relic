@@ -15,7 +15,6 @@ const testing = std.testing;
 
 const testgit = @import("testgit.zig");
 const stash = @import("stash.zig");
-const hooks = @import("hooks.zig");
 const object = @import("object.zig");
 const Repository = @import("repo.zig").Repository;
 
@@ -34,10 +33,8 @@ const Twin = struct {
     fn init(gpa: Allocator, io: Io) !*Twin {
         const t = try gpa.create(Twin);
         errdefer gpa.destroy(t);
-        t.environ = try hooks.testEnviron(gpa);
+        t.environ = try testgit.programEnviron(gpa);
         errdefer t.environ.deinit();
-        _ = t.environ.orderedRemove("GIT_DIR");
-        _ = t.environ.orderedRemove("GIT_INDEX_FILE");
         try t.environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
         try t.environ.put("GIT_COMMITTER_DATE", "@1700000000 +0000");
         t.git = try testgit.Repo.init(gpa, io, &.{});

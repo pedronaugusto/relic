@@ -803,12 +803,9 @@ test "a #! line names its interpreter by base name, as git for Windows reads it"
 
 /// An environment for a hook: the machine's `PATH`, and a `GIT_DIR` and
 /// `GIT_INDEX_FILE` planted to prove the runner takes them away.
-pub fn testEnviron(gpa: Allocator) !std.process.Environ.Map {
-    var map: std.process.Environ.Map = .init(gpa);
+fn testEnviron(gpa: Allocator) !std.process.Environ.Map {
+    var map = try testgit.programEnviron(gpa);
     errdefer map.deinit();
-    const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
-    defer gpa.free(path);
-    try map.put("PATH", path);
     try map.put("GIT_DIR", "/nowhere/.git");
     try map.put("GIT_INDEX_FILE", "/nowhere/index");
     try map.put("RELIC_KEPT", "kept");
