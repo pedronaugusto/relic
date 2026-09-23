@@ -549,8 +549,23 @@ pub const Config = struct {
     /// appended to the end of its section, or a new section is appended to
     /// the end of the file. Nothing else in the file moves.
     pub fn set(config: *Config, full_name: []const u8, value: []const u8) SetError!void {
-        const split = splitFullName(full_name) orelse return error.NoWritableSource;
         const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
+        return config.setInFile(file_index, full_name, value);
+    }
+
+    /// `set`, in the first writable file read at `level` rather than the
+    /// last writable one.
+    ///
+    /// A repository with `extensions.worktreeConfig` on has two writable
+    /// files, and a value git keeps in `.git/config` — a submodule's url,
+    /// say — belongs in the first of them whichever is last.
+    pub fn setIn(config: *Config, level: Level, full_name: []const u8, value: []const u8) SetError!void {
+        const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
+        return config.setInFile(file_index, full_name, value);
+    }
+
+    fn setInFile(config: *Config, file_index: u32, full_name: []const u8, value: []const u8) SetError!void {
+        const split = splitFullName(full_name) orelse return error.NoWritableSource;
         const file = &config.files.items[file_index];
 
         // The last matching line wins on read, so that is the one to change.
@@ -651,8 +666,18 @@ pub const Config = struct {
     /// Remove every setting of `full_name` from the writable file, keeping
     /// everything else exactly as it was.
     pub fn unset(config: *Config, full_name: []const u8) SetError!void {
-        const split = splitFullName(full_name) orelse return error.NoWritableSource;
         const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
+        return config.unsetInFile(file_index, full_name);
+    }
+
+    /// `unset`, in the first writable file read at `level`.
+    pub fn unsetIn(config: *Config, level: Level, full_name: []const u8) SetError!void {
+        const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
+        return config.unsetInFile(file_index, full_name);
+    }
+
+    fn unsetInFile(config: *Config, file_index: u32, full_name: []const u8) SetError!void {
+        const split = splitFullName(full_name) orelse return error.NoWritableSource;
         const file = &config.files.items[file_index];
 
         var section: []const u8 = "";
@@ -680,6 +705,42 @@ pub const Config = struct {
             i += 1;
         }
         try config.reindex();
+    }
+
+    /// Remove every `[section "subsection"]` from the first writable file
+    /// read at `level`, with every line up to the next section header —
+    /// comments included, which is what `git config --remove-section`
+    /// takes. Returns whether there was one.
+    pub fn removeSectionIn(config: *Config, level: Level, section: []const u8, subsection: ?[]const u8) SetError!bool {
+        const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
+        const file = &config.files.items[file_index];
+        var removing = false;
+        var removed = false;
+        var i: usize = 0;
+        while (i < file.lines.items.len) {
+            const line = file.lines.items[i];
+            if (line.kind == .section) {
+                removing = std.ascii.eqlIgnoreCase(line.section, section) and
+                    line.has_subsection == (subsection != null) and
+                    std.mem.eql(u8, line.subsection, subsection orelse "");
+            }
+            if (removing) {
+                if (line.owned) config.gpa.free(line.text);
+                _ = file.lines.orderedRemove(i);
+                removed = true;
+                continue;
+            }
+            i += 1;
+        }
+        try config.reindex();
+        return removed;
+    }
+
+    fn writableFileAt(config: *const Config, level: Level) ?u32 {
+        for (config.files.items, 0..) |f, i| {
+            if (f.writable and f.level == level) return @intCast(i);
+        }
+        return null;
     }
 
     fn writableFileIndex(config: *const Config) ?u32 {
@@ -1023,6 +1084,8 @@ pub fn unquote(gpa: Allocator, raw: []const u8) (Allocator.Error || ParseError)!
     return out.toOwnedSlice();
 }
 
+const testgit = @import("testgit.zig");
+
 test "values read with the last one winning" {
     const gpa = std.testing.allocator;
     var config = try Config.parseText(gpa, "# a comment\n" ++
@@ -1235,6 +1298,58 @@ test "unsetting removes only the matching lines" {
         "\tname = Ada\n" ++
         "\n", after);
     try std.testing.expect(config.get("core.autocrlf") == null);
+}
+
+test "a value set at one level lands in that level's file, not the last writable one" {
+    const gpa = std.testing.allocator;
+    var config = try Config.parseText(gpa, "[core]\n\tbare = false\n", .local);
+    defer config.deinit();
+    config.files.items[0].writable = true;
+    var worktree = try Config.parseText(gpa, "[core]\n\tsparseCheckout = true\n", .worktree);
+    defer worktree.deinit();
+    // The second file joins the first, as `Repository.open` reads them.
+    const text = try gpa.dupe(u8, worktree.files.items[0].text);
+    const path = gpa.dupe(u8, "config.worktree") catch |err| {
+        gpa.free(text);
+        return err;
+    };
+    try config.addParsedFile(path, text, .worktree, true);
+
+    try config.setIn(.local, "submodule.lib.url", "../lib");
+    const local = try config.files.items[0].render();
+    defer gpa.free(local);
+    try std.testing.expectEqualStrings("[core]\n\tbare = false\n[submodule \"lib\"]\n\turl = ../lib\n", local);
+    try std.testing.expectEqualStrings("../lib", config.get("submodule.lib.url").?);
+
+    try config.unsetIn(.local, "submodule.lib.url");
+    try std.testing.expect(config.get("submodule.lib.url") == null);
+    try std.testing.expectError(error.NoWritableSource, config.setIn(.global, "user.name", "x"));
+}
+
+test "removing a section takes its header and every line up to the next one, as git does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const text = "[core]\n\tbare = false\n" ++
+        "[submodule \"lib\"]\n\tactive = true\n# kept by nobody\n\turl = ../lib\n" ++
+        "[submodule \"other\"]\n\turl = ../other\n" ++
+        "[submodule \"lib\"]\n\tupdate = none\n\n" ++
+        "[user]\n\tname = Ada\n";
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "probe.config", text);
+    try git.exec(io, &.{ "config", "-f", "probe.config", "--remove-section", "submodule.lib" });
+    const theirs = try git.readFile(io, "probe.config");
+    defer gpa.free(theirs);
+
+    var config = try Config.parseText(gpa, text, .local);
+    defer config.deinit();
+    config.files.items[0].writable = true;
+    try std.testing.expect(try config.removeSectionIn(.local, "submodule", "lib"));
+    try std.testing.expect(!try config.removeSectionIn(.local, "submodule", "lib"));
+    const ours = try config.renderWritable();
+    defer gpa.free(ours);
+    try std.testing.expectEqualStrings(theirs, ours);
+    try std.testing.expectEqualStrings("../other", config.get("submodule.other.url").?);
 }
 
 test "a variable before any section is a named error" {
