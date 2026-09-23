@@ -83,5 +83,6 @@ test {
         _ = @import("transport_test.zig");
         _ = @import("stash_test.zig");
         _ = @import("signing_test.zig");
+        _ = @import("embedded_repo_test.zig");
     }
 }

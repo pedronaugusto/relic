@@ -52,6 +52,10 @@ pub const Error = error{
     /// A `SubmoduleProbe` could not read a submodule's repository. The probe
     /// says which and why.
     SubmoduleUnreadable,
+    /// A repository inside the working tree has no commit checked out, so a
+    /// gitlink for it would have nothing to record. git's `add` stops there
+    /// too. `AddOptions.refusal` says which.
+    NoCommitCheckedOut,
 } || Allocator.Error || odb_mod.Error || index_mod.ReadError ||
     index_mod.WriteError || fs.StatError || Io.Dir.Iterator.Error ||
     Io.Dir.OpenError || Io.Dir.DeleteFileError || Io.Dir.DeleteDirError ||
@@ -111,8 +115,11 @@ pub const AddOutcome = struct {
     /// The pack the new blobs went into, when `AddOptions.new_blobs` asked
     /// for one and there was anything to write.
     pack: ?pack_mod.WriteReport = null,
-    /// Directories holding their own `.git`, which are neither descended
-    /// into nor staged unless the index already has a gitlink for them.
+    /// Repositories inside the working tree that the index had nothing for,
+    /// staged as gitlinks to the commit each has checked out. Counted in
+    /// `added` too. git stages them the same way and warns about each, since
+    /// a clone of the superproject gets a gitlink and no url to fill it
+    /// from; a caller says so from this.
     nested_repositories: u32 = 0,
     /// Gitlinks whose submodule has another commit checked out than the
     /// index records, and which now record that one. Counted in `modified`
@@ -166,6 +173,9 @@ pub const AddOptions = struct {
     programs: ?program.Programs = null,
     /// Where filters passed over are reported.
     filter_report: ?*filter.Report = null,
+    /// Where the path is written when a repository inside the working tree
+    /// stops the walk with `error.NoCommitCheckedOut`.
+    refusal: ?*Refusal = null,
 };
 
 /// `git add -A`: walk the working tree, stage what changed, stage deletions,
@@ -176,6 +186,11 @@ pub const AddOptions = struct {
 /// racy rule is what keeps it correct: an entry whose modification time is
 /// not older than the index's own is read anyway, because a file rewritten
 /// inside one second without changing size is invisible to a stat.
+///
+/// A repository inside the working tree that the index has nothing for is
+/// staged as git stages it, as a gitlink to the commit it has checked out,
+/// and counted in `AddOutcome.nested_repositories`; one with no commit
+/// checked out is `error.NoCommitCheckedOut`, where git's `add` stops too.
 pub fn addAll(
     gpa: Allocator,
     io: Io,
@@ -339,17 +354,6 @@ const Walker = struct {
     }
 
     fn enterDirectory(w: *Walker, path: []const u8, depth: u32, found: fs.Entry) Error!void {
-        // A directory holding its own `.git` is another repository. git
-        // stages it as a gitlink only if the index already has one, and
-        // never walks into it.
-        var dot_git_buf: [4096]u8 = undefined;
-        const dot_git = std.fmt.bufPrint(&dot_git_buf, "{s}/.git", .{path}) catch return;
-        var nested = false;
-        if (w.wt.statFile(w.io, dot_git, .{})) |_| {
-            nested = true;
-        } else |_| {}
-        if (nested) w.outcome.nested_repositories += 1;
-
         // A gitlink's directory is a submodule's, whatever it holds: nothing
         // in it is walked, and what is staged for it is the commit its
         // repository has checked out, which is git's `add -A`. One nobody
@@ -374,15 +378,42 @@ const Walker = struct {
                 return;
             }
         }
-        if (nested) return;
-
-        if (w.options.rules.ignore) |rules| {
-            const decided = rules.match(path, true);
-            // An excluded directory is not entered at all, so a negation
-            // inside it cannot bring anything back — which is git's rule.
-            if (decided.excluded and !w.index.hasDirectory(path)) return;
+        // A directory the index has files under is walked like any other,
+        // even when it holds a `.git` of its own: git descends into it too.
+        if (!w.index.hasDirectory(path)) {
+            if (w.options.rules.ignore) |rules| {
+                // An excluded directory is not entered at all, so a negation
+                // inside it cannot bring anything back — which is git's rule.
+                if (rules.match(path, true).excluded) return;
+            }
+            if (try gitlink.isRepository(w.gpa, w.io, w.wt, path)) return w.stageRepository(path, found);
         }
         try w.walk(path, depth + 1);
+    }
+
+    /// A repository inside the working tree that the index has nothing for
+    /// is staged as git's `add -A` stages it: a gitlink to the commit it has
+    /// checked out, its directory never walked.
+    fn stageRepository(w: *Walker, path: []const u8, found: fs.Entry) Error!void {
+        if (!safepath.isSafeStoredPath(path)) {
+            w.outcome.unsafe_paths += 1;
+            return;
+        }
+        const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.kind)) orelse {
+            if (w.options.refusal) |r| r.set(null, path);
+            return error.NoCommitCheckedOut;
+        };
+        try w.markSeen(path);
+        const tree = try w.index.cacheTree();
+        tree.invalidate(path);
+        try w.fresh.append(w.gpa, .{
+            .path = try w.arena.allocator().dupe(u8, path),
+            .oid = checked_out,
+            .mode = .gitlink,
+            .stat = found.stat,
+        });
+        w.outcome.added += 1;
+        w.outcome.nested_repositories += 1;
     }
 
     /// Remember that a path is still in the working tree, so the deletion
@@ -540,7 +571,9 @@ pub const Change = enum {
 
 /// One path's status.
 pub const StatusEntry = struct {
-    /// Owned by the `Status`.
+    /// Owned by the `Status`. A directory reported whole ends in `/`, as
+    /// git prints it: a repository inside the working tree, an untracked
+    /// directory under `Untracked.normal`, an ignored one.
     path: []const u8,
     /// HEAD against the index.
     staged: Change,
@@ -640,9 +673,15 @@ pub const StatusOptions = struct {
     head_tree: ?Oid = null,
     /// Whether to list untracked files. `all` is what
     /// `--untracked-files=all` asks for; `normal` reports a directory
-    /// holding only untracked files once, by its name.
+    /// holding only untracked files once, by its name. Under either, a
+    /// repository inside the working tree is one entry, `sub/`, and is
+    /// never looked into.
     untracked: Untracked = .all,
-    /// Whether to list ignored files too.
+    /// Whether to list ignored paths too, as `--ignored` does: under
+    /// `normal` an ignored directory is one entry and so is an untracked
+    /// one holding nothing but ignored files; under `all` every ignored
+    /// file is its own. Nothing is listed under `Untracked.no`, which is
+    /// git's rule.
     include_ignored: bool = false,
     /// How a populated submodule is looked into. Without one, a gitlink's
     /// working-tree state is its `HEAD` against the recorded commit and
@@ -843,22 +882,24 @@ const StatusScan = struct {
                         continue;
                     }
                 }
-                const tracked_below = s.index.hasDirectory(path);
-                if (s.options.rules.ignore) |rules| {
-                    const decided = rules.match(path, true);
-                    if (decided.excluded and !tracked_below) {
-                        if (s.options.include_ignored) try s.record(path, .ignored);
-                        continue;
-                    }
+                // A directory the index has files under is walked, whatever
+                // it holds; git descends into it too.
+                if (s.index.hasDirectory(path)) {
+                    try s.walk(path, depth + 1);
+                    continue;
                 }
-                var nested_git: bool = false;
-                if (s.wt.statFile(s.io, try std.fmt.allocPrint(s.arena, "{s}/.git", .{path}), .{})) |_| {
-                    nested_git = true;
-                } else |_| {}
-                if (nested_git) {
-                    if (s.index.find(path) == null and s.options.untracked != .no) {
-                        try s.record(path, .untracked);
-                    }
+                if (s.options.untracked == .no) continue;
+                const as_directory = try std.fmt.allocPrint(s.arena, "{s}/", .{path});
+                if (s.excluded(path, true)) {
+                    if (s.options.include_ignored) try s.ignoredDirectory(path, as_directory, depth);
+                    continue;
+                }
+                if (try gitlink.isRepository(s.gpa, s.io, s.wt, path)) {
+                    try s.record(as_directory, .untracked);
+                    continue;
+                }
+                if (s.options.untracked == .normal) {
+                    try s.untrackedDirectory(path, as_directory, depth);
                     continue;
                 }
                 try s.walk(path, depth + 1);
@@ -867,13 +908,12 @@ const StatusScan = struct {
 
             const tracked = s.index.find(path);
             if (tracked == null) {
-                if (s.options.rules.ignore) |rules| {
-                    if (rules.match(path, false).excluded) {
-                        if (s.options.include_ignored) try s.record(path, .ignored);
-                        continue;
-                    }
+                if (s.options.untracked == .no) continue;
+                if (s.excluded(path, false)) {
+                    if (s.options.include_ignored) try s.record(path, .ignored);
+                    continue;
                 }
-                if (s.options.untracked != .no) try s.record(path, .untracked);
+                try s.record(path, .untracked);
                 continue;
             }
             const entry_ptr = tracked.?;
@@ -883,6 +923,133 @@ const StatusScan = struct {
             const change = try s.compare(entry_ptr, path, found);
             if (change != .unmodified) try s.record(path, change);
         }
+    }
+
+    fn excluded(s: *const StatusScan, path: []const u8, is_dir: bool) bool {
+        const rules = s.options.rules.ignore orelse return false;
+        return rules.match(path, is_dir).excluded;
+    }
+
+    /// An ignored directory the index has nothing under. Under `normal` it
+    /// is one entry, when it holds anything at all; under `all` each file
+    /// in it is, though a repository in it is still one.
+    fn ignoredDirectory(s: *StatusScan, path: []const u8, as_directory: []const u8, depth: u32) Error!void {
+        if (try gitlink.isRepository(s.gpa, s.io, s.wt, path)) return s.record(as_directory, .ignored);
+        if (s.options.untracked == .normal) {
+            if (try s.holdsAnything(path, depth + 1)) try s.record(as_directory, .ignored);
+            return;
+        }
+        var names = try s.readNames(path);
+        defer names.deinit(s.gpa);
+        for (names.items) |item| {
+            const child = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ path, item.name });
+            if (item.kind == .directory) {
+                try s.ignoredDirectory(child, try std.fmt.allocPrint(s.arena, "{s}/", .{child}), depth + 1);
+            } else if (item.kind == .file or item.kind == .sym_link) {
+                try s.record(child, .ignored);
+            }
+        }
+    }
+
+    /// An untracked directory under `normal`: one entry, `dir/`, when
+    /// anything in it is untracked, with the ignored paths inside listed
+    /// beside it when they are asked for; one ignored entry when all it
+    /// holds is ignored; nothing when it holds nothing.
+    fn untrackedDirectory(s: *StatusScan, path: []const u8, as_directory: []const u8, depth: u32) Error!void {
+        var ignored: std.ArrayList([]const u8) = .empty;
+        defer ignored.deinit(s.gpa);
+        if (try s.classify(path, depth + 1, &ignored)) {
+            try s.record(as_directory, .untracked);
+            if (s.options.include_ignored) {
+                for (ignored.items) |p| try s.record(p, .ignored);
+            }
+        } else if (ignored.items.len != 0 and s.options.include_ignored) {
+            try s.record(as_directory, .ignored);
+        }
+    }
+
+    /// Whether anything in the untracked directory `path` is untracked,
+    /// gathering into `ignored` the ignored paths in it the way git's
+    /// `normal` listing names them: a file, or a directory that holds
+    /// nothing but ignored paths, by its name. A repository inside counts
+    /// as untracked content, whatever it holds, and is not looked into.
+    fn classify(s: *StatusScan, path: []const u8, depth: u32, ignored: *std.ArrayList([]const u8)) Error!bool {
+        if (depth > 64) return false;
+        if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, path, depth);
+        defer if (s.options.rules.ignore) |rules| rules.popTo(depth + 2);
+
+        var names = try s.readNames(path);
+        defer names.deinit(s.gpa);
+        var untracked = false;
+        for (names.items) |item| {
+            const child = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ path, item.name });
+            if (item.kind == .directory) {
+                const as_directory = try std.fmt.allocPrint(s.arena, "{s}/", .{child});
+                if (s.excluded(child, true)) {
+                    if (!s.options.include_ignored) continue;
+                    if (try gitlink.isRepository(s.gpa, s.io, s.wt, child) or try s.holdsAnything(child, depth + 1)) {
+                        try ignored.append(s.gpa, as_directory);
+                    }
+                    continue;
+                }
+                if (try gitlink.isRepository(s.gpa, s.io, s.wt, child)) {
+                    untracked = true;
+                } else {
+                    const mark = ignored.items.len;
+                    if (try s.classify(child, depth + 1, ignored)) {
+                        untracked = true;
+                    } else if (ignored.items.len != mark) {
+                        ignored.shrinkRetainingCapacity(mark);
+                        try ignored.append(s.gpa, as_directory);
+                    }
+                }
+            } else if (item.kind == .file or item.kind == .sym_link) {
+                if (s.excluded(child, false)) {
+                    if (s.options.include_ignored) try ignored.append(s.gpa, child);
+                } else {
+                    untracked = true;
+                }
+            }
+            // Nothing more can change the answer when the ignored paths
+            // are not wanted.
+            if (untracked and !s.options.include_ignored) return true;
+        }
+        return untracked;
+    }
+
+    /// Whether `path` holds a file, or a repository, anywhere below it: an
+    /// ignored directory that holds nothing is not listed.
+    fn holdsAnything(s: *StatusScan, path: []const u8, depth: u32) Error!bool {
+        if (depth > 64) return false;
+        var names = try s.readNames(path);
+        defer names.deinit(s.gpa);
+        for (names.items) |item| {
+            if (item.kind == .file or item.kind == .sym_link) return true;
+            if (item.kind != .directory) continue;
+            const child = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ path, item.name });
+            if (try gitlink.isRepository(s.gpa, s.io, s.wt, child)) return true;
+            if (try s.holdsAnything(child, depth + 1)) return true;
+        }
+        return false;
+    }
+
+    const Name = struct { name: []const u8, kind: Io.File.Kind };
+
+    /// The entries of `path` other than `.git`, their names in the arena.
+    /// Read whole before any is looked at, so no directory handle is held
+    /// open across the recursion.
+    fn readNames(s: *StatusScan, path: []const u8) Error!std.ArrayList(Name) {
+        var out: std.ArrayList(Name) = .empty;
+        errdefer out.deinit(s.gpa);
+        var dir = s.wt.openDir(s.io, path, .{ .iterate = true }) catch return out;
+        defer dir.close(s.io);
+        var scan = try dirscan.Scan.init(s.gpa, s.io, dir);
+        defer scan.deinit();
+        while (try scan.next()) |item| {
+            if (std.mem.eql(u8, item.name, ".git")) continue;
+            try out.append(s.gpa, .{ .name = try s.arena.dupe(u8, item.name), .kind = item.entry.kind });
+        }
+        return out;
     }
 
     fn compare(s: *StatusScan, entry: *index_mod.Entry, path: []const u8, found: fs.Entry) Error!Change {
@@ -1100,7 +1267,7 @@ pub const Refusal = struct {
         return r.buffer[0..r.len];
     }
 
-    fn set(r: *Refusal, reason: safepath.Reason, text: []const u8) void {
+    fn set(r: *Refusal, reason: ?safepath.Reason, text: []const u8) void {
         r.reason = reason;
         r.len = @min(text.len, r.buffer.len);
         @memcpy(r.buffer[0..r.len], text[0..r.len]);
@@ -1801,7 +1968,10 @@ pub const Listing = struct {
     }
 };
 
-/// The index's paths plus the untracked ones, with the ignore rules applied.
+/// The index's paths plus the untracked ones, with the ignore rules applied:
+/// what `git ls-files --cached --others --exclude-standard` lists. A
+/// repository inside the working tree that the index has nothing for is one
+/// untracked path ending in `/`.
 pub fn list(
     gpa: Allocator,
     io: Io,
@@ -1876,8 +2046,16 @@ const ListScan = struct {
                 if (s.index.find(path)) |entry| {
                     if (entry.mode == .gitlink) continue;
                 }
-                if (s.rules.ignore) |rules| {
-                    if (rules.match(path, true).excluded and !s.index.hasDirectory(path)) continue;
+                if (!s.index.hasDirectory(path)) {
+                    if (s.rules.ignore) |rules| {
+                        if (rules.match(path, true).excluded) continue;
+                    }
+                    // A repository inside the working tree is its own to
+                    // list: git names it once, as `sub/`.
+                    if (try gitlink.isRepository(s.gpa, s.io, s.wt, path)) {
+                        try s.out.append(s.arena, try std.fmt.allocPrint(s.arena, "{s}/", .{path}));
+                        continue;
+                    }
                 }
                 try s.walk(path, depth + 1);
                 continue;

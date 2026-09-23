@@ -106,6 +106,21 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!?GitDir 
     return result;
 }
 
+/// Whether the directory `path` under `wt` holds a repository of its own:
+/// `<path>/.git` is a git directory, or a `.git` file naming one. This is
+/// git's `is_nonbare_repository_dir`, which is how its walk of a working
+/// tree tells a repository inside it from a directory to descend into.
+pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!bool {
+    // Almost every directory has no `.git` at all, and one access says so
+    // without opening anything.
+    var buf: [4096]u8 = undefined;
+    const dot_git = std.fmt.bufPrint(&buf, "{s}/.git", .{path}) catch return false;
+    wt.access(io, dot_git, .{}) catch return false;
+    var found = (try open(gpa, io, wt, path)) orelse return false;
+    found.close(io);
+    return true;
+}
+
 /// The commit `HEAD` resolves to in the repository whose working tree is
 /// `path`, or `null` when there is no repository there or its `HEAD` does not
 /// name a commit.
