@@ -44,6 +44,14 @@ pub const remote = @import("remote.zig");
 pub const progress = @import("progress.zig");
 pub const fsck = @import("fsck.zig");
 pub const indexpack = @import("indexpack.zig");
+pub const connection = @import("connection.zig");
+pub const sideband = @import("sideband.zig");
+pub const protocol = @import("protocol.zig");
+pub const objectwalk = @import("objectwalk.zig");
+pub const fetchpack = @import("fetchpack.zig");
+pub const local = @import("local.zig");
+pub const transport = @import("transport.zig");
+pub const fetch = @import("fetch.zig");
 
 const builtin = @import("builtin");
 

@@ -55,3 +55,41 @@ pub fn gitInput(gpa: Allocator, io: Io, dir: Io.Dir, args: []const []const u8, i
     }
     return outcome.stdout;
 }
+
+/// The absolute path of `dir`. The result is the caller's.
+pub fn absolutePath(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
+    const path = try dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(path);
+    return gpa.dupe(u8, path);
+}
+
+/// A history in a real repository, for a remote to be fetched from: files
+/// that change a little each commit, a directory, a branch, a lightweight
+/// tag and annotated tags, one of them on a commit below a tip.
+pub fn historyRepo(gpa: Allocator, io: Io, commits: usize) !testgit.Repo {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    errdefer repo.deinit();
+    try addCommits(gpa, io, &repo, 0, commits);
+    try repo.exec(io, &.{ "tag", "light" });
+    try repo.exec(io, &.{ "tag", "-a", "v1", "-m", "version one" });
+    try repo.exec(io, &.{ "tag", "-a", "old", "-m", "an old one", "HEAD~1" });
+    try repo.exec(io, &.{ "branch", "side", "HEAD~1" });
+    return repo;
+}
+
+/// Add `count` commits to `repo`'s current branch, numbered from `first`.
+pub fn addCommits(gpa: Allocator, io: Io, repo: *testgit.Repo, first: usize, count: usize) !void {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    for (0..40) |line| try text.print(gpa, "line {d} of a file that is long enough to delta well\n", .{line});
+    for (first..first + count) |i| {
+        try text.print(gpa, "change {d}\n", .{i});
+        try repo.writeFile(io, "src/a.txt", text.items);
+        try repo.writeFile(io, "docs/b.md", text.items[0 .. text.items.len / 2]);
+        var name_buf: [32]u8 = undefined;
+        try repo.writeFile(io, try std.fmt.bufPrint(&name_buf, "files/{d}.txt", .{i}), "new\n");
+        try repo.exec(io, &.{ "add", "-A" });
+        var msg_buf: [32]u8 = undefined;
+        try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg_buf, "commit {d}", .{i}) });
+    }
+}
