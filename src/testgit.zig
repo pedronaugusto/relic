@@ -293,6 +293,24 @@ pub fn programEnviron(gpa: Allocator) !std.process.Environ.Map {
     return map;
 }
 
+/// An isolated environment, as `isolatedEnviron` makes with no home, with
+/// both of git's dates fixed at `secs` seconds past the epoch, UTC, for
+/// `Repo.environ`. The caller releases it.
+pub fn datedEnv(gpa: Allocator, secs: i64) !Environ.Map {
+    var map = try isolatedEnviron(gpa, no_home);
+    errdefer map.deinit();
+    try setDate(&map, secs);
+    return map;
+}
+
+/// Move both of git's dates in an environment made by `datedEnv`.
+pub fn setDate(map: *Environ.Map, secs: i64) !void {
+    var buf: [64]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buf, "{d} +0000", .{secs});
+    try map.put("GIT_AUTHOR_DATE", text);
+    try map.put("GIT_COMMITTER_DATE", text);
+}
+
 var git_checked: bool = false;
 var git_present: bool = false;
 var git_major: u32 = 0;

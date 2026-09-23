@@ -383,46 +383,185 @@ pub fn parentsOf(db: *const odb_mod.Odb, oid: Oid, parents: []const Oid) []const
 }
 
 /// Every merge base of `a` and `b`: the common ancestors none of whose
-/// descendants is also a common ancestor.
+/// descendants is also a common ancestor, newest committer date first.
+///
+/// This is git's walk and git's order, which matters beyond speed: when there
+/// is more than one base, the order is the order a merge folds them in. Both
+/// commits' ancestries are painted down together, newest date first, until
+/// only commits already known to be behind a common ancestor are left; the
+/// common ones found are then checked against each other and any one another
+/// can reach is dropped.
 ///
 /// The result is the caller's. An empty result means the two commits share
 /// no history, which is what an unrelated-histories merge looks like.
 pub fn mergeBases(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid) Error![]Oid {
-    var from_a: Oid.Set = .empty;
-    defer from_a.deinit(gpa);
-    try reachable(gpa, io, db, a, &from_a);
+    if (a.eql(b)) {
+        const out = try gpa.alloc(Oid, 1);
+        out[0] = a;
+        return out;
+    }
+    var painter: Painter = .{ .gpa = gpa, .io = io, .db = db };
+    defer painter.deinit();
 
-    var common: std.ArrayList(Oid) = .empty;
-    defer common.deinit(gpa);
-    var from_b: Oid.Set = .empty;
-    defer from_b.deinit(gpa);
-    try reachable(gpa, io, db, b, &from_b);
+    var found: std.ArrayList(Oid) = .empty;
+    defer found.deinit(gpa);
+    try painter.paint(a, &.{b}, &found);
 
-    var it = from_b.keyIterator();
-    while (it.next()) |oid| {
-        if (from_a.contains(oid.*)) try common.append(gpa, oid.*);
+    var candidates: std.ArrayList(Oid) = .empty;
+    errdefer candidates.deinit(gpa);
+    for (found.items) |oid| {
+        if (!painter.flagsOf(oid).stale) try candidates.append(gpa, oid);
+    }
+    if (candidates.items.len <= 1) return candidates.toOwnedSlice(gpa);
+
+    // More than one: keep only those no other one reaches.
+    const redundant = try gpa.alloc(bool, candidates.items.len);
+    defer gpa.free(redundant);
+    @memset(redundant, false);
+    var others: std.ArrayList(Oid) = .empty;
+    defer others.deinit(gpa);
+    var positions: std.ArrayList(usize) = .empty;
+    defer positions.deinit(gpa);
+    for (candidates.items, 0..) |one, i| {
+        if (redundant[i]) continue;
+        others.clearRetainingCapacity();
+        positions.clearRetainingCapacity();
+        for (candidates.items, 0..) |other, j| {
+            if (i == j or redundant[j]) continue;
+            try others.append(gpa, other);
+            try positions.append(gpa, j);
+        }
+        painter.clear();
+        var ignored: std.ArrayList(Oid) = .empty;
+        defer ignored.deinit(gpa);
+        try painter.paint(one, others.items, &ignored);
+        if (painter.flagsOf(one).parent2) redundant[i] = true;
+        for (others.items, positions.items) |other, j| {
+            if (painter.flagsOf(other).parent1) redundant[j] = true;
+        }
+    }
+    var kept: std.ArrayList(Oid) = .empty;
+    errdefer kept.deinit(gpa);
+    for (candidates.items, redundant) |oid, is_redundant| {
+        if (!is_redundant) try painter.insertByDate(&kept, oid);
+    }
+    candidates.deinit(gpa);
+    return kept.toOwnedSlice(gpa);
+}
+
+/// git's `paint_down_to_common`, with the commits it has read kept for the
+/// next paint.
+const Painter = struct {
+    gpa: Allocator,
+    io: Io,
+    db: *odb_mod.Odb,
+    commits: std.AutoHashMapUnmanaged(OidKey, Loaded) = .empty,
+    flags: std.AutoHashMapUnmanaged(OidKey, Flags) = .empty,
+
+    const Flags = packed struct { parent1: bool = false, parent2: bool = false, stale: bool = false, result: bool = false };
+    const Loaded = struct { parents: []const Oid, time: i64 };
+    const Queued = struct { oid: Oid, time: i64, order: u64 };
+
+    fn deinit(p: *Painter) void {
+        var it = p.commits.valueIterator();
+        while (it.next()) |loaded| p.gpa.free(loaded.parents);
+        p.commits.deinit(p.gpa);
+        p.flags.deinit(p.gpa);
     }
 
-    // A common ancestor that another common ancestor can reach is not a
-    // merge base: it is behind one.
-    var bases: std.ArrayList(Oid) = .empty;
-    errdefer bases.deinit(gpa);
-    for (common.items) |candidate| {
-        var redundant = false;
-        for (common.items) |other| {
-            if (other.eql(candidate)) continue;
-            var from_other: Oid.Set = .empty;
-            defer from_other.deinit(gpa);
-            try reachableExcluding(gpa, io, db, other, candidate, &from_other);
-            if (from_other.contains(candidate)) {
-                redundant = true;
-                break;
+    fn clear(p: *Painter) void {
+        p.flags.clearRetainingCapacity();
+    }
+
+    fn flagsOf(p: *const Painter, oid: Oid) Flags {
+        return p.flags.get(OidKey.of(oid)) orelse .{};
+    }
+
+    fn load(p: *Painter, oid: Oid) Error!Loaded {
+        if (p.commits.get(OidKey.of(oid))) |loaded| return loaded;
+        const found = try p.db.read(p.io, oid);
+        defer p.gpa.free(found.bytes);
+        if (found.type != .commit) return error.NotACommit;
+        var commit = try object.Commit.parse(p.gpa, p.db.kind, found.bytes);
+        defer commit.deinit();
+        const loaded: Loaded = .{ .parents = try p.gpa.dupe(Oid, commit.parents), .time = commit.committer.when_secs };
+        errdefer p.gpa.free(loaded.parents);
+        try p.commits.put(p.gpa, OidKey.of(oid), loaded);
+        return loaded;
+    }
+
+    /// `commit_list_insert_by_date`: before the first one that is older, so
+    /// a commit goes after those of the same date.
+    fn insertByDate(p: *Painter, list: *std.ArrayList(Oid), oid: Oid) Error!void {
+        const time = (try p.load(oid)).time;
+        var at: usize = 0;
+        while (at < list.items.len) : (at += 1) {
+            if ((try p.load(list.items[at])).time < time) break;
+        }
+        try list.insert(p.gpa, at, oid);
+    }
+
+    fn byDate(_: void, x: Queued, y: Queued) std.math.Order {
+        if (x.time != y.time) return std.math.order(y.time, x.time);
+        return std.math.order(x.order, y.order);
+    }
+
+    /// Paint `one` and `twos` down, collecting every commit both reach first
+    /// into `result` by date.
+    fn paint(p: *Painter, one: Oid, twos: []const Oid, result: *std.ArrayList(Oid)) Error!void {
+        var queue: std.PriorityQueue(Queued, void, byDate) = .empty;
+        defer queue.deinit(p.gpa);
+        var order: u64 = 0;
+
+        try p.mark(one, .{ .parent1 = true });
+        try queue.push(p.gpa, .{ .oid = one, .time = (try p.load(one)).time, .order = order });
+        order += 1;
+        for (twos) |two| {
+            try p.mark(two, .{ .parent2 = true });
+            try queue.push(p.gpa, .{ .oid = two, .time = (try p.load(two)).time, .order = order });
+            order += 1;
+        }
+
+        while (p.hasNonStale(&queue)) {
+            const item = queue.pop().?;
+            var flags = p.flagsOf(item.oid);
+            flags.result = false;
+            if (flags.parent1 and flags.parent2 and !flags.stale) {
+                var own = p.flagsOf(item.oid);
+                if (!own.result) {
+                    own.result = true;
+                    try p.flags.put(p.gpa, OidKey.of(item.oid), own);
+                    try p.insertByDate(result, item.oid);
+                }
+                flags.stale = true;
+            }
+            const loaded = try p.load(item.oid);
+            for (loaded.parents) |parent| {
+                const have = p.flagsOf(parent);
+                if ((!flags.parent1 or have.parent1) and (!flags.parent2 or have.parent2) and
+                    (!flags.stale or have.stale)) continue;
+                try p.mark(parent, flags);
+                try queue.push(p.gpa, .{ .oid = parent, .time = (try p.load(parent)).time, .order = order });
+                order += 1;
             }
         }
-        if (!redundant) try bases.append(gpa, candidate);
     }
-    return bases.toOwnedSlice(gpa);
-}
+
+    fn mark(p: *Painter, oid: Oid, add: Flags) Error!void {
+        const gop = try p.flags.getOrPut(p.gpa, OidKey.of(oid));
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        gop.value_ptr.parent1 = gop.value_ptr.parent1 or add.parent1;
+        gop.value_ptr.parent2 = gop.value_ptr.parent2 or add.parent2;
+        gop.value_ptr.stale = gop.value_ptr.stale or add.stale;
+    }
+
+    fn hasNonStale(p: *const Painter, queue: anytype) bool {
+        for (queue.items) |item| {
+            if (!p.flagsOf(item.oid).stale) return true;
+        }
+        return false;
+    }
+};
 
 /// The first merge base of `a` and `b`, or `null` when they share no
 /// history.
@@ -582,31 +721,6 @@ fn reachable(gpa: Allocator, io: Io, db: *odb_mod.Odb, from: Oid, out: *Oid.Set)
     }
 }
 
-fn reachableExcluding(
-    gpa: Allocator,
-    io: Io,
-    db: *odb_mod.Odb,
-    from: Oid,
-    target: Oid,
-    out: *Oid.Set,
-) Error!void {
-    var queue: std.ArrayList(Oid) = .empty;
-    defer queue.deinit(gpa);
-    try queue.append(gpa, from);
-    while (queue.items.len != 0) {
-        const oid = queue.pop().?;
-        if (out.contains(oid)) continue;
-        try out.put(gpa, oid, {});
-        if (oid.eql(target)) continue;
-        const found = try db.read(io, oid);
-        defer gpa.free(found.bytes);
-        if (found.type != .commit) return error.NotACommit;
-        var commit = try object.Commit.parse(gpa, db.kind, found.bytes);
-        defer commit.deinit();
-        for (parentsOf(db, oid, commit.parents)) |parent| try queue.append(gpa, parent);
-    }
-}
-
 test "ancestry reports a missing commit instead of a negative answer" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -620,4 +734,60 @@ test "ancestry reports a missing commit instead of a negative answer" {
     const ancestor = try Oid.parse(.sha1, "1" ** 40);
     const missing = try Oid.parse(.sha1, "2" ** 40);
     try std.testing.expectError(error.ObjectNotFound, isAncestor(gpa, io, &db, ancestor, missing));
+}
+
+const testgit = @import("testgit.zig");
+
+test "merge bases are git's, in git's order, through a criss-cross" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    var env = try testgit.datedEnv(gpa, 1_700_000_000);
+    defer env.deinit();
+    repo.environ = &env;
+
+    // Two branches that merge each other, twice, so that the tips have two
+    // merge bases; the dates are fixed so the order is too.
+    const steps = [_][]const []const u8{
+        &.{ "commit", "-q", "--allow-empty", "-m", "root" },
+        &.{ "checkout", "-q", "-b", "side" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "s1" },
+        &.{ "checkout", "-q", "main" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "m1" },
+        &.{ "branch", "m1" },
+        &.{ "merge", "-q", "--no-ff", "-m", "m2", "side" },
+        &.{ "checkout", "-q", "side" },
+        &.{ "merge", "-q", "--no-ff", "-m", "s2", "m1" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "s3" },
+        &.{ "checkout", "-q", "main" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "m3" },
+    };
+    for (steps, 0..) |step, i| {
+        try testgit.setDate(&env, 1_700_000_000 + @as(i64, @intCast(i)) * 60);
+        try repo.exec(io, step);
+    }
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    for ([_][2][]const u8{ .{ "main", "side" }, .{ "side", "main" }, .{ "main", "m1" }, .{ "m1", "side" }, .{ "main", "main" } }) |pair| {
+        const expected = try repo.run(io, &.{ "merge-base", "--all", pair[0], pair[1] });
+        defer gpa.free(expected);
+        const a_text = try repo.line(io, &.{ "rev-parse", pair[0] });
+        defer gpa.free(a_text);
+        const b_text = try repo.line(io, &.{ "rev-parse", pair[1] });
+        defer gpa.free(b_text);
+        const bases = try mergeBases(gpa, io, &db, try Oid.parse(.sha1, a_text), try Oid.parse(.sha1, b_text));
+        defer gpa.free(bases);
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(gpa);
+        for (bases) |oid| {
+            var hex: [hash.max_hex_len]u8 = undefined;
+            try got.appendSlice(gpa, oid.hex(&hex));
+            try got.append(gpa, '\n');
+        }
+        try std.testing.expectEqualStrings(expected, got.items);
+    }
 }
