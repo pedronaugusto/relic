@@ -25,6 +25,8 @@ const fetchpack = @import("fetchpack.zig");
 const indexpack = @import("indexpack.zig");
 const local = @import("local.zig");
 const ssh = @import("ssh.zig");
+const smarthttp = @import("smarthttp.zig");
+const credential = @import("credential.zig");
 const progress_mod = @import("progress.zig");
 
 const Oid = hash.Oid;
@@ -41,7 +43,7 @@ pub const Error = error{
     /// The transport needs to run a program — `ssh`, a credential helper —
     /// and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
-} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error;
+} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error;
 
 /// How a remote is reached.
 pub const Options = struct {
@@ -58,6 +60,9 @@ pub const Options = struct {
     /// answers in v0, which is read the same.
     protocol_v2: bool = true,
     progress: ?progress_mod.Progress = null,
+    /// What stands in for a terminal when an HTTP server asks for a
+    /// credential no helper has.
+    prompt: ?credential.Prompt = null,
 };
 
 /// An open remote.
@@ -106,7 +111,16 @@ pub const Session = struct {
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind);
             },
-            .http, .https => return error.UnsupportedTransport,
+            .http, .https => {
+                const conn = try smarthttp.connect(gpa, io, parsed, service, .{
+                    .config = options.config,
+                    .programs = options.programs,
+                    .protocol_v2 = options.protocol_v2,
+                    .prompt = options.prompt,
+                });
+                errdefer conn.close(io);
+                return fromConnection(gpa, conn, service, kind);
+            },
             .git => return error.UnsupportedTransport,
         }
     }

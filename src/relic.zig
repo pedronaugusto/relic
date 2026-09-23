@@ -51,6 +51,8 @@ pub const objectwalk = @import("objectwalk.zig");
 pub const fetchpack = @import("fetchpack.zig");
 pub const local = @import("local.zig");
 pub const ssh = @import("ssh.zig");
+pub const credential = @import("credential.zig");
+pub const smarthttp = @import("smarthttp.zig");
 pub const transport = @import("transport.zig");
 pub const fetch = @import("fetch.zig");
 
