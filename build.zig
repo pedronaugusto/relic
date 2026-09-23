@@ -50,10 +50,22 @@ pub fn build(b: *std.Build) void {
     // test. With tracing off nothing in the runner asks for a trace, and the
     // fuzzers build and run. What it costs is the return trace under a
     // failing test; the error and the test's name are still printed.
+    // The delta search runs its candidates on the caller's executor when
+    // `PackOptions.threads` asks for more than one, and the suite writes
+    // the same repository from two processes and two tasks at once. Whether
+    // that is free of races is a claim a race detector can check and a
+    // reader cannot: `zig build test -Dthread-sanitizer`.
+    const thread_sanitizer = b.option(
+        bool,
+        "thread-sanitizer",
+        "Build the tests with ThreadSanitizer",
+    ) orelse false;
+
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/relic.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = if (thread_sanitizer) true else null,
         .error_tracing = false,
     });
     test_module.addOptions("build_options", build_options);
