@@ -93,3 +93,34 @@ pub fn addCommits(gpa: Allocator, io: Io, repo: *testgit.Repo, first: usize, cou
         try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg_buf, "commit {d}", .{i}) });
     }
 }
+
+/// Write a stand-in for `ssh` into `dir` and return its absolute path. It
+/// notes each argument it is given in `<itself>.log`, answers OpenSSH's
+/// `-G` probe as OpenSSH does, skips the options, ignores the host, and runs
+/// the command it was asked to run here — with git's own programs on the
+/// path, as a login shell on a server has them. git's test suite does the
+/// same.
+pub fn fakeSsh(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try dir.writeFile(io, .{ .sub_path = "fake-ssh", .data =
+        \\#!/bin/sh
+        \\for a in "$@"; do printf '[%s]' "$a" >> "$0.log"; done; echo >> "$0.log"
+        \\while [ $# -gt 0 ]; do
+        \\  case "$1" in
+        \\    -G) exit 0 ;;
+        \\    -o|-p|-P) shift 2 ;;
+        \\    -*) shift ;;
+        \\    *) break ;;
+        \\  esac
+        \\done
+        \\shift
+        \\PATH="$(git --exec-path):$PATH" exec sh -c "$*"
+        \\
+    });
+    const file = try dir.openFile(io, "fake-ssh", .{});
+    defer file.close(io);
+    try file.setPermissions(io, .fromMode(0o755));
+    const base = try absolutePath(gpa, io, dir);
+    defer gpa.free(base);
+    return std.fmt.allocPrint(gpa, "{s}/fake-ssh", .{base});
+}

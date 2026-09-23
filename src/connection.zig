@@ -219,9 +219,19 @@ pub const Process = struct {
 
     fn close(context: *anyopaque, io: Io) void {
         const p: *Process = @ptrCast(@alignCast(context));
-        // A conversation that ended well was finished; one closed without
-        // that is being abandoned, and the program is stopped rather than
-        // waited on, since it may be waiting on us.
+        if (!p.exited) {
+            // The end of the conversation: the program's input ends, and so
+            // does this side's interest in its output, so a program still
+            // writing — after a refusal half way through a pack — stops at
+            // a closed pipe rather than waiting on one nobody reads.
+            p.writer.interface.flush() catch {};
+            if (p.running.child.stdout) |stdout| {
+                stdout.close(io);
+                p.running.child.stdout = null;
+            }
+            p.exited = true;
+            _ = p.running.wait(io) catch {};
+        }
         p.running.deinit(io);
         p.gpa.free(p.read_buffer);
         p.gpa.free(p.write_buffer);

@@ -24,6 +24,7 @@ const protocol = @import("protocol.zig");
 const fetchpack = @import("fetchpack.zig");
 const indexpack = @import("indexpack.zig");
 const local = @import("local.zig");
+const ssh = @import("ssh.zig");
 const progress_mod = @import("progress.zig");
 
 const Oid = hash.Oid;
@@ -40,7 +41,7 @@ pub const Error = error{
     /// The transport needs to run a program — `ssh`, a credential helper —
     /// and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
-} || local.Error || fetchpack.Error || protocol.Error || program.Error;
+} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error;
 
 /// How a remote is reached.
 pub const Options = struct {
@@ -68,6 +69,10 @@ pub const Session = struct {
         smart: struct {
             conn: *Connection,
             advertisement: protocol.Advertisement,
+            /// Whether the server has finished with the conversation — a
+            /// v0 upload-pack after its pack — rather than waiting for a
+            /// command.
+            done: bool = false,
         },
     },
 
@@ -82,7 +87,6 @@ pub const Session = struct {
         options: Options,
     ) Error!Session {
         const parsed = url_mod.Url.parse(url) catch |err| return err;
-        _ = options;
         switch (parsed.scheme) {
             .local, .file => {
                 const remote = try gpa.create(local.Remote);
@@ -92,7 +96,17 @@ pub const Session = struct {
                 if (kind) |k| if (k != remote.repo.kind) return error.ObjectFormatMismatch;
                 return .{ .gpa = gpa, .service = service, .impl = .{ .local = remote } };
             },
-            .ssh, .http, .https => return error.UnsupportedTransport,
+            .ssh => {
+                const conn = try ssh.connect(gpa, io, parsed, service, .{
+                    .programs = options.programs,
+                    .config = options.config,
+                    .service_program = options.service_program,
+                    .protocol_v2 = options.protocol_v2,
+                });
+                errdefer conn.close(io);
+                return fromConnection(gpa, conn, service, kind);
+            },
+            .http, .https => return error.UnsupportedTransport,
             .git => return error.UnsupportedTransport,
         }
     }
@@ -114,6 +128,15 @@ pub const Session = struct {
                 s.gpa.destroy(remote);
             },
             .smart => |*smart| {
+                // A conversation over a pipe that the server still waits on
+                // ends with a flush, which it reads as nothing more wanted,
+                // as git's disconnect writes it.
+                if (!smart.conn.stateless and !smart.done) {
+                    if (smart.conn.request()) |w| {
+                        @import("pktline.zig").flush(w) catch {};
+                        w.flush() catch {};
+                    } else |_| {}
+                }
                 smart.advertisement.deinit();
                 smart.conn.close(io);
             },
@@ -177,6 +200,9 @@ pub const Session = struct {
                 return .{ .pack = written.name, .objects = written.objects };
             },
             .smart => |*smart| {
+                // A v0 server sends its pack and is done; a v2 server
+                // waits for the next command.
+                if (smart.advertisement.version != .v2) smart.done = true;
                 const result = try fetchpack.fetch(gpa, io, smart.conn, &smart.advertisement, db, pack_dir, request, options);
                 return .{ .pack = result.name, .objects = result.objects };
             },

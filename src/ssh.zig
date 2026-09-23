@@ -1,0 +1,386 @@
+//! Reaching a remote over ssh: the person's own `ssh`, started the way git
+//! starts it.
+//!
+//! Which program runs is git's choice made the same way: `GIT_SSH_COMMAND`
+//! from the caller's environment, then `core.sshCommand`, each a command
+//! line a shell reads; else `GIT_SSH`, a program run directly; else `ssh`.
+//! Which options it understands is its variant, from `GIT_SSH_VARIANT` or
+//! `ssh.variant`, else from the program's name — `ssh`, `plink`,
+//! `tortoiseplink` — and for any other name git asks the program itself:
+//! one that accepts OpenSSH's `-G` is OpenSSH, and one that does not is
+//! `simple`, which takes nothing but a host and a command. OpenSSH is asked
+//! to pass `GIT_PROTOCOL` along, which is how protocol v2 is requested over
+//! ssh; a port is `-p` to OpenSSH and `-P` to the PuTTY family, and a
+//! `simple` ssh given one is refused by name, as git refuses it.
+//!
+//! The remote command is `git-upload-pack '<path>'` or
+//! `git-receive-pack '<path>'`, the path quoted as git's `sq_quote` quotes
+//! it. A host or a path beginning with `-` is refused, as git refuses it,
+//! because `ssh` would read it as an option.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+
+const program = @import("program.zig");
+const config_mod = @import("config.zig");
+const url_mod = @import("url.zig");
+const connection = @import("connection.zig");
+
+const Connection = connection.Connection;
+
+pub const Error = error{
+    /// The caller handed in no `program.Programs`, and ssh is a program.
+    ProgramsNotGranted,
+    /// The `simple` variant has no way to be given a port; git refuses the
+    /// same.
+    SshVariantRefusesPort,
+    /// A host beginning with `-`, which `ssh` would read as an option.
+    SuspiciousHostname,
+    /// A path beginning with `-`, which the remote command would read as an
+    /// option.
+    SuspiciousPathname,
+} || connection.Error || program.Error;
+
+/// The option dialect of the ssh program.
+pub const Variant = enum {
+    /// Unknown: ask the program with `-G`.
+    auto,
+    /// A host and a command, nothing else.
+    simple,
+    /// OpenSSH.
+    ssh,
+    plink,
+    putty,
+    tortoiseplink,
+
+    /// The variant a `GIT_SSH_VARIANT` or `ssh.variant` value names. Any
+    /// word git does not know is OpenSSH, as in git.
+    pub fn parse(text: []const u8) Variant {
+        if (std.mem.eql(u8, text, "auto")) return .auto;
+        if (std.mem.eql(u8, text, "plink")) return .plink;
+        if (std.mem.eql(u8, text, "putty")) return .putty;
+        if (std.mem.eql(u8, text, "tortoiseplink")) return .tortoiseplink;
+        if (std.mem.eql(u8, text, "simple")) return .simple;
+        return .ssh;
+    }
+};
+
+/// How the conversation is started.
+pub const Options = struct {
+    programs: ?program.Programs = null,
+    config: ?*const config_mod.Config = null,
+    /// The program asked for on the remote side, in place of
+    /// `git-upload-pack` or `git-receive-pack`.
+    service_program: ?[]const u8 = null,
+    /// Ask an upload-pack for protocol v2.
+    protocol_v2: bool = true,
+    /// Where ssh's own messages go: a password prompt, a host key warning.
+    /// They are the person's, as they are when git runs ssh.
+    stderr: enum { inherit, ignore } = .inherit,
+};
+
+/// The variables git clears before it runs a program for another
+/// repository: they describe this one.
+pub const local_repo_env = [_][]const u8{
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG",             "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",                 "GIT_OBJECT_DIRECTORY",   "GIT_DIR",
+    "GIT_WORK_TREE",                    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",                   "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",                       "GIT_SHALLOW_FILE",       "GIT_COMMON_DIR",
+};
+
+/// Start ssh to `url`'s host running `service` on `url`'s path.
+pub fn connect(
+    gpa: Allocator,
+    io: Io,
+    url: url_mod.Url,
+    service: connection.Service,
+    options: Options,
+) Error!*Connection {
+    const programs = options.programs orelse return error.ProgramsNotGranted;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    if (url.host.len != 0 and url.host[0] == '-') return error.SuspiciousHostname;
+    if (url.user) |user| {
+        if (user.len != 0 and user[0] == '-') return error.SuspiciousHostname;
+    }
+    if (url.path.len != 0 and url.path[0] == '-') return error.SuspiciousPathname;
+    const host = if (url.user) |user| try std.fmt.allocPrint(arena, "{s}@{s}", .{ user, url.host }) else url.host;
+    var port_buf: [8]u8 = undefined;
+    const port: ?[]const u8 = if (url.port) |p| std.fmt.bufPrint(&port_buf, "{d}", .{p}) catch unreachable else null;
+
+    // The program, and whether it is a command line.
+    var command: []const u8 = "ssh";
+    var shell = false;
+    if (programs.environ.get("GIT_SSH_COMMAND")) |line| {
+        command = line;
+        shell = true;
+    } else if (configValue(arena, options.config, "core.sshcommand")) |line| {
+        command = line;
+        shell = true;
+    } else if (programs.environ.get("GIT_SSH")) |path| {
+        command = path;
+    }
+
+    var variant = variantOf(arena, programs, options.config, command, shell);
+    const v2 = options.protocol_v2 and service == .upload_pack;
+
+    if (variant == .auto) {
+        // Ask it: OpenSSH answers `-G` with its configuration and exit 0.
+        var probe: std.ArrayList([]const u8) = .empty;
+        try probe.appendSlice(arena, &.{ command, "-G" });
+        try pushOptions(arena, &probe, .ssh, port, v2);
+        try probe.append(arena, host);
+        const probed = program.run(programs, gpa, io, .{
+            .argv = probe.items,
+            .shell = shell,
+            .stderr = .ignore,
+        }, "", .{ .output = .limited(1 << 20) });
+        if (probed) |outcome_value| {
+            var outcome = outcome_value;
+            defer outcome.deinit(gpa);
+            variant = if (outcome.succeeded()) .ssh else .simple;
+        } else |err| switch (err) {
+            error.OutputTooLong => variant = .simple,
+            else => |e| return e,
+        }
+    }
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.append(arena, command);
+    try pushOptions(arena, &argv, variant, port, v2);
+    try argv.append(arena, host);
+    try argv.append(arena, try remoteCommand(arena, options.service_program orelse service.name(), url.path));
+
+    const set: []const program.Var = if (v2 and variant == .ssh)
+        &.{.{ .name = "GIT_PROTOCOL", .value = "version=2" }}
+    else
+        &.{};
+    return connection.Process.start(gpa, io, programs, .{
+        .argv = argv.items,
+        .shell = shell,
+        .set = set,
+        .unset = &local_repo_env,
+        .stderr = switch (options.stderr) {
+            .inherit => .inherit,
+            .ignore => .ignore,
+        },
+    });
+}
+
+fn configValue(arena: Allocator, config: ?*const config_mod.Config, key: []const u8) ?[]const u8 {
+    const c = config orelse return null;
+    const raw = c.get(key) orelse return null;
+    return config_mod.unquote(arena, raw) catch null;
+}
+
+/// git's `determine_ssh_variant`.
+fn variantOf(arena: Allocator, programs: program.Programs, config: ?*const config_mod.Config, command: []const u8, shell: bool) Variant {
+    if (programs.environ.get("GIT_SSH_VARIANT")) |text| return Variant.parse(text);
+    if (configValue(arena, config, "ssh.variant")) |text| return Variant.parse(text);
+    // For a command line, the variant is its first word's.
+    var first = command;
+    if (shell) {
+        const trimmed = std.mem.trim(u8, command, " \t");
+        const end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
+        first = std.mem.trim(u8, trimmed[0..end], "'\"");
+    }
+    const base_start = if (std.mem.lastIndexOfAny(u8, first, "/\\")) |slash| slash + 1 else 0;
+    const base = first[base_start..];
+    if (std.ascii.eqlIgnoreCase(base, "ssh") or std.ascii.eqlIgnoreCase(base, "ssh.exe")) return .ssh;
+    if (std.ascii.eqlIgnoreCase(base, "plink") or std.ascii.eqlIgnoreCase(base, "plink.exe")) return .plink;
+    if (std.ascii.eqlIgnoreCase(base, "tortoiseplink") or std.ascii.eqlIgnoreCase(base, "tortoiseplink.exe")) return .tortoiseplink;
+    return .auto;
+}
+
+/// git's `push_ssh_options`.
+fn pushOptions(arena: Allocator, argv: *std.ArrayList([]const u8), variant: Variant, port: ?[]const u8, v2: bool) Error!void {
+    if (variant == .ssh and v2) try argv.appendSlice(arena, &.{ "-o", "SendEnv=GIT_PROTOCOL" });
+    if (variant == .tortoiseplink) try argv.append(arena, "-batch");
+    if (port) |p| {
+        switch (variant) {
+            .auto => unreachable,
+            .simple => return error.SshVariantRefusesPort,
+            .ssh => try argv.append(arena, "-p"),
+            .plink, .putty, .tortoiseplink => try argv.append(arena, "-P"),
+        }
+        try argv.append(arena, p);
+    }
+}
+
+/// `<program> '<path>'`, with the path quoted as git's `sq_quote` quotes
+/// it: in single quotes, each `'` and `!` closed out, escaped and reopened.
+pub fn remoteCommand(arena: Allocator, service_program: []const u8, path: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, service_program);
+    try out.appendSlice(arena, " '");
+    for (path) |c| {
+        if (c == '\'' or c == '!') {
+            try out.appendSlice(arena, "'\\");
+            try out.append(arena, c);
+            try out.append(arena, '\'');
+        } else try out.append(arena, c);
+    }
+    try out.append(arena, '\'');
+    return out.items;
+}
+
+const testing = std.testing;
+
+test "a path is quoted as git's sq_quote quotes it" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqualStrings("git-upload-pack '/srv/it'\\''s'\\!''", try remoteCommand(arena, "git-upload-pack", "/srv/it's!"));
+}
+
+const builtin = @import("builtin");
+const testgit = @import("testgit.zig");
+const testremote = @import("testremote.zig");
+const transport = @import("transport.zig");
+const fetch_mod = @import("fetch.zig");
+const repo_mod = @import("repo.zig");
+
+test "ssh is handed the same arguments git hands it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tools = testing.tmpDir(.{ .iterate = true });
+    defer tools.cleanup();
+    const fake = try testremote.fakeSsh(gpa, io, tools.dir);
+    defer gpa.free(fake);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+
+    var source = try testremote.historyRepo(gpa, io, 2);
+    defer source.deinit();
+    // A path with a quote in it, to be quoted.
+    try source.exec(io, &.{ "init", "-q", "--bare", "it's" });
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+
+    var here = try testgit.Repo.init(gpa, io, &.{});
+    defer here.deinit();
+    try here.exec(io, &.{ "config", "core.sshCommand", fake });
+    var repo = try repo_mod.Repository.open(gpa, io, here.dir, .{});
+    defer repo.deinit(io);
+
+    const Case = struct { url: []const u8, variant: ?[]const u8 = null };
+    const url_port = try std.fmt.allocPrint(gpa, "ssh://ada@example.invalid:2222{s}", .{source_path});
+    defer gpa.free(url_port);
+    const url_scp = try std.fmt.allocPrint(gpa, "example.invalid:{s}/it's", .{source_path});
+    defer gpa.free(url_scp);
+    const url_plain = try std.fmt.allocPrint(gpa, "ssh://example.invalid:22{s}", .{source_path});
+    defer gpa.free(url_plain);
+    const cases = [_]Case{
+        .{ .url = url_port },
+        .{ .url = url_scp },
+        .{ .url = url_plain, .variant = "plink" },
+        .{ .url = url_plain, .variant = "ssh" },
+    };
+    for (cases) |case| {
+        tools.dir.deleteFile(io, "fake-ssh.log") catch {};
+        var variant_buf: [64]u8 = undefined;
+        const variant_setting = if (case.variant) |v| try std.fmt.bufPrint(&variant_buf, "ssh.variant={s}", .{v}) else "ssh.variant=auto";
+        here.report_failures = case.variant == null;
+        // git's own arguments, from the same stand-in. A plink given a
+        // repository it cannot reach fails after it has been started, which
+        // is all that is compared.
+        if (here.run(io, &.{ "-c", variant_setting, "ls-remote", case.url })) |listed| {
+            gpa.free(listed);
+        } else |err| if (case.variant == null) return err;
+        const theirs = try tools.dir.readFileAlloc(io, "fake-ssh.log", gpa, .unlimited);
+        defer gpa.free(theirs);
+        tools.dir.deleteFile(io, "fake-ssh.log") catch {};
+
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(gpa);
+        try text.print(gpa, "[core]\nsshCommand = {s}\n[ssh]\nvariant = {s}\n", .{ fake, case.variant orelse "auto" });
+        var settings = try @import("config.zig").Config.parseText(gpa, text.items, .local);
+        defer settings.deinit();
+        if (transport.Session.open(gpa, io, case.url, .upload_pack, .sha1, .{
+            .programs = .{ .environ = &env },
+            .config = &settings,
+        })) |opened| {
+            var session = opened;
+            var refs = try session.listRefs(gpa, io, &.{});
+            refs.deinit();
+            session.close(io);
+        } else |err| if (case.variant == null) return err;
+        const ours = try tools.dir.readFileAlloc(io, "fake-ssh.log", gpa, .unlimited);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+    }
+}
+
+test "a fetch over ssh leaves what git fetch leaves, in v2 and in v0" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tools = testing.tmpDir(.{ .iterate = true });
+    defer tools.cleanup();
+    const fake = try testremote.fakeSsh(gpa, io, tools.dir);
+    defer gpa.free(fake);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+
+    for ([_][]const u8{ "ssh", "simple" }) |variant| {
+        var source = try testremote.historyRepo(gpa, io, 4);
+        defer source.deinit();
+        const source_path = try testremote.absolutePath(gpa, io, source.dir);
+        defer gpa.free(source_path);
+        const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}", .{source_path});
+        defer gpa.free(url);
+
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }) |twin| {
+            try twin.exec(io, &.{ "remote", "add", "origin", url });
+            try twin.exec(io, &.{ "config", "core.sshCommand", fake });
+            try twin.exec(io, &.{ "config", "ssh.variant", variant });
+        }
+        try by_git.exec(io, &.{ "fetch", "origin" });
+        var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
+        defer repo.deinit(io);
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{
+            .who = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 },
+            .programs = .{ .environ = &env },
+        });
+        defer outcome.deinit();
+        try testing.expect(outcome.pack != null);
+
+        const format = "--format=%(refname) %(objectname) %(symref)";
+        const theirs = try by_git.run(io, &.{ "for-each-ref", format });
+        defer gpa.free(theirs);
+        const ours = try by_relic.run(io, &.{ "for-each-ref", format });
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+        const head_theirs = try by_git.readFile(io, ".git/FETCH_HEAD");
+        defer gpa.free(head_theirs);
+        const head_ours = try by_relic.readFile(io, ".git/FETCH_HEAD");
+        defer gpa.free(head_ours);
+        try testing.expectEqualStrings(head_theirs, head_ours);
+        try by_relic.exec(io, &.{ "fsck", "--strict", "--no-dangling" });
+    }
+}
+
+test "ssh without the permission to run it, or a port a simple ssh cannot take, is refused by name" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const url = try url_mod.Url.parse("ssh://example.invalid:2222/srv/repo");
+    try testing.expectError(error.ProgramsNotGranted, connect(gpa, io, url, .upload_pack, .{}));
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var config = try @import("config.zig").Config.parseText(gpa, "[ssh]\nvariant = simple\n", .local);
+    defer config.deinit();
+    try testing.expectError(error.SshVariantRefusesPort, connect(gpa, io, url, .upload_pack, .{
+        .programs = .{ .environ = &env },
+        .config = &config,
+    }));
+    const dashed = try url_mod.Url.parse("-oProxyCommand=evil:repo");
+    try testing.expectError(error.SuspiciousHostname, connect(gpa, io, dashed, .upload_pack, .{ .programs = .{ .environ = &env } }));
+}
