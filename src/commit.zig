@@ -30,6 +30,7 @@ const worktree = @import("worktree.zig");
 const index_mod = @import("index.zig");
 const hooks = @import("hooks.zig");
 const fs = @import("fs.zig");
+const signing = @import("signing.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -53,7 +54,7 @@ pub const Error = error{
     OperationInProgress,
     /// `commit.cleanup` names no mode git knows.
     InvalidCleanupMode,
-} || hooks.Error || repo_mod.Error || refs_mod.TransactionError || worktree.Error ||
+} || hooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
     index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError ||
     error{NameTooLong};
 
@@ -88,6 +89,9 @@ pub const Options = struct {
     cleanup: ?Cleanup = null,
     /// `false` skips `post-rewrite` after an amend.
     post_rewrite: bool = true,
+    /// Whether and how to sign it. By default `commit.gpgSign` decides,
+    /// and signing needs the caller's `Programs`.
+    signing: signing.Request = .{},
 };
 
 /// Who, when, and what to say. The times are the caller's, because nothing
@@ -199,6 +203,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         .committer = request.committer,
         .message = message,
         .extra = carried,
+        .signing = options.signing,
     });
 
     const action = if (current == null)

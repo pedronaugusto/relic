@@ -23,6 +23,7 @@ const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
 const program = @import("program.zig");
 const hooks = @import("hooks.zig");
+const signing = @import("signing.zig");
 
 const Oid = hash.Oid;
 
@@ -55,6 +56,9 @@ pub const Error = error{
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
     config_mod.ParseError || config_mod.ValueError || odb_mod.Error ||
     refs_mod.ReadError || worktrees.Error;
+
+/// Errors from writing a commit or a tag, which may be signed.
+pub const WriteError = Error || signing.Error;
 
 /// How deep `open` walks upwards looking for a `.git`.
 pub const max_discovery_depth: u8 = 64;
@@ -95,8 +99,9 @@ pub const Repository = struct {
     config: config_mod.Config,
     odb: odb_mod.Odb,
     refs: refs_mod.Store,
-    /// The setting that caused `error.UnsupportedExtension` or
-    /// `error.UnsupportedRepositoryVersion`, for a message. Empty otherwise.
+    /// The setting that caused `error.UnsupportedExtension`,
+    /// `error.UnsupportedRepositoryVersion` or
+    /// `error.SigningRequiresPrograms`, for a message. Empty otherwise.
     unsupported: [64]u8 = @splat(0),
     unsupported_len: usize = 0,
 
@@ -572,13 +577,19 @@ pub const Repository = struct {
         message: []const u8,
         encoding: ?[]const u8 = null,
         extra: []const object.ExtraHeader = &.{},
+        /// Whether and how to sign it. By default `commit.gpgSign` decides,
+        /// as it does for `git commit-tree`.
+        signing: signing.Request = .{},
     };
 
     /// Write a commit object. No ref is moved and no log is written: that is
     /// a ref transaction, and keeping the two apart is what makes
     /// `commit-tree` a usable primitive.
-    pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest) Error!Oid {
-        const bytes = object.Commit.build(repo.gpa, repo.kind, .{
+    ///
+    /// A commit that is to be signed and comes with no `Programs` to sign it
+    /// is `error.SigningRequiresPrograms`, never an unsigned commit.
+    pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest) WriteError!Oid {
+        const fields: object.Commit.Fields = .{
             .tree = request.tree,
             .parents = request.parents,
             .author = request.author,
@@ -586,22 +597,57 @@ pub const Repository = struct {
             .encoding = request.encoding,
             .extra = request.extra,
             .message = request.message,
-        }) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.UnexpectedObjectType,
+        };
+        var signer = try repo.signerFor(request.signing, "commit.gpgsign", "commit.gpgSign");
+        defer if (signer) |*s| s.deinit();
+        const bytes = (if (signer) |*s|
+            signing.signCommit(s, io, repo.kind, fields, request.signing.key)
+        else
+            object.Commit.build(repo.gpa, repo.kind, fields)) catch |err| switch (err) {
+            error.InvalidSignature, error.MixedHashKinds => return error.UnexpectedObjectType,
+            else => |e| return e,
         };
         defer repo.gpa.free(bytes);
         return repo.odb.write(io, .commit, bytes);
     }
 
-    /// Write an annotated tag object.
-    pub fn writeTag(repo: *Repository, io: Io, fields: object.Tag.Fields) Error!Oid {
-        const bytes = object.Tag.build(repo.gpa, repo.kind, fields) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.UnexpectedObjectType,
+    /// Write an annotated tag object. `tag.gpgSign` or
+    /// `tag.forceSignAnnotated` makes it signed, which needs `writeTagWith`
+    /// and the caller's `Programs`; here it is refused.
+    pub fn writeTag(repo: *Repository, io: Io, fields: object.Tag.Fields) WriteError!Oid {
+        return repo.writeTagWith(io, fields, .{});
+    }
+
+    /// Write an annotated tag object, signed as `request` and the
+    /// configuration say, with the signature after the message.
+    pub fn writeTagWith(repo: *Repository, io: Io, fields: object.Tag.Fields, request: signing.Request) WriteError!Oid {
+        var signer = try repo.signerFor(request, "tag.gpgsign", "tag.gpgSign");
+        defer if (signer) |*s| s.deinit();
+        const bytes = (if (signer) |*s|
+            signing.signTag(s, io, repo.kind, fields, request.key)
+        else
+            object.Tag.build(repo.gpa, repo.kind, fields)) catch |err| switch (err) {
+            error.InvalidSignature, error.MixedHashKinds => return error.UnexpectedObjectType,
+            else => |e| return e,
         };
         defer repo.gpa.free(bytes);
         return repo.odb.write(io, .tag, bytes);
+    }
+
+    /// The signer a write needs, or `null` when it is not to be signed.
+    fn signerFor(repo: *Repository, request: signing.Request, key: []const u8, spelling: []const u8) WriteError!?signing.Signer {
+        const wanted = switch (request.sign) {
+            .always => true,
+            .never => false,
+            .config => (repo.config.getBool(key, false) catch false) or
+                (std.mem.startsWith(u8, key, "tag.") and (repo.config.getBool("tag.forcesignannotated", false) catch false)),
+        };
+        if (!wanted) return null;
+        const programs = request.programs orelse {
+            repo.setUnsupported(if (request.sign == .config) spelling else "");
+            return error.SigningRequiresPrograms;
+        };
+        return try signing.Signer.init(repo.gpa, &repo.config, programs);
     }
 
     /// The reflog policy `core.logAllRefUpdates` asks for.
