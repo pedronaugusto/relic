@@ -51,6 +51,11 @@ pub const Invocation = struct {
     /// Where the program's diagnostics go. A hook's reach the person, as
     /// git's do; a helper's are the caller's to show.
     stderr: enum { capture, inherit, ignore } = .capture,
+    /// Where the program's standard output goes. `to_stderr` is this
+    /// process's own standard error, which is where git sends most hooks'
+    /// output so that it never mixes with what git itself prints; `inherit`
+    /// is this process's standard output, where `pre-push`'s goes.
+    stdout: enum { capture, inherit, to_stderr, ignore } = .capture,
 };
 
 pub const Error = error{
@@ -61,6 +66,7 @@ pub const Error = error{
 
 pub const Outcome = struct {
     term: Child.Term,
+    /// Empty unless `Invocation.stdout` is `.capture`.
     stdout: []u8,
     /// Empty unless `Invocation.stderr` is `.capture`.
     stderr: []u8,
@@ -112,39 +118,53 @@ pub fn run(
     };
     defer if (feeding) |*f| f.cancel(io);
 
-    const capture = started.child.stderr != null;
+    // Whichever of the two streams are pipes, in a fixed order: standard
+    // output first when it is one.
+    var pipes: [2]Io.File = undefined;
+    var count: usize = 0;
+    const stdout_at: ?usize = if (started.child.stdout) |f| blk: {
+        pipes[count] = f;
+        count += 1;
+        break :blk count - 1;
+    } else null;
+    const stderr_at: ?usize = if (started.child.stderr) |f| blk: {
+        pipes[count] = f;
+        count += 1;
+        break :blk count - 1;
+    } else null;
+
     var buffers: Io.File.MultiReader.Buffer(2) = undefined;
     var multi: Io.File.MultiReader = undefined;
-    const files: []const Io.File = if (capture)
-        &.{ started.child.stdout.?, started.child.stderr.? }
-    else
-        &.{started.child.stdout.?};
     // The layout is computed from the count, so a buffer for two holds one.
+    // A reader over no streams at all cannot be made, and there is nothing
+    // for it to do.
     const streams = buffers.toStreams();
-    streams.len = @intCast(files.len);
-    multi.init(gpa, io, streams, files);
-    defer multi.deinit();
+    streams.len = @intCast(count);
+    if (count != 0) multi.init(gpa, io, streams, pipes[0..count]);
+    defer if (count != 0) multi.deinit();
 
-    while (multi.fill(64, limits.timeout)) |_| {
-        if (limits.output.toInt()) |most| {
-            for (0..files.len) |i| {
-                if (multi.reader(i).buffered().len > most) return error.OutputTooLong;
+    if (count != 0) {
+        while (multi.fill(64, limits.timeout)) |_| {
+            if (limits.output.toInt()) |most| {
+                for (0..count) |i| {
+                    if (multi.reader(i).buffered().len > most) return error.OutputTooLong;
+                }
             }
+        } else |err| switch (err) {
+            error.EndOfStream => {},
+            else => |e| return e,
         }
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        else => |e| return e,
+        try multi.checkAnyError();
     }
-    try multi.checkAnyError();
     if (feeding) |*f| {
         f.await(io);
         feeding = null;
     }
 
     const term = try started.wait(io);
-    const stdout = try multi.toOwnedSlice(0);
+    const stdout = if (stdout_at) |i| try multi.toOwnedSlice(i) else try gpa.alloc(u8, 0);
     errdefer gpa.free(stdout);
-    const stderr = if (capture) try multi.toOwnedSlice(1) else try gpa.alloc(u8, 0);
+    const stderr = if (stderr_at) |i| try multi.toOwnedSlice(i) else try gpa.alloc(u8, 0);
     return .{ .term = term, .stdout = stdout, .stderr = stderr };
 }
 
@@ -182,7 +202,8 @@ pub const Running = struct {
     }
 };
 
-/// Start a program with piped standard input and output.
+/// Start a program with piped standard input, and its standard output a
+/// pipe unless `Invocation.stdout` sends it elsewhere.
 pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation) Error!Running {
     var environ = try programs.environ.clone(gpa);
     errdefer environ.deinit();
@@ -197,7 +218,12 @@ pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation)
         .cwd = invocation.cwd,
         .environ_map = &environ,
         .stdin = .pipe,
-        .stdout = .pipe,
+        .stdout = switch (invocation.stdout) {
+            .capture => .pipe,
+            .inherit => .inherit,
+            .to_stderr => .{ .file = Io.File.stderr() },
+            .ignore => .ignore,
+        },
         .stderr = switch (invocation.stderr) {
             .capture => .pipe,
             .inherit => .inherit,
@@ -345,6 +371,34 @@ test "a failing program is its status, its diagnostics kept apart" {
     try testing.expectEqual(Child.Term{ .exited = 3 }, outcome.term);
     try testing.expectEqualStrings("out\n", outcome.stdout);
     try testing.expectEqualStrings("err\n", outcome.stderr);
+}
+
+test "output sent elsewhere is not collected, and the status still is" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var environ = try testEnviron();
+    defer environ.deinit();
+
+    var outcome = try run(.{ .environ = &environ }, gpa, io, .{
+        .argv = &.{"echo out; echo err >&2; exit 4"},
+        .shell = true,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }, "", .{});
+    defer outcome.deinit(gpa);
+    try testing.expectEqual(Child.Term{ .exited = 4 }, outcome.term);
+    try testing.expectEqualStrings("", outcome.stdout);
+    try testing.expectEqualStrings("", outcome.stderr);
+
+    var kept = try run(.{ .environ = &environ }, gpa, io, .{
+        .argv = &.{"echo err >&2"},
+        .shell = true,
+        .stdout = .ignore,
+    }, "", .{});
+    defer kept.deinit(gpa);
+    try testing.expect(kept.succeeded());
+    try testing.expectEqualStrings("err\n", kept.stderr);
 }
 
 test "output past the limit is refused by name" {
