@@ -236,6 +236,29 @@ const CommandLine = struct {
     }
 };
 
+/// The variables that point a git at one particular repository. A program
+/// relic starts for a repository it has open is started without them, from
+/// the directory it is to work in, so a variable the caller's own process
+/// inherited cannot send it to a different repository. The list is git's
+/// own `local_repo_env`.
+pub const repository_variables = [_][]const u8{
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+};
+
 /// Whether git would hand this command line to a shell: it holds a byte of
 /// `|&;<>()$\`\\"' \t\n*?[#~=%`.
 pub fn needsShell(line: []const u8) bool {
