@@ -8,6 +8,7 @@ const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
 const odb_mod = @import("odb.zig");
 const diff = @import("diff.zig");
+const textdiff = @import("textdiff.zig");
 
 const Oid = hash.Oid;
 
@@ -472,6 +473,97 @@ fn expectPatches(pair: *Pair, io: Io, options: diff.Options, flags: []const []co
         defer gpa.free(expected);
         std.testing.expectEqualStrings(expected, out.written()) catch |err| {
             std.debug.print("differs at {s}\n", .{change.path()});
+            return err;
+        };
+    }
+}
+
+/// The hunks of `git diff -U0` as the changes they stand for.
+fn parseZeroContextHunks(gpa: std.mem.Allocator, text: []const u8) ![]textdiff.Change {
+    var out: std.ArrayList(textdiff.Change) = .empty;
+    errdefer out.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "@@ -")) continue;
+        const close = std.mem.indexOfPos(u8, line, 4, " @@") orelse return error.BadHunk;
+        const ranges = line[4..close];
+        const plus = std.mem.indexOf(u8, ranges, " +") orelse return error.BadHunk;
+        const old = try parseRange(ranges[0..plus]);
+        const new = try parseRange(ranges[plus + 2 ..]);
+        try out.append(gpa, .{
+            .old_start = if (old.count == 0) old.start else old.start - 1,
+            .old_count = old.count,
+            .new_start = if (new.count == 0) new.start else new.start - 1,
+            .new_count = new.count,
+        });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+fn parseRange(text: []const u8) !struct { start: usize, count: usize } {
+    if (std.mem.indexOfScalar(u8, text, ',')) |comma| {
+        return .{
+            .start = try std.fmt.parseInt(usize, text[0..comma], 10),
+            .count = try std.fmt.parseInt(usize, text[comma + 1 ..], 10),
+        };
+    }
+    return .{ .start = try std.fmt.parseInt(usize, text, 10), .count = 1 };
+}
+
+test "the histogram diff lands on the lines git's does, over a random corpus" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    // Few distinct lines, so that every choice histogram makes -- which
+    // run anchors, which occurrence comes first, when a region goes to
+    // Myers and when a slid run is diffed again -- is exercised.
+    var prng = std.Random.DefaultPrng.init(0x68697374);
+    const rng = prng.random();
+    var old: std.ArrayList(u8) = .empty;
+    defer old.deinit(gpa);
+    var new: std.ArrayList(u8) = .empty;
+    defer new.deinit(gpa);
+    for (0..40) |case| {
+        const alphabet: u8 = 2 + rng.uintLessThan(u8, 6);
+        old.clearRetainingCapacity();
+        for (0..rng.uintLessThan(usize, 40)) |_| {
+            try old.append(gpa, 'a' + rng.uintLessThan(u8, alphabet));
+            if (rng.uintLessThan(u8, 5) == 0) try old.append(gpa, ' ');
+            try old.append(gpa, '\n');
+        }
+        new.clearRetainingCapacity();
+        var lines = std.mem.splitScalar(u8, old.items, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            switch (rng.uintLessThan(u8, 10)) {
+                0 => {},
+                1 => try new.appendSlice(gpa, &.{ 'a' + rng.uintLessThan(u8, alphabet), '\n' }),
+                else => {},
+            }
+            if (rng.uintLessThan(u8, 10) != 0) {
+                try new.appendSlice(gpa, line);
+                try new.append(gpa, '\n');
+            }
+        }
+        try repo.writeFile(io, "old", old.items);
+        try repo.writeFile(io, "new", new.items);
+        // `diff --no-index` exits 1 when the files differ; the output is
+        // what is compared.
+        const output = try repo.runInput(io, &.{ "diff", "--no-index", "--diff-algorithm=histogram", "-U0", "old", "new" }, "");
+        defer gpa.free(output);
+        const expected = try parseZeroContextHunks(gpa, output);
+        defer gpa.free(expected);
+
+        const old_lines = try textdiff.splitLines(gpa, old.items);
+        defer gpa.free(old_lines);
+        const new_lines = try textdiff.splitLines(gpa, new.items);
+        defer gpa.free(new_lines);
+        const got = try textdiff.diffLines(gpa, old_lines, new_lines, .{ .algorithm = .histogram });
+        defer gpa.free(got);
+        std.testing.expectEqualSlices(textdiff.Change, expected, got) catch |err| {
+            std.debug.print("case {d}\n", .{case});
             return err;
         };
     }

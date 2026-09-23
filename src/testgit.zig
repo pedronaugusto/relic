@@ -154,6 +154,46 @@ pub const Repo = struct {
         return r.environ orelse &r.isolated.?;
     }
 
+    /// Run `git` with `input` on its standard input and return its standard
+    /// output, which is the caller's, whatever it exits with.
+    pub fn runInput(r: *Repo, io: Io, args: []const []const u8, input: []const u8) ![]u8 {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(r.gpa);
+        try argv.append(r.gpa, "git");
+        try argv.appendSlice(r.gpa, r.defaults);
+        try argv.appendSlice(r.gpa, args);
+        var own: ?Environ.Map = null;
+        defer if (own) |*map| map.deinit();
+        const environ_map = r.environ orelse if (r.isolated) |*map| map else blk: {
+            own = try isolatedEnviron(r.gpa, no_home);
+            break :blk &own.?;
+        };
+        var child = try std.process.spawn(io, .{
+            .argv = argv.items,
+            .cwd = .{ .dir = r.dir },
+            .environ_map = environ_map,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .ignore,
+        });
+        defer child.kill(io);
+        {
+            var buf: [4096]u8 = undefined;
+            var w = child.stdin.?.writer(io, &buf);
+            try w.interface.writeAll(input);
+            try w.interface.flush();
+            child.stdin.?.close(io);
+            child.stdin = null;
+        }
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(r.gpa);
+        var buf: [4096]u8 = undefined;
+        var reader = child.stdout.?.reader(io, &buf);
+        try reader.interface.appendRemainingUnlimited(r.gpa, &out);
+        _ = try child.wait(io);
+        return out.toOwnedSlice(r.gpa);
+    }
+
     /// Run `git` and discard its output.
     pub fn exec(r: *Repo, io: Io, args: []const []const u8) !void {
         const out = try r.run(io, args);

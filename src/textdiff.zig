@@ -12,8 +12,9 @@
 //! equally short scripts and the raw algorithm picks whichever its tie-breaks
 //! reach first; the slide is what collapses that freedom to git's answer.
 //!
-//! The histogram algorithm is here too. It is not asked to agree with Myers,
-//! only to be correct and to give the same answer every time.
+//! The histogram algorithm is here too, with the shape git's xhistogram gives
+//! it, because git's merge machinery diffs with it: where a conflict starts
+//! and ends in a cherry-pick is decided by which run histogram anchors on.
 //!
 //! Patience is git's xpatience, line for line, because its answer is the
 //! one `git diff --patience` prints: anchor on the lines that occur exactly
@@ -109,7 +110,19 @@ pub fn diffLines(
     defer changed_new.deinit(gpa);
 
     switch (options.algorithm) {
-        .myers, .histogram => try whole(gpa, a, b, classified.classes, changed_old, changed_new, options),
+        .myers => try whole(gpa, a, b, classified.classes, changed_old, changed_new, options),
+        .histogram => {
+            var h: Histogram = .{
+                .gpa = gpa,
+                .a = a,
+                .b = b,
+                .classes = classified.classes,
+                .changed_a = changed_old,
+                .changed_b = changed_new,
+                .options = options,
+            };
+            try h.diff(1, a.len, 1, b.len);
+        },
         .patience => {
             var p: Patience = .{
                 .gpa = gpa,
@@ -125,19 +138,28 @@ pub fn diffLines(
         },
     }
 
-    compact(changed_old, a, old, changed_new, options.indent_heuristic);
-    compact(changed_new, b, new, changed_old, options.indent_heuristic);
+    const rediff_old: ?Rediff = if (options.algorithm == .histogram)
+        .{ .gpa = gpa, .other_ids = b, .classes = classified.classes, .options = options }
+    else
+        null;
+    const rediff_new: ?Rediff = if (options.algorithm == .histogram)
+        .{ .gpa = gpa, .other_ids = a, .classes = classified.classes, .options = options }
+    else
+        null;
+    try compact(changed_old, a, old, changed_new, options.indent_heuristic, rediff_old);
+    try compact(changed_new, b, new, changed_old, options.indent_heuristic, rediff_new);
 
     return buildScript(gpa, changed_old, changed_new);
 }
 
-/// Mark the changed lines of two whole files with Myers or the histogram,
-/// the way git's `xdl_do_diff` does: the equal head and tail set aside,
-/// then, for Myers, the lines no match can come from.
+/// Mark the changed lines of two whole files with Myers, the way git's
+/// `xdl_do_diff` does: the equal head and tail set aside, then the lines no
+/// match can come from.
 ///
 /// `a` and `b` are the identity numbers of the two files and the flags are
-/// theirs, one per line. The patience algorithm calls this on a gap as if
-/// the gap were a pair of files, which is what git's fallback does.
+/// theirs, one per line. Patience and the histogram call this on a region
+/// as if the region were a pair of files, which is what git's fallback
+/// does.
 fn whole(
     gpa: Allocator,
     a: []const u32,
@@ -163,23 +185,13 @@ fn whole(
     // line dropped for being uninformative is a match that can never be
     // found again, but still loses the ones with no counterpart at all,
     // which no script could match; that is git's own rule, and which lines
-    // the search sees decides its ties. The histogram never prunes, as in
-    // git.
-    var index_old: []const u32 = undefined;
-    var index_new: []const u32 = undefined;
-    if (options.algorithm != .histogram) {
-        const counts = try classCounts(gpa, a, b, classes);
-        defer gpa.free(counts.in_old);
-        defer gpa.free(counts.in_new);
-        index_old = try selectRecords(gpa, a, counts.in_new, start, end_old, changed_old, options.minimal);
-        errdefer gpa.free(index_old);
-        index_new = try selectRecords(gpa, b, counts.in_old, start, end_new, changed_new, options.minimal);
-    } else {
-        index_old = try identityIndex(gpa, start, end_old);
-        errdefer gpa.free(index_old);
-        index_new = try identityIndex(gpa, start, end_new);
-    }
+    // the search sees decides its ties.
+    const counts = try classCounts(gpa, a, b, classes);
+    defer gpa.free(counts.in_old);
+    defer gpa.free(counts.in_new);
+    const index_old = try selectRecords(gpa, a, counts.in_new, start, end_old, changed_old, options.minimal);
     defer gpa.free(index_old);
+    const index_new = try selectRecords(gpa, b, counts.in_old, start, end_new, changed_new, options.minimal);
     defer gpa.free(index_new);
 
     const packed_old = try gpa.alloc(u32, index_old.len);
@@ -208,12 +220,7 @@ fn whole(
         .work = 0,
         .max_work = options.max_work,
     };
-
-    if (options.algorithm == .histogram) {
-        try search.histogram(gpa, 0, packed_old.len, 0, packed_new.len, options.minimal);
-    } else {
-        search.myers(0, packed_old.len, 0, packed_new.len, options.minimal);
-    }
+    search.myers(0, packed_old.len, 0, packed_new.len, options.minimal);
 }
 
 /// One hunk of a unified diff.
@@ -542,14 +549,6 @@ fn inDiscardableRun(dis: []const u8, i: isize, start: isize, end: isize) bool {
     const no_match = no_match_before + no_match_after;
     const common = common_before + common_after;
     return common * kpdis_run < common + no_match;
-}
-
-/// Every line of `[start, end)`, for the algorithm that wants them all. The
-/// result is the caller's.
-fn identityIndex(gpa: Allocator, start: usize, end: usize) Allocator.Error![]u32 {
-    const out = try gpa.alloc(u32, end - start);
-    for (out, 0..) |*at, i| at.* = @intCast(start + i);
-    return out;
 }
 
 //=========================================================================
@@ -955,122 +954,195 @@ const Search = struct {
         }
         return if (best > 0) best_split else null;
     }
+};
 
-    //=====================================================================
-    // Histogram
-    //=====================================================================
+//=========================================================================
+// Histogram
+//
+// xdiff's xhistogram, line for line in what it decides. A region is split
+// at its longest common run anchored on the rarest line available; what is
+// left either side is split the same way. The ties are the point: which
+// run is longest, which occurrence of a repeated line is tried first, and
+// when a line is too common to anchor anything all decide where a merge's
+// conflict lands, and git's merge machinery diffs with this algorithm. It
+// does not trim the equal ends first, and a region it cannot anchor goes to
+// a Myers diff of just that region -- pruned against the region's own
+// counts, as git's fallback prepares it afresh.
+//=========================================================================
 
-    /// The longest common run in a box, anchored on the rarest line
-    /// available, recursing on what is left either side of it. A region
-    /// whose only common lines are too common to anchor anything goes to
-    /// Myers instead.
-    fn histogram(
-        s: *Search,
-        gpa: Allocator,
-        off1: usize,
-        lim1: usize,
-        off2: usize,
-        lim2: usize,
-        need_min: bool,
-    ) Allocator.Error!void {
-        if (off1 == lim1) {
-            s.markB(off2, lim2);
-            return;
-        }
-        if (off2 == lim2) {
-            s.markA(off1, lim1);
-            return;
-        }
+const Histogram = struct {
+    gpa: Allocator,
+    a: []const u32,
+    b: []const u32,
+    classes: u32,
+    changed_a: Flags,
+    changed_b: Flags,
+    options: Options,
 
-        // A line repeated more than this in one region anchors nothing: the
-        // scan that would follow every occurrence costs more than the better
-        // script is worth, which is where git hands the region to Myers.
-        const max_chain = 64;
+    /// Lines occurring more often than this in a region anchor nothing.
+    const max_chain: u32 = 64;
 
-        const n1 = lim1 - off1;
-        const next = try gpa.alloc(u32, n1);
-        defer gpa.free(next);
-        var first: std.AutoHashMapUnmanaged(u32, u32) = .empty;
-        defer first.deinit(gpa);
-        var last: std.AutoHashMapUnmanaged(u32, u32) = .empty;
-        defer last.deinit(gpa);
-        var count: std.AutoHashMapUnmanaged(u32, u32) = .empty;
-        defer count.deinit(gpa);
+    /// A common run, as one-based inclusive line numbers. All zeros is none.
+    const Region = struct { begin1: usize = 0, end1: usize = 0, begin2: usize = 0, end2: usize = 0 };
 
-        const no_next = std.math.maxInt(u32);
-        for (off1..lim1) |i| {
-            const id = s.a[i];
-            next[i - off1] = no_next;
-            const gop = try count.getOrPut(gpa, id);
-            if (gop.found_existing) {
-                gop.value_ptr.* += 1;
-                next[last.get(id).? - off1] = @intCast(i);
-            } else {
-                gop.value_ptr.* = 1;
-                try first.put(gpa, id, @intCast(i));
+    /// One value's occurrences in the old side of a region: the first line
+    /// it is on and how many lines it is on.
+    const Record = struct { ptr: usize, cnt: u32 };
+
+    fn markA(h: *Histogram, line: usize, count: usize) void {
+        for (line..line + count) |l| h.changed_a.set(@intCast(l - 1), true);
+    }
+
+    fn markB(h: *Histogram, line: usize, count: usize) void {
+        for (line..line + count) |l| h.changed_b.set(@intCast(l - 1), true);
+    }
+
+    /// Diff lines `line1 .. line1 + count1` against `line2 .. line2 +
+    /// count2`, one-based, as `histogram_diff` does.
+    fn diff(h: *Histogram, line1_in: usize, count1_in: usize, line2_in: usize, count2_in: usize) Allocator.Error!void {
+        var line1 = line1_in;
+        var count1 = count1_in;
+        var line2 = line2_in;
+        var count2 = count2_in;
+        while (true) {
+            if (count1 == 0 and count2 == 0) return;
+            if (count1 == 0) return h.markB(line2, count2);
+            if (count2 == 0) return h.markA(line1, count1);
+
+            var lcs: Region = .{};
+            if (try h.findLcs(&lcs, line1, count1, line2, count2)) {
+                return h.giveUp(line1, count1, line2, count2);
             }
-            try last.put(gpa, id, @intCast(i));
+            if (lcs.begin1 == 0 and lcs.begin2 == 0) {
+                h.markA(line1, count1);
+                h.markB(line2, count2);
+                return;
+            }
+            try h.diff(line1, lcs.begin1 - line1, line2, lcs.begin2 - line2);
+            const end1 = line1 + count1 - 1;
+            const end2 = line2 + count2 - 1;
+            count1 = end1 - lcs.end1;
+            line1 = lcs.end1 + 1;
+            count2 = end2 - lcs.end2;
+            line2 = lcs.end2 + 1;
+        }
+    }
+
+    /// Find the anchor run. True when the region has common lines but every
+    /// one of them is too common, which is git's signal to hand it to Myers.
+    fn findLcs(
+        h: *Histogram,
+        lcs: *Region,
+        line1: usize,
+        count1: usize,
+        line2: usize,
+        count2: usize,
+    ) Allocator.Error!bool {
+        const end1 = line1 + count1 - 1;
+        const end2 = line2 + count2 - 1;
+
+        // Every occurrence of a value chains to the next one down the file,
+        // and the value's record starts at its first. Scanning from the end
+        // is what leaves the chains in that order.
+        const next = try h.gpa.alloc(usize, count1);
+        defer h.gpa.free(next);
+        var records: std.AutoHashMapUnmanaged(u32, Record) = .empty;
+        defer records.deinit(h.gpa);
+        try records.ensureTotalCapacity(h.gpa, @intCast(@min(count1, h.classes)));
+        var ptr = end1;
+        while (ptr >= line1) : (ptr -= 1) {
+            const gop = records.getOrPutAssumeCapacity(h.a[ptr - 1]);
+            if (gop.found_existing) {
+                next[ptr - line1] = gop.value_ptr.ptr;
+                gop.value_ptr.ptr = ptr;
+                gop.value_ptr.cnt +|= 1;
+            } else {
+                next[ptr - line1] = 0;
+                gop.value_ptr.* = .{ .ptr = ptr, .cnt = 1 };
+            }
+            if (ptr == line1) break;
         }
 
-        var best: ?struct { as: usize, ae: usize, bs: usize, be: usize } = null;
-        var best_len: usize = 0;
-        var best_count: u32 = std.math.maxInt(u32);
+        var best_cnt: u32 = max_chain + 1;
         var has_common = false;
-        var too_common = false;
-
-        var b = off2;
-        scan: while (b < lim2) {
-            var b_next = b + 1;
-            var cursor = first.get(s.b[b]);
-            while (cursor) |a_at| {
-                const a: usize = a_at;
-                cursor = if (next[a - off1] == no_next) null else next[a - off1];
+        var b_ptr = line2;
+        while (b_ptr <= end2) {
+            var b_next = b_ptr + 1;
+            const rec = records.get(h.b[b_ptr - 1]) orelse {
+                b_ptr = b_next;
+                continue;
+            };
+            if (rec.cnt > best_cnt) {
                 has_common = true;
-                const occurrences = count.get(s.b[b]).?;
-                if (occurrences > max_chain) {
-                    too_common = true;
-                    break :scan;
-                }
-
-                var as = a;
-                var bs = b;
-                while (as > off1 and bs > off2 and s.a[as - 1] == s.b[bs - 1]) {
+                b_ptr = b_next;
+                continue;
+            }
+            has_common = true;
+            var as = rec.ptr;
+            occurrences: while (true) {
+                var np = next[as - line1];
+                var bs = b_ptr;
+                var ae = as;
+                var be = bs;
+                var rc = rec.cnt;
+                while (line1 < as and line2 < bs and h.a[as - 2] == h.b[bs - 2]) {
                     as -= 1;
                     bs -= 1;
+                    if (1 < rc) rc = @min(rc, records.get(h.a[as - 1]).?.cnt);
                 }
-                var ae = a;
-                var be = b;
-                while (ae + 1 < lim1 and be + 1 < lim2 and s.a[ae + 1] == s.b[be + 1]) {
+                while (ae < end1 and be < end2 and h.a[ae] == h.b[be]) {
                     ae += 1;
                     be += 1;
+                    if (1 < rc) rc = @min(rc, records.get(h.a[ae - 1]).?.cnt);
                 }
-                var rarest = occurrences;
-                for (as..ae + 1) |x| rarest = @min(rarest, count.get(s.a[x]).?);
-
-                if (be + 1 > b_next) b_next = be + 1;
-                const len = ae - as + 1;
-                if (len > best_len or rarest < best_count) {
-                    best = .{ .as = as, .ae = ae, .bs = bs, .be = be };
-                    best_len = len;
-                    best_count = rarest;
+                if (b_next <= be) b_next = be + 1;
+                if (lcs.end1 - lcs.begin1 < ae - as or rc < best_cnt) {
+                    lcs.* = .{ .begin1 = as, .begin2 = bs, .end1 = ae, .end2 = be };
+                    best_cnt = rc;
                 }
+                if (np == 0) break;
+                while (np <= ae) {
+                    np = next[np - line1];
+                    if (np == 0) break :occurrences;
+                }
+                as = np;
             }
-            b = b_next;
+            b_ptr = b_next;
         }
+        return has_common and max_chain < best_cnt;
+    }
 
-        if (!has_common) {
-            s.markAll(off1, lim1, off2, lim2);
-            return;
-        }
-        if (too_common or best == null) {
-            s.myers(off1, lim1, off2, lim2, need_min);
-            return;
-        }
-        const lcs = best.?;
-        try s.histogram(gpa, off1, lcs.as, off2, lcs.bs, need_min);
-        try s.histogram(gpa, lcs.ae + 1, lim1, lcs.be + 1, lim2, need_min);
+    fn giveUp(h: *Histogram, line1: usize, count1: usize, line2: usize, count2: usize) Allocator.Error!void {
+        return fallBack(h.gpa, h.a, h.changed_a, line1 - 1, count1, h.b, h.changed_b, line2 - 1, count2, h.classes, h.options);
     }
 };
+
+/// A Myers diff of one region of each side, prepared as if the two regions
+/// were whole files -- git's `xdl_fall_back_diff` -- with every flag in both
+/// regions overwritten by its answer.
+fn fallBack(
+    gpa: Allocator,
+    a: []const u32,
+    changed_a: Flags,
+    start_a: usize,
+    count_a: usize,
+    b: []const u32,
+    changed_b: Flags,
+    start_b: usize,
+    count_b: usize,
+    classes: u32,
+    options_in: Options,
+) Allocator.Error!void {
+    const flags_a = try Flags.init(gpa, count_a);
+    defer flags_a.deinit(gpa);
+    const flags_b = try Flags.init(gpa, count_b);
+    defer flags_b.deinit(gpa);
+    var options = options_in;
+    options.algorithm = .myers;
+    try whole(gpa, a[start_a..][0..count_a], b[start_b..][0..count_b], classes, flags_a, flags_b, options);
+    for (0..count_a) |i| changed_a.set(@intCast(start_a + i), flags_a.get(@intCast(i)));
+    for (0..count_b) |i| changed_b.set(@intCast(start_b + i), flags_b.get(@intCast(i)));
+}
 
 //=========================================================================
 // Patience
@@ -1367,12 +1439,29 @@ fn slideUp(f: Flags, ids: []const u32, g: *Group) bool {
 /// the opposite side's flags, walked in step so that a run can be told when
 /// it lines up with a change over there. `lines` is this side's real bytes,
 /// which only the indentation heuristic reads.
-fn compact(f: Flags, ids: []const u32, lines: []const Line, other: Flags, indent_heuristic: bool) void {
+/// What the slide needs to diff a merged run again, which only a histogram
+/// diff asks for.
+const Rediff = struct {
+    gpa: Allocator,
+    other_ids: []const u32,
+    classes: u32,
+    options: Options,
+};
+
+fn compact(
+    f: Flags,
+    ids: []const u32,
+    lines: []const Line,
+    other: Flags,
+    indent_heuristic: bool,
+    rediff: ?Rediff,
+) Allocator.Error!void {
     var g = groupInit(f);
     var go = groupInit(other);
 
     while (true) {
         if (g.end != g.start) {
+            const g_orig = g;
             var earliest_end: isize = g.end;
             var end_matching_other: isize = -1;
             var groupsize: isize = g.end - g.start;
@@ -1428,6 +1517,28 @@ fn compact(f: Flags, ids: []const u32, lines: []const Line, other: Flags, indent
                 while (g.end > best_shift) {
                     std.debug.assert(slideUp(f, ids, &g));
                     std.debug.assert(groupPrevious(other, &go));
+                }
+            }
+
+            // A run that slid into a neighbour may now hold lines the other
+            // side's run also holds, which histogram's anchoring allows and
+            // Myers' does not. git diffs the merged pair again, this side
+            // first, and so does this.
+            if (rediff) |r| {
+                if (go.end != go.start and (g.start != g_orig.start or g.end != g_orig.end)) {
+                    try fallBack(
+                        r.gpa,
+                        ids,
+                        f,
+                        @intCast(g.start),
+                        @intCast(g.end - g.start),
+                        r.other_ids,
+                        other,
+                        @intCast(go.start),
+                        @intCast(go.end - go.start),
+                        r.classes,
+                        r.options,
+                    );
                 }
             }
         }

@@ -85,6 +85,9 @@ pub const Error = error{
     /// A path the stash has as a file and the index has as a directory, or
     /// the other way round. `Refusal` names it.
     DirectoryFileConflict,
+    /// A path the stash and the index hold as different kinds of thing: a
+    /// file and a symlink, or either and a submodule. `Refusal` names it.
+    DistinctTypesConflict,
     /// An untracked directory holding a repository of its own, which a stash
     /// would record as a submodule. `Refusal` names it.
     NestedRepository,
@@ -805,7 +808,7 @@ pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions
         };
     }
 
-    const labels: merge.BlobOptions.Labels = .{
+    const labels: merge.Labels = .{
         .ours = if (stash.base_tree.eql(current_tree)) "Version stash was based on" else "Updated upstream",
         .base = "Stash base",
         .theirs = "Stashed changes",
@@ -828,6 +831,10 @@ pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions
             .directory_file => {
                 if (options.refusal) |r| r.set(c.path);
                 return error.DirectoryFileConflict;
+            },
+            .distinct_types => {
+                if (options.refusal) |r| r.set(c.path);
+                return error.DistinctTypesConflict;
             },
             .both_modified => {
                 const marked = c.merged orelse continue;
