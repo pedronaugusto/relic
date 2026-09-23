@@ -158,19 +158,22 @@ fn whole(
         end_new -= 1;
     }
 
-    // Which lines the search actually sees. Plain Myers gets git's pruned
-    // set. Asking for a minimal script takes the pruning off, because a
+    // Which lines the search actually sees. Myers gets git's pruned set. A
+    // minimal script keeps the lines that are merely too common, because a
     // line dropped for being uninformative is a match that can never be
-    // found again; the histogram never prunes, as in git.
+    // found again, but still loses the ones with no counterpart at all,
+    // which no script could match; that is git's own rule, and which lines
+    // the search sees decides its ties. The histogram never prunes, as in
+    // git.
     var index_old: []const u32 = undefined;
     var index_new: []const u32 = undefined;
-    if (options.algorithm != .histogram and !options.minimal) {
+    if (options.algorithm != .histogram) {
         const counts = try classCounts(gpa, a, b, classes);
         defer gpa.free(counts.in_old);
         defer gpa.free(counts.in_new);
-        index_old = try selectRecords(gpa, a, counts.in_new, start, end_old, changed_old);
+        index_old = try selectRecords(gpa, a, counts.in_new, start, end_old, changed_old, options.minimal);
         errdefer gpa.free(index_old);
-        index_new = try selectRecords(gpa, b, counts.in_old, start, end_new, changed_new);
+        index_new = try selectRecords(gpa, b, counts.in_old, start, end_new, changed_new, options.minimal);
     } else {
         index_old = try identityIndex(gpa, start, end_old);
         errdefer gpa.free(index_old);
@@ -461,7 +464,8 @@ fn classCounts(gpa: Allocator, a: []const u32, b: []const u32, classes: u32) All
 
 /// The lines of `ids[start..end]` the search should see, as indices into
 /// the whole file. Everything else is marked changed here and never
-/// reconsidered. The result is the caller's.
+/// reconsidered. `need_min` keeps every line that has a counterpart, however
+/// common. The result is the caller's.
 fn selectRecords(
     gpa: Allocator,
     ids: []const u32,
@@ -469,6 +473,7 @@ fn selectRecords(
     start: usize,
     end: usize,
     changed: Flags,
+    need_min: bool,
 ) Allocator.Error![]u32 {
     if (start >= end) return gpa.alloc(u32, 0);
 
@@ -481,7 +486,7 @@ fn selectRecords(
     const limit = @min(bogosqrt(ids.len), max_eqlimit);
     for (start..end) |i| {
         const nm = counts_other[ids[i]];
-        dis[i] = if (nm == 0) 0 else if (nm >= limit) 2 else 1;
+        dis[i] = if (nm == 0) 0 else if (nm >= limit and !need_min) 2 else 1;
     }
 
     var kept: std.ArrayList(u32) = .empty;
