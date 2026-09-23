@@ -1832,6 +1832,10 @@ pub const SparseOutcome = struct {
     /// Entries left alone because the file on the disk does not match the
     /// index, so removing it would lose work.
     kept_dirty: u32 = 0,
+    /// Entries that came back where something was already on the disk at
+    /// their path. What is there is not overwritten; the entry comes back
+    /// with it, and a status says whether the two differ, as in git.
+    already_present: u32 = 0,
 };
 
 /// Make the working tree hold exactly the paths the sparse patterns
@@ -1840,7 +1844,9 @@ pub const SparseOutcome = struct {
 /// A path that leaves gets `skip-worktree` and its file is removed; a path
 /// that returns loses the flag and its file is written. A file whose
 /// content differs from the index is left where it is and counted, because
-/// removing it would throw away work nobody asked to throw away.
+/// removing it would throw away work nobody asked to throw away; and a
+/// returning path where something is already on the disk is not written
+/// over, for the same reason, which is git's rule for both.
 pub fn applySparse(
     gpa: Allocator,
     io: Io,
@@ -1913,6 +1919,11 @@ pub fn applySparse(
             if (safepath.check(entry.path, .worktree) != null) {
                 if (options.refusal) |out| out.set(.git_directory, entry.path);
                 return error.UnsafePath;
+            }
+            if (try fs.statAt(io, wt, entry.path)) |_| {
+                entry.skip_worktree = false;
+                outcome.already_present += 1;
+                continue;
             }
             _ = scratch.reset(.retain_capacity);
             const a = scratch.allocator();
