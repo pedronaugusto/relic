@@ -76,5 +76,6 @@ test {
         _ = @import("lfs_test.zig");
         _ = @import("eol_test.zig");
         _ = @import("testremote.zig");
+        _ = @import("transport_test.zig");
     }
 }

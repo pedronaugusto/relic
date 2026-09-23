@@ -681,6 +681,17 @@ const PushTwins = struct {
         var work_git = try root.dir.openDir(io, "work-git", .{});
         defer work_git.close(io);
         try work_git.writeFile(io, .{ .sub_path = "new.txt", .data = "new work\n" });
+        // Bytes that do not compress, so the pack is larger than a small
+        // `http.postBuffer` and is sent in chunks.
+        var noise: [16 * 1024]u8 = undefined;
+        var state: u64 = 0x9e3779b97f4a7c15;
+        for (&noise) |*b| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            b.* = @truncate(state);
+        }
+        try work_git.writeFile(io, .{ .sub_path = "noise.bin", .data = &noise });
         try t.git(work_git, &.{ "add", "-A" });
         try t.git(work_git, &.{ "commit", "-q", "-m", "new work" });
         try t.git(work_git, &.{ "branch", "feature" });
@@ -957,6 +968,8 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
             defer gpa.free(url);
             try twins.git(work, &.{ "remote", "set-url", "origin", url });
             try twins.git(work, &.{ "config", "core.sshCommand", fake });
+            // Small enough that the push is sent in chunks as it is written.
+            try twins.git(work, &.{ "config", "http.postBuffer", "1024" });
         }
         var outcome = try twins.pushBoth(&.{ "origin", "main", "feature", "v2", ":refs/heads/side" }, .{
             .who = test_who,
