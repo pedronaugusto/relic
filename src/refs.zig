@@ -479,6 +479,14 @@ pub const LogMessage = struct {
 /// operations, so a commit-time error is indeterminate and may have installed
 /// a prefix; reread the affected refs before retrying.
 ///
+/// An update or a deletion goes through a symbolic ref to the ref at the end
+/// of it, as git's does unless told `--no-deref`: moving `HEAD` while it
+/// names `refs/heads/main` moves `refs/heads/main`, and both logs record it.
+/// Moving the branch `HEAD` names, by its own name, records it in `HEAD`'s
+/// log as well, because that is also what `HEAD` did. `EditOptions.no_deref`
+/// changes the named ref itself, which is how `HEAD` is detached. A symbolic
+/// new value always changes the named ref, as `git symbolic-ref` does.
+///
 /// With `hooks` set, `reference-transaction` is told about the transaction
 /// the way git tells it about every one: `preparing` before any lock is
 /// taken, `prepared` once every lock is held and checked, then `committed`
@@ -495,6 +503,9 @@ pub const Transaction = struct {
     /// Whether `preparing` has been announced, which is what makes giving
     /// up announce `aborted`.
     announced: bool = false,
+    /// Whether the deletions' `packed-refs` step has been announced as
+    /// prepared and is owed its end.
+    packed_announced: bool = false,
 
     /// One ref's change.
     pub const Edit = struct {
@@ -510,6 +521,21 @@ pub const Transaction = struct {
         /// Whether the old value came from `packed-refs` rather than a loose
         /// file, which decides whether the packed file has to be rewritten.
         was_packed: bool = false,
+        /// Whether to go through the ref to the one it names, when it is
+        /// symbolic.
+        deref: bool = true,
+        /// Set by `prepare` on a symbolic ref an update went through, and on
+        /// `HEAD` when the branch it names moves: the ref is locked and its
+        /// log gains the line, and its own value is left alone. The line's
+        /// values are those of the edit at `via`.
+        via: ?usize = null,
+    };
+
+    /// How one edit treats a symbolic ref.
+    pub const EditOptions = struct {
+        /// Change the named ref itself even when it is symbolic, rather than
+        /// the ref it names: git's `--no-deref`.
+        no_deref: bool = false,
     };
 
     /// Release the transaction, rolling back anything `prepare` took.
@@ -528,17 +554,24 @@ pub const Transaction = struct {
 
     /// Point `name` at `new`, whatever it is now.
     pub fn update(tx: *Transaction, name: []const u8, new: Ref, expected: Expected) TransactionError!void {
-        try tx.add(name, new, expected);
+        try tx.change(name, new, expected, .{});
     }
 
     /// Create `name`, which must not exist.
     pub fn create(tx: *Transaction, name: []const u8, new: Ref) TransactionError!void {
-        try tx.add(name, new, .must_not_exist);
+        try tx.change(name, new, .must_not_exist, .{});
     }
 
     /// Remove `name`.
     pub fn delete(tx: *Transaction, name: []const u8, expected: Expected) TransactionError!void {
-        try tx.add(name, null, expected);
+        try tx.change(name, null, expected, .{});
+    }
+
+    /// Point `name` at `new`, or remove it when `new` is `null`, with the
+    /// choice of whether a symbolic `name` is gone through.
+    pub fn change(tx: *Transaction, name: []const u8, new: ?Ref, expected: Expected, options: EditOptions) TransactionError!void {
+        try tx.add(name, new, expected);
+        tx.edits.items[tx.edits.items.len - 1].deref = !options.no_deref;
     }
 
     fn add(tx: *Transaction, name: []const u8, new: ?Ref, expected: Expected) TransactionError!void {
@@ -566,18 +599,22 @@ pub const Transaction = struct {
         std.debug.assert(!tx.prepared);
         errdefer tx.abort(io);
 
+        if (tx.hooks != null) {
+            tx.announced = true;
+            try tx.announce(io, .preparing);
+        }
+
+        try tx.splitSymbolic(io);
+
         // Two edits whose names nest — `refs/heads/a` and `refs/heads/a/b` —
         // cannot both exist, because one is a file and the other a directory
         // with the same path.
         for (tx.edits.items, 0..) |a, i| {
+            if (a.via != null) continue;
             for (tx.edits.items[i + 1 ..]) |b| {
+                if (b.via != null) continue;
                 if (nests(a.name, b.name)) return error.RefNameConflict;
             }
-        }
-
-        if (tx.hooks != null) {
-            tx.announced = true;
-            try tx.announce(io, .preparing);
         }
 
         for (tx.edits.items) |*edit| {
@@ -594,6 +631,8 @@ pub const Transaction = struct {
                 error.LockHeld => return error.LockHeld,
                 else => |e| return e,
             };
+            // A ref only logged through is held, not checked.
+            if (edit.via != null) continue;
 
             const current = try tx.store.read(tx.gpa, io, edit.name);
             var current_oid: ?Oid = null;
@@ -630,19 +669,140 @@ pub const Transaction = struct {
                 },
             }
         }
-        if (tx.hooks != null) try tx.announce(io, .prepared);
+        if (tx.hooks != null) {
+            // git's files backend removes deleted refs from `packed-refs` in
+            // a transaction of its own, which the hook hears about too: it
+            // is prepared, and later committed, when a deleted ref is
+            // packed, and given up at once when none is.
+            if (tx.hasDeletions()) {
+                const needed = for (tx.edits.items) |e| {
+                    if (e.via == null and e.new == null and e.was_packed) break true;
+                } else false;
+                if (needed) {
+                    try tx.announceAs(io, .preparing, true);
+                    tx.packed_announced = true;
+                    try tx.announceAs(io, .prepared, true);
+                } else {
+                    tx.announceAs(io, .aborted, true) catch {};
+                }
+            }
+            try tx.announce(io, .prepared);
+        }
         tx.prepared = true;
+    }
+
+    fn hasDeletions(tx: *const Transaction) bool {
+        for (tx.edits.items) |e| {
+            if (e.via == null and e.new == null) return true;
+        }
+        return false;
+    }
+
+    /// git's `split_symref_update` and `split_head_update`. An edit through
+    /// a symbolic ref moves to the ref at the end of the chain, and every
+    /// symbolic ref on the way keeps only its log line; a branch `HEAD`
+    /// names, moved by its own name, gives `HEAD` a log line too.
+    fn splitSymbolic(tx: *Transaction, io: Io) TransactionError!void {
+        const given = tx.edits.items.len;
+        for (0..given) |i| {
+            const e = tx.edits.items[i];
+            if (!e.deref) continue;
+            if (e.new) |n| if (n == .symbolic) continue;
+
+            var chain: std.ArrayList([]const u8) = .empty;
+            defer {
+                for (chain.items[1..]) |name| tx.gpa.free(name);
+                chain.deinit(tx.gpa);
+            }
+            try chain.append(tx.gpa, e.name);
+            while (true) {
+                if (chain.items.len > max_symbolic_depth + 1) return error.SymbolicRefLoop;
+                const at = chain.items[chain.items.len - 1];
+                const found = (try tx.store.readLoose(tx.gpa, io, at)) orelse break;
+                switch (found) {
+                    .direct => break,
+                    .symbolic => |target| {
+                        errdefer tx.gpa.free(target);
+                        if (!safepath.isValidRefName(target)) return error.InvalidRefName;
+                        for (chain.items) |seen| {
+                            if (std.mem.eql(u8, seen, target)) return error.SymbolicRefLoop;
+                        }
+                        try chain.append(tx.gpa, target);
+                    },
+                }
+            }
+            if (chain.items.len == 1) continue;
+
+            const final = chain.items[chain.items.len - 1];
+            for (tx.edits.items) |other| {
+                if (std.mem.eql(u8, other.name, final)) return error.DuplicateEdit;
+            }
+            const target_at = tx.edits.items.len;
+            try tx.edits.append(tx.gpa, .{
+                .name = try tx.gpa.dupe(u8, final),
+                .new = e.new,
+                .expected = e.expected,
+            });
+            tx.edits.items[i].via = target_at;
+            tx.edits.items[i].expected = .any;
+            for (chain.items[1 .. chain.items.len - 1]) |middle| {
+                for (tx.edits.items) |other| {
+                    if (std.mem.eql(u8, other.name, middle)) return error.DuplicateEdit;
+                }
+                try tx.edits.append(tx.gpa, .{
+                    .name = try tx.gpa.dupe(u8, middle),
+                    .new = e.new,
+                    .expected = .any,
+                    .via = target_at,
+                });
+            }
+        }
+
+        // The branch `HEAD` names, moved by its own name.
+        for (tx.edits.items) |e| {
+            if (std.mem.eql(u8, e.name, "HEAD")) return;
+        }
+        const head = (try tx.store.readLoose(tx.gpa, io, "HEAD")) orelse return;
+        const branch = switch (head) {
+            .direct => return,
+            .symbolic => |target| target,
+        };
+        defer tx.gpa.free(branch);
+        for (tx.edits.items, 0..) |e, i| {
+            if (e.via != null or !std.mem.eql(u8, e.name, branch)) continue;
+            if (e.new) |n| if (n == .symbolic) return;
+            try tx.edits.append(tx.gpa, .{
+                .name = try tx.gpa.dupe(u8, "HEAD"),
+                .new = e.new,
+                .expected = .any,
+                .via = i,
+            });
+            return;
+        }
     }
 
     /// Tell `reference-transaction` where the transaction is. The old value
     /// on each line is the one the edit expected, or zero when it expected
     /// none or any, which is what git writes.
     fn announce(tx: *Transaction, io: Io, state: hooks.Runner.TransactionState) hooks.Error!void {
+        return tx.announceAs(io, state, false);
+    }
+
+    /// With `packed`, the lines of the `packed-refs` step: one per deleted
+    /// ref, with no old value and no new one.
+    fn announceAs(tx: *Transaction, io: Io, state: hooks.Runner.TransactionState, packed_step: bool) hooks.Error!void {
         const runner = tx.hooks orelse return;
-        const lines = try tx.gpa.alloc(hooks.Runner.RefUpdate, tx.edits.items.len);
-        defer tx.gpa.free(lines);
-        for (tx.edits.items, lines) |edit, *line| {
-            line.* = .{
+        var lines: std.ArrayList(hooks.Runner.RefUpdate) = .empty;
+        defer lines.deinit(tx.gpa);
+        for (tx.edits.items) |edit| {
+            // A ref only logged through is not an update of its own, and git
+            // leaves it off the hook's lines.
+            if (edit.via != null) continue;
+            if (packed_step) {
+                if (edit.new == null) try lines.append(tx.gpa, .{ .old = null, .new = null, .name = edit.name });
+                continue;
+            }
+            try lines.append(tx.gpa, .{
                 .old = switch (edit.expected) {
                     .matches => |oid| .{ .oid = oid },
                     else => null,
@@ -652,9 +812,9 @@ pub const Transaction = struct {
                     .symbolic => |target| .{ .symbolic = target },
                 } else null,
                 .name = edit.name,
-            };
+            });
         }
-        _ = try runner.referenceTransaction(io, tx.store.kind, state, lines);
+        _ = try runner.referenceTransaction(io, tx.store.kind, state, lines.items);
     }
 
     /// Write every new value, and append a log line for each where the
@@ -672,12 +832,18 @@ pub const Transaction = struct {
 
         var rewrite_packed = false;
         for (tx.edits.items) |edit| {
-            if (edit.new == null and edit.was_packed) rewrite_packed = true;
+            if (edit.via == null and edit.new == null and edit.was_packed) rewrite_packed = true;
         }
         if (rewrite_packed) try tx.removeFromPacked(io);
+        if (tx.packed_announced) {
+            tx.packed_announced = false;
+            tx.announceAs(io, .committed, true) catch {};
+        }
 
         var hex: [hash.max_hex_len]u8 = undefined;
         for (tx.edits.items) |*edit| {
+            // Its lock is given up with the rest, the file as it was.
+            if (edit.via != null) continue;
             const lock = &edit.lock.?;
             if (edit.new) |new| {
                 switch (new) {
@@ -712,13 +878,16 @@ pub const Transaction = struct {
         if (log) |message| {
             for (tx.edits.items) |edit| {
                 // A deleted ref's log went with it.
-                if (edit.new == null) continue;
-                const old = edit.old orelse Oid.zero(tx.store.kind);
-                const new = switch (edit.new orelse Ref{ .direct = Oid.zero(tx.store.kind) }) {
+                if (edit.via == null and edit.new == null) continue;
+                // A ref logged through records what the ref at the end of it
+                // did.
+                const source = if (edit.via) |at| tx.edits.items[at] else edit;
+                const old = source.old orelse Oid.zero(tx.store.kind);
+                const new = switch (source.new orelse Ref{ .direct = Oid.zero(tx.store.kind) }) {
                     .direct => |oid| oid,
                     // A symbolic ref's log records what it now resolves to.
                     .symbolic => blk: {
-                        const resolved = try tx.store.resolve(tx.gpa, io, edit.name);
+                        const resolved = try tx.store.resolve(tx.gpa, io, source.name);
                         if (resolved) |r| {
                             defer tx.gpa.free(r.name);
                             break :blk r.oid;
@@ -756,7 +925,7 @@ pub const Transaction = struct {
         for (listing.entries) |entry| {
             var removed = false;
             for (tx.edits.items) |edit| {
-                if (edit.new == null and std.mem.eql(u8, edit.name, entry.name)) removed = true;
+                if (edit.via == null and edit.new == null and std.mem.eql(u8, edit.name, entry.name)) removed = true;
             }
             if (!removed) try kept.append(tx.gpa, entry);
         }
@@ -769,6 +938,10 @@ pub const Transaction = struct {
         if (!tx.finished) {
             tx.releaseLocks(io);
             tx.finished = true;
+            if (tx.packed_announced) {
+                tx.packed_announced = false;
+                tx.announceAs(io, .aborted, true) catch {};
+            }
             if (tx.announced) tx.announce(io, .aborted) catch {};
         }
     }
@@ -1138,6 +1311,90 @@ test "reference-transaction hears from a transaction what git's hears" {
     try twin.expectSameLog(io);
 }
 
+test "an update goes through HEAD to its branch, and both logs record it, as git's does" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var twin = try HookTwin.init(gpa, io, logging_hook);
+    defer twin.deinit();
+    const first_text = try twin.git.line(io, &.{ "rev-parse", "HEAD~1" });
+    defer gpa.free(first_text);
+    const second_text = try twin.git.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(second_text);
+    const first = try Oid.parse(.sha1, first_text);
+    const second = try Oid.parse(.sha1, second_text);
+
+    try twin.gitWithHooks(io, &.{ "update-ref", "-m", "through HEAD", "HEAD", first_text, second_text });
+    try twin.gitWithHooks(io, &.{ "update-ref", "-m", "the branch by name", "refs/heads/main", second_text });
+    try twin.gitWithHooks(io, &.{ "update-ref", "--no-deref", "-m", "detached", "HEAD", first_text });
+    try twin.gitWithHooks(io, &.{ "update-ref", "--no-deref", "-m", "attached", "HEAD", second_text });
+    try twin.gitWithHooks(io, &.{ "symbolic-ref", "HEAD", "refs/heads/main" });
+    try twin.gitWithHooks(io, &.{ "update-ref", "-d", "-m", "deleted through HEAD", "HEAD" });
+
+    var git_dir = try twin.relic.gitDir(io);
+    defer git_dir.close(io);
+    var config = try @import("config.zig").Config.parseText(gpa, "", .local);
+    defer config.deinit();
+    var runner = try hooks.Runner.init(gpa, io, .{
+        .config = &config,
+        .git_dir = git_dir,
+        .common_dir = git_dir,
+        .work_dir = twin.relic.dir,
+    }, .{ .environ = &twin.environ }, .{ .output = .ignore });
+    defer runner.deinit();
+    var store: Store = .init(gpa, .sha1, git_dir, git_dir);
+    const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
+    const Step = struct { name: []const u8, new: ?Ref, expected: Expected, no_deref: bool = false, message: ?[]const u8 };
+    const steps = [_]Step{
+        .{ .name = "HEAD", .new = .{ .direct = first }, .expected = .{ .matches = second }, .message = "through HEAD" },
+        .{ .name = "refs/heads/main", .new = .{ .direct = second }, .expected = .any, .message = "the branch by name" },
+        .{ .name = "HEAD", .new = .{ .direct = first }, .expected = .any, .no_deref = true, .message = "detached" },
+        .{ .name = "HEAD", .new = .{ .direct = second }, .expected = .any, .no_deref = true, .message = "attached" },
+        .{ .name = "HEAD", .new = .{ .symbolic = "refs/heads/main" }, .expected = .any, .message = "" },
+        .{ .name = "HEAD", .new = null, .expected = .any, .message = "deleted through HEAD" },
+    };
+    for (steps) |step| {
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        tx.hooks = &runner;
+        try tx.change(step.name, step.new, step.expected, .{ .no_deref = step.no_deref });
+        try tx.commit(io, if (step.message) |m| .{ .who = who, .message = m } else null);
+    }
+
+    try twin.expectSameLog(io);
+    for ([_][]const u8{ ".git/HEAD", ".git/logs/HEAD" }) |path| {
+        const a = try twin.git.readFile(io, path);
+        defer gpa.free(a);
+        const b = try twin.relic.readFile(io, path);
+        defer gpa.free(b);
+        try std.testing.expectEqualStrings(a, b);
+    }
+    const listing_a = try listTree(gpa, io, twin.git.dir);
+    defer gpa.free(listing_a);
+    const listing_b = try listTree(gpa, io, twin.relic.dir);
+    defer gpa.free(listing_b);
+    try std.testing.expectEqualStrings(listing_a, listing_b);
+}
+
+test "an edit named twice, once through HEAD, is refused before anything moves" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "refs/heads");
+    try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/main\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = "1" ** 40 ++ "\n" });
+    var store: Store = .init(gpa, .sha1, tmp.dir, tmp.dir);
+    var tx = store.begin(gpa);
+    defer tx.deinit(io);
+    try tx.update("HEAD", .{ .direct = try Oid.parse(.sha1, "2" ** 40) }, .any);
+    try tx.update("refs/heads/main", .{ .direct = try Oid.parse(.sha1, "3" ** 40) }, .any);
+    try std.testing.expectError(error.DuplicateEdit, tx.commit(io, null));
+    const main = (try store.read(gpa, io, "refs/heads/main")).?;
+    try std.testing.expect(main.direct.eql(try Oid.parse(.sha1, "1" ** 40)));
+    try std.testing.expect(!fs.lockHeld(io, tmp.dir, "HEAD"));
+}
+
 test "a reference-transaction hook refusing a transaction leaves every ref as it was" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -1180,7 +1437,7 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
     }
 }
 
-test "a deletion is announced with the value it expected and a zero new value" {
+test "a deletion is announced as git announces it, packed or loose" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -1188,7 +1445,16 @@ test "a deletion is announced with the value it expected and a zero new value" {
     defer twin.deinit();
     const head_text = try twin.relic.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head_text);
-    try twin.relic.exec(io, &.{ "branch", "gone" });
+    const head = try Oid.parse(.sha1, head_text);
+    inline for (.{ &twin.git, &twin.relic }) |r| {
+        try r.exec(io, &.{ "-c", "core.hooksPath=none", "branch", "packed" });
+        try r.exec(io, &.{ "-c", "core.hooksPath=none", "pack-refs", "--all" });
+        try r.exec(io, &.{ "-c", "core.hooksPath=none", "branch", "loose" });
+    }
+    // One loose ref, then a packed and a loose one together.
+    try twin.gitWithHooks(io, &.{ "update-ref", "-d", "refs/heads/loose", head_text });
+    try twin.gitWithHooks(io, &.{ "branch", "loose" });
+    try twin.gitWithHooks(io, &.{ "branch", "-D", "-q", "packed", "loose" });
 
     var git_dir = try twin.relic.gitDir(io);
     defer git_dir.close(io);
@@ -1202,19 +1468,30 @@ test "a deletion is announced with the value it expected and a zero new value" {
     }, .{ .environ = &twin.environ }, .{ .output = .ignore });
     defer runner.deinit();
     var store: Store = .init(gpa, .sha1, git_dir, git_dir);
-    var tx = store.begin(gpa);
-    defer tx.deinit(io);
-    tx.hooks = &runner;
-    try tx.delete("refs/heads/gone", .{ .matches = try Oid.parse(.sha1, head_text) });
-    try tx.commit(io, null);
-
-    const log = try twin.relic.readFile(io, ".git/rt.log");
-    defer gpa.free(log);
-    const line = try std.fmt.allocPrint(gpa, "{s} {s} refs/heads/gone\n", .{ head_text, "0" ** 40 });
-    defer gpa.free(line);
-    const expected = try std.mem.concat(gpa, u8, &.{ "preparing\n", line, "prepared\n", line, "committed\n", line });
-    defer gpa.free(expected);
-    try std.testing.expectEqualStrings(expected, log);
+    {
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        tx.hooks = &runner;
+        try tx.delete("refs/heads/loose", .{ .matches = head });
+        try tx.commit(io, null);
+    }
+    {
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        tx.hooks = &runner;
+        try tx.create("refs/heads/loose", .{ .direct = head });
+        try tx.commit(io, null);
+    }
+    {
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        tx.hooks = &runner;
+        // `git branch -D` expects no value.
+        try tx.delete("refs/heads/packed", .any);
+        try tx.delete("refs/heads/loose", .any);
+        try tx.commit(io, null);
+    }
+    try twin.expectSameLog(io);
 }
 
 test "deleting a ref takes its log and its empty directories with it, as git does" {

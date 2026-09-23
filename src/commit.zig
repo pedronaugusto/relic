@@ -8,8 +8,9 @@
 //! written, and may change the index, so the index is read again after it.
 //! The message goes into `COMMIT_EDITMSG`, where `prepare-commit-msg` and
 //! then `commit-msg` may rewrite it, and what is in the file afterwards is
-//! the message. Then the tree and the commit are written, the branch moves
-//! under its lock with a log line on the branch and on `HEAD`, and
+//! the message. Then the tree and the commit are written, `HEAD` moves —
+//! the branch it names, under its lock, with a log line there and on
+//! `HEAD` — and
 //! `post-commit` runs last, when nothing it does can undo the commit.
 //!
 //! No editor is ever started: the caller supplies the message, which is
@@ -127,13 +128,6 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    // Where the commit goes: the branch `HEAD` names, or `HEAD` itself when
-    // it is detached.
-    const head_ref = (try repo.refs.read(arena, io, "HEAD")) orelse return error.MalformedRef;
-    const target: []const u8 = switch (head_ref) {
-        .symbolic => |name| name,
-        .direct => "HEAD",
-    };
     const current: ?Oid = if (try repo.refs.resolve(arena, io, "HEAD")) |r| r.oid else null;
     if (options.amend and current == null) return error.NothingToAmend;
 
@@ -220,15 +214,10 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         tx.hooks = options.hooks;
-        try tx.update(target, .{ .direct = new }, if (current) |c| .{ .matches = c } else .must_not_exist);
+        // Through `HEAD`, as git moves it: the branch `HEAD` names moves,
+        // or `HEAD` itself when it is detached, and both logs say so.
+        try tx.update("HEAD", .{ .direct = new }, if (current) |c| .{ .matches = c } else .must_not_exist);
         try tx.commit(io, .{ .who = request.committer, .message = log_message, .policy = policy });
-    }
-    // git moves the branch through `HEAD`, and `HEAD`'s own log records it.
-    if (!std.mem.eql(u8, target, "HEAD")) {
-        const has_log = try reflog.exists(io, repo.git_dir, gpa, "HEAD");
-        if (reflog.shouldLog(policy, "HEAD", has_log)) {
-            try reflog.append(gpa, io, repo.git_dir, "HEAD", current orelse Oid.zero(repo.kind), new, request.committer, log_message);
-        }
     }
 
     // The cache tree now names every directory, and the index keeps it.

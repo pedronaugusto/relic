@@ -1660,7 +1660,9 @@ fn checkoutCommit(
         "HEAD";
     var tx = sub.beginRefs();
     defer tx.deinit(io);
-    try tx.update("HEAD", .{ .direct = commit }, .any);
+    // A submodule is left on a detached `HEAD`, as `git submodule update`
+    // leaves it, not with its branch moved.
+    try tx.change("HEAD", .{ .direct = commit }, .any, .{ .no_deref = true });
     const log: ?refs_mod.LogMessage = if (options.who) |who| .{
         .who = who,
         .message = try std.fmt.allocPrint(arena, "checkout: moving from {s} to {s}", .{ from, commit.hex(&hex) }),
