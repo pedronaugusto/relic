@@ -1368,8 +1368,11 @@ fn parseVariableLine(raw: []const u8) ParseError!VariableLine {
     const name = raw[name_start..i];
     if (name.len == 0 or !std.ascii.isAlphabetic(name[0])) return error.InvalidVariableName;
 
+    // After the name and any spaces or tabs, git takes nothing but a line
+    // break, which makes the name a bare one, or an `=`. A comment there is
+    // refused, as git refuses it.
     while (i < raw.len and (raw[i] == ' ' or raw[i] == '\t')) i += 1;
-    if (i >= raw.len or raw[i] == '\n' or raw[i] == '\r' or raw[i] == '#' or raw[i] == ';') {
+    if (i >= raw.len or raw[i] == '\n' or std.mem.startsWith(u8, raw[i..], "\r\n")) {
         return .{ .name = name, .value_start = i, .value_end = i, .has_value = false };
     }
     if (raw[i] != '=') return error.InvalidVariableName;
@@ -1613,18 +1616,55 @@ test "setting a value rewrites one line and leaves the rest alone" {
     try std.testing.expectEqualStrings("true", config.get("core.autocrlf").?);
 }
 
-test "setting a bare variable inserts an equals sign" {
+test "setting a bare variable inserts an equals sign, as git does" {
     const gpa = std.testing.allocator;
-    var config = try Config.parseText(gpa, "[core]\n\tbare  # repository kind\n", .local);
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try expectSetsAgree(&git, "[core]\n\tbare\n", &.{.{ "core.bare", "false" }});
+
+    var config = try Config.parseText(gpa, "[core]\n\tbare\n", .local);
     defer config.deinit();
     config.files.items[0].writable = true;
-
-    try config.set("core.bare", "false");
     try config.set("core.bare", "true");
     const after = try config.renderWritable();
     defer gpa.free(after);
-    try std.testing.expectEqualStrings("[core]\n\tbare = true  # repository kind\n", after);
+    try std.testing.expectEqualStrings("[core]\n\tbare = true\n", after);
     try std.testing.expectEqualStrings("true", config.get("core.bare").?);
+}
+
+test "a name is followed by a line break or an equals sign, and by nothing else git refuses" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const lines = [_][]const u8{
+        "\tbare # c\n", "\tbare ; c\n", "\tbare\r\n",     "\tbare x\n",  "\tbare \r= 1\n",
+        "\tbare\t\n",   "\tbare",       "\tbare\r",       "\tb-1 = 2\n", "\t1b = 2\n",
+        "\tb_1 = 2\n",  "\tbare=\n",    "\tbare = # c\n",
+    };
+    for (lines) |line| {
+        const text = try std.fmt.allocPrint(gpa, "[core]\n{s}", .{line});
+        defer gpa.free(text);
+        try git.writeFile(io, "probe.config", text);
+        git.report_failures = false;
+        const git_ok = if (git.run(io, &.{ "config", "-f", "probe.config", "--list" })) |out| blk: {
+            gpa.free(out);
+            break :blk true;
+        } else |err| switch (err) {
+            error.GitFailed => false,
+            else => return err,
+        };
+        const ours_ok = if (Config.parseText(gpa, text, .local)) |parsed| blk: {
+            var c = parsed;
+            c.deinit();
+            break :blk true;
+        } else |_| false;
+        if (git_ok != ours_ok) {
+            std.debug.print("line {any}: git says {}, this says {}\n", .{ line, git_ok, ours_ok });
+            return error.TestExpectedEqual;
+        }
+    }
 }
 
 test "a new value joins its section and a new section is appended" {
