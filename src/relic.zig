@@ -87,6 +87,8 @@ pub const message = @import("message.zig");
 pub const head = @import("head.zig");
 pub const reset = @import("reset.zig");
 pub const merging = @import("merging.zig");
+pub const todo = @import("todo.zig");
+pub const sequencer = @import("sequencer.zig");
 
 const builtin = @import("builtin");
 

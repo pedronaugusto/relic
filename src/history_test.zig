@@ -468,3 +468,301 @@ test "a signed-off merge with its own message, and one stopped before committing
     }
     try expectSameState(&pair, io, &merge_state, &main_logs);
 }
+
+//=========================================================================
+// Cherry-pick and revert
+//=========================================================================
+
+const sequencer = @import("sequencer.zig");
+
+const pick_state = [_][]const u8{
+    "sequencer/todo",   "sequencer/head", "sequencer/abort-safety", "sequencer/opts",
+    "CHERRY_PICK_HEAD", "REVERT_HEAD",    "MERGE_MSG",              "AUTO_MERGE",
+    "ORIG_HEAD",
+};
+
+/// The commits `git rev-list --reverse <range>` lists, in that order. The
+/// slice is the caller's.
+fn revList(gpa: Allocator, io: Io, repo: *testgit.Repo, range: []const u8) ![]Oid {
+    const text = try repo.run(io, &.{ "rev-list", "--reverse", range });
+    defer gpa.free(text);
+    var out: std.ArrayList(Oid) = .empty;
+    errdefer out.deinit(gpa);
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| try out.append(gpa, try Oid.parse(.sha1, line));
+    return out.toOwnedSlice(gpa);
+}
+
+fn oidOf(gpa: Allocator, io: Io, repo: *testgit.Repo, rev: []const u8) !Oid {
+    const text = try repo.line(io, &.{ "rev-parse", rev });
+    defer gpa.free(text);
+    return Oid.parse(.sha1, text);
+}
+
+test "a cherry-pick sequence stops where git's does, and each side continues the other's" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+
+    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "main..topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const commits = try revList(gpa, io, &pair.ours, "main..topic");
+        defer gpa.free(commits);
+        var outcome = try sequencer.pick(gpa, io, &repo, commits, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(sequencer.Stop.conflict, outcome.stopped.?);
+        try std.testing.expectEqual(@as(usize, 1), outcome.made.len);
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+
+    // Resolved the same way on both sides, and continued by the other.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "f", "a\nresolved\nc\n");
+        try r.exec(io, &.{ "add", "f" });
+    }
+    try pair.ours.exec(io, &.{ "cherry-pick", "--continue" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+        defer repo.deinit(io);
+        var outcome = try sequencer.proceed(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expect(outcome.stopped == null);
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+}
+
+test "a pick with -x, a sign-off and the other recorded options leaves git's opts and message" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+
+    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "-x", "-s", "--allow-empty", "--keep-redundant-commits", "-m", "1", "main..topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const commits = try revList(gpa, io, &pair.ours, "main..topic");
+        defer gpa.free(commits);
+        var outcome = try sequencer.pick(gpa, io, &repo, commits, .{
+            .who = who,
+            .record_origin = true,
+            .signoff = true,
+            .allow_empty = true,
+            .empty = .keep,
+            .mainline = 1,
+        });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+
+    // git skips what this stopped at, and this aborts what git stopped at
+    // once the copies swap.
+    try pair.ours.exec(io, &.{ "cherry-pick", "--skip" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+        defer repo.deinit(io);
+        var outcome = try sequencer.skip(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+}
+
+test "a single pick and a revert sequence stop, abort and skip as git's do" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+
+    // A single pick keeps no sequence.
+    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try sequencer.pick(gpa, io, &repo, &.{try oidOf(gpa, io, &pair.ours, "topic~1")}, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(sequencer.Stop.conflict, outcome.stopped.?);
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+    try pair.git.exec(io, &.{ "cherry-pick", "--abort" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try sequencer.abort(gpa, io, &repo, who, null);
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+
+    // A revert sequence; the revert of a revert is a reapply.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "checkout", "-q", "topic" });
+        try r.exec(io, &.{ "revert", "--no-edit", "HEAD~2" });
+        try r.writeFile(io, "f", "a\nX\nc\n");
+        try r.exec(io, &.{ "commit", "-q", "-am", "x change" });
+    }
+    try gitMayFail(&pair.git, io, &.{ "revert", "--no-edit", "HEAD~1", "topic~3" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const commits = [_]Oid{ try oidOf(gpa, io, &pair.ours, "HEAD~1"), try oidOf(gpa, io, &pair.ours, "topic~3") };
+        var outcome = try sequencer.revert(gpa, io, &repo, &commits, .{ .who = who });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &pick_state, &.{ "HEAD", "refs/heads/topic" });
+
+    // Aborting goes back to where the sequence began, on both sides.
+    try pair.git.exec(io, &.{ "revert", "--abort" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try sequencer.abort(gpa, io, &repo, who, null);
+    }
+    try expectSameState(&pair, io, &pick_state, &.{ "HEAD", "refs/heads/topic" });
+}
+
+/// Commits whose messages exercise the trailer rules, and one that is
+/// empty to begin with, on `side`; `main` has one change of its own.
+fn trailersScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "a", "a\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side" });
+    const messages = [_][]const u8{
+        "plain subject",
+        "subject\n\nA body paragraph.",
+        "subject\n\nAcked-by: Someone <s@example.com>",
+        "subject\n\nSigned-off-by: Fixture <fixture@example.com>",
+        "subject\n\nSigned-off-by: Fixture <fixture@example.com>\nReviewed-by: R <r@example.com>",
+        "subject\n\nsome text\n(cherry picked from commit 1111111111111111111111111111111111111111)\nmore\nand more",
+        "  \n\nleading blank lines\n\nbody  \n\n\n",
+    };
+    for (messages, 0..) |msg, i| {
+        var name_buf: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "f{d}", .{i});
+        try repo.writeFile(io, name, name);
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-q", "--cleanup=verbatim", "-m", msg });
+    }
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "empty from the start" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "m", "m\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "main change" });
+}
+
+test "picked messages take -x and sign-off lines by git's trailer rules" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, trailersScript);
+    defer pair.deinit();
+
+    try pair.git.exec(io, &.{ "cherry-pick", "-x", "-s", "--allow-empty", "main..side" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const commits = try revList(gpa, io, &pair.ours, "main..side");
+        defer gpa.free(commits);
+        var outcome = try sequencer.pick(gpa, io, &repo, commits, .{
+            .who = who,
+            .record_origin = true,
+            .signoff = true,
+            .allow_empty = true,
+        });
+        defer outcome.deinit();
+        try std.testing.expect(outcome.stopped == null);
+        try std.testing.expectEqual(commits.len, outcome.made.len);
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+    try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "log", "--format=%H%n%B", "main~8..main" });
+}
+
+test "a pick that becomes empty stops, and is dropped or kept when asked, as git's is" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, trailersScript);
+    defer pair.deinit();
+
+    // `f0` is picked once, and then again, when it changes nothing.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "cherry-pick", "side~7" });
+    const empty_modes = [_]struct { args: []const []const u8, empty: sequencer.Empty }{
+        .{ .args = &.{ "cherry-pick", "side~7" }, .empty = .stop },
+        .{ .args = &.{ "cherry-pick", "--empty=drop", "side~7" }, .empty = .drop },
+        .{ .args = &.{ "cherry-pick", "--empty=keep", "side~7" }, .empty = .keep },
+    };
+    for (empty_modes) |mode| {
+        try gitMayFail(&pair.git, io, mode.args);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try sequencer.pick(gpa, io, &repo, &.{try oidOf(gpa, io, &pair.ours, "side~7")}, .{ .who = who, .empty = mode.empty });
+            defer outcome.deinit();
+            if (mode.empty == .stop) try std.testing.expectEqual(sequencer.Stop.empty, outcome.stopped.?);
+        }
+        try expectSameState(&pair, io, &pick_state, &main_logs);
+        if (mode.empty == .stop) {
+            try pair.git.exec(io, &.{ "cherry-pick", "--skip" });
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var skipped = try sequencer.skip(gpa, io, &repo, .{ .who = who });
+            skipped.deinit();
+        }
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+}
+
+/// A merge commit on `side`, to be picked against its first parent.
+fn mergeCommitScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "a", "a\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "feature" });
+    try repo.writeFile(io, "feature", "f\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "feature work" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side", "main" });
+    try repo.writeFile(io, "side", "s\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "side work" });
+    try repo.exec(io, &.{ "merge", "-q", "--no-ff", "--no-edit", "feature" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "m", "m\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "main change" });
+}
+
+test "a merge commit is picked and reverted against the mainline parent it is given" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, mergeCommitScript);
+    defer pair.deinit();
+
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try std.testing.expectError(error.MergeWithoutMainline, sequencer.pick(gpa, io, &repo, &.{try oidOf(gpa, io, &pair.ours, "side")}, .{ .who = who }));
+    }
+    try pair.git.exec(io, &.{ "cherry-pick", "-m", "1", "side" });
+    try pair.git.exec(io, &.{ "revert", "--no-edit", "-m", "1", "HEAD" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var picked = try sequencer.pick(gpa, io, &repo, &.{try oidOf(gpa, io, &pair.ours, "side")}, .{ .who = who, .mainline = 1 });
+        defer picked.deinit();
+        var reverted = try sequencer.revert(gpa, io, &repo, &.{picked.made[0]}, .{ .who = who, .mainline = 1 });
+        defer reverted.deinit();
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+}
