@@ -667,15 +667,37 @@ fn textEolIsCrlf(core: CoreSettings) bool {
     };
 }
 
+/// What check-in knows about the version of a file the index already has.
+pub const Stored = struct {
+    /// The index's blob for the path is text with CRLF endings, which
+    /// `hasCrlfText` says. Where the content decides whether a file is text,
+    /// git leaves such a file's endings alone rather than change every line
+    /// of it on the next commit.
+    has_crlf: bool = false,
+};
+
+/// Whether a blob is text with at least one CRLF in it, by the check-in
+/// rule: git's `has_crlf_in_index`, asked of the index's version of a path.
+pub fn hasCrlfText(blob: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, blob, '\r') == null) return false;
+    return !isBinaryForCheckIn(blob) and gatherStats(blob).crlf != 0;
+}
+
 /// Normalise for storage: CRLF becomes LF where the attributes and the
 /// configuration say the file is text.
 ///
 /// This is the call that decides a blob's name. Getting it wrong produces a
 /// tree git disagrees with, which is the one thing this package is for.
 pub fn toGit(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreSettings) Allocator.Error!Conversion {
+    return toGitStored(gpa, bytes, a, core, .{});
+}
+
+/// `toGit`, knowing what the index already holds for the path.
+pub fn toGitStored(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreSettings, stored: Stored) Allocator.Error!Conversion {
     const action = crlfAction(a, core);
     if (action == .binary) return .{ .bytes = bytes, .owned = false };
     if (action.isAuto() and isBinaryForCheckIn(bytes)) return .{ .bytes = bytes, .owned = false };
+    if (action.isAuto() and stored.has_crlf) return .{ .bytes = bytes, .owned = false };
     if (std.mem.indexOfScalar(u8, bytes, '\r') == null) return .{ .bytes = bytes, .owned = false };
 
     var out = try std.ArrayList(u8).initCapacity(gpa, bytes.len);

@@ -27,6 +27,8 @@ const fs = @import("fs.zig");
 const program = @import("program.zig");
 const filter = @import("filter.zig");
 const lfs = @import("lfs.zig");
+const index_mod = @import("index.zig");
+const odb_mod = @import("odb.zig");
 
 /// Errors from converting.
 pub const Error = error{
@@ -46,7 +48,8 @@ pub const Error = error{
     /// relic does not.
     LfsExtensionUnsupported,
 } || Allocator.Error || Io.Cancelable || fs.ReadSizedError || Io.File.Reader.Error ||
-    lfs.Store.InstallError || lfs.Store.OpenError || Io.File.Writer.Error || lfs.FetchError;
+    lfs.Store.InstallError || lfs.Store.OpenError || Io.File.Writer.Error || lfs.FetchError ||
+    odb_mod.Error;
 
 /// What a conversion into the repository gave.
 pub const ToGit = struct {
@@ -137,6 +140,12 @@ pub const Session = struct {
         report: ?*filter.Report = null,
         /// Where a checkout's missing LFS objects are fetched from.
         fetch: ?lfs.Fetcher = null,
+        /// The index the working tree is compared with, and the objects it
+        /// names. Where the content decides whether a file is text, a file
+        /// whose indexed version already has CRLF endings keeps them, as it
+        /// does in git; without these, every such file is normalised.
+        index: ?*const index_mod.Index = null,
+        db: ?*odb_mod.Odb = null,
     };
 
     const Delayed = struct {
@@ -210,7 +219,7 @@ pub const Session = struct {
         const resolved = try s.resolve(path, applied);
         if (resolved == .native_lfs) {
             const pointer_bytes = try s.lfsCleanFile(a, path, storing);
-            return s.afterFilter(a, pointer_bytes, applied);
+            return s.afterFilter(a, path, pointer_bytes, applied);
         }
         const bytes = try fs.readFileSized(a, s.io, s.options.wt, path, size, 1 << 31);
         return s.convertToGit(a, path, bytes, applied, resolved, storing);
@@ -247,13 +256,31 @@ pub const Session = struct {
                 if (try s.clean(a, path, driver, bytes)) |out| cleaned = out;
             },
         }
-        return s.afterFilter(a, cleaned, applied);
+        return s.afterFilter(a, path, cleaned, applied);
     }
 
-    fn afterFilter(s: *Session, a: Allocator, bytes: []const u8, applied: attributes.Attributes) Allocator.Error!ToGit {
-        const crlf = try attributes.toGit(a, bytes, applied, s.options.core);
+    fn afterFilter(s: *Session, a: Allocator, path: []const u8, bytes: []const u8, applied: attributes.Attributes) Error!ToGit {
+        var stored: attributes.Stored = .{};
+        if (attributes.crlfAction(applied, s.options.core).isAuto() and std.mem.indexOf(u8, bytes, "\r\n") != null) {
+            stored.has_crlf = try s.storedHasCrlf(path);
+        }
+        const crlf = try attributes.toGitStored(a, bytes, applied, s.options.core, stored);
         const ident = if (identOn(applied)) try identToGit(a, crlf.bytes) else null;
         return .{ .bytes = ident orelse crlf.bytes, .irreversible = crlf.irreversible };
+    }
+
+    /// Whether the index's version of `path` is text with CRLF endings:
+    /// stage 0, or in the middle of a merge the stage that is ours, as git
+    /// reads it.
+    fn storedHasCrlf(s: *Session, path: []const u8) Error!bool {
+        const index = s.options.index orelse return false;
+        const db = s.options.db orelse return false;
+        const entry = index.find(path) orelse index.findStage(path, 2) orelse return false;
+        if (!entry.mode.isBlob()) return false;
+        const found = try db.read(s.io, entry.oid);
+        defer db.gpa.free(found.bytes);
+        if (found.type != .blob) return false;
+        return attributes.hasCrlfText(found.bytes);
     }
 
     /// Convert a blob for the working tree.

@@ -85,3 +85,52 @@ test "the crlf attribute and every text value are read as git reads them" {
         try expectSameAsGit(gpa, io, autocrlf, &files);
     }
 }
+
+test "a file whose indexed version has CRLF endings keeps them where the content decides, as in git" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const cases = [_][2][]const u8{
+        .{ "false", "* text=auto\n" },
+        .{ "false", "* text=auto eol=crlf\n" },
+        .{ "true", "" },
+        .{ "input", "" },
+        // `text` is not the content deciding, and normalises regardless.
+        .{ "false", "* text\n" },
+    };
+    for (cases) |case| {
+        var twin = try ft.Twin.init(gpa, io, &.{.{ "core.autocrlf", case[0] }}, &.{
+            .{ "kept.txt", "one\r\ntwo\r\n" },
+            .{ "touched.txt", "same\r\n" },
+        });
+        defer twin.deinit();
+        twin.ours.defaults = &settings_without_autocrlf;
+        twin.theirs.defaults = &settings_without_autocrlf;
+        for ([_]*testgit.Repo{ &twin.ours, &twin.theirs }) |r| {
+            // Committed with its carriage returns, before any rule said
+            // otherwise.
+            try r.exec(io, &.{ "-c", "core.autocrlf=false", "add", "-A" });
+            try r.exec(io, &.{ "commit", "-q", "-m", "crlf" });
+            if (case[1].len > 0) try r.writeFile(io, ".gitattributes", case[1]);
+            try r.writeFile(io, "kept.txt", "one\r\ntwo\r\nthree\r\n");
+            try r.dir.deleteFile(io, "touched.txt");
+            try r.writeFile(io, "touched.txt", "same\r\n");
+            try r.writeFile(io, "new.txt", "x\r\ny\r\n");
+        }
+
+        // Status first: a file rewritten with the same bytes is unmodified
+        // only if it is not normalised against the index.
+        var result = try ft.relicStatus(gpa, io, twin.ours.dir, .{});
+        defer result.deinit();
+        const porcelain = try twin.ours.run(io, &.{ "status", "--porcelain", "--untracked-files=no" });
+        defer gpa.free(porcelain);
+        const git_says_touched = std.mem.indexOf(u8, porcelain, "touched.txt") != null;
+        try testing.expectEqual(git_says_touched, result.find("touched.txt") != null);
+
+        try twin.theirs.exec(io, &.{ "add", "-A" });
+        const ours_tree = try ft.relicAdd(gpa, io, twin.ours.dir, .{});
+        if (!ours_tree.eql(try ft.treeOf(gpa, io, &twin.theirs))) {
+            std.debug.print("core.autocrlf={s} attributes {s}: relic's tree is not git's\n", .{ case[0], case[1] });
+            return error.TestUnexpectedResult;
+        }
+    }
+}

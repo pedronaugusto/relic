@@ -88,6 +88,31 @@ pub fn relicCheckout(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, tree: Oid, run
     return outcome;
 }
 
+/// relic's status of the working tree against the index and `HEAD`.
+pub fn relicStatus(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !worktree.Status {
+    var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+    defer repo.deinit(io);
+    var ignore_rules = try repo.loadIgnore(io);
+    defer ignore_rules.deinit();
+    var attrs = try repo.loadAttrs(io);
+    defer attrs.deinit();
+    var drivers = try repo.loadFilters(io, run.drivers);
+    defer drivers.deinit();
+    var rules = repo.worktreeRules();
+    rules.ignore = &ignore_rules;
+    rules.attrs = &attrs;
+    rules.filters = &drivers;
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+    return worktree.status(gpa, io, dir, &index, &repo.odb, .{
+        .rules = rules,
+        .head_tree = try repo.headTree(io),
+        .untracked = .no,
+        .programs = run.programs,
+        .filter_report = run.report,
+    });
+}
+
 /// Remove everything in the working tree but `.git`.
 pub fn emptyWorktree(io: Io, dir: Io.Dir) !void {
     var it = dir.iterate();

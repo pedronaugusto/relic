@@ -213,6 +213,8 @@ pub fn addAll(
         .drivers = options.rules.filters,
         .programs = options.programs,
         .report = options.filter_report,
+        .index = index,
+        .db = db,
     });
     defer conv.deinit();
 
@@ -743,6 +745,8 @@ pub fn status(
         .drivers = options.rules.filters,
         .programs = options.programs,
         .report = options.filter_report,
+        .index = index,
+        .db = db,
     });
     defer conv.deinit();
     var scan: StatusScan = .{
@@ -1538,6 +1542,8 @@ pub fn applySparse(
         .drivers = options.rules.filters,
         .programs = options.programs,
         .report = options.filter_report,
+        .index = index,
+        .db = db,
     });
     defer conv.deinit();
 
