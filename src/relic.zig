@@ -37,6 +37,7 @@ pub const gitlink = @import("gitlink.zig");
 pub const submodule = @import("submodule.zig");
 pub const filter = @import("filter.zig");
 pub const lfs = @import("lfs.zig");
+pub const convert = @import("convert.zig");
 
 const builtin = @import("builtin");
 
@@ -51,5 +52,7 @@ test {
         _ = @import("bench_test.zig");
         _ = @import("diff_test.zig");
         _ = @import("submodule_test.zig");
+        _ = @import("filter_test.zig");
+        _ = @import("lfs_test.zig");
     }
 }

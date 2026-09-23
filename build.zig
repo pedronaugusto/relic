@@ -38,8 +38,22 @@ pub fn build(b: *std.Build) void {
     });
     const install_lock_helper = b.addInstallArtifact(lock_helper, .{});
 
+    // A long-running filter process has to be a program for the same
+    // reason: relic and git are each handed it as `filter.<driver>.process`
+    // and what they store is compared.
+    const filter_helper = b.addExecutable(.{
+        .name = "relic-filter-helper",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/filter_helper.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_filter_helper = b.addInstallArtifact(filter_helper, .{});
+
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
+    build_options.addOption([]const u8, "filter_helper_path", b.getInstallPath(.bin, filter_helper.out_filename));
 
     // Error return traces are off for the test binary, and the reason is
     // `zig build test --fuzz`. Building the suite with fuzzing instrumented
@@ -77,6 +91,7 @@ pub fn build(b: *std.Build) void {
 
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&install_lock_helper.step);
+    run_tests.step.dependOn(&install_filter_helper.step);
 
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);
@@ -87,6 +102,7 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "Compile everything without running it");
     check_step.dependOn(&tests.step);
     check_step.dependOn(&lock_helper.step);
+    check_step.dependOn(&filter_helper.step);
 
     //=====================================================================
     // Examples

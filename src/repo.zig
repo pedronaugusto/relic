@@ -18,6 +18,7 @@ const ignore = @import("ignore.zig");
 const attributes = @import("attributes.zig");
 const worktree = @import("worktree.zig");
 const worktrees = @import("worktrees.zig");
+const filter = @import("filter.zig");
 const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
 
@@ -481,6 +482,13 @@ pub const Repository = struct {
             if (repo.config.getBool(key, false) catch false) try out.append(gpa, name);
         }
         return out.toOwnedSlice(gpa);
+    }
+
+    /// The filter drivers the configuration defines and relic's own LFS,
+    /// for `worktree.Rules.filters`. The result is the caller's, and borrows
+    /// the repository's directories for as long as it lives.
+    pub fn loadFilters(repo: *Repository, io: Io, options: filter.Drivers.Options) filter.Drivers.LoadError!filter.Drivers {
+        return filter.Drivers.load(repo.gpa, io, &repo.config, repo.common_dir, repo.work_dir, options);
     }
 
     /// Open the repository's own index.

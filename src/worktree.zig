@@ -21,6 +21,10 @@ const sparse = @import("sparse.zig");
 const dirscan = @import("dirscan.zig");
 const pack_mod = @import("pack.zig");
 const gitlink = @import("gitlink.zig");
+const convert = @import("convert.zig");
+const filter = @import("filter.zig");
+const lfs = @import("lfs.zig");
+const program = @import("program.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -54,7 +58,7 @@ pub const Error = error{
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.SymLinkError ||
     Io.Dir.ReadLinkError || Io.Writer.Error || Io.File.SyncError ||
     Io.File.SetPermissionsError || object.Tree.Builder.AddError ||
-    object.TreeParseError;
+    object.TreeParseError || convert.Error;
 
 /// What the caller supplies so that a blob is hashed the way git would hash
 /// it, and so that ignore rules are the ones git would apply.
@@ -66,8 +70,13 @@ pub const Rules = struct {
     attrs: ?*attributes.Attrs = null,
     /// The `core` settings that take part in line-ending conversion.
     core: attributes.CoreSettings = .{},
-    /// Filter names whose `filter.<name>.required` is true.
+    /// Filter names whose `filter.<name>.required` is true. Read only when
+    /// `filters` is null, and then a path naming one is refused.
     required_filters: []const []const u8 = &.{},
+    /// The filter drivers and relic's own LFS, from `Repository.loadFilters`.
+    /// Null is what relic did before it ran filters: a required driver is
+    /// refused through `required_filters` and every other is passed over.
+    filters: ?*const filter.Drivers = null,
     /// Whether the filesystem folds case, from `core.ignoreCase`.
     ignore_case: bool = false,
     /// How much of a cached stat to believe, from `core.checkStat`.
@@ -153,6 +162,10 @@ pub const AddOptions = struct {
     /// A path prefix to limit the walk to, `/`-separated. Empty walks the
     /// whole tree.
     prefix: []const u8 = "",
+    /// The permission to run the filter programs `rules.filters` names.
+    programs: ?program.Programs = null,
+    /// Where filters passed over are reported.
+    filter_report: ?*filter.Report = null,
 };
 
 /// `git add -A`: walk the working tree, stage what changed, stage deletions,
@@ -192,8 +205,20 @@ pub fn addAll(
     errdefer if (filling) |open| db.abortPack(io, open);
     if (options.new_blobs == .pack) filling = try db.beginPack(io, options.pack);
 
+    var conv: convert.Session = .init(gpa, io, .{
+        .wt = wt,
+        .kind = db.kind,
+        .core = options.rules.core,
+        .required_filters = options.rules.required_filters,
+        .drivers = options.rules.filters,
+        .programs = options.programs,
+        .report = options.filter_report,
+    });
+    defer conv.deinit();
+
     var walker: Walker = .{
         .gpa = gpa,
+        .conv = &conv,
         .arena = &arena_instance,
         .scratch = &scratch_instance,
         .io = io,
@@ -241,6 +266,8 @@ pub fn addAll(
 
 const Walker = struct {
     gpa: Allocator,
+    /// The conversions, and the filter processes, for the whole walk.
+    conv: *convert.Session,
     /// Lives for the whole walk: the paths `seen` holds.
     arena: *std.heap.ArenaAllocator,
     /// Reset after every file, so one file's temporary bytes do not
@@ -446,13 +473,9 @@ const Walker = struct {
             return w.store(buf[0..len]);
         }
 
-        const bytes = try fs.readFileSized(a, w.io, w.wt, path, found.stat.size, 1 << 31);
         if (w.options.rules.attrs) |attrs| {
             const applied = try attrs.lookup(a, path, false);
-            if (attributes.unsupported(applied, w.options.rules.required_filters)) |_| {
-                return error.UnsupportedAttribute;
-            }
-            const converted = try attributes.toGit(a, bytes, applied, w.options.rules.core);
+            const converted = try w.conv.toGitFile(a, path, found.stat.size, applied, .store);
             if (converted.irreversible) switch (w.options.rules.core.safecrlf) {
                 .false => {},
                 .true => return error.IrreversibleConversion,
@@ -460,6 +483,7 @@ const Walker = struct {
             };
             return w.store(converted.bytes);
         }
+        const bytes = try fs.readFileSized(a, w.io, w.wt, path, found.stat.size, 1 << 31);
         return w.store(bytes);
     }
 
@@ -622,6 +646,11 @@ pub const StatusOptions = struct {
     /// working-tree state is its `HEAD` against the recorded commit and
     /// nothing else: no content is inspected and no ignore setting is read.
     submodules: ?SubmoduleProbe = null,
+    /// The permission to run the clean filters `rules.filters` names, which
+    /// is how a filtered file whose stat changed is compared.
+    programs: ?program.Programs = null,
+    /// Where filters passed over are reported.
+    filter_report: ?*filter.Report = null,
 
     /// How much of an untracked directory `status` reports: nothing, the
     /// directory itself, or every file under it. These are what `git status`
@@ -704,9 +733,21 @@ pub fn status(
         };
     }
 
-    // The index against the working tree.
+    // The index against the working tree. A file whose stat changed is
+    // compared through what it would be stored as, clean filter and all.
+    var conv: convert.Session = .init(gpa, io, .{
+        .wt = wt,
+        .kind = db.kind,
+        .core = options.rules.core,
+        .required_filters = options.rules.required_filters,
+        .drivers = options.rules.filters,
+        .programs = options.programs,
+        .report = options.filter_report,
+    });
+    defer conv.deinit();
     var scan: StatusScan = .{
         .gpa = gpa,
+        .conv = &conv,
         .arena = arena,
         .io = io,
         .wt = wt,
@@ -757,6 +798,7 @@ fn lessThanStatus(_: void, a: StatusEntry, b: StatusEntry) bool {
 
 const StatusScan = struct {
     gpa: Allocator,
+    conv: *convert.Session,
     arena: Allocator,
     io: Io,
     wt: Io.Dir,
@@ -860,20 +902,14 @@ const StatusScan = struct {
         var scratch: std.heap.ArenaAllocator = .init(s.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
-        const bytes = if (found.kind == .sym_link) blk: {
+        const content = if (found.kind == .sym_link) blk: {
             var buf: [4096]u8 = undefined;
             const len = try s.wt.readLink(s.io, path, &buf);
             break :blk try a.dupe(u8, buf[0..len]);
+        } else if (s.options.rules.attrs) |attrs| blk: {
+            const applied = try attrs.lookup(a, path, false);
+            break :blk (try s.conv.toGitFile(a, path, found.stat.size, applied, .hash_only)).bytes;
         } else try s.wt.readFileAlloc(s.io, path, a, .limited(1 << 31));
-
-        var content: []const u8 = bytes;
-        if (s.options.rules.attrs) |attrs| {
-            if (found.kind != .sym_link) {
-                const applied = try attrs.lookup(a, path, false);
-                const converted = try attributes.toGit(a, bytes, applied, s.options.rules.core);
-                content = converted.bytes;
-            }
-        }
         const oid = hash.Hasher.object(s.db.kind, "blob", content);
         if (oid.eql(entry.oid)) return .unmodified;
         return .modified;
@@ -1043,6 +1079,9 @@ pub const CheckoutOutcome = struct {
     /// Gitlinks: a directory is made and nothing is put in it, because the
     /// submodule's own repository is the caller's business.
     gitlinks: u32 = 0,
+    /// LFS files written as their pointer, because the object was not in
+    /// the store. `CheckoutOptions.filter_report` names them.
+    lfs_pointers: u32 = 0,
 };
 
 /// Where a refusal is written, so `error.UnsafePath` can say which path and
@@ -1071,6 +1110,14 @@ pub const CheckoutOptions = struct {
     remove_empty_directories: bool = true,
     /// Where to write the path and the rule when a tree entry is refused.
     refusal: ?*Refusal = null,
+    /// The permission to run the smudge filters `rules.filters` names.
+    programs: ?program.Programs = null,
+    /// Where filters passed over, and LFS files left as pointers, are
+    /// reported.
+    filter_report: ?*filter.Report = null,
+    /// What fetches LFS objects the store does not have. It is called once,
+    /// with all of them, after every other file is written.
+    lfs_fetch: ?lfs.Fetcher = null,
 };
 
 /// `read-tree --reset -u`: make the working tree and the index match `tree`.
@@ -1080,6 +1127,12 @@ pub const CheckoutOptions = struct {
 /// left exactly as they are. Nothing about `HEAD` moves: a caller that wants
 /// a branch moved does that with a ref transaction, which is a separate
 /// decision from what is on the disk.
+///
+/// The `.gitattributes` files the tree carries are the ones the files are
+/// written by, for as long as the call lasts, as they are in git: a
+/// checkout into an empty directory has no other copy of them. A file a
+/// filter hands over late, or whose LFS object has to be fetched, is
+/// written after all the others.
 pub fn checkout(
     gpa: Allocator,
     io: Io,
@@ -1095,6 +1148,26 @@ pub fn checkout(
     const arena = arena_instance.allocator();
 
     var wanted = try flatten(arena, io, db, tree_oid);
+
+    const attrs_before = if (options.rules.attrs) |attrs| attrs.levels.items.len else 0;
+    const macros_before = if (options.rules.attrs) |attrs| attrs.macros.items.len else 0;
+    defer if (options.rules.attrs) |attrs| {
+        attrs.levels.shrinkRetainingCapacity(attrs_before);
+        attrs.macros.shrinkRetainingCapacity(macros_before);
+    };
+    if (options.rules.attrs) |attrs| try addTreeAttributes(arena, io, db, attrs, &wanted);
+
+    var conv: convert.Session = .init(gpa, io, .{
+        .wt = wt,
+        .kind = db.kind,
+        .core = options.rules.core,
+        .required_filters = options.rules.required_filters,
+        .drivers = options.rules.filters,
+        .programs = options.programs,
+        .report = options.filter_report,
+        .fetch = options.lfs_fetch,
+    });
+    defer conv.deinit();
 
     // Every path out of the tree is checked before it becomes a filesystem
     // path. A tree is a file format and anyone may write one.
@@ -1219,11 +1292,11 @@ pub fn checkout(
                 wt.deleteFile(io, path) catch {};
                 if (options.rules.symlinks) {
                     wt.symLink(io, found.bytes, path, .{}) catch {
-                        try writeFile(io, wt, path, found.bytes, false);
+                        try writeFile(io, wt, path, .{ .bytes = found.bytes }, false);
                         outcome.symlinks_as_files += 1;
                     };
                 } else {
-                    try writeFile(io, wt, path, found.bytes, false);
+                    try writeFile(io, wt, path, .{ .bytes = found.bytes }, false);
                     outcome.symlinks_as_files += 1;
                 }
                 outcome.written += 1;
@@ -1231,31 +1304,37 @@ pub fn checkout(
             .file, .exec => {
                 const found = try db.read(io, want.oid);
                 defer gpa.free(found.bytes);
-                var bytes: []const u8 = found.bytes;
+                const executable = want.mode == .exec and options.rules.file_mode;
                 if (options.rules.attrs) |attrs| {
                     const applied = try attrs.lookup(a, path, false);
-                    if (attributes.unsupported(applied, options.rules.required_filters)) |_| {
-                        return error.UnsupportedAttribute;
-                    }
-                    const converted = try attributes.toWorktree(a, found.bytes, applied, options.rules.core);
-                    bytes = converted.bytes;
+                    const smudged = try conv.toWorktree(a, path, found.bytes, applied, .{
+                        .blob = want.oid,
+                        .treeish = tree_oid,
+                        .can_delay = true,
+                    });
+                    // Its index entry is added when it arrives.
+                    if (smudged == .delayed) continue;
+                    try writeSmudged(io, wt, path, smudged, executable);
+                } else {
+                    try writeFile(io, wt, path, .{ .bytes = found.bytes }, executable);
                 }
-                try writeFile(io, wt, path, bytes, want.mode == .exec and options.rules.file_mode);
                 outcome.written += 1;
             },
             .tree => return error.UnsupportedEntry,
         }
-
-        const after = try fs.statAt(io, wt, path);
-        const tree = try index.cacheTree();
-        tree.invalidate(path);
-        try index.add(.{
-            .path = path,
-            .oid = want.oid,
-            .mode = want.mode,
-            .stat = if (after) |s| s.stat else .none,
-        });
+        try recordWritten(io, wt, index, path, want);
     }
+
+    var late: std.heap.ArenaAllocator = .init(gpa);
+    defer late.deinit();
+    while (try conv.nextReady(late.allocator())) |ready| {
+        defer _ = late.reset(.retain_capacity);
+        const want = wanted.get(ready.path).?;
+        try writeSmudged(io, wt, ready.path, ready.content, want.mode == .exec and options.rules.file_mode);
+        outcome.written += 1;
+        try recordWritten(io, wt, index, ready.path, want);
+    }
+    outcome.lfs_pointers = conv.lfs_pointers;
 
     if (options.remove_empty_directories) {
         var dir_it = removed_dirs.keyIterator();
@@ -1272,6 +1351,57 @@ pub fn checkout(
     tree.root.oid = tree_oid;
 
     return outcome;
+}
+
+/// Stat what was just written and put it in the index.
+fn recordWritten(io: Io, wt: Io.Dir, index: *Index, path: []const u8, want: TreeEntry) Error!void {
+    const after = try fs.statAt(io, wt, path);
+    const tree = try index.cacheTree();
+    tree.invalidate(path);
+    try index.add(.{
+        .path = path,
+        .oid = want.oid,
+        .mode = want.mode,
+        .stat = if (after) |s| s.stat else .none,
+    });
+}
+
+/// Put the tree's own `.gitattributes` files into `attrs`, each at the depth
+/// its directory is at. The text lives in `arena`; the caller takes the
+/// levels out again before the arena goes.
+fn addTreeAttributes(
+    arena: Allocator,
+    io: Io,
+    db: *Odb,
+    attrs: *attributes.Attrs,
+    wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+) Error!void {
+    var it = wanted.iterator();
+    while (it.next()) |item| {
+        const path = item.key_ptr.*;
+        const base = if (std.mem.eql(u8, path, ".gitattributes"))
+            ""
+        else if (std.mem.endsWith(u8, path, "/.gitattributes"))
+            path[0 .. path.len - "/.gitattributes".len]
+        else
+            continue;
+        if (!item.value_ptr.mode.isBlob() or item.value_ptr.mode == .symlink) continue;
+        const found = try db.read(io, item.value_ptr.oid);
+        defer db.gpa.free(found.bytes);
+        const depth: u32 = if (base.len == 0) 0 else @intCast(std.mem.count(u8, base, "/") + 1);
+        try attrs.addText(try arena.dupe(u8, found.bytes), base, path, depth + 1);
+    }
+}
+
+fn writeSmudged(io: Io, wt: Io.Dir, path: []const u8, smudged: convert.Smudged, executable: bool) Error!void {
+    switch (smudged) {
+        .bytes => |bytes| try writeFile(io, wt, path, .{ .bytes = bytes }, executable),
+        .file => |file| {
+            defer file.close(io);
+            try writeFile(io, wt, path, .{ .file = file }, executable);
+        },
+        .delayed => unreachable,
+    }
 }
 
 fn directoryIsReplaceable(
@@ -1311,7 +1441,14 @@ fn refuseCaseCollisions(arena: Allocator, wanted: *std.StringHashMapUnmanaged(Tr
     }
 }
 
-fn writeFile(io: Io, wt: Io.Dir, path: []const u8, bytes: []const u8, executable: bool) Error!void {
+/// What a file is written from: bytes in memory, or an open file copied in
+/// pieces.
+const Source = union(enum) {
+    bytes: []const u8,
+    file: Io.File,
+};
+
+fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: bool) Error!void {
     // A file that is there is replaced rather than opened for writing, so a
     // reader sees the old bytes or the new ones.
     var name_buf: [256]u8 = undefined;
@@ -1335,7 +1472,17 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, bytes: []const u8, executable
         defer file.close(io);
         var buf: [16 * 1024]u8 = undefined;
         var fw = file.writer(io, &buf);
-        try fw.interface.writeAll(bytes);
+        switch (source) {
+            .bytes => |bytes| try fw.interface.writeAll(bytes),
+            .file => |from| {
+                var in_buf: [64 * 1024]u8 = undefined;
+                var reader = from.reader(io, &in_buf);
+                _ = reader.interface.streamRemaining(&fw.interface) catch |err| switch (err) {
+                    error.ReadFailed => return reader.err.?,
+                    error.WriteFailed => return fw.err.?,
+                };
+            },
+        }
         try fw.interface.flush();
         if (Io.File.Permissions.has_executable_bit) {
             file.setPermissions(io, fs.permissionsFor(executable)) catch {};
@@ -1383,6 +1530,16 @@ pub fn applySparse(
     var outcome: SparseOutcome = .{};
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
+    var conv: convert.Session = .init(gpa, io, .{
+        .wt = wt,
+        .kind = db.kind,
+        .core = options.rules.core,
+        .required_filters = options.rules.required_filters,
+        .drivers = options.rules.filters,
+        .programs = options.programs,
+        .report = options.filter_report,
+    });
+    defer conv.deinit();
 
     for (index.entries.items) |*entry| {
         if (entry.stage != 0) continue;
@@ -1403,11 +1560,7 @@ pub fn applySparse(
                     if (options.rules.attrs) |attrs| {
                         if (found.kind != .sym_link) {
                             const applied = try attrs.lookup(a, entry.path, false);
-                            if (attributes.unsupported(applied, options.rules.required_filters)) |_| {
-                                return error.UnsupportedAttribute;
-                            }
-                            const converted = try attributes.toGit(a, raw, applied, options.rules.core);
-                            content = converted.bytes;
+                            content = (try conv.toGit(a, entry.path, raw, applied, .hash_only)).bytes;
                         }
                     }
                     if (!hash.Hasher.object(db.kind, "blob", content).eql(entry.oid)) {
@@ -1444,13 +1597,14 @@ pub fn applySparse(
             }
             const found = try db.read(io, entry.oid);
             defer gpa.free(found.bytes);
-            var bytes: []const u8 = found.bytes;
+            const executable = entry.mode == .exec and options.rules.file_mode;
             if (options.rules.attrs) |attrs| {
                 const applied = try attrs.lookup(a, entry.path, false);
-                const converted = try attributes.toWorktree(a, found.bytes, applied, options.rules.core);
-                bytes = converted.bytes;
+                const smudged = try conv.toWorktree(a, entry.path, found.bytes, applied, .{ .blob = entry.oid });
+                try writeSmudged(io, wt, entry.path, smudged, executable);
+            } else {
+                try writeFile(io, wt, entry.path, .{ .bytes = found.bytes }, executable);
             }
-            try writeFile(io, wt, entry.path, bytes, entry.mode == .exec and options.rules.file_mode);
             if (try fs.statAt(io, wt, entry.path)) |after| entry.stat = after.stat;
             entry.skip_worktree = false;
             outcome.restored += 1;
