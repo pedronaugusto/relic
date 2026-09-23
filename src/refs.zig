@@ -167,14 +167,12 @@ pub const Store = struct {
     }
 
     /// Which directory a ref lives in.
+    ///
+    /// A name of capitals, dashes and underscores alone -- `HEAD`,
+    /// `ORIG_HEAD`, `AUTO_MERGE`, `REBASE_HEAD` -- is a pseudo-ref, and
+    /// every pseudo-ref belongs to one working tree, which is git's rule.
     pub fn dirFor(store: *const Store, name: []const u8) Io.Dir {
-        if (std.mem.eql(u8, name, "HEAD") or
-            std.mem.eql(u8, name, "ORIG_HEAD") or
-            std.mem.eql(u8, name, "FETCH_HEAD") or
-            std.mem.eql(u8, name, "MERGE_HEAD") or
-            std.mem.eql(u8, name, "CHERRY_PICK_HEAD") or
-            std.mem.eql(u8, name, "REVERT_HEAD") or
-            std.mem.eql(u8, name, "BISECT_HEAD") or
+        if (isPseudoRef(name) or
             std.mem.startsWith(u8, name, "refs/bisect/") or
             std.mem.startsWith(u8, name, "refs/worktree/") or
             std.mem.startsWith(u8, name, "refs/rewritten/"))
@@ -550,6 +548,16 @@ pub const Store = struct {
         return reflog.read(gpa, io, store.dirFor(name), name, store.kind);
     }
 };
+
+/// Capitals, dashes and underscores and nothing else: git's syntax for a
+/// pseudo-ref.
+fn isPseudoRef(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (!std.ascii.isUpper(c) and c != '-' and c != '_') return false;
+    }
+    return true;
+}
 
 fn isReadableName(name: []const u8) bool {
     // A pseudo-ref such as `HEAD` or `ORIG_HEAD` is upper case with no

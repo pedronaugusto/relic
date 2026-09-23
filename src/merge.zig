@@ -30,7 +30,7 @@ pub const Error = error{
     /// A path's `merge` attribute names a driver `merge.<name>.driver`
     /// configures, which is a program this merge does not run.
     UnsupportedMergeDriver,
-} || Allocator.Error || odb_mod.Error || object.TreeParseError ||
+} || attributes.Error || Allocator.Error || odb_mod.Error || object.TreeParseError ||
     object.Tree.Builder.AddError || index_mod.ReadError;
 
 /// A content merge refuses data git classifies as binary.
@@ -598,7 +598,11 @@ pub const TreeOptions = struct {
     /// `merge=union` keeps both, `merge=text` and an unknown name merge as
     /// text) and `conflict-marker-size`. git reads them from the working
     /// tree, and so does a caller that wants its answer.
-    attributes: ?*const attributes.Attrs = null,
+    attributes: ?*attributes.Attrs = null,
+    /// Where the `.gitattributes` files along a merged path are read from,
+    /// into `attributes`, the first time a path under them is merged. Without
+    /// it `attributes` is used as the caller loaded it.
+    attributes_dir: ?Io.Dir = null,
     /// The names of the merge drivers `merge.<name>.driver` configures.
     /// Such a driver is a program; a path whose `merge` attribute names one
     /// is `error.UnsupportedMergeDriver`.
@@ -787,6 +791,7 @@ fn ortMerge(
     std.mem.sort([]const u8, paths.items, {}, lessThanPath);
 
     const resolutions = try arena.alloc(Resolution, paths.items.len);
+    var loaded_dirs: LoadedDirs = .empty;
     for (paths.items, resolutions) |path, *resolution| {
         resolution.* = try resolvePath(
             arena,
@@ -797,6 +802,7 @@ fn ortMerge(
             our_entries.get(path),
             their_entries.get(path),
             options,
+            &loaded_dirs,
         );
     }
 
@@ -868,6 +874,10 @@ fn sameType(a: object.Mode, b: object.Mode) bool {
     return a == b;
 }
 
+/// The directories whose `.gitattributes` a merge has read, so that each is
+/// read once.
+const LoadedDirs = std.StringHashMapUnmanaged(void);
+
 fn resolvePath(
     arena: Allocator,
     io: Io,
@@ -877,6 +887,7 @@ fn resolvePath(
     a: ?Side,
     b: ?Side,
     options: TreeOptions,
+    loaded_dirs: *LoadedDirs,
 ) Error!Resolution {
     if (sameSide(a, b)) return .{ .result = a };
     if (sameSide(o, a)) return .{ .result = b };
@@ -912,6 +923,19 @@ fn resolvePath(
     var blob_options = options.blob;
     var binary = false;
     if (options.attributes) |attrs| {
+        if (options.attributes_dir) |dir| {
+            var depth: u32 = 0;
+            var at: usize = 0;
+            while (true) : (depth += 1) {
+                const base = path[0..at];
+                if (!loaded_dirs.contains(base)) {
+                    try loaded_dirs.put(arena, try arena.dupe(u8, base), {});
+                    try attrs.addDirectory(io, dir, base, depth);
+                }
+                const slash = std.mem.indexOfScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
+                at = slash;
+            }
+        }
         const applied = try attrs.lookup(arena, path, false);
         if (applied.value("conflict-marker-size")) |text| {
             if (std.fmt.parseInt(u8, text, 10)) |size| {

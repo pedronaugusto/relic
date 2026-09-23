@@ -1809,6 +1809,94 @@ pub fn writePaths(
     return outcome;
 }
 
+/// What `writeEntry` left on the disk.
+pub const Written = struct {
+    /// The file's stat after writing, for the index.
+    stat: fs.Stat,
+    /// A symlink written as an ordinary file holding its target, because the
+    /// platform or `core.symlinks` refuses a real one.
+    symlink_as_file: bool = false,
+};
+
+/// Write one tree entry into the working tree the way `checkout` writes it:
+/// line endings converted as the attributes say, the executable bit set
+/// where the filesystem keeps one, a symlink made or written as a file
+/// holding its target, a gitlink made as an empty directory. Whatever is at
+/// `path` is replaced; the directories above it are made.
+pub fn writeEntry(
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    db: *Odb,
+    path: []const u8,
+    mode: object.Mode,
+    oid: Oid,
+    rules: Rules,
+) Error!Written {
+    if (safepath.check(path, .worktree) != null) return error.UnsafePath;
+    if (std.fs.path.dirnamePosix(path)) |parent| {
+        wt.createDirPath(io, parent) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => |e| return e,
+        };
+    }
+    var written: Written = .{ .stat = .none };
+    switch (mode) {
+        .gitlink => {
+            wt.createDirPath(io, path) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => |e| return e,
+            };
+        },
+        .symlink => {
+            const found = try db.read(io, oid);
+            defer gpa.free(found.bytes);
+            wt.deleteFile(io, path) catch {};
+            if (rules.symlinks) {
+                wt.symLink(io, found.bytes, path, .{}) catch {
+                    try writeFile(io, wt, path, .{ .bytes = found.bytes }, false);
+                    written.symlink_as_file = true;
+                };
+            } else {
+                try writeFile(io, wt, path, .{ .bytes = found.bytes }, false);
+                written.symlink_as_file = true;
+            }
+        },
+        .file, .exec => {
+            var scratch: std.heap.ArenaAllocator = .init(gpa);
+            defer scratch.deinit();
+            const a = scratch.allocator();
+            const found = try db.read(io, oid);
+            defer gpa.free(found.bytes);
+            var bytes: []const u8 = found.bytes;
+            if (rules.attrs) |attrs| {
+                const applied = try attrs.lookup(a, path, false);
+                if (attributes.unsupported(applied, rules.required_filters)) |_| {
+                    return error.UnsupportedAttribute;
+                }
+                const converted = try attributes.toWorktree(a, found.bytes, applied, rules.core);
+                bytes = converted.bytes;
+            }
+            try writeFile(io, wt, path, .{ .bytes = bytes }, mode == .exec and rules.file_mode);
+        },
+        .tree => return error.UnsupportedEntry,
+    }
+    if (try fs.statAt(io, wt, path)) |after| written.stat = after.stat;
+    return written;
+}
+
+/// Remove one file from the working tree, and every directory above it that
+/// it leaves empty. A file that is already gone is not an error.
+pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Error!void {
+    if (safepath.check(path, .worktree) != null) return error.UnsafePath;
+    wt.deleteFile(io, path) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {},
+        error.IsDir => wt.deleteDir(io, path) catch {},
+        else => |e| return e,
+    };
+    if (std.fs.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, wt, parent);
+}
+
 fn directoryIsReplaceable(
     arena: Allocator,
     io: Io,

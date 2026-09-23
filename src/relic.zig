@@ -81,6 +81,12 @@ pub const hooks = @import("hooks.zig");
 pub const commit = @import("commit.zig");
 pub const stash = @import("stash.zig");
 pub const signing = @import("signing.zig");
+pub const threeway = @import("threeway.zig");
+pub const abbrev = @import("abbrev.zig");
+pub const message = @import("message.zig");
+pub const head = @import("head.zig");
+pub const reset = @import("reset.zig");
+pub const merging = @import("merging.zig");
 
 const builtin = @import("builtin");
 
@@ -113,5 +119,6 @@ test {
         _ = @import("revwalk_test.zig");
         _ = @import("shallow_test.zig");
         _ = @import("partial_test.zig");
+        _ = @import("history_test.zig");
     }
 }
