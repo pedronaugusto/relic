@@ -52,6 +52,10 @@ pub const Repo = struct {
     /// expects the failure — the one that holds `index.lock` while git tries
     /// to take it — turns this off, so a passing run says nothing.
     report_failures: bool = true,
+    /// The environment git runs in, when a test needs one of its own — a
+    /// fixed commit date, or a `GNUPGHOME` that is not the person's. `null`
+    /// is this process's.
+    environ: ?*const std.process.Environ.Map = null,
 
     /// Make a temporary directory and run `git init` in it.
     ///
@@ -91,6 +95,7 @@ pub const Repo = struct {
         const result = try std.process.run(r.gpa, io, .{
             .argv = argv.items,
             .cwd = .{ .dir = r.dir },
+            .environ_map = r.environ,
         });
         defer r.gpa.free(result.stderr);
         switch (result.term) {

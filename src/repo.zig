@@ -21,6 +21,8 @@ const worktrees = @import("worktrees.zig");
 const filter = @import("filter.zig");
 const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
+const program = @import("program.zig");
+const hooks = @import("hooks.zig");
 
 const Oid = hash.Oid;
 
@@ -615,6 +617,23 @@ pub const Repository = struct {
     /// Begin a ref transaction over this repository.
     pub fn beginRefs(repo: *Repository) refs_mod.Transaction {
         return repo.refs.begin(repo.gpa);
+    }
+
+    /// A runner for this repository's hooks, carrying the caller's
+    /// permission to start them. It is what an operation that may run a
+    /// hook takes; the configuration is read now and not again.
+    pub fn hookRunner(
+        repo: *Repository,
+        io: Io,
+        programs: program.Programs,
+        options: hooks.Options,
+    ) hooks.InitError!hooks.Runner {
+        return hooks.Runner.init(repo.gpa, io, .{
+            .config = &repo.config,
+            .git_dir = repo.git_dir,
+            .common_dir = repo.common_dir,
+            .work_dir = repo.work_dir,
+        }, programs, options);
     }
 
     /// Every linked worktree.

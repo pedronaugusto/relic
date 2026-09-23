@@ -58,6 +58,8 @@ pub const fetch = @import("fetch.zig");
 pub const clone = @import("clone.zig");
 pub const sendpack = @import("sendpack.zig");
 pub const push = @import("push.zig");
+pub const hooks = @import("hooks.zig");
+pub const commit = @import("commit.zig");
 
 const builtin = @import("builtin");
 

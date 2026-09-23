@@ -75,6 +75,23 @@ pub fn shouldLog(policy: Policy, ref: []const u8, log_exists: bool) bool {
     };
 }
 
+/// A log message as git writes one: every run of whitespace, newlines
+/// included, becomes one space, and none is left at either end. The result
+/// is the caller's.
+pub fn normalizeMessage(gpa: Allocator, message: []const u8) Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var was_space = true;
+    for (message) |c| {
+        const space = c == ' ' or c == '\t' or c == '\n' or c == '\r';
+        if (was_space and space) continue;
+        was_space = space;
+        try out.append(gpa, if (space) ' ' else c);
+    }
+    while (out.items.len > 0 and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
+    return out.toOwnedSlice(gpa);
+}
+
 /// The path of a ref's log under the git directory: `logs/<ref>`.
 /// The result is the caller's.
 pub fn pathFor(gpa: Allocator, ref: []const u8) Allocator.Error![]u8 {
@@ -278,4 +295,11 @@ fn fuzzLog(_: void, smith: *std.testing.Smith) anyerror!void {
         _ = parseLine(line, .sha1) catch continue;
     }
     _ = gpa;
+}
+
+test "a log message is collapsed the way git collapses it" {
+    const gpa = std.testing.allocator;
+    const out = try normalizeMessage(gpa, "  commit:  first\tline\n\nmore  \n");
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("commit: first line more", out);
 }
