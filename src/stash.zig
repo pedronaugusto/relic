@@ -574,7 +574,7 @@ pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
         try tx.update(ref_name, .{ .direct = stash_commit }, .any);
         try tx.commit(io, .{
             .who = options.who,
-            .message = try reflog.normalizeMessage(arena, message),
+            .message = message,
             .policy = .always,
         });
     }

@@ -83,7 +83,8 @@ pub fn normalizeMessage(gpa: Allocator, message: []const u8) Allocator.Error![]u
     errdefer out.deinit(gpa);
     var was_space = true;
     for (message) |c| {
-        const space = c == ' ' or c == '\t' or c == '\n' or c == '\r';
+        // C's `isspace`, which is what git asks.
+        const space = c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0b or c == 0x0c;
         if (was_space and space) continue;
         was_space = space;
         try out.append(gpa, if (space) ' ' else c);

@@ -207,8 +207,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     else
         "commit";
     const subject_end = std.mem.indexOfScalar(u8, message, '\n') orelse message.len;
-    const log_text = try std.fmt.allocPrint(arena, "{s}: {s}", .{ action, message[0..subject_end] });
-    const log_message = try reflog.normalizeMessage(arena, log_text);
+    const log_message = try std.fmt.allocPrint(arena, "{s}: {s}", .{ action, message[0..subject_end] });
     const policy = repo.reflogPolicy();
     {
         var tx = repo.beginRefs();

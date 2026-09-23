@@ -466,7 +466,9 @@ fn isReadableName(name: []const u8) bool {
 /// What a log entry a transaction writes says.
 pub const LogMessage = struct {
     who: object.Signature,
-    /// The text after the tab. Empty writes no tab.
+    /// The text after the tab, which the transaction collapses as git
+    /// does: every run of whitespace one space, none at either end. Empty
+    /// writes no tab.
     message: []const u8 = "",
     policy: reflog.Policy = .standard,
 };
@@ -876,6 +878,8 @@ pub const Transaction = struct {
         }
 
         if (log) |message| {
+            const text = try reflog.normalizeMessage(tx.gpa, message.message);
+            defer tx.gpa.free(text);
             for (tx.edits.items) |edit| {
                 // A deleted ref's log went with it.
                 if (edit.via == null and edit.new == null) continue;
@@ -905,7 +909,7 @@ pub const Transaction = struct {
                     old,
                     new,
                     message.who,
-                    message.message,
+                    text,
                 );
             }
         }
@@ -1374,6 +1378,35 @@ test "an update goes through HEAD to its branch, and both logs record it, as git
     const listing_b = try listTree(gpa, io, twin.relic.dir);
     defer gpa.free(listing_b);
     try std.testing.expectEqualStrings(listing_a, listing_b);
+}
+
+test "a log message is collapsed in the transaction as git collapses it" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var twin = try HookTwin.init(gpa, io, "#!/bin/sh\n");
+    defer twin.deinit();
+    const head_text = try twin.relic.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head_text);
+    const message = "  commit:\tsubject  line\n\n  body \r\n";
+    try twin.gitWithHooks(io, &.{ "update-ref", "-m", message, "refs/heads/topic", head_text });
+
+    var git_dir = try twin.relic.gitDir(io);
+    defer git_dir.close(io);
+    var store: Store = .init(gpa, .sha1, git_dir, git_dir);
+    var tx = store.begin(gpa);
+    defer tx.deinit(io);
+    try tx.update("refs/heads/topic", .{ .direct = try Oid.parse(.sha1, head_text) }, .any);
+    try tx.commit(io, .{
+        .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 },
+        .message = message,
+    });
+    const a = try twin.git.readFile(io, ".git/logs/refs/heads/topic");
+    defer gpa.free(a);
+    const b = try twin.relic.readFile(io, ".git/logs/refs/heads/topic");
+    defer gpa.free(b);
+    try std.testing.expectEqualStrings(a, b);
+    try std.testing.expect(std.mem.endsWith(u8, b, "\tcommit: subject line body\n"));
 }
 
 test "an edit named twice, once through HEAD, is refused before anything moves" {
