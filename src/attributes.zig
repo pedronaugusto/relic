@@ -1,8 +1,9 @@
 //! `.gitattributes`, and the line-ending conversion it drives.
 //!
 //! Only the attributes that change the bytes of a blob are interpreted here:
-//! `text`, `eol`, and the two that mean this release cannot produce the blob
-//! git would — `working-tree-encoding` and a named `filter`. Every other
+//! `text`, `eol`, the `crlf` that came before `text`, and the two that are
+//! not line endings — `working-tree-encoding`, a named refusal, and
+//! `filter`, which `convert.zig` runs. Every other
 //! attribute is read, stored and handed back, so a caller may act on `diff`,
 //! `merge` or one of its own without this package having an opinion.
 //!
@@ -562,21 +563,107 @@ pub const Conversion = struct {
     }
 };
 
-/// Whether the bytes are normalised on the way into the object database.
-fn convertsOnCheckIn(a: Attributes, core: CoreSettings, bytes: []const u8) bool {
-    if (a.get("text")) |state| {
-        switch (state) {
-            .unset, .unspecified => return false,
-            .set => return true,
-            .value => |v| {
-                if (std.mem.eql(u8, v, "auto")) return !isBinaryForCheckIn(bytes);
-                return true;
-            },
+/// What the attributes and `core` settings decide about a path's line
+/// endings: git's `crlf_action`, worked out the way `convert_attrs` works
+/// it out.
+///
+/// `text` is read first and the legacy `crlf` attribute only when `text`
+/// says nothing, each as `text` is read: set, unset, `input` or `auto`,
+/// any other value meaning nothing was said. An `eol` attribute makes a
+/// path text, and says which ending it is written with. What is still
+/// undecided after that is `core.autocrlf`'s.
+pub const CrlfAction = enum {
+    /// Left exactly as it is, both ways.
+    binary,
+    /// Text, stored with LF and written with LF.
+    text_input,
+    /// Text, stored with LF and written with CRLF.
+    text_crlf,
+    /// Text if it looks like text, written as `core.eol` and
+    /// `core.autocrlf` say.
+    auto,
+    /// Text if it looks like text, written with LF.
+    auto_input,
+    /// Text if it looks like text, written with CRLF.
+    auto_crlf,
+
+    /// Whether the content decides: a file that looks binary is left alone.
+    pub fn isAuto(action: CrlfAction) bool {
+        return switch (action) {
+            .auto, .auto_input, .auto_crlf => true,
+            else => false,
+        };
+    }
+
+    /// Whether a checkout writes CRLF endings.
+    pub fn writesCrlf(action: CrlfAction, core: CoreSettings) bool {
+        return switch (action) {
+            .binary, .text_input, .auto_input => false,
+            .text_crlf, .auto_crlf => true,
+            .auto => textEolIsCrlf(core),
+        };
+    }
+};
+
+/// The action for a path with these attributes, under these settings.
+pub fn crlfAction(a: Attributes, core: CoreSettings) CrlfAction {
+    var said = textSaid(a.get("text"));
+    if (said == .nothing) said = textSaid(a.get("crlf"));
+    if (said != .binary) {
+        const eol = a.value("eol") orelse "";
+        const lf = std.mem.eql(u8, eol, "lf");
+        const crlf = std.mem.eql(u8, eol, "crlf");
+        if (said == .auto and lf) {
+            return .auto_input;
+        } else if (said == .auto and crlf) {
+            return .auto_crlf;
+        } else if (lf) {
+            return .text_input;
+        } else if (crlf) {
+            return .text_crlf;
         }
     }
+    return switch (said) {
+        .binary => .binary,
+        .text => if (textEolIsCrlf(core)) .text_crlf else .text_input,
+        .input => .text_input,
+        .auto => .auto,
+        .nothing => switch (core.autocrlf) {
+            .false => .binary,
+            .true => .auto_crlf,
+            .input => .auto_input,
+        },
+    };
+}
+
+/// What one of `text` and `crlf` says.
+const TextSaid = enum { nothing, text, binary, input, auto };
+
+fn textSaid(state: ?State) TextSaid {
+    return switch (state orelse return .nothing) {
+        .set => .text,
+        .unset => .binary,
+        .unspecified => .nothing,
+        .value => |v| if (std.mem.eql(u8, v, "input"))
+            .input
+        else if (std.mem.eql(u8, v, "auto"))
+            .auto
+        else
+            .nothing,
+    };
+}
+
+/// Whether a text file with nothing more specific to go by is written with
+/// CRLF: `core.autocrlf` first, then `core.eol`, then the platform.
+fn textEolIsCrlf(core: CoreSettings) bool {
     return switch (core.autocrlf) {
-        .false => false,
-        .true, .input => !isBinaryForCheckIn(bytes),
+        .true => true,
+        .input => false,
+        .false => switch (core.eol) {
+            .crlf => true,
+            .lf => false,
+            .native => CoreSettings.native_is_crlf,
+        },
     };
 }
 
@@ -586,7 +673,9 @@ fn convertsOnCheckIn(a: Attributes, core: CoreSettings, bytes: []const u8) bool 
 /// This is the call that decides a blob's name. Getting it wrong produces a
 /// tree git disagrees with, which is the one thing this package is for.
 pub fn toGit(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreSettings) Allocator.Error!Conversion {
-    if (!convertsOnCheckIn(a, core, bytes)) return .{ .bytes = bytes, .owned = false };
+    const action = crlfAction(a, core);
+    if (action == .binary) return .{ .bytes = bytes, .owned = false };
+    if (action.isAuto() and isBinaryForCheckIn(bytes)) return .{ .bytes = bytes, .owned = false };
     if (std.mem.indexOfScalar(u8, bytes, '\r') == null) return .{ .bytes = bytes, .owned = false };
 
     var out = try std.ArrayList(u8).initCapacity(gpa, bytes.len);
@@ -609,43 +698,12 @@ pub fn toGit(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreSetting
     };
 }
 
-/// Whether the bytes get CRLF endings on the way out to the working tree.
-fn convertsOnCheckout(a: Attributes, core: CoreSettings, bytes: []const u8) bool {
-    if (a.get("eol")) |state| {
-        switch (state) {
-            .value => |v| {
-                if (std.mem.eql(u8, v, "crlf")) return true;
-                if (std.mem.eql(u8, v, "lf")) return false;
-            },
-            else => {},
-        }
-    }
-    const text_state = a.get("text");
-    if (text_state) |state| {
-        switch (state) {
-            .unset, .unspecified => return false,
-            .set => {},
-            .value => |v| {
-                if (std.mem.eql(u8, v, "auto") and isBinaryForCheckIn(bytes)) return false;
-            },
-        }
-        // The file is text; `core.eol` decides the ending.
-        return switch (core.eol) {
-            .lf => false,
-            .crlf => true,
-            .native => CoreSettings.native_is_crlf,
-        };
-    }
-    // No `text` attribute: only `core.autocrlf = true` converts, and only
-    // for a file the check-in rule calls text.
-    if (core.autocrlf != .true) return false;
-    return !isBinaryForCheckIn(bytes);
-}
-
 /// Convert for the working tree: LF becomes CRLF where the attributes and
 /// the configuration ask for it.
 pub fn toWorktree(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreSettings) Allocator.Error!Conversion {
-    if (!convertsOnCheckout(a, core, bytes)) return .{ .bytes = bytes, .owned = false };
+    const action = crlfAction(a, core);
+    if (!action.writesCrlf(core)) return .{ .bytes = bytes, .owned = false };
+    if (action.isAuto() and isBinaryForCheckIn(bytes)) return .{ .bytes = bytes, .owned = false };
     if (std.mem.indexOfScalar(u8, bytes, '\n') == null) return .{ .bytes = bytes, .owned = false };
 
     var out = try std.ArrayList(u8).initCapacity(gpa, bytes.len + bytes.len / 16 + 8);

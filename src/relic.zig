@@ -54,5 +54,6 @@ test {
         _ = @import("submodule_test.zig");
         _ = @import("filter_test.zig");
         _ = @import("lfs_test.zig");
+        _ = @import("eol_test.zig");
     }
 }
