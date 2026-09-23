@@ -1042,6 +1042,9 @@ const HookTwin = struct {
         try t.environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
         try t.environ.put("GIT_COMMITTER_DATE", "@1700000000 +0000");
         inline for (.{ &t.git, &t.relic }) |r| {
+            // The same dates, so both twins hold the same commits.
+            r.environ = &t.environ;
+            defer r.environ = null;
             try r.writeFile(io, "a.txt", "a\n");
             try r.exec(io, &.{ "add", "a.txt" });
             try r.exec(io, &.{ "commit", "-q", "-m", "one" });
