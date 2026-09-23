@@ -40,6 +40,7 @@ const transport = @import("transport.zig");
 const objectwalk = @import("objectwalk.zig");
 const indexpack = @import("indexpack.zig");
 const progress_mod = @import("progress.zig");
+const credential = @import("credential.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -103,6 +104,9 @@ pub const Options = struct {
     /// The permission to run programs, which an ssh remote and a
     /// credential helper need.
     programs: ?program.Programs = null,
+    /// What stands in for a terminal when an HTTP server asks for a
+    /// credential no helper has.
+    prompt: ?credential.Prompt = null,
     progress: ?progress_mod.Progress = null,
     /// Checks received objects the way git's `fsck` does.
     check_objects: bool = true,
@@ -255,6 +259,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .config = &repo.config,
         .service_program = remote.upload_pack,
         .progress = options.progress,
+        .prompt = options.prompt,
     });
     defer session.close(io);
 
@@ -273,6 +278,8 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     // The local refs, by name.
     var local_refs = try repo.refs.list(gpa, io, "refs/");
     defer local_refs.deinit();
+    var local = try LocalIndex.init(gpa, &local_refs);
+    defer local.deinit(gpa);
 
     var map: std.ArrayList(MapEntry) = .empty;
     var autotags = false;
@@ -316,7 +323,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     if (tags == .all) {
         try fetchMap(arena, &map, remote_refs.refs, try Refspec.parse("refs/tags/*:refs/tags/*", .fetch), false, .not_for_merge);
     } else if (tags == .auto and autotags) {
-        try findNonLocalTags(arena, io, repo, remote_refs.refs, &local_refs, &map, null);
+        try findNonLocalTags(arena, gpa, io, repo, remote_refs.refs, &local, &map, null);
     }
 
     // Refs the command line fetched are also kept where the configured
@@ -345,7 +352,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
             const dst = entry.dst orelse continue;
             for (checked_out) |branch| {
                 if (!std.mem.eql(u8, branch, dst)) continue;
-                if (local_refs.find(dst) != null) return error.WouldUpdateCheckedOutBranch;
+                if (local.names.contains(dst)) return error.WouldUpdateCheckedOutBranch;
             }
         }
     }
@@ -354,6 +361,9 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     // under a pruned one can be created.
     var pruned: std.ArrayList([]const u8) = .empty;
     if (prune) {
+        var fetched_names: std.StringHashMapUnmanaged(void) = .empty;
+        defer fetched_names.deinit(gpa);
+        for (map.items) |m| try fetched_names.put(gpa, m.name, {});
         for (local_refs.entries) |entry| {
             if (entry.target == .symbolic) continue;
             var matched = false;
@@ -362,9 +372,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
                 if (spec.negative) continue;
                 const source = (try spec.mapDestination(arena, entry.name)) orelse continue;
                 matched = true;
-                for (map.items) |m| {
-                    if (std.mem.eql(u8, m.name, source)) stale = false;
-                }
+                if (fetched_names.contains(source)) stale = false;
             }
             if (!matched or !stale) continue;
             var tx = repo.beginRefs();
@@ -378,7 +386,8 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 
     // The objects: everything the map names that is not here yet.
     var wants: std.ArrayList(Oid) = .empty;
-    for (map.items) |entry| try addWant(arena, io, repo, &wants, entry.oid);
+    var wanted_seen: Oid.Set = .empty;
+    for (map.items) |entry| try addWant(arena, io, repo, &wants, &wanted_seen, entry.oid);
     var tips: std.ArrayList(Oid) = .empty;
     var common_tips: std.ArrayList(Oid) = .empty;
     for (local_refs.entries) |entry| switch (entry.target) {
@@ -389,12 +398,12 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => |target| gpa.free(target),
     };
-    for (remote_refs.refs) |ref| {
-        for (tips.items) |tip| {
-            if (tip.eql(ref.oid)) {
-                try common_tips.append(arena, tip);
-                break;
-            }
+    {
+        var tip_set: Oid.Set = .empty;
+        defer tip_set.deinit(gpa);
+        for (tips.items) |tip| try tip_set.put(gpa, tip, {});
+        for (remote_refs.refs) |ref| {
+            if (tip_set.contains(ref.oid)) try common_tips.append(arena, ref.oid);
         }
     }
 
@@ -415,9 +424,10 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     // Tags that point at what the fetch brought.
     var backfill: std.ArrayList(MapEntry) = .empty;
     if (tags == .auto and autotags) {
-        try findNonLocalTags(arena, io, repo, remote_refs.refs, &local_refs, &backfill, map.items);
+        try findNonLocalTags(arena, gpa, io, repo, remote_refs.refs, &local, &backfill, map.items);
         var missing_tags: std.ArrayList(Oid) = .empty;
-        for (backfill.items) |entry| try addWant(arena, io, repo, &missing_tags, entry.oid);
+        var missing_seen: Oid.Set = .empty;
+        for (backfill.items) |entry| try addWant(arena, io, repo, &missing_tags, &missing_seen, entry.oid);
         if (missing_tags.items.len != 0) {
             _ = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
                 .wants = missing_tags.items,
@@ -469,7 +479,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
                     });
                 }
                 const dst = entry.dst orelse continue;
-                const decision = try decide(gpa, io, repo, entry.*, dst, options.force, &local_refs);
+                const decision = try decide(gpa, io, repo, entry.*, dst, options.force, &local);
                 try updates.append(arena, .{
                     .remote_ref = entry.name,
                     .local_ref = dst,
@@ -664,51 +674,74 @@ fn validLocal(name: []const u8) bool {
 /// tags the map already holds are left out.
 fn findNonLocalTags(
     arena: Allocator,
+    gpa: Allocator,
     io: Io,
     repo: *Repository,
     remote_refs: []const protocol.RemoteRef,
-    local_refs: *const refs_mod.Store.Listing,
+    local: *const LocalIndex,
     out: *std.ArrayList(MapEntry),
     fetched: ?[]const MapEntry,
 ) Error!void {
     const start = out.items.len;
+    // What the map already asks for, as sets, so each remote tag costs a
+    // lookup and not a walk.
+    var queued: std.StringHashMapUnmanaged(void) = .empty;
+    defer queued.deinit(gpa);
+    var wanted: Oid.Set = .empty;
+    defer wanted.deinit(gpa);
+    if (fetched) |entries| {
+        for (entries) |entry| {
+            if (entry.dst) |dst| try queued.put(gpa, dst, {});
+        }
+    } else {
+        for (out.items[0..start]) |entry| try wanted.put(gpa, entry.oid, {});
+    }
+    var added: std.StringHashMapUnmanaged(void) = .empty;
+    defer added.deinit(gpa);
+
     for (remote_refs) |ref| {
         if (!std.mem.startsWith(u8, ref.name, "refs/tags/")) continue;
         if (ref.unborn) continue;
-        if (local_refs.find(ref.name) != null) continue;
+        if (local.names.contains(ref.name)) continue;
         // After the pack, a tag already queued to be written is not taken
         // twice; before it, git takes a tag the command line named without
         // a place to keep it as well, and so does this.
-        var queued = false;
-        if (fetched) |entries| {
-            for (entries) |entry| {
-                if (entry.dst) |dst| {
-                    if (std.mem.eql(u8, dst, ref.name)) queued = true;
-                }
-            }
-        }
-        for (out.items[start..]) |entry| {
-            if (std.mem.eql(u8, entry.name, ref.name)) queued = true;
-        }
-        if (queued) continue;
-        const wanted: []const MapEntry = fetched orelse out.items[0..start];
+        if (queued.contains(ref.name) or added.contains(ref.name)) continue;
         var reachable = try repo.odb.exists(io, ref.oid);
         if (!reachable) {
             if (ref.peeled) |peeled| reachable = try repo.odb.exists(io, peeled);
         }
         if (!reachable and fetched == null) {
-            for (wanted) |entry| {
-                if (entry.oid.eql(ref.oid)) reachable = true;
-                if (ref.peeled) |peeled| {
-                    if (entry.oid.eql(peeled)) reachable = true;
-                }
-            }
+            reachable = wanted.contains(ref.oid) or (if (ref.peeled) |peeled| wanted.contains(peeled) else false);
         }
         if (!reachable) continue;
         const name = try arena.dupe(u8, ref.name);
+        try added.put(gpa, name, {});
         try out.append(arena, .{ .name = name, .oid = ref.oid, .dst = name, .force = false, .status = .not_for_merge });
     }
 }
+
+/// The local refs by name, each with its value where it is not symbolic.
+const LocalIndex = struct {
+    names: std.StringHashMapUnmanaged(?Oid) = .empty,
+
+    fn init(gpa: Allocator, listing: *const refs_mod.Store.Listing) Allocator.Error!LocalIndex {
+        var index: LocalIndex = .{};
+        errdefer index.names.deinit(gpa);
+        try index.names.ensureTotalCapacity(gpa, @intCast(listing.entries.len));
+        for (listing.entries) |entry| {
+            index.names.putAssumeCapacity(entry.name, switch (entry.target) {
+                .direct => |oid| oid,
+                .symbolic => null,
+            });
+        }
+        return index;
+    }
+
+    fn deinit(index: *LocalIndex, gpa: Allocator) void {
+        index.names.deinit(gpa);
+    }
+};
 
 fn applyNegative(arena: Allocator, map: *std.ArrayList(MapEntry), specs: []const Refspec) Allocator.Error!void {
     _ = arena;
@@ -743,10 +776,8 @@ fn removeDuplicates(map: *std.ArrayList(MapEntry)) Error!void {
     map.shrinkRetainingCapacity(kept);
 }
 
-fn addWant(arena: Allocator, io: Io, repo: *Repository, wants: *std.ArrayList(Oid), oid: Oid) Error!void {
-    for (wants.items) |w| {
-        if (w.eql(oid)) return;
-    }
+fn addWant(arena: Allocator, io: Io, repo: *Repository, wants: *std.ArrayList(Oid), seen: *Oid.Set, oid: Oid) Error!void {
+    if ((try seen.getOrPut(arena, oid)).found_existing) return;
     if (try repo.odb.exists(io, oid)) return;
     try wants.append(arena, oid);
 }
@@ -802,21 +833,16 @@ fn decide(
     entry: MapEntry,
     dst: []const u8,
     force: bool,
-    local_refs: *const refs_mod.Store.Listing,
+    local: *const LocalIndex,
 ) Error!Decision {
     var old: ?Oid = null;
-    if (local_refs.find(dst)) |found| switch (found.target) {
-        .direct => |oid| old = oid,
-        .symbolic => {
-            if (try repo.refs.resolve(gpa, io, dst)) |resolved| {
-                gpa.free(resolved.name);
-                old = resolved.oid;
-            }
-        },
-    } else if (try repo.refs.resolve(gpa, io, dst)) |resolved| {
-        // Written earlier in this fetch.
-        gpa.free(resolved.name);
-        old = resolved.oid;
+    if (local.names.get(dst)) |value| {
+        if (value) |oid| {
+            old = oid;
+        } else if (try repo.refs.resolve(gpa, io, dst)) |resolved| {
+            gpa.free(resolved.name);
+            old = resolved.oid;
+        }
     }
     const current = old orelse {
         const message = if (std.mem.startsWith(u8, entry.name, "refs/tags/"))
@@ -1139,6 +1165,16 @@ test "named refspecs, pruning and every tag are what git makes of them" {
     defer pruned.deinit();
     try testing.expectEqual(@as(usize, 1), pruned.pruned.len);
     try testing.expectEqualStrings("refs/remotes/origin/gone", pruned.pruned[0]);
+
+    // All or none, each ref with its own log line.
+    try testremote.addCommits(gpa, io, &twins.source, 20, 1);
+    try twins.source.exec(io, &.{ "branch", "-f", "side", "HEAD" });
+    var atomic = try twins.fetchBoth(gpa, io, &.{ "--atomic", "origin" }, .{
+        .who = test_who,
+        .atomic = true,
+        .reflog_action = "fetch --atomic origin",
+    });
+    defer atomic.deinit();
 }
 
 test "a non-fast-forward and a moved tag are refused as git refuses them, and forced as git forces them" {

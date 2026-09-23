@@ -122,6 +122,8 @@ pub const Options = struct {
 
 /// What happened to one ref.
 pub const RefResult = struct {
+    /// The push URL this result is for.
+    url: []const u8,
     /// The local ref pushed, or `null` for a deletion or an object name.
     local_ref: ?[]const u8,
     remote_ref: []const u8,
@@ -200,7 +202,9 @@ const Update = struct {
     force: bool,
 };
 
-/// Push from `repo` to `remote_name`, a configured remote or a URL.
+/// Push from `repo` to `remote_name`, a configured remote or a URL. A
+/// remote with several push URLs is pushed to each in turn, as git pushes
+/// to each, and every URL's results are in the outcome.
 pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {
     var outcome: Outcome = .{ .arena = .init(gpa), .refs = &.{} };
     errdefer outcome.arena.deinit();
@@ -208,7 +212,6 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
 
     var remote = try remote_mod.Remote.get(gpa, &repo.config, remote_name);
     defer remote.deinit();
-    const url = remote.push_urls[0];
 
     var specs: std.ArrayList(Refspec) = .empty;
     for (options.refspecs) |text| {
@@ -219,6 +222,27 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     }
     if (specs.items.len == 0) try defaultRefspecs(arena, gpa, io, repo, &remote, remote_name, &specs);
 
+    var results: std.ArrayList(RefResult) = .empty;
+    for (remote.push_urls) |url| {
+        try pushTo(arena, gpa, io, repo, &remote, try arena.dupe(u8, url), specs.items, options, &results, &outcome);
+    }
+    outcome.refs = results.items;
+    return outcome;
+}
+
+/// One push URL's part of a push.
+fn pushTo(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    remote: *const remote_mod.Remote,
+    url: []const u8,
+    specs: []const Refspec,
+    options: Options,
+    all_results: *std.ArrayList(RefResult),
+    outcome: *Outcome,
+) Error!void {
     var session = try transport.Session.open(gpa, io, url, .receive_pack, repo.kind, .{
         .programs = options.programs,
         .config = &repo.config,
@@ -233,20 +257,21 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     var local_refs = try repo.refs.list(gpa, io, "refs/");
     defer local_refs.deinit();
 
-    const updates = try matchRefs(arena, gpa, io, repo, &local_refs, &remote_refs, specs.items);
+    const updates = try matchRefs(arena, gpa, io, repo, &local_refs, &remote_refs, specs);
 
     // Judge each before anything is sent.
     var results: std.ArrayList(RefResult) = .empty;
     for (updates) |u| {
         const old = if (remote_refs.find(u.remote_ref)) |r| r.oid else Oid.zero(repo.kind);
         var result: RefResult = .{
+            .url = url,
             .local_ref = u.local_ref,
             .remote_ref = u.remote_ref,
             .old = old,
             .new = u.new,
             .status = .ok,
         };
-        try judge(gpa, io, repo, &remote, &result, u.force or options.force, options.leases);
+        try judge(gpa, io, repo, remote, &result, u.force or options.force, options.leases);
         try results.append(arena, result);
     }
 
@@ -289,8 +314,8 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
         for (results.items) |*r| {
             if (r.status == .ok) r.status = .not_sent;
         }
-        outcome.refs = results.items;
-        return outcome;
+        try all_results.appendSlice(arena, results.items);
+        return;
     }
 
     if (commands.items.len != 0) {
@@ -315,8 +340,10 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
             .progress = options.progress,
         });
         defer report.deinit();
-        outcome.unpack_ok = report.unpack_ok;
-        if (report.unpack_message) |m| outcome.unpack_message = try arena.dupe(u8, m);
+        if (!report.unpack_ok) {
+            outcome.unpack_ok = false;
+            if (report.unpack_message) |m| outcome.unpack_message = try arena.dupe(u8, m);
+        }
         for (results.items) |*r| {
             if (r.status != .ok) continue;
             if (!report.unpack_ok) {
@@ -337,12 +364,10 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     if (remote.name != null) {
         for (results.items) |r| {
             if (r.status != .ok and r.status != .up_to_date) continue;
-            try updateTracking(gpa, io, repo, &remote, r, options.who);
+            try updateTracking(gpa, io, repo, remote, r, options.who);
         }
     }
-
-    outcome.refs = results.items;
-    return outcome;
+    try all_results.appendSlice(arena, results.items);
 }
 
 /// The refspecs `push.default` asks for when none are named.
@@ -1020,4 +1045,37 @@ test "a repository on this machine refuses its checked-out branch as receive-pac
         try file.setPermissions(io, .fromMode(0o755));
     }
     try testing.expectError(error.RemoteHooksNotRun, push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{"main:refs/heads/third"} }));
+}
+
+test "a remote with two push URLs is pushed to both, as git pushes to both" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twins = try PushTwins.init(gpa, io);
+    defer twins.deinit();
+    for ([_][]const u8{ "git", "relic" }) |who| {
+        const first = try std.fmt.allocPrint(gpa, "{s}/remote-{s}.git", .{ twins.root_path, who });
+        defer gpa.free(first);
+        const second = try std.fmt.allocPrint(gpa, "{s}/extra-{s}.git", .{ twins.root_path, who });
+        defer gpa.free(second);
+        try twins.git(twins.root.dir, &.{ "clone", "-q", "--bare", first, second });
+        const work_name = try std.fmt.allocPrint(gpa, "work-{s}", .{who});
+        defer gpa.free(work_name);
+        var work = try twins.root.dir.openDir(io, work_name, .{});
+        defer work.close(io);
+        try twins.git(work, &.{ "config", "--add", "remote.origin.pushurl", first });
+        try twins.git(work, &.{ "config", "--add", "remote.origin.pushurl", second });
+    }
+    var outcome = try twins.pushBoth(&.{ "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"} });
+    defer outcome.deinit();
+    try testing.expectEqual(@as(usize, 2), outcome.refs.len);
+    try testing.expect(!std.mem.eql(u8, outcome.refs[0].url, outcome.refs[1].url));
+    var extra_git = try twins.root.dir.openDir(io, "extra-git.git", .{});
+    defer extra_git.close(io);
+    var extra_relic = try twins.root.dir.openDir(io, "extra-relic.git", .{});
+    defer extra_relic.close(io);
+    const theirs = try twins.gitOut(extra_git, &.{ "rev-parse", "main" });
+    defer gpa.free(theirs);
+    const ours = try twins.gitOut(extra_relic, &.{ "rev-parse", "main" });
+    defer gpa.free(ours);
+    try testing.expectEqualStrings(theirs, ours);
 }
