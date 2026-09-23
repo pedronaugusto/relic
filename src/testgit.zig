@@ -1,9 +1,10 @@
 //! The fixture harness: a real `git` on the machine, run in a temporary
 //! directory, generating the bytes the suite compares against.
 //!
-//! Nothing in the library spawns a process. This file is test-only, and it
-//! exists so that a format change in git arrives as a red build rather than as
-//! a silent divergence. A machine with no `git` skips the tests that need one.
+//! The library starts a process only through `program.zig`, and only with the
+//! permission its caller hands it. This file is test-only, and it exists so
+//! that a format change in git arrives as a red build rather than as a silent
+//! divergence. A machine with no `git` skips the tests that need one.
 //!
 //! Every invocation carries a fixed set of `-c` settings, so a person's own
 //! `~/.gitconfig` cannot change the bytes a fixture holds. A test that wants

@@ -30,6 +30,8 @@ pub const commitgraph = @import("commitgraph.zig");
 pub const midx = @import("midx.zig");
 pub const textdiff = @import("textdiff.zig");
 pub const diff = @import("diff.zig");
+pub const pktline = @import("pktline.zig");
+pub const program = @import("program.zig");
 
 const builtin = @import("builtin");
 
