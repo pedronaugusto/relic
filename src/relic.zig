@@ -35,6 +35,7 @@ pub const program = @import("program.zig");
 pub const gitmodules = @import("gitmodules.zig");
 pub const gitlink = @import("gitlink.zig");
 pub const submodule = @import("submodule.zig");
+pub const lfs = @import("lfs.zig");
 
 const builtin = @import("builtin");
 
