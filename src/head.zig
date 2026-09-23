@@ -74,14 +74,20 @@ pub const Log = struct {
 
 /// Move `HEAD` from where `from` says it is to `new`: the branch it names,
 /// or `HEAD` itself when it is detached, with the same line in both logs.
-/// A move to where it already is writes `HEAD`'s log alone, as git does.
+/// A move to where it already is writes `HEAD`'s log alone, and only when
+/// `HEAD` names a branch, as git does.
 /// The ref must still hold `from.oid`, which is what stops a move racing a
 /// second writer from losing that writer's commit.
 pub fn advance(io: Io, repo: *Repository, from: Head, new: Oid, log: Log) Error!void {
-    // A move to where it already is changes no ref, and git then writes the
-    // line to `HEAD`'s log alone.
+    // A move to where it already is changes no ref. git still writes the
+    // line to `HEAD`'s log when `HEAD` names a branch, because its update of
+    // `HEAD` through the branch is logged on its own; a detached `HEAD` that
+    // stays put logs nothing.
     if (from.oid) |old| {
-        if (old.eql(new)) return appendHeadLog(io, repo, old, new, log);
+        if (old.eql(new)) {
+            if (from.branch != null) try appendHeadLog(io, repo, old, new, log);
+            return;
+        }
     }
     const policy = repo.reflogPolicy();
     const expected: refs_mod.Expected = if (from.oid) |oid| .{ .matches = oid } else .must_not_exist;

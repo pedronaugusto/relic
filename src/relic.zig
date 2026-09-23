@@ -89,6 +89,8 @@ pub const reset = @import("reset.zig");
 pub const merging = @import("merging.zig");
 pub const todo = @import("todo.zig");
 pub const sequencer = @import("sequencer.zig");
+pub const patchid = @import("patchid.zig");
+pub const rebase = @import("rebase.zig");
 
 const builtin = @import("builtin");
 

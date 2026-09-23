@@ -123,6 +123,8 @@ pub fn expectSameState(
     logs: []const []const u8,
 ) !void {
     const gpa = pair.gpa;
+    // Whatever this package wrote, git finds nothing wrong with it.
+    try pair.ours.exec(io, &.{ "fsck", "--strict", "--no-progress", "--no-dangling" });
     try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "rev-parse", "HEAD" });
     try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "symbolic-ref", "-q", "HEAD" });
     try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "ls-files", "--stage" });
@@ -765,4 +767,574 @@ test "a merge commit is picked and reverted against the mainline parent it is gi
         defer reverted.deinit();
     }
     try expectSameState(&pair, io, &pick_state, &main_logs);
+}
+
+//=========================================================================
+// Rebase
+//=========================================================================
+
+const rebase = @import("rebase.zig");
+
+const rebase_state = [_][]const u8{
+    "rebase-merge/author-script",             "rebase-merge/done",
+    "rebase-merge/drop_redundant_commits",    "rebase-merge/keep_redundant_commits",
+    "rebase-merge/end",                       "rebase-merge/git-rebase-todo",
+    "rebase-merge/head-name",                 "rebase-merge/interactive",
+    "rebase-merge/message",                   "rebase-merge/msgnum",
+    "rebase-merge/no-reschedule-failed-exec", "rebase-merge/onto",
+    "rebase-merge/orig-head",                 "rebase-merge/patch",
+    "rebase-merge/rewritten-list",            "rebase-merge/stopped-sha",
+    "rebase-merge/amend",                     "rebase-merge/current-fixups",
+    "rebase-merge/message-squash",            "rebase-merge/message-fixup",
+    "REBASE_HEAD",                            "ORIG_HEAD",
+    "MERGE_MSG",                              "AUTO_MERGE",
+    "CHERRY_PICK_HEAD",                       "MERGE_HEAD",
+};
+
+/// The instructions of a sheet, without git's help below them, which says
+/// what the installed git's version says.
+fn expectSameSheet(pair: *Pair, io: Io, name: []const u8) !void {
+    const gpa = pair.gpa;
+    const left = try readOrMissing(gpa, io, &pair.git, name);
+    defer gpa.free(left);
+    const right = try readOrMissing(gpa, io, &pair.ours, name);
+    defer gpa.free(right);
+    const cut_left = left[0 .. std.mem.indexOf(u8, left, "\n#") orelse left.len];
+    const cut_right = right[0 .. std.mem.indexOf(u8, right, "\n#") orelse right.len];
+    try std.testing.expectEqualStrings(cut_left, cut_right);
+}
+
+test "a rebase that stops on a conflict leaves git's state, and either side finishes the other's" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
+    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Stop.conflict, outcome.stopped.?);
+    }
+    try expectSameSheet(&pair, io, ".git/rebase-merge/git-rebase-todo.backup");
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+    try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{"status"});
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "f", "a\nresolved\nc\n");
+        try r.exec(io, &.{ "add", "f" });
+    }
+    try pair.ours.exec(io, &.{ "rebase", "--continue" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+        defer repo.deinit(io);
+        var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+        try std.testing.expectEqual(@as(usize, 3), outcome.rewritten.len);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+}
+
+test "a clean rebase, an up-to-date one, and one onto another base land where git's do" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, cleanScript);
+    defer pair.deinit();
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "clean" });
+    try pair.git.exec(io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/clean" });
+
+    // Again: already there.
+    try pair.git.exec(io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.up_to_date, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/clean" });
+
+    // `--onto`: the last commit alone, onto the base.
+    try pair.git.exec(io, &.{ "rebase", "--onto", "main~1", "clean~1" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "clean~1"), .{
+            .who = who,
+            .onto = try oidOf(gpa, io, &pair.ours, "main~1"),
+            .onto_name = "main~1",
+        });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/clean" });
+}
+
+/// Run `git rebase -i` with `sheet` as the edited todo list.
+fn gitRebaseInteractive(repo: *testgit.Repo, io: Io, sheet: []const u8, args: []const []const u8) !void {
+    try repo.writeFile(io, ".git/relic-todo", sheet);
+    const env = @constCast(repo.environ.?);
+    try env.put("GIT_SEQUENCE_EDITOR", "cp .git/relic-todo");
+    defer _ = env.swapRemove("GIT_SEQUENCE_EDITOR");
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(repo.gpa);
+    try argv.appendSlice(repo.gpa, &.{ "rebase", "-i" });
+    try argv.appendSlice(repo.gpa, args);
+    try gitMayFail(repo, io, argv.items);
+}
+
+/// Five commits on `side` over `main`, each adding its own file, the last
+/// two meant to be folded into the first.
+fn sheetScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "base", "base\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side" });
+    const subjects = [_][]const u8{ "first", "second", "third", "fixup! first", "squash! first" };
+    for (subjects, 0..) |subject, i| {
+        var name_buf: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "file{d}", .{i});
+        try repo.writeFile(io, name, subject);
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-q", "-m", subject });
+    }
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "main", "main\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "main moves on" });
+    try repo.exec(io, &.{ "checkout", "-q", "side" });
+}
+
+fn sheetFor(gpa: Allocator, io: Io, repo: *testgit.Repo, lines: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (lines) |line| {
+        // `<command> <rev>` with the rev made a full name.
+        var parts = std.mem.splitScalar(u8, line, ' ');
+        const command = parts.next().?;
+        try out.appendSlice(gpa, command);
+        if (parts.next()) |rev| {
+            try out.append(gpa, ' ');
+            if (std.mem.eql(u8, command, "exec") or std.mem.eql(u8, command, "label") or std.mem.eql(u8, command, "reset")) {
+                try out.appendSlice(gpa, rev);
+            } else {
+                const oid_text = try repo.line(io, &.{ "rev-parse", rev });
+                defer gpa.free(oid_text);
+                try out.appendSlice(gpa, oid_text);
+            }
+            while (parts.next()) |rest| {
+                try out.append(gpa, ' ');
+                try out.appendSlice(gpa, rest);
+            }
+        }
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "an interactive rebase driven by a sheet does what git's does, line for line" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, sheetScript);
+    defer pair.deinit();
+
+    const sheet = try sheetFor(gpa, io, &pair.git, &.{
+        "pick side~4 # first",
+        "fixup side~1",
+        "squash side",
+        "reword side~3",
+        "drop side~2",
+    });
+    defer gpa.free(sheet);
+    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .todo = sheet });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+}
+
+test "an edit and a break stop where git's do, and each side continues the other's" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, sheetScript);
+    defer pair.deinit();
+
+    const sheet = try sheetFor(gpa, io, &pair.git, &.{
+        "edit side~4",
+        "break",
+        "pick side~3",
+    });
+    defer gpa.free(sheet);
+    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .todo = sheet });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Stop.edit, outcome.stopped.?);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+    try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{"status"});
+
+    // Amend at the edit stop the same way on both sides, and swap.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "file0", "amended\n");
+        try r.exec(io, &.{ "add", "file0" });
+    }
+    try pair.ours.exec(io, &.{ "rebase", "--continue" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+        defer repo.deinit(io);
+        var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Stop.@"break", outcome.stopped.?);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+    try pair.git.exec(io, &.{ "rebase", "--continue" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+}
+
+/// `topic`'s commits, and on `main` the same changes made again -- one in
+/// text, one in a binary file, one a change of mode -- so a rebase finds
+/// them already upstream by patch id.
+fn upstreamScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "text", "1\n2\n3\n");
+    try repo.writeFile(io, "bin", "a\x00b");
+    try repo.writeFile(io, "script", "echo\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.writeFile(io, "text", "1\n2\n3 changed\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "text change" });
+    try repo.writeFile(io, "bin", "a\x00c");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "binary change" });
+    try repo.exec(io, &.{ "update-index", "--chmod=+x", "script" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "mode change" });
+    try repo.writeFile(io, "own", "own\n");
+    try repo.exec(io, &.{ "add", "own" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "topic's own" });
+    try repo.exec(io, &.{ "checkout", "-q", "-f", "main" });
+    try repo.writeFile(io, "other", "other\n");
+    try repo.exec(io, &.{ "add", "other" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "main first" });
+    for ([_][]const u8{ "topic~3", "topic~2", "topic~1" }) |rev| {
+        try repo.exec(io, &.{ "cherry-pick", rev });
+    }
+    try repo.exec(io, &.{ "checkout", "-q", "-f", "topic" });
+}
+
+test "commits already upstream are left out by patch id, text, binary and mode alike" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, upstreamScript);
+    defer pair.deinit();
+
+    try pair.git.exec(io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+        try std.testing.expectEqual(@as(usize, 1), outcome.rewritten.len);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+}
+
+test "a rebase stopped on one side is skipped and aborted by the other" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
+    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" });
+        defer outcome.deinit();
+    }
+    // Each skips the other's stop.
+    try pair.ours.exec(io, &.{ "rebase", "--skip" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+        defer repo.deinit(io);
+        var outcome = try rebase.skip(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+
+    // A second run, aborted crosswise.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "ORIG_HEAD" });
+    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" });
+        defer outcome.deinit();
+    }
+    try pair.ours.exec(io, &.{ "rebase", "--abort" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+        defer repo.deinit(io);
+        try rebase.abort(gpa, io, &repo, who);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+}
+
+test "autosquash moves fixup and squash commits where git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, sheetScript);
+    defer pair.deinit();
+
+    try pair.env.put("GIT_SEQUENCE_EDITOR", "true");
+    try pair.git.exec(io, &.{ "rebase", "-i", "--autosquash", "main" });
+    _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{
+            .who = who,
+            .onto_name = "main",
+            .interactive = true,
+            .autosquash = true,
+        });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+}
+
+test "an exec line runs only through the programs the caller hands in" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, sheetScript);
+    defer pair.deinit();
+
+    const sheet = try sheetFor(gpa, io, &pair.git, &.{
+        "pick side~4",
+        "exec echo ran >> exec-log",
+        "pick side~3",
+        "exec false",
+        "pick side~2",
+    });
+    defer gpa.free(sheet);
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try std.testing.expectError(error.ExecNotPermitted, rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .todo = sheet }));
+        try std.testing.expect(!rebase.inProgress(io, &repo));
+    }
+    for ([_]*testgit.Repo{&pair.git}) |r| try r.writeFile(io, ".git/info/exclude", "exec-log\n");
+    try pair.ours.writeFile(io, ".git/info/exclude", "exec-log\n");
+    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{
+            .who = who,
+            .onto_name = "main",
+            .todo = sheet,
+            .programs = .{ .environ = &pair.env },
+        });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Stop.exec_failed, outcome.stopped.?);
+        try std.testing.expectEqualStrings("false", outcome.exec.?);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+    const ran = try pair.ours.readFile(io, "exec-log");
+    defer gpa.free(ran);
+    try std.testing.expectEqualStrings("ran\n", ran);
+}
+
+test "labels, resets and merges rebuild a merge as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, mergeCommitScript);
+    defer pair.deinit();
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "side" });
+    const sheet = try sheetFor(gpa, io, &pair.git, &.{
+        "label onto",
+        "reset onto",
+        "pick feature",
+        "label feature",
+        "reset onto",
+        "pick side~1",
+        "merge -C side feature # Merge branch 'feature' into side",
+    });
+    defer gpa.free(sheet);
+    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .todo = sheet });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+    try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "for-each-ref", "refs/rewritten" });
+}
+
+/// `topic` with two more branches at its first commit and a third checked
+/// out there in a linked worktree.
+fn branchesScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try cleanScript(repo, io);
+    try repo.writeFile(io, ".git/info/exclude", "held-wt\n");
+    try repo.exec(io, &.{ "branch", "part", "clean~1" });
+    try repo.exec(io, &.{ "branch", "zpart", "clean~1" });
+    try repo.exec(io, &.{ "worktree", "add", "-q", "-b", "held", "held-wt", "clean~1" });
+    try repo.exec(io, &.{ "checkout", "-q", "clean" });
+}
+
+test "update-refs moves the other branches with the commits they point at, and not one checked out elsewhere" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, branchesScript);
+    defer pair.deinit();
+
+    try pair.git.exec(io, &.{ "rebase", "--update-refs", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const sheet = try rebase.plan(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .update_refs = true });
+        defer gpa.free(sheet);
+        try std.testing.expect(std.mem.indexOf(u8, sheet, "update-ref refs/heads/zpart\nupdate-ref refs/heads/part\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, sheet, "# Ref refs/heads/held checked out at '") != null);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .update_refs = true });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/clean", "refs/heads/part", "refs/heads/zpart", "refs/heads/held" });
+    try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "for-each-ref", "refs/heads" });
+}
+
+test "a branch named to rebase is switched to first, and a detached HEAD rebases where it stands" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, cleanScript);
+    defer pair.deinit();
+
+    try pair.git.exec(io, &.{ "rebase", "main", "clean" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .branch = "clean" });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/clean", "refs/heads/main" });
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "--detach", "topic" });
+    try gitMayFail(&pair.git, io, &.{ "rebase", "main~0" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main~0" });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+}
+
+test "the messages a person would edit come from the caller, and land as an editor's would" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, sheetScript);
+    defer pair.deinit();
+
+    const sheet = try sheetFor(gpa, io, &pair.git, &.{
+        "reword side~4",
+        "pick side~3",
+        "squash side~2",
+    });
+    defer gpa.free(sheet);
+    // git's editor writes the same text over whatever it is shown.
+    try pair.git.writeFile(io, ".git/relic-message", "Edited by hand\n\n# a comment the cleanup takes away\nwith a body\n");
+    try pair.env.put("GIT_EDITOR", "cp .git/relic-message");
+    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    try pair.env.put("GIT_EDITOR", "true");
+
+    const Editor = struct {
+        seen: [4]rebase.MessageKind = undefined,
+        count: usize = 0,
+        fn edit(context: *anyopaque, kind: rebase.MessageKind, proposed: []const u8) ?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(proposed.len != 0);
+            self.seen[self.count] = kind;
+            self.count += 1;
+            return "Edited by hand\n\n# a comment the cleanup takes away\nwith a body\n";
+        }
+    };
+    var editor: Editor = .{};
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{
+            .who = who,
+            .onto_name = "main",
+            .todo = sheet,
+            .messages = .{ .context = &editor, .editFn = Editor.edit },
+        });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try std.testing.expectEqual(@as(usize, 2), editor.count);
+    try std.testing.expectEqual(rebase.MessageKind.reword, editor.seen[0]);
+    try std.testing.expectEqual(rebase.MessageKind.squash, editor.seen[1]);
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
 }
