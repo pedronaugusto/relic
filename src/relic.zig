@@ -32,6 +32,7 @@ pub const textdiff = @import("textdiff.zig");
 pub const diff = @import("diff.zig");
 pub const pktline = @import("pktline.zig");
 pub const program = @import("program.zig");
+pub const gitmodules = @import("gitmodules.zig");
 
 const builtin = @import("builtin");
 
