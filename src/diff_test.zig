@@ -328,3 +328,227 @@ test "a diff against the empty tree is every file added" {
     }
     try std.testing.expectEqual(count, changes.items.len);
 }
+
+const frob_before =
+    "#include <stdio.h>\n" ++
+    "\n" ++
+    "// Frobs foo heartily\n" ++
+    "int frobnitz(int foo)\n" ++
+    "{\n" ++
+    "    int i;\n" ++
+    "    for(i = 0; i < 10; i++)\n" ++
+    "    {\n" ++
+    "        printf(\"Your answer is: \");\n" ++
+    "        printf(\"%d\\n\", foo);\n" ++
+    "    }\n" ++
+    "}\n" ++
+    "\n" ++
+    "int fact(int n)\n" ++
+    "{\n" ++
+    "    if(n > 1)\n" ++
+    "    {\n" ++
+    "        return fact(n-1) * n;\n" ++
+    "    }\n" ++
+    "    return 1;\n" ++
+    "}\n" ++
+    "\n" ++
+    "int main(int argc, char **argv)\n" ++
+    "{\n" ++
+    "    frobnitz(fact(10));\n" ++
+    "}\n";
+
+const frob_after =
+    "#include <stdio.h>\n" ++
+    "\n" ++
+    "int fib(int n)\n" ++
+    "{\n" ++
+    "    if(n > 2)\n" ++
+    "    {\n" ++
+    "        return fib(n-1) + fib(n-2);\n" ++
+    "    }\n" ++
+    "    return 1;\n" ++
+    "}\n" ++
+    "\n" ++
+    "// Frobs foo heartily\n" ++
+    "int frobnitz(int foo)\n" ++
+    "{\n" ++
+    "    int i;\n" ++
+    "    for(i = 0; i < 10; i++)\n" ++
+    "    {\n" ++
+    "        printf(\"%d\\n\", foo);\n" ++
+    "    }\n" ++
+    "}\n" ++
+    "\n" ++
+    "int main(int argc, char **argv)\n" ++
+    "{\n" ++
+    "    frobnitz(fib(10));\n" ++
+    "}\n";
+
+/// A small deterministic generator, so a fixture is the same on every run
+/// and a failure can be reproduced from its file name.
+const Lcg = struct {
+    state: u64,
+
+    fn next(l: *Lcg, bound: u64) u64 {
+        l.state = l.state *% 6364136223846793005 +% 1442695040888963407;
+        return (l.state >> 33) % bound;
+    }
+};
+
+/// One line of generated text. Most lines come from a handful, so the files
+/// repeat themselves the way source does and the unique lines are few; the
+/// rest are unique, which is what patience anchors on.
+fn generatedLine(l: *Lcg, out: *std.ArrayList(u8), gpa: std.mem.Allocator) !void {
+    const common = [_][]const u8{ "{\n", "}\n", "\n", "    return x;\n", "    x += 1;\n", "else\n" };
+    if (l.next(3) != 0) {
+        try out.appendSlice(gpa, common[@intCast(l.next(common.len))]);
+    } else {
+        try out.print(gpa, "unique line {d}\n", .{l.next(1_000_000)});
+    }
+}
+
+fn setupAlgorithms(repo: *testgit.Repo, io: Io) anyerror!void {
+    const gpa = repo.gpa;
+    try repo.writeFile(io, "frob.c", frob_before);
+    var before: [24]std.ArrayList(u8) = @splat(.empty);
+    defer for (&before) |*b| b.deinit(gpa);
+    for (&before, 0..) |*text, i| {
+        var l: Lcg = .{ .state = i + 1 };
+        const lines = 10 + l.next(70);
+        for (0..lines) |_| try generatedLine(&l, text, gpa);
+        var name: [32]u8 = undefined;
+        try repo.writeFile(io, try std.fmt.bufPrint(&name, "gen{d:0>2}.txt", .{i}), text.items);
+    }
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+
+    try repo.writeFile(io, "frob.c", frob_after);
+    for (&before, 0..) |*text, i| {
+        var l: Lcg = .{ .state = 1000 + i };
+        var after: std.ArrayList(u8) = .empty;
+        defer after.deinit(gpa);
+        var lines = std.mem.splitScalar(u8, text.items, '\n');
+        while (lines.next()) |line| {
+            if (lines.peek() == null and line.len == 0) break;
+            switch (l.next(10)) {
+                // Dropped.
+                0 => {},
+                // Replaced.
+                1 => try generatedLine(&l, &after, gpa),
+                // Something inserted before it.
+                2 => {
+                    try generatedLine(&l, &after, gpa);
+                    try after.print(gpa, "{s}\n", .{line});
+                },
+                else => try after.print(gpa, "{s}\n", .{line}),
+            }
+        }
+        var name: [32]u8 = undefined;
+        try repo.writeFile(io, try std.fmt.bufPrint(&name, "gen{d:0>2}.txt", .{i}), after.items);
+    }
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
+}
+
+/// Every change's patch under `options`, against what git prints with
+/// `flags` for the same two trees.
+fn expectPatches(pair: *Pair, io: Io, options: diff.Options, flags: []const []const u8) !void {
+    const gpa = std.testing.allocator;
+    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    defer changes.deinit();
+    try std.testing.expect(changes.items.len > 20);
+
+    for (changes.items) |change| {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try diff.unified(gpa, io, &out.writer, &pair.db, change, options);
+
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "diff", "--no-color", "-U3", "--no-renames" });
+        try argv.appendSlice(gpa, flags);
+        try argv.appendSlice(gpa, &.{ pair.old_text, pair.new_text, "--", change.path() });
+        const expected = try pair.repo.run(io, argv.items);
+        defer gpa.free(expected);
+        std.testing.expectEqualStrings(expected, out.written()) catch |err| {
+            std.debug.print("differs at {s}\n", .{change.path()});
+            return err;
+        };
+    }
+}
+
+test "the patience patch is byte for byte what git diff --patience prints" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(gpa, io, setupAlgorithms);
+    defer pair.deinit(io, gpa);
+    try expectPatches(&pair, io, .{ .algorithm = .patience }, &.{"--patience"});
+
+    // The fixtures are ones where the choice shows: on some of them the
+    // patience patch is not the Myers patch.
+    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    defer changes.deinit();
+    var differing: usize = 0;
+    for (changes.items) |change| {
+        var mine: std.Io.Writer.Allocating = .init(gpa);
+        defer mine.deinit();
+        try diff.unified(gpa, io, &mine.writer, &pair.db, change, .{ .algorithm = .patience });
+        var plain: std.Io.Writer.Allocating = .init(gpa);
+        defer plain.deinit();
+        try diff.unified(gpa, io, &plain.writer, &pair.db, change, .{});
+        if (!std.mem.eql(u8, mine.written(), plain.written())) differing += 1;
+    }
+    try std.testing.expect(differing >= 5);
+}
+
+test "plain myers is unchanged beside patience, on the same fixtures" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(gpa, io, setupAlgorithms);
+    defer pair.deinit(io, gpa);
+    try expectPatches(&pair, io, .{}, &.{"--diff-algorithm=myers"});
+}
+
+test "an anchored patience patch is what git diff --anchored prints" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(gpa, io, setupAlgorithms);
+    defer pair.deinit(io, gpa);
+    try expectPatches(
+        &pair,
+        io,
+        .{ .algorithm = .patience, .anchors = &.{ "    return", "int main" } },
+        &.{ "--anchored=    return", "--anchored=int main" },
+    );
+}
+
+test "diff.algorithm picks the algorithm git picks when none is asked for" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(gpa, io, setupAlgorithms);
+    defer pair.deinit(io, gpa);
+
+    const config_mod = @import("config.zig");
+    for ([_][]const u8{ "patience", "Myers", "default" }) |value| {
+        try pair.repo.exec(io, &.{ "config", "diff.algorithm", value });
+        var git_dir = try pair.repo.gitDir(io);
+        defer git_dir.close(io);
+        var config = try config_mod.Config.openFile(gpa, io, .{ .dir = git_dir, .sub_path = "config" }, .local, .{});
+        defer config.deinit();
+        const options = try diff.configured(&config, .{});
+        expectPatches(&pair, io, options, &.{}) catch |err| {
+            std.debug.print("with diff.algorithm={s}\n", .{value});
+            return err;
+        };
+    }
+
+    var bogus = try config_mod.Config.parseText(gpa, "[diff]\n\talgorithm = sideways\n", .local);
+    defer bogus.deinit();
+    try std.testing.expectError(error.UnknownDiffAlgorithm, diff.configured(&bogus, .{}));
+    var histogram = try config_mod.Config.parseText(gpa, "[diff]\n\talgorithm = HISTOGRAM\n", .local);
+    defer histogram.deinit();
+    try std.testing.expectEqual(diff.Algorithm.histogram, (try diff.configured(&histogram, .{})).algorithm);
+    var absent = config_mod.Config.initEmpty(gpa);
+    defer absent.deinit();
+    try std.testing.expectEqual(diff.Algorithm.histogram, (try diff.configured(&absent, .{ .algorithm = .histogram })).algorithm);
+}

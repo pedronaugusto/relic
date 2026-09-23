@@ -15,6 +15,14 @@
 //! The histogram algorithm is here too. It is not asked to agree with Myers,
 //! only to be correct and to give the same answer every time.
 //!
+//! Patience is git's xpatience, line for line, because its answer is the
+//! one `git diff --patience` prints: anchor on the lines that occur exactly
+//! once on each side, keep the longest run of them that is in order on both,
+//! recurse into the gaps, and hand a gap with no unique line in common to the
+//! classic pipeline as if it were a pair of files of its own. That last step
+//! is where the answers of a patience diff come from on repetitive input, so
+//! it is the same trimming, pruning and Myers the plain algorithm runs.
+//!
 //! Nothing in this file opens a file or reads an object: it takes bytes and
 //! gives back indices.
 
@@ -22,7 +30,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// Which algorithm produces the edit script.
-pub const Algorithm = enum { myers, histogram };
+pub const Algorithm = enum { myers, histogram, patience };
 
 /// One line of an input, as a slice of the original bytes including its
 /// trailing newline when it had one.
@@ -76,6 +84,10 @@ pub const Options = struct {
     /// Zero means no cap, which still leaves git's own give-up heuristics in
     /// force unless `minimal` is set.
     max_work: usize = 0,
+    /// Lines on the old side that begin with one of these are kept as
+    /// context wherever an ordering allows it, which is `git diff
+    /// --anchored`. Only the patience algorithm reads them, as in git.
+    anchors: []const []const u8 = &.{},
 };
 
 /// The edit script between two line lists: the runs that differ, in order,
@@ -96,6 +108,45 @@ pub fn diffLines(
     const changed_new = try Flags.init(gpa, new.len);
     defer changed_new.deinit(gpa);
 
+    switch (options.algorithm) {
+        .myers, .histogram => try whole(gpa, a, b, classified.classes, changed_old, changed_new, options),
+        .patience => {
+            var p: Patience = .{
+                .gpa = gpa,
+                .a = a,
+                .b = b,
+                .old = old,
+                .classes = classified.classes,
+                .changed_a = changed_old,
+                .changed_b = changed_new,
+                .options = options,
+            };
+            try p.run();
+        },
+    }
+
+    compact(changed_old, a, old, changed_new, options.indent_heuristic);
+    compact(changed_new, b, new, changed_old, options.indent_heuristic);
+
+    return buildScript(gpa, changed_old, changed_new);
+}
+
+/// Mark the changed lines of two whole files with Myers or the histogram,
+/// the way git's `xdl_do_diff` does: the equal head and tail set aside,
+/// then, for Myers, the lines no match can come from.
+///
+/// `a` and `b` are the identity numbers of the two files and the flags are
+/// theirs, one per line. The patience algorithm calls this on a gap as if
+/// the gap were a pair of files, which is what git's fallback does.
+fn whole(
+    gpa: Allocator,
+    a: []const u32,
+    b: []const u32,
+    classes: u32,
+    changed_old: Flags,
+    changed_new: Flags,
+    options: Options,
+) Allocator.Error!void {
     // The equal head and tail cannot be part of any change, and keeping them
     // out of the search is what git does before it starts counting edits.
     var start: usize = 0;
@@ -113,8 +164,8 @@ pub fn diffLines(
     // found again; the histogram never prunes, as in git.
     var index_old: []const u32 = undefined;
     var index_new: []const u32 = undefined;
-    if (options.algorithm == .myers and !options.minimal) {
-        const counts = try classCounts(gpa, a, b, classified.classes);
+    if (options.algorithm != .histogram and !options.minimal) {
+        const counts = try classCounts(gpa, a, b, classes);
         defer gpa.free(counts.in_old);
         defer gpa.free(counts.in_new);
         index_old = try selectRecords(gpa, a, counts.in_new, start, end_old, changed_old);
@@ -155,15 +206,11 @@ pub fn diffLines(
         .max_work = options.max_work,
     };
 
-    switch (options.algorithm) {
-        .myers => search.myers(0, packed_old.len, 0, packed_new.len, options.minimal),
-        .histogram => try search.histogram(gpa, 0, packed_old.len, 0, packed_new.len, options.minimal),
+    if (options.algorithm == .histogram) {
+        try search.histogram(gpa, 0, packed_old.len, 0, packed_new.len, options.minimal);
+    } else {
+        search.myers(0, packed_old.len, 0, packed_new.len, options.minimal);
     }
-
-    compact(changed_old, a, old, changed_new, options.indent_heuristic);
-    compact(changed_new, b, new, changed_old, options.indent_heuristic);
-
-    return buildScript(gpa, changed_old, changed_new);
 }
 
 /// One hunk of a unified diff.
@@ -1021,6 +1068,231 @@ const Search = struct {
 };
 
 //=========================================================================
+// Patience
+//
+// git's xpatience.c. A region is diffed by the lines that occur exactly once
+// in it on each side: the longest run of those that is in the same order on
+// both sides is taken as the backbone, each backbone line is grown outward
+// over equal neighbours, and the gaps between are regions of their own,
+// where a line that was repeated before may now be unique. A region with no
+// unique line in common goes to the classic pipeline as a pair of files.
+//
+// git recurses; this keeps a list of regions still to do instead. The
+// regions are disjoint and each one writes only its own flags, so the order
+// they are done in cannot change the answer, and a deep file cannot run the
+// stack out.
+//=========================================================================
+
+const Patience = struct {
+    gpa: Allocator,
+    a: []const u32,
+    b: []const u32,
+    /// The old side's real lines, which only the anchor test reads.
+    old: []const Line,
+    classes: u32,
+    changed_a: Flags,
+    changed_b: Flags,
+    options: Options,
+
+    /// A region still to be diffed: `count1` lines from `line1` of the old
+    /// side against `count2` lines from `line2` of the new.
+    const Region = struct { line1: usize, count1: usize, line2: usize, count2: usize };
+
+    /// A line of the old side and what the new side holds of it. `line2` is
+    /// `none` until the new side is seen and `repeated` once either side has
+    /// it twice, which is what takes it out of the running.
+    const Slot = struct {
+        line1: usize,
+        line2: usize = none,
+        anchor: bool,
+        /// The backbone entry before this one, as an index into the slots.
+        previous: u32 = no_slot,
+
+        const none = std.math.maxInt(usize);
+        const repeated = std.math.maxInt(usize) - 1;
+    };
+
+    const no_slot = std.math.maxInt(u32);
+
+    fn run(p: *Patience) Allocator.Error!void {
+        var todo: std.ArrayList(Region) = .empty;
+        defer todo.deinit(p.gpa);
+        try todo.append(p.gpa, .{ .line1 = 0, .count1 = p.a.len, .line2 = 0, .count2 = p.b.len });
+        while (todo.pop()) |next| try p.diffRegion(next, &todo);
+    }
+
+    fn markA(p: *Patience, from: usize, count: usize) void {
+        for (from..from + count) |i| p.changed_a.set(@intCast(i), true);
+    }
+
+    fn markB(p: *Patience, from: usize, count: usize) void {
+        for (from..from + count) |i| p.changed_b.set(@intCast(i), true);
+    }
+
+    fn isAnchor(p: *const Patience, line: Line) bool {
+        for (p.options.anchors) |anchor| {
+            if (std.mem.startsWith(u8, line, anchor)) return true;
+        }
+        return false;
+    }
+
+    fn diffRegion(p: *Patience, r: Region, todo: *std.ArrayList(Region)) Allocator.Error!void {
+        if (r.count1 == 0) return p.markB(r.line2, r.count2);
+        if (r.count2 == 0) return p.markA(r.line1, r.count1);
+
+        // Every distinct line of the old side, in the order it first
+        // appears there, which is the order the backbone is built in.
+        var slots: std.ArrayList(Slot) = .empty;
+        defer slots.deinit(p.gpa);
+        var by_class: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+        defer by_class.deinit(p.gpa);
+        try by_class.ensureTotalCapacity(p.gpa, @intCast(@min(r.count1, p.classes)));
+
+        for (r.line1..r.line1 + r.count1) |i| {
+            const gop = by_class.getOrPutAssumeCapacity(p.a[i]);
+            if (gop.found_existing) {
+                slots.items[gop.value_ptr.*].line2 = Slot.repeated;
+                continue;
+            }
+            gop.value_ptr.* = @intCast(slots.items.len);
+            try slots.append(p.gpa, .{ .line1 = i, .anchor = p.isAnchor(p.old[i]) });
+        }
+
+        var has_matches = false;
+        for (r.line2..r.line2 + r.count2) |j| {
+            const at = by_class.get(p.b[j]) orelse continue;
+            has_matches = true;
+            const slot = &slots.items[at];
+            slot.line2 = if (slot.line2 == Slot.none) j else Slot.repeated;
+        }
+
+        if (!has_matches) {
+            p.markA(r.line1, r.count1);
+            p.markB(r.line2, r.count2);
+            return;
+        }
+
+        const backbone = try p.longestCommon(slots.items);
+        defer p.gpa.free(backbone);
+        if (backbone.len == 0) return p.fallBack(r);
+        try p.walk(r, slots.items, backbone, todo);
+    }
+
+    /// The longest run of lines unique on both sides that is in order on
+    /// both, as slot indices in order. Patience sorting: each line goes on
+    /// the pile after the longest run ending lower on the new side, and an
+    /// anchor, once placed, is never displaced. The result is the caller's.
+    fn longestCommon(p: *Patience, slots: []Slot) Allocator.Error![]u32 {
+        const piles = try p.gpa.alloc(u32, slots.len);
+        defer p.gpa.free(piles);
+        var longest: usize = 0;
+        // No pile at or below this one may be replaced.
+        var anchor_at: isize = -1;
+
+        for (slots, 0..) |*slot, at| {
+            if (slot.line2 == Slot.none or slot.line2 == Slot.repeated) continue;
+            // The last pile whose top is lower on the new side, or -1.
+            var left: isize = -1;
+            var right: isize = @intCast(longest);
+            while (left + 1 < right) {
+                const middle = left + @divTrunc(right - left, 2);
+                if (slots[piles[@intCast(middle)]].line2 > slot.line2) right = middle else left = middle;
+            }
+            slot.previous = if (left < 0) no_slot else piles[@intCast(left)];
+            const i = left + 1;
+            if (i <= anchor_at) continue;
+            piles[@intCast(i)] = @intCast(at);
+            if (slot.anchor) {
+                anchor_at = i;
+                longest = @intCast(anchor_at + 1);
+            } else if (i == longest) {
+                longest += 1;
+            }
+        }
+
+        const out = try p.gpa.alloc(u32, longest);
+        if (longest == 0) return out;
+        var cursor = piles[longest - 1];
+        var n = longest;
+        while (true) {
+            n -= 1;
+            out[n] = cursor;
+            cursor = slots[cursor].previous;
+            if (cursor == no_slot) break;
+        }
+        // The chain from the top pile back is exactly one slot per pile.
+        std.debug.assert(n == 0);
+        return out;
+    }
+
+    /// Grow each backbone line over the equal lines around it, and queue
+    /// the gaps between.
+    fn walk(p: *Patience, r: Region, slots: []const Slot, backbone: []const u32, todo: *std.ArrayList(Region)) Allocator.Error!void {
+        const end1 = r.line1 + r.count1;
+        const end2 = r.line2 + r.count2;
+        var line1 = r.line1;
+        var line2 = r.line2;
+        var k: usize = 0;
+        while (true) {
+            var next1: usize = end1;
+            var next2: usize = end2;
+            if (k < backbone.len) {
+                next1 = slots[backbone[k]].line1;
+                next2 = slots[backbone[k]].line2;
+                while (next1 > line1 and next2 > line2 and p.a[next1 - 1] == p.b[next2 - 1]) {
+                    next1 -= 1;
+                    next2 -= 1;
+                }
+            }
+            while (line1 < next1 and line2 < next2 and p.a[line1] == p.b[line2]) {
+                line1 += 1;
+                line2 += 1;
+            }
+            if (next1 > line1 or next2 > line2) {
+                try todo.append(p.gpa, .{
+                    .line1 = line1,
+                    .count1 = next1 - line1,
+                    .line2 = line2,
+                    .count2 = next2 - line2,
+                });
+            }
+            if (k == backbone.len) return;
+
+            // A stretch of backbone lines that follow one another on both
+            // sides is one match, and the next gap starts after all of it.
+            while (k + 1 < backbone.len and
+                slots[backbone[k + 1]].line1 == slots[backbone[k]].line1 + 1 and
+                slots[backbone[k + 1]].line2 == slots[backbone[k]].line2 + 1) k += 1;
+            line1 = slots[backbone[k]].line1 + 1;
+            line2 = slots[backbone[k]].line2 + 1;
+            k += 1;
+        }
+    }
+
+    /// A region with no line unique on both sides is diffed the classic
+    /// way, as a pair of files of its own, which is git's
+    /// `xdl_fall_back_diff`: the trimming and the pruning are over this
+    /// region alone, and its flags are copied into place.
+    fn fallBack(p: *Patience, r: Region) Allocator.Error!void {
+        const sub_a = try Flags.init(p.gpa, r.count1);
+        defer sub_a.deinit(p.gpa);
+        const sub_b = try Flags.init(p.gpa, r.count2);
+        defer sub_b.deinit(p.gpa);
+        try whole(
+            p.gpa,
+            p.a[r.line1..][0..r.count1],
+            p.b[r.line2..][0..r.count2],
+            p.classes,
+            sub_a,
+            sub_b,
+            p.options,
+        );
+        for (0..r.count1) |i| p.changed_a.set(@intCast(r.line1 + i), sub_a.get(@intCast(i)));
+        for (0..r.count2) |i| p.changed_b.set(@intCast(r.line2 + i), sub_b.get(@intCast(i)));
+    }
+};
+
+//=========================================================================
 // The slide
 //
 // xdiff's xdl_change_compact. Each run of changed lines is pushed as far up
@@ -1764,7 +2036,7 @@ fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
     defer gpa.free(old);
     const new = try splitLines(gpa, b);
     defer gpa.free(new);
-    for ([_]Algorithm{ .myers, .histogram }) |algorithm| {
+    for ([_]Algorithm{ .myers, .histogram, .patience }) |algorithm| {
         const changes = try diffLines(gpa, old, new, .{ .algorithm = algorithm });
         defer gpa.free(changes);
 

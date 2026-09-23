@@ -14,6 +14,7 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const textdiff = @import("textdiff.zig");
 const attributes = @import("attributes.zig");
+const config_mod = @import("config.zig");
 
 const Oid = hash.Oid;
 
@@ -373,7 +374,42 @@ pub const Options = struct {
     /// A cap on the algorithm's work before it falls back to a coarser but
     /// correct script.
     max_work: usize = 0,
+    /// Old-side lines beginning with one of these stay as context where
+    /// they can, which is `git diff --anchored`. Read by the patience
+    /// algorithm only, as in git, where `--anchored` also selects it.
+    anchors: []const []const u8 = &.{},
 };
+
+/// Errors from reading the diff settings out of a configuration.
+pub const ConfigError = error{
+    /// `diff.algorithm` names something other than `default`, `myers`,
+    /// `minimal`, `patience` or `histogram`, which git refuses too.
+    UnknownDiffAlgorithm,
+};
+
+/// `options` with the algorithm `diff.algorithm` names, which is the one
+/// `git diff`, `git log -p` and `git show` use when none is asked for.
+///
+/// The value is read without regard to case, as git reads it. `minimal` is
+/// Myers made to prove its script minimal, and `default` is Myers. With the
+/// setting absent `options` comes back as it was given.
+pub fn configured(config: *const config_mod.Config, options: Options) ConfigError!Options {
+    const text = config.get("diff.algorithm") orelse return options;
+    var out = options;
+    if (std.ascii.eqlIgnoreCase(text, "myers") or std.ascii.eqlIgnoreCase(text, "default")) {
+        out.algorithm = .myers;
+    } else if (std.ascii.eqlIgnoreCase(text, "minimal")) {
+        out.algorithm = .myers;
+        out.minimal = true;
+    } else if (std.ascii.eqlIgnoreCase(text, "patience")) {
+        out.algorithm = .patience;
+    } else if (std.ascii.eqlIgnoreCase(text, "histogram")) {
+        out.algorithm = .histogram;
+    } else {
+        return error.UnknownDiffAlgorithm;
+    }
+    return out;
+}
 
 fn toTextOptions(options: Options) textdiff.Options {
     return .{
@@ -385,6 +421,7 @@ fn toTextOptions(options: Options) textdiff.Options {
         .ignore_whitespace_change = options.ignore_whitespace_change,
         .ignore_trailing_whitespace = options.ignore_trailing_whitespace,
         .max_work = options.max_work,
+        .anchors = options.anchors,
     };
 }
 
