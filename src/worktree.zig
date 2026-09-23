@@ -1441,6 +1441,7 @@ pub fn writePaths(
     options: CheckoutOptions,
 ) Error!CheckoutOutcome {
     var outcome: CheckoutOutcome = .{};
+    defer if (options.rules.attrs) |attrs| attrs.leave();
     for (writes) |w| {
         if (safepath.check(w.path, .worktree)) |refused| {
             if (options.refusal) |out| out.set(refused.reason, w.path);
@@ -1523,6 +1524,7 @@ pub fn writePaths(
                 defer gpa.free(found.bytes);
                 const executable = want.mode == .exec and options.rules.file_mode;
                 if (options.rules.attrs) |attrs| {
+                    try attrs.enter(io, wt, w.path);
                     const applied = try attrs.lookup(a, w.path, false);
                     const smudged = try conv.toWorktree(a, w.path, found.bytes, applied, .{
                         .blob = want.oid,
@@ -1536,6 +1538,7 @@ pub fn writePaths(
                 } else {
                     try writeFile(io, wt, w.path, .{ .bytes = found.bytes }, executable);
                 }
+                if (options.rules.attrs) |attrs| attrs.written(w.path);
                 outcome.written += 1;
             },
             .tree => return error.UnsupportedEntry,
@@ -1695,6 +1698,7 @@ pub fn applySparse(
         .db = db,
     });
     defer conv.deinit();
+    defer if (options.rules.attrs) |attrs| attrs.leave();
 
     for (index.entries.items) |*entry| {
         if (entry.stage != 0) continue;
@@ -1714,6 +1718,7 @@ pub fn applySparse(
                     var content: []const u8 = raw;
                     if (options.rules.attrs) |attrs| {
                         if (found.kind != .sym_link) {
+                            try attrs.enter(io, wt, entry.path);
                             const applied = try attrs.lookup(a, entry.path, false);
                             content = (try conv.toGit(a, entry.path, raw, applied, .hash_only)).bytes;
                         }
@@ -1754,6 +1759,7 @@ pub fn applySparse(
             defer gpa.free(found.bytes);
             const executable = entry.mode == .exec and options.rules.file_mode;
             if (options.rules.attrs) |attrs| {
+                try attrs.enter(io, wt, entry.path);
                 const applied = try attrs.lookup(a, entry.path, false);
                 const smudged = try conv.toWorktree(a, entry.path, found.bytes, applied, .{ .blob = entry.oid });
                 try writeSmudged(io, wt, entry.path, smudged, executable);

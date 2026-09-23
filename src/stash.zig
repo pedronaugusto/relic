@@ -384,12 +384,7 @@ const Ctx = struct {
         } else try fs.readFileSized(a, ctx.io, ctx.wt, path, found.stat.size, 1 << 31);
         var content: []const u8 = raw;
         if (mode != .symlink) {
-            // The working tree's own `.gitattributes` at the top, which a
-            // walk loads on its way in and takes out again on its way back.
-            const has_top = for (ctx.attrs.levels.items) |level| {
-                if (level.base.len == 0 and level.precedence == 1) break true;
-            } else false;
-            if (!has_top) try ctx.attrs.addDirectory(ctx.io, ctx.wt, "", 0);
+            try ctx.attrs.enter(ctx.io, ctx.wt, path);
             const applied = try ctx.attrs.lookup(a, path, false);
             content = (try ctx.conv.toGit(a, path, raw, applied, if (write) .store else .hash_only)).bytes;
         }

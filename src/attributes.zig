@@ -70,6 +70,9 @@ pub const Level = struct {
     /// Higher wins. `info/attributes` is highest, then the deepest
     /// `.gitattributes`, down to the global file.
     precedence: u32,
+    /// Loaded by `enter` rather than by the caller, so `leave` takes it
+    /// away again.
+    entered: bool = false,
 };
 
 /// The precedence `info/attributes` is given, above every `.gitattributes`.
@@ -119,6 +122,10 @@ pub const Attrs = struct {
     levels: std.ArrayList(Level),
     macros: std.ArrayList(Macro),
     case_fold: bool,
+    /// The directory `enter` last loaded the levels down to, and whether it
+    /// has loaded any.
+    entered_dir: std.ArrayList(u8) = .empty,
+    entered_any: bool = false,
 
     /// An `[attr]name …` line: a name that expands to a list of
     /// assignments.
@@ -160,7 +167,90 @@ pub const Attrs = struct {
         attrs.gpa.destroy(attrs.arena);
         attrs.levels.deinit(attrs.gpa);
         attrs.macros.deinit(attrs.gpa);
+        attrs.entered_dir.deinit(attrs.gpa);
         attrs.* = undefined;
+    }
+
+    /// Load the `.gitattributes` of every directory from the root of the
+    /// working tree down to the one holding `path`, so that a lookup of
+    /// `path` sees every file git would consult. This is for a caller that
+    /// is not walking the tree — a checkout goes path by path — and is
+    /// cheapest over paths in sorted order: only the directories that
+    /// differ from the last call's are read. A directory whose file the
+    /// caller loaded itself is not read again. `leave` gives back what this
+    /// loaded.
+    pub fn enter(attrs: *Attrs, io: Io, wt: Io.Dir, path: []const u8) Error!void {
+        const dir = std.fs.path.dirnamePosix(path) orelse "";
+        if (attrs.entered_any and std.mem.eql(u8, attrs.entered_dir.items, dir)) return;
+        // How many leading directories this shares with the last one, and
+        // how long they are.
+        var common: u32 = 0;
+        var kept_len: usize = 0;
+        if (attrs.entered_any) {
+            var a = std.mem.splitScalar(u8, attrs.entered_dir.items, '/');
+            var b = std.mem.splitScalar(u8, dir, '/');
+            while (true) {
+                const x = a.next() orelse break;
+                const y = b.next() orelse break;
+                if (x.len == 0 or !std.mem.eql(u8, x, y)) break;
+                kept_len += x.len + @intFromBool(common != 0);
+                common += 1;
+            }
+            // The root is precedence one and the directory `d` deep is
+            // `d + 1`; the shared ones stay.
+            attrs.dropEntered(common + 2);
+        } else {
+            try attrs.enterOne(io, wt, "", 0);
+        }
+        var depth: u32 = common;
+        var at: usize = kept_len;
+        while (at < dir.len) {
+            if (at != 0 and dir[at] == '/') at += 1;
+            const end = std.mem.indexOfScalarPos(u8, dir, at, '/') orelse dir.len;
+            depth += 1;
+            try attrs.enterOne(io, wt, dir[0..end], depth);
+            at = end;
+        }
+        attrs.entered_dir.clearRetainingCapacity();
+        try attrs.entered_dir.appendSlice(attrs.gpa, dir);
+        attrs.entered_any = true;
+    }
+
+    /// Give back every level `enter` loaded, leaving what the caller loaded.
+    pub fn leave(attrs: *Attrs) void {
+        attrs.dropEntered(0);
+        attrs.entered_dir.clearRetainingCapacity();
+        attrs.entered_any = false;
+    }
+
+    /// Tell the attributes a file was just written at `path`. A
+    /// `.gitattributes` there changes what `enter` loaded, so the next
+    /// `enter` reads the directories again.
+    pub fn written(attrs: *Attrs, path: []const u8) void {
+        const name = if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| path[slash + 1 ..] else path;
+        if (std.mem.eql(u8, name, ".gitattributes")) attrs.leave();
+    }
+
+    fn enterOne(attrs: *Attrs, io: Io, wt: Io.Dir, base: []const u8, depth: u32) Error!void {
+        for (attrs.levels.items) |level| {
+            if (level.precedence == depth + 1 and std.mem.eql(u8, level.base, base)) return;
+        }
+        const before = attrs.levels.items.len;
+        // The base must outlive the level, and `base` is the caller's.
+        try attrs.addDirectory(io, wt, try attrs.arena.allocator().dupe(u8, base), depth);
+        if (attrs.levels.items.len > before) attrs.levels.items[before].entered = true;
+    }
+
+    fn dropEntered(attrs: *Attrs, precedence: u32) void {
+        var i: usize = 0;
+        while (i < attrs.levels.items.len) {
+            const level = attrs.levels.items[i];
+            if (level.entered and level.precedence >= precedence) {
+                _ = attrs.levels.orderedRemove(i);
+                continue;
+            }
+            i += 1;
+        }
     }
 
     /// Load `info/attributes` from the common directory, at the highest
@@ -259,6 +349,12 @@ pub const Attrs = struct {
         while (i < attrs.levels.items.len) {
             const level = attrs.levels.items[i];
             if (level.precedence >= precedence and level.precedence != info_precedence) {
+                // What `enter` loaded is no longer all there, so the next
+                // `enter` starts again.
+                if (level.entered) {
+                    attrs.entered_any = false;
+                    attrs.entered_dir.clearRetainingCapacity();
+                }
                 _ = attrs.levels.orderedRemove(i);
                 continue;
             }

@@ -600,3 +600,71 @@ test "resetIndex puts the index back and leaves the files alone" {
     var hex: [hash.max_hex_len]u8 = undefined;
     try std.testing.expectEqualStrings(head_tree_text, written.hex(&hex));
 }
+
+test "checkout and writePaths apply every .gitattributes on the way down, as git does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const Repository = @import("repo.zig").Repository;
+    const files = [_]struct { path: []const u8, bytes: []const u8 }{
+        .{ .path = ".gitattributes", .bytes = "*.txt text\n" },
+        .{ .path = "sub/.gitattributes", .bytes = "*.txt eol=crlf\n" },
+        .{ .path = "sub/deeper/.gitattributes", .bytes = "b.txt eol=lf\n" },
+        .{ .path = "top.txt", .bytes = "a\nb\n" },
+        .{ .path = "sub/x.txt", .bytes = "a\nb\n" },
+        .{ .path = "sub/deeper/b.txt", .bytes = "a\nb\n" },
+        .{ .path = "sub/deeper/c.txt", .bytes = "a\nb\n" },
+    };
+
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var here = try testgit.Repo.init(gpa, io, &.{});
+    defer here.deinit();
+    inline for (.{ &git, &here }) |r| {
+        for (files) |f| try r.writeFile(io, f.path, f.bytes);
+        try r.exec(io, &.{ "add", "." });
+        try r.exec(io, &.{ "commit", "-q", "-m", "attributes" });
+        for (files) |f| try r.dir.deleteFile(io, f.path);
+    }
+    try git.exec(io, &.{ "checkout", "--", "." });
+
+    var repo = try Repository.open(gpa, io, here.dir, .{});
+    defer repo.deinit(io);
+    var attrs = try repo.loadAttrs(io);
+    defer attrs.deinit();
+    var rules = repo.worktreeRules();
+    rules.attrs = &attrs;
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+    const tree = (try repo.headTree(io)).?;
+    _ = try worktree.checkout(gpa, io, here.dir, &index, &repo.odb, tree, .{ .rules = rules });
+    // What `enter` loaded is given back.
+    try std.testing.expectEqual(@as(usize, 0), attrs.levels.items.len);
+
+    for (files) |f| {
+        const a = try git.readFile(io, f.path);
+        defer gpa.free(a);
+        const b = try here.readFile(io, f.path);
+        defer gpa.free(b);
+        std.testing.expectEqualStrings(a, b) catch |err| {
+            std.debug.print("{s} differs\n", .{f.path});
+            return err;
+        };
+    }
+    const crlf = try here.readFile(io, "sub/deeper/c.txt");
+    defer gpa.free(crlf);
+    try std.testing.expectEqualStrings("a\r\nb\r\n", crlf);
+
+    // One path on its own, with the files that decide it already there.
+    try git.dir.deleteFile(io, "sub/deeper/c.txt");
+    try git.exec(io, &.{ "checkout", "--", "sub/deeper/c.txt" });
+    try here.dir.deleteFile(io, "sub/deeper/c.txt");
+    const entry = index.find("sub/deeper/c.txt").?;
+    _ = try worktree.writePaths(gpa, io, here.dir, &index, &repo.odb, &.{
+        .{ .path = "sub/deeper/c.txt", .blob = .{ .mode = entry.mode, .oid = entry.oid } },
+    }, .{ .rules = rules });
+    const a = try git.readFile(io, "sub/deeper/c.txt");
+    defer gpa.free(a);
+    const b = try here.readFile(io, "sub/deeper/c.txt");
+    defer gpa.free(b);
+    try std.testing.expectEqualStrings(a, b);
+}

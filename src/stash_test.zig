@@ -381,3 +381,39 @@ test "dropping and clearing leave git's list" {
     try testing.expectError(error.FileNotFound, twin.relic.readFile(io, ".git/logs/refs/stash"));
     try testing.expectError(error.NoSuchStash, stash.drop(&repo, io, 0, .{}));
 }
+
+test "a stash goes through the clean and smudge filters as git's does" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twin = try Twin.init(gpa, io);
+    defer twin.deinit(gpa);
+    inline for (.{ &twin.git, &twin.relic }) |r| {
+        try r.exec(io, &.{ "config", "filter.up.clean", "tr a-z A-Z" });
+        try r.exec(io, &.{ "config", "filter.up.smudge", "tr A-Z a-z" });
+        try r.exec(io, &.{ "config", "filter.up.required", "true" });
+    }
+    try twin.write(io, ".gitattributes", "*.up filter=up\n");
+    try twin.write(io, "a.up", "hello\n");
+    try twin.both(io, &.{ "add", "." });
+    try twin.both(io, &.{ "commit", "-q", "-m", "filtered" });
+    try twin.write(io, "a.up", "hello, changed\n");
+    try twin.write(io, "b.up", "new and untracked\n");
+
+    try twin.git.exec(io, &.{ "stash", "push", "-q", "-u" });
+    var repo = try twin.open(gpa, io);
+    defer repo.deinit(io);
+    var drivers = try repo.loadFilters(io, .{});
+    defer drivers.deinit();
+    const programs: @import("program.zig").Programs = .{ .environ = &twin.environ };
+    // Without the permission to run the required filter, nothing is stashed.
+    try testing.expectError(error.UnsupportedAttribute, stash.push(&repo, io, .{ .who = who, .untracked = .include }));
+    _ = try stash.push(&repo, io, .{ .who = who, .untracked = .include, .filters = &drivers, .programs = programs });
+    try twin.expectSame(io, &.{ "rev-parse", "stash", "stash^2", "stash^3" });
+    try twin.expectSameState(io, &.{ "a.up", "b.up" });
+
+    try twin.git.exec(io, &.{ "stash", "pop", "-q" });
+    var popped = try stash.pop(&repo, io, 0, .{ .filters = &drivers, .programs = programs });
+    defer popped.deinit();
+    try twin.expectSameState(io, &.{ "a.up", "b.up" });
+}
