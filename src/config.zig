@@ -1129,6 +1129,12 @@ fn isSpace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
 
+/// What git drops at either end of an unquoted value: its `isspace` short of
+/// the line break, which ends the value instead.
+fn isValueSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\r';
+}
+
 /// git's `iskeychar`: what a section or a variable name may hold.
 fn isKeyChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '-';
@@ -1368,18 +1374,25 @@ fn parseVariableLine(raw: []const u8) ParseError!VariableLine {
     }
     if (raw[i] != '=') return error.InvalidVariableName;
     i += 1;
-    while (i < raw.len and (raw[i] == ' ' or raw[i] == '\t')) i += 1;
+    while (i < raw.len and isValueSpace(raw[i])) i += 1;
     const value_start = i;
 
     // Walk to the end of the value, honouring quotes so that a `#` inside
-    // one is not a comment.
+    // one is not a comment. Only a line break ends it: a carriage return
+    // that is not part of one is a byte of the value, as a tab is, and like
+    // a tab it is dropped only at either end.
     var in_quotes = false;
     var end = i;
     var last_significant = i;
     while (end < raw.len) : (end += 1) {
         const c = raw[end];
         if (c == '\\') {
-            if (end + 1 < raw.len) {
+            // A backslash before a line break continues the value, and a
+            // carriage return and a line feed are one line break.
+            if (end + 2 < raw.len and raw[end + 1] == '\r' and raw[end + 2] == '\n') {
+                end += 2;
+                last_significant = end + 1;
+            } else if (end + 1 < raw.len) {
                 end += 1;
                 last_significant = end + 1;
             }
@@ -1391,9 +1404,9 @@ fn parseVariableLine(raw: []const u8) ParseError!VariableLine {
             continue;
         }
         if (!in_quotes) {
-            if (c == '\n' or c == '\r') break;
+            if (c == '\n') break;
             if (c == '#' or c == ';') break;
-            if (c != ' ' and c != '\t') last_significant = end + 1;
+            if (!isValueSpace(c)) last_significant = end + 1;
         } else {
             last_significant = end + 1;
         }
@@ -1776,6 +1789,37 @@ test "a header reads as git reads it, and a header git refuses is refused" {
         }
         std.testing.expectEqualStrings(theirs, ours.written()) catch |err| {
             std.debug.print("header {any}\n", .{header});
+            return err;
+        };
+    }
+}
+
+test "a value reads as git reads it, carriage returns and all" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const lines = [_][]const u8{
+        "\ty = p\rq\n",      "\ty = p\r",           "\ty = p\r \n",       "\ty = \rp\n",
+        "\ty = p\r\r\n",     "\ty = p \r q\n",      "\ty = p\t\n",        "\ty = p\rq # c\n",
+        "\ty = p\tq  r\n",   "\ty = \"q\r\" x\r\n", "\ty = a\\\r\nb\r\n", "\ty = a\\\nb\n",
+        "\ty = \" p \"\t\n", "\ty = p;q\n",         "\ty = \"p;q\"\n",    "\ty =\r\n",
+    };
+    for (lines) |line| {
+        const text = try std.fmt.allocPrint(gpa, "[a]\n{s}", .{line});
+        defer gpa.free(text);
+        try git.writeFile(io, "probe.config", text);
+        const theirs = try git.run(io, &.{ "config", "-f", "probe.config", "-z", "--get", "a.y" });
+        defer gpa.free(theirs);
+
+        var config = try Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        const ours = try unquote(gpa, config.get("a.y").?);
+        defer gpa.free(ours);
+        const ours_z = try std.fmt.allocPrint(gpa, "{s}\x00", .{ours});
+        defer gpa.free(ours_z);
+        std.testing.expectEqualStrings(theirs, ours_z) catch |err| {
+            std.debug.print("line {any}\n", .{line});
             return err;
         };
     }
