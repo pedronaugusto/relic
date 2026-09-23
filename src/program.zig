@@ -9,10 +9,14 @@
 //! itself, because the library has none of its own.
 //!
 //! A command read from a configuration file — `filter.<name>.clean`,
-//! `credential.helper`, `core.sshCommand`, `gpg.program` — is a command line,
-//! and git runs it the way a shell reads it when it holds anything a shell
-//! would interpret, and directly otherwise; `Invocation.shell` does the same.
-//! A hook is a file and runs directly. Running a command line needs `sh`,
+//! `credential.helper`, `core.sshCommand` — is a command line, and git runs
+//! it the way a shell reads it when it holds anything a shell would
+//! interpret, and directly otherwise; `Invocation.shell` does the same. Not
+//! every program named in the configuration is a command line: git runs
+//! `gpg.program` and its per-format siblings directly, as the path of one
+//! program, so a path with a space in it works and a pipeline does not, and
+//! `gpg.ssh.defaultKeyCommand` is split into words with no shell at all. A
+//! hook is a file and runs directly. Running a command line needs `sh`,
 //! which is every Unix's and which git for Windows installs.
 
 const std = @import("std");

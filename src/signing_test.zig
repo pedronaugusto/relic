@@ -358,3 +358,36 @@ test "the commit porcelain signs as commit.gpgSign says" {
     _ = try commit_mod.commit(&repo, io, .{ .author = who, .committer = who, .message = "m" }, .{ .signing = .{ .programs = k.programs() } });
     try k.repo.exec(io, &.{ "verify-commit", "HEAD" });
 }
+
+test "a signing program is one path, spaces and all, as git runs it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var k = try Keyed.init(gpa, io, .ssh, &.{});
+    defer k.deinit(io);
+    try k.makeKey(io);
+    // A wrapper in a directory whose name a shell would split in two.
+    try k.repo.writeFile(io, "keys/my tools/keygen", "#!/bin/sh\necho used >> \"$(dirname \"$0\")/log\"\nexec ssh-keygen \"$@\"\n");
+    const wrapper_file = try k.repo.dir.openFile(io, "keys/my tools/keygen", .{});
+    try wrapper_file.setPermissions(io, .fromMode(0o755));
+    wrapper_file.close(io);
+    const wrapper = try std.fs.path.join(gpa, &.{ k.home, "my tools", "keygen" });
+    defer gpa.free(wrapper);
+    try k.config(io, "gpg.ssh.program", wrapper);
+
+    try k.repo.writeFile(io, "a.txt", "a\n");
+    try k.repo.exec(io, &.{ "add", "a.txt" });
+    try k.repo.exec(io, &.{ "-c", "commit.gpgSign=true", "commit", "-q", "-m", "signed by git" });
+    const mine = try relicCommit(k, io, "HEAD^{tree}");
+    var hex: [hash.max_hex_len]u8 = undefined;
+    try k.repo.exec(io, &.{ "verify-commit", mine.hex(&hex) });
+    var theirs = try verifyHere(k, io, "HEAD", false);
+    defer theirs.deinit();
+    try testing.expectEqual(@as(u8, 'G'), theirs.letter());
+
+    // git signed, git verified, relic signed and relic verified, each through
+    // the wrapper.
+    const log = try k.repo.readFile(io, "keys/my tools/log");
+    defer gpa.free(log);
+    try testing.expect(std.mem.count(u8, log, "used\n") >= 4);
+}
