@@ -38,6 +38,9 @@ pub const submodule = @import("submodule.zig");
 pub const filter = @import("filter.zig");
 pub const lfs = @import("lfs.zig");
 pub const convert = @import("convert.zig");
+pub const refspec = @import("refspec.zig");
+pub const url = @import("url.zig");
+pub const remote = @import("remote.zig");
 
 const builtin = @import("builtin");
 
