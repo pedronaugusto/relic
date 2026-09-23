@@ -780,7 +780,7 @@ pub const Config = struct {
             if (line.owned) config.gpa.free(line.text);
             line.text = replacement;
             line.owned = true;
-            line.name = parsed.name;
+            // The name is the one already read, and already lower-cased.
             line.value_start = parsed.value_start;
             line.value_end = parsed.value_end;
             line.has_value = parsed.has_value;
@@ -794,11 +794,17 @@ pub const Config = struct {
         text.writer.writeByte('\n') catch return error.OutOfMemory;
         const new_text = try text.toOwnedSlice();
         const parsed = parseVariableLine(new_text) catch unreachable;
+        const name = blk: {
+            errdefer config.gpa.free(new_text);
+            var names = file.names.promote(config.gpa);
+            defer file.names = names.state;
+            break :blk try lowered(names.allocator(), parsed.name);
+        };
         const new_line: Line = .{
             .kind = .variable,
             .text = new_text,
             .owned = true,
-            .name = parsed.name,
+            .name = name,
             .value_start = parsed.value_start,
             .value_end = parsed.value_end,
             .has_value = true,
@@ -1204,7 +1210,9 @@ fn parseLines(gpa: Allocator, names: Allocator, text: []const u8, out: *std.Arra
         try out.append(gpa, .{
             .kind = .variable,
             .text = raw,
-            .name = variable.name,
+            // git lower-cases a variable's name as it reads it, and
+            // `git config --list` prints it so.
+            .name = try lowered(names, variable.name),
             .value_start = variable.value_start,
             .value_end = variable.value_end,
             .has_value = variable.has_value,
@@ -2074,6 +2082,41 @@ test "a value given on the command line is taken as it is, under any subsection"
     try std.testing.expectError(error.InvalidKey, Config.open(gpa, io, .{ .command = &.{"core_x.y=1"} }, .{}));
 }
 
+test "a variable's name reads lower-cased, as git config --list prints it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const text = "[Core]\n\tAutoCRLF = true\n\tIgnoreCase\n[Remote \"Origin\"]\n\tURL = x\n";
+    try git.writeFile(io, "probe.config", text);
+    const theirs = try git.run(io, &.{ "config", "-f", "probe.config", "--list", "-z" });
+    defer gpa.free(theirs);
+
+    var config = try Config.parseText(gpa, text, .local);
+    defer config.deinit();
+    var ours: std.Io.Writer.Allocating = .init(gpa);
+    defer ours.deinit();
+    for (config.entries.items) |entry| {
+        try ours.writer.print("{s}.", .{entry.section});
+        if (entry.has_subsection) try ours.writer.print("{s}.", .{entry.subsection});
+        try ours.writer.writeAll(entry.name);
+        if (entry.value) |v| try ours.writer.print("\n{s}", .{v});
+        try ours.writer.writeByte(0);
+    }
+    try std.testing.expectEqualStrings(theirs, ours.written());
+
+    // A name set here is written as it was given, as git writes it, and
+    // read back lower-cased.
+    config.files.items[0].writable = true;
+    try config.set("core.FileMode", "false");
+    try config.set("core.AUTOcrlf", "input");
+    const rendered = try config.renderWritable();
+    defer gpa.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\tFileMode = false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\tAutoCRLF = input\n") != null);
+    try std.testing.expectEqualStrings("filemode", config.find("core.filemode").?.name);
+}
+
 test "a variable before any section is read as git reads it, under no name a lookup reaches" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -2082,7 +2125,7 @@ test "a variable before any section is read as git reads it, under no name a loo
     const texts = [_][]const u8{
         "x = 1\n[core]\n\ty = 2\n",
         "x\n",
-        "  x = a b # c\n[a]\n\tz = 3\nw = 4\n",
+        "  X = a b # c\n[a]\n\tZ = 3\nw = 4\n",
         "\xEF\xBB\xBFx = 1\n",
     };
     for (texts) |text| {

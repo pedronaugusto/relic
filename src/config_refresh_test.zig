@@ -125,7 +125,7 @@ test "a configuration the repository can no longer be opened with is refused, an
     try git.exec(io, &.{ "config", "-f", ".git/config", "extensions.somethingNew", "true" });
     try git.exec(io, &.{ "config", "-f", ".git/config", "user.name", "Grace" });
     try testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io));
-    try testing.expectEqualStrings("somethingNew", repo.unsupportedSetting());
+    try testing.expectEqualStrings("somethingnew", repo.unsupportedSetting());
     try expectValue(&repo, "user.name", "Ada");
 
     try git.exec(io, &.{ "config", "-f", ".git/config", "--unset", "extensions.somethingNew" });
