@@ -51,6 +51,10 @@ pub const Error = error{
     /// Peeling crossed the maximum annotated-tag chain without reaching a
     /// non-tag object.
     TagDepthExceeded,
+    /// The configuration read again by `refreshConfig` names another hash
+    /// than the one the repository was opened with. Every object name it
+    /// holds would change, so it is opened again rather than refreshed.
+    ObjectFormatChanged,
 } || object.ParseError || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
@@ -96,6 +100,12 @@ pub const Repository = struct {
     common_is_separate: bool,
     /// The hash this repository's object names are written with.
     kind: hash.Kind,
+    /// What the configuration files held at `open`, or when `refreshConfig`
+    /// last found one changed. Nothing reads them again behind the caller's
+    /// back, so another process's `git config` is seen after a
+    /// `refreshConfig` and not before. The operations that read a file
+    /// fresh from the disk are the ones that write it: a submodule's
+    /// settings are edited in `.git/config` as read at that moment.
     config: config_mod.Config,
     odb: odb_mod.Odb,
     refs: refs_mod.Store,
@@ -123,12 +133,16 @@ pub const Repository = struct {
         /// What the object database is told.
         odb: odb_mod.Options = .{},
         /// A system-wide configuration file, if the caller wants one read.
+        /// `refreshConfig` reads it again through the same directory, which
+        /// therefore stays open while the repository does.
         system_config: ?config_mod.Sources.Path = null,
-        /// A per-user configuration file, if the caller wants one read.
+        /// A per-user configuration file, if the caller wants one read. Its
+        /// directory stays open while the repository does, as the system
+        /// one's does.
         global_config: ?config_mod.Sources.Path = null,
         /// The home directory, for `~/` in a config value or an
         /// `includeIf` condition. This package reads no environment, so the
-        /// caller supplies it.
+        /// caller supplies it, and it is borrowed for the repository's life.
         home: ?[]const u8 = null,
         /// Values that beat every file, as `name=value`.
         config_overrides: []const []const u8 = &.{},
@@ -251,45 +265,71 @@ pub const Repository = struct {
 
         // The configuration is read before anything else, because it says
         // which hash the object names are written with.
-        const context: config_mod.Context = .{ .home = options.home };
-        repo.config = try config_mod.Config.open(gpa, io, .{
+        const read = try repo.readConfig(io, .{
             .system = options.system_config,
             .global = options.global_config,
             .local = .{ .dir = repo.common_dir, .sub_path = "config" },
-            .worktree = null,
             .command = options.config_overrides,
-        }, context);
+        }, .{ .home = options.home });
+        repo.config = read.config;
         errdefer repo.config.deinit();
-
-        const version = repo.config.getInt("core.repositoryformatversion", 0) catch 0;
-        if (version < 0 or version > 1) {
-            repo.setUnsupported("core.repositoryFormatVersion");
-            return error.UnsupportedRepositoryVersion;
-        }
-        if (version == 1) try repo.checkExtensions();
-
-        if (repo.config.get("extensions.objectformat")) |text| {
-            repo.kind = hash.Kind.parse(text) catch return error.UnknownObjectFormat;
-        }
-
-        // A worktree-scoped configuration file exists only when the
-        // extension says so, and it is read after the local one.
-        if (repo.config.getBool("extensions.worktreeconfig", false) catch false) {
-            const with_worktree = try config_mod.Config.open(gpa, io, .{
-                .system = options.system_config,
-                .global = options.global_config,
-                .local = .{ .dir = repo.common_dir, .sub_path = "config" },
-                .worktree = .{ .dir = repo.git_dir, .sub_path = "config.worktree" },
-                .command = options.config_overrides,
-            }, context);
-            repo.config.deinit();
-            repo.config = with_worktree;
-        }
+        repo.kind = read.kind;
 
         repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, repo.kind, options.odb);
         errdefer repo.odb.deinit(io);
         repo.refs = .init(gpa, repo.kind, repo.git_dir, repo.common_dir);
         return repo;
+    }
+
+    /// Read `sources` — every one but the worktree's — and check the format
+    /// they name; then, when `extensions.worktreeConfig` is on, read them
+    /// again with `config.worktree` after the local file, which exists only
+    /// when the extension says so and has no say in the format.
+    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context) Error!struct { config: config_mod.Config, kind: hash.Kind } {
+        var config = try config_mod.Config.open(repo.gpa, io, sources, context);
+        errdefer config.deinit();
+        const kind = try repo.checkFormat(&config);
+        if (!(config.getBool("extensions.worktreeconfig", false) catch false)) return .{ .config = config, .kind = kind };
+        var with_worktree = sources;
+        with_worktree.worktree = .{ .dir = repo.git_dir, .sub_path = "config.worktree" };
+        const both = try config_mod.Config.open(repo.gpa, io, with_worktree, context);
+        config.deinit();
+        return .{ .config = both, .kind = kind };
+    }
+
+    /// The format version and the extensions `config` names, checked, and
+    /// the hash it says object names are written with.
+    fn checkFormat(repo: *Repository, config: *const config_mod.Config) Error!hash.Kind {
+        const version = config.getInt("core.repositoryformatversion", 0) catch 0;
+        if (version < 0 or version > 1) {
+            repo.setUnsupported("core.repositoryFormatVersion");
+            return error.UnsupportedRepositoryVersion;
+        }
+        if (version == 1) try repo.checkExtensions(config);
+        const text = config.get("extensions.objectformat") orelse return .sha1;
+        return hash.Kind.parse(text) catch error.UnknownObjectFormat;
+    }
+
+    /// Read the configuration again if a file it came from has changed since
+    /// it was read, and say whether it had.
+    ///
+    /// A daemon holding a repository for days calls this where it wants
+    /// another process's `git config` to count — before an operation, say —
+    /// and it costs a read of each file the configuration came from,
+    /// includes among them, and a parse only when one differs. Edits made
+    /// to `config` in memory and never written are replaced by what the
+    /// files hold. A configuration that no longer passes `open`'s checks is
+    /// that check's error, and the one held before is kept.
+    pub fn refreshConfig(repo: *Repository, io: Io) Error!bool {
+        if (!try repo.config.isStale(io)) return false;
+        var sources = repo.config.sources;
+        sources.worktree = null;
+        var fresh = try repo.readConfig(io, sources, repo.config.context);
+        errdefer fresh.config.deinit();
+        if (fresh.kind != repo.kind) return error.ObjectFormatChanged;
+        repo.config.deinit();
+        repo.config = fresh.config;
+        return true;
     }
 
     fn setUnsupported(repo: *Repository, text: []const u8) void {
@@ -318,8 +358,8 @@ pub const Repository = struct {
         "refstorage",
     };
 
-    fn checkExtensions(repo: *Repository) Error!void {
-        for (repo.config.entries.items) |entry| {
+    fn checkExtensions(repo: *Repository, config: *const config_mod.Config) Error!void {
+        for (config.entries.items) |entry| {
             if (!std.ascii.eqlIgnoreCase(entry.section, "extensions")) continue;
             var known = false;
             for (known_extensions) |name| {

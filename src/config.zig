@@ -241,11 +241,32 @@ pub const Context = struct {
 pub const max_include_depth: u8 = 10;
 
 /// A merged view of every configuration file that applies.
+///
+/// It holds what the files held when they were read. Nothing reads them
+/// again on its own: `isStale` says whether any has changed since, and
+/// `Repository.refreshConfig` is what reads them again.
 pub const Config = struct {
     gpa: Allocator,
     files: std.ArrayList(SourceFile) = .empty,
     entries: std.ArrayList(Entry) = .empty,
     context: Context = .{},
+    /// What `open` was asked to read, kept so the same files can be read
+    /// again. The paths and the command-line values are owned; the
+    /// directories are the caller's, and stay open while the configuration
+    /// may be read again.
+    sources: Sources = .{},
+    /// Every file a read tried, includes among them and the ones that were
+    /// not there, with the bytes each held.
+    read: std.ArrayList(Read) = .empty,
+
+    /// One file a read tried.
+    pub const Read = struct {
+        dir: Io.Dir,
+        /// Owned.
+        sub_path: []const u8,
+        /// What it held, owned; `null` when it was not there.
+        bytes: ?[]const u8,
+    };
 
     /// An empty configuration, which answers `null` to everything.
     pub fn initEmpty(gpa: Allocator) Config {
@@ -257,6 +278,7 @@ pub const Config = struct {
     pub fn open(gpa: Allocator, io: Io, sources: Sources, context: Context) ParseError!Config {
         var config: Config = .{ .gpa = gpa, .context = context };
         errdefer config.deinit();
+        try config.keepSources(sources);
 
         if (sources.system) |p| try config.addFile(io, p, .system, false, 0);
         if (sources.global) |p| try config.addFile(io, p, .global, false, 0);
@@ -293,12 +315,68 @@ pub const Config = struct {
         for (config.files.items) |*f| f.deinit();
         config.files.deinit(config.gpa);
         config.entries.deinit(config.gpa);
+        for (config.read.items) |r| {
+            config.gpa.free(r.sub_path);
+            if (r.bytes) |b| config.gpa.free(b);
+        }
+        config.read.deinit(config.gpa);
+        const paths = [_]?Sources.Path{ config.sources.system, config.sources.global, config.sources.local, config.sources.worktree };
+        for (paths) |maybe| {
+            if (maybe) |path| config.gpa.free(path.sub_path);
+        }
+        for (config.sources.command) |value| config.gpa.free(value);
+        config.gpa.free(config.sources.command);
         config.* = undefined;
+    }
+
+    fn keepSources(config: *Config, sources: Sources) Allocator.Error!void {
+        const gpa = config.gpa;
+        const fields = [_][]const u8{ "system", "global", "local", "worktree" };
+        inline for (fields) |field| {
+            if (@field(sources, field)) |path| {
+                @field(config.sources, field) = .{ .dir = path.dir, .sub_path = try gpa.dupe(u8, path.sub_path) };
+            }
+        }
+        const command = try gpa.alloc([]const u8, sources.command.len);
+        var kept: usize = 0;
+        errdefer {
+            for (command[0..kept]) |value| gpa.free(value);
+            gpa.free(command);
+        }
+        for (sources.command) |value| {
+            command[kept] = try gpa.dupe(u8, value);
+            kept += 1;
+        }
+        config.sources.command = command;
+    }
+
+    /// Whether a file this configuration was read from now holds other
+    /// bytes than it did, or is there when it was not, or is gone. Includes
+    /// count, and so does an include that was not there when it was read.
+    ///
+    /// The files are read and compared, which is exact: a stat cannot see a
+    /// rewrite of the same size inside the file system's timestamp
+    /// resolution, and a configuration is small enough that reading it is
+    /// the cheap part. Nothing is parsed and nothing is kept.
+    pub fn isStale(config: *const Config, io: Io) (Allocator.Error || Io.Dir.ReadFileAllocError)!bool {
+        for (config.read.items) |r| {
+            const now = try fs.readFileAlloc(config.gpa, io, r.dir, r.sub_path, 1 << 24);
+            defer if (now) |b| config.gpa.free(b);
+            const was = r.bytes orelse {
+                if (now != null) return true;
+                continue;
+            };
+            const is = now orelse return true;
+            if (!std.mem.eql(u8, was, is)) return true;
+        }
+        return false;
     }
 
     fn addFile(config: *Config, io: Io, path: Sources.Path, level: Level, writable: bool, depth: u8) ParseError!void {
         if (depth > max_include_depth) return error.IncludeTooDeep;
-        const text = (try fs.readFileAlloc(config.gpa, io, path.dir, path.sub_path, 1 << 24)) orelse return;
+        const read = try fs.readFileAlloc(config.gpa, io, path.dir, path.sub_path, 1 << 24);
+        try config.remember(path, read);
+        const text = read orelse return;
         const owned_path = config.gpa.dupe(u8, path.sub_path) catch |err| {
             config.gpa.free(text);
             return err;
@@ -307,6 +385,16 @@ pub const Config = struct {
         const first_entry = config.entries.items.len;
         try config.addParsedFile(owned_path, text, level, writable);
         try config.followIncludes(io, path.dir, level, first_entry, depth);
+    }
+
+    /// Keep what a read found, so `isStale` can ask again.
+    fn remember(config: *Config, path: Sources.Path, read: ?[]const u8) Allocator.Error!void {
+        errdefer if (read) |b| config.gpa.free(b);
+        const sub_path = try config.gpa.dupe(u8, path.sub_path);
+        errdefer config.gpa.free(sub_path);
+        const bytes = if (read) |b| try config.gpa.dupe(u8, b) else null;
+        errdefer if (bytes) |b| config.gpa.free(b);
+        try config.read.append(config.gpa, .{ .dir = path.dir, .sub_path = sub_path, .bytes = bytes });
     }
 
     fn addParsedFile(config: *Config, path: []const u8, text: []const u8, level: Level, writable: bool) ParseError!void {
