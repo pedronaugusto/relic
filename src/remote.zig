@@ -21,6 +21,7 @@ const refspec = @import("refspec.zig");
 const Config = config_mod.Config;
 const Refspec = refspec.Refspec;
 
+/// Errors from reading a remote's settings.
 pub const Error = error{
     /// A `remote.<name>.fetch` or `.push` value git would refuse. `Remote`
     /// carries the value in `invalid`.

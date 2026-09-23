@@ -38,6 +38,7 @@ const config_mod = @import("config.zig");
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 
+/// Errors from a clone.
 pub const Error = error{
     /// The destination holds something already. git refuses to clone into
     /// a directory that is not empty.

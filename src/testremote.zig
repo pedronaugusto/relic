@@ -169,6 +169,7 @@ pub const HttpServer = struct {
     log: std.ArrayList(u8) = .empty,
     log_mutex: Io.Mutex = .init,
 
+    /// How the server behaves.
     pub const HttpOptions = struct {
         /// Answer 401 unless the request carries this user and password.
         basic_auth: ?struct { user: []const u8, password: []const u8 } = null,

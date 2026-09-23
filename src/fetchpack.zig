@@ -35,6 +35,7 @@ const Oid = hash.Oid;
 const Connection = connection.Connection;
 const Odb = odb_mod.Odb;
 
+/// Errors from asking for a pack and receiving it.
 pub const Error = error{
     /// The server's side-band carried an error. `Connection.message` holds
     /// its text.

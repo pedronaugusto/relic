@@ -27,6 +27,7 @@ pub const agent = "relic/0.3";
 /// Which dialect the server opened in.
 pub const Version = enum { v0, v1, v2 };
 
+/// Errors from the opening message and from listing refs.
 pub const Error = error{
     /// `version <n>` for an `n` this release does not speak.
     UnsupportedProtocolVersion,
@@ -63,6 +64,7 @@ pub const Advertisement = struct {
     /// The hash the server's object names are written with.
     kind: hash.Kind,
 
+    /// Release everything.
     pub fn deinit(adv: *Advertisement) void {
         adv.arena.deinit();
         adv.* = undefined;
@@ -211,6 +213,7 @@ pub const RefList = struct {
     arena: std.heap.ArenaAllocator,
     refs: []const RemoteRef,
 
+    /// Release everything.
     pub fn deinit(list: *RefList) void {
         list.arena.deinit();
         list.* = undefined;
@@ -445,6 +448,7 @@ pub const Fake = struct {
         .close = close,
     };
 
+    /// A connection whose server says `bytes`.
     pub fn init(bytes: []const u8) Fake {
         return .{
             .fixed = .fixed(bytes),

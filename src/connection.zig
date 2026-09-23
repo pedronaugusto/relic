@@ -32,6 +32,7 @@ pub const Service = enum {
     }
 };
 
+/// Errors from a conversation with a remote service.
 pub const Error = error{
     /// The server closed the conversation before the message was over.
     RemoteHungUp,
@@ -61,6 +62,7 @@ pub const Connection = struct {
     message_buffer: [256]u8 = undefined,
     message_len: usize = 0,
 
+    /// What each transport supplies.
     pub const VTable = struct {
         /// The server's first message. Called once, first.
         advertisement: *const fn (context: *anyopaque, connection: *Connection) Error!*Io.Reader,

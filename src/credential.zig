@@ -27,6 +27,7 @@ const config_mod = @import("config.zig");
 const program = @import("program.zig");
 const url_mod = @import("url.zig");
 
+/// Errors from filling, storing or erasing a credential.
 pub const Error = error{
     /// A helper answered `quit=1`, which ends the search.
     CredentialHelperQuit,
@@ -68,6 +69,7 @@ pub const Session = struct {
     username_from_url: bool = false,
     initialised: bool = false,
 
+    /// Forget the credential, clearing its bytes, and release everything.
     pub fn deinit(s: *Session) void {
         s.clear();
         s.* = undefined;

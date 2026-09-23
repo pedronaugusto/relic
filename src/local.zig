@@ -29,6 +29,7 @@ const builtin = @import("builtin");
 
 const Oid = hash.Oid;
 
+/// Errors from a repository on this machine used as a remote.
 pub const Error = error{
     /// The path names no repository.
     NotARepository,
@@ -62,6 +63,7 @@ pub const Remote = struct {
         return .{ .gpa = gpa, .repo = repo };
     }
 
+    /// Close the repository.
     pub fn deinit(r: *Remote, io: Io) void {
         r.repo.deinit(io);
         r.* = undefined;

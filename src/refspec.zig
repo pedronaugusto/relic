@@ -24,6 +24,7 @@ const hash = @import("hash.zig");
 /// the source out.
 pub const Direction = enum { fetch, push };
 
+/// Errors from reading a refspec.
 pub const ParseError = error{
     /// A refspec git's own parser refuses: a pattern on one side only, an
     /// invalid ref name, a negative refspec with a destination or an object

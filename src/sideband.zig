@@ -14,6 +14,7 @@ const Io = std.Io;
 const pktline = @import("pktline.zig");
 const progress_mod = @import("progress.zig");
 
+/// Why a side-band stream stopped.
 pub const Error = error{
     /// Channel 3: the server stopped, and `Demux.message` says why.
     RemoteError,

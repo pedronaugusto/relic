@@ -46,6 +46,7 @@ const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
 const Repository = repo_mod.Repository;
 
+/// Errors from a fetch.
 pub const Error = error{
     /// A refspec the caller named that git would refuse.
     InvalidRefspec,
@@ -124,6 +125,7 @@ pub const Update = struct {
     new: Oid,
     result: Result,
 
+    /// What happened to the ref.
     pub const Result = enum {
         /// The ref did not exist and now does.
         created,
@@ -168,6 +170,7 @@ pub const Outcome = struct {
     pack: ?Oid,
     objects: u32,
 
+    /// Release everything.
     pub fn deinit(outcome: *Outcome) void {
         outcome.arena.deinit();
         outcome.* = undefined;

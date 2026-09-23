@@ -29,6 +29,7 @@ const connection = @import("connection.zig");
 
 const Connection = connection.Connection;
 
+/// Errors from starting a conversation over ssh.
 pub const Error = error{
     /// The caller handed in no `program.Programs`, and ssh is a program.
     ProgramsNotGranted,

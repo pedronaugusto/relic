@@ -26,6 +26,7 @@ const progress_mod = @import("progress.zig");
 const Oid = hash.Oid;
 const Connection = connection.Connection;
 
+/// Errors from sending a push.
 pub const Error = error{
     /// An atomic push to a server that cannot apply one.
     AtomicPushUnsupported,
@@ -80,6 +81,7 @@ pub const Report = struct {
     unpack_message: ?[]const u8,
     refs: []const RefReport,
 
+    /// Release everything.
     pub fn deinit(report: *Report) void {
         report.arena.deinit();
         report.* = undefined;

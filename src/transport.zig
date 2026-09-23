@@ -34,8 +34,10 @@ const progress_mod = @import("progress.zig");
 const Oid = hash.Oid;
 const Connection = connection.Connection;
 
+/// Which service a session talks to.
 pub const Service = connection.Service;
 
+/// Errors from opening and using a remote.
 pub const Error = error{
     /// A transport relic does not have: `git://`, `rsync://`, a remote
     /// helper's `<helper>::<address>`.

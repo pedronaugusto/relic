@@ -24,6 +24,7 @@ pub const Event = union(enum) {
     written: Count,
 };
 
+/// How far along: `done` of `total`.
 pub const Count = struct {
     done: u64,
     total: u64,

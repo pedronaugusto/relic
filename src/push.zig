@@ -45,6 +45,7 @@ const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
 const Repository = repo_mod.Repository;
 
+/// Errors from a push.
 pub const Error = error{
     /// A refspec the caller named that git would refuse.
     InvalidRefspec,
@@ -137,6 +138,7 @@ pub const RefResult = struct {
     /// The remote's reason, for `rejected_by_remote`.
     message: ?[]const u8 = null,
 
+    /// What became of the update.
     pub const Status = enum {
         /// Updated.
         ok,
@@ -179,6 +181,7 @@ pub const Outcome = struct {
     /// Why it did not.
     unpack_message: ?[]const u8 = null,
 
+    /// Release everything.
     pub fn deinit(outcome: *Outcome) void {
         outcome.arena.deinit();
         outcome.* = undefined;

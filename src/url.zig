@@ -24,6 +24,7 @@ pub const Scheme = enum {
     https,
 };
 
+/// Errors from reading a URL.
 pub const ParseError = error{
     /// A scheme relic has no transport for, or the `<helper>::` form, which
     /// runs a remote helper.
@@ -102,11 +103,9 @@ pub const Url = struct {
             }
             return url;
         }
-        if (isLocal(text)) {
-            // `<helper>::<address>` is the remote-helper form; a path cannot
-            // hold `::` before a slash, so this is where it would land.
-            return .{ .scheme = .local, .path = text, .raw = text };
-        }
+        if (isLocal(text)) return .{ .scheme = .local, .path = text, .raw = text };
+        // `<helper>::<address>` is the remote-helper form: a colon before any
+        // slash, and a second one straight after it.
         if (std.mem.indexOf(u8, text, "::")) |_| {
             const colon = std.mem.indexOfScalar(u8, text, ':').?;
             if (text.len > colon + 1 and text[colon + 1] == ':') return error.UnsupportedTransport;

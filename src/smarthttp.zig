@@ -36,6 +36,7 @@ const credential = @import("credential.zig");
 const Connection = connection.Connection;
 const Service = connection.Service;
 
+/// Errors from a conversation over smart HTTP.
 pub const Error = error{
     /// The server asked for credentials and none were accepted:
     /// `Connection.message` holds the status.

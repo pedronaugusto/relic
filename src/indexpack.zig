@@ -38,6 +38,7 @@ const Oid = hash.Oid;
 const Kind = hash.Kind;
 const Progress = progress_mod.Progress;
 
+/// Errors from receiving a pack.
 pub const Error = error{
     /// The stream does not begin `PACK`.
     NotAPack,

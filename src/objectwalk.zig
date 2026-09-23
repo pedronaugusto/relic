@@ -29,6 +29,7 @@ const pack = @import("pack.zig");
 const Oid = hash.Oid;
 const Odb = odb_mod.Odb;
 
+/// Errors from walking objects.
 pub const Error = error{
     /// An object below a tip is not in the database. `missing_out` names
     /// it.
@@ -113,9 +114,7 @@ pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: 
     var it = walk.nodes.iterator();
     while (it.next()) |kv| {
         const node = kv.value_ptr;
-        if (node.flags & flag_uninteresting == 0) continue;
-        if (node.flags & flag_popped == 0 and node.flags & flag_seen != 0 and !node.loaded) continue;
-        if (!node.loaded) continue;
+        if (node.flags & flag_uninteresting == 0 or !node.loaded) continue;
         try walk.markTreeHad(node.tree);
     }
 
