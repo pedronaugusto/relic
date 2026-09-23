@@ -1419,6 +1419,7 @@ pub const PathWrite = struct {
     /// beside the marked-up file.
     index: bool = true,
 
+    /// A mode and a blob's name.
     pub const Blob = struct { mode: object.Mode, oid: Oid };
 };
 

@@ -45,6 +45,7 @@ pub const BlobOptions = struct {
     /// are.
     labels: Labels = .{},
 
+    /// The three names, as `git merge-file -L` takes them.
     pub const Labels = struct {
         ours: []const u8 = "ours",
         base: []const u8 = "base",

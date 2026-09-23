@@ -597,6 +597,7 @@ pub const Signed = struct {
     payload: []u8,
     signature: []u8,
 
+    /// Release both.
     pub fn deinit(s: *Signed, gpa: Allocator) void {
         gpa.free(s.payload);
         gpa.free(s.signature);
