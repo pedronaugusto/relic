@@ -38,9 +38,11 @@ fn expectSameAsGit(gpa: std.mem.Allocator, io: Io, autocrlf: []const u8, files: 
     const theirs_tree = try ft.treeOf(gpa, io, &twin.theirs);
     const ours_tree = try ft.relicAdd(gpa, io, twin.ours.dir, .{});
     if (!ours_tree.eql(theirs_tree)) {
-        const listing = try twin.theirs.run(io, &.{ "ls-files", "--eol" });
+        const listing = try twin.theirs.run(io, &.{ "ls-files", "--eol", "-s" });
         defer gpa.free(listing);
-        std.debug.print("core.autocrlf={s}: relic's tree is not git's\n{s}", .{ autocrlf, listing });
+        const ours = try twin.ours.run(io, &.{ "ls-files", "-s" });
+        defer gpa.free(ours);
+        std.debug.print("core.autocrlf={s}: relic's tree is not git's\ngit:\n{s}relic:\n{s}", .{ autocrlf, listing, ours });
         return error.TestUnexpectedResult;
     }
 
@@ -132,5 +134,45 @@ test "a file whose indexed version has CRLF endings keeps them where the content
             std.debug.print("core.autocrlf={s} attributes {s}: relic's tree is not git's\n", .{ case[0], case[1] });
             return error.TestUnexpectedResult;
         }
+    }
+}
+
+test "the text rule counts the whole file, and a checkout leaves a file with a carriage return alone" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const past_window: [9000]u8 = @splat('a');
+    const nul_late = "x\r\n" ++ past_window ++ "\x00\r\n";
+    const cr_late = "x\r\n" ++ past_window ++ "q\rz\r\n";
+    const files = [_][2][]const u8{
+        .{ ".gitattributes", "* text=auto eol=crlf\n" },
+        // Binary for a byte past the first 8000.
+        .{ "zero.txt", nul_late },
+        .{ "cr.txt", cr_late },
+        // Text, the end-of-file mark not counted against it.
+        .{ "eof.txt", "ab\r\n\x1a" },
+        .{ "plain.txt", "one\r\ntwo\r\n" },
+    };
+    try expectSameAsGit(gpa, io, "false", &files);
+
+    // Out of the repository: a blob with a CRLF and a bare LF is written
+    // exactly as it is stored, and one with only bare LFs is converted.
+    var twin = try ft.Twin.init(gpa, io, &.{}, &.{
+        .{ "mixed.txt", "a\r\nb\n" },
+        .{ "bare.txt", "a\nb\n" },
+        .{ "eof.txt", "ab\n\x1a" },
+    });
+    defer twin.deinit();
+    for ([_]*testgit.Repo{ &twin.ours, &twin.theirs }) |r| {
+        try r.exec(io, &.{ "add", "-A" });
+        try r.writeFile(io, ".gitattributes", "*.txt text=auto eol=crlf\n");
+        try r.exec(io, &.{ "add", ".gitattributes" });
+    }
+    const tree = try ft.treeOf(gpa, io, &twin.ours);
+    try ft.emptyWorktree(io, twin.theirs.dir);
+    try twin.theirs.exec(io, &.{ "checkout", "--", "." });
+    try ft.emptyWorktree(io, twin.ours.dir);
+    _ = try ft.relicCheckout(gpa, io, twin.ours.dir, tree, .{});
+    for ([_][]const u8{ "mixed.txt", "bare.txt", "eof.txt" }) |path| {
+        try ft.expectSameFile(gpa, io, &twin.ours, &twin.theirs, path);
     }
 }

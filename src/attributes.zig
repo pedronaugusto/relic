@@ -487,7 +487,7 @@ pub fn isBinaryForDiff(bytes: []const u8) bool {
     return std.mem.indexOfScalar(u8, window, 0) != null;
 }
 
-/// How many bytes either binary rule looks at.
+/// How many bytes the diff rule looks at.
 pub const first_few_bytes = 8000;
 
 /// What `gatherStats` counted.
@@ -500,16 +500,17 @@ pub const TextStat = struct {
     nul: bool = false,
 };
 
-/// Count the things git's check-in rule looks at, over the first 8000 bytes.
+/// Count the things git's check-in rule looks at, over the whole content:
+/// unlike the diff rule, this one has no window, and a NUL or a lone
+/// carriage return anywhere makes a file binary.
 pub fn gatherStats(bytes: []const u8) TextStat {
     var stat: TextStat = .{};
-    const window = bytes[0..@min(bytes.len, first_few_bytes)];
     var i: usize = 0;
-    while (i < window.len) : (i += 1) {
-        const c = window[i];
+    while (i < bytes.len) : (i += 1) {
+        const c = bytes[i];
         switch (c) {
             '\r' => {
-                if (i + 1 < window.len and window[i + 1] == '\n') {
+                if (i + 1 < bytes.len and bytes[i + 1] == '\n') {
                     stat.crlf += 1;
                     i += 1;
                 } else {
@@ -530,6 +531,9 @@ pub fn gatherStats(bytes: []const u8) TextStat {
             else => stat.printable += 1,
         }
     }
+    // A ^Z ending the file is the end-of-file mark some editors write, and
+    // git does not count it against the file.
+    if (bytes.len > 0 and bytes[bytes.len - 1] == 0x1a) stat.nonprintable -= 1;
     return stat;
 }
 
@@ -540,7 +544,10 @@ pub fn gatherStats(bytes: []const u8) TextStat {
 /// than the diff rule in one direction and looser in another, and using the
 /// wrong one writes a blob git would not write.
 pub fn isBinaryForCheckIn(bytes: []const u8) bool {
-    const stat = gatherStats(bytes);
+    return statsAreBinary(gatherStats(bytes));
+}
+
+fn statsAreBinary(stat: TextStat) bool {
     if (stat.lonecr != 0) return true;
     if (stat.nul) return true;
     if ((stat.printable >> 7) < stat.nonprintable) return true;
@@ -725,7 +732,12 @@ pub fn toGitStored(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreS
 pub fn toWorktree(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreSettings) Allocator.Error!Conversion {
     const action = crlfAction(a, core);
     if (!action.writesCrlf(core)) return .{ .bytes = bytes, .owned = false };
-    if (action.isAuto() and isBinaryForCheckIn(bytes)) return .{ .bytes = bytes, .owned = false };
+    if (action.isAuto()) {
+        // A file that already has a carriage return in it is left as it
+        // is, CRLF or not: the content deciding means not guessing twice.
+        const stat = gatherStats(bytes);
+        if (stat.lonecr != 0 or stat.crlf != 0 or statsAreBinary(stat)) return .{ .bytes = bytes, .owned = false };
+    }
     if (std.mem.indexOfScalar(u8, bytes, '\n') == null) return .{ .bytes = bytes, .owned = false };
 
     var out = try std.ArrayList(u8).initCapacity(gpa, bytes.len + bytes.len / 16 + 8);
