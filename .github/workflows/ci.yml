@@ -15,11 +15,18 @@ permissions:
 
 env:
   ZIG_VERSION: 0.16.0
+  # The git the Linux gate builds. The suite's reftable fixtures need 2.45
+  # and `git refs verify` 2.47, and the runners ship older gits; a pinned
+  # release keeps the gate's fixtures from moving under it.
+  GIT_VERSION: 2.55.0
 
 jobs:
-  # The whole suite in every build mode, on all three platforms. The suite
-  # generates its fixtures with whatever git the runner has, so this is also
-  # the git version matrix: three images, three gits.
+  # The whole suite in every build mode, on all three platforms, with a git
+  # recent enough for every fixture: a pinned release built on Linux,
+  # Homebrew's current one on macOS, Chocolatey's current Git for Windows.
+  # The job refuses to run the suite on anything older than 2.47, because
+  # a fixture that needs a newer git skips rather than fails, and a gate
+  # that skips is not one. The floor is the old-git job below.
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -35,8 +42,49 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: git version
-        run: git --version
+      - name: Cache git (Linux)
+        if: runner.os == 'Linux'
+        id: git-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/git
+          key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build git (Linux)
+        if: runner.os == 'Linux' && steps.git-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev
+          curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /tmp/git.tar.xz
+          mkdir -p /tmp/git-src && tar -xJf /tmp/git.tar.xz -C /tmp/git-src --strip-components=1
+          make -C /tmp/git-src -j"$(nproc)" NO_TCLTK=1 NO_GETTEXT=1 prefix=/opt/git all
+          sudo make -C /tmp/git-src NO_TCLTK=1 NO_GETTEXT=1 prefix=/opt/git install
+
+      - name: Use the built git (Linux)
+        if: runner.os == 'Linux'
+        run: echo /opt/git/bin >> "$GITHUB_PATH"
+
+      - name: Install git (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install git || brew upgrade git
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      - name: Install git (Windows)
+        if: runner.os == 'Windows'
+        run: choco upgrade git -y --no-progress
+
+      - name: git version, at least 2.47
+        shell: bash
+        run: |
+          git --version
+          version=$(git --version | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1 \2/')
+          set -- $version
+          if [ "$1" -lt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -lt 47 ]; }; then
+            echo "git $1.$2 is older than the 2.47 every fixture needs" >&2
+            exit 1
+          fi
 
       - name: Formatting
         run: zig fmt --check src examples build.zig build.zig.zon
