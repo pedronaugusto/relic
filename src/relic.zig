@@ -55,6 +55,7 @@ pub const credential = @import("credential.zig");
 pub const smarthttp = @import("smarthttp.zig");
 pub const transport = @import("transport.zig");
 pub const fetch = @import("fetch.zig");
+pub const clone = @import("clone.zig");
 
 const builtin = @import("builtin");
 
