@@ -38,8 +38,6 @@ pub const ParseError = error{
     InvalidFetchRecurse,
     /// `shallow` is not a boolean.
     InvalidShallow,
-    /// A subsection name ending in an escaping backslash.
-    MalformedSectionHeader,
 } || config_mod.ParseError;
 
 /// How a submodule is brought to the commit its superproject records.
@@ -178,7 +176,7 @@ pub const Gitmodules = struct {
             else
                 null;
 
-            const name = try unescapeSubsection(arena, entry.subsection);
+            const name = try arena.dupe(u8, entry.subsection);
             if (!checkName(name)) {
                 try refused.append(arena, .{ .name = name, .key = key, .value = value, .reason = .suspicious_name });
                 continue;
@@ -266,21 +264,6 @@ fn parseFetchRecurse(value: ?[]const u8) ParseError!FetchRecurse {
     } else |_| {}
     if (std.mem.eql(u8, v, "on-demand")) return .on_demand;
     return error.InvalidFetchRecurse;
-}
-
-/// A quoted subsection's escapes: a backslash takes the next byte as it is.
-fn unescapeSubsection(arena: Allocator, raw: []const u8) ParseError![]const u8 {
-    if (std.mem.indexOfScalar(u8, raw, '\\') == null) return arena.dupe(u8, raw);
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < raw.len) : (i += 1) {
-        if (raw[i] == '\\') {
-            i += 1;
-            if (i == raw.len) return error.MalformedSectionHeader;
-        }
-        try out.append(arena, raw[i]);
-    }
-    return out.items;
 }
 
 /// git's `looks_like_command_line_option`.

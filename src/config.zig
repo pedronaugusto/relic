@@ -16,8 +16,10 @@ const fs = @import("fs.zig");
 
 /// Errors from reading a configuration file.
 pub const ParseError = error{
-    /// A `[` with no `]`, or a section name holding a character git does not
-    /// allow.
+    /// A section header git refuses: a `[` with no `]`, a name holding a
+    /// character other than a letter, a digit, `-` or `.`, a space that is
+    /// not followed by a quoted subsection, anything but `]` after the
+    /// closing quote, or a line break inside the quotes.
     MalformedSectionHeader,
     /// A name holding a character that is not a letter, a digit or `-`, or
     /// one that does not begin with a letter.
@@ -28,6 +30,9 @@ pub const ParseError = error{
     VariableOutsideSection,
     /// `include.path` or an `includeIf` nested deeper than the cap.
     IncludeTooDeep,
+    /// A value given as `Sources.command` under a name git refuses; see
+    /// `checkKey`.
+    InvalidKey,
 } || Allocator.Error || Io.Dir.ReadFileAllocError;
 
 /// Errors from asking for a value in a particular shape.
@@ -49,10 +54,18 @@ const Line = struct {
     /// text or owned by the file after an edit.
     text: []const u8,
     owned: bool = false,
-    /// For a `.section` line: the normalised section and subsection.
+    /// For a `.section` line: the section, lower-cased, and the subsection
+    /// as git reads it — a quoted one with its escapes undone, a dotted one
+    /// lower-cased. Borrowed from the text or from the file's `names`.
     section: []const u8 = "",
     subsection: []const u8 = "",
     has_subsection: bool = false,
+    /// For a `.section` line: the name as spelled before any space, and
+    /// whether a quoted subsection followed it. `[Section.Sub]` is spelled
+    /// `Section.Sub` and is not quoted; `[remote "origin"]` is spelled
+    /// `remote` and is.
+    spelled: []const u8 = "",
+    quoted: bool = false,
     /// For a `.variable` line: the normalised name, and the span of the
     /// value inside `text`.
     name: []const u8 = "",
@@ -62,6 +75,41 @@ const Line = struct {
     has_value: bool = false,
 
     const Kind = enum { section, variable, other };
+
+    /// Whether this header is `[section.sub]`, git's older spelling, whose
+    /// subsection git lower-cases on reading and matches without case when
+    /// it looks for the section to add a value to.
+    fn legacy(line: Line) bool {
+        return line.has_subsection and !line.quoted;
+    }
+
+    /// Whether a new value of `split` belongs in the section this header
+    /// opens: git's rule when it looks for where to add one.
+    fn opensSectionOf(line: Line, split: FullName) bool {
+        if (!std.ascii.eqlIgnoreCase(line.section, split.section)) return false;
+        const sub = split.subsection orelse return !line.has_subsection;
+        if (!line.has_subsection) return false;
+        if (line.legacy()) return std.ascii.eqlIgnoreCase(line.subsection, sub);
+        return std.mem.eql(u8, line.subsection, sub);
+    }
+
+    /// Whether this header is the one `git config --remove-section` names
+    /// with `full`: the header as spelled, compared byte for byte, with a
+    /// quoted subsection's escapes undone. Neither the section's case nor
+    /// the dotted spelling's is folded, which is git's own comparison.
+    fn spelledAs(line: Line, full: []const u8) bool {
+        if (!line.quoted) return std.mem.eql(u8, line.spelled, full);
+        if (!std.mem.startsWith(u8, full, line.spelled)) return false;
+        const rest = full[line.spelled.len..];
+        if (rest.len == 0 or rest[0] != '.') return false;
+        // A dotted name before the quotes, `[a.b "c"]`, reads as the
+        // subsection `b.c`: the quoted part is what follows the dotted one.
+        const quoted_part = if (std.mem.indexOfScalar(u8, line.spelled, '.')) |dot|
+            line.subsection[line.spelled.len - dot ..]
+        else
+            line.subsection;
+        return std.mem.eql(u8, rest[1..], quoted_part);
+    }
 };
 
 /// Where a value came from, which is what decides precedence when two files
@@ -90,6 +138,9 @@ pub const SourceFile = struct {
     lines: std.ArrayList(Line),
     /// Whether this file is one `set` may write to.
     writable: bool,
+    /// Section and subsection names that are not a slice of a line as
+    /// written: a lower-cased section, a subsection with its escapes undone.
+    names: std.heap.ArenaAllocator.State = .{},
 
     /// Release the file.
     pub fn deinit(f: *SourceFile) void {
@@ -97,6 +148,8 @@ pub const SourceFile = struct {
             if (line.owned) f.gpa.free(line.text);
         }
         f.lines.deinit(f.gpa);
+        var names = f.names.promote(f.gpa);
+        names.deinit();
         f.gpa.free(f.text);
         f.gpa.free(f.path);
         f.* = undefined;
@@ -117,8 +170,14 @@ pub const SourceFile = struct {
 pub const Entry = struct {
     /// Lower-case.
     section: []const u8,
-    /// Case-sensitive, empty when there is none.
+    /// Case-sensitive, with a quoted subsection's escapes undone. Empty when
+    /// there is none, and also for `[section ""]`, which `has_subsection`
+    /// tells apart.
     subsection: []const u8,
+    /// Whether the header named a subsection at all. git reads
+    /// `[section ""]` as a subsection that is empty, and `section..name`
+    /// is the only full name that reaches it.
+    has_subsection: bool,
     /// Lower-case.
     name: []const u8,
     /// `null` for a bare name, which git reads as true.
@@ -137,8 +196,8 @@ pub const Entry = struct {
     pub fn matches(e: Entry, section: []const u8, subsection: ?[]const u8, name: []const u8) bool {
         if (!std.ascii.eqlIgnoreCase(e.section, section)) return false;
         if (!std.ascii.eqlIgnoreCase(e.name, name)) return false;
-        if (subsection) |sub| return std.mem.eql(u8, e.subsection, sub);
-        return e.subsection.len == 0;
+        if (subsection) |sub| return e.has_subsection and std.mem.eql(u8, e.subsection, sub);
+        return !e.has_subsection;
     }
 };
 
@@ -260,50 +319,61 @@ pub const Config = struct {
             .writable = writable,
         };
         errdefer file.deinit();
-        try parseLines(config.gpa, text, &file.lines);
+        {
+            var names = file.names.promote(config.gpa);
+            defer file.names = names.state;
+            try parseLines(config.gpa, names.allocator(), text, &file.lines);
+        }
+        try config.files.append(config.gpa, file);
+        errdefer _ = config.files.pop();
+        try config.indexFile(@intCast(config.files.items.len - 1));
+    }
 
-        const file_index: u32 = @intCast(config.files.items.len);
+    fn indexFile(config: *Config, file_index: u32) Allocator.Error!void {
+        const file = &config.files.items[file_index];
         var section: []const u8 = "";
         var subsection: []const u8 = "";
+        var has_subsection = false;
         for (file.lines.items, 0..) |line, i| {
             switch (line.kind) {
                 .section => {
                     section = line.section;
                     subsection = line.subsection;
+                    has_subsection = line.has_subsection;
                 },
                 .variable => try config.entries.append(config.gpa, .{
                     .section = section,
                     .subsection = subsection,
+                    .has_subsection = has_subsection,
                     .name = line.name,
                     .value = if (line.has_value) line.text[line.value_start..line.value_end] else null,
-                    .level = level,
+                    .level = file.level,
                     .file_index = file_index,
                     .line_index = @intCast(i),
                 }),
                 .other => {},
             }
         }
-        try config.files.append(config.gpa, file);
     }
 
     fn addCommandValues(config: *Config, values: []const []const u8) ParseError!void {
         // A command-line value is `section.name=value` or
         // `section.sub.name=value`; it is turned into a one-line file so it
-        // goes through exactly the same parser as everything else.
+        // goes through exactly the same parser as everything else. The value
+        // is taken as it is, the way `git -c` takes it, so it is written
+        // with the quoting a file would need to hold it.
         var text: std.Io.Writer.Allocating = .init(config.gpa);
         errdefer text.deinit();
         for (values) |pair| {
             const eq = std.mem.indexOfScalar(u8, pair, '=');
             const full = if (eq) |at| pair[0..at] else pair;
             const value = if (eq) |at| pair[at + 1 ..] else null;
-            const split = splitFullName(full) orelse continue;
-            if (split.subsection) |sub| {
-                text.writer.print("[{s} \"{s}\"]\n", .{ split.section, sub }) catch return error.OutOfMemory;
-            } else {
-                text.writer.print("[{s}]\n", .{split.section}) catch return error.OutOfMemory;
-            }
+            const split = try checkKey(full);
+            writeSectionHeader(&text.writer, split) catch return error.OutOfMemory;
             if (value) |v| {
-                text.writer.print("\t{s} = {s}\n", .{ split.name, v }) catch return error.OutOfMemory;
+                text.writer.print("\t{s} = ", .{split.name}) catch return error.OutOfMemory;
+                writeValue(&text.writer, v) catch return error.OutOfMemory;
+                text.writer.writeByte('\n') catch return error.OutOfMemory;
             } else {
                 text.writer.print("\t{s}\n", .{split.name}) catch return error.OutOfMemory;
             }
@@ -540,6 +610,8 @@ pub const Config = struct {
     pub const SetError = error{
         /// No source was opened that may be written to.
         NoWritableSource,
+        /// A name git refuses to write; see `checkKey`.
+        InvalidKey,
     } || Allocator.Error || fs.LockError || fs.CommitError;
 
     /// Set `full_name` to `value` in the writable file, keeping every
@@ -565,32 +637,34 @@ pub const Config = struct {
     }
 
     fn setInFile(config: *Config, file_index: u32, full_name: []const u8, value: []const u8) SetError!void {
-        const split = splitFullName(full_name) orelse return error.NoWritableSource;
+        const split = try checkKey(full_name);
         const file = &config.files.items[file_index];
 
         // The last matching line wins on read, so that is the one to change.
+        // A new value goes where git puts one: after the last variable of
+        // the last section it belongs in, or straight after that section's
+        // header when it has none. A comment or a blank line does not move
+        // that point, which keeps a trailing blank line where the person who
+        // wrote it put it.
         var target: ?usize = null;
-        var section_end: ?usize = null;
-        var section: []const u8 = "";
-        var subsection: []const u8 = "";
+        var insert_at: ?usize = null;
+        var in_section = false;
+        var same_key_section = false;
         for (file.lines.items, 0..) |line, i| {
             switch (line.kind) {
                 .section => {
-                    section = line.section;
-                    subsection = line.subsection;
+                    in_section = line.opensSectionOf(split);
+                    if (in_section) insert_at = i + 1;
+                    same_key_section = in_section and
+                        std.mem.eql(u8, line.subsection, split.subsection orelse "");
                 },
                 .variable => {
-                    if (std.ascii.eqlIgnoreCase(section, split.section) and
-                        std.mem.eql(u8, subsection, split.subsection orelse ""))
-                    {
-                        section_end = i + 1;
-                        if (std.ascii.eqlIgnoreCase(line.name, split.name)) target = i;
-                    }
+                    if (!in_section) continue;
+                    insert_at = i + 1;
+                    // `[a.b]` takes a new `a.B.x` as git does, but only an
+                    // exact subsection is the same key.
+                    if (same_key_section and std.ascii.eqlIgnoreCase(line.name, split.name)) target = i;
                 },
-                // A comment or a blank line does not move the insertion
-                // point: git appends a new variable after the section's last
-                // *variable*, which keeps a trailing blank line where the
-                // person who wrote it put it.
                 .other => {},
             }
         }
@@ -607,9 +681,7 @@ pub const Config = struct {
                 })
             else blk: {
                 var name_start: usize = 0;
-                while (name_start < line.text.len and (line.text[name_start] == ' ' or line.text[name_start] == '\t')) {
-                    name_start += 1;
-                }
+                while (name_start < line.text.len and isSpace(line.text[name_start])) name_start += 1;
                 const name_end = name_start + line.name.len;
                 break :blk try std.fmt.allocPrint(config.gpa, "{s} = {s}{s}", .{
                     line.text[0..name_end],
@@ -625,42 +697,79 @@ pub const Config = struct {
             line.value_start = parsed.value_start;
             line.value_end = parsed.value_end;
             line.has_value = parsed.has_value;
-        } else {
-            const escaped = try escapeValue(config.gpa, value);
-            defer config.gpa.free(escaped);
-            const text = try std.fmt.allocPrint(config.gpa, "\t{s} = {s}\n", .{ split.name, escaped });
-            errdefer config.gpa.free(text);
-            const value_start = 1 + split.name.len + 3;
-            const new_line: Line = .{
-                .kind = .variable,
-                .text = text,
-                .owned = true,
-                .name = text[1 .. 1 + split.name.len],
-                .value_start = value_start,
-                .value_end = text.len - 1,
-                .has_value = true,
-            };
-            if (section_end) |at| {
-                try file.lines.insert(config.gpa, at, new_line);
-            } else {
-                const header = if (split.subsection) |sub|
-                    try std.fmt.allocPrint(config.gpa, "[{s} \"{s}\"]\n", .{ split.section, sub })
-                else
-                    try std.fmt.allocPrint(config.gpa, "[{s}]\n", .{split.section});
-                errdefer config.gpa.free(header);
-                const parsed_header = parseSectionHeader(std.mem.trim(u8, header, " \t\r\n")) catch unreachable;
-                try file.lines.append(config.gpa, .{
-                    .kind = .section,
-                    .text = header,
-                    .owned = true,
-                    .section = parsed_header.section,
-                    .subsection = parsed_header.subsection orelse "",
-                    .has_subsection = parsed_header.subsection != null,
-                });
-                try file.lines.append(config.gpa, new_line);
-            }
+            return config.reindex();
         }
-        try config.reindex();
+
+        var text: std.Io.Writer.Allocating = .init(config.gpa);
+        errdefer text.deinit();
+        text.writer.print("\t{s} = ", .{split.name}) catch return error.OutOfMemory;
+        writeValue(&text.writer, value) catch return error.OutOfMemory;
+        text.writer.writeByte('\n') catch return error.OutOfMemory;
+        const new_text = try text.toOwnedSlice();
+        const parsed = parseVariableLine(new_text) catch unreachable;
+        const new_line: Line = .{
+            .kind = .variable,
+            .text = new_text,
+            .owned = true,
+            .name = parsed.name,
+            .value_start = parsed.value_start,
+            .value_end = parsed.value_end,
+            .has_value = true,
+        };
+        {
+            errdefer config.gpa.free(new_text);
+            try file.lines.ensureUnusedCapacity(config.gpa, 3);
+        }
+        const at = insert_at orelse file.lines.items.len;
+        // git ends the line before with a newline when it has none, which a
+        // header followed by a comment, or a file's last line, may lack.
+        if (at > 0 and !std.mem.endsWith(u8, file.lines.items[at - 1].text, "\n")) {
+            file.lines.insertAssumeCapacity(at, .{ .kind = .other, .text = "\n" });
+            return config.insertNew(file, at + 1, split, insert_at != null, new_line);
+        }
+        return config.insertNew(file, at, split, insert_at != null, new_line);
+    }
+
+    /// Put a new variable line at `at`, under a new header when no section
+    /// it belongs in exists. Capacity for both is reserved.
+    fn insertNew(config: *Config, file: *SourceFile, at: usize, split: FullName, section_exists: bool, new_line: Line) SetError!void {
+        if (section_exists) {
+            file.lines.insertAssumeCapacity(at, new_line);
+            return config.reindex();
+        }
+        var header_text: std.Io.Writer.Allocating = .init(config.gpa);
+        defer header_text.deinit();
+        writeSectionHeader(&header_text.writer, split) catch {
+            config.gpa.free(new_line.text);
+            return error.OutOfMemory;
+        };
+        const header = header_text.toOwnedSlice() catch {
+            config.gpa.free(new_line.text);
+            return error.OutOfMemory;
+        };
+        var names = file.names.promote(config.gpa);
+        defer file.names = names.state;
+        const parsed = parseSectionHeader(names.allocator(), header, 0) catch |err| {
+            config.gpa.free(header);
+            config.gpa.free(new_line.text);
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                // `checkKey` let through only what writes as a header.
+                else => unreachable,
+            };
+        };
+        file.lines.appendAssumeCapacity(.{
+            .kind = .section,
+            .text = header,
+            .owned = true,
+            .section = parsed.section,
+            .subsection = parsed.subsection,
+            .has_subsection = parsed.has_subsection,
+            .spelled = parsed.spelled,
+            .quoted = parsed.quoted,
+        });
+        file.lines.appendAssumeCapacity(new_line);
+        return config.reindex();
     }
 
     /// Remove every setting of `full_name` from the writable file, keeping
@@ -677,24 +786,27 @@ pub const Config = struct {
     }
 
     fn unsetInFile(config: *Config, file_index: u32, full_name: []const u8) SetError!void {
-        const split = splitFullName(full_name) orelse return error.NoWritableSource;
+        const split = try checkKey(full_name);
         const file = &config.files.items[file_index];
 
-        var section: []const u8 = "";
-        var subsection: []const u8 = "";
+        var section: Line = .{ .kind = .other, .text = "" };
         var i: usize = 0;
         while (i < file.lines.items.len) {
             const line = file.lines.items[i];
             switch (line.kind) {
-                .section => {
-                    section = line.section;
-                    subsection = line.subsection;
-                },
+                .section => section = line,
                 .variable => {
-                    if (std.ascii.eqlIgnoreCase(section, split.section) and
-                        std.mem.eql(u8, subsection, split.subsection orelse "") and
-                        std.ascii.eqlIgnoreCase(line.name, split.name))
-                    {
+                    const entry: Entry = .{
+                        .section = section.section,
+                        .subsection = section.subsection,
+                        .has_subsection = section.has_subsection,
+                        .name = line.name,
+                        .value = null,
+                        .level = file.level,
+                        .file_index = file_index,
+                        .line_index = @intCast(i),
+                    };
+                    if (section.kind == .section and entry.matches(split.section, split.subsection, split.name)) {
                         if (line.owned) config.gpa.free(line.text);
                         _ = file.lines.orderedRemove(i);
                         continue;
@@ -711,19 +823,24 @@ pub const Config = struct {
     /// read at `level`, with every line up to the next section header —
     /// comments included, which is what `git config --remove-section`
     /// takes. Returns whether there was one.
+    ///
+    /// The header is matched as git matches it: as spelled, so `Submodule`
+    /// is not `submodule` here although it is when a value is read, and
+    /// `[a.b]` answers to the section `a` with the subsection `b`.
     pub fn removeSectionIn(config: *Config, level: Level, section: []const u8, subsection: ?[]const u8) SetError!bool {
         const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
         const file = &config.files.items[file_index];
+        const full = if (subsection) |sub|
+            try std.fmt.allocPrint(config.gpa, "{s}.{s}", .{ section, sub })
+        else
+            try config.gpa.dupe(u8, section);
+        defer config.gpa.free(full);
         var removing = false;
         var removed = false;
         var i: usize = 0;
         while (i < file.lines.items.len) {
             const line = file.lines.items[i];
-            if (line.kind == .section) {
-                removing = std.ascii.eqlIgnoreCase(line.section, section) and
-                    line.has_subsection == (subsection != null) and
-                    std.mem.eql(u8, line.subsection, subsection orelse "");
-            }
+            if (line.kind == .section) removing = line.spelledAs(full);
             if (removing) {
                 if (line.owned) config.gpa.free(line.text);
                 _ = file.lines.orderedRemove(i);
@@ -753,28 +870,7 @@ pub const Config = struct {
 
     fn reindex(config: *Config) Allocator.Error!void {
         config.entries.clearRetainingCapacity();
-        for (config.files.items, 0..) |*file, file_index| {
-            var section: []const u8 = "";
-            var subsection: []const u8 = "";
-            for (file.lines.items, 0..) |line, i| {
-                switch (line.kind) {
-                    .section => {
-                        section = line.section;
-                        subsection = line.subsection;
-                    },
-                    .variable => try config.entries.append(config.gpa, .{
-                        .section = section,
-                        .subsection = subsection,
-                        .name = line.name,
-                        .value = if (line.has_value) line.text[line.value_start..line.value_end] else null,
-                        .level = file.level,
-                        .file_index = @intCast(file_index),
-                        .line_index = @intCast(i),
-                    }),
-                    .other => {},
-                }
-            }
-        }
+        for (0..config.files.items.len) |file_index| try config.indexFile(@intCast(file_index));
     }
 
     /// Write the edited file back through `<path>.lock`.
@@ -866,72 +962,152 @@ pub fn parseInt(raw: []const u8) ValueError!i64 {
     return std.math.mul(i64, base, multiplier) catch error.NotAnInteger;
 }
 
-/// Quote a value if it needs quoting, the way git writes one. The result is
-/// the caller's.
-pub fn escapeValue(gpa: Allocator, value: []const u8) Allocator.Error![]u8 {
-    var needs_quotes = false;
+/// Check `full` the way git checks a name before it writes one, and split
+/// it.
+///
+/// git's `git_config_parse_key`: the variable is what follows the last dot
+/// and must begin with a letter; it and the section hold only letters,
+/// digits and `-`; the subsection between them may hold anything but a line
+/// break, which no header can carry. A section may be empty only when a
+/// subsection follows it, as in `.sub.name`.
+pub fn checkKey(full: []const u8) error{InvalidKey}!FullName {
+    const last = std.mem.lastIndexOfScalar(u8, full, '.') orelse return error.InvalidKey;
+    if (last == 0 or last == full.len - 1) return error.InvalidKey;
+    const split = splitFullName(full).?;
+    for (split.section) |c| {
+        if (!isKeyChar(c)) return error.InvalidKey;
+    }
+    if (!std.ascii.isAlphabetic(split.name[0])) return error.InvalidKey;
+    for (split.name) |c| {
+        if (!isKeyChar(c)) return error.InvalidKey;
+    }
+    if (split.subsection) |sub| {
+        if (std.mem.indexOfScalar(u8, sub, '\n') != null) return error.InvalidKey;
+    }
+    return split;
+}
+
+/// The header git writes for a new section, with its line ending:
+/// `[section]`, or `[section "subsection"]` with every `"` and `\` in the
+/// subsection escaped by a backslash. The section keeps the case it was
+/// given, as git's does.
+fn writeSectionHeader(w: *std.Io.Writer, split: FullName) std.Io.Writer.Error!void {
+    const sub = split.subsection orelse return w.print("[{s}]\n", .{split.section});
+    try w.print("[{s} \"", .{split.section});
+    for (sub) |c| {
+        if (c == '"' or c == '\\') try w.writeByte('\\');
+        try w.writeByte(c);
+    }
+    try w.writeAll("\"]\n");
+}
+
+/// A value spelled the way git writes one. A line break, a tab, a quote and
+/// a backslash are escaped; the whole value is quoted only when it begins
+/// or ends with a space, or holds a `;`, a `#` or a carriage return, which
+/// reading would otherwise drop.
+fn writeValue(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+    var quote = value.len != 0 and (value[0] == ' ' or value[value.len - 1] == ' ');
+    for (value) |c| {
+        if (c == ';' or c == '#' or c == '\r') quote = true;
+    }
+    if (quote) try w.writeByte('"');
     for (value) |c| {
         switch (c) {
-            '"', '\\', '\n', '\t', ';', '#' => needs_quotes = true,
-            else => {},
+            '\n' => try w.writeAll("\\n"),
+            '\t' => try w.writeAll("\\t"),
+            '"', '\\' => {
+                try w.writeByte('\\');
+                try w.writeByte(c);
+            },
+            else => try w.writeByte(c),
         }
     }
-    if (value.len != 0 and (value[0] == ' ' or value[value.len - 1] == ' ')) needs_quotes = true;
-    if (!needs_quotes) return gpa.dupe(u8, value);
+    if (quote) try w.writeByte('"');
+}
 
+/// A value spelled the way git writes one: escaped where it must be, and
+/// quoted only where a leading or trailing space, a `;`, a `#` or a
+/// carriage return would otherwise be lost. The result is the caller's.
+pub fn escapeValue(gpa: Allocator, value: []const u8) Allocator.Error![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
-    out.writer.writeByte('"') catch return error.OutOfMemory;
-    for (value) |c| {
-        switch (c) {
-            '"' => out.writer.writeAll("\\\"") catch return error.OutOfMemory,
-            '\\' => out.writer.writeAll("\\\\") catch return error.OutOfMemory,
-            '\n' => out.writer.writeAll("\\n") catch return error.OutOfMemory,
-            '\t' => out.writer.writeAll("\\t") catch return error.OutOfMemory,
-            else => out.writer.writeByte(c) catch return error.OutOfMemory,
-        }
-    }
-    out.writer.writeByte('"') catch return error.OutOfMemory;
+    writeValue(&out.writer, value) catch return error.OutOfMemory;
     return out.toOwnedSlice();
 }
 
-fn parseLines(gpa: Allocator, text: []const u8, out: *std.ArrayList(Line)) ParseError!void {
-    var offset: usize = 0;
-    var have_section = false;
-    while (offset < text.len) {
-        var end = std.mem.indexOfScalarPos(u8, text, offset, '\n') orelse text.len;
-        // A trailing backslash continues the line, which git allows for a
-        // value spread over several lines.
-        while (end < text.len) {
-            var body_end = end;
-            if (body_end > offset and text[body_end - 1] == '\r') body_end -= 1;
-            if (body_end > offset and text[body_end - 1] == '\\') {
-                end = std.mem.indexOfScalarPos(u8, text, end + 1, '\n') orelse text.len;
-            } else break;
-        }
-        const line_end = if (end < text.len) end + 1 else end;
-        const raw = text[offset..line_end];
-        offset = line_end;
+/// git's `isspace`, which is these four and not the vertical tab or the form
+/// feed.
+fn isSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+}
 
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') {
-            try out.append(gpa, .{ .kind = .other, .text = raw });
+/// git's `iskeychar`: what a section or a variable name may hold.
+fn isKeyChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-';
+}
+
+/// Split `text` into lines the way git's parser walks it.
+///
+/// A physical line may hold more than one: git reads `[core] bare = true`
+/// as a header and a variable, and `[a][b]` as two headers, so each becomes
+/// its own `Line` and rendering them back to back gives the bytes again. A
+/// comment ends at its line break whatever precedes it; only a value
+/// continues onto the next line after a backslash.
+fn parseLines(gpa: Allocator, names: Allocator, text: []const u8, out: *std.ArrayList(Line)) ParseError!void {
+    var offset: usize = 0;
+    // git skips a UTF-8 byte-order mark at the start of the file.
+    const bom = "\xEF\xBB\xBF";
+    if (std.mem.startsWith(u8, text, bom)) {
+        try out.append(gpa, .{ .kind = .other, .text = text[0..bom.len] });
+        offset = bom.len;
+    }
+    var have_section = false;
+    var start = offset;
+    while (offset < text.len) {
+        const c = text[offset];
+        if (c == '\n') {
+            offset += 1;
+            try out.append(gpa, .{ .kind = .other, .text = text[start..offset] });
+            start = offset;
             continue;
         }
-        if (trimmed[0] == '[') {
-            const header = try parseSectionHeader(trimmed);
+        if (isSpace(c)) {
+            offset += 1;
+            continue;
+        }
+        if (c == '#' or c == ';') {
+            offset = if (std.mem.indexOfScalarPos(u8, text, offset, '\n')) |nl| nl + 1 else text.len;
+            try out.append(gpa, .{ .kind = .other, .text = text[start..offset] });
+            start = offset;
+            continue;
+        }
+        if (c == '[') {
+            const header = try parseSectionHeader(names, text, offset);
+            offset = header.end;
+            // A line break straight after the `]` belongs to the header:
+            // git adds a new value after it, and after anything else on
+            // the line it adds one of its own first.
+            if (std.mem.startsWith(u8, text[offset..], "\n")) {
+                offset += 1;
+            } else if (std.mem.startsWith(u8, text[offset..], "\r\n")) {
+                offset += 2;
+            }
             try out.append(gpa, .{
                 .kind = .section,
-                .text = raw,
+                .text = text[start..offset],
                 .section = header.section,
-                .subsection = header.subsection orelse "",
-                .has_subsection = header.subsection != null,
+                .subsection = header.subsection,
+                .has_subsection = header.has_subsection,
+                .spelled = header.spelled,
+                .quoted = header.quoted,
             });
+            start = offset;
             have_section = true;
             continue;
         }
         if (!have_section) return error.VariableOutsideSection;
-
+        offset = try variableEnd(text, offset);
+        const raw = text[start..offset];
         const variable = try parseVariableLine(raw);
         try out.append(gpa, .{
             .kind = .variable,
@@ -941,37 +1117,146 @@ fn parseLines(gpa: Allocator, text: []const u8, out: *std.ArrayList(Line)) Parse
             .value_end = variable.value_end,
             .has_value = variable.has_value,
         });
+        start = offset;
     }
+    if (start < text.len) try out.append(gpa, .{ .kind = .other, .text = text[start..] });
 }
 
-const SectionHeader = struct { section: []const u8, subsection: ?[]const u8 };
-
-fn parseSectionHeader(trimmed: []const u8) ParseError!SectionHeader {
-    if (trimmed[trimmed.len - 1] != ']') return error.MalformedSectionHeader;
-    const inner = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t");
-    if (inner.len == 0) return error.MalformedSectionHeader;
-    if (std.mem.indexOfScalar(u8, inner, '"')) |quote| {
-        const section = std.mem.trim(u8, inner[0..quote], " \t");
-        if (inner[inner.len - 1] != '"') return error.MalformedSectionHeader;
-        const subsection = inner[quote + 1 .. inner.len - 1];
-        try checkSectionName(section);
-        return .{ .section = section, .subsection = subsection };
+/// Where the variable beginning at `start` ends: just past the line break
+/// that is not escaped, inside quotes, or inside a trailing comment's line.
+fn variableEnd(text: []const u8, start: usize) ParseError!usize {
+    var in_quotes = false;
+    var i = start;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == '\n') {
+            if (in_quotes) return error.MalformedValue;
+            return i + 1;
+        }
+        if (c == '\\') {
+            // A backslash takes the next byte with it, a line break
+            // included: that is how a value continues.
+            if (i + 2 < text.len and text[i + 1] == '\r' and text[i + 2] == '\n') {
+                i += 2;
+            } else if (i + 1 < text.len) {
+                i += 1;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if (!in_quotes and (c == '#' or c == ';')) {
+            return if (std.mem.indexOfScalarPos(u8, text, i, '\n')) |nl| nl + 1 else text.len;
+        }
     }
-    // The dotted form `[section.sub]` is git's older spelling; the part
-    // after the first dot is the subsection and is case-sensitive.
-    if (std.mem.indexOfScalar(u8, inner, '.')) |dot| {
-        try checkSectionName(inner[0..dot]);
-        return .{ .section = inner[0..dot], .subsection = inner[dot + 1 ..] };
-    }
-    try checkSectionName(inner);
-    return .{ .section = inner, .subsection = null };
+    return text.len;
 }
 
-fn checkSectionName(name: []const u8) ParseError!void {
-    if (name.len == 0) return error.MalformedSectionHeader;
+const SectionHeader = struct {
+    /// Just past the `]`.
+    end: usize,
+    section: []const u8,
+    subsection: []const u8,
+    has_subsection: bool,
+    spelled: []const u8,
+    quoted: bool,
+};
+
+/// Read the header whose `[` is at `text[at]`, as git's `get_base_var` and
+/// `get_extended_base_var` read one.
+///
+/// The name runs from the `[` to a `]` or a space, and holds letters,
+/// digits, `-` and `.`; it is lower-cased, all of it, so the older
+/// `[Section.Sub]` spelling reads as `section.sub`. A space begins a quoted
+/// subsection: any further spaces, a `"`, bytes in which a backslash takes
+/// the next byte as it is, a `"`, and the `]` at once. A line break
+/// anywhere before the `]` is refused, which is why a subsection can never
+/// hold one.
+fn parseSectionHeader(names: Allocator, text: []const u8, at: usize) ParseError!SectionHeader {
+    var i = at + 1;
+    while (true) : (i += 1) {
+        if (i >= text.len) return error.MalformedSectionHeader;
+        const c = text[i];
+        if (c == ']' or isSpace(c)) break;
+        if (!isKeyChar(c) and c != '.') return error.MalformedSectionHeader;
+    }
+    const spelled = text[at + 1 .. i];
+    const name = try lowered(names, spelled);
+    const dot = std.mem.indexOfScalar(u8, name, '.');
+    const section = name[0 .. dot orelse name.len];
+
+    if (text[i] == ']') {
+        if (spelled.len == 0) return error.MalformedSectionHeader;
+        return .{
+            .end = i + 1,
+            .section = section,
+            .subsection = if (dot) |d| name[d + 1 ..] else "",
+            .has_subsection = dot != null,
+            .spelled = spelled,
+            .quoted = false,
+        };
+    }
+
+    while (i < text.len and isSpace(text[i])) : (i += 1) {
+        if (text[i] == '\n') return error.MalformedSectionHeader;
+    }
+    if (i >= text.len or text[i] != '"') return error.MalformedSectionHeader;
+    i += 1;
+    const quoted_start = i;
+    var escapes = false;
+    while (true) : (i += 1) {
+        if (i >= text.len or text[i] == '\n') return error.MalformedSectionHeader;
+        if (text[i] == '"') break;
+        if (text[i] == '\\') {
+            escapes = true;
+            i += 1;
+            if (i >= text.len or text[i] == '\n') return error.MalformedSectionHeader;
+        }
+        // A carriage return before a line break is the line break's.
+        if (text[i] == '\r' and i + 1 < text.len and text[i + 1] == '\n') return error.MalformedSectionHeader;
+    }
+    const quoted_raw = text[quoted_start..i];
+    if (i + 1 >= text.len or text[i + 1] != ']') return error.MalformedSectionHeader;
+
+    const quoted = if (escapes) try unescapeSubsection(names, quoted_raw) else quoted_raw;
+    // `[a.b "c"]` is the section `a` with the subsection `b.c`: git
+    // appends the quoted part to the name read so far.
+    const subsection = if (dot) |d|
+        try std.fmt.allocPrint(names, "{s}.{s}", .{ name[d + 1 ..], quoted })
+    else
+        quoted;
+    return .{
+        .end = i + 2,
+        .section = section,
+        .subsection = subsection,
+        .has_subsection = true,
+        .spelled = spelled,
+        .quoted = true,
+    };
+}
+
+/// `name`, lower-cased, sliced when it already is.
+fn lowered(names: Allocator, name: []const u8) Allocator.Error![]const u8 {
     for (name) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '.') return error.MalformedSectionHeader;
+        if (std.ascii.isUpper(c)) return std.ascii.allocLowerString(names, name);
     }
+    return name;
+}
+
+/// A quoted subsection's escapes undone: a backslash takes the next byte as
+/// it is, whatever it is.
+fn unescapeSubsection(names: Allocator, raw: []const u8) Allocator.Error![]const u8 {
+    var out = try names.alloc(u8, raw.len);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        if (raw[i] == '\\') i += 1;
+        out[n] = raw[i];
+        n += 1;
+    }
+    return out[0..n];
 }
 
 const VariableLine = struct {
@@ -1352,6 +1637,273 @@ test "removing a section takes its header and every line up to the next one, as 
     try std.testing.expectEqualStrings("../other", config.get("submodule.other.url").?);
 }
 
+test "a header reads as git reads it, and a header git refuses is refused" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const headers = [_][]const u8{
+        "[s \"a\\\"b\"]",      "[s \"a\\\\b\"]",   "[s \"a\\qb\"]",  "[S.Sub]",
+        "[S.Sub.Deep]",        "[ core]",          "[core ]",        "[ \"x\"]",
+        "[core.]",             "[.a]",             "[.]",            "[]",
+        "[s  \t \"a\"]",       "[s \"a\" ]",       "[s\"a\"]",       "[s \"a\\\nb\"]",
+        "[s \"a\nb\"]",        "[s \"a\rb\"]",     "[s \"a\r\nb\"]", "[core] bare = true",
+        "[core] # c",          "[core]]",          "[core][user]",   "[Core_x]",
+        "[s \"a]b\"]",         "[s \"a\"b\"]",     "[s \"\" ]",      "[s \"\"]",
+        "[s.]",                "[s \"a\"\n]",      "[s \"a\\\"]",    "[a.B \"C\"]",
+        "[Remote \"Origin\"]", "[s \"a;b#c\"]",    "[s \"t\tb\"]",   "[s \"\xc3\xa9\"]",
+        "\xEF\xBB\xBF[core]",  "[core]\r",         "# c \\\n[core]", "[s \"a b\"]",
+        "[s \"a\\",            "[core",            "[s \"a",         "[a-b.C-d]",
+        "; x\n[core]\t; y",    "[s \"a\\\r\nb\"]", "[s\t\"a\"]",     "[s \"x\"]]",
+    };
+    for (headers) |header| {
+        const text = try std.fmt.allocPrint(gpa, "{s}\n\tx = 1\n", .{header});
+        defer gpa.free(text);
+        try git.writeFile(io, "probe.config", text);
+        git.report_failures = false;
+        const listed: ?[]u8 = git.run(io, &.{ "config", "-f", "probe.config", "--list", "-z" }) catch |err| switch (err) {
+            error.GitFailed => null,
+            else => return err,
+        };
+        defer if (listed) |l| gpa.free(l);
+
+        var config = Config.parseText(gpa, text, .local) catch |err| {
+            if (listed == null) continue;
+            std.debug.print("{any}: git reads it, this says {t}\n", .{ header, err });
+            return error.TestExpectedEqual;
+        };
+        defer config.deinit();
+        const theirs = listed orelse {
+            std.debug.print("{any}: git refuses it, this reads it\n", .{header});
+            return error.TestExpectedEqual;
+        };
+        var ours: std.Io.Writer.Allocating = .init(gpa);
+        defer ours.deinit();
+        for (config.entries.items) |entry| {
+            try ours.writer.writeAll(entry.section);
+            if (entry.has_subsection) try ours.writer.print(".{s}", .{entry.subsection});
+            const value = try unquote(gpa, entry.value orelse "");
+            defer gpa.free(value);
+            try ours.writer.print(".{s}\n{s}\x00", .{ entry.name, value });
+        }
+        std.testing.expectEqualStrings(theirs, ours.written()) catch |err| {
+            std.debug.print("header {any}\n", .{header});
+            return err;
+        };
+    }
+}
+
+test "a name git refuses to write is refused here, and every other one is written" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const keys = [_][]const u8{
+        "s.a\nb.x", ".a.x",    "s_x.y",  "s.a.1y", "s.a.",    "sx",       "s.a.y_z",  ".x",
+        "a..x",     "a.b c.x", "a b.x",  "a.x-y",  "a.-x",    "A.B.C.D",  "a.\"\\.x", "a.b\r.x",
+        "a.b.x.",   "a.x",     "1a.b.x", "a.1x",   "a-b.c-d", "a.b\tc.x",
+    };
+    for (keys) |key| {
+        git.report_failures = false;
+        const git_ok = if (git.run(io, &.{ "config", "-f", "probe.config", key, "1" })) |out| blk: {
+            gpa.free(out);
+            break :blk true;
+        } else |err| switch (err) {
+            error.GitFailed => false,
+            else => return err,
+        };
+        const ours_ok = if (checkKey(key)) |_| true else |_| false;
+        if (git_ok != ours_ok) {
+            std.debug.print("key {any}: git says {}, this says {}\n", .{ key, git_ok, ours_ok });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+/// Run each `git config -f probe.config <key> <value>` in `git`, and the
+/// same `set` here over the same starting text; the two files must be the
+/// same bytes, and git must read back every value set here.
+fn expectSetsAgree(git: *testgit.Repo, start: []const u8, sets: []const [2][]const u8) !void {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try git.writeFile(io, "probe.config", start);
+    var config = try Config.parseText(gpa, start, .local);
+    defer config.deinit();
+    config.files.items[0].writable = true;
+    for (sets) |pair| {
+        try git.exec(io, &.{ "config", "-f", "probe.config", pair[0], pair[1] });
+        try config.set(pair[0], pair[1]);
+    }
+    const theirs = try git.readFile(io, "probe.config");
+    defer gpa.free(theirs);
+    const ours = try config.renderWritable();
+    defer gpa.free(ours);
+    try std.testing.expectEqualStrings(theirs, ours);
+
+    // The other direction: git reads what this wrote.
+    try git.writeFile(io, "ours.config", ours);
+    for (sets) |pair| {
+        // git adds `a.B.x` to `[a.b]`, where it reads as `a.b.x`: a name
+        // git cannot read back after setting it is one this cannot either.
+        git.report_failures = false;
+        const read = git.run(io, &.{ "config", "-f", "ours.config", "--get-all", pair[0] }) catch |err| switch (err) {
+            error.GitFailed => {
+                try std.testing.expect(config.get(pair[0]) == null);
+                continue;
+            },
+            else => return err,
+        };
+        defer gpa.free(read);
+        const want = try std.fmt.allocPrint(gpa, "{s}\n", .{pair[1]});
+        defer gpa.free(want);
+        // A name git adds a line for rather than replaces reads back as more
+        // than one value; the last is the one set.
+        try std.testing.expect(std.mem.endsWith(u8, read, want));
+        const value = try unquote(gpa, config.get(pair[0]).?);
+        defer gpa.free(value);
+        try std.testing.expectEqualStrings(pair[1], value);
+    }
+}
+
+test "setting values writes the bytes git config writes, headers and escapes included" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+
+    try expectSetsAgree(&git, "", &.{
+        .{ "Core.AutoCRLF", "true" },
+        .{ "s.a\"b\\c.X", "1" },
+        .{ "S.Sub.x", "2" },
+        .{ "v.q.v1", "a\"b\\c" },
+        .{ "v.q.v2", " lead" },
+        .{ "v.q.v3", "tab\tx" },
+        .{ "v.q.v4", "semi;x" },
+        .{ "v.q.v5", "cr\rx" },
+        .{ "v.q.v6", "nl\nx" },
+        .{ "v.q.v7", "" },
+        .{ "v.q.v8", "trail " },
+        .{ "v.q.v9", "hash#x" },
+        .{ "s..y", "3" },
+        .{ ".a.x", "4" },
+        .{ "a.b c.x", "5" },
+        .{ "url.https://example.com/a\"b.insteadOf", "x" },
+        .{ "s.a\rb.x", "6" },
+        .{ "Section.x", "7" },
+        .{ "core.x", "8" },
+    });
+    // Into sections that are there: the older dotted spelling takes a new
+    // name without regard to case, a quoted one only exactly; an empty
+    // section takes it straight after its header; a header followed by a
+    // comment, and a last line with no line break, gain one first.
+    try expectSetsAgree(&git, "[a.b]\n\tx = 1\n[c \"D\"]\n\tx = 1\n", &.{
+        .{ "a.B.y", "2" },
+        .{ "a.B.x", "3" },
+        .{ "c.d.x", "4" },
+        .{ "A.b.z", "5" },
+        .{ "C.D.z", "6" },
+    });
+    try expectSetsAgree(&git, "[core]\n\ta=1\n[user]\n[core]\n[x]\n", &.{.{ "core.c", "1" }});
+    try expectSetsAgree(&git, "[core]\n\ta=1\n[user]\n[core]\n\tb=1\n[x]\n", &.{.{ "core.c", "1" }});
+    try expectSetsAgree(&git, "[core] # c\n[user]\n", &.{.{ "core.x", "1" }});
+    try expectSetsAgree(&git, "[core][user]\n", &.{.{ "core.x", "1" }});
+    try expectSetsAgree(&git, "[core]", &.{.{ "core.x", "1" }});
+    try expectSetsAgree(&git, "[a]\n\tx = 1", &.{ .{ "a.y", "1" }, .{ "b.y", "2" } });
+    try expectSetsAgree(&git, "[s \"a\\\"b\"]\n\tx = 1\n[s \"a\\\\b\"]\n\tx = 1\n", &.{
+        .{ "s.a\"b.x", "2" },
+        .{ "s.a\\b.y", "3" },
+        .{ "s.a\\\"b.z", "4" },
+    });
+    try expectSetsAgree(&git, "[s]\n\tx = 1\n[s \"\"]\n\tx = 1\n", &.{
+        .{ "s..x", "2" },
+        .{ "s.x", "3" },
+    });
+    try expectSetsAgree(&git, "\xEF\xBB\xBF[core]\r\n\tx = 1\r\n", &.{.{ "core.y", "2" }});
+    try expectSetsAgree(&git, "\xEF\xBB\xBF[core]\r\n", &.{.{ "core.y", "2" }});
+}
+
+test "a section is removed and a value unset as git config matches them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const start = "[Sub \"x\"]\n\ty=1\n[sub \"X\"]\n\ty=2\n[a.b]\n\tz=1\n[A.B]\n\tz=2\n[a \"b\"]\n\tz=3\n" ++
+        "[s \"a\\\"b\"]\n\ty=1\n[a.b \"c\"]\n\tx=1\n[s \"\"]\n\tq=1\n[s]\n\tq=1\n";
+    const Removal = struct { section: []const u8, subsection: ?[]const u8, full: []const u8 };
+    const removals = [_]Removal{
+        .{ .section = "Sub", .subsection = "x", .full = "Sub.x" },
+        .{ .section = "sub", .subsection = "X", .full = "sub.X" },
+        .{ .section = "sub", .subsection = "x", .full = "sub.x" },
+        .{ .section = "a", .subsection = "b", .full = "a.b" },
+        .{ .section = "s", .subsection = "a\"b", .full = "s.a\"b" },
+        .{ .section = "a", .subsection = "b.c", .full = "a.b.c" },
+        .{ .section = "s", .subsection = "", .full = "s." },
+        .{ .section = "s", .subsection = null, .full = "s" },
+    };
+    for (removals) |removal| {
+        try git.writeFile(io, "probe.config", start);
+        git.report_failures = false;
+        const git_removed = if (git.run(io, &.{ "config", "-f", "probe.config", "--remove-section", removal.full })) |out| blk: {
+            gpa.free(out);
+            break :blk true;
+        } else |err| switch (err) {
+            error.GitFailed => false,
+            else => return err,
+        };
+        const theirs = try git.readFile(io, "probe.config");
+        defer gpa.free(theirs);
+
+        var config = try Config.parseText(gpa, start, .local);
+        defer config.deinit();
+        config.files.items[0].writable = true;
+        const removed = try config.removeSectionIn(.local, removal.section, removal.subsection);
+        const ours = try config.renderWritable();
+        defer gpa.free(ours);
+        std.testing.expectEqual(git_removed, removed) catch |err| {
+            std.debug.print("--remove-section {s}\n", .{removal.full});
+            return err;
+        };
+        try std.testing.expectEqualStrings(theirs, ours);
+    }
+
+    // `--unset` matches the subsection exactly, even under the dotted
+    // spelling that takes a new value without regard to case.
+    const unset_start = "[a.b]\n\tx = 1\n\ty = 1\n[s \"a\\\"b\"]\n\tx = 1\n\ty = 1\n[s \"\"]\n\tx = 1\n\ty = 1\n";
+    const unsets = [_][]const u8{ "a.B.x", "a.b.x", "s.a\"b.x", "s..x", "s.x" };
+    for (unsets) |key| {
+        try git.writeFile(io, "probe.config", unset_start);
+        git.report_failures = false;
+        if (git.run(io, &.{ "config", "-f", "probe.config", "--unset", key })) |out| gpa.free(out) else |err| switch (err) {
+            error.GitFailed => {},
+            else => return err,
+        }
+        const theirs = try git.readFile(io, "probe.config");
+        defer gpa.free(theirs);
+        var config = try Config.parseText(gpa, unset_start, .local);
+        defer config.deinit();
+        config.files.items[0].writable = true;
+        try config.unset(key);
+        const ours = try config.renderWritable();
+        defer gpa.free(ours);
+        try std.testing.expectEqualStrings(theirs, ours);
+    }
+}
+
+test "a value given on the command line is taken as it is, under any subsection" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var config = try Config.open(gpa, io, .{ .command = &.{
+        "s.a\"b\\c.x=semi;colon # not a comment",
+        "core.bare",
+    } }, .{});
+    defer config.deinit();
+    const value = try unquote(gpa, config.get("s.a\"b\\c.x").?);
+    defer gpa.free(value);
+    try std.testing.expectEqualStrings("semi;colon # not a comment", value);
+    try std.testing.expect(try config.getBool("core.bare", false));
+    try std.testing.expectError(error.InvalidKey, Config.open(gpa, io, .{ .command = &.{"core_x.y=1"} }, .{}));
+}
+
 test "a variable before any section is a named error" {
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.VariableOutsideSection, Config.parseText(gpa, "x = 1\n", .local));
@@ -1365,6 +1917,11 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [2048]u8 = undefined;
     const input = scratch[0..smith.slice(&scratch)];
+    var name_scratch: [64]u8 = undefined;
+    const subsection = name_scratch[0..smith.slice(&name_scratch)];
+    var value_scratch: [64]u8 = undefined;
+    const value = value_scratch[0..smith.slice(&value_scratch)];
+
     var config = Config.parseText(gpa, input, .local) catch return;
     defer config.deinit();
     _ = config.get("core.autocrlf");
@@ -1372,4 +1929,40 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
     _ = config.getInt("core.bigfilethreshold", 0) catch {};
     const values = config.all("core.autocrlf") catch return;
     gpa.free(values);
+
+    // Whatever subsection and value are set, the file written reads back
+    // with that value under that name, and the file it was written into
+    // still parses. Only a line break in the subsection is refused.
+    config.files.items[0].writable = true;
+    const key = try std.fmt.allocPrint(gpa, "fuzz.{s}.name", .{subsection});
+    defer gpa.free(key);
+    config.set(key, value) catch |err| switch (err) {
+        error.InvalidKey => {
+            try std.testing.expect(std.mem.indexOfScalar(u8, subsection, '\n') != null);
+            return;
+        },
+        else => return err,
+    };
+    const rendered = try config.renderWritable();
+    defer gpa.free(rendered);
+    var again = try Config.parseText(gpa, rendered, .local);
+    defer again.deinit();
+    // Except git's own quirk: `[fuzz.sub]` takes a new `fuzz.SUB.name`,
+    // where it reads as `fuzz.sub.name`.
+    const raw = again.get(key) orelse {
+        for (subsection) |c| {
+            if (std.ascii.isUpper(c)) return;
+        }
+        return error.TestUnexpectedResult;
+    };
+    const decoded = try unquote(gpa, raw);
+    defer gpa.free(decoded);
+    try std.testing.expectEqualStrings(value, decoded);
+    // Removing the section leaves a file that still parses.
+    again.files.items[0].writable = true;
+    _ = try again.removeSectionIn(.local, "fuzz", subsection);
+    const removed = try again.renderWritable();
+    defer gpa.free(removed);
+    var third = try Config.parseText(gpa, removed, .local);
+    third.deinit();
 }

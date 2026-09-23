@@ -64,9 +64,6 @@ pub const Error = error{
     MissingUrl,
     /// A url `gitmodules.checkUrl` refuses. `Refusal.setting` holds it.
     DisallowedUrl,
-    /// A name holding `"`, `\` or a line break, which this release cannot
-    /// write as a configuration section.
-    UnsupportedName,
     /// A submodule path whose component is a symbolic link.
     SymlinkInPath,
     /// `modules/<name>` would lie inside another submodule's repository —
@@ -429,10 +426,6 @@ fn moduleUrl(
         error.CannotStripComponent => refuse(refusal, display, url, error.CannotStripComponent),
         else => |e| e,
     };
-}
-
-fn checkConfigName(name: []const u8, display: []const u8, refusal: ?*Refusal) Error!void {
-    if (std.mem.indexOfAny(u8, name, "\"\\\n\r") != null) return refuse(refusal, display, name, error.UnsupportedName);
 }
 
 /// Edits to the superproject's `.git/config`: read fresh from the disk and
@@ -977,7 +970,6 @@ pub fn init(gpa: Allocator, io: Io, repo: *Repository, options: InitOptions) Err
             if (!try isActive(arena, repo, m.name, entry.path)) continue;
         }
         const module = entry.module orelse return refuse(options.refusal, entry.path, "", error.NoSubmoduleMapping);
-        try checkConfigName(module.name, entry.path, options.refusal);
 
         if (!try isActive(arena, repo, module.name, entry.path)) {
             try edits.set(repo, try configKey(arena, module.name, "active"), "true");
@@ -1059,7 +1051,6 @@ fn syncIn(
         if (!try isActive(arena, repo, module.name, entry.path)) continue;
         const display = try join(arena, prefix, entry.path);
         try validatePath(io, wt, entry.path, display, options.refusal);
-        try checkConfigName(module.name, display, options.refusal);
 
         var for_super: []const u8 = "";
         var for_sub: []const u8 = "";

@@ -645,6 +645,46 @@ test "init writes .git/config byte for byte as git submodule init writes it" {
     try expectSameFile(gpa, io, ours.git.dir, theirs.git.dir, ".git/config");
 }
 
+test "a name holding a quote and a backslash is registered, synced and removed as git does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var f = try Fixture.init(gpa, io);
+    defer f.deinit();
+    try f.super.exec(io, &.{ "config", "-f", ".gitmodules", "--rename-section", "submodule.vendor/lib", "submodule.we\"ird\\name" });
+    try f.super.exec(io, &.{ "commit", "-q", "-am", "rename it" });
+
+    var ours = try Clone.init(gpa, io, &f.super, false);
+    defer ours.deinit(io);
+    var theirs = try Clone.init(gpa, io, &f.super, false);
+    defer theirs.deinit(io);
+    var repo = try ours.open(gpa, io);
+    defer repo.deinit(io);
+
+    const outcome = try submodule.init(gpa, io, &repo, .{});
+    try testing.expectEqual(@as(u32, 1), outcome.registered);
+    try theirs.git.exec(io, &.{ "submodule", "init" });
+    try expectSameFile(gpa, io, ours.git.dir, theirs.git.dir, ".git/config");
+    try testing.expect(repo.config.get("submodule.we\"ird\\name.url") != null);
+
+    for ([_]*testgit.Repo{ &ours.git, &theirs.git }) |g| {
+        try g.exec(io, &.{ "config", "-f", ".gitmodules", "submodule.we\"ird\\name.url", "../elsewhere/lib" });
+    }
+    _ = try submodule.sync(gpa, io, &repo, .{});
+    try theirs.git.exec(io, &.{ "submodule", "sync", "-q" });
+    try expectSameFile(gpa, io, ours.git.dir, theirs.git.dir, ".git/config");
+
+    const removed = try submodule.deinitialize(gpa, io, &repo, .{ .force = true });
+    try testing.expectEqual(@as(u32, 1), removed.unregistered);
+    try theirs.git.exec(io, &.{ "submodule", "deinit", "-q", "-f", "--all" });
+    // git finds the section to remove with `--get-regexp` over the name,
+    // where `\n` is not a backslash and an `n`, so it leaves this one
+    // behind; the section `git config --remove-section` names is the one
+    // taken here.
+    try theirs.git.exec(io, &.{ "config", "--remove-section", "submodule.we\"ird\\name" });
+    try expectSameFile(gpa, io, ours.git.dir, theirs.git.dir, ".git/config");
+    try testing.expect(repo.config.get("submodule.we\"ird\\name.url") == null);
+}
+
 test "a relative url resolves against the default remote, or against the superproject itself" {
     const gpa = testing.allocator;
     const io = testing.io;
