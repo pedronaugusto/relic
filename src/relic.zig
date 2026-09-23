@@ -60,6 +60,7 @@ pub const sendpack = @import("sendpack.zig");
 pub const push = @import("push.zig");
 pub const hooks = @import("hooks.zig");
 pub const commit = @import("commit.zig");
+pub const stash = @import("stash.zig");
 
 const builtin = @import("builtin");
 
@@ -79,5 +80,6 @@ test {
         _ = @import("eol_test.zig");
         _ = @import("testremote.zig");
         _ = @import("transport_test.zig");
+        _ = @import("stash_test.zig");
     }
 }

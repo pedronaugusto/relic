@@ -40,6 +40,16 @@ pub const ConflictStyle = enum {
 /// Options for a blob merge.
 pub const BlobOptions = struct {
     conflict_style: ConflictStyle = .merge,
+    /// The names written after the markers, which is what `git merge-file
+    /// -L` sets and what a stash's `Updated upstream` and `Stashed changes`
+    /// are.
+    labels: Labels = .{},
+
+    pub const Labels = struct {
+        ours: []const u8 = "ours",
+        base: []const u8 = "base",
+        theirs: []const u8 = "theirs",
+    };
 };
 
 /// The owned bytes produced by a blob merge.
@@ -158,18 +168,18 @@ pub fn blobs(
                 Refined{};
             try out.appendSlice(gpa, our_region[0..refined.prefix]);
             try endMarkerLine(gpa, &out);
-            try out.appendSlice(gpa, "<<<<<<< ours\n");
+            try markerLine(gpa, &out, "<<<<<<<", options.labels.ours);
             try out.appendSlice(gpa, our_region[refined.prefix .. our_region.len - refined.our_suffix]);
             try endMarkerLine(gpa, &out);
             if (options.conflict_style == .diff3) {
-                try out.appendSlice(gpa, "||||||| base\n");
+                try markerLine(gpa, &out, "|||||||", options.labels.base);
                 try appendLines(gpa, &out, base_lines[start..end]);
                 try endMarkerLine(gpa, &out);
             }
             try out.appendSlice(gpa, "=======\n");
             try out.appendSlice(gpa, their_region[refined.prefix .. their_region.len - refined.their_suffix]);
             try endMarkerLine(gpa, &out);
-            try out.appendSlice(gpa, ">>>>>>> theirs\n");
+            try markerLine(gpa, &out, ">>>>>>>", options.labels.theirs);
             try out.appendSlice(gpa, our_region[our_region.len - refined.our_suffix ..]);
         }
         base_at = end;
@@ -213,6 +223,15 @@ fn refineConflict(gpa: Allocator, ours: []const u8, theirs: []const u8) Allocato
         their_suffix += their_lines[their_last].len;
     }
     return .{ .prefix = prefix, .our_suffix = our_suffix, .their_suffix = their_suffix };
+}
+
+fn markerLine(gpa: Allocator, out: *std.ArrayList(u8), marker: []const u8, label: []const u8) Allocator.Error!void {
+    try out.appendSlice(gpa, marker);
+    if (label.len != 0) {
+        try out.append(gpa, ' ');
+        try out.appendSlice(gpa, label);
+    }
+    try out.append(gpa, '\n');
 }
 
 fn endMarkerLine(gpa: Allocator, out: *std.ArrayList(u8)) Allocator.Error!void {

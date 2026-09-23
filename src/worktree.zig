@@ -944,7 +944,7 @@ const StatusScan = struct {
 };
 
 /// One flattened tree entry.
-const TreeEntry = struct { mode: object.Mode, oid: Oid };
+pub const TreeEntry = struct { mode: object.Mode, oid: Oid };
 
 fn flattenTree(
     arena: Allocator,
@@ -1406,6 +1406,154 @@ fn writeSmudged(io: Io, wt: Io.Dir, path: []const u8, smudged: convert.Smudged, 
         },
         .delayed => unreachable,
     }
+}
+
+/// One path `writePaths` puts into the working tree.
+pub const PathWrite = struct {
+    path: []const u8,
+    /// The mode and blob to write, or `null` to remove the file.
+    blob: ?Blob,
+    /// Whether the index follows: the path's entry becomes `blob` at stage
+    /// zero, every other stage of it going, or leaves with the file. `false`
+    /// leaves the index to the caller, which is how a conflict's stages sit
+    /// beside the marked-up file.
+    index: bool = true,
+
+    pub const Blob = struct { mode: object.Mode, oid: Oid };
+};
+
+/// `checkout-index -f` for the named paths only: write each blob into the
+/// working tree, or remove the file, and bring the index along. Nothing
+/// else in either is touched, so a caller that has decided which paths may
+/// change — a merge that has checked none of them holds local changes —
+/// changes exactly those. Removals happen before writes, so a file may give
+/// way to a directory of the same name. A file is written as a checkout
+/// writes it, through the same line-ending conversion, smudge filters and
+/// LFS, and one a filter hands over late is written after the others.
+pub fn writePaths(
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    index: *Index,
+    db: *Odb,
+    writes: []const PathWrite,
+    options: CheckoutOptions,
+) Error!CheckoutOutcome {
+    var outcome: CheckoutOutcome = .{};
+    for (writes) |w| {
+        if (safepath.check(w.path, .worktree)) |refused| {
+            if (options.refusal) |out| out.set(refused.reason, w.path);
+            return error.UnsafePath;
+        }
+    }
+
+    var conv: convert.Session = .init(gpa, io, .{
+        .wt = wt,
+        .kind = db.kind,
+        .core = options.rules.core,
+        .required_filters = options.rules.required_filters,
+        .drivers = options.rules.filters,
+        .programs = options.programs,
+        .report = options.filter_report,
+        .fetch = options.lfs_fetch,
+    });
+    defer conv.deinit();
+
+    for (writes) |w| {
+        if (w.blob != null) continue;
+        wt.deleteFile(io, w.path) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => {},
+            else => |e| return e,
+        };
+        if (w.index) {
+            const tree = try index.cacheTree();
+            tree.invalidate(w.path);
+            _ = index.remove(w.path);
+        }
+        outcome.removed += 1;
+        if (options.remove_empty_directories) {
+            if (std.fs.path.dirnamePosix(w.path)) |parent| removeEmptyDirectories(io, wt, parent);
+        }
+    }
+
+    var waiting: std.StringHashMapUnmanaged(PathWrite) = .empty;
+    defer waiting.deinit(gpa);
+    for (writes) |w| {
+        const want = w.blob orelse continue;
+        if (try fs.statAt(io, wt, w.path)) |found| {
+            // An empty directory gives way; one with anything in it is
+            // someone's work.
+            if (found.kind == .directory) wt.deleteDir(io, w.path) catch return error.UntrackedWouldBeOverwritten;
+        }
+        if (std.fs.path.dirnamePosix(w.path)) |parent| {
+            wt.createDirPath(io, parent) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => |e| return e,
+            };
+        }
+        var scratch: std.heap.ArenaAllocator = .init(gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        switch (want.mode) {
+            .gitlink => {
+                wt.createDirPath(io, w.path) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => |e| return e,
+                };
+                outcome.gitlinks += 1;
+            },
+            .symlink => {
+                const found = try db.read(io, want.oid);
+                defer gpa.free(found.bytes);
+                wt.deleteFile(io, w.path) catch {};
+                if (options.rules.symlinks) {
+                    wt.symLink(io, found.bytes, w.path, .{}) catch {
+                        try writeFile(io, wt, w.path, .{ .bytes = found.bytes }, false);
+                        outcome.symlinks_as_files += 1;
+                    };
+                } else {
+                    try writeFile(io, wt, w.path, .{ .bytes = found.bytes }, false);
+                    outcome.symlinks_as_files += 1;
+                }
+                outcome.written += 1;
+            },
+            .file, .exec => {
+                const found = try db.read(io, want.oid);
+                defer gpa.free(found.bytes);
+                const executable = want.mode == .exec and options.rules.file_mode;
+                if (options.rules.attrs) |attrs| {
+                    const applied = try attrs.lookup(a, w.path, false);
+                    const smudged = try conv.toWorktree(a, w.path, found.bytes, applied, .{
+                        .blob = want.oid,
+                        .can_delay = true,
+                    });
+                    if (smudged == .delayed) {
+                        try waiting.put(gpa, w.path, w);
+                        continue;
+                    }
+                    try writeSmudged(io, wt, w.path, smudged, executable);
+                } else {
+                    try writeFile(io, wt, w.path, .{ .bytes = found.bytes }, executable);
+                }
+                outcome.written += 1;
+            },
+            .tree => return error.UnsupportedEntry,
+        }
+        if (w.index) try recordWritten(io, wt, index, w.path, .{ .mode = want.mode, .oid = want.oid });
+    }
+
+    var late: std.heap.ArenaAllocator = .init(gpa);
+    defer late.deinit();
+    while (try conv.nextReady(late.allocator())) |ready| {
+        defer _ = late.reset(.retain_capacity);
+        const w = waiting.get(ready.path).?;
+        const want = w.blob.?;
+        try writeSmudged(io, wt, w.path, ready.content, want.mode == .exec and options.rules.file_mode);
+        outcome.written += 1;
+        if (w.index) try recordWritten(io, wt, index, w.path, .{ .mode = want.mode, .oid = want.oid });
+    }
+    outcome.lfs_pointers = conv.lfs_pointers;
+    return outcome;
 }
 
 fn directoryIsReplaceable(
