@@ -1793,16 +1793,22 @@ fn doUpdateRef(r: *Run, ref: []const u8) Error!void {
 const UpdateRef = struct { ref: []const u8, before: Oid, after: Oid };
 
 fn parseUpdateRefs(r: *Run, text: []const u8) Error!std.ArrayList(UpdateRef) {
+    return parseUpdateRefsText(r.arena, r.repo.kind, text);
+}
+
+/// The records of an `update-refs` file: a ref, where it was, and where
+/// it goes, one line each.
+fn parseUpdateRefsText(arena: Allocator, kind: hash.Kind, text: []const u8) error{ MalformedState, OutOfMemory }!std.ArrayList(UpdateRef) {
     var out: std.ArrayList(UpdateRef) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |ref| {
         if (ref.len == 0) break;
         const before = lines.next() orelse return error.MalformedState;
         const after = lines.next() orelse return error.MalformedState;
-        try out.append(r.arena, .{
+        try out.append(arena, .{
             .ref = ref,
-            .before = Oid.parse(r.repo.kind, before) catch return error.MalformedState,
-            .after = Oid.parse(r.repo.kind, after) catch return error.MalformedState,
+            .before = Oid.parse(kind, before) catch return error.MalformedState,
+            .after = Oid.parse(kind, after) catch return error.MalformedState,
         });
     }
     return out;
@@ -2346,5 +2352,20 @@ fn fuzzAuthorScript(_: void, smith: *std.testing.Smith) anyerror!void {
     var buf: [512]u8 = undefined;
     _ = parseAuthorScript(text, &buf) catch |err| switch (err) {
         error.MalformedState => return,
+    };
+}
+
+test "fuzz: any bytes are an update-refs file or a named error" {
+    try std.testing.fuzz({}, fuzzUpdateRefs, .{});
+}
+
+fn fuzzUpdateRefs(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input: [256]u8 = undefined;
+    const text = input[0..smith.slice(&input)];
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    _ = parseUpdateRefsText(arena.allocator(), .sha1, text) catch |err| switch (err) {
+        error.MalformedState => return,
+        error.OutOfMemory => return err,
     };
 }

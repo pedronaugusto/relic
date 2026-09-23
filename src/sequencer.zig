@@ -293,6 +293,14 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
 fn readOpts(gpa: Allocator, io: Io, repo: *Repository, options: *Options) Error!void {
     const text = (try head_mod.readState(gpa, io, repo.git_dir, opts_path)) orelse return;
     defer gpa.free(text);
+    try parseOpts(gpa, text, options);
+}
+
+/// Errors from reading the `opts` file.
+const OptsError = error{ MalformedState, EditorRequested, SigningRequested, UnsupportedStrategy, OutOfMemory };
+
+/// Read the settings in an `opts` file's text into `options`.
+fn parseOpts(gpa: Allocator, text: []const u8, options: *Options) OptsError!void {
     var parsed = config_mod.Config.parseText(gpa, text, .local) catch return error.MalformedState;
     defer parsed.deinit();
     for (parsed.entries.items) |entry| {
@@ -322,7 +330,7 @@ fn readOpts(gpa: Allocator, io: Io, repo: *Repository, options: *Options) Error!
             options.allow_ff = on;
         } else if (std.mem.eql(u8, key, "mainline")) {
             const n = config_mod.parseInt(value) catch return error.MalformedState;
-            options.mainline = if (n > 0) @intCast(n) else null;
+            options.mainline = if (n > 0) std.math.cast(u32, n) orelse return error.MalformedState else null;
         } else if (std.mem.eql(u8, key, "strategy")) {
             if (!std.mem.eql(u8, value, "ort") and !std.mem.eql(u8, value, "recursive")) return error.UnsupportedStrategy;
         } else if (std.mem.eql(u8, key, "gpg-sign")) {
@@ -963,4 +971,26 @@ fn removeBranchState(io: Io, repo: *Repository) Error!void {
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
     try head_mod.deleteRef(io, repo, "REVERT_HEAD");
     try merging.removeMergeState(io, repo);
+}
+
+test "fuzz: any bytes are an opts file or a named error" {
+    try std.testing.fuzz({}, fuzzOpts, .{});
+}
+
+fn fuzzOpts(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input: [256]u8 = undefined;
+    const text = input[0..smith.slice(&input)];
+    var options: Options = .{ .who = undefined };
+    parseOpts(std.testing.allocator, text, &options) catch |err| switch (err) {
+        error.MalformedState, error.EditorRequested, error.SigningRequested, error.UnsupportedStrategy => return,
+        error.OutOfMemory => return err,
+    };
+}
+
+test "an opts file with a mainline past any parent number is malformed" {
+    var options: Options = .{ .who = undefined };
+    try std.testing.expectError(error.MalformedState, parseOpts(std.testing.allocator, "[options]\n\tmainline = 99999999999\n", &options));
+    try parseOpts(std.testing.allocator, "[options]\n\tmainline = 2\n\tsignoff = true\n", &options);
+    try std.testing.expectEqual(@as(?u32, 2), options.mainline);
+    try std.testing.expect(options.signoff);
 }
