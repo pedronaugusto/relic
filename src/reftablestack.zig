@@ -21,7 +21,10 @@
 //! by a table, while what every ref and log says does not.
 //!
 //! `FETCH_HEAD` and `MERGE_HEAD` stay files in a reftable repository, as git
-//! keeps them, and a transaction naming either is refused.
+//! keeps them: a transaction writes them under their own `.lock` beside
+//! the stack, and no log. Every other pseudoref -- `ORIG_HEAD`,
+//! `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `AUTO_MERGE` -- is a ref in the stack,
+//! which is where git since 2.45 keeps them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -519,7 +522,9 @@ fn isPerWorktree(store: *const refs.Store, name: []const u8) bool {
     return store.dirFor(name).handle == store.git_dir.handle;
 }
 
-/// Whether `name` is one git keeps as a file whatever the ref format.
+/// Whether `name` is one git keeps as a file whatever the ref format:
+/// `FETCH_HEAD`, which holds more than a ref can, and `MERGE_HEAD`, which
+/// may hold several.
 pub fn isSpecial(name: []const u8) bool {
     return std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD");
 }
@@ -760,7 +765,7 @@ pub fn prepare(tx: *refs.Transaction, io: Io) refs.TransactionError!void {
     const gpa = tx.gpa;
     var needs_worktree = false;
     for (tx.edits.items) |edit| {
-        if (isSpecial(edit.name)) return error.InvalidRefName;
+        if (isSpecial(edit.name)) continue;
         if (isLinked(store) and isPerWorktree(store, edit.name)) needs_worktree = true;
     }
 
@@ -782,7 +787,13 @@ pub fn prepare(tx: *refs.Transaction, io: Io) refs.TransactionError!void {
     for (tx.edits.items) |*edit| {
         // A ref only logged through is neither read nor checked.
         if (edit.via != null) continue;
-        const current = try readIn(&stacks, store, gpa, edit.name);
+        if (isSpecial(edit.name)) {
+            try lockSpecial(tx, io, edit);
+        }
+        const current = if (isSpecial(edit.name))
+            try store.read(gpa, io, edit.name)
+        else
+            try readIn(&stacks, store, gpa, edit.name);
         var current_oid: ?Oid = null;
         if (current) |value| switch (value) {
             .direct => |oid| current_oid = oid,
@@ -809,6 +820,37 @@ pub fn prepare(tx: *refs.Transaction, io: Io) refs.TransactionError!void {
     tx.reftable = pending;
 }
 
+/// Take the file lock a special ref is written through, as the files
+/// backend takes a loose ref's.
+fn lockSpecial(tx: *refs.Transaction, io: Io, edit: *refs.Transaction.Edit) refs.TransactionError!void {
+    const buffer = try tx.gpa.alloc(u8, 4096);
+    edit.lock_buffer = buffer;
+    edit.lock = try fs.LockFile.open(tx.gpa, io, tx.store.dirFor(edit.name), edit.name, buffer, .{});
+}
+
+/// Write each special ref's new value into its file, or remove the file.
+fn commitSpecial(tx: *refs.Transaction, io: Io) refs.TransactionError!void {
+    var hex: [hash.max_hex_len]u8 = undefined;
+    for (tx.edits.items) |*edit| {
+        if (!isSpecial(edit.name) or edit.via != null) continue;
+        const lock = &edit.lock.?;
+        if (edit.new) |new| {
+            switch (new) {
+                .direct => |oid| lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed,
+                .symbolic => |target| lock.writer().print("ref: {s}\n", .{target}) catch return error.WriteFailed,
+            }
+            try lock.commit(io);
+        } else {
+            lock.deinit(io);
+            edit.lock = null;
+            tx.store.dirFor(edit.name).deleteFile(io, edit.name) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            };
+        }
+    }
+}
+
 /// A name and a directory of names cannot both exist: `refs/heads/a` and
 /// `refs/heads/a/b`. git checks that against the refs already there, and
 /// so does this, leaving out the ones the transaction deletes.
@@ -818,7 +860,7 @@ fn checkNames(tx: *refs.Transaction, stacks: *const Stacks) refs.TransactionErro
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     for (tx.edits.items) |edit| {
-        if (edit.new == null or edit.via != null) continue;
+        if (edit.new == null or edit.via != null or isSpecial(edit.name)) continue;
         const stack = stacks.forName(tx.store, edit.name);
         // A ref where a directory of this one would be.
         var end = edit.name.len;
@@ -852,6 +894,7 @@ pub fn commit(tx: *refs.Transaction, io: Io, log: ?refs.LogMessage) refs.Transac
     const store = tx.store;
     try addTable(tx, io, pending, &pending.main, &pending.stacks.main, false, log);
     if (pending.worktree) |*w| try addTable(tx, io, pending, w, &pending.stacks.worktree.?, true, log);
+    try commitSpecial(tx, io);
 
     const options = store.reftable_options;
     const compact_worktree = pending.worktree != null;
@@ -963,6 +1006,7 @@ fn addTable(
         break :blk try logMessage(arena, normal, store.reftable_options.write.block_size);
     } else null;
     for (tx.edits.items) |edit| {
+        if (isSpecial(edit.name)) continue;
         if (isLinked(store) and isPerWorktree(store, edit.name) != worktree_stack) continue;
         // A ref an update went through, or `HEAD` when the branch it names
         // moved, keeps its value and gains the log line: git's
@@ -1648,12 +1692,64 @@ test "a name and a directory of names conflict with what is already there" {
         try tx.commit(io, null);
     }
     try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/a") == null);
-    try std.testing.expectError(error.InvalidRefName, blk: {
+}
+
+test "FETCH_HEAD and MERGE_HEAD are files and the other pseudorefs are in the stack, as git keeps them" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    try requireReftableGit(gpa, io);
+    var git = try testgit.Repo.init(gpa, io, &.{"--ref-format=reftable"});
+    defer git.deinit();
+    try git.writeFile(io, "a.txt", "a\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const tip_text = try git.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(tip_text);
+    const tip = try Oid.parse(.sha1, tip_text);
+
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
-        try tx.create("FETCH_HEAD", .{ .direct = one });
-        break :blk tx.commit(io, null);
-    });
+        for ([_][]const u8{ "FETCH_HEAD", "MERGE_HEAD", "ORIG_HEAD", "CHERRY_PICK_HEAD" }) |name| {
+            try tx.create(name, .{ .direct = tip });
+        }
+        try tx.commit(io, .{ .who = fixtureWho(1_700_000_000), .message = "pseudorefs" });
+    }
+    var line_buf: [64]u8 = undefined;
+    const want_line = try std.fmt.bufPrint(&line_buf, "{s}\n", .{tip_text});
+    for ([_][]const u8{ ".git/FETCH_HEAD", ".git/MERGE_HEAD" }) |path| {
+        const text = try git.readFile(io, path);
+        defer gpa.free(text);
+        try std.testing.expectEqualStrings(want_line, text);
+    }
+    try std.testing.expectError(error.FileNotFound, git.dir.access(io, ".git/ORIG_HEAD", .{}));
+    try std.testing.expectError(error.FileNotFound, git.dir.access(io, ".git/CHERRY_PICK_HEAD", .{}));
+    for ([_][]const u8{ "FETCH_HEAD", "MERGE_HEAD", "ORIG_HEAD", "CHERRY_PICK_HEAD" }) |name| {
+        const seen = try git.line(io, &.{ "rev-parse", "--verify", "-q", name });
+        defer gpa.free(seen);
+        try std.testing.expectEqualStrings(tip_text, seen);
+        const ours = (try repo.refs.read(gpa, io, name)).?;
+        try std.testing.expect(ours.direct.eql(tip));
+    }
+    // The special ones get no log.
+    var fetch_log = try repo.readLog(io, "FETCH_HEAD");
+    defer fetch_log.deinit();
+    try std.testing.expectEqual(@as(usize, 0), fetch_log.entries.len);
+
+    {
+        var tx = repo.beginRefs();
+        defer tx.deinit(io);
+        try tx.delete("MERGE_HEAD", .{ .matches = tip });
+        try tx.delete("CHERRY_PICK_HEAD", .must_exist);
+        try tx.commit(io, null);
+    }
+    try std.testing.expectError(error.FileNotFound, git.dir.access(io, ".git/MERGE_HEAD", .{}));
+    git.report_failures = false;
+    try std.testing.expectError(error.GitFailed, git.exec(io, &.{ "rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD" }));
+    git.report_failures = true;
+    try refsVerify(&git, io, &.{});
 }
 
 test "git waits on the lock a prepared transaction holds, and reads the result" {
