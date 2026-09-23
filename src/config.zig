@@ -26,8 +26,6 @@ pub const ParseError = error{
     InvalidVariableName,
     /// A quoted value with no closing quote, or an unknown escape.
     MalformedValue,
-    /// A variable before any section header.
-    VariableOutsideSection,
     /// `include.path` or an `includeIf` nested deeper than the cap.
     IncludeTooDeep,
     /// A value given as `Sources.command` under a name git refuses; see
@@ -168,7 +166,8 @@ pub const SourceFile = struct {
 
 /// One name and value, with where it came from.
 pub const Entry = struct {
-    /// Lower-case.
+    /// Lower-case. Empty, with no subsection, for a variable written before
+    /// any header, which git reads and no full name reaches.
     section: []const u8,
     /// Case-sensitive, with a quoted subsection's escapes undone. Empty when
     /// there is none, and also for `[section ""]`, which `has_subsection`
@@ -1155,7 +1154,6 @@ fn parseLines(gpa: Allocator, names: Allocator, text: []const u8, out: *std.Arra
         try out.append(gpa, .{ .kind = .other, .text = text[0..bom.len] });
         offset = bom.len;
     }
-    var have_section = false;
     var start = offset;
     while (offset < text.len) {
         const c = text[offset];
@@ -1196,10 +1194,10 @@ fn parseLines(gpa: Allocator, names: Allocator, text: []const u8, out: *std.Arra
                 .quoted = header.quoted,
             });
             start = offset;
-            have_section = true;
             continue;
         }
-        if (!have_section) return error.VariableOutsideSection;
+        // A variable before any header is read, as git reads it: it has
+        // no section, so no full name reaches it, but `entries` lists it.
         offset = try variableEnd(text, offset);
         const raw = text[start..offset];
         const variable = try parseVariableLine(raw);
@@ -2076,9 +2074,36 @@ test "a value given on the command line is taken as it is, under any subsection"
     try std.testing.expectError(error.InvalidKey, Config.open(gpa, io, .{ .command = &.{"core_x.y=1"} }, .{}));
 }
 
-test "a variable before any section is a named error" {
+test "a variable before any section is read as git reads it, under no name a lookup reaches" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.VariableOutsideSection, Config.parseText(gpa, "x = 1\n", .local));
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const texts = [_][]const u8{
+        "x = 1\n[core]\n\ty = 2\n",
+        "x\n",
+        "  x = a b # c\n[a]\n\tz = 3\nw = 4\n",
+        "\xEF\xBB\xBFx = 1\n",
+    };
+    for (texts) |text| {
+        try git.writeFile(io, "probe.config", text);
+        const theirs = try git.run(io, &.{ "config", "-f", "probe.config", "--list", "-z" });
+        defer gpa.free(theirs);
+        var config = try Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        var ours: std.Io.Writer.Allocating = .init(gpa);
+        defer ours.deinit();
+        for (config.entries.items) |entry| {
+            if (entry.section.len != 0 or entry.has_subsection) try ours.writer.print("{s}.", .{entry.section});
+            if (entry.has_subsection) try ours.writer.print("{s}.", .{entry.subsection});
+            try ours.writer.print("{s}", .{entry.name});
+            if (entry.value) |v| try ours.writer.print("\n{s}", .{v});
+            try ours.writer.writeByte(0);
+        }
+        try std.testing.expectEqualStrings(theirs, ours.written());
+        // git will not look one up either: the name has no section.
+        try std.testing.expect(config.get("x") == null);
+    }
 }
 
 test "fuzz: any bytes are a configuration or a named error" {
