@@ -1405,3 +1405,75 @@ test "a merge git would carry across a rename is refused by name, and one it wou
     }
     try expectSameState(&pair, io, &merge_state, &main_logs);
 }
+
+/// `gone` adds a file and takes it away again.
+fn goneScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try cleanScript(repo, io);
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "gone", "topic~3" });
+    try repo.writeFile(io, "tmp", "for a while\n");
+    try repo.exec(io, &.{ "add", "tmp" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "add tmp" });
+    try repo.exec(io, &.{ "rm", "-q", "tmp" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "remove tmp" });
+    try repo.writeFile(io, "tmp", "in the way\n");
+}
+
+test "a pick refused for an untracked file goes back on the sheet, and continues once the file is gone" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, goneScript);
+    defer pair.deinit();
+
+    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var blocked: threeway.Blocked = .{};
+        try std.testing.expectError(error.UntrackedWouldBeOverwritten, rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .blocked = &blocked }));
+        try std.testing.expectEqualStrings("tmp", blocked.path());
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/gone" });
+
+    // Each continues the other's once the file is out of the way.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.dir.deleteFile(io, "tmp");
+    try pair.ours.exec(io, &.{ "rebase", "--continue" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+        defer repo.deinit(io);
+        var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/gone" });
+}
+
+test "a cherry-pick sequence refused for an untracked file leaves what git's leaves" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, goneScript);
+    defer pair.deinit();
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "main" });
+    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "gone~1", "gone" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const commits = [_]Oid{ try oidOf(gpa, io, &pair.ours, "gone~1"), try oidOf(gpa, io, &pair.ours, "gone") };
+        try std.testing.expectError(error.UntrackedWouldBeOverwritten, sequencer.pick(gpa, io, &repo, &commits, .{ .who = who }));
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+
+    // With the file gone, each aborts the other's.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.dir.deleteFile(io, "tmp");
+    try pair.ours.exec(io, &.{ "cherry-pick", "--abort" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+        defer repo.deinit(io);
+        try sequencer.abort(gpa, io, &repo, who, null);
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+}

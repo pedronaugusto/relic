@@ -1069,22 +1069,35 @@ fn runLoop(r: *Run) Error!Outcome {
                 return finishOutcome(r, .stopped, .@"break", null);
             },
             .pick, .reword, .edit, .fixup, .squash => {
-                if (try pickOne(r)) |outcome| return outcome;
+                const stopped = pickOne(r) catch |err| return reschedule(r, item, err);
+                if (stopped) |outcome| return outcome;
             },
             .exec => {
                 if (try doExec(r, item.arg)) |outcome| return outcome;
             },
-            .label => try doLabel(r, item.arg),
-            .reset => try doReset(r, item.arg),
+            .label => doLabel(r, item.arg) catch |err| return reschedule(r, item, err),
+            .reset => doReset(r, item.arg) catch |err| return reschedule(r, item, err),
             .merge => {
-                if (try doMerge(r, item)) |outcome| return outcome;
+                const stopped = doMerge(r, item) catch |err| return reschedule(r, item, err);
+                if (stopped) |outcome| return outcome;
             },
-            .update_ref => try doUpdateRef(r, item.arg),
+            .update_ref => doUpdateRef(r, item.arg) catch |err| return reschedule(r, item, err),
             .noop, .drop, .comment, .revert => {},
         }
         _ = r.items.orderedRemove(0);
     }
     return finish(r);
+}
+
+/// An instruction that failed without stopping -- a refusal, or a label
+/// that does not resolve -- goes back on top of the sheet, as git
+/// reschedules it, so that once the cause is dealt with a continue tries it
+/// again instead of passing over it. Its line stays in `done` too, as in
+/// git, and `REBASE_HEAD` names its commit.
+fn reschedule(r: *Run, item: todo.Item, err: Error) Error {
+    try saveTodo(r, 0);
+    if (item.commit) |commit| try head_mod.writeRef(r.io, r.repo, "REBASE_HEAD", commit);
+    return err;
 }
 
 /// The author a commit's buffer names, as `write_author_script` records it:
