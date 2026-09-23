@@ -214,6 +214,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
+        tx.hooks = options.hooks;
         try tx.update(target, .{ .direct = new }, if (current) |c| .{ .matches = c } else .must_not_exist);
         try tx.commit(io, .{ .who = request.committer, .message = log_message, .policy = policy });
     }

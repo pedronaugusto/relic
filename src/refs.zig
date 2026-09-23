@@ -15,6 +15,8 @@ const object = @import("object.zig");
 const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
 const reflog = @import("reflog.zig");
+const hooks = @import("hooks.zig");
+const testgit = @import("testgit.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -59,7 +61,7 @@ pub const TransactionError = error{
     /// `refs/heads/a` and `refs/heads/a/b` are the same path.
     RefNameConflict,
 } || ReadError || fs.CommitError || fs.LockError || reflog.AppendError ||
-    Io.Dir.DeleteFileError || Io.Dir.CreateDirPathError;
+    Io.Dir.DeleteFileError || Io.Dir.CreateDirPathError || hooks.Error;
 
 /// What a ref points at.
 pub const Ref = union(enum) {
@@ -476,12 +478,23 @@ pub const LogMessage = struct {
 /// appends each log line. Those renames and appends are separate filesystem
 /// operations, so a commit-time error is indeterminate and may have installed
 /// a prefix; reread the affected refs before retrying.
+///
+/// With `hooks` set, `reference-transaction` is told about the transaction
+/// the way git tells it about every one: `preparing` before any lock is
+/// taken, `prepared` once every lock is held and checked, then `committed`
+/// or `aborted`. A hook that fails in either of the first two refuses the
+/// transaction, which then rolls back as it would for a held lock.
 pub const Transaction = struct {
     store: *Store,
     gpa: Allocator,
     edits: std.ArrayList(Edit),
     prepared: bool = false,
     finished: bool = false,
+    /// The hooks to run, or `null` to run none.
+    hooks: ?*hooks.Runner = null,
+    /// Whether `preparing` has been announced, which is what makes giving
+    /// up announce `aborted`.
+    announced: bool = false,
 
     /// One ref's change.
     pub const Edit = struct {
@@ -502,7 +515,13 @@ pub const Transaction = struct {
     /// Release the transaction, rolling back anything `prepare` took.
     pub fn deinit(tx: *Transaction, io: Io) void {
         tx.abort(io);
-        for (tx.edits.items) |edit| tx.gpa.free(edit.name);
+        for (tx.edits.items) |edit| {
+            tx.gpa.free(edit.name);
+            if (edit.new) |new| switch (new) {
+                .symbolic => |target| tx.gpa.free(target),
+                .direct => {},
+            };
+        }
         tx.edits.deinit(tx.gpa);
         tx.* = undefined;
     }
@@ -556,6 +575,11 @@ pub const Transaction = struct {
             }
         }
 
+        if (tx.hooks != null) {
+            tx.announced = true;
+            try tx.announce(io, .preparing);
+        }
+
         for (tx.edits.items) |*edit| {
             const dir = tx.store.dirFor(edit.name);
             if (std.fs.path.dirnamePosix(edit.name)) |parent| {
@@ -606,7 +630,31 @@ pub const Transaction = struct {
                 },
             }
         }
+        if (tx.hooks != null) try tx.announce(io, .prepared);
         tx.prepared = true;
+    }
+
+    /// Tell `reference-transaction` where the transaction is. The old value
+    /// on each line is the one the edit expected, or zero when it expected
+    /// none or any, which is what git writes.
+    fn announce(tx: *Transaction, io: Io, state: hooks.Runner.TransactionState) hooks.Error!void {
+        const runner = tx.hooks orelse return;
+        const lines = try tx.gpa.alloc(hooks.Runner.RefUpdate, tx.edits.items.len);
+        defer tx.gpa.free(lines);
+        for (tx.edits.items, lines) |edit, *line| {
+            line.* = .{
+                .old = switch (edit.expected) {
+                    .matches => |oid| .{ .oid = oid },
+                    else => null,
+                },
+                .new = if (edit.new) |new| switch (new) {
+                    .direct => |oid| .{ .oid = oid },
+                    .symbolic => |target| .{ .symbolic = target },
+                } else null,
+                .name = edit.name,
+            };
+        }
+        _ = try runner.referenceTransaction(io, tx.store.kind, state, lines);
     }
 
     /// Write every new value, and append a log line for each where the
@@ -682,6 +730,9 @@ pub const Transaction = struct {
 
         tx.finished = true;
         tx.releaseLocks(io);
+        // The refs have moved; a hook failing now changes nothing, and its
+        // status is not an error of the transaction's.
+        if (tx.announced) tx.announce(io, .committed) catch {};
     }
 
     fn removeFromPacked(tx: *Transaction, io: Io) TransactionError!void {
@@ -699,11 +750,13 @@ pub const Transaction = struct {
         try tx.store.writePacked(io, kept.items);
     }
 
-    /// Give up, leaving the repository exactly as it was.
+    /// Give up, leaving the repository exactly as it was. A transaction
+    /// that announced itself to `reference-transaction` announces this too.
     pub fn abort(tx: *Transaction, io: Io) void {
         if (!tx.finished) {
             tx.releaseLocks(io);
             tx.finished = true;
+            if (tx.announced) tx.announce(io, .aborted) catch {};
         }
     }
 
@@ -716,13 +769,6 @@ pub const Transaction = struct {
             if (edit.lock_buffer.len != 0) {
                 tx.gpa.free(edit.lock_buffer);
                 edit.lock_buffer = &.{};
-            }
-            if (edit.new) |new| {
-                switch (new) {
-                    .symbolic => |target| tx.gpa.free(target),
-                    .direct => {},
-                }
-                edit.new = null;
             }
         }
     }
@@ -947,6 +993,202 @@ test "nesting names in one transaction is refused" {
     try tx.create("refs/heads/a", .{ .direct = one });
     try tx.create("refs/heads/a/b", .{ .direct = one });
     try std.testing.expectError(error.RefNameConflict, tx.commit(io, null));
+}
+
+/// Two repositories holding the same commit, made by git with a fixed date,
+/// each with a `reference-transaction` hook that appends its state and its
+/// input to `.git/rt.log`.
+const HookTwin = struct {
+    git: testgit.Repo,
+    relic: testgit.Repo,
+    environ: std.process.Environ.Map,
+
+    fn init(gpa: Allocator, io: Io, hook_body: []const u8) !HookTwin {
+        var t: HookTwin = .{
+            .git = try testgit.Repo.init(gpa, io, &.{}),
+            .relic = undefined,
+            .environ = undefined,
+        };
+        errdefer t.git.deinit();
+        t.relic = try testgit.Repo.init(gpa, io, &.{});
+        errdefer t.relic.deinit();
+        t.environ = try hooks.testEnviron(gpa);
+        errdefer t.environ.deinit();
+        _ = t.environ.orderedRemove("GIT_DIR");
+        _ = t.environ.orderedRemove("GIT_INDEX_FILE");
+        try t.environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
+        try t.environ.put("GIT_COMMITTER_DATE", "@1700000000 +0000");
+        inline for (.{ &t.git, &t.relic }) |r| {
+            try r.writeFile(io, "a.txt", "a\n");
+            try r.exec(io, &.{ "add", "a.txt" });
+            try r.exec(io, &.{ "commit", "-q", "-m", "one" });
+            try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "two" });
+            try r.writeFile(io, ".git/hooks/reference-transaction", hook_body);
+            const file = try r.dir.openFile(io, ".git/hooks/reference-transaction", .{});
+            defer file.close(io);
+            try file.setPermissions(io, .fromMode(0o755));
+        }
+        return t;
+    }
+
+    fn deinit(t: *HookTwin) void {
+        t.environ.deinit();
+        t.git.deinit();
+        t.relic.deinit();
+    }
+
+    fn gitWithHooks(t: *HookTwin, io: Io, args: []const []const u8) !void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(t.git.gpa);
+        try argv.appendSlice(t.git.gpa, &.{ "-c", "core.hooksPath=.git/hooks" });
+        try argv.appendSlice(t.git.gpa, args);
+        t.git.environ = &t.environ;
+        defer t.git.environ = null;
+        try t.git.exec(io, argv.items);
+    }
+
+    fn expectSameLog(t: *HookTwin, io: Io) !void {
+        const a = try t.git.readFile(io, ".git/rt.log");
+        defer t.git.gpa.free(a);
+        const b = try t.relic.readFile(io, ".git/rt.log");
+        defer t.relic.gpa.free(b);
+        try std.testing.expectEqualStrings(a, b);
+    }
+};
+
+const logging_hook = "#!/bin/sh\n{ echo \"$1\"; cat; } >> .git/rt.log\n";
+
+test "reference-transaction hears from a transaction what git's hears" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var twin = try HookTwin.init(gpa, io, logging_hook);
+    defer twin.deinit();
+
+    const first_text = try twin.git.line(io, &.{ "rev-parse", "HEAD~1" });
+    defer gpa.free(first_text);
+    const second_text = try twin.git.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(second_text);
+    const first = try Oid.parse(.sha1, first_text);
+    const second = try Oid.parse(.sha1, second_text);
+
+    try twin.gitWithHooks(io, &.{ "update-ref", "refs/heads/topic", first_text });
+    try twin.gitWithHooks(io, &.{ "update-ref", "refs/heads/topic", second_text, first_text });
+    try twin.gitWithHooks(io, &.{ "symbolic-ref", "HEAD", "refs/heads/topic" });
+
+    var git_dir = try twin.relic.gitDir(io);
+    defer git_dir.close(io);
+    var config = try @import("config.zig").Config.parseText(gpa, "", .local);
+    defer config.deinit();
+    var runner = try hooks.Runner.init(gpa, io, .{
+        .config = &config,
+        .git_dir = git_dir,
+        .common_dir = git_dir,
+        .work_dir = twin.relic.dir,
+    }, .{ .environ = &twin.environ }, .{ .output = .ignore });
+    defer runner.deinit();
+    var store: Store = .init(gpa, .sha1, git_dir, git_dir);
+    {
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        tx.hooks = &runner;
+        try tx.update("refs/heads/topic", .{ .direct = first }, .any);
+        try tx.commit(io, null);
+    }
+    {
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        tx.hooks = &runner;
+        try tx.update("refs/heads/topic", .{ .direct = second }, .{ .matches = first });
+        try tx.commit(io, null);
+    }
+    {
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        tx.hooks = &runner;
+        try tx.update("HEAD", .{ .symbolic = "refs/heads/topic" }, .any);
+        try tx.commit(io, null);
+    }
+    try twin.expectSameLog(io);
+}
+
+test "a reference-transaction hook refusing a transaction leaves every ref as it was" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_][]const u8{ "preparing", "prepared" }) |state| {
+        var body_buf: [160]u8 = undefined;
+        const body = try std.fmt.bufPrint(&body_buf, "#!/bin/sh\n{{ echo \"$1\"; cat; }} >> .git/rt.log\n[ \"$1\" = {s} ] && exit 1\nexit 0\n", .{state});
+        var twin = try HookTwin.init(gpa, io, body);
+        defer twin.deinit();
+        const head_text = try twin.git.line(io, &.{ "rev-parse", "HEAD" });
+        defer gpa.free(head_text);
+        const head = try Oid.parse(.sha1, head_text);
+
+        twin.git.report_failures = false;
+        try std.testing.expectError(error.GitFailed, twin.gitWithHooks(io, &.{ "update-ref", "refs/heads/topic", head_text }));
+
+        var git_dir = try twin.relic.gitDir(io);
+        defer git_dir.close(io);
+        var config = try @import("config.zig").Config.parseText(gpa, "", .local);
+        defer config.deinit();
+        var runner = try hooks.Runner.init(gpa, io, .{
+            .config = &config,
+            .git_dir = git_dir,
+            .common_dir = git_dir,
+            .work_dir = twin.relic.dir,
+        }, .{ .environ = &twin.environ }, .{ .output = .ignore });
+        defer runner.deinit();
+        var store: Store = .init(gpa, .sha1, git_dir, git_dir);
+        {
+            var tx = store.begin(gpa);
+            defer tx.deinit(io);
+            tx.hooks = &runner;
+            try tx.update("refs/heads/topic", .{ .direct = head }, .any);
+            try std.testing.expectError(error.HookRejected, tx.commit(io, null));
+        }
+        try std.testing.expectEqualStrings("reference-transaction", runner.failure.event());
+        try std.testing.expect((try store.read(gpa, io, "refs/heads/topic")) == null);
+        try std.testing.expect(!fs.lockHeld(io, git_dir, "refs/heads/topic"));
+        try twin.expectSameLog(io);
+    }
+}
+
+test "a deletion is announced with the value it expected and a zero new value" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var twin = try HookTwin.init(gpa, io, logging_hook);
+    defer twin.deinit();
+    const head_text = try twin.relic.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head_text);
+    try twin.relic.exec(io, &.{ "branch", "gone" });
+
+    var git_dir = try twin.relic.gitDir(io);
+    defer git_dir.close(io);
+    var config = try @import("config.zig").Config.parseText(gpa, "", .local);
+    defer config.deinit();
+    var runner = try hooks.Runner.init(gpa, io, .{
+        .config = &config,
+        .git_dir = git_dir,
+        .common_dir = git_dir,
+        .work_dir = twin.relic.dir,
+    }, .{ .environ = &twin.environ }, .{ .output = .ignore });
+    defer runner.deinit();
+    var store: Store = .init(gpa, .sha1, git_dir, git_dir);
+    var tx = store.begin(gpa);
+    defer tx.deinit(io);
+    tx.hooks = &runner;
+    try tx.delete("refs/heads/gone", .{ .matches = try Oid.parse(.sha1, head_text) });
+    try tx.commit(io, null);
+
+    const log = try twin.relic.readFile(io, ".git/rt.log");
+    defer gpa.free(log);
+    const line = try std.fmt.allocPrint(gpa, "{s} {s} refs/heads/gone\n", .{ head_text, "0" ** 40 });
+    defer gpa.free(line);
+    const expected = try std.mem.concat(gpa, u8, &.{ "preparing\n", line, "prepared\n", line, "committed\n", line });
+    defer gpa.free(expected);
+    try std.testing.expectEqualStrings(expected, log);
 }
 
 test "fuzz: any packed-refs bytes are a listing or a named error" {
