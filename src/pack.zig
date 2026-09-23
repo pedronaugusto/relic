@@ -1384,6 +1384,9 @@ pub const Writer = struct {
     entries: std.ArrayList(WrittenEntry),
     deltas: u32 = 0,
     finished: bool = false,
+    /// Whether the pack goes to a caller's writer rather than to a file:
+    /// no index, no rename, and nothing on the disk to take away.
+    streaming: bool = false,
 
     /// How many bytes of the file are buffered before a write.
     const file_buffer_len = 64 * 1024;
@@ -1460,6 +1463,58 @@ pub const Writer = struct {
         return initMaybeCounted(gpa, io, dir, kind, null, options);
     }
 
+    /// Begin a pack of exactly `object_count` objects written to `out` as
+    /// it goes — a push's pack, on its way to the other side — with no
+    /// index and no file. `finish` writes the trailing checksum to `out`;
+    /// flushing `out` is the caller's.
+    pub fn initStream(
+        gpa: Allocator,
+        kind: Kind,
+        out: *Io.Writer,
+        object_count: u32,
+        options: WriteOptions,
+    ) WriteError!*Writer {
+        const w = try gpa.create(Writer);
+        errdefer gpa.destroy(w);
+        const window = try gpa.alloc(u8, flate.max_window_len);
+        errdefer gpa.free(window);
+        const compress = try gpa.create(flate.Compress);
+        errdefer gpa.destroy(compress);
+        w.* = .{
+            .gpa = gpa,
+            .kind = kind,
+            .dir = undefined,
+            .options = options,
+            .expected = object_count,
+            .temp = undefined,
+            .temp_len = 0,
+            .file = undefined,
+            .file_writer = undefined,
+            .file_buffer = &.{},
+            .sink = undefined,
+            .window = window,
+            .compress = compress,
+            .entries = .empty,
+            .seen = .empty,
+            .streaming = true,
+        };
+        w.sink = .{
+            .out = out,
+            .hasher = .init(kind),
+            .crc = .init(),
+            .count = 0,
+            .writer = .{ .buffer = &w.sink.buffer, .vtable = &.{ .drain = Sink.drain } },
+            .buffer = undefined,
+        };
+        w.sink.writer.buffer = &w.sink.buffer;
+        var header: [12]u8 = undefined;
+        @memcpy(header[0..4], "PACK");
+        std.mem.writeInt(u32, header[4..8], 2, .big);
+        std.mem.writeInt(u32, header[8..12], object_count, .big);
+        try w.sink.emit(&header);
+        return w;
+    }
+
     fn initMaybeCounted(
         gpa: Allocator,
         io: Io,
@@ -1533,7 +1588,7 @@ pub const Writer = struct {
         if (!w.finished) w.abort(io);
         w.entries.deinit(w.gpa);
         w.seen.deinit(w.gpa);
-        w.gpa.free(w.file_buffer);
+        if (w.file_buffer.len != 0) w.gpa.free(w.file_buffer);
         w.gpa.free(w.window);
         w.gpa.destroy(w.compress);
         const gpa = w.gpa;
@@ -1543,6 +1598,10 @@ pub const Writer = struct {
     /// Give up, leaving the directory as it was.
     pub fn abort(w: *Writer, io: Io) void {
         if (w.finished) return;
+        if (w.streaming) {
+            w.finished = true;
+            return;
+        }
         w.file.close(io);
         w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
         w.finished = true;
@@ -1646,6 +1705,18 @@ pub const Writer = struct {
         }
         if (w.entries.items.len > std.math.maxInt(u32)) return error.TooManyObjects;
 
+        if (w.streaming) {
+            const checksum = w.sink.hasher.final();
+            try w.sink.out.writeAll(checksum.raw());
+            w.finished = true;
+            return .{
+                .name = checksum,
+                .objects = @intCast(w.entries.items.len),
+                .pack_bytes = w.sink.count + w.kind.rawLen(),
+                .index_bytes = 0,
+                .deltas = w.deltas,
+            };
+        }
         const checksum = if (w.expected != null)
             w.sink.hasher.final()
         else
@@ -1959,6 +2030,42 @@ fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
     // resolved, and checks every CRC and the trailer.
     const checked = try p.verify(io, null, 0);
     if (checked.objects != report.objects) return error.PackDidNotRoundTrip;
+}
+
+test "a pack written to a stream is byte for byte the pack written to a file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const base_bytes = "a base with enough in it for a delta to copy from\n";
+    const target = base_bytes ++ "and a line more\n";
+    const base_oid = hash.Hasher.object(.sha1, "blob", base_bytes);
+    const target_oid = hash.Hasher.object(.sha1, "blob", target);
+    const patch = try copyThenInsert(gpa, base_bytes.len, "and a line more\n");
+    defer gpa.free(patch);
+
+    var file_writer = try Writer.init(gpa, io, tmp.dir, .sha1, 2, .{});
+    defer file_writer.deinit(io);
+    const at = try file_writer.add(base_oid, .blob, base_bytes);
+    _ = try file_writer.addOfsDelta(target_oid, at, patch);
+    const written = try file_writer.finish(io);
+
+    var stream: Io.Writer.Allocating = .init(gpa);
+    defer stream.deinit();
+    var stream_writer = try Writer.initStream(gpa, .sha1, &stream.writer, 2, .{});
+    defer stream_writer.deinit(io);
+    const stream_at = try stream_writer.add(base_oid, .blob, base_bytes);
+    _ = try stream_writer.addOfsDelta(target_oid, stream_at, patch);
+    const streamed = try stream_writer.finish(io);
+
+    try std.testing.expect(written.name.eql(streamed.name));
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var name_buf: [64]u8 = undefined;
+    const pack_name = try std.fmt.bufPrint(&name_buf, "pack-{s}.pack", .{written.name.hex(&hex)});
+    const on_disk = try tmp.dir.readFileAlloc(io, pack_name, gpa, .unlimited);
+    defer gpa.free(on_disk);
+    try std.testing.expectEqualSlices(u8, on_disk, stream.written());
 }
 
 test "a pack with no objects is still a pack" {

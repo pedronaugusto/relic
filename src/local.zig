@@ -21,13 +21,22 @@ const pack = @import("pack.zig");
 const protocol = @import("protocol.zig");
 const objectwalk = @import("objectwalk.zig");
 const url_mod = @import("url.zig");
+const object = @import("object.zig");
+const revwalk = @import("revwalk.zig");
+const safepath = @import("safepath.zig");
+const sendpack = @import("sendpack.zig");
+const builtin = @import("builtin");
 
 const Oid = hash.Oid;
 
 pub const Error = error{
     /// The path names no repository.
     NotARepository,
-} || repo_mod.Error || objectwalk.Error || refs_mod.ReadError;
+    /// The repository has hooks a push would run — `pre-receive`, `update`,
+    /// `post-receive` and the rest — and relic runs no hook on another
+    /// repository's behalf.
+    RemoteHooksNotRun,
+} || repo_mod.Error || objectwalk.Error || refs_mod.ReadError || refs_mod.TransactionError;
 
 /// Another repository, open.
 pub const Remote = struct {
@@ -186,7 +195,160 @@ pub const Remote = struct {
         try into.refresh(io);
         return report;
     }
+
+    /// How a push to this repository is applied.
+    pub const ReceiveOptions = struct {
+        /// Who the reflog entries are written as, and when.
+        who: object.Signature,
+        /// Apply every command or none.
+        atomic: bool = false,
+    };
+
+    /// Apply a push to this repository as `git-receive-pack` applies one:
+    /// the objects copied from `from` as one pack, then each command under
+    /// receive-pack's own rules — `receive.denyCurrentBranch`,
+    /// `receive.denyDeleteCurrent`, `receive.denyDeletes`,
+    /// `receive.denyNonFastForwards` — and the value the pusher saw, each
+    /// ref written with `push` in its log. The answer is the report a
+    /// receive-pack would send.
+    ///
+    /// A repository with hooks that a push runs is refused whole: those
+    /// hooks are its owner's, and applying the push without them would skip
+    /// whatever they check.
+    pub fn receivePush(
+        r: *Remote,
+        gpa: Allocator,
+        io: Io,
+        from: *odb_mod.Odb,
+        commands: []const sendpack.Command,
+        objects: []const odb_mod.PackEntry,
+        options: ReceiveOptions,
+    ) (Error || sendpack.Error)!sendpack.Report {
+        try r.refuseHooks(io);
+
+        var report: sendpack.Report = .{ .arena = .init(gpa), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
+        errdefer report.arena.deinit();
+        const arena = report.arena.allocator();
+
+        var needs_pack = false;
+        for (commands) |command| {
+            if (!command.new.isZero()) needs_pack = true;
+        }
+        if (needs_pack and objects.len != 0) {
+            var pack_dir = try r.repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
+            defer pack_dir.close(io);
+            _ = try from.writePack(io, pack_dir, objects, .{});
+            try r.repo.odb.refresh(io);
+        }
+
+        const config = &r.repo.config;
+        const bare = r.repo.isBare();
+        const current = try r.repo.refs.currentBranch(gpa, io);
+        defer if (current) |c| gpa.free(c);
+        const deny_current = !bare and denies(config, "receive.denycurrentbranch", true);
+        const deny_delete_current = !bare and denies(config, "receive.denydeletecurrent", true);
+        const deny_deletes = config.getBool("receive.denydeletes", false) catch false;
+        const deny_non_ff = config.getBool("receive.denynonfastforwards", false) catch false;
+
+        var refs: std.ArrayList(sendpack.RefReport) = .empty;
+        var refused = false;
+        for (commands) |command| {
+            const name = try arena.dupe(u8, command.name);
+            const is_current = if (current) |c|
+                std.mem.startsWith(u8, name, "refs/heads/") and std.mem.eql(u8, name["refs/heads/".len..], c)
+            else
+                false;
+            var reason: ?[]const u8 = null;
+            if (!std.mem.startsWith(u8, name, "refs/") or !safepath.isValidRefName(name)) {
+                reason = "funny refname";
+            } else if (command.new.isZero()) {
+                if (deny_deletes) reason = "deletion prohibited";
+                if (is_current and deny_delete_current) reason = "deletion of the current branch prohibited";
+            } else {
+                if (is_current and deny_current) reason = "branch is currently checked out";
+                if (reason == null and !try r.repo.odb.exists(io, command.new)) reason = "missing necessary objects";
+                if (reason == null and deny_non_ff and !command.old.isZero()) {
+                    const ok = revwalk.isAncestor(gpa, io, &r.repo.odb, command.old, command.new) catch false;
+                    if (!ok) reason = "non-fast-forward";
+                }
+            }
+            if (reason != null) refused = true;
+            try refs.append(arena, .{ .name = name, .ok = reason == null, .message = reason });
+        }
+
+        if (options.atomic) {
+            if (refused) {
+                for (refs.items) |*ref| {
+                    if (ref.ok) {
+                        ref.ok = false;
+                        ref.message = "atomic transaction failed";
+                    }
+                }
+            } else {
+                var tx = r.repo.beginRefs();
+                defer tx.deinit(io);
+                for (commands) |command| try stage(&tx, command);
+                if (tx.commit(io, .{ .who = options.who, .message = "push", .policy = r.repo.reflogPolicy() })) |_| {} else |_| {
+                    for (refs.items) |*ref| {
+                        ref.ok = false;
+                        ref.message = "failed to update ref";
+                    }
+                }
+            }
+        } else {
+            for (commands, refs.items) |command, *ref| {
+                if (!ref.ok) continue;
+                var tx = r.repo.beginRefs();
+                defer tx.deinit(io);
+                try stage(&tx, command);
+                tx.commit(io, .{ .who = options.who, .message = "push", .policy = r.repo.reflogPolicy() }) catch {
+                    ref.ok = false;
+                    ref.message = "failed to update ref";
+                };
+            }
+        }
+        report.refs = refs.items;
+        return report;
+    }
+
+    fn stage(tx: *refs_mod.Transaction, command: sendpack.Command) refs_mod.TransactionError!void {
+        const expected: refs_mod.Expected = if (command.old.isZero()) .must_not_exist else .{ .matches = command.old };
+        if (command.new.isZero()) {
+            try tx.delete(command.name, expected);
+        } else {
+            try tx.update(command.name, .{ .direct = command.new }, expected);
+        }
+    }
+
+    /// Refuse a repository whose push would run hooks.
+    fn refuseHooks(r: *Remote, io: Io) Error!void {
+        const hooks_path = r.repo.config.get("core.hookspath");
+        var dir = (if (hooks_path) |path|
+            Io.Dir.cwd().openDir(io, path, .{})
+        else
+            r.repo.common_dir.openDir(io, "hooks", .{})) catch return;
+        defer dir.close(io);
+        for ([_][]const u8{
+            "pre-receive",  "update",           "post-receive",          "post-update",
+            "proc-receive", "push-to-checkout", "reference-transaction",
+        }) |name| {
+            const stat = dir.statFile(io, name, .{}) catch continue;
+            if (stat.kind != .file) continue;
+            if (builtin.os.tag != .windows and stat.permissions.toMode() & 0o111 == 0) continue;
+            return error.RemoteHooksNotRun;
+        }
+    }
 };
+
+/// Whether a `receive.deny*` setting denies: `refuse` and true do, and so
+/// does an unset one whose default is to.
+fn denies(config: *const @import("config.zig").Config, key: []const u8, default: bool) bool {
+    const raw = config.get(key) orelse return default;
+    if (std.ascii.eqlIgnoreCase(raw, "refuse")) return true;
+    if (std.ascii.eqlIgnoreCase(raw, "warn") or std.ascii.eqlIgnoreCase(raw, "ignore")) return false;
+    if (std.ascii.eqlIgnoreCase(raw, "updateinstead")) return true;
+    return @import("config.zig").parseBool(raw) catch default;
+}
 
 fn matches(name: []const u8, prefixes: []const []const u8) bool {
     if (prefixes.len == 0) return true;

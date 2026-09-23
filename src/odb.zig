@@ -1003,6 +1003,34 @@ pub const Odb = struct {
         entries: []const PackEntry,
         options: PackOptions,
     ) Error!pack.WriteReport {
+        return odb.writePackInto(io, .{ .dir = pack_dir }, entries, options);
+    }
+
+    /// `writePack`, with the pack written to `out` as it is made rather
+    /// than to a file: what a push sends. No index is written; `out` is not
+    /// flushed.
+    pub fn writePackTo(
+        odb: *Odb,
+        io: Io,
+        out: *Io.Writer,
+        entries: []const PackEntry,
+        options: PackOptions,
+    ) Error!pack.WriteReport {
+        return odb.writePackInto(io, .{ .stream = out }, entries, options);
+    }
+
+    const PackTarget = union(enum) {
+        dir: Io.Dir,
+        stream: *Io.Writer,
+    };
+
+    fn writePackInto(
+        odb: *Odb,
+        io: Io,
+        target: PackTarget,
+        entries: []const PackEntry,
+        options: PackOptions,
+    ) Error!pack.WriteReport {
         const gpa = odb.gpa;
 
         // Every object's type and length, which is what the order is by. A
@@ -1030,10 +1058,14 @@ pub const Odb = struct {
         }
         std.mem.sort(Ordered, ordered, {}, beforeInPackOrder);
 
-        var writer = try pack.Writer.init(gpa, io, pack_dir, odb.kind, @intCast(entries.len), .{
+        const write_options: pack.WriteOptions = .{
             .sync = options.sync,
             .compression = options.compression,
-        });
+        };
+        var writer = switch (target) {
+            .dir => |pack_dir| try pack.Writer.init(gpa, io, pack_dir, odb.kind, @intCast(entries.len), write_options),
+            .stream => |out| try pack.Writer.initStream(gpa, odb.kind, out, @intCast(entries.len), write_options),
+        };
         defer writer.deinit(io);
 
         var window: std.ArrayList(WindowSlot) = .empty;

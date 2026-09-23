@@ -56,6 +56,8 @@ pub const smarthttp = @import("smarthttp.zig");
 pub const transport = @import("transport.zig");
 pub const fetch = @import("fetch.zig");
 pub const clone = @import("clone.zig");
+pub const sendpack = @import("sendpack.zig");
+pub const push = @import("push.zig");
 
 const builtin = @import("builtin");
 

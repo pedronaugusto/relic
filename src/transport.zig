@@ -27,6 +27,8 @@ const local = @import("local.zig");
 const ssh = @import("ssh.zig");
 const smarthttp = @import("smarthttp.zig");
 const credential = @import("credential.zig");
+const sendpack = @import("sendpack.zig");
+const object = @import("object.zig");
 const progress_mod = @import("progress.zig");
 
 const Oid = hash.Oid;
@@ -43,7 +45,7 @@ pub const Error = error{
     /// The transport needs to run a program — `ssh`, a credential helper —
     /// and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
-} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error;
+} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error || sendpack.Error;
 
 /// How a remote is reached.
 pub const Options = struct {
@@ -182,6 +184,45 @@ pub const Session = struct {
             .local => |remote| remote.listRefs(gpa, io, prefixes),
             .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes }),
         };
+    }
+
+    /// What a push sends.
+    pub const PushRequest = struct {
+        commands: []const sendpack.Command,
+        /// Everything the new values reach that the remote lacks.
+        objects: []const odb_mod.PackEntry,
+        atomic: bool = false,
+        push_options: []const []const u8 = &.{},
+        /// Who a repository on this machine logs the update as.
+        who: object.Signature,
+        progress: ?progress_mod.Progress = null,
+    };
+
+    /// Send a push, reading the objects from `db`, and return the remote's
+    /// report of each command.
+    pub fn push(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: PushRequest) Error!sendpack.Report {
+        std.debug.assert(s.service == .receive_pack);
+        switch (s.impl) {
+            .local => |remote| {
+                // A repository on this machine runs no hooks for relic, and
+                // push options are for hooks.
+                if (request.push_options.len != 0) return error.PushOptionsUnsupported;
+                return remote.receivePush(gpa, io, db, request.commands, request.objects, .{
+                    .who = request.who,
+                    .atomic = request.atomic,
+                });
+            },
+            .smart => |*smart| {
+                smart.done = true;
+                return sendpack.send(gpa, io, smart.conn, &smart.advertisement, db, .{
+                    .commands = request.commands,
+                    .objects = request.objects,
+                    .atomic = request.atomic,
+                    .push_options = request.push_options,
+                    .progress = request.progress,
+                });
+            },
+        }
     }
 
     /// What a fetch asks for.
