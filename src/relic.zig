@@ -33,6 +33,8 @@ pub const diff = @import("diff.zig");
 pub const pktline = @import("pktline.zig");
 pub const program = @import("program.zig");
 pub const gitmodules = @import("gitmodules.zig");
+pub const gitlink = @import("gitlink.zig");
+pub const submodule = @import("submodule.zig");
 
 const builtin = @import("builtin");
 
@@ -46,5 +48,6 @@ test {
         _ = @import("concurrency_test.zig");
         _ = @import("bench_test.zig");
         _ = @import("diff_test.zig");
+        _ = @import("submodule_test.zig");
     }
 }

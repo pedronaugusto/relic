@@ -156,7 +156,12 @@ pub const Repository = struct {
             // A `.git` file, which is what a linked worktree has.
             if (try worktrees.readGitFile(gpa, io, current)) |target| {
                 defer gpa.free(target);
-                const git_dir = Io.Dir.openDirAbsolute(io, target, .{ .iterate = true }) catch
+                // A linked worktree's names its directory absolutely; a
+                // submodule's names it relative to the file itself.
+                const git_dir = (if (std.fs.path.isAbsolute(target))
+                    Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
+                else
+                    current.openDir(io, target, .{ .iterate = true })) catch
                     return error.BrokenGitFile;
                 const work = try current.openDir(io, ".", .{ .iterate = true });
                 if (current_owned) current.close(io);

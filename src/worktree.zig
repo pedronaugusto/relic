@@ -20,6 +20,7 @@ const attributes = @import("attributes.zig");
 const sparse = @import("sparse.zig");
 const dirscan = @import("dirscan.zig");
 const pack_mod = @import("pack.zig");
+const gitlink = @import("gitlink.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -44,6 +45,9 @@ pub const Error = error{
     /// A tree wants a file where the working tree has a directory containing
     /// untracked content, which checkout must not discard.
     UntrackedWouldBeOverwritten,
+    /// A `SubmoduleProbe` could not read a submodule's repository. The probe
+    /// says which and why.
+    SubmoduleUnreadable,
 } || Allocator.Error || odb_mod.Error || index_mod.ReadError ||
     index_mod.WriteError || fs.StatError || Io.Dir.Iterator.Error ||
     Io.Dir.OpenError || Io.Dir.DeleteFileError || Io.Dir.DeleteDirError ||
@@ -101,6 +105,10 @@ pub const AddOutcome = struct {
     /// Directories holding their own `.git`, which are neither descended
     /// into nor staged unless the index already has a gitlink for them.
     nested_repositories: u32 = 0,
+    /// Gitlinks whose submodule has another commit checked out than the
+    /// index records, and which now record that one. Counted in `modified`
+    /// too.
+    gitlinks_moved: u32 = 0,
     /// Paths the working tree holds that a tree must never carry — a name
     /// that reaches `.git` on some filesystem, a DOS device name, a
     /// component ending in a dot or a space. They are skipped rather than
@@ -302,7 +310,6 @@ const Walker = struct {
     }
 
     fn enterDirectory(w: *Walker, path: []const u8, depth: u32, found: fs.Entry) Error!void {
-        _ = found;
         // A directory holding its own `.git` is another repository. git
         // stages it as a gitlink only if the index already has one, and
         // never walks into it.
@@ -312,17 +319,33 @@ const Walker = struct {
         if (w.wt.statFile(w.io, dot_git, .{})) |_| {
             nested = true;
         } else |_| {}
+        if (nested) w.outcome.nested_repositories += 1;
 
-        if (nested) {
-            w.outcome.nested_repositories += 1;
-            if (w.index.find(path)) |entry| {
-                if (entry.mode == .gitlink) {
-                    try w.markSeen(path);
+        // A gitlink's directory is a submodule's, whatever it holds: nothing
+        // in it is walked, and what is staged for it is the commit its
+        // repository has checked out, which is git's `add -A`. One nobody
+        // populated, or whose `HEAD` names nothing, stays as recorded.
+        if (w.index.find(path)) |entry| {
+            if (entry.mode == .gitlink) {
+                try w.markSeen(path);
+                const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.kind)) orelse {
                     w.outcome.unchanged += 1;
+                    return;
+                };
+                if (checked_out.eql(entry.oid)) {
+                    w.outcome.unchanged += 1;
+                    return;
                 }
+                const tree = try w.index.cacheTree();
+                tree.invalidate(path);
+                entry.oid = checked_out;
+                entry.stat = found.stat;
+                w.outcome.modified += 1;
+                w.outcome.gitlinks_moved += 1;
+                return;
             }
-            return;
         }
+        if (nested) return;
 
         if (w.options.rules.ignore) |rules| {
             const decided = rules.match(path, true);
@@ -499,6 +522,53 @@ pub const StatusEntry = struct {
     unstaged: Change,
     /// Set when the path has entries at stages 1 to 3.
     conflicted: bool = false,
+    /// Set when the path is a gitlink in `HEAD` or in the index: the path is
+    /// a submodule, and this is what its working tree holds. It is the `S<c><m><u>` field of
+    /// `git status --porcelain=v2`, where every other path has `N...`.
+    submodule: ?SubmoduleState = null,
+};
+
+/// What a submodule's working tree holds, as its superproject's status sees
+/// it.
+///
+/// Any of the three makes the gitlink modified in the working tree, which
+/// is the ` M` that `git status --porcelain` prints for all three alike.
+pub const SubmoduleState = struct {
+    /// Its `HEAD` is another commit than the one the index records.
+    new_commits: bool = false,
+    /// It has tracked changes, staged or not, or a submodule of its own
+    /// does.
+    modified_content: bool = false,
+    /// It has untracked files, or a submodule of its own does.
+    untracked_content: bool = false,
+
+    /// Whether none of the three holds.
+    pub fn isClean(s: SubmoduleState) bool {
+        return !s.new_commits and !s.modified_content and !s.untracked_content;
+    }
+};
+
+/// What `status` asks of a populated submodule.
+///
+/// The working-tree layer cannot open another repository — that is the
+/// layer above it — so the question goes through here.
+/// `submodule.StatusProbe` answers it the way git does: it opens the
+/// submodule, honours `submodule.<name>.ignore` and `diff.ignoreSubmodules`,
+/// and runs a status inside, recursively.
+pub const SubmoduleProbe = struct {
+    context: *anyopaque,
+    inspectFn: *const fn (context: *anyopaque, io: Io, path: []const u8, recorded: Oid) Error!SubmoduleState,
+    /// Whether a gitlink whose index entry differs from `HEAD`'s is left out
+    /// too. `--ignore-submodules=all` asks for that and no configured
+    /// setting can: git always shows a staged submodule, so that one added
+    /// by hand is not committed unseen.
+    ignore_staged: bool = false,
+
+    /// What the submodule at `path` holds, against the commit the index
+    /// records for it, already filtered by what the settings ignore.
+    pub fn inspect(p: SubmoduleProbe, io: Io, path: []const u8, recorded: Oid) Error!SubmoduleState {
+        return p.inspectFn(p.context, io, path, recorded);
+    }
 };
 
 /// What `status` found, sorted by path.
@@ -548,6 +618,10 @@ pub const StatusOptions = struct {
     untracked: Untracked = .all,
     /// Whether to list ignored files too.
     include_ignored: bool = false,
+    /// How a populated submodule is looked into. Without one, a gitlink's
+    /// working-tree state is its `HEAD` against the recorded commit and
+    /// nothing else: no content is inspected and no ignore setting is read.
+    submodules: ?SubmoduleProbe = null,
 
     /// How much of an untracked directory `status` reports: nothing, the
     /// directory itself, or every file under it. These are what `git status`
@@ -592,6 +666,12 @@ pub fn status(
             slot.value_ptr.conflicted = true;
             continue;
         }
+        if (options.submodules) |probe| {
+            if (probe.ignore_staged) {
+                const was_gitlink = if (head_paths.get(entry.path)) |e| e.mode == .gitlink else false;
+                if (entry.mode == .gitlink or was_gitlink) continue;
+            }
+        }
         const staged: Change = blk: {
             const in_head = head_paths.get(entry.path) orelse break :blk .added;
             if (!in_head.oid.eql(entry.oid)) break :blk .modified;
@@ -613,6 +693,9 @@ pub fn status(
     var head_it = head_paths.iterator();
     while (head_it.next()) |pair| {
         if (index.find(pair.key_ptr.*) != null) continue;
+        if (options.submodules) |probe| {
+            if (probe.ignore_staged and pair.value_ptr.mode == .gitlink) continue;
+        }
         const slot = try entries.getOrPut(arena, pair.key_ptr.*);
         slot.value_ptr.* = .{
             .path = slot.key_ptr.*,
@@ -656,6 +739,11 @@ pub fn status(
     for (entries.values()) |value| {
         if (!(value.conflicted or value.staged != .unmodified or value.unstaged != .unmodified)) continue;
         out[i] = value;
+        if (out[i].submodule == null) {
+            const in_head = if (head_paths.get(value.path)) |e| e.mode == .gitlink else false;
+            const in_index = if (index.find(value.path)) |e| e.mode == .gitlink else false;
+            if (in_head or in_index) out[i].submodule = .{};
+        }
         i += 1;
     }
     std.mem.sort(StatusEntry, out, {}, lessThanStatus);
@@ -702,6 +790,13 @@ const StatusScan = struct {
 
             const found = item.entry;
             if (found.kind == .directory) {
+                if (s.index.find(path)) |entry| {
+                    if (entry.mode == .gitlink) {
+                        try s.seen.put(s.gpa, entry.path, {});
+                        try s.inspectGitlink(entry, path);
+                        continue;
+                    }
+                }
                 const tracked_below = s.index.hasDirectory(path);
                 if (s.options.rules.ignore) |rules| {
                     const decided = rules.match(path, true);
@@ -782,6 +877,21 @@ const StatusScan = struct {
         const oid = hash.Hasher.object(s.db.kind, "blob", content);
         if (oid.eql(entry.oid)) return .unmodified;
         return .modified;
+    }
+
+    /// A gitlink's directory is never walked. Its state is the probe's
+    /// answer, or without one its `HEAD` against the recorded commit.
+    fn inspectGitlink(s: *StatusScan, entry: *index_mod.Entry, path: []const u8) Error!void {
+        if (entry.skip_worktree) return;
+        const state: SubmoduleState = if (s.options.submodules) |probe|
+            try probe.inspect(s.io, path, entry.oid)
+        else blk: {
+            const checked_out = try gitlink.head(s.gpa, s.io, s.wt, path, s.db.kind);
+            break :blk .{ .new_commits = checked_out != null and !checked_out.?.eql(entry.oid) };
+        };
+        if (state.isClean()) return;
+        try s.record(path, .modified);
+        s.entries.getPtr(path).?.submodule = state;
     }
 
     fn record(s: *StatusScan, path: []const u8, change: Change) Error!void {
@@ -1028,7 +1138,15 @@ pub fn checkout(
             i += 1;
             continue;
         }
-        wt.deleteFile(io, entry.path) catch |err| switch (err) {
+        if (entry.mode == .gitlink) {
+            // A submodule nobody populated leaves with its empty directory;
+            // a populated one's directory stays where it is, as git leaves
+            // it with a warning.
+            wt.deleteDir(io, entry.path) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir, error.DirNotEmpty => {},
+                else => |e| return e,
+            };
+        } else wt.deleteFile(io, entry.path) catch |err| switch (err) {
             error.FileNotFound, error.NotDir, error.IsDir => {},
             else => |e| return e,
         };
@@ -1439,6 +1557,10 @@ const ListScan = struct {
                 try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dir_path, item.name });
             const found = item.entry;
             if (found.kind == .directory) {
+                // A submodule's directory is its own repository's to list.
+                if (s.index.find(path)) |entry| {
+                    if (entry.mode == .gitlink) continue;
+                }
                 if (s.rules.ignore) |rules| {
                     if (rules.match(path, true).excluded and !s.index.hasDirectory(path)) continue;
                 }
