@@ -1122,12 +1122,7 @@ pub fn clear(repo: *Repository, io: Io, options: DropOptions) Error!void {
             .direct => |oid| try tx.delete(ref_name, .{ .matches = oid }),
             .symbolic => try tx.delete(ref_name, .any),
         }
+        // Deleting the ref deletes its log, which is the list.
         try tx.commit(io, null);
     }
-    // Deleting a ref deletes its log in git's files backend, and the log is
-    // the list.
-    repo.common_dir.deleteFile(io, "logs/" ++ ref_name) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => |e| return e,
-    };
 }

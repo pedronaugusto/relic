@@ -662,7 +662,10 @@ pub const Transaction = struct {
     /// committed prefix; callers must reread every affected ref.
     ///
     /// A deletion also removes the ref from `packed-refs`, because a packed
-    /// entry left behind is a ref that comes back.
+    /// entry left behind is a ref that comes back, and removes the ref's
+    /// log, as git's files backend does: a log with no ref is one a later
+    /// ref of the same name would inherit. Directories left empty under
+    /// `refs/<kind>/` and `logs/refs/<kind>/` go too.
     pub fn commit(tx: *Transaction, io: Io, log: ?LogMessage) TransactionError!void {
         if (!tx.prepared) try tx.prepare(io);
         std.debug.assert(!tx.finished);
@@ -695,11 +698,21 @@ pub const Transaction = struct {
                     error.FileNotFound => {},
                     else => |e| return e,
                 };
+                removeEmptyParents(io, dir, edit.name);
+                const log_path = try reflog.pathFor(tx.gpa, edit.name);
+                defer tx.gpa.free(log_path);
+                dir.deleteFile(io, log_path) catch |err| switch (err) {
+                    error.FileNotFound, error.NotDir => {},
+                    else => |e| return e,
+                };
+                removeEmptyParents(io, dir, log_path);
             }
         }
 
         if (log) |message| {
             for (tx.edits.items) |edit| {
+                // A deleted ref's log went with it.
+                if (edit.new == null) continue;
                 const old = edit.old orelse Oid.zero(tx.store.kind);
                 const new = switch (edit.new orelse Ref{ .direct = Oid.zero(tx.store.kind) }) {
                     .direct => |oid| oid,
@@ -773,6 +786,18 @@ pub const Transaction = struct {
         }
     }
 };
+
+/// Remove the directories above `path` that are left empty, down to but not
+/// including `refs/<kind>/` — or `logs/refs/<kind>/` — which git keeps.
+fn removeEmptyParents(io: Io, dir: Io.Dir, path: []const u8) void {
+    const keep: usize = if (std.mem.startsWith(u8, path, "logs/")) 3 else 2;
+    var current = path;
+    while (std.fs.path.dirnamePosix(current)) |parent| {
+        if (std.mem.count(u8, parent, "/") < keep) return;
+        dir.deleteDir(io, parent) catch return;
+        current = parent;
+    }
+}
 
 fn nests(a: []const u8, b: []const u8) bool {
     if (a.len == b.len) return false;
@@ -1187,6 +1212,81 @@ test "a deletion is announced with the value it expected and a zero new value" {
     const expected = try std.mem.concat(gpa, u8, &.{ "preparing\n", line, "prepared\n", line, "committed\n", line });
     defer gpa.free(expected);
     try std.testing.expectEqualStrings(expected, log);
+}
+
+test "deleting a ref takes its log and its empty directories with it, as git does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var here = try testgit.Repo.init(gpa, io, &.{});
+    defer here.deinit();
+    inline for (.{ &git, &here }) |r| {
+        try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+        try r.exec(io, &.{ "branch", "a/b/c" });
+        try r.exec(io, &.{ "branch", "d" });
+        try r.exec(io, &.{ "branch", "e" });
+        try r.exec(io, &.{ "pack-refs", "--all" });
+        try r.exec(io, &.{ "branch", "-f", "e", "HEAD" });
+    }
+    try git.exec(io, &.{ "branch", "-q", "-D", "a/b/c", "d", "e" });
+
+    var git_dir = try here.gitDir(io);
+    defer git_dir.close(io);
+    var store: Store = .init(gpa, .sha1, git_dir, git_dir);
+    var tx = store.begin(gpa);
+    defer tx.deinit(io);
+    try tx.delete("refs/heads/a/b/c", .must_exist);
+    try tx.delete("refs/heads/d", .must_exist);
+    try tx.delete("refs/heads/e", .must_exist);
+    try tx.commit(io, null);
+
+    const refs_a = try git.run(io, &.{"for-each-ref"});
+    defer gpa.free(refs_a);
+    const refs_b = try here.run(io, &.{"for-each-ref"});
+    defer gpa.free(refs_b);
+    try std.testing.expectEqualStrings(refs_a, refs_b);
+    const packed_a = try git.readFile(io, ".git/packed-refs");
+    defer gpa.free(packed_a);
+    const packed_b = try here.readFile(io, ".git/packed-refs");
+    defer gpa.free(packed_b);
+    try std.testing.expectEqualStrings(packed_a, packed_b);
+    const listing_a = try listTree(gpa, io, git.dir);
+    defer gpa.free(listing_a);
+    const listing_b = try listTree(gpa, io, here.dir);
+    defer gpa.free(listing_b);
+    try std.testing.expectEqualStrings(listing_a, listing_b);
+    try std.testing.expect(std.mem.indexOf(u8, listing_b, "heads/a") == null);
+}
+
+/// Every path under `.git/refs` and `.git/logs`, sorted, one per line.
+fn listTree(gpa: Allocator, io: Io, top: Io.Dir) ![]u8 {
+    var paths: std.ArrayList([]u8) = .empty;
+    defer {
+        for (paths.items) |p| gpa.free(p);
+        paths.deinit(gpa);
+    }
+    for ([_][]const u8{ ".git/refs", ".git/logs" }) |root| {
+        var dir = top.openDir(io, root, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+        var walker = try dir.walk(gpa);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            try paths.append(gpa, try std.fmt.allocPrint(gpa, "{s}/{s}", .{ root, entry.path }));
+        }
+    }
+    std.mem.sort([]u8, paths.items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (paths.items) |p| {
+        try out.appendSlice(gpa, p);
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
 }
 
 test "fuzz: any packed-refs bytes are a listing or a named error" {
