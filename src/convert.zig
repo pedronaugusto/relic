@@ -41,8 +41,9 @@ pub const Error = error{
     FilterCapability,
     /// A process filter wrote something that is not a pkt-line.
     FilterReply,
-    /// An LFS pointer names an extension, which is a program relic does not
-    /// run.
+    /// An LFS pointer names an extension, or `lfs.extension.<name>` is
+    /// configured: a program git-lfs would run around the content, which
+    /// relic does not.
     LfsExtensionUnsupported,
 } || Allocator.Error || Io.Cancelable || fs.ReadSizedError || Io.File.Reader.Error ||
     lfs.Store.InstallError || lfs.Store.OpenError || Io.File.Writer.Error || lfs.FetchError;
@@ -486,6 +487,7 @@ pub const Session = struct {
     fn lfsClean(s: *Session, a: Allocator, bytes: []const u8, storing: Storing) Error![]const u8 {
         if (lfs.Pointer.decode(bytes)) |_| return bytes else |_| {}
         const l = s.lfsOf().?;
+        if (l.extensions) return error.LfsExtensionUnsupported;
         var source: Io.Reader = .fixed(bytes);
         const pointer = switch (storing) {
             .store => try l.store.install(s.io, &source, null),
@@ -496,6 +498,7 @@ pub const Session = struct {
 
     fn lfsCleanFile(s: *Session, a: Allocator, path: []const u8, storing: Storing) Error![]const u8 {
         const l = s.lfsOf().?;
+        if (l.extensions) return error.LfsExtensionUnsupported;
         const file = try s.options.wt.openFile(s.io, path, .{});
         defer file.close(s.io);
         var head: [lfs.pointer_size_cutoff]u8 = undefined;

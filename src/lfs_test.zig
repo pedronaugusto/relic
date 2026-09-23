@@ -355,7 +355,7 @@ test "status names an LFS file by hashing it, and stores nothing" {
     try testing.expectError(error.FileNotFound, r.dir.access(io, objectPath(&path_buf, "lfs", &changed), .{}));
 }
 
-test "a pointer naming an extension is refused by name rather than smudged without it" {
+test "an LFS extension is refused by name rather than skipped" {
     const gpa = testing.allocator;
     const io = testing.io;
     try testgit.requireGit(gpa, io);
@@ -369,4 +369,10 @@ test "a pointer naming an extension is refused by name rather than smudged witho
     const tree = try ft.treeOf(gpa, io, &r);
     try ft.emptyWorktree(io, r.dir);
     try testing.expectError(error.LfsExtensionUnsupported, ft.relicCheckout(gpa, io, r.dir, tree, .{}));
+
+    // A configured extension would change the pointer git-lfs writes, so
+    // a clean is refused too.
+    try r.exec(io, &.{ "config", "lfs.extension.foo.clean", "foo clean %f" });
+    try r.writeFile(io, "y.bin", "large\n");
+    try testing.expectError(error.LfsExtensionUnsupported, ft.relicAdd(gpa, io, r.dir, .{}));
 }

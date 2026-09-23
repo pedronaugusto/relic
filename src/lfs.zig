@@ -556,6 +556,9 @@ pub const Lfs = struct {
     arena: std.heap.ArenaAllocator.State,
     store: Store,
     settings: Settings,
+    /// An `lfs.extension.<name>` is configured. git-lfs would run it on
+    /// every clean and name it in the pointer, so a clean here is refused.
+    extensions: bool,
 
     /// Errors from loading.
     pub const LoadError = Allocator.Error || Io.Dir.ReadFileAllocError ||
@@ -600,9 +603,17 @@ pub const Lfs = struct {
         const exclude = try settingValue(a, config, if (file_config) |*c| c else null, "lfs.fetchexclude");
         const url = try settingValue(a, config, if (file_config) |*c| c else null, "lfs.url");
 
+        var extensions = false;
+        for (config.entries.items) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.section, "lfs") and std.mem.startsWith(u8, entry.subsection, "extension.")) {
+                extensions = true;
+            }
+        }
+
         return .{
             .gpa = gpa,
             .arena = arena_instance.state,
+            .extensions = extensions,
             .store = .{ .base = common_dir, .root = root },
             .settings = .{
                 .fetch_include = if (include) |v| try splitPatterns(a, v) else &.{},
