@@ -41,6 +41,9 @@ pub const convert = @import("convert.zig");
 pub const refspec = @import("refspec.zig");
 pub const url = @import("url.zig");
 pub const remote = @import("remote.zig");
+pub const progress = @import("progress.zig");
+pub const fsck = @import("fsck.zig");
+pub const indexpack = @import("indexpack.zig");
 
 const builtin = @import("builtin");
 
@@ -58,5 +61,6 @@ test {
         _ = @import("filter_test.zig");
         _ = @import("lfs_test.zig");
         _ = @import("eol_test.zig");
+        _ = @import("testremote.zig");
     }
 }

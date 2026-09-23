@@ -1342,12 +1342,15 @@ pub const WriteReport = struct {
     deltas: u32,
 };
 
-/// One entry, as the index will need it.
-const WrittenEntry = struct {
+/// One entry, as the index will need it: its name, where it begins in the
+/// pack, and the CRC32 of its bytes there.
+pub const IndexEntry = struct {
     oid: Oid,
     offset: u64,
     crc: u32,
 };
+
+const WrittenEntry = IndexEntry;
 
 /// A writer for a packfile and its index.
 ///
@@ -1718,96 +1721,114 @@ pub const Writer = struct {
         return hasher.final();
     }
 
-    /// The `.idx`, version 2: the magic, the fanout over the first byte of
-    /// each name, the names sorted, a CRC per entry, the offsets with the
-    /// 64-bit table for anything past two gigabytes, the pack's checksum and
-    /// the index's own.
     fn writeIndex(w: *Writer, io: Io, pack_checksum: Oid, idx_name: []const u8) WriteError!u64 {
-        std.mem.sort(WrittenEntry, w.entries.items, {}, lessThanWritten);
-
-        const raw_len = w.kind.rawLen();
-
-        const buffer = try w.gpa.alloc(u8, file_buffer_len);
-        defer w.gpa.free(buffer);
-        const file = try w.dir.createFile(io, idx_name, .{ .exclusive = false, .truncate = true });
-        var failed = true;
-        defer if (failed) {
-            file.close(io);
-            w.dir.deleteFile(io, idx_name) catch {};
-        };
-        var fw = file.writer(io, buffer);
-        var hasher: hash.Hasher = .init(w.kind);
-        var written: u64 = 0;
-
-        const Emit = struct {
-            fn go(out: *Io.Writer, h: *hash.Hasher, total: *u64, bytes: []const u8) Io.Writer.Error!void {
-                h.update(bytes);
-                total.* += bytes.len;
-                try out.writeAll(bytes);
-            }
-        };
-        const out = &fw.interface;
-
-        var head: [8]u8 = undefined;
-        @memcpy(head[0..4], idx_magic);
-        std.mem.writeInt(u32, head[4..8], 2, .big);
-        try Emit.go(out, &hasher, &written, &head);
-
-        // The fanout: for each first byte, how many names are at or below it.
-        var fanout: [256]u32 = @splat(0);
-        for (w.entries.items) |e| fanout[e.oid.raw()[0]] += 1;
-        var running: u32 = 0;
-        for (&fanout) |*slot| {
-            running += slot.*;
-            slot.* = running;
-        }
-        for (fanout) |value| {
-            var bytes: [4]u8 = undefined;
-            std.mem.writeInt(u32, &bytes, value, .big);
-            try Emit.go(out, &hasher, &written, &bytes);
-        }
-
-        for (w.entries.items) |e| try Emit.go(out, &hasher, &written, e.oid.raw()[0..raw_len]);
-        for (w.entries.items) |e| {
-            var bytes: [4]u8 = undefined;
-            std.mem.writeInt(u32, &bytes, e.crc, .big);
-            try Emit.go(out, &hasher, &written, &bytes);
-        }
-
-        // Anything past two gigabytes goes in the 64-bit table, and its row
-        // in the 32-bit table is that row's position with the high bit set.
-        var large: std.ArrayList(u64) = .empty;
-        defer large.deinit(w.gpa);
-        for (w.entries.items) |e| {
-            var bytes: [4]u8 = undefined;
-            if (e.offset <= std.math.maxInt(u31)) {
-                std.mem.writeInt(u32, &bytes, @intCast(e.offset), .big);
-            } else {
-                std.mem.writeInt(u32, &bytes, 0x8000_0000 | @as(u32, @intCast(large.items.len)), .big);
-                try large.append(w.gpa, e.offset);
-            }
-            try Emit.go(out, &hasher, &written, &bytes);
-        }
-        for (large.items) |value| {
-            var bytes: [8]u8 = undefined;
-            std.mem.writeInt(u64, &bytes, value, .big);
-            try Emit.go(out, &hasher, &written, &bytes);
-        }
-
-        try Emit.go(out, &hasher, &written, pack_checksum.raw()[0..raw_len]);
-        const own = hasher.final();
-        written += raw_len;
-        try out.writeAll(own.raw()[0..raw_len]);
-        try out.flush();
-        switch (w.options.sync) {
-            .none => {},
-            .batch, .per_file => try file.sync(io),
-        }
-        file.close(io);
-        failed = false;
-        return written;
+        return writeIndexFile(w.gpa, io, w.dir, idx_name, w.kind, w.entries.items, pack_checksum, w.options.sync);
     }
 };
+
+/// Write the `.idx`, version 2, for a pack whose entries are `entries`, in
+/// `dir` as `sub_path`: the magic, the fanout over the first byte of each
+/// name, the names sorted, a CRC per entry, the offsets with the 64-bit
+/// table for anything past two gigabytes, the pack's checksum and the
+/// index's own. `entries` is sorted in place. Returns the index's size.
+///
+/// What goes in is exactly what `git index-pack` writes for the same pack,
+/// byte for byte, which is why a received pack's index and a written one's
+/// come from here.
+pub fn writeIndexFile(
+    gpa: Allocator,
+    io: Io,
+    dir: Io.Dir,
+    sub_path: []const u8,
+    kind: Kind,
+    entries: []IndexEntry,
+    pack_checksum: Oid,
+    sync: fs.Sync,
+) WriteError!u64 {
+    std.mem.sort(WrittenEntry, entries, {}, lessThanWritten);
+
+    const raw_len = kind.rawLen();
+
+    const buffer = try gpa.alloc(u8, Writer.file_buffer_len);
+    defer gpa.free(buffer);
+    const file = try dir.createFile(io, sub_path, .{ .exclusive = false, .truncate = true });
+    var failed = true;
+    defer if (failed) {
+        file.close(io);
+        dir.deleteFile(io, sub_path) catch {};
+    };
+    var fw = file.writer(io, buffer);
+    var hasher: hash.Hasher = .init(kind);
+    var written: u64 = 0;
+
+    const Emit = struct {
+        fn go(out: *Io.Writer, h: *hash.Hasher, total: *u64, bytes: []const u8) Io.Writer.Error!void {
+            h.update(bytes);
+            total.* += bytes.len;
+            try out.writeAll(bytes);
+        }
+    };
+    const out = &fw.interface;
+
+    var head: [8]u8 = undefined;
+    @memcpy(head[0..4], idx_magic);
+    std.mem.writeInt(u32, head[4..8], 2, .big);
+    try Emit.go(out, &hasher, &written, &head);
+
+    // The fanout: for each first byte, how many names are at or below it.
+    var fanout: [256]u32 = @splat(0);
+    for (entries) |e| fanout[e.oid.raw()[0]] += 1;
+    var running: u32 = 0;
+    for (&fanout) |*slot| {
+        running += slot.*;
+        slot.* = running;
+    }
+    for (fanout) |value| {
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, value, .big);
+        try Emit.go(out, &hasher, &written, &bytes);
+    }
+
+    for (entries) |e| try Emit.go(out, &hasher, &written, e.oid.raw()[0..raw_len]);
+    for (entries) |e| {
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, e.crc, .big);
+        try Emit.go(out, &hasher, &written, &bytes);
+    }
+
+    // Anything past two gigabytes goes in the 64-bit table, and its row
+    // in the 32-bit table is that row's position with the high bit set.
+    var large: std.ArrayList(u64) = .empty;
+    defer large.deinit(gpa);
+    for (entries) |e| {
+        var bytes: [4]u8 = undefined;
+        if (e.offset <= std.math.maxInt(u31)) {
+            std.mem.writeInt(u32, &bytes, @intCast(e.offset), .big);
+        } else {
+            std.mem.writeInt(u32, &bytes, 0x8000_0000 | @as(u32, @intCast(large.items.len)), .big);
+            try large.append(gpa, e.offset);
+        }
+        try Emit.go(out, &hasher, &written, &bytes);
+    }
+    for (large.items) |value| {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, value, .big);
+        try Emit.go(out, &hasher, &written, &bytes);
+    }
+
+    try Emit.go(out, &hasher, &written, pack_checksum.raw()[0..raw_len]);
+    const own = hasher.final();
+    written += raw_len;
+    try out.writeAll(own.raw()[0..raw_len]);
+    try out.flush();
+    switch (sync) {
+        .none => {},
+        .batch, .per_file => try file.sync(io),
+    }
+    file.close(io);
+    failed = false;
+    return written;
+}
 
 test "a written pack and its index read back, entry kind for entry kind" {
     const io = std.testing.io;
