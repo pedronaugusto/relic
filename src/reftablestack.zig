@@ -49,6 +49,9 @@ pub const Options = struct {
     /// `reftable.geometricFactor`: how much larger each older table must be
     /// than everything after it.
     geometric_factor: u8 = 2,
+    /// `reftable.lockTimeout`: how long to wait for `tables.list.lock`, with
+    /// git's backoff. git waits 100 milliseconds unless told otherwise.
+    lock: fs.OnContention = .{ .wait_ms = 100 },
 };
 
 /// Errors from reading a stack.
@@ -736,7 +739,7 @@ pub const Pending = struct {
     }
 };
 
-fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir) refs.TransactionError!Pending.Locked {
+fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, on_contention: fs.OnContention) refs.TransactionError!Pending.Locked {
     parent.createDirPath(io, "reftable") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => |e| return e,
@@ -745,7 +748,7 @@ fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir) refs.TransactionError!Pendi
     errdefer dir.close(io);
     const buffer = try gpa.alloc(u8, 4096);
     errdefer gpa.free(buffer);
-    const lock = try fs.LockFile.open(gpa, io, dir, "tables.list", buffer, .{});
+    const lock = try fs.LockFile.open(gpa, io, dir, "tables.list", buffer, .{ .on_contention = on_contention });
     return .{ .dir = dir, .lock = lock, .buffer = buffer };
 }
 
@@ -761,13 +764,13 @@ pub fn prepare(tx: *refs.Transaction, io: Io) refs.TransactionError!void {
         if (isLinked(store) and isPerWorktree(store, edit.name)) needs_worktree = true;
     }
 
-    var main = try lockStack(gpa, io, store.common_dir);
+    var main = try lockStack(gpa, io, store.common_dir, store.reftable_options.lock);
     errdefer {
         main.lock.deinit(io);
         gpa.free(main.buffer);
         main.dir.close(io);
     }
-    var worktree: ?Pending.Locked = if (needs_worktree) try lockStack(gpa, io, store.git_dir) else null;
+    var worktree: ?Pending.Locked = if (needs_worktree) try lockStack(gpa, io, store.git_dir, store.reftable_options.lock) else null;
     errdefer if (worktree) |*w| {
         w.lock.deinit(io);
         gpa.free(w.buffer);
@@ -884,7 +887,7 @@ pub fn appendLog(
     if (std.mem.indexOfAny(u8, who.name, "<>\n") != null or
         std.mem.indexOfAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
     const parent = if (isLinked(store) and isPerWorktree(store, name)) store.git_dir else store.common_dir;
-    var locked = try lockStack(gpa, io, parent);
+    var locked = try lockStack(gpa, io, parent, store.reftable_options.lock);
     defer {
         if (!locked.written) locked.lock.deinit(io);
         gpa.free(locked.buffer);
@@ -1066,7 +1069,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     };
     defer dir.close(io);
     var buffer: [4096]u8 = undefined;
-    var list_lock = try fs.LockFile.open(gpa, io, dir, "tables.list", &buffer, .{});
+    var list_lock = try fs.LockFile.open(gpa, io, dir, "tables.list", &buffer, .{ .on_contention = options.lock });
     defer list_lock.deinit(io);
     var stack = try Stack.load(gpa, io, dir, kind);
     defer stack.deinit();
@@ -1754,6 +1757,54 @@ test "a log entry goes into the stack, and the files path refuses to write where
     var log = try repo.readLog(io, "refs/heads/main");
     defer log.deinit();
     try std.testing.expectEqualStrings("reset: moving to HEAD", log.entries[log.entries.len - 1].message);
+}
+
+fn createMain(repo: *repo_mod.Repository, io: Io) refs.TransactionError!void {
+    var tx = repo.beginRefs();
+    defer tx.deinit(io);
+    try tx.create("refs/heads/main", .{ .direct = Oid.zero(.sha1) });
+    try tx.commit(io, null);
+}
+
+fn openWithTimeout(gpa: Allocator, io: Io, dir: Io.Dir, text: []const u8) !repo_mod.Repository {
+    const config = try dir.readFileAlloc(io, ".git/config", gpa, .limited(1 << 16));
+    defer gpa.free(config);
+    const with = try std.fmt.allocPrint(gpa, "{s}[reftable]\n\tlockTimeout = {s}\n", .{ config, text });
+    defer gpa.free(with);
+    try dir.writeFile(io, .{ .sub_path = ".git/config", .data = with });
+    return repo_mod.Repository.open(gpa, io, dir, .{});
+}
+
+test "a writer waits for tables.list.lock as long as reftable.lockTimeout says" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    {
+        var made = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+        made.deinit(io);
+    }
+    {
+        var repo = try openWithTimeout(gpa, io, tmp.dir, "0");
+        defer repo.deinit(io);
+        try std.testing.expect(repo.refs.reftable_options.lock == .fail);
+    }
+    var repo = try openWithTimeout(gpa, io, tmp.dir, "10000");
+    defer repo.deinit(io);
+    try std.testing.expectEqual(@as(u32, 10000), repo.refs.reftable_options.lock.wait_ms);
+
+    // Held, then let go while the writer is waiting on it: the writer gets
+    // the lock and commits rather than giving up.
+    const blocker = try tmp.dir.createFile(io, ".git/reftable/tables.list.lock", .{ .exclusive = true });
+    blocker.close(io);
+    var pending = io.concurrent(createMain, .{ &repo, io }) catch {
+        try tmp.dir.deleteFile(io, ".git/reftable/tables.list.lock");
+        return error.SkipZigTest;
+    };
+    try io.sleep(.fromMilliseconds(150), .awake);
+    try tmp.dir.deleteFile(io, ".git/reftable/tables.list.lock");
+    try pending.await(io);
+    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/main") != null);
 }
 
 /// `git refs verify`, where the git has it: 2.47 and later.

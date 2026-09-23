@@ -424,6 +424,15 @@ pub const Repository = struct {
         options.write.index_objects = try repo.config.getBool("reftable.indexobjects", true);
         const factor = try repo.config.getInt("reftable.geometricfactor", options.geometric_factor);
         if (factor > 0 and factor <= std.math.maxInt(u8)) options.geometric_factor = @intCast(factor);
+        // git's reading: zero means try once, a negative number means wait
+        // for ever, which here is as long as a wait can be written down.
+        const timeout = try repo.config.getInt("reftable.locktimeout", 100);
+        options.lock = if (timeout == 0)
+            .fail
+        else if (timeout < 0)
+            .{ .wait_ms = std.math.maxInt(u32) }
+        else
+            .{ .wait_ms = std.math.cast(u32, timeout) orelse std.math.maxInt(u32) };
         return options;
     }
 

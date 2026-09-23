@@ -356,8 +356,8 @@ pub const OnContention = union(enum) {
     /// better to do wants.
     fail,
     /// Retry with a quadratic backoff starting at one millisecond and capped
-    /// at a thousandfold, for up to this many milliseconds in total. git's
-    /// own constants.
+    /// at a thousandfold, each wait spread a quarter either way, for up to
+    /// this many milliseconds in total. git's own constants.
     wait_ms: u32,
 };
 
@@ -534,18 +534,33 @@ fn createExclusive(
             else => return err,
         }
         if (waited >= deadline_ms) return error.LockHeld;
-        const delay = backoffMs(attempt);
+        var jitter: [2]u8 = undefined;
+        io.random(&jitter);
+        const delay = backoffMs(attempt, std.mem.readInt(u16, &jitter, .little));
         try Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(delay), .clock = .awake } }, io);
-        waited += @intCast(delay);
+        waited +|= @intCast(delay);
         attempt += 1;
     }
 }
 
-/// git's backoff: one millisecond, squared each attempt, capped at a
-/// thousandfold.
-fn backoffMs(attempt: u32) i64 {
-    const multiplier: u64 = std.math.powi(u64, 2, @min(attempt, 10)) catch 1000;
-    return @intCast(@min(multiplier, 1000));
+/// git's backoff, from `lock_file_timeout`: the attempt number squared, in
+/// milliseconds, capped at a thousand, and each wait somewhere between
+/// three quarters and five quarters of that so that two waiters do not
+/// retry in step. `random` picks where.
+fn backoffMs(attempt: u32, random: u16) i64 {
+    const n: u64 = @as(u64, attempt) + 1;
+    const multiplier: u64 = @min(n * n, 1000);
+    const spread: u64 = 750 + @as(u64, random % 500);
+    return @intCast(@max(1, spread * multiplier / 1000));
+}
+
+test "the backoff grows as git's does, by squares to a second, with spread" {
+    try std.testing.expectEqual(@as(i64, 1), backoffMs(0, 250));
+    try std.testing.expectEqual(@as(i64, 4), backoffMs(1, 250));
+    try std.testing.expectEqual(@as(i64, 9), backoffMs(2, 250));
+    try std.testing.expectEqual(@as(i64, 1000), backoffMs(40, 250));
+    try std.testing.expectEqual(@as(i64, 750), backoffMs(40, 0));
+    try std.testing.expectEqual(@as(i64, 1249), backoffMs(40, 499));
 }
 
 /// Rename, retrying briefly on Windows.
