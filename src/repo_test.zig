@@ -228,7 +228,7 @@ test "discovery finds the repository from a subdirectory" {
     );
 }
 
-test "reftable and an unknown extension are refused by name" {
+test "an unknown ref storage and an unknown extension are refused by name" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     try testgit.requireGit(gpa, io);
@@ -242,7 +242,7 @@ test "reftable and an unknown extension are refused by name" {
         }
         try tmp.dir.writeFile(io, .{
             .sub_path = ".git/config",
-            .data = "[core]\n\trepositoryformatversion = 1\n[extensions]\n\trefStorage = reftable\n",
+            .data = "[core]\n\trepositoryformatversion = 1\n[extensions]\n\trefStorage = lmdb\n",
         });
         try std.testing.expectError(
             error.UnsupportedRefStorage,

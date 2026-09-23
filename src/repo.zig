@@ -19,6 +19,7 @@ const attributes = @import("attributes.zig");
 const worktree = @import("worktree.zig");
 const worktrees = @import("worktrees.zig");
 const filter = @import("filter.zig");
+const reftablestack = @import("reftablestack.zig");
 const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
 const program = @import("program.zig");
@@ -38,9 +39,10 @@ pub const Error = error{
     /// 1 where git requires every extension to be understood.
     /// `unsupported` names it.
     UnsupportedExtension,
-    /// `extensions.refStorage = reftable`. The refs are all somewhere this
-    /// release does not read, and reporting the repository as having none
-    /// would be worse than refusing it.
+    /// `extensions.refStorage` names a format other than `files` and
+    /// `reftable`. The refs are somewhere this release does not read, and
+    /// reporting the repository as having none would be worse than refusing
+    /// it.
     UnsupportedRefStorage,
     /// `extensions.objectFormat` names a hash this release does not have.
     UnknownObjectFormat,
@@ -59,7 +61,7 @@ pub const Error = error{
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
     config_mod.ParseError || config_mod.ValueError || odb_mod.Error ||
-    refs_mod.ReadError || worktrees.Error;
+    refs_mod.ReadError || refs_mod.TransactionError || worktrees.Error;
 
 /// Errors from writing a commit or a tag, which may be signed.
 pub const WriteError = Error || signing.Error;
@@ -83,6 +85,10 @@ pub const InitOptions = struct {
     /// What the object database is opened with, including whether every
     /// SHA-1 name it takes is checked for a collision attack.
     odb: odb_mod.Options = .{},
+    /// Where the refs are kept: loose files and `packed-refs`, or a
+    /// reftable stack, which is `git init --ref-format=reftable` and which
+    /// git 3.0 makes the default.
+    ref_format: refs_mod.Format = .files,
 };
 
 /// An open repository.
@@ -286,6 +292,15 @@ pub const Repository = struct {
         repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, repo.kind, options.odb);
         errdefer repo.odb.deinit(io);
         repo.refs = .init(gpa, repo.kind, repo.git_dir, repo.common_dir);
+        const version = repo.config.getInt("core.repositoryformatversion", 0) catch 0;
+        if (version == 1) {
+            if (repo.config.get("extensions.refstorage")) |text| {
+                if (std.ascii.eqlIgnoreCase(text, "reftable")) {
+                    repo.refs.format = .reftable;
+                    repo.refs.reftable_options = try repo.reftableOptions();
+                }
+            }
+        }
         return repo;
     }
 
@@ -370,8 +385,43 @@ pub const Repository = struct {
         const trimmed = std.mem.trimEnd(u8, text, " \t\r\n");
         if (!std.mem.startsWith(u8, trimmed, "ref:")) return null;
         const target = std.mem.trim(u8, trimmed["ref:".len..], " \t");
+        // A reftable repository's `HEAD` file is a placeholder; `HEAD` is
+        // in the stack, read before the configuration says which hash the
+        // tables are written with, so each is tried.
+        if (std.mem.eql(u8, target, "refs/heads/.invalid")) {
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            for ([_]hash.Kind{ .sha1, .sha256 }) |kind| {
+                const head_value = reftablestack.headIn(gpa, arena.allocator(), io, git_dir, kind) catch |err| switch (err) {
+                    error.HashMismatch => continue,
+                    else => return null,
+                };
+                const value = head_value orelse return null;
+                switch (value) {
+                    .direct => return null,
+                    .symbolic => |name| {
+                        if (!std.mem.startsWith(u8, name, "refs/heads/")) return null;
+                        return try gpa.dupe(u8, name);
+                    },
+                }
+            }
+            return null;
+        }
         if (!std.mem.startsWith(u8, target, "refs/heads/")) return null;
         return try gpa.dupe(u8, target);
+    }
+
+    /// The `reftable.*` settings, for the stack's writes and compactions.
+    fn reftableOptions(repo: *const Repository) Error!reftablestack.Options {
+        var options: reftablestack.Options = .{};
+        const block_size = try repo.config.getInt("reftable.blocksize", options.write.block_size);
+        if (block_size > 0 and block_size < (1 << 24)) options.write.block_size = @intCast(block_size);
+        const restart = try repo.config.getInt("reftable.restartinterval", options.write.restart_interval);
+        if (restart > 0 and restart <= std.math.maxInt(u16)) options.write.restart_interval = @intCast(restart);
+        options.write.index_objects = try repo.config.getBool("reftable.indexobjects", true);
+        const factor = try repo.config.getInt("reftable.geometricfactor", options.geometric_factor);
+        if (factor > 0 and factor <= std.math.maxInt(u8)) options.geometric_factor = @intCast(factor);
+        return options;
     }
 
     fn setUnsupported(repo: *Repository, text: []const u8) void {
@@ -413,7 +463,7 @@ pub const Repository = struct {
             }
             if (std.ascii.eqlIgnoreCase(entry.name, "refstorage")) {
                 const value = entry.value orelse "";
-                if (!std.ascii.eqlIgnoreCase(value, "files")) {
+                if (!std.ascii.eqlIgnoreCase(value, "files") and !std.ascii.eqlIgnoreCase(value, "reftable")) {
                     repo.setUnsupported("extensions.refStorage");
                     return error.UnsupportedRefStorage;
                 }
@@ -440,19 +490,28 @@ pub const Repository = struct {
 
         try git_dir.createDirPath(io, "objects/pack");
         try git_dir.createDirPath(io, "objects/info");
-        try git_dir.createDirPath(io, "refs/heads");
-        try git_dir.createDirPath(io, "refs/tags");
         try git_dir.createDirPath(io, "info");
 
         var head_buf: [512]u8 = undefined;
-        const head_line = std.fmt.bufPrint(&head_buf, "ref: refs/heads/{s}\n", .{options.default_branch}) catch
-            return error.NotARepository;
-        try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = head_line });
+        switch (options.ref_format) {
+            .files => {
+                try git_dir.createDirPath(io, "refs/heads");
+                try git_dir.createDirPath(io, "refs/tags");
+                const head_line = std.fmt.bufPrint(&head_buf, "ref: refs/heads/{s}\n", .{options.default_branch}) catch
+                    return error.NotARepository;
+                try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = head_line });
+            },
+            .reftable => {
+                const target = std.fmt.bufPrint(&head_buf, "refs/heads/{s}", .{options.default_branch}) catch
+                    return error.NotARepository;
+                try reftablestack.initialize(gpa, io, git_dir, options.object_format, .{ .symbolic = target }, null, .{});
+            },
+        }
 
         var config_text: std.Io.Writer.Allocating = .init(gpa);
         defer config_text.deinit();
         const w = &config_text.writer;
-        const version: u8 = if (options.object_format == .sha1) 0 else 1;
+        const version: u8 = if (options.object_format == .sha1 and options.ref_format == .files) 0 else 1;
         w.print("[core]\n", .{}) catch return error.OutOfMemory;
         w.print("\trepositoryformatversion = {d}\n", .{version}) catch return error.OutOfMemory;
         w.print("\tfilemode = {s}\n", .{if (options.file_mode) "true" else "false"}) catch return error.OutOfMemory;
@@ -460,9 +519,14 @@ pub const Repository = struct {
         if (!options.bare) {
             w.print("\tlogallrefupdates = true\n", .{}) catch return error.OutOfMemory;
         }
+        if (options.object_format != .sha1 or options.ref_format == .reftable) {
+            w.print("[extensions]\n", .{}) catch return error.OutOfMemory;
+        }
         if (options.object_format != .sha1) {
-            w.print("[extensions]\n\tobjectformat = {s}\n", .{options.object_format.name()}) catch
-                return error.OutOfMemory;
+            w.print("\tobjectformat = {s}\n", .{options.object_format.name()}) catch return error.OutOfMemory;
+        }
+        if (options.ref_format == .reftable) {
+            w.print("\trefstorage = reftable\n", .{}) catch return error.OutOfMemory;
         }
         try git_dir.writeFile(io, .{ .sub_path = "config", .data = config_text.written() });
 
@@ -743,8 +807,26 @@ pub const Repository = struct {
     }
 
     /// Begin a ref transaction over this repository.
+    ///
+    /// The transaction peels an annotated tag it writes through this
+    /// repository's objects, which a reftable records beside the tag as git
+    /// does. The repository must outlive the transaction.
     pub fn beginRefs(repo: *Repository) refs_mod.Transaction {
-        return repo.refs.begin(repo.gpa);
+        var tx = repo.refs.begin(repo.gpa);
+        tx.peeler = .{ .context = repo, .peel = peelForRefs };
+        return tx;
+    }
+
+    fn peelForRefs(context: *anyopaque, io: Io, oid: Oid) ?Oid {
+        const repo: *Repository = @ptrCast(@alignCast(context));
+        const header = repo.odb.readHeader(io, oid) catch return null;
+        if (header.type != .tag) return null;
+        return repo.peel(io, oid) catch null;
+    }
+
+    /// A ref's log, oldest first, whichever format the refs are kept in.
+    pub fn readLog(repo: *Repository, io: Io, name: []const u8) (refs_mod.ReadError || reflog.ReadError)!reflog.Log {
+        return repo.refs.readLog(repo.gpa, io, name);
     }
 
     /// A runner for this repository's hooks, carrying the caller's

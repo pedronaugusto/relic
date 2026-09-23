@@ -63,7 +63,7 @@ pub const Error = error{
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.SymLinkError ||
     Io.Dir.ReadLinkError || Io.Writer.Error || Io.File.SyncError ||
     Io.File.SetPermissionsError || object.Tree.Builder.AddError ||
-    object.TreeParseError || convert.Error || sparseindex.Error;
+    object.TreeParseError || convert.Error || sparseindex.Error || gitlink.Error;
 
 /// What the caller supplies so that a blob is hashed the way git would hash
 /// it, and so that ignore rules are the ones git would apply.

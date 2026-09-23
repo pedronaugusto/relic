@@ -5,6 +5,11 @@
 //! are installed with separate renames and reflogs with separate appends, as
 //! they are in git: an I/O error can leave a committed prefix and the caller
 //! must reread the refs before deciding what happened.
+//!
+//! A repository whose refs are a reftable stack is read and written through
+//! the same `Store` and `Transaction`; `format` says which, and
+//! `reftablestack` is the other side. There a transaction is one table added
+//! under one lock, so its commit is all or nothing.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -17,6 +22,7 @@ const safepath = @import("safepath.zig");
 const reflog = @import("reflog.zig");
 const hooks = @import("hooks.zig");
 const testgit = @import("testgit.zig");
+const reftablestack = @import("reftablestack.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -41,7 +47,8 @@ pub const ReadError = error{
     /// which is the name of the file that blocks every update to the ref
     /// without it.
     InvalidRefName,
-} || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error;
+} || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
+    reftablestack.Error;
 
 /// Errors from a transaction.
 pub const TransactionError = error{
@@ -61,7 +68,26 @@ pub const TransactionError = error{
     /// `refs/heads/a` and `refs/heads/a/b` are the same path.
     RefNameConflict,
 } || ReadError || fs.CommitError || fs.LockError || reflog.AppendError ||
-    Io.Dir.DeleteFileError || Io.Dir.CreateDirPathError || hooks.Error;
+    Io.Dir.DeleteFileError || Io.Dir.CreateDirPathError || hooks.Error || Io.Dir.WriteFileError;
+
+/// Where a repository's refs are kept.
+pub const Format = enum {
+    /// Loose files under `refs/` and `packed-refs`.
+    files,
+    /// A reftable stack under `reftable/`, which `extensions.refStorage`
+    /// names.
+    reftable,
+};
+
+/// Peels an object name for a ref about to be written, so that a reftable
+/// can record what an annotated tag points at beside it, as git's does.
+/// `Repository.beginRefs` supplies one.
+pub const Peeler = struct {
+    context: *anyopaque,
+    /// The object `oid` peels to when it is an annotated tag, or `null`
+    /// when it is not one or cannot be read.
+    peel: *const fn (context: *anyopaque, io: Io, oid: Oid) ?Oid,
+};
 
 /// What a ref points at.
 pub const Ref = union(enum) {
@@ -114,6 +140,11 @@ pub const Store = struct {
     kind: Kind,
     git_dir: Io.Dir,
     common_dir: Io.Dir,
+    /// Which backend holds the refs. `Repository` sets it from
+    /// `extensions.refStorage`.
+    format: Format = .files,
+    /// How a reftable stack is written and compacted.
+    reftable_options: reftablestack.Options = .{},
 
     /// Open over an already-opened pair of directories, which the store does
     /// not close.
@@ -146,11 +177,22 @@ pub const Store = struct {
     /// caller's.
     pub fn read(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
         if (!isReadableName(name)) return error.InvalidRefName;
+        if (store.format == .reftable) {
+            if (reftablestack.isSpecial(name)) return store.readLoose(gpa, io, name);
+            return reftablestack.read(store, gpa, io, name);
+        }
         if (try store.readLoose(gpa, io, name)) |found| return found;
         var listing = try store.readPacked(gpa, io);
         defer listing.deinit();
         if (listing.find(name)) |entry| return .{ .direct = entry.oid };
         return null;
+    }
+
+    /// A ref's own value, symbolic or not, where a symbolic one can be:
+    /// the loose file, or the reftable stack.
+    fn readOwnValue(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
+        if (store.format == .reftable) return store.read(gpa, io, name);
+        return store.readLoose(gpa, io, name);
     }
 
     fn readLoose(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
@@ -203,7 +245,10 @@ pub const Store = struct {
     /// The branch `HEAD` is on, without `refs/heads/`, or `null` when `HEAD`
     /// is detached. The result is the caller's.
     pub fn currentBranch(store: *const Store, gpa: Allocator, io: Io) ReadError!?[]u8 {
-        const found = (try store.readLoose(gpa, io, "HEAD")) orelse return null;
+        const found = (if (store.format == .reftable)
+            try store.read(gpa, io, "HEAD")
+        else
+            try store.readLoose(gpa, io, "HEAD")) orelse return null;
         switch (found) {
             .direct => return null,
             .symbolic => |target| {
@@ -244,6 +289,7 @@ pub const Store = struct {
     /// does and what makes a `pack-refs` that has not yet removed the loose
     /// file harmless.
     pub fn list(store: *const Store, gpa: Allocator, io: Io, prefix: []const u8) ReadError!Listing {
+        if (store.format == .reftable) return reftablestack.list(store, gpa, io, prefix);
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();
@@ -454,6 +500,13 @@ pub const Store = struct {
     pub fn begin(store: *Store, gpa: Allocator) Transaction {
         return .{ .store = store, .gpa = gpa, .edits = .empty };
     }
+
+    /// A ref's log, oldest first, from `logs/<ref>` or from the reftable
+    /// stack as the format says. An absent log is an empty one.
+    pub fn readLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) (ReadError || reflog.ReadError)!reflog.Log {
+        if (store.format == .reftable) return reftablestack.readLog(store, gpa, io, name);
+        return reflog.read(gpa, io, store.dirFor(name), name, store.kind);
+    }
 };
 
 fn isReadableName(name: []const u8) bool {
@@ -508,6 +561,11 @@ pub const Transaction = struct {
     /// Whether the deletions' `packed-refs` step has been announced as
     /// prepared and is owed its end.
     packed_announced: bool = false,
+    /// Peels a new value that is an annotated tag, for a reftable to record
+    /// beside it. `null` records the tag alone, which git reads as well.
+    peeler: ?Peeler = null,
+    /// What `prepare` took in a reftable repository.
+    reftable: ?*reftablestack.Pending = null,
 
     /// One ref's change.
     pub const Edit = struct {
@@ -619,6 +677,14 @@ pub const Transaction = struct {
             }
         }
 
+        if (tx.store.format == .reftable) {
+            // One table under one lock: no `packed-refs` step to announce.
+            try reftablestack.prepare(tx, io);
+            if (tx.hooks != null) try tx.announce(io, .prepared);
+            tx.prepared = true;
+            return;
+        }
+
         for (tx.edits.items) |*edit| {
             const dir = tx.store.dirFor(edit.name);
             if (std.fs.path.dirnamePosix(edit.name)) |parent| {
@@ -720,7 +786,7 @@ pub const Transaction = struct {
             while (true) {
                 if (chain.items.len > max_symbolic_depth + 1) return error.SymbolicRefLoop;
                 const at = chain.items[chain.items.len - 1];
-                const found = (try tx.store.readLoose(tx.gpa, io, at)) orelse break;
+                const found = (try tx.store.readOwnValue(tx.gpa, io, at)) orelse break;
                 switch (found) {
                     .direct => break,
                     .symbolic => |target| {
@@ -764,7 +830,7 @@ pub const Transaction = struct {
         for (tx.edits.items) |e| {
             if (std.mem.eql(u8, e.name, "HEAD")) return;
         }
-        const head = (try tx.store.readLoose(tx.gpa, io, "HEAD")) orelse return;
+        const head = (try tx.store.readOwnValue(tx.gpa, io, "HEAD")) orelse return;
         const branch = switch (head) {
             .direct => return,
             .symbolic => |target| target,
@@ -831,6 +897,14 @@ pub const Transaction = struct {
     pub fn commit(tx: *Transaction, io: Io, log: ?LogMessage) TransactionError!void {
         if (!tx.prepared) try tx.prepare(io);
         std.debug.assert(!tx.finished);
+
+        if (tx.store.format == .reftable) {
+            try reftablestack.commit(tx, io, log);
+            tx.finished = true;
+            tx.releaseLocks(io);
+            if (tx.announced) tx.announce(io, .committed) catch {};
+            return;
+        }
 
         var rewrite_packed = false;
         for (tx.edits.items) |edit| {
@@ -951,6 +1025,7 @@ pub const Transaction = struct {
     }
 
     fn releaseLocks(tx: *Transaction, io: Io) void {
+        reftablestack.releasePending(tx, io);
         for (tx.edits.items) |*edit| {
             if (edit.lock) |*lock| {
                 lock.deinit(io);

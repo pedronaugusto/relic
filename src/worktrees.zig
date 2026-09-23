@@ -4,7 +4,10 @@
 //! What is on the disk, measured against git rather than read from a
 //! document: `<common>/worktrees/<id>/` holding `HEAD`, `gitdir`,
 //! `commondir`, `index`, `ORIG_HEAD` and `logs/HEAD`, and a `.git` *file* in
-//! the destination whose only line is `gitdir: <absolute path>`.
+//! the destination whose only line is `gitdir: <absolute path>`. In a
+//! repository whose refs are a reftable stack, `HEAD` and `ORIG_HEAD` are in
+//! a stack of the worktree's own under `reftable/`, and the `HEAD` file is
+//! the placeholder git leaves there.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,6 +18,8 @@ const hash = @import("hash.zig");
 const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
 const refs_mod = @import("refs.zig");
+const reftablestack = @import("reftablestack.zig");
+const config_mod = @import("config.zig");
 
 const Oid = hash.Oid;
 
@@ -39,7 +44,8 @@ pub const Error = error{
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.DeleteFileError ||
     Io.Dir.DeleteTreeError || Io.Dir.RenameError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
-    Io.Dir.Iterator.Error || Io.Dir.RealPathError || refs_mod.ReadError;
+    Io.Dir.Iterator.Error || Io.Dir.RealPathError || refs_mod.ReadError ||
+    refs_mod.TransactionError || config_mod.ParseError;
 
 /// One registered worktree.
 pub const Entry = struct {
@@ -138,7 +144,18 @@ pub fn list(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Error!L
         } else |_| {}
 
         const lock_text = try fs.readFileAlloc(arena, io, admin, "locked", 4096);
-        const head_text = try fs.readFileAlloc(arena, io, admin, "HEAD", 4096);
+        var head_text = try fs.readFileAlloc(arena, io, admin, "HEAD", 4096);
+        // A reftable worktree's `HEAD` is in its own stack; the file is a
+        // placeholder.
+        if (try reftablestack.headIn(gpa, arena, io, admin, kind)) |value| {
+            head_text = switch (value) {
+                .symbolic => |target| try std.fmt.allocPrint(arena, "ref: {s}", .{target}),
+                .direct => |oid| blk: {
+                    var hex: [hash.max_hex_len]u8 = undefined;
+                    break :blk try arena.dupe(u8, oid.hex(&hex));
+                },
+            };
+        }
         var branch: ?[]const u8 = null;
         var head: ?Oid = null;
         if (head_text) |text| {
@@ -241,7 +258,26 @@ pub fn add(
         return error.InvalidWorktreeName;
     try writeLine(io, admin, "gitdir", gitfile_path);
 
-    if (options.detach_at) |oid| {
+    if (reftablestack.isReftableRepository(io, common_dir)) {
+        // `HEAD` goes into a stack of the worktree's own, which is what git
+        // reads there, and the file beside it is the placeholder.
+        var config = try config_mod.Config.openFile(gpa, io, .{ .dir = common_dir, .sub_path = "config" }, .local, .{});
+        defer config.deinit();
+        const kind: hash.Kind = if (config.get("extensions.objectformat")) |text|
+            hash.Kind.parse(text) catch return error.CorruptWorktree
+        else
+            .sha1;
+        var target_buf: [512]u8 = undefined;
+        if (options.detach_at) |oid| {
+            try reftablestack.initialize(gpa, io, admin, kind, .{ .direct = oid }, oid, .{});
+        } else if (options.branch) |branch| {
+            const target = std.fmt.bufPrint(&target_buf, "refs/heads/{s}", .{branch}) catch
+                return error.InvalidWorktreeName;
+            try reftablestack.initialize(gpa, io, admin, kind, .{ .symbolic = target }, null, .{});
+        } else {
+            return error.CorruptWorktree;
+        }
+    } else if (options.detach_at) |oid| {
         var hex: [hash.max_hex_len]u8 = undefined;
         try writeLine(io, admin, "HEAD", oid.hex(&hex));
         try writeLine(io, admin, "ORIG_HEAD", oid.hex(&hex));
@@ -255,13 +291,16 @@ pub fn add(
     }
 
     // git creates the log directory and an empty `logs/HEAD` so the first
-    // ref update in the new worktree has somewhere to go.
-    admin.createDirPath(io, "logs") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => |e| return e,
-    };
-    const log_file = try admin.createFile(io, "logs/HEAD", .{ .truncate = false });
-    log_file.close(io);
+    // ref update in the new worktree has somewhere to go. A reftable stack
+    // keeps its logs in its tables.
+    if (!reftablestack.isReftableRepository(io, common_dir)) {
+        admin.createDirPath(io, "logs") catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => |e| return e,
+        };
+        const log_file = try admin.createFile(io, "logs/HEAD", .{ .truncate = false });
+        log_file.close(io);
+    }
 
     // And the `.git` file in the destination, which is what makes the
     // directory a worktree at all.

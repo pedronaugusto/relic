@@ -17,12 +17,14 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const fs = @import("fs.zig");
 const refs_mod = @import("refs.zig");
+const reftablestack = @import("reftablestack.zig");
 
 const Oid = hash.Oid;
 
 /// Errors from looking at a gitlink's directory: the filesystem's. A ref
 /// that does not parse is a `HEAD` that names nothing, not an error.
-pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error;
+pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
+    refs_mod.ReadError;
 
 /// A submodule's repository, found from its working tree.
 pub const GitDir = struct {
@@ -44,8 +46,12 @@ pub const GitDir = struct {
     }
 
     /// A ref store over the two directories, which it borrows.
-    pub fn refStore(g: *const GitDir, gpa: Allocator, kind: hash.Kind) refs_mod.Store {
-        return .init(gpa, kind, g.git_dir, g.common_dir);
+    /// A store over its refs, in whichever format they are kept: a stack
+    /// under `reftable/`, or loose files and `packed-refs`.
+    pub fn refStore(g: *const GitDir, gpa: Allocator, io: Io, kind: hash.Kind) refs_mod.Store {
+        var store: refs_mod.Store = .init(gpa, kind, g.git_dir, g.common_dir);
+        if (reftablestack.isReftableRepository(io, g.common_dir)) store.format = .reftable;
+        return store;
     }
 };
 
@@ -127,7 +133,7 @@ pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!
 pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8, kind: hash.Kind) Error!?Oid {
     var found = (try open(gpa, io, wt, path)) orelse return null;
     defer found.close(io);
-    const store = found.refStore(gpa, kind);
+    const store = found.refStore(gpa, io, kind);
     const resolved = (store.head(gpa, io) catch |err| switch (err) {
         error.MalformedRef, error.MalformedPackedRefs, error.SymbolicRefLoop, error.InvalidRefName => return null,
         else => |e| return e,
