@@ -17,6 +17,7 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const textdiff = @import("textdiff.zig");
+const similarity = @import("similarity.zig");
 const attributes = @import("attributes.zig");
 
 const Oid = hash.Oid;
@@ -30,6 +31,11 @@ pub const Error = error{
     /// A path's `merge` attribute names a driver `merge.<name>.driver`
     /// configures, which is a program this merge does not run.
     UnsupportedMergeDriver,
+    /// git's merge would pair a path one side deleted with a path that side
+    /// added, and merge across the rename; this merge does not follow
+    /// renames, and its result would differ. `TreeOptions.blocked` gets
+    /// the deleted path.
+    RenameNotFollowed,
 } || attributes.Error || Allocator.Error || odb_mod.Error || object.TreeParseError ||
     object.Tree.Builder.AddError || index_mod.ReadError;
 
@@ -583,6 +589,24 @@ pub const Result = struct {
 
 const Entries = std.StringHashMapUnmanaged(Side);
 
+/// Where a refusal writes the path that caused it, so a caller can say which
+/// file stood in the way without anything being allocated.
+pub const Blocked = struct {
+    buffer: [4096]u8 = undefined,
+    len: usize = 0,
+
+    /// The path. Empty when nothing was refused.
+    pub fn path(b: *const Blocked) []const u8 {
+        return b.buffer[0..b.len];
+    }
+
+    /// Record `text` as the path that caused a refusal.
+    pub fn set(b: *Blocked, text: []const u8) void {
+        b.len = @min(text.len, b.buffer.len);
+        @memcpy(b.buffer[0..b.len], text[0..b.len]);
+    }
+};
+
 /// Options for a tree merge.
 pub const TreeOptions = struct {
     /// Resolve what can be resolved the way git's merge machinery does:
@@ -607,6 +631,13 @@ pub const TreeOptions = struct {
     /// Such a driver is a program; a path whose `merge` attribute names one
     /// is `error.UnsupportedMergeDriver`.
     configured_drivers: []const []const u8 = &.{},
+    /// Whether git would follow renames here: `merge.renames`, and off
+    /// for `-X no-renames`. This merge never follows one; with this on, a
+    /// content merge whose result a rename would change is
+    /// `error.RenameNotFollowed` instead of a different answer.
+    renames: bool = true,
+    /// Where a refusal writes the path that caused it.
+    blocked: ?*Blocked = null,
 };
 
 /// Merge `ours` and `theirs` against their common ancestor `base`.
@@ -790,6 +821,11 @@ fn ortMerge(
     }
     std.mem.sort([]const u8, paths.items, {}, lessThanPath);
 
+    if (options.renames) {
+        try refuseRenames(arena, io, db, paths.items, &base_entries, &our_entries, &their_entries, options.blocked);
+        try refuseRenames(arena, io, db, paths.items, &base_entries, &their_entries, &our_entries, options.blocked);
+    }
+
     const resolutions = try arena.alloc(Resolution, paths.items.len);
     var loaded_dirs: LoadedDirs = .empty;
     for (paths.items, resolutions) |path, *resolution| {
@@ -947,7 +983,10 @@ fn resolvePath(
             .set, .unspecified => {},
             .value => |name| {
                 for (options.configured_drivers) |configured| {
-                    if (std.mem.eql(u8, configured, name)) return error.UnsupportedMergeDriver;
+                    if (std.mem.eql(u8, configured, name)) {
+                        if (options.blocked) |where| where.set(path);
+                        return error.UnsupportedMergeDriver;
+                    }
                 }
                 if (std.mem.eql(u8, name, "binary")) binary = true;
                 if (std.mem.eql(u8, name, "union")) blob_options.favor = .union_;
@@ -1010,6 +1049,108 @@ fn survivor(arena: Allocator, io: Io, db: *odb_mod.Odb, side: Side) Error!?[]con
 
 fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
+}
+
+/// Refuse a merge whose result git's rename detection would change, as
+/// seen from `side`, which deleted a path and added another.
+///
+/// git looks for renames only where they matter, and the answer is the
+/// same without them everywhere else; this is the same test. A path `side`
+/// deleted is worth pairing when `other` changed or deleted it, or when it
+/// lies in a directory `side` emptied and `other` added to -- the case
+/// where git would move the addition after the directory. Such a path is
+/// paired with an added one that is identical to it, or, for regular files,
+/// scores at least half by git's similarity measure. An identical pair
+/// matters too when `other` added a file where `side` put the renamed one.
+/// Any pairing is `error.RenameNotFollowed`: which pairs git would choose,
+/// and what it would make of them, is not worked out here.
+fn refuseRenames(
+    arena: Allocator,
+    io: Io,
+    db: *odb_mod.Odb,
+    paths: []const []const u8,
+    base: *const Entries,
+    side: *const Entries,
+    other: *const Entries,
+    blocked: ?*Blocked,
+) Error!void {
+    var targets: std.ArrayList([]const u8) = .empty;
+    for (paths) |path| {
+        if (side.contains(path) and !base.contains(path)) try targets.append(arena, path);
+    }
+    if (targets.items.len == 0) return;
+
+    // Directories `side` emptied that `other` added something beneath.
+    var side_dirs: std.StringHashMapUnmanaged(void) = .empty;
+    var base_dirs: std.StringHashMapUnmanaged(void) = .empty;
+    inline for (.{ .{ side, &side_dirs }, .{ base, &base_dirs } }) |pair| {
+        var it = pair[0].keyIterator();
+        while (it.next()) |key| {
+            var at = key.len;
+            while (std.mem.lastIndexOfScalar(u8, key.*[0..at], '/')) |slash| {
+                const slot = try pair[1].getOrPut(arena, key.*[0..slash]);
+                if (slot.found_existing) break;
+                at = slash;
+            }
+        }
+    }
+    var emptied: std.StringHashMapUnmanaged(void) = .empty;
+    var other_it = other.keyIterator();
+    while (other_it.next()) |key| {
+        if (base.contains(key.*)) continue;
+        var at = key.len;
+        while (std.mem.lastIndexOfScalar(u8, key.*[0..at], '/')) |slash| {
+            const dir = key.*[0..slash];
+            if (base_dirs.contains(dir) and !side_dirs.contains(dir)) try emptied.put(arena, dir, {});
+            at = slash;
+        }
+    }
+
+    var target_bytes: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (paths) |path| {
+        const was = base.get(path) orelse continue;
+        if (side.contains(path)) continue;
+        const content_relevant = !sameSide(other.get(path), was);
+        var location_relevant = false;
+        var at = path.len;
+        while (std.mem.lastIndexOfScalar(u8, path[0..at], '/')) |slash| {
+            if (emptied.contains(path[0..slash])) location_relevant = true;
+            at = slash;
+        }
+        const relevant = content_relevant or location_relevant;
+
+        var source_bytes: ?[]const u8 = null;
+        for (targets.items) |target| {
+            const now = side.get(target).?;
+            const identical = now.oid.eql(was.oid) and
+                ((isRegular(now.mode) and isRegular(was.mode)) or now.mode == was.mode);
+            const paired = if (identical)
+                relevant or other.contains(target)
+            else if (!relevant or !isRegular(now.mode) or !isRegular(was.mode))
+                false
+            else blk: {
+                if (source_bytes == null) source_bytes = try readBlob(arena, io, db, was.oid);
+                const slot = try target_bytes.getOrPut(arena, target);
+                if (!slot.found_existing) slot.value_ptr.* = try readBlob(arena, io, db, now.oid);
+                const got = try similarity.score(arena, source_bytes.?, slot.value_ptr.*, similarity.default_minimum);
+                break :blk got >= similarity.default_minimum;
+            };
+            if (paired) {
+                if (blocked) |b| b.set(path);
+                return error.RenameNotFollowed;
+            }
+        }
+    }
+}
+
+fn isRegular(mode: object.Mode) bool {
+    return mode == .file or mode == .exec;
+}
+
+fn readBlob(arena: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid) Error![]const u8 {
+    const found = try db.read(io, oid);
+    defer db.gpa.free(found.bytes);
+    return arena.dupe(u8, found.bytes);
 }
 
 fn sameSide(a: ?Side, b: ?Side) bool {

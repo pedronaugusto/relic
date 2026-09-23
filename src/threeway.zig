@@ -55,21 +55,7 @@ pub const Error = error{
 
 /// Where a refusal writes the path that caused it, so a caller can say which
 /// file stood in the way without anything being allocated.
-pub const Blocked = struct {
-    buffer: [4096]u8 = undefined,
-    len: usize = 0,
-
-    /// The path. Empty when nothing was refused.
-    pub fn path(b: *const Blocked) []const u8 {
-        return b.buffer[0..b.len];
-    }
-
-    /// Record `text` as the path that caused a refusal.
-    pub fn set(b: *Blocked, text: []const u8) void {
-        b.len = @min(text.len, b.buffer.len);
-        @memcpy(b.buffer[0..b.len], text[0..b.len]);
-    }
-};
+pub const Blocked = merge.Blocked;
 
 /// How a merge is carried out.
 pub const Options = struct {
@@ -181,6 +167,8 @@ pub fn apply(
         .attributes = &attrs,
         .attributes_dir = wt,
         .configured_drivers = drivers,
+        .renames = configuredRenames(repo),
+        .blocked = options.blocked,
     });
     defer result.deinit();
 
@@ -365,6 +353,17 @@ fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
 
 fn lessThanConflict(_: void, a: Conflict, b: Conflict) bool {
     return std.mem.order(u8, a.path, b.path) == .lt;
+}
+
+/// Whether git's merge would follow renames: `merge.renames`, then
+/// `diff.renames`, and on when neither says otherwise. `copies` is on.
+fn configuredRenames(repo: *Repository) bool {
+    for ([_][]const u8{ "merge.renames", "diff.renames" }) |key| {
+        const text = repo.config.get(key) orelse continue;
+        if (std.ascii.eqlIgnoreCase(text, "copies") or std.ascii.eqlIgnoreCase(text, "copy")) return true;
+        return @import("config.zig").parseBool(text) catch true;
+    }
+    return true;
 }
 
 /// The names `merge.<name>.driver` configures.

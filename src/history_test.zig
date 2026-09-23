@@ -1338,3 +1338,70 @@ test "the messages a person would edit come from the caller, and land as an edit
     try std.testing.expectEqual(rebase.MessageKind.squash, editor.seen[1]);
     try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
 }
+
+/// `topic` renames a file and `main` edits it; `topic` also renames a file
+/// `main` leaves alone.
+fn renameScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "moved", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    try repo.writeFile(io, "quiet", "q1\nq2\nq3\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "quiet" });
+    try repo.exec(io, &.{ "mv", "quiet", "quiet-renamed" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "rename the quiet one" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.exec(io, &.{ "mv", "moved", "elsewhere" });
+    try repo.writeFile(io, "elsewhere", "1\n2\n3\n4\n5\n6\n7\n8\n9\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "rename and extend" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "moved", "one\n2\n3\n4\n5\n6\n7\n8\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "edit in place" });
+}
+
+test "a merge git would carry across a rename is refused by name, and one it would not is git's" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, renameScript);
+    defer pair.deinit();
+
+    // git follows `moved` to `elsewhere` and merges the edit into it.
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var blocked: threeway.Blocked = .{};
+        try std.testing.expectError(error.RenameNotFollowed, merging.start(gpa, io, &repo, target, .{ .who = who, .blocked = &blocked }));
+        try std.testing.expectEqualStrings("moved", blocked.path());
+    }
+    // Nothing was touched but `ORIG_HEAD`, which git writes before any
+    // merge it tries.
+    try expectSameState(&pair, io, &.{ "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE" }, &main_logs);
+
+    // The quiet rename changes nothing git's merge would do without it.
+    try pair.git.exec(io, &.{ "merge", "--no-edit", "quiet" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "quiet");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(merging.Outcome.Result.merged, outcome.result);
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+
+    // With renames off, git's answer is the one this merge gives.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "merge.renames", "false" });
+    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(merging.Outcome.Result.conflicted, outcome.result);
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+}
