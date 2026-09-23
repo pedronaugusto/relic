@@ -545,10 +545,11 @@ fn writeRefs(gpa: Allocator, io: Io, repo: *Repository, pending: []const Pending
     try tx.commit(io, null);
     const policy = repo.reflogPolicy();
     for (pending) |p| {
-        const dir = repo.refs.dirFor(p.name);
-        const exists = try reflog.exists(io, dir, gpa, p.name);
+        // Through the store, so a reftable repository's log is where git
+        // reads it.
+        const exists = try repo.refs.logExists(gpa, io, p.name);
         if (!reflog.shouldLog(policy, p.name, exists)) continue;
-        try reflog.append(gpa, io, dir, p.name, p.old orelse .zero(repo.kind), p.new, options.who, p.message);
+        try repo.refs.appendLog(gpa, io, p.name, p.old orelse .zero(repo.kind), p.new, options.who, p.message);
     }
 }
 

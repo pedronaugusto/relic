@@ -515,6 +515,34 @@ pub const Store = struct {
         return .{ .store = store, .gpa = gpa, .edits = .empty };
     }
 
+    /// Whether `name` has a log, in whichever format the refs are kept.
+    pub fn logExists(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!bool {
+        if (store.format == .reftable) return reftablestack.logExists(store, gpa, io, name);
+        return reflog.exists(io, store.dirFor(name), gpa, name);
+    }
+
+    /// Append one entry to a ref's log without moving the ref: a line of
+    /// `logs/<ref>`, or in a reftable repository a table of its own, which
+    /// is where git would look for it. The message is collapsed as a
+    /// transaction's is.
+    pub fn appendLog(
+        store: *const Store,
+        gpa: Allocator,
+        io: Io,
+        name: []const u8,
+        old: Oid,
+        new: Oid,
+        who: object.Signature,
+        message: []const u8,
+    ) TransactionError!void {
+        if (!safepath.isValidRefName(name)) return error.InvalidRefName;
+        if (store.format == .reftable) return reftablestack.appendLog(store, gpa, io, name, old, new, who, message);
+        // The message a transaction would write: collapsed as git collapses it.
+        const text = try reflog.normalizeMessage(gpa, message);
+        defer gpa.free(text);
+        return reflog.append(gpa, io, store.dirFor(name), name, old, new, who, text);
+    }
+
     /// A ref's log, oldest first, from `logs/<ref>` or from the reftable
     /// stack as the format says. An absent log is an empty one.
     pub fn readLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) (ReadError || reflog.ReadError)!reflog.Log {

@@ -868,6 +868,67 @@ pub fn commit(tx: *refs.Transaction, io: Io, log: ?refs.LogMessage) refs.Transac
     }
 }
 
+/// `Store.appendLog` over reftable: one entry, written as a table of its
+/// own under the stack's lock, which is how git writes a log that moves no
+/// ref. The message is kept as a transaction's is.
+pub fn appendLog(
+    store: *const refs.Store,
+    gpa: Allocator,
+    io: Io,
+    name: []const u8,
+    old: Oid,
+    new: Oid,
+    who: object.Signature,
+    message: []const u8,
+) refs.TransactionError!void {
+    if (std.mem.indexOfAny(u8, who.name, "<>\n") != null or
+        std.mem.indexOfAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
+    const parent = if (isLinked(store) and isPerWorktree(store, name)) store.git_dir else store.common_dir;
+    var locked = try lockStack(gpa, io, parent);
+    defer {
+        if (!locked.written) locked.lock.deinit(io);
+        gpa.free(locked.buffer);
+        locked.dir.close(io);
+    }
+    var stack = try Stack.load(gpa, io, locked.dir, store.kind);
+    defer stack.deinit();
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const update_index = stack.maxUpdateIndex() + 1;
+    const record: reftable.LogRecord = .{ .name = name, .update_index = update_index, .value = .{ .update = .{
+        .old = old,
+        .new = new,
+        .name = who.name,
+        .email = who.email,
+        .time = std.math.cast(u64, who.when_secs) orelse 0,
+        .tz_offset = zoneFromMinutes(who.offset_minutes),
+        .message = try logMessage(arena_instance.allocator(), try reflog.normalizeMessage(arena_instance.allocator(), message), store.reftable_options.write.block_size),
+    } } };
+    const bytes = try reftable.write(gpa, store.kind, store.reftable_options.write, update_index, update_index, &.{}, &.{record});
+    defer gpa.free(bytes);
+    try install(gpa, io, &locked, &stack, bytes, update_index);
+    if (!store.reftable_options.auto_compact) return;
+    compactIn(gpa, io, parent, store.kind, store.reftable_options, .auto) catch |err| switch (err) {
+        error.LockHeld => {},
+        else => |e| return e,
+    };
+}
+
+/// Put a new table beside the others and name it last in `tables.list`,
+/// through the lock the caller holds.
+fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack, bytes: []const u8, update_index: u64) refs.TransactionError!void {
+    var name_buf: [64]u8 = undefined;
+    const name = tableName(&name_buf, io, update_index, update_index);
+    try writeTable(gpa, io, locked.dir, name, bytes);
+    const w = locked.lock.writer();
+    w.writeAll(stack.list) catch return error.WriteFailed;
+    if (stack.list.len != 0 and stack.list[stack.list.len - 1] != '\n') w.writeByte('\n') catch return error.WriteFailed;
+    w.print("{s}\n", .{name}) catch return error.WriteFailed;
+    try locked.lock.commit(io);
+    locked.lock.deinit(io);
+    locked.written = true;
+}
+
 /// Give up whatever `prepare` took.
 pub fn releasePending(tx: *refs.Transaction, io: Io) void {
     const pending = tx.reftable orelse return;
@@ -954,17 +1015,7 @@ fn addTable(
 
     const bytes = try reftable.write(gpa, store.kind, store.reftable_options.write, update_index, update_index, records.items, logs.items);
     defer gpa.free(bytes);
-    var name_buf: [64]u8 = undefined;
-    const name = tableName(&name_buf, io, update_index, update_index);
-    try writeTable(gpa, io, locked.dir, name, bytes);
-
-    const w = locked.lock.writer();
-    w.writeAll(stack.list) catch return error.WriteFailed;
-    if (stack.list.len != 0 and stack.list[stack.list.len - 1] != '\n') w.writeByte('\n') catch return error.WriteFailed;
-    w.print("{s}\n", .{name}) catch return error.WriteFailed;
-    try locked.lock.commit(io);
-    locked.lock.deinit(io);
-    locked.written = true;
+    try install(gpa, io, locked, stack, bytes, update_index);
 }
 
 /// A reflog message as git's reftable writer keeps it: on one line, no
@@ -1257,7 +1308,7 @@ fn requireReftableGit(gpa: Allocator, io: Io) !void {
     try testgit.requireGitVersion(gpa, io, 2, 45);
 }
 
-fn who(when: i64) object.Signature {
+fn fixtureWho(when: i64) object.Signature {
     return .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = when, .offset_minutes = 90 };
 }
 
@@ -1367,8 +1418,8 @@ test "what this writes into a reftable repository git reads, logs and all" {
         c.* = try repo.writeCommit(io, .{
             .tree = tree,
             .parents = if (parent) |p| &.{p} else &.{},
-            .author = who(1_700_000_000 + @as(i64, @intCast(i))),
-            .committer = who(1_700_000_000 + @as(i64, @intCast(i))),
+            .author = fixtureWho(1_700_000_000 + @as(i64, @intCast(i))),
+            .committer = fixtureWho(1_700_000_000 + @as(i64, @intCast(i))),
             .message = "a commit\n",
         });
         parent = c.*;
@@ -1377,7 +1428,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
         .target = commits[3],
         .target_type = .commit,
         .name = "v1",
-        .tagger = who(1_700_000_100),
+        .tagger = fixtureWho(1_700_000_100),
         .message = "a tag\n",
     });
 
@@ -1388,7 +1439,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
         defer tx.deinit(io);
         try tx.update("refs/heads/main", .{ .direct = c }, if (i == 0) .must_not_exist else .{ .matches = commits[i - 1] });
         try tx.update("HEAD", .{ .symbolic = "refs/heads/main" }, .any);
-        try tx.commit(io, .{ .who = who(1_700_000_000 + @as(i64, @intCast(i))), .message = "commit: a commit" });
+        try tx.commit(io, .{ .who = fixtureWho(1_700_000_000 + @as(i64, @intCast(i))), .message = "commit: a commit" });
     }
     {
         var tx = repo.beginRefs();
@@ -1397,13 +1448,13 @@ test "what this writes into a reftable repository git reads, logs and all" {
         try tx.create("refs/heads/topic", .{ .direct = commits[5] });
         try tx.create("refs/heads/doomed", .{ .direct = commits[6] });
         try tx.create("refs/heads/link", .{ .symbolic = "refs/heads/topic" });
-        try tx.commit(io, .{ .who = who(1_700_000_200), .message = "branch: made" });
+        try tx.commit(io, .{ .who = fixtureWho(1_700_000_200), .message = "branch: made" });
     }
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         try tx.delete("refs/heads/doomed", .must_exist);
-        try tx.commit(io, .{ .who = who(1_700_000_300), .message = "branch: deleted" });
+        try tx.commit(io, .{ .who = fixtureWho(1_700_000_300), .message = "branch: deleted" });
     }
 
     // Compaction kept the stack short.
@@ -1513,7 +1564,7 @@ test "a table written for a transaction is the table git writes for it" {
             try tx.create(name, .{ .direct = if (i % 7 == 0) tag_oid else blob_oid });
         }
         try tx.create("refs/tags/zz-link", .{ .symbolic = "refs/heads/main" });
-        try tx.commit(io, .{ .who = who(1_700_000_000), .message = "bulk" });
+        try tx.commit(io, .{ .who = fixtureWho(1_700_000_000), .message = "bulk" });
     }
 
     var lists: [2][]u8 = undefined;
@@ -1628,7 +1679,7 @@ test "git waits on the lock a prepared transaction holds, and reads the result" 
     try std.testing.expectError(error.GitFailed, git.exec(io, &.{ "-c", "reftable.lockTimeout=0", "branch", "theirs" }));
     git.report_failures = true;
 
-    try tx.commit(io, .{ .who = who(1_700_000_000), .message = "branch: Created" });
+    try tx.commit(io, .{ .who = fixtureWho(1_700_000_000), .message = "branch: Created" });
     try git.exec(io, &.{ "branch", "theirs" });
     const ours = try git.line(io, &.{ "rev-parse", "refs/heads/ours" });
     defer gpa.free(ours);
@@ -1670,6 +1721,39 @@ test "a repository's stack is kept between reads and read again only when it cha
     var listing = try repo.refs.list(gpa, io, "refs/");
     defer listing.deinit();
     try std.testing.expectEqual(settled, cache.reloads);
+}
+
+test "a log entry goes into the stack, and the files path refuses to write where git will not look" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    try requireReftableGit(gpa, io);
+    var git = try testgit.Repo.init(gpa, io, &.{"--ref-format=reftable"});
+    defer git.deinit();
+    try git.writeFile(io, "a.txt", "a\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const tip_text = try git.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(tip_text);
+    const tip = try Oid.parse(.sha1, tip_text);
+
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    try std.testing.expectError(
+        error.ReftableRepository,
+        reflog.append(gpa, io, repo.git_dir, "refs/heads/main", tip, tip, fixtureWho(1), "direct"),
+    );
+    try std.testing.expectError(error.ReftableRepository, reflog.read(gpa, io, repo.git_dir, "HEAD", .sha1));
+    try std.testing.expectError(error.FileNotFound, git.dir.access(io, ".git/logs/refs/heads/main", .{}));
+
+    try repo.refs.appendLog(gpa, io, "refs/heads/main", tip, tip, fixtureWho(1_700_000_000), "reset: moving to HEAD");
+    const shown = try gitReflog(&git, io, "refs/heads/main");
+    defer gpa.free(shown);
+    try std.testing.expect(std.mem.startsWith(u8, shown, tip_text));
+    try std.testing.expect(std.mem.indexOf(u8, shown, "\treset: moving to HEAD\n") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, shown, "\n"));
+    var log = try repo.readLog(io, "refs/heads/main");
+    defer log.deinit();
+    try std.testing.expectEqualStrings("reset: moving to HEAD", log.entries[log.entries.len - 1].message);
 }
 
 /// `git refs verify`, where the git has it: 2.47 and later.
@@ -1845,7 +1929,7 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         try tx.create("refs/heads/ours", .{ .direct = tip });
-        try tx.commit(io, .{ .who = who(1_700_000_000), .message = "branch: Created from main" });
+        try tx.commit(io, .{ .who = fixtureWho(1_700_000_000), .message = "branch: Created from main" });
     }
     try git.dir.createDirPath(io, "trees/ours");
     var dest = try git.dir.openDir(io, "trees/ours", .{ .iterate = true });
@@ -1878,7 +1962,7 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
         defer tx.deinit(io);
         try tx.create("refs/bisect/good", .{ .direct = tip });
         try tx.change("HEAD", .{ .direct = tip }, .any, .{ .no_deref = true });
-        try tx.commit(io, .{ .who = who(1_700_000_100), .message = "checkout: moving to detached" });
+        try tx.commit(io, .{ .who = fixtureWho(1_700_000_100), .message = "checkout: moving to detached" });
     }
     const detached = try git.line(io, &.{ "-C", "trees/ours", "rev-parse", "--symbolic-full-name", "HEAD" });
     defer gpa.free(detached);

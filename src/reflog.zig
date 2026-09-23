@@ -19,13 +19,28 @@ const Oid = hash.Oid;
 pub const AppendError = Io.File.OpenError || Io.Writer.Error ||
     Io.File.WritePositionalError || Io.File.StatError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Allocator.Error ||
-    error{InvalidSignature};
+    error{
+        InvalidSignature,
+        /// The directory is a reftable repository's, whose logs are in
+        /// its tables: a `logs/` file there is one git never reads.
+        /// `refs.Store.appendLog` writes to either format.
+        ReftableRepository,
+    };
 
 /// Errors from reading a log.
 pub const ReadError = error{
     /// A line that is not `old new ident` with the right shapes.
     MalformedReflogEntry,
+    /// The directory is a reftable repository's; `refs.Store.readLog`
+    /// reads either format.
+    ReftableRepository,
 } || Allocator.Error || Io.Dir.ReadFileAllocError || object.Signature.ParseError;
+
+/// Whether `git_dir` keeps its refs, and so its logs, in a reftable stack.
+fn isReftable(io: Io, git_dir: Io.Dir) bool {
+    git_dir.access(io, "reftable/tables.list", .{}) catch return false;
+    return true;
+}
 
 /// One line of a log.
 pub const Entry = struct {
@@ -111,7 +126,8 @@ pub fn exists(io: Io, git_dir: Io.Dir, gpa: Allocator, ref: []const u8) Allocato
 ///
 /// The log is opened for appending rather than replaced: several processes
 /// appending a line each interleave lines, never halves of one, because a
-/// line is written in a single call.
+/// line is written in a single call. In a reftable repository this is
+/// `error.ReftableRepository`, and `refs.Store.appendLog` is the call.
 pub fn append(
     gpa: Allocator,
     io: Io,
@@ -122,6 +138,7 @@ pub fn append(
     who: object.Signature,
     message: []const u8,
 ) AppendError!void {
+    if (isReftable(io, git_dir)) return error.ReftableRepository;
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     if (std.fs.path.dirnamePosix(path)) |parent| {
@@ -198,8 +215,11 @@ pub const Log = struct {
     }
 };
 
-/// Read `logs/<ref>`. An absent log is an empty one.
+/// Read `logs/<ref>`. An absent log is an empty one. In a reftable
+/// repository this is `error.ReftableRepository` rather than an empty log
+/// that is not the truth; `refs.Store.readLog` reads either format.
 pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash.Kind) ReadError!Log {
+    if (isReftable(io, git_dir)) return error.ReftableRepository;
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     const bytes = (try fs.readFileAlloc(gpa, io, git_dir, path, 1 << 28)) orelse
