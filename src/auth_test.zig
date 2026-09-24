@@ -182,9 +182,10 @@ const Person = struct {
         const sources = locations.sources();
         return repo_mod.Repository.open(p.gpa, io, dir, .{
             .system_config = sources.system,
+            .xdg_config = sources.xdg,
             .global_config = sources.global,
             .home = locations.home,
-            .config_overrides = locations.command,
+            .config_pairs = locations.pairs,
         });
     }
 };

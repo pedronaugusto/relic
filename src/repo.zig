@@ -187,12 +187,18 @@ pub const Repository = struct {
         /// directory stays open while the repository does, as the system
         /// one's does.
         global_config: ?config_mod.Sources.Path = null,
+        /// The XDG one, `~/.config/git/config`, read before
+        /// `global_config`, as git reads both.
+        xdg_config: ?config_mod.Sources.Path = null,
         /// The home directory, for `~/` in a config value or an
         /// `includeIf` condition. This package reads no environment, so the
         /// caller supplies it. The configuration keeps its own copy.
         home: ?[]const u8 = null,
         /// Values that beat every file, as `name=value`.
         config_overrides: []const []const u8 = &.{},
+        /// Values that beat every file, after `config_overrides`, with the
+        /// name and value apart: what `userconfig.Locations.pairs` holds.
+        config_pairs: []const config_mod.Sources.Pair = &.{},
     };
 
     const Discovered = struct {
@@ -320,9 +326,11 @@ pub const Repository = struct {
         defer if (branch) |b| gpa.free(b);
         const read = try repo.readConfig(io, .{
             .system = options.system_config,
+            .xdg = options.xdg_config,
             .global = options.global_config,
             .local = .{ .dir = repo.common_dir, .sub_path = "config" },
             .command = options.config_overrides,
+            .pairs = options.config_pairs,
         }, .{ .git_dir = git_dir_path, .branch = if (branch) |b| b["refs/heads/".len..] else null, .home = options.home });
         repo.config = read.config;
         errdefer repo.config.deinit();

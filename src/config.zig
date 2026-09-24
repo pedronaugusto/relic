@@ -115,7 +115,7 @@ const Line = struct {
 pub const Level = enum {
     /// `$(prefix)/etc/gitconfig`, or whatever the caller names.
     system,
-    /// `~/.gitconfig` or `$XDG_CONFIG_HOME/git/config`.
+    /// `~/.gitconfig` and `$XDG_CONFIG_HOME/git/config`.
     global,
     /// The repository's own `.git/config`.
     local,
@@ -204,7 +204,10 @@ pub const Entry = struct {
 pub const Sources = struct {
     /// The system file, if any.
     system: ?Path = null,
-    /// The global file, if any.
+    /// `$XDG_CONFIG_HOME/git/config` (`~/.config/git/config`), if any: a
+    /// global file read before `global`, whose values win over it.
+    xdg: ?Path = null,
+    /// The global file, if any: `~/.gitconfig`, or `GIT_CONFIG_GLOBAL`.
     global: ?Path = null,
     /// The repository's `.git/config`.
     local: ?Path = null,
@@ -213,6 +216,18 @@ pub const Sources = struct {
     /// Values that beat every file, as `name=value` pairs with the name in
     /// full — `core.autocrlf=input`. Borrowed for the call.
     command: []const []const u8 = &.{},
+    /// Values that beat every file, read after `command`, with the name
+    /// and value held apart — so a name may hold `=`, as one from
+    /// `GIT_CONFIG_PARAMETERS` or `GIT_CONFIG_KEY_<n>` may. Borrowed for
+    /// the call.
+    pairs: []const Pair = &.{},
+
+    /// A name in full and its value; `null` is a bare name, which reads as
+    /// true.
+    pub const Pair = struct {
+        name: []const u8,
+        value: ?[]const u8,
+    };
 
     /// A file to read, named relative to a directory.
     pub const Path = struct {
@@ -278,8 +293,9 @@ pub const Config = struct {
         return .{ .gpa = gpa };
     }
 
-    /// Read every source that is there, in git's order: system, then global,
-    /// then local, then worktree, then the caller's own values.
+    /// Read every source that is there, in git's order: system, then the
+    /// XDG file and the global one, then local, then worktree, then the
+    /// caller's own values.
     pub fn open(gpa: Allocator, io: Io, sources: Sources, context: Context) ParseError!Config {
         var config: Config = .{ .gpa = gpa };
         errdefer config.deinit();
@@ -287,10 +303,11 @@ pub const Config = struct {
         try config.keepSources(sources);
 
         if (sources.system) |p| try config.addFile(io, p, .system, false, 0);
+        if (sources.xdg) |p| try config.addFile(io, p, .global, false, 0);
         if (sources.global) |p| try config.addFile(io, p, .global, false, 0);
         if (sources.local) |p| try config.addFile(io, p, .local, true, 0);
         if (sources.worktree) |p| try config.addFile(io, p, .worktree, true, 0);
-        if (sources.command.len != 0) try config.addCommandValues(sources.command);
+        if (sources.command.len != 0 or sources.pairs.len != 0) try config.addCommandValues(sources.command, sources.pairs);
         return config;
     }
 
@@ -327,12 +344,17 @@ pub const Config = struct {
             if (r.bytes) |b| config.gpa.free(b);
         }
         config.read.deinit(config.gpa);
-        const paths = [_]?Sources.Path{ config.sources.system, config.sources.global, config.sources.local, config.sources.worktree };
+        const paths = [_]?Sources.Path{ config.sources.system, config.sources.xdg, config.sources.global, config.sources.local, config.sources.worktree };
         for (paths) |maybe| {
             if (maybe) |path| config.gpa.free(path.sub_path);
         }
         for (config.sources.command) |value| config.gpa.free(value);
         config.gpa.free(config.sources.command);
+        for (config.sources.pairs) |pair| {
+            config.gpa.free(pair.name);
+            if (pair.value) |v| config.gpa.free(v);
+        }
+        config.gpa.free(config.sources.pairs);
         config.gpa.free(config.context_storage);
         config.* = undefined;
     }
@@ -359,7 +381,7 @@ pub const Config = struct {
 
     fn keepSources(config: *Config, sources: Sources) Allocator.Error!void {
         const gpa = config.gpa;
-        const fields = [_][]const u8{ "system", "global", "local", "worktree" };
+        const fields = [_][]const u8{ "system", "xdg", "global", "local", "worktree" };
         inline for (fields) |field| {
             if (@field(sources, field)) |path| {
                 @field(config.sources, field) = .{ .dir = path.dir, .sub_path = try gpa.dupe(u8, path.sub_path) };
@@ -376,6 +398,22 @@ pub const Config = struct {
             kept += 1;
         }
         config.sources.command = command;
+        const pairs = try gpa.alloc(Sources.Pair, sources.pairs.len);
+        var kept_pairs: usize = 0;
+        errdefer {
+            for (pairs[0..kept_pairs]) |pair| {
+                gpa.free(pair.name);
+                if (pair.value) |v| gpa.free(v);
+            }
+            gpa.free(pairs);
+        }
+        for (sources.pairs) |pair| {
+            const name = try gpa.dupe(u8, pair.name);
+            errdefer gpa.free(name);
+            pairs[kept_pairs] = .{ .name = name, .value = if (pair.value) |v| try gpa.dupe(u8, v) else null };
+            kept_pairs += 1;
+        }
+        config.sources.pairs = pairs;
     }
 
     /// Whether a file this configuration was read from now holds other
@@ -472,7 +510,7 @@ pub const Config = struct {
         }
     }
 
-    fn addCommandValues(config: *Config, values: []const []const u8) ParseError!void {
+    fn addCommandValues(config: *Config, values: []const []const u8, pairs: []const Sources.Pair) ParseError!void {
         // A command-line value is `section.name=value` or
         // `section.sub.name=value`; it is turned into a one-line file so it
         // goes through exactly the same parser as everything else. The value
@@ -480,10 +518,16 @@ pub const Config = struct {
         // with the quoting a file would need to hold it.
         var text: std.Io.Writer.Allocating = .init(config.gpa);
         errdefer text.deinit();
-        for (values) |pair| {
+        const every = try config.gpa.alloc(Sources.Pair, values.len + pairs.len);
+        defer config.gpa.free(every);
+        for (values, every[0..values.len]) |pair, *out| {
             const eq = std.mem.indexOfScalar(u8, pair, '=');
-            const full = if (eq) |at| pair[0..at] else pair;
-            const value = if (eq) |at| pair[at + 1 ..] else null;
+            out.* = .{ .name = if (eq) |at| pair[0..at] else pair, .value = if (eq) |at| pair[at + 1 ..] else null };
+        }
+        @memcpy(every[values.len..], pairs);
+        for (every) |pair| {
+            const full = pair.name;
+            const value = pair.value;
             const split = try checkKey(full);
             writeSectionHeader(&text.writer, split) catch return error.OutOfMemory;
             if (value) |v| {
