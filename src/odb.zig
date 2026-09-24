@@ -70,8 +70,13 @@ pub const Options = struct {
 
 /// Errors from the object database.
 pub const Error = error{
-    /// No loose object and no pack holds it, after one pack refresh.
+    /// No loose object and no pack holds it, after one pack refresh — and,
+    /// in a partial clone with a `Lazy` installed, after asking the
+    /// promisor remote.
     ObjectNotFound,
+    /// A partial clone's promisor remote was asked for a missing object and
+    /// could not give it. The `Lazy` that asked keeps why.
+    PromisorFetchFailed,
     /// A loose object whose inflated bytes do not match its own header.
     CorruptLooseObject,
     /// A loose object whose content does not hash to its own name.
@@ -203,6 +208,29 @@ pub const Odb = struct {
     /// having no parents, because theirs are not here. Empty in a whole
     /// repository.
     shallow: Oid.Set = .empty,
+    /// What asks a partial clone's promisor remote for an object this
+    /// database does not have, when a read meets one. `null` — the default,
+    /// and the case in every repository that is not a partial clone — and a
+    /// miss is `error.ObjectNotFound`.
+    lazy: ?Lazy = null,
+
+    /// A fetch of missing objects, installed by the caller: `partial.zig`
+    /// makes one.
+    pub const Lazy = struct {
+        context: *anyopaque,
+        /// Bring `oids` into the database. Called with `lazy` unset, so a
+        /// read it makes cannot ask again.
+        fetch: *const fn (context: *anyopaque, io: Io, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void,
+    };
+
+    /// Ask the promisor remote for `oids`, then look again.
+    pub fn fetchMissing(odb: *Odb, io: Io, oids: []const Oid) Error!void {
+        const lazy = odb.lazy orelse return error.ObjectNotFound;
+        odb.lazy = null;
+        defer odb.lazy = lazy;
+        try lazy.fetch(lazy.context, io, oids);
+        try odb.refresh(io);
+    }
 
     /// Open the object database under `git_dir`.
     ///
@@ -425,6 +453,10 @@ pub const Odb = struct {
         if (try odb.tryRead(io, oid)) |found| return found;
         try odb.refresh(io);
         if (try odb.tryRead(io, oid)) |found| return found;
+        if (odb.lazy != null) {
+            try odb.fetchMissing(io, &.{oid});
+            if (try odb.tryRead(io, oid)) |found| return found;
+        }
         return error.ObjectNotFound;
     }
 
@@ -494,6 +526,10 @@ pub const Odb = struct {
         if (try odb.tryReadHeaderForPack(io, oid, cache_available)) |found| return found;
         try odb.refresh(io);
         if (try odb.tryReadHeaderForPack(io, oid, cache_available)) |found| return found;
+        if (odb.lazy != null) {
+            try odb.fetchMissing(io, &.{oid});
+            if (try odb.tryReadHeaderForPack(io, oid, cache_available)) |found| return found;
+        }
         return error.ObjectNotFound;
     }
 

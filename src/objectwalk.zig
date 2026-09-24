@@ -347,6 +347,28 @@ pub fn checkConnected(
     fresh: ?*const pack.Index,
     missing_out: ?*Oid,
 ) Error!void {
+    return checkConnectedWith(gpa, io, db, tips, fresh, missing_out, .{});
+}
+
+/// What `checkConnectedWith` allows.
+pub const ConnectedOptions = struct {
+    /// The pack came from a partial clone's promisor remote, whose filter
+    /// left objects out on purpose: an object the pack's objects name and
+    /// the repository lacks is one the remote promises, as git's
+    /// `--exclude-promisor-objects` reads it.
+    promisor: bool = false,
+};
+
+/// `checkConnected`, with `options`.
+pub fn checkConnectedWith(
+    gpa: Allocator,
+    io: Io,
+    db: *Odb,
+    tips: []const Oid,
+    fresh: ?*const pack.Index,
+    missing_out: ?*Oid,
+    options: ConnectedOptions,
+) Error!void {
     var seen: Oid.Set = .empty;
     defer seen.deinit(gpa);
     var stack: std.ArrayList(Oid) = .empty;
@@ -358,6 +380,11 @@ pub fn checkConnected(
         const walk_into = if (fresh) |index| (try index.find(oid)) != null else true;
         if (!walk_into) {
             if (!try db.exists(io, oid)) {
+                // A tip is never promised; what the pack's objects name is.
+                const is_tip = for (tips) |tip| {
+                    if (tip.eql(oid)) break true;
+                } else false;
+                if (options.promisor and !is_tip) continue;
                 if (missing_out) |out| out.* = oid;
                 return error.MissingObject;
             }

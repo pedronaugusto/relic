@@ -50,6 +50,10 @@ pub const Error = error{
     /// that does not speak of shallow history — or does not have the kind of
     /// deepening asked for.
     ShallowUnsupportedByServer,
+    /// A partial-clone filter asked of a server that does not filter —
+    /// git's `uploadpack.allowFilter` is off. git would fetch everything
+    /// and say so; relic does not fetch what the caller asked it not to.
+    FilterUnsupportedByServer,
 } || protocol.Error || indexpack.Error || odb_mod.Error || object.ParseError;
 
 /// What to ask for.
@@ -70,6 +74,9 @@ pub const Request = struct {
     /// This repository's shallow boundary, which the server is told so it
     /// sends nothing from below it.
     shallow: []const Oid = &.{},
+    /// A partial clone's filter, as `partial.normalize` spells it:
+    /// `blob:none`, `blob:limit=1024`, `tree:0`.
+    filter: ?[]const u8 = null,
 };
 
 /// How deep the history is to be: git's `--depth`, `--deepen`,
@@ -174,6 +181,7 @@ fn fetchV2(
     if (request.deepen != null or request.shallow.len != 0) {
         if (!adv.commandHas("fetch", "shallow")) return error.ShallowUnsupportedByServer;
     }
+    if (request.filter != null and !adv.commandHas("fetch", "filter")) return error.FilterUnsupportedByServer;
     var common: std.ArrayList(Oid) = .empty;
     defer common.deinit(gpa);
     var haves_to_send: usize = 16;
@@ -259,6 +267,7 @@ fn writeFetchV2(
     if (request.include_tag) try pktline.write(w, "include-tag\n");
     try pktline.write(w, "ofs-delta\n");
     try writeShallowRequest(w, request);
+    if (request.filter) |spec| try pktline.print(w, "filter {s}\n", .{spec});
     for (request.wants) |oid| try pktline.print(w, "want {f}\n", .{oid});
     for (common) |oid| try pktline.print(w, "have {f}\n", .{oid});
     var added: usize = 0;
@@ -393,6 +402,7 @@ fn fetchV0(
             if (d.relative and !adv.has("deepen-relative")) return error.ShallowUnsupportedByServer;
         }
     }
+    if (request.filter != null and !adv.has("filter")) return error.FilterUnsupportedByServer;
     const band: enum { none, small, large } = if (adv.has("side-band-64k"))
         .large
     else if (adv.has("side-band"))
@@ -490,6 +500,7 @@ fn writeFetchV0(
         try pktline.print(w, "want {f}{s}\n", .{ oid, caps.buffered() });
     }
     try writeShallowRequest(w, request);
+    if (request.filter) |spec| try pktline.print(w, "filter {s}\n", .{spec});
     try pktline.flush(w);
     var sent: usize = 0;
     while (sent < v0_haves) : (sent += 1) {
@@ -756,4 +767,19 @@ test "the server's refusal comes back by name, with its words" {
     const nowhere = hash.Hasher.object(.sha1, "blob", "not on the server");
     try testing.expectError(error.RemoteError, fetch(gpa, io, conn, &adv, &repo.odb, pack_dir, .{ .wants = &.{nowhere}, .tips = &.{} }, .{}));
     try testing.expect(std.mem.indexOf(u8, conn.message(), "not our ref") != null);
+}
+
+test "fuzz: a shallow-info line is a boundary commit or a named failure" {
+    try testing.fuzz({}, fuzzShallowInfo, .{});
+}
+
+fn fuzzShallowInfo(_: void, smith: *testing.Smith) anyerror!void {
+    var scratch: [256]u8 = undefined;
+    const input = scratch[0..smith.slice(&scratch)];
+    var info: ShallowInfo = .{ .gpa = testing.allocator };
+    defer info.deinit();
+    _ = info.take(.sha1, input) catch |err| switch (err) {
+        error.ProtocolError => return,
+        else => |e| return e,
+    };
 }

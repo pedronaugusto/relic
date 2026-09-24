@@ -33,6 +33,8 @@ const pack = @import("pack.zig");
 const revwalk = @import("revwalk.zig");
 const fetchpack = @import("fetchpack.zig");
 const shallow_mod = @import("shallow.zig");
+const partial = @import("partial.zig");
+const config_mod = @import("config.zig");
 const refspec_mod = @import("refspec.zig");
 const remote_mod = @import("remote.zig");
 const url_mod = @import("url.zig");
@@ -68,12 +70,13 @@ pub const Error = error{
     /// boundary on a fetch that did not ask to: git's `--update-shallow`,
     /// which relic does not do.
     ShallowUpdateRefused,
-    /// A partial-clone filter, which is not in this release.
-    PartialCloneUnsupported,
+    /// A filter asked of a remote that is not the repository's promisor:
+    /// the objects it would leave out would be missing, not promised.
+    NotAPromisorRemote,
     /// An object below a fetched ref is not in the repository after the
     /// pack arrived. `Outcome` is not returned; `Options.missing` names it.
     MissingObject,
-} || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
+} || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
     revwalk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
 
 /// How a fetch runs.
@@ -119,7 +122,8 @@ pub const Options = struct {
     shallow_exclude: []const []const u8 = &.{},
     /// `--unshallow`: the whole history, and no boundary.
     unshallow: bool = false,
-    /// `--filter`: refused by name in this release.
+    /// `--filter`, for a partial clone's promisor remote; `null` takes
+    /// `remote.<name>.partialclonefilter`, as git does.
     filter: ?[]const u8 = null,
     /// The permission to run programs, which an ssh remote and a
     /// credential helper need.
@@ -222,7 +226,6 @@ const MapEntry = struct {
 
 /// Fetch from `remote_name`, a configured remote or a URL, into `repo`.
 pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {
-    if (options.filter != null) return error.PartialCloneUnsupported;
     const deepen = try deepenRequest(repo, options);
 
     var outcome: Outcome = .{
@@ -278,6 +281,20 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     }
 
     const follow_head = cli_specs.items.len == 0 and remote.name != null and followRemoteHead(&repo.config, remote.name.?);
+
+    // A promisor remote's packs are filtered as the clone was, and what
+    // they leave out is promised rather than missing.
+    const promisor = remote.name != null and partial.isPromisor(&repo.config, remote.name.?);
+    const filter_spec: ?[]const u8 = blk: {
+        const spec = options.filter orelse if (promisor) configured: {
+            const key = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{remote.name.?});
+            const raw = repo.config.get(key) orelse break :configured null;
+            break :configured try config_mod.unquote(arena, raw);
+        } else null;
+        const text = spec orelse break :blk null;
+        if (!promisor) return error.NotAPromisorRemote;
+        break :blk try partial.normalize(arena, text);
+    };
 
     const url = remote.urls[0];
     var session = try transport.Session.open(gpa, io, url, .upload_pack, repo.kind, .{
@@ -452,6 +469,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .include_tag = tags != .none,
         .deepen = deepen,
         .shallow = boundary,
+        .filter = filter_spec,
     }, .{
         .progress = options.progress,
         .receive = .{ .check_objects = options.check_objects },
@@ -459,6 +477,8 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     });
     outcome.pack = fetched.pack;
     outcome.objects = fetched.objects;
+    // A fetch's promisor pack names no refs; git's names none either.
+    if (promisor) if (fetched.pack) |name| try partial.writePromisor(io, pack_dir, name, &.{});
 
     // The boundary the server drew. Walks from here on stop at it; it is
     // written once everything below the refs is known to be here.
@@ -511,7 +531,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
             const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
             fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
         }
-        objectwalk.checkConnected(gpa, io, &repo.odb, all_tips.items, if (fresh) |*index| index else null, options.missing) catch |err| switch (err) {
+        objectwalk.checkConnectedWith(gpa, io, &repo.odb, all_tips.items, if (fresh) |*index| index else null, options.missing, .{ .promisor = promisor }) catch |err| switch (err) {
             error.MissingObject => return error.MissingObject,
             else => |e| return e,
         };
@@ -1329,5 +1349,5 @@ test "unshallowing a whole repository and a filtered fetch are refused by name" 
     var repo = try Repository.init(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
     try testing.expectError(error.NotShallow, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true }));
-    try testing.expectError(error.PartialCloneUnsupported, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .filter = "blob:none" }));
+    try testing.expectError(error.NotAPromisorRemote, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .filter = "blob:none" }));
 }

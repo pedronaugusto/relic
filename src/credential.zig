@@ -690,3 +690,25 @@ test "a helper list follows git's rule that an empty value clears it" {
     try testing.expectEqualStrings("ada", settings.username.?);
     try testing.expect(settings.use_http_path);
 }
+
+test "fuzz: a helper's answer is read or ignored, never trusted into a crash" {
+    try testing.fuzz({}, fuzzAnswer, .{});
+}
+
+fn fuzzAnswer(_: void, smith: *testing.Smith) anyerror!void {
+    var scratch: [2048]u8 = undefined;
+    const input = scratch[0..smith.slice(&scratch)];
+    var session: Session = .{ .gpa = testing.allocator, .url = try url_mod.Url.parse("https://git.example.com/r.git") };
+    defer session.deinit();
+    _ = session.readAnswer(input) catch |err| switch (err) {
+        error.CredentialMultistageUnsupported => return,
+        else => |e| return e,
+    };
+    // Whatever was taken is handed back to a helper as git would.
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try session.writeInput(arena_state.allocator(), &out, .store, false);
+    _ = session.authorization();
+}

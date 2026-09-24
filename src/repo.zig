@@ -464,6 +464,9 @@ pub const Repository = struct {
         "worktreeconfig",
         "relativeworktrees",
         "refstorage",
+        // A partial clone's promisor remote, as git before 2.44 names it;
+        // the objects it may be asked for are read as any others.
+        "partialclone",
     };
 
     fn checkExtensions(repo: *Repository, config: *const config_mod.Config) Error!void {

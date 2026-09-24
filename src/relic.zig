@@ -66,6 +66,7 @@ pub const userconfig = @import("userconfig.zig");
 pub const httpsettings = @import("httpsettings.zig");
 pub const smarthttp = @import("smarthttp.zig");
 pub const shallow = @import("shallow.zig");
+pub const partial = @import("partial.zig");
 pub const transport = @import("transport.zig");
 pub const fetch = @import("fetch.zig");
 pub const clone = @import("clone.zig");
@@ -105,5 +106,6 @@ test {
         _ = @import("auth_test.zig");
         _ = @import("revwalk_test.zig");
         _ = @import("shallow_test.zig");
+        _ = @import("partial_test.zig");
     }
 }

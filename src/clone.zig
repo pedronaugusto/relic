@@ -30,6 +30,7 @@ const repo_mod = @import("repo.zig");
 const pack = @import("pack.zig");
 const fetchpack = @import("fetchpack.zig");
 const shallow_mod = @import("shallow.zig");
+const partial = @import("partial.zig");
 const worktree = @import("worktree.zig");
 const filter = @import("filter.zig");
 const url_mod = @import("url.zig");
@@ -52,13 +53,14 @@ pub const Error = error{
     DestinationNotEmpty,
     /// `Options.branch` names neither a branch nor a tag the remote has.
     RemoteBranchNotFound,
-    /// A partial-clone filter, which is not in this release.
-    PartialCloneUnsupported,
+    /// A partial clone from a repository on this machine, which the local
+    /// transport copies whole.
+    PartialCloneLocalUnsupported,
     /// An object below a fetched ref did not arrive.
     MissingObject,
     /// A remote name git would refuse.
     InvalidRemoteName,
-} || transport.Error || shallow_mod.Error || repo_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
+} || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
     worktree.Error || config_mod.Config.SetError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
     filter.Drivers.LoadError;
 
@@ -99,7 +101,10 @@ pub const Options = struct {
     /// named by `branch`) and the tags pointing into it. `null` is git's
     /// default: on for a shallow clone, off otherwise.
     single_branch: ?bool = null,
-    /// `--filter`: refused by name in this release.
+    /// `--filter`: a partial clone, whose server leaves out what the filter
+    /// names — `blob:none`, `blob:limit=<size>`, `tree:<depth>` — and is
+    /// asked for it when it is read. The checkout's own files are fetched
+    /// before it, in one request, with `programs`.
     filter: ?[]const u8 = null,
     /// The permission to run programs, which an ssh remote and a
     /// credential helper need.
@@ -122,7 +127,6 @@ pub const Options = struct {
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Error!Repository {
-    if (options.filter != null) return error.PartialCloneUnsupported;
     const deepen: ?fetchpack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
         .{ .depth = options.depth, .since = options.shallow_since, .not = options.shallow_exclude }
     else
@@ -137,9 +141,11 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const filter_spec: ?[]const u8 = if (options.filter) |spec| try partial.normalize(arena, spec) else null;
 
     // A path is recorded absolute, as git records it.
     const parsed = url_mod.Url.parse(url) catch |err| return err;
+    if (filter_spec != null and (parsed.scheme == .local or parsed.scheme == .file)) return error.PartialCloneLocalUnsupported;
     if (deepen != null and (parsed.scheme == .local or parsed.scheme == .file)) return error.ShallowLocalUnsupported;
     const recorded = if (parsed.scheme == .local)
         try Io.Dir.cwd().realPathFileAlloc(io, url, arena)
@@ -200,6 +206,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     const origin = options.origin;
     try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.url", .{origin}), recorded);
     if (!options.tags) try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.tagopt", .{origin}), "--no-tags");
+
     // One branch, or one tag, when that is all that is fetched.
     const single_tag: ?[]const u8 = if (single_branch and head_branch == null and detached != null and options.branch != null)
         try std.fmt.allocPrint(arena, "refs/tags/{s}", .{options.branch.?})
@@ -213,6 +220,11 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         else
             try std.fmt.allocPrint(arena, "+refs/heads/*:refs/remotes/{s}/*", .{origin});
         try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{origin}), spec);
+    }
+    if (filter_spec) |spec| {
+        try repo.config.set("core.repositoryformatversion", "1");
+        try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.promisor", .{origin}), "true");
+        try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{origin}), spec);
     }
 
     // Every branch, and every tag unless asked not to; or, for a single
@@ -248,11 +260,26 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .tips = &.{},
         .include_tag = options.tags,
         .deepen = deepen,
+        .filter = filter_spec,
     }, .{
         .progress = options.progress,
         .receive = .{ .check_objects = options.check_objects },
         .shallow_info = &shallow_info,
     });
+    // A partial clone's pack is a promisor pack, and says for which refs.
+    if (filter_spec != null) if (fetched.pack) |name| {
+        var sought: std.ArrayList(partial.PromisorRef) = .empty;
+        for (remote_refs.refs) |ref| {
+            if (ref.unborn or std.mem.endsWith(u8, ref.name, "^{}")) continue;
+            const listed = if (std.mem.eql(u8, ref.name, "HEAD"))
+                true
+            else for (wants.items) |want| {
+                if (want.eql(ref.oid)) break (std.mem.startsWith(u8, ref.name, "refs/heads/") or std.mem.startsWith(u8, ref.name, "refs/tags/"));
+            } else false;
+            if (listed) try sought.append(arena, .{ .oid = ref.oid, .name = ref.name });
+        }
+        try partial.writePromisor(io, pack_dir, name, sought.items);
+    };
     if (shallow_info.shallow.items.len != 0) {
         var empty: Oid.Set = .empty;
         repo.odb.shallow.deinit(gpa);
@@ -280,7 +307,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
             fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
         }
-        objectwalk.checkConnected(gpa, io, &repo.odb, wants.items, if (fresh) |*index| index else null, null) catch |err| switch (err) {
+        objectwalk.checkConnectedWith(gpa, io, &repo.odb, wants.items, if (fresh) |*index| index else null, null, .{ .promisor = filter_spec != null }) catch |err| switch (err) {
             error.MissingObject => return error.MissingObject,
             else => |e| return e,
         };
@@ -340,9 +367,27 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     try repo.config.write(io, repo.common_dir, "config");
 
     if (!options.bare and !options.separate_git_dir and options.checkout) {
-        if (head_commit) |commit| try checkOut(gpa, io, &repo, commit, options.programs);
+        if (head_commit) |commit| {
+            // A partial clone's checkout reads what the filter left out:
+            // fetched first, in one request, as git does.
+            var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = options.programs, .prompt = options.prompt, .check_objects = options.check_objects });
+            defer lazy.deinit();
+            if (filter_spec != null) {
+                lazy.install();
+                lazy.prefetchTree(io, try repo.commitTree(io, repo.peel(io, commit) catch commit)) catch |err| return lazyFailed(err);
+            }
+            try checkOut(gpa, io, &repo, commit, options.programs);
+        }
     }
     return repo;
+}
+
+fn lazyFailed(err: anyerror) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Canceled => error.Canceled,
+        else => error.PromisorFetchFailed,
+    };
 }
 
 fn refspecNameOk(name: []const u8) bool {
@@ -590,12 +635,14 @@ test "an empty remote clones to an unborn branch, as git's does" {
     try testing.expectEqualStrings(theirs, ours);
 }
 
-test "a destination that is not empty and a filtered clone are refused by name" {
+test "a destination that is not empty and a filter git does not have are refused by name" {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "occupied", .data = "x" });
     try testing.expectError(error.DestinationNotEmpty, clone(gpa, io, "/nowhere", tmp.dir, .{ .who = test_who }));
-    try testing.expectError(error.PartialCloneUnsupported, clone(gpa, io, "/nowhere", tmp.dir, .{ .who = test_who, .filter = "blob:none" }));
+    var empty = testing.tmpDir(.{ .iterate = true });
+    defer empty.cleanup();
+    try testing.expectError(error.InvalidFilter, clone(gpa, io, "/nowhere", empty.dir, .{ .who = test_who, .filter = "blob:some" }));
 }
