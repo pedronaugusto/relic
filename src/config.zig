@@ -224,10 +224,14 @@ pub const Sources = struct {
 /// What an `includeIf` condition needs to know about the repository.
 ///
 /// The caller supplies it, because this package reads no environment and has
-/// no opinion about where a repository is.
+/// no opinion about where a repository is. `Repository.open` supplies the
+/// first two itself. `Config.open` and `Config.openFile` keep their own
+/// copy.
 pub const Context = struct {
-    /// The absolute path of the `.git` directory, `/`-separated, for
-    /// `gitdir:` and `gitdir/i:`.
+    /// The absolute path of the `.git` directory, `/`-separated and with
+    /// every symbolic link resolved, which is the path git matches first,
+    /// for `gitdir:` and `gitdir/i:`. A linked worktree's is its own
+    /// administrative directory.
     git_dir: ?[]const u8 = null,
     /// The branch `HEAD` points at, without `refs/heads/`, for `onbranch:`.
     branch: ?[]const u8 = null,
@@ -249,6 +253,8 @@ pub const Config = struct {
     files: std.ArrayList(SourceFile) = .empty,
     entries: std.ArrayList(Entry) = .empty,
     context: Context = .{},
+    /// The bytes `context` points into, when `open` or `openFile` copied it.
+    context_storage: []u8 = &.{},
     /// What `open` was asked to read, kept so the same files can be read
     /// again. The paths and the command-line values are owned; the
     /// directories are the caller's, and stay open while the configuration
@@ -275,8 +281,9 @@ pub const Config = struct {
     /// Read every source that is there, in git's order: system, then global,
     /// then local, then worktree, then the caller's own values.
     pub fn open(gpa: Allocator, io: Io, sources: Sources, context: Context) ParseError!Config {
-        var config: Config = .{ .gpa = gpa, .context = context };
+        var config: Config = .{ .gpa = gpa };
         errdefer config.deinit();
+        try config.keepContext(context);
         try config.keepSources(sources);
 
         if (sources.system) |p| try config.addFile(io, p, .system, false, 0);
@@ -290,8 +297,9 @@ pub const Config = struct {
     /// Read one file as the whole configuration. What a tool inspecting a
     /// single file wants.
     pub fn openFile(gpa: Allocator, io: Io, path: Sources.Path, level: Level, context: Context) ParseError!Config {
-        var config: Config = .{ .gpa = gpa, .context = context };
+        var config: Config = .{ .gpa = gpa };
         errdefer config.deinit();
+        try config.keepContext(context);
         try config.addFile(io, path, level, true, 0);
         return config;
     }
@@ -325,7 +333,28 @@ pub const Config = struct {
         }
         for (config.sources.command) |value| config.gpa.free(value);
         config.gpa.free(config.sources.command);
+        config.gpa.free(config.context_storage);
         config.* = undefined;
+    }
+
+    fn keepContext(config: *Config, context: Context) Allocator.Error!void {
+        const parts = [_]?[]const u8{ context.git_dir, context.branch, context.home };
+        var total: usize = 0;
+        for (parts) |part| total += if (part) |p| p.len else 0;
+        const storage = try config.gpa.alloc(u8, total);
+        var at: usize = 0;
+        var kept: [parts.len]?[]const u8 = undefined;
+        for (parts, &kept) |part, *out| {
+            const p = part orelse {
+                out.* = null;
+                continue;
+            };
+            @memcpy(storage[at..][0..p.len], p);
+            out.* = storage[at..][0..p.len];
+            at += p.len;
+        }
+        config.context_storage = storage;
+        config.context = .{ .git_dir = kept[0], .branch = kept[1], .home = kept[2] };
     }
 
     fn keepSources(config: *Config, sources: Sources) Allocator.Error!void {

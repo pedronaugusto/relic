@@ -105,7 +105,9 @@ pub const Repository = struct {
     /// back, so another process's `git config` is seen after a
     /// `refreshConfig` and not before. The operations that read a file
     /// fresh from the disk are the ones that write it: a submodule's
-    /// settings are edited in `.git/config` as read at that moment.
+    /// settings are edited in `.git/config` as read at that moment. An
+    /// `includeIf` is decided against this repository's `.git` directory
+    /// and the branch `HEAD` was on when the files were read.
     config: config_mod.Config,
     odb: odb_mod.Odb,
     refs: refs_mod.Store,
@@ -142,7 +144,7 @@ pub const Repository = struct {
         global_config: ?config_mod.Sources.Path = null,
         /// The home directory, for `~/` in a config value or an
         /// `includeIf` condition. This package reads no environment, so the
-        /// caller supplies it, and it is borrowed for the repository's life.
+        /// caller supplies it. The configuration keeps its own copy.
         home: ?[]const u8 = null,
         /// Values that beat every file, as `name=value`.
         config_overrides: []const []const u8 = &.{},
@@ -265,12 +267,18 @@ pub const Repository = struct {
 
         // The configuration is read before anything else, because it says
         // which hash the object names are written with.
+        // An `includeIf` asks where the `.git` directory is and which branch
+        // `HEAD` is on, so both are known before the first file is read.
+        var path_buffer: [4096]u8 = undefined;
+        const git_dir_path = try absoluteGitDir(io, repo.git_dir, &path_buffer);
+        const branch = try currentBranch(gpa, io, repo.git_dir);
+        defer if (branch) |b| gpa.free(b);
         const read = try repo.readConfig(io, .{
             .system = options.system_config,
             .global = options.global_config,
             .local = .{ .dir = repo.common_dir, .sub_path = "config" },
             .command = options.config_overrides,
-        }, .{ .home = options.home });
+        }, .{ .git_dir = git_dir_path, .branch = if (branch) |b| b["refs/heads/".len..] else null, .home = options.home });
         repo.config = read.config;
         errdefer repo.config.deinit();
         repo.kind = read.kind;
@@ -311,25 +319,59 @@ pub const Repository = struct {
     }
 
     /// Read the configuration again if a file it came from has changed since
-    /// it was read, and say whether it had.
+    /// it was read, or `HEAD` is on another branch than it was, which an
+    /// `includeIf "onbranch:"` depends on, and say whether it read it.
     ///
     /// A daemon holding a repository for days calls this where it wants
     /// another process's `git config` to count — before an operation, say —
     /// and it costs a read of each file the configuration came from,
-    /// includes among them, and a parse only when one differs. Edits made
+    /// includes among them, and of `HEAD`, and a parse only when one
+    /// differs. Edits made
     /// to `config` in memory and never written are replaced by what the
     /// files hold. A configuration that no longer passes `open`'s checks is
     /// that check's error, and the one held before is kept.
     pub fn refreshConfig(repo: *Repository, io: Io) Error!bool {
-        if (!try repo.config.isStale(io)) return false;
+        // `onbranch:` makes the branch `HEAD` is on part of what was read.
+        const branch = try currentBranch(repo.gpa, io, repo.git_dir);
+        defer if (branch) |b| repo.gpa.free(b);
+        const short = if (branch) |b| b["refs/heads/".len..] else null;
+        const same_branch = if (repo.config.context.branch) |was|
+            short != null and std.mem.eql(u8, was, short.?)
+        else
+            short == null;
+        if (same_branch and !try repo.config.isStale(io)) return false;
         var sources = repo.config.sources;
         sources.worktree = null;
-        var fresh = try repo.readConfig(io, sources, repo.config.context);
+        var context = repo.config.context;
+        context.branch = short;
+        var fresh = try repo.readConfig(io, sources, context);
         errdefer fresh.config.deinit();
         if (fresh.kind != repo.kind) return error.ObjectFormatChanged;
         repo.config.deinit();
         repo.config = fresh.config;
         return true;
+    }
+
+    /// The `.git` directory's path as git matches it in a `gitdir:`
+    /// condition: absolute, symbolic links resolved, `/`-separated.
+    fn absoluteGitDir(io: Io, git_dir: Io.Dir, buffer: []u8) Error![]const u8 {
+        const len = try git_dir.realPath(io, buffer);
+        const path = buffer[0..len];
+        if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+        return path;
+    }
+
+    /// The branch `HEAD` is on, as `refs/heads/<name>` and the caller's, or
+    /// `null` when it is detached. An unborn branch counts, as it does for
+    /// git's `onbranch:`.
+    fn currentBranch(gpa: Allocator, io: Io, git_dir: Io.Dir) Error!?[]u8 {
+        const text = (try fs.readFileAlloc(gpa, io, git_dir, "HEAD", 4096)) orelse return null;
+        defer gpa.free(text);
+        const trimmed = std.mem.trimEnd(u8, text, " \t\r\n");
+        if (!std.mem.startsWith(u8, trimmed, "ref:")) return null;
+        const target = std.mem.trim(u8, trimmed["ref:".len..], " \t");
+        if (!std.mem.startsWith(u8, target, "refs/heads/")) return null;
+        return try gpa.dupe(u8, target);
     }
 
     fn setUnsupported(repo: *Repository, text: []const u8) void {
