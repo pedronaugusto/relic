@@ -588,9 +588,7 @@ fn stagePath(r: *Run, index: *Index, path: []const u8) Error!void {
     const oid = try r.repo.odb.write(r.io, .blob, content);
     const found = try fs.statAt(r.io, r.wt, path);
     // A stage-0 entry replaces the path's stages, which git remembers.
-    for (index.entries.items) |e| {
-        if (std.mem.eql(u8, e.path, path)) try index.recordResolveUndo(e);
-    }
+    _ = try index.resolveStages(path);
     _ = index.remove(path);
     try index.add(.{ .path = path, .oid = oid, .mode = mode, .stat = if (found) |f| f.stat else .none });
     const tree = try index.cacheTree();

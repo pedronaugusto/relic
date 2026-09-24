@@ -18,6 +18,7 @@ const object = @import("object.zig");
 const repo_mod = @import("repo.zig");
 const merging = @import("merging.zig");
 const rerere = @import("rerere.zig");
+const worktree = @import("worktree.zig");
 const threeway = @import("threeway.zig");
 const ort = @import("ort.zig");
 
@@ -2272,4 +2273,41 @@ test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records 
         try rebase.quit(gpa, io, &repo);
     }
     try expectSameRerere(&pair, io);
+}
+
+test "adding a resolved file replaces its conflict and remembers the stages, as git add does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "before" });
+    // Resolved by editing the file, and by deleting it.
+    for ([_]bool{ false, true }) |delete| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+            try gitMayFail(r, io, &.{ "merge", "topic" });
+            if (delete) {
+                try r.dir.deleteFile(io, "f");
+            } else try r.writeFile(io, "f", "a\nresolved by hand\nc\n");
+        }
+        try pair.git.exec(io, &.{ "add", "-A" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var index = try repo.openIndex(io);
+            defer index.deinit();
+            var ignore = try repo.loadIgnore(io);
+            defer ignore.deinit();
+            var attrs = try repo.loadAttrs(io);
+            defer attrs.deinit();
+            var rules = repo.worktreeRules();
+            rules.ignore = &ignore;
+            rules.attrs = &attrs;
+            _ = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = rules });
+            try index.write(io, repo.git_dir, "index", .{});
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+    }
 }

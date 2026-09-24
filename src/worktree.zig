@@ -270,8 +270,11 @@ pub fn addAll(
     }
     // New entries go in once, sorted once. A walk produces paths in tree
     // order and the index is in path order, so inserting them one at a time
-    // would move the tail of the list on almost every file.
+    // would move the tail of the list on almost every file. One that
+    // resolves a conflict replaces its stages, which the index remembers,
+    // as git's `add_index_entry` does.
     try index.addMany(fresh.items);
+    for (fresh.items) |entry| _ = try index.resolveStages(entry.path);
 
     if (options.stage_deletions) {
         var gone: std.ArrayList([]const u8) = .empty;
@@ -282,9 +285,11 @@ pub fn addAll(
                     entry.path.len > options.prefix.len and
                     entry.path[options.prefix.len] == '/');
             if (!under_prefix or entry.skip_worktree or entry.isSparseDirectory() or seen.contains(entry.path)) continue;
-            // The file is gone from the working tree: stage its removal.
+            // The file is gone from the working tree: stage its removal,
+            // remembering a conflict's stages as git does.
             const tree = try index.cacheTree();
             tree.invalidate(entry.path);
+            try index.recordResolveUndo(entry);
             try gone.append(gpa, entry.path);
             outcome.removed += 1;
         }
@@ -439,10 +444,14 @@ const Walker = struct {
 
     fn stageFile(w: *Walker, path: []const u8, found: fs.Entry) Error!void {
         const tracked = w.index.find(path);
+        // A conflicted path is in the index, at its stages, and is added
+        // whatever the ignore rules say.
+        const conflicted = tracked == null and (w.index.findStage(path, 1) != null or
+            w.index.findStage(path, 2) != null or w.index.findStage(path, 3) != null);
         if (tracked == null) {
-            if (w.options.rules.ignore) |rules| {
+            if (!conflicted) if (w.options.rules.ignore) |rules| {
                 if (rules.match(path, false).excluded) return;
-            }
+            };
         } else if (tracked.?.skip_worktree) {
             try w.markSeen(path);
             return;

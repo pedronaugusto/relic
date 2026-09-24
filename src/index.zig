@@ -1056,17 +1056,17 @@ pub const Index = struct {
     /// middle of a sorted list is linear and doing it per path is quadratic.
     pub fn removeMany(index: *Index, paths: []const []const u8) void {
         if (paths.len == 0) return;
+        // Every entry is decided before any path is freed: `paths` may
+        // borrow the entries' own bytes. A kept entry is swapped forward,
+        // so the dropped ones gather at the end, still whole, and go after.
+        const list = index.entries.items;
         var write_at: usize = 0;
-        for (index.entries.items) |entry| {
-            var drop = false;
-            if (std.sort.binarySearch([]const u8, paths, entry.path, orderPath) != null) drop = true;
-            if (drop) {
-                index.gpa.free(entry.path);
-                continue;
-            }
-            index.entries.items[write_at] = entry;
+        for (list, 0..) |entry, read_at| {
+            if (std.sort.binarySearch([]const u8, paths, entry.path, orderPath) != null) continue;
+            std.mem.swap(Entry, &list[write_at], &list[read_at]);
             write_at += 1;
         }
+        for (list[write_at..]) |entry| index.gpa.free(entry.path);
         index.entries.shrinkRetainingCapacity(write_at);
     }
 
@@ -1118,6 +1118,26 @@ pub const Index = struct {
         const item = &undo.entries.items[lo];
         item.modes[entry.stage - 1] = entry.mode.raw();
         item.oids[entry.stage - 1] = entry.oid;
+    }
+
+    /// Remove `path`'s conflict stages, remembering each with
+    /// `recordResolveUndo`, as git does when a stage-0 entry replaces them.
+    /// Returns how many went.
+    pub fn resolveStages(index: *Index, path: []const u8) Allocator.Error!usize {
+        var removed: usize = 0;
+        var at = index.position(path, 1);
+        while (at < index.entries.items.len and std.mem.eql(u8, index.entries.items[at].path, path)) {
+            const entry = index.entries.items[at];
+            if (entry.stage == 0) {
+                at += 1;
+                continue;
+            }
+            try index.recordResolveUndo(entry);
+            index.gpa.free(entry.path);
+            _ = index.entries.orderedRemove(at);
+            removed += 1;
+        }
+        return removed;
     }
 
     /// Forget what resolutions replaced, as git's `unpack_trees` does when
@@ -1756,4 +1776,52 @@ fn fuzzIndex(_: void, smith: *std.testing.Smith) anyerror!void {
     _ = index.find("a");
     const bytes = index.toBytes(.{}) catch return;
     gpa.free(bytes);
+}
+
+test "entries removed by the paths they hold themselves all go, and the rest stay in order" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    const oid = Oid.zero(.sha1);
+    for ([_][]const u8{ "a", "b", "c", "d", "e" }) |p| try index.add(.{ .path = p, .oid = oid, .mode = .file });
+    for ([_]u2{ 1, 2, 3 }) |stage| try index.add(.{ .path = "f", .oid = oid, .mode = .file, .stage = stage });
+    // The list borrows the entries' own bytes, as a caller's often does.
+    var gone: std.ArrayList([]const u8) = .empty;
+    defer gone.deinit(gpa);
+    for (index.entries.items) |e| {
+        if (!std.mem.eql(u8, e.path, "b") and !std.mem.eql(u8, e.path, "d")) try gone.append(gpa, e.path);
+    }
+    index.removeMany(gone.items);
+    try std.testing.expectEqual(@as(usize, 2), index.entries.items.len);
+    try std.testing.expectEqualStrings("b", index.entries.items[0].path);
+    try std.testing.expectEqualStrings("d", index.entries.items[1].path);
+}
+
+test "a conflict's stages leave with their resolution remembered, in path order" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    const one = try Oid.parse(.sha1, "1111111111111111111111111111111111111111");
+    const two = try Oid.parse(.sha1, "2222222222222222222222222222222222222222");
+    for ([_][]const u8{ "z", "m" }) |p| {
+        try index.add(.{ .path = p, .oid = one, .mode = .file, .stage = 1 });
+        try index.add(.{ .path = p, .oid = two, .mode = .exec, .stage = 3 });
+    }
+    try std.testing.expectEqual(@as(usize, 2), try index.resolveStages("z"));
+    try std.testing.expectEqual(@as(usize, 2), try index.resolveStages("m"));
+    try std.testing.expectEqual(@as(usize, 0), index.entries.items.len);
+    const undo = index.resolve_undo.?;
+    try std.testing.expectEqual(@as(usize, 2), undo.entries.items.len);
+    try std.testing.expectEqualStrings("m", undo.entries.items[0].path);
+    try std.testing.expectEqualStrings("z", undo.entries.items[1].path);
+    try std.testing.expectEqual([3]u32{ 0o100644, 0, 0o100755 }, undo.entries.items[1].modes);
+    try std.testing.expect(undo.entries.items[1].oids[1] == null);
+    // Written and read back as git writes the extension.
+    const bytes = try index.toBytes(.{});
+    defer gpa.free(bytes);
+    var back = try Index.parse(gpa, .sha1, bytes);
+    defer back.deinit();
+    try std.testing.expectEqual(@as(usize, 2), back.resolve_undo.?.entries.items.len);
+    index.dropResolveUndo();
+    try std.testing.expect(index.resolve_undo == null);
 }
