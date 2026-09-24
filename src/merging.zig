@@ -145,6 +145,9 @@ pub const Options = struct {
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
     /// `--no-rerere-autoupdate`, or `rerere.autoUpdate` when `null`.
     rerere_autoupdate: ?bool = null,
+    /// Keep the inner merges' messages in `Outcome.messages`, as git does at
+    /// `GIT_MERGE_VERBOSITY=5`.
+    inner_messages: bool = false,
 };
 
 /// What a merge did.
@@ -253,6 +256,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
             .algorithm = .histogram,
         },
         .blocked = options.blocked,
+        .inner_messages = options.inner_messages,
     });
     defer outcome.deinit();
     try index.write(io, repo.git_dir, "index", .{});

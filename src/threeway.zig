@@ -70,6 +70,9 @@ pub const Options = struct {
     rename_score: u32 = 0,
     /// Where a refusal writes the path that caused it.
     blocked: ?*Blocked = null,
+    /// Keep the inner merges' messages, as git does at
+    /// `GIT_MERGE_VERBOSITY=5`: `ort.Options.inner_messages`.
+    inner_messages: bool = false,
 };
 
 /// One conflicted path.
@@ -223,6 +226,7 @@ fn run(
         .submodules = .{ .context = &submodules, .openFn = SubmoduleOpener.open },
         .abbrev_len = @import("abbrev.zig").defaultLength(&repo.config, db),
         .blocked = options.blocked,
+        .inner_messages = options.inner_messages,
     };
     var merged = switch (sides) {
         .trees => |t| try ort.mergeTrees(gpa, io, db, t.base, t.ours, t.theirs, ort_options),

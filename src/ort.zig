@@ -22,8 +22,9 @@
 //!
 //! Several merge bases are merged into one first, recursively, with the
 //! labels git gives the inner merges and the markers they leave nested in
-//! the base; the inner merges' messages are not kept, as git keeps them only
-//! at its highest verbosity.
+//! the base. The inner merges' messages are dropped, as git drops them
+//! below its highest verbosity, unless `Options.inner_messages` asks for
+//! them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -130,6 +131,12 @@ pub const Options = struct {
     abbrev_len: usize = abbrev.fallback,
     /// Where a refusal writes the path that caused it.
     blocked: ?*merge.Blocked = null,
+    /// Keep the messages of the inner merges a merge of several bases
+    /// makes, each after `  From inner merge:` and two spaces a level, and
+    /// ahead of the outer merge's own for the same path. git keeps them at
+    /// verbosity 5 and above, `GIT_MERGE_VERBOSITY=5`, and drops them
+    /// otherwise.
+    inner_messages: bool = false,
 };
 
 /// What a message is about: git's conflict types, whose short names
@@ -422,10 +429,11 @@ const Merge = struct {
 
     const Virtual = struct { tree: Oid, parents: []const CommitRef, fake: Oid };
 
+    /// `clear_or_reinit_internal_opts` between one merge and the next, as
+    /// a merge of several bases makes them: the messages stay, as git's
+    /// `output` map does, and so does the largest rename limit asked for.
     fn reset(m: *Merge) void {
         m.reinit();
-        m.conflicts = .empty;
-        m.needed_limit = 0;
         m.cached_pairs = .{ .{}, .{}, .{} };
         m.cached_target_names = .{ .empty, .empty, .empty };
         m.cached_irrelevant = .{ .empty, .empty, .empty };
@@ -457,7 +465,8 @@ const Merge = struct {
     //---------------------------------------------------------------------
 
     /// `path_msg`: a message filed under `primary`. Those of an inner merge
-    /// are dropped, as git drops them below its highest verbosity.
+    /// are dropped, as git drops them below its highest verbosity, unless
+    /// `Options.inner_messages` keeps them.
     fn pathMsg(
         m: *Merge,
         kind: MessageKind,
@@ -468,13 +477,18 @@ const Merge = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) Allocator.Error!void {
-        if (m.call_depth > 0) return;
+        if (m.call_depth > 0 and !m.options.inner_messages) return;
         var paths: std.ArrayList([]const u8) = .empty;
         try paths.append(m.arena, primary);
         if (other1) |p| try paths.append(m.arena, p);
         if (other2) |p| try paths.append(m.arena, p);
         try paths.appendSlice(m.arena, others);
-        const text = try std.fmt.allocPrint(m.arena, fmt, args);
+        var text: []const u8 = try std.fmt.allocPrint(m.arena, fmt, args);
+        if (m.call_depth > 0) {
+            const indent = try m.arena.alloc(u8, 2 * m.call_depth);
+            @memset(indent, ' ');
+            text = try std.mem.concat(m.arena, u8, &.{ "  From inner merge:", indent, text });
+        }
         const slot = try m.conflicts.getOrPut(m.arena, primary);
         if (!slot.found_existing) {
             slot.key_ptr.* = try m.arena.dupe(u8, primary);

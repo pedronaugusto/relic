@@ -492,6 +492,12 @@ fn runCrissCross(gpa: Allocator, io: Io, seed: u64) !void {
         std.debug.print("criss-cross seed {d} reversed\n", .{seed});
         return err;
     };
+    // At verbosity 5 git keeps the inner merges' messages too.
+    try repo.isolated.?.put("GIT_MERGE_VERBOSITY", "5");
+    expectSameMerge(gpa, io, &repo, "main", "topic", .{ .inner_messages = true }) catch |err| {
+        std.debug.print("criss-cross seed {d} with the inner merges' messages\n", .{seed});
+        return err;
+    };
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does" {
