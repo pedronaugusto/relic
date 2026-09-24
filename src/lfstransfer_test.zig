@@ -726,3 +726,90 @@ test "an .lfsconfig missing from the working tree is read from the index, then f
         try testing.expectEqualStrings(stage.want, (try server.client.endpoint(.download)).url);
     }
 }
+
+test "with no remote named, the remote and the endpoint are the ones git-lfs picks, FETCH_HEAD included" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    var seed = try committed(fx, "seed", nobody, &.{.{ "a.bin", "a\n" }});
+    defer seed.close(io);
+    try fx.gitIn(seed, &.{ "lfs", "push", "origin", "main" });
+    try fx.gitIn(seed, &.{ "push", "-q", "--no-verify", "origin", "main" });
+    const served = try fx.url();
+    defer gpa.free(served);
+    const served_lfs = try std.fmt.allocPrint(gpa, "{s}/info/lfs", .{served});
+    defer gpa.free(served_lfs);
+    const dead = "http://127.0.0.1:1/dead.git";
+    const oid = testlfs.sha256Hex("a\n");
+    var object_buf: [128]u8 = undefined;
+    const object_path = try std.fmt.bufPrint(&object_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+
+    // The remote git-lfs picks is the one it fetches from: every other one
+    // is a port nothing listens on.
+    const Case = struct { name: []const u8, picked: []const u8, setup: []const []const []const u8 };
+    const cases = [_]Case{
+        .{ .name = "tracking", .picked = "other", .setup = &.{
+            &.{ "remote", "add", "origin", dead },
+            &.{ "remote", "add", "other", served },
+            &.{ "config", "branch.main.remote", "other" },
+        } },
+        .{ .name = "lfsdefault", .picked = "second", .setup = &.{
+            &.{ "remote", "add", "origin", dead },
+            &.{ "remote", "add", "second", served },
+            &.{ "config", "remote.lfsdefault", "second" },
+        } },
+        .{ .name = "single", .picked = "upstream", .setup = &.{
+            &.{ "remote", "add", "upstream", served },
+        } },
+    };
+    for (cases) |case| {
+        var d = try fx.dir(case.name);
+        defer d.close(io);
+        try fx.gitIn(d, &.{ "init", "-q", "-b", "main" });
+        for (case.setup) |args| try fx.gitIn(d, args);
+        try fx.gitIn(d, &.{ "fetch", "-q", case.picked });
+        var ref_buf: [64]u8 = undefined;
+        try fx.gitIn(d, &.{ "reset", "-q", "--hard", try std.fmt.bufPrint(&ref_buf, "{s}/main", .{case.picked}) });
+        try fx.gitIn(d, &.{ "lfs", "fetch" });
+        try d.access(io, object_path, .{});
+
+        var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+        defer repo.deinit(io);
+        const server = try lfsapi.Server.open(gpa, io, &repo, null, .{ .programs = fx.programs() });
+        defer server.close();
+        try testing.expectEqualStrings(case.picked, server.remote);
+        try testing.expectEqualStrings(served_lfs, (try server.client.endpoint(.download)).url);
+    }
+
+    // With no branch yet, and with no remote at all but a FETCH_HEAD, the
+    // endpoint is the one git lfs env names for origin.
+    const EnvCase = struct { name: []const u8, setup: []const []const []const u8 };
+    const env_cases = [_]EnvCase{
+        .{ .name = "tracking-unborn", .setup = &.{
+            &.{ "remote", "add", "origin", "https://origin.example.com/r.git" },
+            &.{ "remote", "add", "other", "https://other.example.com/r.git" },
+            &.{ "config", "branch.main.remote", "other" },
+        } },
+        .{ .name = "fetch-head", .setup = &.{
+            &.{ "fetch", "-q", served, "main" },
+        } },
+    };
+    for (env_cases) |case| {
+        var d = try fx.dir(case.name);
+        defer d.close(io);
+        try fx.gitIn(d, &.{ "init", "-q", "-b", "main" });
+        for (case.setup) |args| try fx.gitIn(d, args);
+        const env = try fx.gitOut(d, &.{ "lfs", "env" });
+        defer gpa.free(env);
+        const line_start = (std.mem.indexOf(u8, env, "\nEndpoint=") orelse return error.TestUnexpectedResult) + "\nEndpoint=".len;
+        const line = env[line_start .. std.mem.indexOfScalarPos(u8, env, line_start, ' ') orelse env.len];
+        var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+        defer repo.deinit(io);
+        const server = try lfsapi.Server.open(gpa, io, &repo, null, .{ .programs = fx.programs() });
+        defer server.close();
+        try testing.expectEqualStrings(line, (try server.client.endpoint(.download)).url);
+    }
+}

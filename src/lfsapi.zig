@@ -495,25 +495,88 @@ pub const Endpoint = struct {
     }
 };
 
+/// What finding an endpoint may need besides the settings.
+pub const Where = struct {
+    /// The absolute path a relative local path is taken against: the
+    /// working tree, or the repository of a bare one.
+    base: ?[]const u8 = null,
+    /// The repository's `FETCH_HEAD`, whose first line names the URL last
+    /// fetched from: git-lfs's last resort for `origin`.
+    fetch_head: ?[]const u8 = null,
+};
+
 /// Find the endpoint of `remote` — a remote's name or a URL — for
 /// `operation`, as git-lfs finds it. Everything is allocated in `arena`.
-/// `base` is the absolute path a relative local path is taken against: the
-/// working tree, or the repository of a bare one.
 pub fn findEndpoint(
     arena: Allocator,
     settings: *const Settings,
     remote: []const u8,
     operation: Operation,
-    base: ?[]const u8,
+    where: Where,
 ) Error!Endpoint {
     if (operation == .upload) {
-        if (try settings.get(arena, "lfs.pushurl")) |u| return newEndpoint(arena, settings, operation, u, base);
+        if (try settings.get(arena, "lfs.pushurl")) |u| return newEndpoint(arena, settings, operation, u, where.base);
     }
-    if (try settings.get(arena, "lfs.url")) |u| return newEndpoint(arena, settings, operation, u, base);
+    if (try settings.get(arena, "lfs.url")) |u| return newEndpoint(arena, settings, operation, u, where.base);
     if (!std.mem.eql(u8, remote, "origin")) {
-        if (try remoteEndpoint(arena, settings, remote, operation, base)) |e| return e;
+        if (try remoteEndpoint(arena, settings, remote, operation, where.base)) |e| return e;
     }
-    return (try remoteEndpoint(arena, settings, "origin", operation, base)) orelse error.LfsEndpointUnknown;
+    if (try remoteEndpoint(arena, settings, "origin", operation, where.base)) |e| return e;
+    // Nothing configured: the URL `FETCH_HEAD` says was last fetched from,
+    // as a download endpoint whatever the operation, which is what
+    // git-lfs does.
+    if (where.fetch_head) |text| {
+        if (fetchHeadUrl(text)) |u| return endpointFromCloneUrl(arena, settings, .download, u, where.base);
+    }
+    return error.LfsEndpointUnknown;
+}
+
+/// The URL on the first line of `FETCH_HEAD`, as git-lfs's pattern reads it:
+/// an object name, an optional `not-for-merge`, and `'<ref>' of <url>` after
+/// an optional `branch ` or `tag `; a URL of letters, digits and `/.-:_`.
+pub fn fetchHeadUrl(text: []const u8) ?[]const u8 {
+    const line = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+    var fields = std.mem.splitScalar(u8, line, '\t');
+    const oid = fields.next() orelse return null;
+    if (oid.len < 40 or oid.len > 64) return null;
+    for (oid) |c| switch (c) {
+        '0'...'9', 'a'...'f' => {},
+        else => return null,
+    };
+    const merge = fields.next() orelse return null;
+    if (merge.len != 0 and !std.mem.eql(u8, merge, "not-for-merge")) return null;
+    var rest = fields.rest();
+    if (std.mem.startsWith(u8, rest, "branch ")) rest = rest["branch ".len..] else if (std.mem.startsWith(u8, rest, "tag ")) rest = rest["tag ".len..];
+    if (rest.len == 0 or rest[0] != '\'') return null;
+    const at = std.mem.lastIndexOf(u8, rest, "' of ") orelse return null;
+    const url = std.mem.trim(u8, rest[at + "' of ".len ..], " \t\r");
+    if (url.len == 0) return null;
+    for (url) |c| {
+        if (!std.ascii.isAlphanumeric(c) and std.mem.indexOfScalar(u8, "/.-:_", c) == null) return null;
+    }
+    return url;
+}
+
+/// The remote git-lfs uses when none is named: for a download the branch's
+/// `remote`, else `remote.lfsdefault`, else the only remote there is, else
+/// `origin`; for an upload the branch's `pushRemote`, else
+/// `remote.lfspushdefault`, else `remote.pushDefault`, else the download's.
+/// `branch` is the branch `HEAD` is on, without `refs/heads/`.
+pub fn defaultRemote(arena: Allocator, settings: *const Settings, branch: ?[]const u8, operation: Operation) Error![]const u8 {
+    if (operation == .upload) {
+        if (branch) |b| {
+            if (try settings.get(arena, try std.fmt.allocPrint(arena, "branch.{s}.pushremote", .{b}))) |r| return r;
+        }
+        if (try settings.get(arena, "remote.lfspushdefault")) |r| return r;
+        if (try settings.get(arena, "remote.pushdefault")) |r| return r;
+    }
+    if (branch) |b| {
+        if (try settings.get(arena, try std.fmt.allocPrint(arena, "branch.{s}.remote", .{b}))) |r| return r;
+    }
+    if (try settings.get(arena, "remote.lfsdefault")) |r| return r;
+    const names = try remote_mod.names(arena, settings.config);
+    if (names.len == 1) return names[0];
+    return "origin";
 }
 
 fn remoteEndpoint(arena: Allocator, settings: *const Settings, remote: []const u8, operation: Operation, base: ?[]const u8) Error!?Endpoint {
@@ -852,7 +915,7 @@ pub const Client = struct {
     /// The remote's name, or a URL.
     remote: []const u8,
     /// What a relative local path is taken against.
-    base: ?[]const u8,
+    where: Where,
     options: Options,
     http: http.Client,
     arena: std.heap.ArenaAllocator,
@@ -874,13 +937,13 @@ pub const Client = struct {
     };
 
     /// Open a client for `remote`. `settings` is borrowed.
-    pub fn init(gpa: Allocator, io: Io, settings: *const Settings, remote: []const u8, base: ?[]const u8, options: Options) Error!Client {
+    pub fn init(gpa: Allocator, io: Io, settings: *const Settings, remote: []const u8, where: Where, options: Options) Error!Client {
         var c: Client = .{
             .gpa = gpa,
             .io = io,
             .settings = settings,
             .remote = remote,
-            .base = base,
+            .where = where,
             .options = options,
             .http = .{ .allocator = gpa, .io = io },
             .arena = .init(gpa),
@@ -955,7 +1018,7 @@ pub const Client = struct {
     fn endpointLocked(c: *Client, operation: Operation) Error!Endpoint {
         const i = @intFromEnum(operation);
         if (c.endpoints[i]) |e| return e;
-        const e = try findEndpoint(c.arena.allocator(), c.settings, c.remote, operation, c.base);
+        const e = try findEndpoint(c.arena.allocator(), c.settings, c.remote, operation, c.where);
         c.endpoints[i] = e;
         return e;
     }
@@ -1564,14 +1627,17 @@ pub const Server = struct {
     base_path: [:0]u8,
     /// The remote's name, or a URL.
     remote: []u8,
+    /// `FETCH_HEAD`, for the endpoint's last resort.
+    fetch_head: ?[]u8 = null,
 
     /// Errors from opening a server.
     pub const OpenError = Error || Settings.LoadError || LfsconfigError || lfs.Lfs.LoadError || Io.Dir.RealPathFileAllocError;
 
-    /// Open `remote` — a remote's name or a URL — of `repo`. Nothing is
-    /// sent until an operation asks. `repo` is borrowed for as long as the
-    /// server is open.
-    pub fn open(gpa: Allocator, io: Io, repo: *repo_mod.Repository, remote: []const u8, options: Options) OpenError!*Server {
+    /// Open `remote` — a remote's name or a URL — of `repo`, or with `null`
+    /// the remote git-lfs would use for a download: `defaultRemote`. Nothing
+    /// is sent until an operation asks. `repo` is borrowed for as long as
+    /// the server is open.
+    pub fn open(gpa: Allocator, io: Io, repo: *repo_mod.Repository, remote: ?[]const u8, options: Options) OpenError!*Server {
         const s = try gpa.create(Server);
         errdefer gpa.destroy(s);
         s.* = .{
@@ -1581,9 +1647,8 @@ pub const Server = struct {
             .client = undefined,
             .lfs = undefined,
             .base_path = undefined,
-            .remote = try gpa.dupe(u8, remote),
+            .remote = undefined,
         };
-        errdefer gpa.free(s.remote);
         s.base_path = try (repo.work_dir orelse repo.common_dir).realPathFileAlloc(io, ".", gpa);
         errdefer gpa.free(s.base_path);
         const lfsconfig = try lfsconfigText(gpa, io, repo);
@@ -1591,9 +1656,25 @@ pub const Server = struct {
         s.settings = .{ .gpa = gpa, .config = &repo.config };
         if (lfsconfig) |t| s.settings.file = try Config.parseText(gpa, t, .local);
         errdefer s.settings.deinit();
+        {
+            var scratch: std.heap.ArenaAllocator = .init(gpa);
+            defer scratch.deinit();
+            const chosen = remote orelse blk: {
+                // A branch with no commit yet is no branch to git-lfs, whose
+                // current ref comes from resolving `HEAD`.
+                const head = try repo.head(io);
+                defer if (head) |h| gpa.free(h.name);
+                const branch = if (head != null) try repo.refs.currentBranch(scratch.allocator(), io) else null;
+                break :blk try defaultRemote(scratch.allocator(), &s.settings, branch, .download);
+            };
+            s.remote = try gpa.dupe(u8, chosen);
+        }
+        errdefer gpa.free(s.remote);
+        s.fetch_head = try fs.readFileAlloc(gpa, io, repo.git_dir, "FETCH_HEAD", 1 << 20);
+        errdefer if (s.fetch_head) |f| gpa.free(f);
         s.lfs = try lfs.Lfs.load(gpa, io, &repo.config, repo.common_dir, null, .{ .lfsconfig = lfsconfig });
         errdefer s.lfs.deinit();
-        s.client = try Client.init(gpa, io, &s.settings, s.remote, s.base_path, options);
+        s.client = try Client.init(gpa, io, &s.settings, s.remote, .{ .base = s.base_path, .fetch_head = s.fetch_head }, options);
         return s;
     }
 
@@ -1605,6 +1686,7 @@ pub const Server = struct {
         s.settings.deinit();
         gpa.free(s.base_path);
         gpa.free(s.remote);
+        if (s.fetch_head) |f| gpa.free(f);
         gpa.destroy(s);
     }
 
@@ -1721,13 +1803,13 @@ test "the endpoint is found where git-lfs looks for it, in git-lfs's order" {
     for (cases) |case| {
         var t = try testSettings(case.config, null);
         defer freeSettings(&t);
-        const e = try findEndpoint(a, &t.settings, case.remote, case.op, "/work");
+        const e = try findEndpoint(a, &t.settings, case.remote, case.op, .{ .base = "/work" });
         try testing.expectEqualStrings(case.want, e.url);
     }
     {
         var t = try testSettings("[remote \"origin\"]\nurl = ssh://git@host.example:2222/org/repo.git\n", null);
         defer freeSettings(&t);
-        const e = try findEndpoint(a, &t.settings, "origin", .download, null);
+        const e = try findEndpoint(a, &t.settings, "origin", .download, .{});
         try testing.expectEqualStrings("git@host.example", e.ssh.?.user_and_host);
         try testing.expectEqualStrings("2222", e.ssh.?.port.?);
         try testing.expectEqualStrings("/org/repo.git", e.ssh.?.path);
@@ -1735,14 +1817,14 @@ test "the endpoint is found where git-lfs looks for it, in git-lfs's order" {
     {
         var t = try testSettings("[remote \"origin\"]\nurl = host.example:org/repo.git\n", null);
         defer freeSettings(&t);
-        const e = try findEndpoint(a, &t.settings, "origin", .download, null);
+        const e = try findEndpoint(a, &t.settings, "origin", .download, .{});
         try testing.expectEqualStrings("host.example", e.ssh.?.user_and_host);
         try testing.expectEqualStrings("org/repo.git", e.ssh.?.path);
     }
     {
         var t = try testSettings("", null);
         defer freeSettings(&t);
-        try testing.expectError(error.LfsEndpointUnknown, findEndpoint(a, &t.settings, "origin", .download, null));
+        try testing.expectError(error.LfsEndpointUnknown, findEndpoint(a, &t.settings, "origin", .download, .{}));
     }
 }
 
@@ -1845,4 +1927,14 @@ fn fuzzAuthenticate(_: void, smith: *testing.Smith) anyerror!void {
         else => return err,
     };
     for (auth.headers) |h| try checkHeader(h.name, h.value);
+}
+
+test "FETCH_HEAD's first line names the URL as git-lfs's pattern reads it" {
+    const oid = "0123456789abcdef0123456789abcdef01234567";
+    try testing.expectEqualStrings("https://git.example.com/r.git", fetchHeadUrl(oid ++ "\t\tbranch 'main' of https://git.example.com/r.git\n").?);
+    try testing.expectEqualStrings("/srv/repo", fetchHeadUrl(oid ++ "\tnot-for-merge\ttag 'v1' of /srv/repo\n").?);
+    try testing.expectEqualStrings("host:path", fetchHeadUrl(oid ++ "\t\t'HEAD' of host:path").?);
+    try testing.expect(fetchHeadUrl(oid ++ "\t\tbranch 'main' of https://x/a b\n") == null);
+    try testing.expect(fetchHeadUrl("xyz\t\tbranch 'main' of https://x\n") == null);
+    try testing.expect(fetchHeadUrl("") == null);
 }
