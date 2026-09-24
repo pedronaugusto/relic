@@ -108,6 +108,95 @@ pub const Options = struct {
     /// Write `pack-<name>.rev` beside the index, as git does while
     /// `pack.writeReverseIndex` is on: `revindex.wanted`.
     reverse_index: bool = true,
+    /// Where the names the pack's commits, trees and tags hold are
+    /// collected, for a caller that checks the pack is connected without
+    /// reading it again: `Links`.
+    links: ?*Links = null,
+};
+
+/// The names a received pack's commits, trees and tags hold, collected as
+/// it is indexed — each object is in hand then — so that whether the pack
+/// is connected is asked of the pack's index and the database alone,
+/// without reading an object again: git's index-pack
+/// `--check-self-contained-and-connected`.
+pub const Links = struct {
+    gpa: Allocator,
+    /// Trees, blobs and tag targets named, each once.
+    named: Oid.Set = .empty,
+    /// Each commit with each parent it names: a parent of a commit on a
+    /// shallow boundary is not looked for.
+    parents: std.ArrayList([2]Oid) = .empty,
+    /// An object did not read as its type says, and no conclusion is drawn:
+    /// the caller walks instead.
+    unreadable: bool = false,
+
+    /// Nothing collected.
+    pub fn init(gpa: Allocator) Links {
+        return .{ .gpa = gpa };
+    }
+
+    /// Release everything.
+    pub fn deinit(l: *Links) void {
+        l.named.deinit(l.gpa);
+        l.parents.deinit(l.gpa);
+        l.* = undefined;
+    }
+
+    fn take(l: *Links, kind: Kind, t: object.Type, oid: Oid, bytes: []const u8) Allocator.Error!void {
+        switch (t) {
+            .blob => {},
+            .commit => {
+                var commit = object.Commit.parse(l.gpa, kind, bytes) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {
+                        l.unreadable = true;
+                        return;
+                    },
+                };
+                defer commit.deinit();
+                try l.named.put(l.gpa, commit.tree, {});
+                for (commit.parents) |parent| try l.parents.append(l.gpa, .{ oid, parent });
+            },
+            .tree => {
+                var entries = object.Tree.parse(kind, bytes).iterate();
+                while (entries.next() catch {
+                    l.unreadable = true;
+                    return;
+                }) |entry| {
+                    if (entry.mode == .gitlink) continue;
+                    try l.named.put(l.gpa, entry.oid, {});
+                }
+            },
+            .tag => {
+                var tag = object.Tag.parse(l.gpa, kind, bytes) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {
+                        l.unreadable = true;
+                        return;
+                    },
+                };
+                defer tag.deinit();
+                try l.named.put(l.gpa, tag.target, {});
+            },
+        }
+    }
+
+    /// The first name the pack holds that is neither in the pack, whose
+    /// index is `fresh`, nor in `db`; `null` when every one is there. A
+    /// parent of a commit in `db`'s shallow boundary is not looked for.
+    pub fn firstMissing(l: *const Links, io: Io, db: *odb_mod.Odb, fresh: *const pack.Index) (odb_mod.Error || pack.IndexError)!?Oid {
+        var it = l.named.keyIterator();
+        while (it.next()) |oid| {
+            if ((try fresh.find(oid.*)) != null) continue;
+            if (!try db.exists(io, oid.*)) return oid.*;
+        }
+        for (l.parents.items) |pair| {
+            if (db.shallow.contains(pair[0])) continue;
+            if ((try fresh.find(pair[1])) != null) continue;
+            if (!try db.exists(io, pair[1])) return pair[1];
+        }
+        return null;
+    }
 };
 
 /// What went wrong, and where, for a message.
@@ -580,7 +669,7 @@ const Indexer = struct {
     fn inflateWhole(x: *Indexer, entry: *Entry) Error!void {
         var hasher: hash.Hasher = .initOptions(x.kind, x.hashOptions());
         hasher.updateHeader(entry.type.name(), entry.size);
-        if (entry.type == .blob or !x.options.check_objects) {
+        if (entry.type == .blob or (!x.options.check_objects and x.options.links == null)) {
             try x.inflate(entry.size, .{ .hash = &hasher }, null);
             entry.oid = hasher.final();
         } else {
@@ -590,6 +679,7 @@ const Indexer = struct {
             try x.inflate(entry.size, .{ .buffer = bytes }, &hasher);
             entry.oid = hasher.final();
             try x.checkObject(entry.oid, entry.type, bytes, entry.offset);
+            if (x.options.links) |l| try l.take(x.kind, entry.type, entry.oid, bytes);
         }
         if (hasher.collisionAttack()) return x.fail(error.CollisionAttack, .{ .oid = entry.oid, .offset = entry.offset });
         entry.resolved = true;
@@ -789,6 +879,7 @@ const Indexer = struct {
             entry.type = top.type;
             entry.resolved = true;
             try x.checkObject(named.oid, top.type, bytes, entry.offset);
+            if (x.options.links) |l| try l.take(x.kind, top.type, named.oid, bytes);
             x.resolved_count += 1;
             Progress.emit(x.options.progress, .{ .resolved = .{ .done = x.resolved_count, .total = x.deltas } });
 
@@ -1317,4 +1408,43 @@ fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
     defer p.deinit(io);
     const checked = try p.verify(io, null, 0);
     if (checked.objects != result.objects) return error.PackDidNotVerify;
+}
+
+test "the names a pack holds are collected as it is indexed, and one that is nowhere is found without reading the pack again" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var source = try historyRepo(gpa, io, 2);
+    defer source.deinit();
+    // A commit and its tree, and none of the tree's blobs.
+    const commit = try source.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(commit);
+    const tree = try source.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(tree);
+    const listing = try std.fmt.allocPrint(gpa, "{s}\n{s}\n", .{ commit, tree });
+    defer gpa.free(listing);
+    const bytes = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--stdout", "-q" }, listing);
+    defer gpa.free(bytes);
+
+    var target = try testgit.Repo.init(gpa, io, &.{"--bare"});
+    defer target.deinit();
+    var repo = try repo_mod.Repository.open(gpa, io, target.dir, .{});
+    defer repo.deinit(io);
+    var pack_dir = try target.dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    var links: Links = .init(gpa);
+    defer links.deinit();
+    var in: Io.Reader = .fixed(bytes);
+    const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{ .check_objects = false, .links = &links });
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var idx_buf: [96]u8 = undefined;
+    const idx_name = try std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{result.name.?.hex(&hex)});
+    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
+    defer index.deinit();
+    try testing.expect(!links.unreadable);
+    // The commit's parent is not there either; what the tree names is
+    // looked for first.
+    const missing = (try links.firstMissing(io, &repo.odb, &index)).?;
+    const ls = try source.run(io, &.{ "ls-tree", "-r", "-t", "HEAD" });
+    defer gpa.free(ls);
+    try testing.expect(std.mem.indexOf(u8, ls, missing.hex(&hex)) != null);
 }

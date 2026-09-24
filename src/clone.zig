@@ -30,6 +30,7 @@ const repo_mod = @import("repo.zig");
 const pack = @import("pack.zig");
 const fetchpack = @import("fetchpack.zig");
 const shallow_mod = @import("shallow.zig");
+const indexpack = @import("indexpack.zig");
 const revindex = @import("revindex.zig");
 const partial = @import("partial.zig");
 const worktree = @import("worktree.zig");
@@ -304,6 +305,10 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     defer pack_dir.close(io);
     var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();
+    // What the pack's objects name, collected as it is indexed, so that
+    // whether it is connected is asked without reading it again.
+    var links: indexpack.Links = .init(gpa);
+    defer links.deinit();
     const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
         .wants = wants.items,
         .tips = &.{},
@@ -312,7 +317,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .filter = send_filter,
     }, .{
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(settings) },
+        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(settings), .links = &links },
         .shallow_info = &shallow_info,
         .warnings = options.warnings,
     });
@@ -359,7 +364,11 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
             fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
         }
-        objectwalk.checkConnectedWith(gpa, io, &repo.odb, wants.items, if (fresh) |*index| index else null, null, .{ .promisor = send_filter != null }) catch |err| switch (err) {
+        const connected = if (fresh) |*index|
+            objectwalk.checkReceived(gpa, io, &repo.odb, wants.items, index, &links, null, .{ .promisor = send_filter != null })
+        else
+            objectwalk.checkConnectedWith(gpa, io, &repo.odb, wants.items, null, null, .{ .promisor = send_filter != null });
+        connected catch |err| switch (err) {
             error.MissingObject => return error.MissingObject,
             else => |e| return e,
         };

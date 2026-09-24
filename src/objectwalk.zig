@@ -27,6 +27,7 @@ const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
 const revwalk = @import("revwalk.zig");
 const ignore = @import("ignore.zig");
+const indexpack = @import("indexpack.zig");
 
 const Oid = hash.Oid;
 const Odb = odb_mod.Odb;
@@ -525,6 +526,35 @@ pub const ConnectedOptions = struct {
     promisor: bool = false,
 };
 
+/// `checkConnectedWith` for a pack just received, whose `links` were
+/// collected as it was indexed. When they read whole and the pack is not a
+/// promisor's, nothing is walked: every name the pack holds is looked up in
+/// the pack and the database, and every tip, which is what git's index-pack
+/// `--check-self-contained-and-connected` lets git's fetch skip its walk
+/// for. Otherwise it walks, as `checkConnectedWith` does.
+pub fn checkReceived(
+    gpa: Allocator,
+    io: Io,
+    db: *Odb,
+    tips: []const Oid,
+    fresh: *const pack.Index,
+    links: *const indexpack.Links,
+    missing_out: ?*Oid,
+    options: ConnectedOptions,
+) Error!void {
+    if (options.promisor or links.unreadable) return checkConnectedWith(gpa, io, db, tips, fresh, missing_out, options);
+    if (try links.firstMissing(io, db, fresh)) |oid| {
+        if (missing_out) |out| out.* = oid;
+        return error.MissingObject;
+    }
+    for (tips) |tip| {
+        if ((try fresh.find(tip)) != null) continue;
+        if (try db.exists(io, tip)) continue;
+        if (missing_out) |out| out.* = tip;
+        return error.MissingObject;
+    }
+}
+
 /// `checkConnected`, with `options`.
 pub fn checkConnectedWith(
     gpa: Allocator,
@@ -537,13 +567,19 @@ pub fn checkConnectedWith(
 ) Error!void {
     var seen: Oid.Set = .empty;
     defer seen.deinit(gpa);
-    var stack: std.ArrayList(Oid) = .empty;
+    // A tree names its blobs as blobs: one is only looked for, never read,
+    // as git's rev-list reads none.
+    const Item = struct { oid: Oid, blob: bool = false };
+    var stack: std.ArrayList(Item) = .empty;
     defer stack.deinit(gpa);
-    for (tips) |tip| try stack.append(gpa, tip);
-    while (stack.pop()) |oid| {
+    for (tips) |tip| try stack.append(gpa, .{ .oid = tip });
+    while (stack.pop()) |item| {
+        const oid = item.oid;
         if (seen.contains(oid)) continue;
         try seen.put(gpa, oid, {});
-        const walk_into = if (fresh) |index| (try index.find(oid)) != null else true;
+        const in_fresh = if (fresh) |index| (try index.find(oid)) != null else false;
+        if (item.blob and in_fresh) continue;
+        const walk_into = if (fresh == null) !item.blob else in_fresh;
         if (!walk_into) {
             if (!try db.exists(io, oid)) {
                 // A tip is never promised; what the pack's objects name is.
@@ -569,20 +605,21 @@ pub fn checkConnectedWith(
             .commit => {
                 var commit = try object.Commit.parse(gpa, db.kind, found.bytes);
                 defer commit.deinit();
-                try stack.append(gpa, commit.tree);
-                for (revwalk.parentsOf(db, oid, commit.parents)) |parent| try stack.append(gpa, parent);
+                try stack.append(gpa, .{ .oid = commit.tree });
+                for (revwalk.parentsOf(db, oid, commit.parents)) |parent| try stack.append(gpa, .{ .oid = parent });
             },
             .tag => {
                 var tag = try object.Tag.parse(gpa, db.kind, found.bytes);
                 defer tag.deinit();
-                try stack.append(gpa, tag.target);
+                try stack.append(gpa, .{ .oid = tag.target });
             },
             .tree => {
                 var entries = object.Tree.parse(db.kind, found.bytes).iterate();
-                while (try entries.next()) |entry| {
-                    if (entry.mode == .gitlink) continue;
-                    try stack.append(gpa, entry.oid);
-                }
+                while (try entries.next()) |entry| switch (entry.mode) {
+                    .gitlink => {},
+                    .tree => try stack.append(gpa, .{ .oid = entry.oid }),
+                    else => try stack.append(gpa, .{ .oid = entry.oid, .blob = true }),
+                };
             },
         }
     }

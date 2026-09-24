@@ -471,6 +471,10 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     const boundary = try shallowList(arena, &repo.odb.shallow);
     var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();
+    // What the pack's objects name, collected as it is indexed, so that
+    // whether it is connected is asked without reading it again.
+    var links: indexpack.Links = .init(gpa);
+    defer links.deinit();
     const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
         .wants = wants,
         .tips = tips.items,
@@ -482,7 +486,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     }, .{
         .warnings = options.warnings,
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config) },
+        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config), .links = &links },
         .shallow_info = &shallow_info,
     });
     outcome.pack = fetched.pack;
@@ -544,10 +548,21 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
             const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
             fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
         }
-        objectwalk.checkConnectedWith(gpa, io, &repo.odb, all_tips.items, if (fresh) |*index| index else null, options.missing, .{ .promisor = promisor }) catch |err| switch (err) {
-            error.MissingObject => return error.MissingObject,
-            else => |e| return e,
-        };
+        if (fresh) |*index| {
+            objectwalk.checkReceived(gpa, io, &repo.odb, all_tips.items, index, &links, options.missing, .{ .promisor = promisor }) catch |err| switch (err) {
+                error.MissingObject => return error.MissingObject,
+                else => |e| return e,
+            };
+        } else {
+            // No pack came: every tip was here already, and what was here is
+            // whole below it. Only that each is here is checked, where git's
+            // `--not --all` walk has nothing to walk.
+            for (all_tips.items) |tip| {
+                if (try repo.odb.exists(io, tip)) continue;
+                if (options.missing) |out| out.* = tip;
+                return error.MissingObject;
+            }
+        }
         if (remote_roots.items.len != 0) {
             // Which refs need which of the remote's roots: git's
             // `assign_shallow_commits_to_refs`, walking what came in the
