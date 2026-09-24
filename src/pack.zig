@@ -1,9 +1,12 @@
 //! Packfiles, and the `.idx` beside them.
 //!
-//! A pack is read, never written. Both delta kinds resolve, the chain is
-//! bounded by a depth cap and a visited set so neither a cycle nor a
-//! thousand-deep chain is a hang, and every entry can be rehashed against the
-//! name the index gives it.
+//! A pack is read and written. Reading, both delta kinds resolve, the chain
+//! is bounded by a depth cap and a visited set so neither a cycle nor a
+//! thousand-deep chain is a hang, and every entry can be rehashed against
+//! the name the index gives it. Writing, `Writer` makes the pack a repack or
+//! a push sends — to a file, or streamed to a writer — with deltas git's
+//! way, and `writeIndexFile` makes the `.idx`, byte for byte git's, for it
+//! and for a pack received by `indexpack.zig`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

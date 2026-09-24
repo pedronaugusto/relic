@@ -11,7 +11,8 @@
 //! local branch, `HEAD` and `refs/remotes/<origin>/HEAD` are written with
 //! `clone: from <url>`, and the branch gets its `remote` and `merge`
 //! settings. Last, the branch's tree is checked out, with the attributes
-//! the tree itself carries deciding line endings, and the index written.
+//! the tree itself carries deciding line endings and filters, and the
+//! index written.
 //!
 //! A shallow clone and a partial one are refused by name in this release.
 
@@ -25,7 +26,7 @@ const refs_mod = @import("refs.zig");
 const repo_mod = @import("repo.zig");
 const pack = @import("pack.zig");
 const worktree = @import("worktree.zig");
-const attributes = @import("attributes.zig");
+const filter = @import("filter.zig");
 const url_mod = @import("url.zig");
 const program = @import("program.zig");
 const protocol = @import("protocol.zig");
@@ -55,7 +56,8 @@ pub const Error = error{
     /// A remote name git would refuse.
     InvalidRemoteName,
 } || transport.Error || repo_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
-    worktree.Error || config_mod.Config.SetError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error;
+    worktree.Error || config_mod.Config.SetError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
+    filter.Drivers.LoadError;
 
 /// How a clone runs.
 pub const Options = struct {
@@ -272,7 +274,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     try repo.config.write(io, repo.common_dir, "config");
 
     if (!options.bare and options.checkout) {
-        if (head_commit) |commit| try checkOut(gpa, io, &repo, commit);
+        if (head_commit) |commit| try checkOut(gpa, io, &repo, commit, options.programs);
     }
     return repo;
 }
@@ -291,55 +293,25 @@ fn addUnique(arena: Allocator, list: *std.ArrayList(Oid), oid: Oid) Allocator.Er
     try list.append(arena, oid);
 }
 
-/// Check out `commit`'s tree into the empty working tree, with the
-/// attributes the tree carries, and write the index.
-fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid) Error!void {
+/// Check out `commit`'s tree into the empty working tree and write the
+/// index. The attributes the tree carries apply, as they do for git, and
+/// its filters run with the caller's `programs`.
+fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, programs: ?program.Programs) Error!void {
     const tree = try repo.commitTree(io, repo.peel(io, commit) catch commit);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    try loadTreeAttributes(gpa, io, repo, &attrs, tree);
+    var drivers = try repo.loadFilters(io, .{});
+    defer drivers.deinit();
     var rules = repo.worktreeRules();
     rules.attrs = &attrs;
+    rules.filters = &drivers;
     const required = try repo.requiredFilters(gpa);
     defer gpa.free(required);
     rules.required_filters = required;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, tree, .{ .rules = rules });
+    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, tree, .{ .rules = rules, .programs = programs });
     try index.write(io, repo.git_dir, "index", .{});
-}
-
-/// Every `.gitattributes` the tree holds, at the depth it is found, which
-/// is what git reads from the index when the working tree is still empty.
-fn loadTreeAttributes(gpa: Allocator, io: Io, repo: *Repository, attrs: *attributes.Attrs, root: Oid) Error!void {
-    const Item = struct { oid: Oid, path: []const u8, depth: u32 };
-    var arena_state: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var stack: std.ArrayList(Item) = .empty;
-    try stack.append(arena, .{ .oid = root, .path = "", .depth = 0 });
-    const keep = attrs.arena.allocator();
-    while (stack.pop()) |item| {
-        const found = try repo.odb.read(io, item.oid);
-        defer repo.odb.gpa.free(found.bytes);
-        var it = object.Tree.parse(repo.kind, found.bytes).iterate();
-        while (try it.next()) |entry| {
-            if (entry.mode == .tree) {
-                const path = if (item.path.len == 0)
-                    try arena.dupe(u8, entry.name)
-                else
-                    try std.fmt.allocPrint(arena, "{s}/{s}", .{ item.path, entry.name });
-                try stack.append(arena, .{ .oid = entry.oid, .path = path, .depth = item.depth + 1 });
-            } else if (entry.mode.isBlob() and std.mem.eql(u8, entry.name, ".gitattributes")) {
-                const blob = try repo.odb.read(io, entry.oid);
-                defer repo.odb.gpa.free(blob.bytes);
-                const text = try keep.dupe(u8, blob.bytes);
-                const base = try keep.dupe(u8, item.path);
-                const source = try std.fmt.allocPrint(keep, "{s}{s}.gitattributes", .{ base, if (base.len == 0) "" else "/" });
-                try attrs.addText(text, base, source, item.depth + 1);
-            }
-        }
-    }
 }
 
 const builtin = @import("builtin");
