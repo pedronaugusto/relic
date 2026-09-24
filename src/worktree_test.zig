@@ -668,3 +668,137 @@ test "checkout and writePaths apply every .gitattributes on the way down, as git
     defer gpa.free(b);
     try std.testing.expectEqualStrings(a, b);
 }
+
+/// The paths git lists under the heading that starts with `heading`, one
+/// per tab-indented line.
+fn listedUnder(gpa: std.mem.Allocator, text: []const u8, heading: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    const at = std.mem.indexOf(u8, text, heading) orelse return out.toOwnedSlice(gpa);
+    var lines = std.mem.splitScalar(u8, text[at..], '\n');
+    _ = lines.next();
+    while (lines.next()) |line| {
+        if (line.len == 0 or line[0] != '\t') break;
+        try out.appendSlice(gpa, line[1..]);
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+fn joined(gpa: std.mem.Allocator, paths: []const []u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (paths) |p| {
+        try out.appendSlice(gpa, p);
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "checkout refuses to lose local changes or untracked files, lists them as git does, and touches nothing" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+
+    try h.repo.writeFile(io, ".gitignore", "*.log\n");
+    try h.repo.writeFile(io, "keep", "keep\n");
+    try h.repo.writeFile(io, "change", "one\n");
+    try h.repo.writeFile(io, "gone", "gone\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "a" });
+    try h.repo.writeFile(io, "change", "two\n");
+    try h.repo.dir.deleteFile(io, "gone");
+    try h.repo.writeFile(io, "new.txt", "new\n");
+    try h.repo.writeFile(io, "dir/f", "f\n");
+    try h.repo.writeFile(io, "build.log", "tracked log\n");
+    try h.repo.exec(io, &.{ "add", "-A", "-f" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "b" });
+    try h.repo.exec(io, &.{ "tag", "b" });
+    const target_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(target_text);
+    const target = try Oid.parse(.sha1, target_text);
+    try h.repo.exec(io, &.{ "checkout", "-q", "HEAD~1" });
+
+    // Local changes where the target changes the file, and where it does
+    // not; untracked files where it puts one, ignored and not.
+    try h.repo.writeFile(io, "change", "mine\n");
+    try h.repo.writeFile(io, "keep", "mine too\n");
+    try h.repo.writeFile(io, "new.txt", "mine\n");
+    try h.repo.writeFile(io, "dir", "a file where a directory goes\n");
+    try h.repo.writeFile(io, "build.log", "an ignored log\n");
+
+    var git = try h.repo.capture(io, &.{ "checkout", "-q", "b" });
+    defer git.deinit(gpa);
+    try std.testing.expect(git.code != 0);
+    const git_changed = try listedUnder(gpa, git.stderr, "error: Your local changes to the following files would be overwritten");
+    defer gpa.free(git_changed);
+    const git_untracked = try listedUnder(gpa, git.stderr, "error: The following untracked working tree files would be overwritten");
+    defer gpa.free(git_untracked);
+
+    try h.reload(gpa, io);
+    var ignore_rules = try ignore.Rules.init(gpa, false);
+    defer ignore_rules.deinit();
+    var obstructions: worktree.Obstructions = .init(gpa);
+    defer obstructions.deinit();
+    try std.testing.expectError(error.LocalChangesWouldBeOverwritten, worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{
+        .force = false,
+        .ignore = &ignore_rules,
+        .obstructions = &obstructions,
+    }));
+    const ours_changed = try joined(gpa, obstructions.changed.items);
+    defer gpa.free(ours_changed);
+    const ours_untracked = try joined(gpa, obstructions.untracked.items);
+    defer gpa.free(ours_untracked);
+    try std.testing.expectEqualStrings(git_changed, ours_changed);
+    try std.testing.expectEqualStrings(git_untracked, ours_untracked);
+
+    // Nothing was touched.
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("mine\n", try h.repo.dir.readFile(io, "change", &buf));
+    try std.testing.expectEqualStrings("mine\n", try h.repo.dir.readFile(io, "new.txt", &buf));
+
+    // With the obstructions gone the checkout goes through, keeping the
+    // change the target does not touch and replacing the ignored file, as
+    // git's does.
+    try h.repo.writeFile(io, "change", "one\n");
+    try h.repo.dir.deleteFile(io, "new.txt");
+    try h.repo.dir.deleteFile(io, "dir");
+    _ = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{ .force = false, .ignore = &ignore_rules });
+    try std.testing.expectEqualStrings("mine too\n", try h.repo.dir.readFile(io, "keep", &buf));
+    try std.testing.expectEqualStrings("tracked log\n", try h.repo.dir.readFile(io, "build.log", &buf));
+    try std.testing.expectEqualStrings("two\n", try h.repo.dir.readFile(io, "change", &buf));
+}
+
+test "a forced checkout overwrites local changes and untracked files, as read-tree --reset -u does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+
+    try h.repo.writeFile(io, "change", "one\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "a" });
+    try h.repo.writeFile(io, "change", "two\n");
+    try h.repo.writeFile(io, "new.txt", "new\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "b" });
+    const target_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(target_text);
+    const target = try Oid.parse(.sha1, target_text);
+    try h.repo.exec(io, &.{ "checkout", "-q", "HEAD~1" });
+    try h.repo.writeFile(io, "change", "mine\n");
+    try h.repo.writeFile(io, "new.txt", "mine\n");
+
+    try h.reload(gpa, io);
+    _ = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, target, .{ .force = true });
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("two\n", try h.repo.dir.readFile(io, "change", &buf));
+    try std.testing.expectEqualStrings("new\n", try h.repo.dir.readFile(io, "new.txt", &buf));
+    try h.index.write(io, h.git_dir, "index", .{});
+    // The index is the target and the working tree matches it; only
+    // `HEAD`, which a checkout does not move, is behind.
+    const status = try h.repo.run(io, &.{ "status", "--porcelain" });
+    defer gpa.free(status);
+    try std.testing.expectEqualStrings("M  change\nA  new.txt\n", status);
+}

@@ -194,6 +194,45 @@ pub const Repo = struct {
         return out.toOwnedSlice(r.gpa);
     }
 
+    /// What a `git` that may fail said: its exit code and both streams,
+    /// the caller's.
+    pub const Captured = struct {
+        code: u8,
+        stdout: []u8,
+        stderr: []u8,
+
+        /// Release both streams.
+        pub fn deinit(c: *Captured, gpa: Allocator) void {
+            gpa.free(c.stdout);
+            gpa.free(c.stderr);
+        }
+    };
+
+    /// Run `git` and keep what it said, whatever it exits with.
+    pub fn capture(r: *Repo, io: Io, args: []const []const u8) !Captured {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(r.gpa);
+        try argv.append(r.gpa, "git");
+        try argv.appendSlice(r.gpa, r.defaults);
+        try argv.appendSlice(r.gpa, args);
+        var own: ?Environ.Map = null;
+        defer if (own) |*map| map.deinit();
+        const environ_map = r.environ orelse if (r.isolated) |*map| map else blk: {
+            own = try isolatedEnviron(r.gpa, no_home);
+            break :blk &own.?;
+        };
+        const result = try std.process.run(r.gpa, io, .{
+            .argv = argv.items,
+            .cwd = .{ .dir = r.dir },
+            .environ_map = environ_map,
+        });
+        const code: u8 = switch (result.term) {
+            .exited => |c| c,
+            else => 255,
+        };
+        return .{ .code = code, .stdout = result.stdout, .stderr = result.stderr };
+    }
+
     /// Run `git` and discard its output.
     pub fn exec(r: *Repo, io: Io, args: []const []const u8) !void {
         const out = try r.run(io, args);

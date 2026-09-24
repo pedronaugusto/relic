@@ -47,8 +47,9 @@ pub const Error = error{
     /// The same path appeared twice with different case on a filesystem
     /// that folds case, so one would silently overwrite the other.
     CaseCollision,
-    /// A tree wants a file where the working tree has a directory containing
-    /// untracked content, which checkout must not discard.
+    /// An untracked file stands where the update puts one, or a directory
+    /// with untracked content where it puts a file: git's "untracked
+    /// working tree files would be overwritten". `Obstructions` lists them.
     UntrackedWouldBeOverwritten,
     /// A `SubmoduleProbe` could not read a submodule's repository. The probe
     /// says which and why.
@@ -57,6 +58,13 @@ pub const Error = error{
     /// gitlink for it would have nothing to record. git's `add` stops there
     /// too. `AddOptions.refusal` says which.
     NoCommitCheckedOut,
+    /// A tracked file the update changes or removes has changes of its own
+    /// in the working tree: git's "your local changes would be
+    /// overwritten". `Obstructions` lists them.
+    LocalChangesWouldBeOverwritten,
+    /// The index has conflicts, which a checkout that keeps local changes
+    /// cannot start from.
+    UnmergedIndex,
 } || Allocator.Error || odb_mod.Error || index_mod.ReadError ||
     index_mod.WriteError || fs.StatError || Io.Dir.Iterator.Error ||
     Io.Dir.OpenError || Io.Dir.DeleteFileError || Io.Dir.DeleteDirError ||
@@ -1179,6 +1187,7 @@ const StatusScan = struct {
 };
 
 /// One flattened tree entry.
+/// One flattened tree entry: a path's mode and object.
 pub const TreeEntry = struct { mode: object.Mode, oid: Oid };
 
 fn flattenTree(
@@ -1356,6 +1365,20 @@ pub const Refusal = struct {
 /// How `checkout` behaves.
 pub const CheckoutOptions = struct {
     rules: Rules = .{},
+    /// `read-tree --reset -u`, the default: rewrite files with changes of
+    /// their own and replace untracked files where the tree puts one.
+    /// `false` is `read-tree -m -u`: a checkout that would lose either is
+    /// refused before anything is touched, with every such path in
+    /// `obstructions`, and a file the tree does not change keeps its local
+    /// changes.
+    force: bool = true,
+    /// Where a refusal lists the paths that caused it.
+    obstructions: ?*Obstructions = null,
+    /// Ignore rules for the root, for telling an ignored file in the way,
+    /// which is replaced as git replaces it, from an untracked one, which
+    /// is not. The `.gitignore` files further down are read into it as
+    /// needed. Without it every file in the way counts as untracked.
+    ignore: ?*ignore.Rules = null,
     /// Whether to remove a directory once the last file in it is removed.
     remove_empty_directories: bool = true,
     /// Where to write the path and the rule when a tree entry is refused.
@@ -1433,6 +1456,26 @@ pub fn checkout(
     }
     if (options.rules.ignore_case) {
         try refuseCaseCollisions(arena, &wanted);
+    }
+
+    if (!options.force) {
+        var updates: std.StringArrayHashMapUnmanaged(?TreeEntry) = .empty;
+        for (index.entries.items) |entry| {
+            if (entry.stage != 0) return error.UnmergedIndex;
+            const want = wanted.get(entry.path);
+            if (want != null and want.?.mode == entry.mode and want.?.oid.eql(entry.oid)) continue;
+            try updates.put(arena, entry.path, want);
+        }
+        var want_it = wanted.iterator();
+        while (want_it.next()) |item| {
+            if (index.find(item.key_ptr.*) != null) continue;
+            try updates.put(arena, item.key_ptr.*, item.value_ptr.*);
+        }
+        try verifyUpdates(gpa, io, wt, index, &updates, .{
+            .rules = options.rules,
+            .ignore = options.ignore,
+            .obstructions = options.obstructions,
+        });
     }
 
     // A directory-to-file transition is safe only when everything below the
@@ -1515,6 +1558,12 @@ pub fn checkout(
             if (entry.oid.eql(want.oid) and entry.mode == want.mode and on_disk != null and
                 !index.isRacy(entry.*) and entry.stat.matches(on_disk.?.stat, options.rules.check_stat, options.rules.timestamp_resolution))
             {
+                outcome.unchanged += 1;
+                continue;
+            }
+            // Without `force` a path the tree does not change keeps its
+            // local changes, as git's checkout keeps them.
+            if (!options.force and entry.oid.eql(want.oid) and entry.mode == want.mode) {
                 outcome.unchanged += 1;
                 continue;
             }
@@ -1895,6 +1944,214 @@ pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Error!void {
         else => |e| return e,
     };
     if (std.fs.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, wt, parent);
+}
+
+/// The paths an update would lose work at, as git lists them.
+pub const Obstructions = struct {
+    gpa: Allocator,
+    /// Tracked paths with changes of their own that the update would
+    /// overwrite or remove, sorted.
+    changed: std.ArrayList([]u8) = .empty,
+    /// Untracked paths the update would overwrite, sorted.
+    untracked: std.ArrayList([]u8) = .empty,
+
+    /// An empty list, allocating from `gpa`.
+    pub fn init(gpa: Allocator) Obstructions {
+        return .{ .gpa = gpa };
+    }
+
+    /// Release the lists.
+    pub fn deinit(o: *Obstructions) void {
+        for (o.changed.items) |p| o.gpa.free(p);
+        for (o.untracked.items) |p| o.gpa.free(p);
+        o.changed.deinit(o.gpa);
+        o.untracked.deinit(o.gpa);
+        o.* = undefined;
+    }
+
+    /// The first path listed, changed ones first, or `null`.
+    pub fn first(o: *const Obstructions) ?[]const u8 {
+        if (o.changed.items.len != 0) return o.changed.items[0];
+        if (o.untracked.items.len != 0) return o.untracked.items[0];
+        return null;
+    }
+};
+
+/// What `verifyUpdates` is told.
+pub const VerifyOptions = struct {
+    rules: Rules = .{},
+    /// Ignore rules for the root; the `.gitignore` files below are read
+    /// into it as needed. An ignored file in the way is not an obstruction,
+    /// as git's checkout and merge overwrite it. Without rules, none is
+    /// ignored.
+    ignore: ?*ignore.Rules = null,
+    obstructions: ?*Obstructions = null,
+};
+
+/// `verify_uptodate` and `verify_absent` from git's `unpack-trees`, over
+/// every path an update changes: `updates` maps each path whose index
+/// entry the update rewrites, adds or removes to what it will hold, `null`
+/// for removal.
+///
+/// A tracked path there whose file has changes of its own is
+/// `error.LocalChangesWouldBeOverwritten`. A new path where an untracked,
+/// unignored file stands -- or stands where a directory above it goes, or
+/// where a directory holding anything but files the update removes stands
+/// in the way -- is `error.UntrackedWouldBeOverwritten`. Every such path is
+/// listed in `options.obstructions` before the error comes back, changed
+/// ones taking precedence; nothing on the disk is touched either way.
+pub fn verifyUpdates(
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    index: *const Index,
+    updates: *const std.StringArrayHashMapUnmanaged(?TreeEntry),
+    options: VerifyOptions,
+) Error!void {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+
+    var changed: std.ArrayList([]const u8) = .empty;
+    var untracked: std.ArrayList([]const u8) = .empty;
+    var loaded_ignores: std.StringHashMapUnmanaged(void) = .empty;
+
+    const paths = try arena.dupe([]const u8, updates.keys());
+    std.mem.sort([]const u8, paths, {}, lessThanName);
+    for (paths) |path| {
+        const want = updates.get(path).?;
+        if (index.find(path)) |entry| {
+            if (entry.skip_worktree) continue;
+            if (try differsFromIndex(gpa, io, wt, index, entry.*, options.rules)) try changed.append(arena, path);
+            continue;
+        }
+        if (want == null) continue;
+        var at: usize = 0;
+        while (true) {
+            const slash = std.mem.indexOfScalarPos(u8, path, at, '/');
+            const prefix = if (slash) |s| path[0..s] else path;
+            const is_last = slash == null;
+            if (try fs.statAt(io, wt, prefix)) |found| {
+                const blocks = if (found.kind == .directory)
+                    is_last and !try directoryGoes(arena, io, wt, prefix, index, updates)
+                else if (index.find(prefix) != null)
+                    false
+                else
+                    !try isIgnoredPath(io, wt, options.ignore, &loaded_ignores, arena, prefix, false);
+                if (blocks) {
+                    try untracked.append(arena, prefix);
+                    break;
+                }
+            }
+            at = (slash orelse break) + 1;
+        }
+    }
+    if (changed.items.len == 0 and untracked.items.len == 0) return;
+    if (options.obstructions) |out| {
+        for (changed.items) |p| try out.changed.append(out.gpa, try out.gpa.dupe(u8, p));
+        for (untracked.items) |p| try out.untracked.append(out.gpa, try out.gpa.dupe(u8, p));
+    }
+    if (changed.items.len != 0) return error.LocalChangesWouldBeOverwritten;
+    return error.UntrackedWouldBeOverwritten;
+}
+
+/// Whether everything under the directory at `dir_path` is a file the
+/// update removes, so the directory may go.
+fn directoryGoes(
+    arena: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    dir_path: []const u8,
+    index: *const Index,
+    updates: *const std.StringArrayHashMapUnmanaged(?TreeEntry),
+) Error!bool {
+    var dir = try wt.openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |item| {
+        const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, item.name });
+        if (item.kind == .directory) {
+            if (!try directoryGoes(arena, io, wt, path, index, updates)) return false;
+            continue;
+        }
+        if (index.find(path) == null) return false;
+        const want = updates.get(path) orelse return false;
+        if (want != null) return false;
+    }
+    return true;
+}
+
+/// Whether an untracked path is ignored, reading the `.gitignore` files
+/// along it into `rules` the first time they are needed.
+fn isIgnoredPath(
+    io: Io,
+    wt: Io.Dir,
+    rules: ?*ignore.Rules,
+    loaded: *std.StringHashMapUnmanaged(void),
+    arena: Allocator,
+    path: []const u8,
+    is_dir: bool,
+) Error!bool {
+    const r = rules orelse return false;
+    var depth: u32 = 0;
+    var at: usize = 0;
+    while (true) : (depth += 1) {
+        const base = path[0..at];
+        if (!loaded.contains(base)) {
+            try loaded.put(arena, try arena.dupe(u8, base), {});
+            r.addDirectory(io, wt, base, depth) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {},
+            };
+        }
+        const slash = std.mem.indexOfScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
+        at = slash;
+    }
+    return r.matchPath(path, is_dir).excluded;
+}
+
+/// Whether the file at `entry.path` holds something other than the index
+/// says. A file that is not there has nothing to lose, which is how git
+/// treats one deleted by hand; a submodule's checkout is its own.
+pub fn differsFromIndex(
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    index: *const Index,
+    entry: index_mod.Entry,
+    rules: Rules,
+) Error!bool {
+    if (entry.mode == .gitlink) return false;
+    const found = (try fs.statAt(io, wt, entry.path)) orelse return false;
+    if (found.kind == .directory) return true;
+    const on_disk_mode: object.Mode = if (found.kind == .sym_link)
+        .symlink
+    else if (!rules.file_mode)
+        (if (entry.mode == .exec) .exec else .file)
+    else if (found.executable) .exec else .file;
+    if (on_disk_mode != entry.mode and !(entry.mode == .symlink and !rules.symlinks)) return true;
+    if (!index.isRacy(entry) and entry.stat.matches(found.stat, rules.check_stat, rules.timestamp_resolution)) {
+        return false;
+    }
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const bytes = if (found.kind == .sym_link) blk: {
+        var buf: [4096]u8 = undefined;
+        const len = try wt.readLink(io, entry.path, &buf);
+        break :blk try a.dupe(u8, buf[0..len]);
+    } else wt.readFileAlloc(io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return true,
+    };
+    var content: []const u8 = bytes;
+    if (rules.attrs) |attrs| {
+        if (found.kind != .sym_link) {
+            const applied = try attrs.lookup(a, entry.path, false);
+            content = (try attributes.toGit(a, bytes, applied, rules.core)).bytes;
+        }
+    }
+    return !hash.Hasher.object(index.kind, "blob", content).eql(entry.oid);
 }
 
 fn directoryIsReplaceable(

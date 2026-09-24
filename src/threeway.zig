@@ -110,7 +110,7 @@ pub const Outcome = struct {
     }
 };
 
-const TreeEntry = struct { mode: object.Mode, oid: Oid };
+const TreeEntry = worktree.TreeEntry;
 
 /// Merge `theirs` into `ours` against `base`, trees all, and leave the result
 /// in `index` and the repository's working tree.
@@ -252,51 +252,27 @@ fn run(
     }
 
     var changes: std.ArrayList([]const u8) = .empty;
+    var updates: std.StringArrayHashMapUnmanaged(?TreeEntry) = .empty;
     for (desired.keys(), desired.values()) |path, want| {
         const have = our_entries.get(path);
         if (sameEntry(have, want)) continue;
         try changes.append(arena, path);
+        try updates.put(arena, path, want);
     }
     std.mem.sort([]const u8, changes.items, {}, lessThanPath);
 
-    // Nothing is written until every change has been checked.
-    var ignore_rules: ?ignore.Rules = null;
-    defer if (ignore_rules) |*r| r.deinit();
-    var loaded_ignores: std.StringHashMapUnmanaged(void) = .empty;
-    for (changes.items) |path| {
-        const want = desired.get(path).?;
-        if (our_entries.contains(path)) {
-            const entry = index.find(path).?;
-            if (entry.skip_worktree) continue;
-            if (try differsOnDisk(gpa, io, wt, index, entry.*, rules)) {
-                if (options.blocked) |b| b.set(path);
-                return error.LocalChangesWouldBeOverwritten;
-            }
-            continue;
+    // Nothing is written until every change has been checked, by the same
+    // rules a checkout keeps.
+    var ignore_rules = try repo.loadIgnore(io);
+    defer ignore_rules.deinit();
+    var obstructions: worktree.Obstructions = .init(gpa);
+    defer obstructions.deinit();
+    worktree.verifyUpdates(gpa, io, wt, index, &updates, .{ .rules = rules, .ignore = &ignore_rules, .obstructions = &obstructions }) catch |err| {
+        if (obstructions.first()) |path| {
+            if (options.blocked) |b| b.set(path);
         }
-        if (want == null) continue;
-        // A new file: nothing untracked may stand where it goes, nor where
-        // any directory above it goes.
-        var at: usize = 0;
-        while (true) {
-            const slash = std.mem.indexOfScalarPos(u8, path, at, '/');
-            const prefix = if (slash) |s| path[0..s] else path;
-            const is_last = slash == null;
-            if (try fs.statAt(io, wt, prefix)) |found| {
-                const blocks = if (found.kind == .directory)
-                    is_last and !try directoryGoes(arena, io, wt, prefix, &our_entries, &desired)
-                else if (our_entries.contains(prefix))
-                    desired.get(prefix).? != null
-                else
-                    !try isIgnored(repo, io, wt, &ignore_rules, &loaded_ignores, arena, prefix, found.kind == .directory);
-                if (blocks) {
-                    if (options.blocked) |b| b.set(prefix);
-                    return error.UntrackedWouldBeOverwritten;
-                }
-            }
-            at = (slash orelse break) + 1;
-        }
-    }
+        return err;
+    };
 
     // Removals first, so that a directory the merge turns into a file is
     // gone before the file is written.
@@ -516,98 +492,5 @@ fn configuredDrivers(arena: Allocator, repo: *Repository) Allocator.Error![]cons
 }
 
 /// Whether the file at `entry.path` holds something other than what the
-/// index says. A file that is not there has nothing to lose, which is how
-/// git treats one deleted by hand.
-pub fn differsOnDisk(
-    gpa: Allocator,
-    io: Io,
-    wt: Io.Dir,
-    index: *const Index,
-    entry: index_mod.Entry,
-    rules: worktree.Rules,
-) Error!bool {
-    // A submodule's checkout is its own; the merge moves only the commit
-    // the index records, as git's does without `--recurse-submodules`.
-    if (entry.mode == .gitlink) return false;
-    const found = (try fs.statAt(io, wt, entry.path)) orelse return false;
-    if (found.kind == .directory) return true;
-    const on_disk_mode: object.Mode = if (found.kind == .sym_link)
-        .symlink
-    else if (!rules.file_mode)
-        (if (entry.mode == .exec) .exec else .file)
-    else if (found.executable) .exec else .file;
-    if (on_disk_mode != entry.mode and !(entry.mode == .symlink and !rules.symlinks)) return true;
-    if (!index.isRacy(entry) and entry.stat.matches(found.stat, rules.check_stat, rules.timestamp_resolution)) {
-        return false;
-    }
-    var scratch: std.heap.ArenaAllocator = .init(gpa);
-    defer scratch.deinit();
-    const a = scratch.allocator();
-    const bytes = if (found.kind == .sym_link) blk: {
-        var buf: [4096]u8 = undefined;
-        const len = try wt.readLink(io, entry.path, &buf);
-        break :blk try a.dupe(u8, buf[0..len]);
-    } else try wt.readFileAlloc(io, entry.path, a, .limited(1 << 31));
-    var content: []const u8 = bytes;
-    if (rules.attrs) |attrs| {
-        if (found.kind != .sym_link) {
-            const applied = try attrs.lookup(a, entry.path, false);
-            content = (try attributes.toGit(a, bytes, applied, rules.core)).bytes;
-        }
-    }
-    return !hash.Hasher.object(index.kind, "blob", content).eql(entry.oid);
-}
-
-/// Whether the directory at `dir_path` holds nothing but files `ours` tracks
-/// and the merge removes, so that it may be replaced by a file.
-fn directoryGoes(
-    arena: Allocator,
-    io: Io,
-    wt: Io.Dir,
-    dir_path: []const u8,
-    our_entries: anytype,
-    desired: *const std.StringArrayHashMapUnmanaged(?TreeEntry),
-) Error!bool {
-    var dir = try wt.openDir(io, dir_path, .{ .iterate = true });
-    defer dir.close(io);
-    var it = dir.iterate();
-    while (try it.next(io)) |item| {
-        const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, item.name });
-        if (item.kind == .directory) {
-            if (!try directoryGoes(arena, io, wt, path, our_entries, desired)) return false;
-            continue;
-        }
-        if (!our_entries.contains(path)) return false;
-        const want = desired.get(path) orelse return false;
-        if (want != null) return false;
-    }
-    return true;
-}
-
-/// Whether an untracked path is ignored, reading the `.gitignore` files
-/// along it the first time they are needed.
-fn isIgnored(
-    repo: *Repository,
-    io: Io,
-    wt: Io.Dir,
-    rules: *?ignore.Rules,
-    loaded: *std.StringHashMapUnmanaged(void),
-    arena: Allocator,
-    path: []const u8,
-    is_dir: bool,
-) Error!bool {
-    if (rules.* == null) rules.* = try repo.loadIgnore(io);
-    const r = &rules.*.?;
-    var depth: u32 = 0;
-    var at: usize = 0;
-    while (true) : (depth += 1) {
-        const base = path[0..at];
-        if (!loaded.contains(base)) {
-            try loaded.put(arena, try arena.dupe(u8, base), {});
-            try r.addDirectory(io, wt, base, depth);
-        }
-        const slash = std.mem.indexOfScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
-        at = slash;
-    }
-    return r.matchPath(path, is_dir).excluded;
-}
+/// index says: `worktree.differsFromIndex`.
+pub const differsOnDisk = worktree.differsFromIndex;
