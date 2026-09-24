@@ -1915,7 +1915,7 @@ const Merge = struct {
             try virtuals.append(m.arena, .{ .oid = v.fake, .parents = parents });
         }
         const gpa = m.db.gpa;
-        const found = try revwalk.mergeBasesWith(gpa, m.io, m.db, m.oidOf(a), m.oidOf(b), virtuals.items);
+        const found = try revwalk.mergeBasesWith(gpa, m.io, m.db, m.oidOf(a), m.oidOf(b), .{ .virtuals = virtuals.items });
         defer gpa.free(found);
         return m.arena.dupe(Oid, found);
     }
