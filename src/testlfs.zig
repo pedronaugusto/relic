@@ -160,6 +160,9 @@ pub const Server = struct {
         /// Send a whole object compressed when the client asks: zstd when
         /// its `Accept-Encoding` names zstd, else gzip when it names gzip.
         encode: bool = false,
+        /// Ask for uploads in chunks, with `Transfer-Encoding: chunked` in
+        /// the upload action's headers.
+        chunked_uploads: bool = false,
     };
 
     /// Listen on an ephemeral port.
@@ -374,8 +377,12 @@ pub const Server = struct {
         var git_protocol: ?[]const u8 = null;
         var range: ?[]const u8 = null;
         var accept_encoding: ?[]const u8 = null;
+        var transfer_encoding: ?[]const u8 = null;
+        var content_length: ?[]const u8 = null;
         var headers = request.iterateHeaders();
         while (headers.next()) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "transfer-encoding")) transfer_encoding = try arena.dupe(u8, h.value);
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length")) content_length = try arena.dupe(u8, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) accept_encoding = try arena.dupe(u8, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "authorization")) authorization = try arena.dupe(u8, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "content-type")) content_type = try arena.dupe(u8, h.value);
@@ -472,6 +479,10 @@ pub const Server = struct {
             }
             if (method == .PUT) {
                 try s.logObject(method, oid, "content-type", content_type);
+                if (s.options.chunked_uploads) {
+                    try s.logObject(method, oid, "transfer-encoding", transfer_encoding);
+                    try s.logObject(method, oid, "content-length", content_length);
+                }
                 if (s.takeFault(.upload)) |f| return respondFault(&request, f);
                 if (!std.mem.eql(u8, &sha256Hex(body), oid)) return request.respond("", .{ .status = .bad_request, .keep_alive = false });
                 try s.putObject(oid, body);
@@ -548,7 +559,8 @@ pub const Server = struct {
             if (s.options.authenticated) try w.writeAll(",\"authenticated\":true");
             if (upload) {
                 if (have == null) {
-                    try w.print(",\"actions\":{{\"upload\":{{\"href\":\"{s}/objects/{s}\",\"header\":{{\"X-Relic-Test\":\"upload\"{s}}},\"expires_in\":3600}}", .{ base, o.oid, auth_header });
+                    const chunked = if (s.options.chunked_uploads) ",\"Transfer-Encoding\":\"chunked\"" else "";
+                    try w.print(",\"actions\":{{\"upload\":{{\"href\":\"{s}/objects/{s}\",\"header\":{{\"X-Relic-Test\":\"upload\"{s}{s}}},\"expires_in\":3600}}", .{ base, o.oid, auth_header, chunked });
                     if (s.options.verify) try w.print(",\"verify\":{{\"href\":\"{s}/verify\",\"header\":{{\"X-Relic-Test\":\"verify\"{s}}}}}", .{ base, auth_header });
                     try w.writeByte('}');
                 }

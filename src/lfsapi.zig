@@ -1379,11 +1379,20 @@ pub const Client = struct {
         const uri = std.Uri.parse(request_url) catch return c.fail(error.MalformedUrl, "malformed URL {s}", .{stripQuery(request_url)});
 
         var headers: std.ArrayList(http.Header) = .empty;
+        // A server's `Transfer-Encoding: chunked` asks for the body in
+        // chunks; that header, `Content-Length` and `Host` are never sent
+        // as given, as git-lfs's client never sends them.
+        var chunked = false;
         // `http.<url>.extraHeader`, as git-lfs adds it to every request.
-        for (try c.extraHeaders(a, request_url)) |h| try headers.append(a, h);
+        for (try c.extraHeaders(a, request_url)) |h| {
+            if (framingHeader(h.name)) continue;
+            try headers.append(a, h);
+        }
         for (request.headers) |h| {
             try checkHeader(h.name, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "authorization") and auth_header != null) continue;
+            if (std.ascii.eqlIgnoreCase(h.name, "transfer-encoding")) chunked = std.mem.eql(u8, h.value, "chunked");
+            if (framingHeader(h.name)) continue;
             try headers.append(a, h);
         }
         var content_type: ?[]const u8 = null;
@@ -1431,7 +1440,7 @@ pub const Client = struct {
                 const file = (o.store.open(c.io, &o.pointer) catch |err| return c.fail(error.ConnectionFailed, "{s}", .{@errorName(err)})) orelse
                     return c.fail(error.HttpStatus, "object {s} is not in the store", .{&o.pointer.oid});
                 defer file.close(c.io);
-                ex.request.transfer_encoding = .{ .content_length = o.pointer.size };
+                ex.request.transfer_encoding = if (chunked) .chunked else .{ .content_length = o.pointer.size };
                 var body_buf: [64 * 1024]u8 = undefined;
                 var body = ex.request.sendBody(&body_buf) catch |err| return c.fail(error.ConnectionFailed, "{s}", .{@errorName(err)});
                 var chunk: [64 * 1024]u8 = undefined;
@@ -1796,6 +1805,15 @@ pub fn gitLfsBool(value: ?[]const u8, fallback: bool) bool {
     if (v.len == 0) return fallback;
     for ([_][]const u8{ "true", "1", "on", "yes", "t" }) |word| {
         if (std.ascii.eqlIgnoreCase(v, word)) return true;
+    }
+    return false;
+}
+
+/// A header the HTTP client writes itself, from the request, and never
+/// from what a server or the configuration hands over.
+fn framingHeader(name: []const u8) bool {
+    for ([_][]const u8{ "content-length", "transfer-encoding", "host" }) |n| {
+        if (std.ascii.eqlIgnoreCase(name, n)) return true;
     }
     return false;
 }

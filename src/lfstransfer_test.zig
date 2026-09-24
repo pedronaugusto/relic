@@ -1292,3 +1292,34 @@ test "every download's batch names the current branch's ref, as git-lfs's do, wh
         try testing.expectEqualStrings(stage.want, logs[1]);
     }
 }
+
+test "an upload whose action asks for chunks is sent in chunks, as git-lfs sends it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const content = try noise(gpa, 200 * 1024, 23);
+    defer gpa.free(content);
+    var logs: [2][]u8 = .{ &.{}, &.{} };
+    defer for (logs) |l| gpa.free(l);
+    for (0..2) |i| {
+        const fx = try Fixture.init(gpa, io, .{ .chunked_uploads = true });
+        defer fx.deinit();
+        const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+        defer gpa.free(nobody);
+        var d = try committed(fx, "work", nobody, &.{.{ "a.bin", content }});
+        defer d.close(io);
+        if (i == 0) {
+            try fx.gitIn(d, &.{ "lfs", "push", "origin", "main" });
+        } else {
+            var outcome = try relicUploadHead(fx, d, .{});
+            defer outcome.deinit();
+            try expectNoFailures(&outcome);
+        }
+        const stored = (try fx.server.object(gpa, &testlfs.sha256Hex(content))).?;
+        defer gpa.free(stored);
+        try testing.expectEqualSlices(u8, content, stored);
+        logs[i] = try fx.server.objectHeaders(gpa);
+    }
+    try testing.expectEqualStrings(logs[0], logs[1]);
+    try testing.expect(std.mem.indexOf(u8, logs[1], "transfer-encoding=chunked\n") != null);
+    try testing.expect(std.mem.indexOf(u8, logs[1], "content-length=-\n") != null);
+}
