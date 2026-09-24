@@ -31,6 +31,8 @@ const repo_mod = @import("repo.zig");
 const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
 const revwalk = @import("revwalk.zig");
+const fetchpack = @import("fetchpack.zig");
+const shallow_mod = @import("shallow.zig");
 const refspec_mod = @import("refspec.zig");
 const remote_mod = @import("remote.zig");
 const url_mod = @import("url.zig");
@@ -59,15 +61,20 @@ pub const Error = error{
     /// git refuses this too, because the working tree would no longer match
     /// its branch. `Options.update_head_ok` allows it.
     WouldUpdateCheckedOutBranch,
-    /// A shallow fetch, which is not in this release.
-    ShallowUnsupported,
+    /// `unshallow` asked of a repository that is not shallow, which git
+    /// refuses as making no sense.
+    NotShallow,
+    /// The server is shallow itself and would move this repository's
+    /// boundary on a fetch that did not ask to: git's `--update-shallow`,
+    /// which relic does not do.
+    ShallowUpdateRefused,
     /// A partial-clone filter, which is not in this release.
     PartialCloneUnsupported,
     /// An object below a fetched ref is not in the repository after the
     /// pack arrived. `Outcome` is not returned; `Options.missing` names it.
     MissingObject,
 } || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
-    revwalk.Error || fs.AtomicWriteError || Io.Dir.OpenError;
+    revwalk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
 
 /// How a fetch runs.
 pub const Options = struct {
@@ -99,8 +106,19 @@ pub const Options = struct {
     /// writes `fetch <remote>` followed by the refspecs, which is what
     /// `git fetch <remote> <refspecs>` writes.
     reflog_action: ?[]const u8 = null,
-    /// `--depth`: refused by name in this release.
+    /// `--depth`: the history from each fetched tip cut to this many
+    /// commits, the boundary written to `.git/shallow`.
     depth: ?u32 = null,
+    /// `--deepen`: the boundary moved this many commits further back.
+    deepen: ?u32 = null,
+    /// `--shallow-since`: the history cut at commits older than this, in
+    /// seconds since the epoch.
+    shallow_since: ?i64 = null,
+    /// `--shallow-exclude`: the history cut where these refs of the
+    /// remote's reach.
+    shallow_exclude: []const []const u8 = &.{},
+    /// `--unshallow`: the whole history, and no boundary.
+    unshallow: bool = false,
     /// `--filter`: refused by name in this release.
     filter: ?[]const u8 = null,
     /// The permission to run programs, which an ssh remote and a
@@ -204,8 +222,8 @@ const MapEntry = struct {
 
 /// Fetch from `remote_name`, a configured remote or a URL, into `repo`.
 pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {
-    if (options.depth != null) return error.ShallowUnsupported;
     if (options.filter != null) return error.PartialCloneUnsupported;
+    const deepen = try deepenRequest(repo, options);
 
     var outcome: Outcome = .{
         .arena = .init(gpa),
@@ -396,7 +414,13 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     // The objects: everything the map names that is not here yet.
     var wants: std.ArrayList(Oid) = .empty;
     var wanted_seen: Oid.Set = .empty;
-    for (map.items) |entry| try addWant(arena, io, repo, &wants, &wanted_seen, entry.oid);
+    for (map.items) |entry| {
+        // Deepening asks again for what is here: its history is what is
+        // wanted.
+        if (deepen != null) {
+            if (!(try wanted_seen.getOrPut(arena, entry.oid)).found_existing) try wants.append(arena, entry.oid);
+        } else try addWant(arena, io, repo, &wants, &wanted_seen, entry.oid);
+    }
     var tips: std.ArrayList(Oid) = .empty;
     var common_tips: std.ArrayList(Oid) = .empty;
     for (local_refs.entries) |entry| switch (entry.target) {
@@ -418,17 +442,43 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 
     var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
+    const boundary = try shallowList(arena, &repo.odb.shallow);
+    var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
+    defer shallow_info.deinit();
     const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
         .wants = wants.items,
         .tips = tips.items,
         .common_tips = common_tips.items,
         .include_tag = tags != .none,
+        .deepen = deepen,
+        .shallow = boundary,
     }, .{
         .progress = options.progress,
         .receive = .{ .check_objects = options.check_objects },
+        .shallow_info = &shallow_info,
     });
     outcome.pack = fetched.pack;
     outcome.objects = fetched.objects;
+
+    // The boundary the server drew. Walks from here on stop at it; it is
+    // written once everything below the refs is known to be here.
+    var old_boundary = repo.odb.shallow;
+    var boundary_moved = false;
+    defer if (boundary_moved) old_boundary.deinit(gpa);
+    errdefer if (boundary_moved) {
+        repo.odb.shallow.deinit(gpa);
+        repo.odb.shallow = old_boundary;
+        boundary_moved = false;
+    };
+    if (shallow_info.shallow.items.len != 0 or shallow_info.unshallow.items.len != 0) {
+        if (deepen == null) {
+            for (shallow_info.shallow.items) |oid| {
+                if (!repo.odb.shallow.contains(oid)) return error.ShallowUpdateRefused;
+            }
+        }
+        repo.odb.shallow = try shallow_mod.apply(gpa, &old_boundary, shallow_info.shallow.items, shallow_info.unshallow.items);
+        boundary_moved = true;
+    }
 
     // Tags that point at what the fetch brought.
     var backfill: std.ArrayList(MapEntry) = .empty;
@@ -466,6 +516,8 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
             else => |e| return e,
         };
     }
+
+    if (boundary_moved) try shallow_mod.write(gpa, io, repo.common_dir, &repo.odb.shallow);
 
     // The refs, in git's order: those for merging first.
     const display_url = try url_mod.anonymize(arena, url);
@@ -784,6 +836,30 @@ fn removeDuplicates(map: *std.ArrayList(MapEntry)) Error!void {
         kept += 1;
     }
     map.shrinkRetainingCapacity(kept);
+}
+
+/// What the options ask of the boundary, as the protocol asks it.
+fn deepenRequest(repo: *Repository, options: Options) Error!?fetchpack.Deepen {
+    if (options.unshallow) {
+        if (repo.odb.shallow.count() == 0) return error.NotShallow;
+        return .{ .depth = 0x7fff_ffff };
+    }
+    if (options.depth == null and options.deepen == null and options.shallow_since == null and options.shallow_exclude.len == 0) return null;
+    return .{
+        .depth = options.depth orelse options.deepen,
+        .relative = options.deepen != null,
+        .since = options.shallow_since,
+        .not = options.shallow_exclude,
+    };
+}
+
+/// The boundary as a list, for the server.
+fn shallowList(arena: Allocator, set: *const Oid.Set) Allocator.Error![]const Oid {
+    const list = try arena.alloc(Oid, set.count());
+    var it = set.keyIterator();
+    var i: usize = 0;
+    while (it.next()) |oid| : (i += 1) list[i] = oid.*;
+    return list;
 }
 
 fn addWant(arena: Allocator, io: Io, repo: *Repository, wants: *std.ArrayList(Oid), seen: *Oid.Set, oid: Oid) Error!void {
@@ -1245,13 +1321,13 @@ test "the branch a working tree has checked out is not fetched into" {
     try testing.expectError(error.GitFailed, twins.by_relic.exec(io, &.{ "fetch", "origin", "+main:main" }));
 }
 
-test "a shallow fetch and a filtered one are refused by name" {
+test "unshallowing a whole repository and a filtered fetch are refused by name" {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var repo = try Repository.init(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
-    try testing.expectError(error.ShallowUnsupported, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .depth = 1 }));
+    try testing.expectError(error.NotShallow, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true }));
     try testing.expectError(error.PartialCloneUnsupported, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .filter = "blob:none" }));
 }

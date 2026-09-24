@@ -14,7 +14,10 @@
 //! the tree itself carries deciding line endings and filters, and the
 //! index written.
 //!
-//! A shallow clone and a partial one are refused by name in this release.
+//! A shallow clone — `depth`, `shallow_since`, `shallow_exclude` — fetches
+//! one branch unless asked for all, as git's does, keeps the tags the pack
+//! brought, and writes the boundary the server drew to `.git/shallow`. A
+//! partial one is refused by name in this release.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -25,6 +28,8 @@ const object = @import("object.zig");
 const refs_mod = @import("refs.zig");
 const repo_mod = @import("repo.zig");
 const pack = @import("pack.zig");
+const fetchpack = @import("fetchpack.zig");
+const shallow_mod = @import("shallow.zig");
 const worktree = @import("worktree.zig");
 const filter = @import("filter.zig");
 const url_mod = @import("url.zig");
@@ -47,15 +52,13 @@ pub const Error = error{
     DestinationNotEmpty,
     /// `Options.branch` names neither a branch nor a tag the remote has.
     RemoteBranchNotFound,
-    /// A shallow clone, which is not in this release.
-    ShallowUnsupported,
     /// A partial-clone filter, which is not in this release.
     PartialCloneUnsupported,
     /// An object below a fetched ref did not arrive.
     MissingObject,
     /// A remote name git would refuse.
     InvalidRemoteName,
-} || transport.Error || repo_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
+} || transport.Error || shallow_mod.Error || repo_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
     worktree.Error || config_mod.Config.SetError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
     filter.Drivers.LoadError;
 
@@ -83,8 +86,19 @@ pub const Options = struct {
     default_branch: []const u8 = "main",
     /// Who the reflog entries are written as, and when.
     who: object.Signature,
-    /// `--depth`: refused by name in this release.
+    /// `--depth`: the history cut to this many commits from each fetched
+    /// tip, the boundary written to `.git/shallow`.
     depth: ?u32 = null,
+    /// `--shallow-since`: the history cut at commits older than this, in
+    /// seconds since the epoch.
+    shallow_since: ?i64 = null,
+    /// `--shallow-exclude`: the history cut where these refs of the
+    /// remote's reach.
+    shallow_exclude: []const []const u8 = &.{},
+    /// `--single-branch`: fetch only the branch checked out (or the tag
+    /// named by `branch`) and the tags pointing into it. `null` is git's
+    /// default: on for a shallow clone, off otherwise.
+    single_branch: ?bool = null,
     /// `--filter`: refused by name in this release.
     filter: ?[]const u8 = null,
     /// The permission to run programs, which an ssh remote and a
@@ -108,8 +122,12 @@ pub const Options = struct {
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Error!Repository {
-    if (options.depth != null) return error.ShallowUnsupported;
     if (options.filter != null) return error.PartialCloneUnsupported;
+    const deepen: ?fetchpack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
+        .{ .depth = options.depth, .since = options.shallow_since, .not = options.shallow_exclude }
+    else
+        null;
+    const single_branch = options.single_branch orelse (deepen != null);
     if (!refspecNameOk(options.origin)) return error.InvalidRemoteName;
     {
         var it = dir.iterate();
@@ -122,6 +140,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
 
     // A path is recorded absolute, as git records it.
     const parsed = url_mod.Url.parse(url) catch |err| return err;
+    if (deepen != null and (parsed.scheme == .local or parsed.scheme == .file)) return error.ShallowLocalUnsupported;
     const recorded = if (parsed.scheme == .local)
         try Io.Dir.cwd().realPathFileAlloc(io, url, arena)
     else
@@ -181,14 +200,23 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     const origin = options.origin;
     try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.url", .{origin}), recorded);
     if (!options.tags) try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.tagopt", .{origin}), "--no-tags");
+    // One branch, or one tag, when that is all that is fetched.
+    const single_tag: ?[]const u8 = if (single_branch and head_branch == null and detached != null and options.branch != null)
+        try std.fmt.allocPrint(arena, "refs/tags/{s}", .{options.branch.?})
+    else
+        null;
     if (!options.bare) {
-        try repo.config.set(
-            try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{origin}),
-            try std.fmt.allocPrint(arena, "+refs/heads/*:refs/remotes/{s}/*", .{origin}),
-        );
+        const spec = if (single_branch and head_branch != null)
+            try std.fmt.allocPrint(arena, "+{s}:refs/remotes/{s}/{s}", .{ head_branch.?, origin, head_branch.?["refs/heads/".len..] })
+        else if (single_tag) |tag|
+            try std.fmt.allocPrint(arena, "+{s}:{s}", .{ tag, tag })
+        else
+            try std.fmt.allocPrint(arena, "+refs/heads/*:refs/remotes/{s}/*", .{origin});
+        try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{origin}), spec);
     }
 
-    // Every branch, and every tag unless asked not to.
+    // Every branch, and every tag unless asked not to; or, for a single
+    // branch, that branch, with the tags pointing into it found after.
     var wants: std.ArrayList(Oid) = .empty;
     var packed_entries: std.ArrayList(refs_mod.Store.PackedEntry) = .empty;
     for (remote_refs.refs) |ref| {
@@ -197,6 +225,10 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         const is_tag = std.mem.startsWith(u8, ref.name, "refs/tags/");
         if (!is_branch and !(is_tag and options.tags)) continue;
         if (std.mem.endsWith(u8, ref.name, "^{}")) continue;
+        if (single_branch) {
+            const chosen = if (head_branch) |b| std.mem.eql(u8, ref.name, b) else if (single_tag) |t| std.mem.eql(u8, ref.name, t) else false;
+            if (!chosen) continue;
+        }
         try addUnique(arena, &wants, ref.oid);
         const local_name = if (is_branch and !options.bare)
             try std.fmt.allocPrint(arena, "refs/remotes/{s}/{s}", .{ origin, ref.name["refs/heads/".len..] })
@@ -209,14 +241,35 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
 
     var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
+    var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
+    defer shallow_info.deinit();
     const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
         .wants = wants.items,
         .tips = &.{},
         .include_tag = options.tags,
+        .deepen = deepen,
     }, .{
         .progress = options.progress,
         .receive = .{ .check_objects = options.check_objects },
+        .shallow_info = &shallow_info,
     });
+    if (shallow_info.shallow.items.len != 0) {
+        var empty: Oid.Set = .empty;
+        repo.odb.shallow.deinit(gpa);
+        repo.odb.shallow = try shallow_mod.apply(gpa, &empty, shallow_info.shallow.items, shallow_info.unshallow.items);
+        try shallow_mod.write(gpa, io, repo.common_dir, &repo.odb.shallow);
+    }
+    // A single branch's tags are those the pack brought, which is what
+    // git's clone keeps of them.
+    if (single_branch and options.tags) {
+        for (remote_refs.refs) |ref| {
+            if (!std.mem.startsWith(u8, ref.name, "refs/tags/") or std.mem.endsWith(u8, ref.name, "^{}")) continue;
+            if (single_tag != null and std.mem.eql(u8, ref.name, single_tag.?)) continue;
+            if (!try repo.odb.exists(io, ref.oid)) continue;
+            if (!@import("safepath.zig").isValidRefName(ref.name)) continue;
+            try packed_entries.append(arena, .{ .name = try arena.dupe(u8, ref.name), .oid = ref.oid, .peeled = ref.peeled });
+        }
+    }
 
     {
         var fresh: ?pack.Index = null;
@@ -271,7 +324,9 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     if (!options.bare) {
         if (remote_head) |head| {
             if (head.symref_target) |target| {
-                if (std.mem.startsWith(u8, target, "refs/heads/") and remote_refs.find(target) != null) {
+                // A single branch's clone has only that branch to point at.
+                const fetched_target = !single_branch or (head_branch != null and std.mem.eql(u8, target, head_branch.?));
+                if (std.mem.startsWith(u8, target, "refs/heads/") and remote_refs.find(target) != null and fetched_target) {
                     var tx = repo.beginRefs();
                     defer tx.deinit(io);
                     const local_head = try std.fmt.allocPrint(arena, "refs/remotes/{s}/HEAD", .{origin});
@@ -535,13 +590,12 @@ test "an empty remote clones to an unborn branch, as git's does" {
     try testing.expectEqualStrings(theirs, ours);
 }
 
-test "a destination that is not empty, a shallow clone and a filtered one are refused by name" {
+test "a destination that is not empty and a filtered clone are refused by name" {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "occupied", .data = "x" });
     try testing.expectError(error.DestinationNotEmpty, clone(gpa, io, "/nowhere", tmp.dir, .{ .who = test_who }));
-    try testing.expectError(error.ShallowUnsupported, clone(gpa, io, "/nowhere", tmp.dir, .{ .who = test_who, .depth = 1 }));
     try testing.expectError(error.PartialCloneUnsupported, clone(gpa, io, "/nowhere", tmp.dir, .{ .who = test_who, .filter = "blob:none" }));
 }

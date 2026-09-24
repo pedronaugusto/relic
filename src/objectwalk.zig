@@ -25,6 +25,7 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
+const revwalk = @import("revwalk.zig");
 
 const Oid = hash.Oid;
 const Odb = odb_mod.Odb;
@@ -189,7 +190,7 @@ const Walk = struct {
         // `load` may have grown the map; the pointer is taken again.
         const again = w.nodes.getPtr(oid).?;
         again.time = commit.committer.when_secs;
-        again.parents = try w.arena.allocator().dupe(Oid, commit.parents);
+        again.parents = try w.arena.allocator().dupe(Oid, revwalk.parentsOf(w.db, oid, commit.parents));
         again.tree = commit.tree;
         again.loaded = true;
         return again;
@@ -376,7 +377,7 @@ pub fn checkConnected(
                 var commit = try object.Commit.parse(gpa, db.kind, found.bytes);
                 defer commit.deinit();
                 try stack.append(gpa, commit.tree);
-                for (commit.parents) |parent| try stack.append(gpa, parent);
+                for (revwalk.parentsOf(db, oid, commit.parents)) |parent| try stack.append(gpa, parent);
             },
             .tag => {
                 var tag = try object.Tag.parse(gpa, db.kind, found.bytes);

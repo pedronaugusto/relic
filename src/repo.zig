@@ -14,6 +14,7 @@ const index_mod = @import("index.zig");
 const refs_mod = @import("refs.zig");
 const reflog = @import("reflog.zig");
 const config_mod = @import("config.zig");
+const shallow = @import("shallow.zig");
 const ignore = @import("ignore.zig");
 const attributes = @import("attributes.zig");
 const worktree = @import("worktree.zig");
@@ -32,6 +33,8 @@ const Oid = hash.Oid;
 pub const Error = error{
     /// No `.git` directory or file at the path or above it.
     NotARepository,
+    /// `.git/shallow` holds a line that is not an object name.
+    MalformedShallowFile,
     /// `core.repositoryFormatVersion` is a number this release does not
     /// know. `unsupported` on the repository says which.
     UnsupportedRepositoryVersion,
@@ -291,6 +294,7 @@ pub const Repository = struct {
 
         repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, repo.kind, options.odb);
         errdefer repo.odb.deinit(io);
+        repo.odb.shallow = try shallow.read(gpa, io, repo.common_dir, repo.kind);
         repo.refs = .init(gpa, repo.kind, repo.git_dir, repo.common_dir);
         const version = repo.config.getInt("core.repositoryformatversion", 0) catch 0;
         if (version == 1) {

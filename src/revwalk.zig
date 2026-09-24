@@ -258,7 +258,9 @@ pub const Walk = struct {
     };
 
     fn load(walk: *Walk, io: Io, oid: Oid) Error!Commit {
-        if (walk.graph) |graph| {
+        // A commit-graph knows the parents a shallow repository does not
+        // have, so it is not asked in one, as git does not ask it.
+        if (walk.db.shallow.count() == 0) if (walk.graph) |graph| {
             if (graph.find(oid)) |position| {
                 if (graph.commitAt(position)) |entry| {
                     if (graph.parentsOf(walk.gpa, position)) |parents| {
@@ -266,7 +268,7 @@ pub const Walk = struct {
                     } else |_| {}
                 } else |_| {}
             }
-        }
+        };
         const found = try walk.db.read(io, oid);
         defer walk.gpa.free(found.bytes);
         if (found.type != .commit) return error.NotACommit;
@@ -274,7 +276,7 @@ pub const Walk = struct {
         defer commit.deinit();
         return .{
             .oid = oid,
-            .parents = try walk.gpa.dupe(Oid, commit.parents),
+            .parents = try walk.gpa.dupe(Oid, parentsOf(walk.db, oid, commit.parents)),
             .time = commit.committer.when_secs,
         };
     }
@@ -373,6 +375,12 @@ const OidKey = struct {
         return .{ .kind = oid.kind, .bytes = oid.bytes };
     }
 };
+
+/// A commit's parents as a walk sees them: none for a commit at a shallow
+/// repository's boundary, whose parents are not in it.
+pub fn parentsOf(db: *const odb_mod.Odb, oid: Oid, parents: []const Oid) []const Oid {
+    return if (db.shallow.contains(oid)) &.{} else parents;
+}
 
 /// Every merge base of `a` and `b`: the common ancestors none of whose
 /// descendants is also a common ancestor.
@@ -519,7 +527,7 @@ const Paint = struct {
         const gop = try p.nodes.getOrPut(p.gpa, OidKey.of(oid));
         if (gop.found_existing) return gop.value_ptr;
         errdefer _ = p.nodes.remove(OidKey.of(oid));
-        if (p.graph) |graph| {
+        if (p.db.shallow.count() == 0) if (p.graph) |graph| {
             if (graph.find(oid)) |position| {
                 if (graph.commitAt(position)) |entry| {
                     if (graph.parentsOf(p.gpa, position)) |parents| {
@@ -528,7 +536,7 @@ const Paint = struct {
                     } else |_| {}
                 } else |_| {}
             }
-        }
+        };
         const found = try p.db.read(p.io, oid);
         defer p.gpa.free(found.bytes);
         if (found.type != .commit) return error.NotACommit;
@@ -537,7 +545,7 @@ const Paint = struct {
         gop.value_ptr.* = .{
             .time = commit.committer.when_secs,
             .generation = infinity,
-            .parents = try p.gpa.dupe(Oid, commit.parents),
+            .parents = try p.gpa.dupe(Oid, parentsOf(p.db, oid, commit.parents)),
         };
         return gop.value_ptr;
     }
@@ -570,7 +578,7 @@ fn reachable(gpa: Allocator, io: Io, db: *odb_mod.Odb, from: Oid, out: *Oid.Set)
         if (found.type != .commit) return error.NotACommit;
         var commit = try object.Commit.parse(gpa, db.kind, found.bytes);
         defer commit.deinit();
-        for (commit.parents) |parent| try queue.append(gpa, parent);
+        for (parentsOf(db, oid, commit.parents)) |parent| try queue.append(gpa, parent);
     }
 }
 
@@ -595,7 +603,7 @@ fn reachableExcluding(
         if (found.type != .commit) return error.NotACommit;
         var commit = try object.Commit.parse(gpa, db.kind, found.bytes);
         defer commit.deinit();
-        for (commit.parents) |parent| try queue.append(gpa, parent);
+        for (parentsOf(db, oid, commit.parents)) |parent| try queue.append(gpa, parent);
     }
 }
 

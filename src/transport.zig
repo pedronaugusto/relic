@@ -48,6 +48,10 @@ pub const Error = error{
     /// The transport needs to run a program — `ssh`, a credential helper —
     /// and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
+    /// A shallow fetch or clone from a repository on this machine, which
+    /// relic copies from in process and does not cut. git ignores `--depth`
+    /// for a local clone by path; relic says so instead.
+    ShallowLocalUnsupported,
 } || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error || sendpack.Error;
 
 /// How a remote is reached.
@@ -261,6 +265,7 @@ pub const Session = struct {
         if (request.wants.len == 0) return .{ .pack = null, .objects = 0 };
         switch (s.impl) {
             .local => |remote| {
+                if (request.deepen != null) return error.ShallowLocalUnsupported;
                 const report = try remote.copyObjects(io, db, pack_dir, request.wants, request.tips, request.include_tag, .{});
                 const written = report orelse return .{ .pack = null, .objects = 0 };
                 return .{ .pack = written.name, .objects = written.objects };

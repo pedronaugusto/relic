@@ -30,6 +30,7 @@ const protocol = @import("protocol.zig");
 const sideband = @import("sideband.zig");
 const indexpack = @import("indexpack.zig");
 const progress_mod = @import("progress.zig");
+const revwalk = @import("revwalk.zig");
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;
@@ -45,6 +46,10 @@ pub const Error = error{
     /// The server wants to hand part of the pack over as a URI, which
     /// relic does not fetch.
     PackfileUrisUnsupported,
+    /// A shallow fetch, or a fetch into a shallow repository, from a server
+    /// that does not speak of shallow history — or does not have the kind of
+    /// deepening asked for.
+    ShallowUnsupportedByServer,
 } || protocol.Error || indexpack.Error || odb_mod.Error || object.ParseError;
 
 /// What to ask for.
@@ -60,6 +65,52 @@ pub const Request = struct {
     common_tips: []const Oid = &.{},
     /// Ask for the annotated tags that point into the pack.
     include_tag: bool = true,
+    /// Make the history shallow, or deeper, or whole.
+    deepen: ?Deepen = null,
+    /// This repository's shallow boundary, which the server is told so it
+    /// sends nothing from below it.
+    shallow: []const Oid = &.{},
+};
+
+/// How deep the history is to be: git's `--depth`, `--deepen`,
+/// `--shallow-since`, `--shallow-exclude` and `--unshallow`.
+pub const Deepen = struct {
+    /// Commits from each wanted tip; with `relative`, beyond the current
+    /// boundary. `--unshallow` is git's infinite depth, 2147483647.
+    depth: ?u32 = null,
+    relative: bool = false,
+    /// Commits newer than this time, in seconds since the epoch.
+    since: ?i64 = null,
+    /// Commits not reachable from these refs, as the server names them.
+    not: []const []const u8 = &.{},
+};
+
+/// What the server said of the boundary: the commits now at it, and those
+/// no longer at it because their parents came.
+pub const ShallowInfo = struct {
+    gpa: Allocator,
+    shallow: std.ArrayList(Oid) = .empty,
+    unshallow: std.ArrayList(Oid) = .empty,
+
+    /// Release both lists.
+    pub fn deinit(info: *ShallowInfo) void {
+        info.shallow.deinit(info.gpa);
+        info.unshallow.deinit(info.gpa);
+    }
+
+    /// Take a `shallow <oid>` or `unshallow <oid>` line; whether it was
+    /// one.
+    fn take(info: *ShallowInfo, kind: hash.Kind, line: []const u8) (Allocator.Error || error{ProtocolError})!bool {
+        if (std.mem.startsWith(u8, line, "shallow ")) {
+            try info.shallow.append(info.gpa, Oid.parse(kind, line["shallow ".len..]) catch return error.ProtocolError);
+            return true;
+        }
+        if (std.mem.startsWith(u8, line, "unshallow ")) {
+            try info.unshallow.append(info.gpa, Oid.parse(kind, line["unshallow ".len..]) catch return error.ProtocolError);
+            return true;
+        }
+        return false;
+    }
 };
 
 /// How the pack is received.
@@ -68,6 +119,9 @@ pub const Options = struct {
     /// Handed to `indexpack.receive`; its `progress` is set from the one
     /// above.
     receive: indexpack.Options = .{},
+    /// Where the server's word on the shallow boundary goes. A request that
+    /// deepens, or names a boundary, needs one.
+    shallow_info: ?*ShallowInfo = null,
 };
 
 /// Fetch a pack for `request` over `conn`, which opened with `adv`, into
@@ -90,8 +144,8 @@ pub fn fetch(
     var receive_options = options.receive;
     receive_options.progress = options.progress;
     return switch (adv.version) {
-        .v2 => fetchV2(gpa, io, conn, adv, db, pack_dir, request, &negotiator, options.progress, receive_options),
-        .v0, .v1 => fetchV0(gpa, io, conn, adv, db, pack_dir, request, &negotiator, options.progress, receive_options),
+        .v2 => fetchV2(gpa, io, conn, adv, db, pack_dir, request, &negotiator, options.progress, receive_options, options.shallow_info),
+        .v0, .v1 => fetchV0(gpa, io, conn, adv, db, pack_dir, request, &negotiator, options.progress, receive_options, options.shallow_info),
     };
 }
 
@@ -115,7 +169,11 @@ fn fetchV2(
     negotiator: *Negotiator,
     progress: ?progress_mod.Progress,
     receive_options: indexpack.Options,
+    shallow_info: ?*ShallowInfo,
 ) Error!indexpack.Result {
+    if (request.deepen != null or request.shallow.len != 0) {
+        if (!adv.commandHas("fetch", "shallow")) return error.ShallowUnsupportedByServer;
+    }
     var common: std.ArrayList(Oid) = .empty;
     defer common.deinit(gpa);
     var haves_to_send: usize = 16;
@@ -179,7 +237,7 @@ fn fetchV2(
                 continue;
             }
         }
-        return receivePackfileV2(gpa, io, conn, in, db, pack_dir, progress, receive_options);
+        return receivePackfileV2(gpa, io, conn, in, db, pack_dir, progress, receive_options, adv.kind, shallow_info);
     }
 }
 
@@ -200,6 +258,7 @@ fn writeFetchV2(
     if (no_progress) try pktline.write(w, "no-progress\n");
     if (request.include_tag) try pktline.write(w, "include-tag\n");
     try pktline.write(w, "ofs-delta\n");
+    try writeShallowRequest(w, request);
     for (request.wants) |oid| try pktline.print(w, "want {f}\n", .{oid});
     for (common) |oid| try pktline.print(w, "have {f}\n", .{oid});
     var added: usize = 0;
@@ -214,6 +273,16 @@ fn writeFetchV2(
         done.* = true;
     }
     try pktline.flush(w);
+}
+
+/// git's `add_shallow_requests`: the boundary, then how to move it.
+fn writeShallowRequest(w: *Io.Writer, request: Request) pktline.WriteError!void {
+    for (request.shallow) |oid| try pktline.print(w, "shallow {f}\n", .{oid});
+    const deepen = request.deepen orelse return;
+    if (deepen.depth) |depth| try pktline.print(w, "deepen {d}\n", .{depth});
+    if (deepen.since) |since| try pktline.print(w, "deepen-since {d}\n", .{since});
+    for (deepen.not) |name| try pktline.print(w, "deepen-not {s}\n", .{name});
+    if (deepen.relative) try pktline.write(w, "deepen-relative\n");
 }
 
 fn expectSection(conn: *Connection, in: *Io.Reader, name: []const u8) Error!void {
@@ -240,6 +309,8 @@ fn receivePackfileV2(
     pack_dir: Io.Dir,
     progress: ?progress_mod.Progress,
     receive_options: indexpack.Options,
+    kind: hash.Kind,
+    shallow_info: ?*ShallowInfo,
 ) Error!indexpack.Result {
     while (true) {
         const packet = try conn.readPacket(in);
@@ -253,12 +324,16 @@ fn receivePackfileV2(
         }
         if (std.mem.eql(u8, header, "packfile")) break;
         if (std.mem.eql(u8, header, "packfile-uris")) return error.PackfileUrisUnsupported;
-        // `shallow-info` and `wanted-refs` answer questions this client did
-        // not ask; their lines run to the delimiter.
+        // `shallow-info` moves the boundary; `wanted-refs` answers a
+        // question this client does not ask. Each runs to the delimiter.
+        const is_shallow = std.mem.eql(u8, header, "shallow-info");
         while (true) {
             switch (try conn.readPacket(in)) {
                 .delim => break,
-                .data => {},
+                .data => |raw| if (is_shallow) {
+                    const info = shallow_info orelse return error.ProtocolError;
+                    if (!try info.take(kind, std.mem.trimEnd(u8, raw, "\n"))) return error.ProtocolError;
+                },
                 else => return error.ProtocolError,
             }
         }
@@ -308,7 +383,16 @@ fn fetchV0(
     negotiator: *Negotiator,
     progress: ?progress_mod.Progress,
     receive_options: indexpack.Options,
+    shallow_info: ?*ShallowInfo,
 ) Error!indexpack.Result {
+    if (request.deepen != null or request.shallow.len != 0) {
+        if (!adv.has("shallow")) return error.ShallowUnsupportedByServer;
+        if (request.deepen) |d| {
+            if (d.since != null and !adv.has("deepen-since")) return error.ShallowUnsupportedByServer;
+            if (d.not.len != 0 and !adv.has("deepen-not")) return error.ShallowUnsupportedByServer;
+            if (d.relative and !adv.has("deepen-relative")) return error.ShallowUnsupportedByServer;
+        }
+    }
     const band: enum { none, small, large } = if (adv.has("side-band-64k"))
         .large
     else if (adv.has("side-band"))
@@ -335,6 +419,11 @@ fn fetchV0(
         };
         if (answered and std.mem.eql(u8, head, "PACK")) break;
         const len = pktline.parseLength(head) orelse return error.ProtocolError;
+        // The flush that ends the server's list of the boundary.
+        if (len == 0 and (request.deepen != null or request.shallow.len != 0)) {
+            in.toss(4);
+            continue;
+        }
         if (len < 4) return error.ProtocolError;
         const whole = in.peek(len) catch |err| switch (err) {
             error.EndOfStream => return error.RemoteHungUp,
@@ -345,8 +434,13 @@ fn fetchV0(
             conn.setMessage(line[4..]);
             return error.RemoteError;
         }
-        const negotiation = std.mem.eql(u8, line, "NAK") or std.mem.startsWith(u8, line, "ACK ") or
-            std.mem.startsWith(u8, line, "shallow ") or std.mem.startsWith(u8, line, "unshallow ");
+        if (std.mem.startsWith(u8, line, "shallow ") or std.mem.startsWith(u8, line, "unshallow ")) {
+            const info = shallow_info orelse return error.ProtocolError;
+            _ = try info.take(adv.kind, line);
+            in.toss(len);
+            continue;
+        }
+        const negotiation = std.mem.eql(u8, line, "NAK") or std.mem.startsWith(u8, line, "ACK ");
         if (!negotiation) {
             if (!answered) return error.ProtocolError;
             break;
@@ -384,14 +478,18 @@ fn writeFetchV0(
         if (adv.has("side-band-64k")) {
             try c.writeAll(" side-band-64k");
         } else if (band) try c.writeAll(" side-band");
+        if (request.deepen != null and request.deepen.?.relative) try c.writeAll(" deepen-relative");
         if (adv.has("thin-pack")) try c.writeAll(" thin-pack");
         if (no_progress and adv.has("no-progress")) try c.writeAll(" no-progress");
         if (request.include_tag and adv.has("include-tag")) try c.writeAll(" include-tag");
         if (adv.has("ofs-delta")) try c.writeAll(" ofs-delta");
+        if (adv.has("deepen-since")) try c.writeAll(" deepen-since");
+        if (adv.has("deepen-not")) try c.writeAll(" deepen-not");
         if (adv.has("agent")) try c.print(" agent={s}", .{protocol.agent});
         if (adv.has("object-format")) try c.print(" object-format={s}", .{adv.kind.name()});
         try pktline.print(w, "want {f}{s}\n", .{ oid, caps.buffered() });
     }
+    try writeShallowRequest(w, request);
     try pktline.flush(w);
     var sent: usize = 0;
     while (sent < v0_haves) : (sent += 1) {
@@ -467,7 +565,7 @@ const Negotiator = struct {
             }
             var commit = try object.Commit.parse(n.gpa, n.db.kind, found.bytes);
             defer commit.deinit();
-            const parents = try n.arena.allocator().dupe(Oid, commit.parents);
+            const parents = try n.arena.allocator().dupe(Oid, revwalk.parentsOf(n.db, oid, commit.parents));
             const gop = try n.nodes.getOrPut(n.gpa, oid);
             if (!gop.found_existing) gop.value_ptr.* = .{};
             gop.value_ptr.time = commit.committer.when_secs;

@@ -198,6 +198,11 @@ pub const Odb = struct {
     /// to. `Repository.worktreeRules` hands it to the working tree, which is
     /// what makes a stat shortcut believe exactly as much as it should.
     timestamp_resolution: fs.Resolution = .nanosecond,
+    /// The commits of a shallow repository's boundary, `.git/shallow`,
+    /// which `Repository.open` fills: every history walk takes them as
+    /// having no parents, because theirs are not here. Empty in a whole
+    /// repository.
+    shallow: Oid.Set = .empty,
 
     /// Open the object database under `git_dir`.
     ///
@@ -389,6 +394,7 @@ pub const Odb = struct {
             odb.gpa.free(state.buffer);
         }
         odb.cache.deinit();
+        odb.shallow.deinit(odb.gpa);
         odb.* = undefined;
     }
 
