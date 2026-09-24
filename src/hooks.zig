@@ -79,7 +79,100 @@ pub const Options = struct {
     /// working in, `/`-terminated, or empty at the top. git sets it for
     /// every program it starts.
     prefix: []const u8 = "",
+    /// Who does the work of the hooks `git lfs install` writes. A hook
+    /// file that is exactly one of git-lfs's own — `isGitLfsHook` — is not
+    /// started when this is set; this is called in its place, so a
+    /// repository set up by git-lfs works on a machine without git-lfs,
+    /// where the hook itself would stop with "git-lfs was not found".
+    /// `lfshooks.Native` is relic's own.
+    lfs: ?LfsHooks = null,
 };
+
+/// What stands in for git-lfs's own hooks.
+pub const LfsHooks = struct {
+    context: ?*anyopaque = null,
+    /// Do what `git lfs <event>` would do with these arguments and this
+    /// input. Returning false fails the hook, as the hook's own exit would.
+    run: *const fn (context: ?*anyopaque, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool,
+};
+
+/// The hook `git lfs install` writes for `{{Command}}`, and the ones older
+/// releases wrote, which git-lfs itself still recognises as its own.
+const git_lfs_hook_current = "#!/bin/sh\ncommand -v git-lfs >/dev/null 2>&1 || { printf >&2 \"\\n%s\\n\\n\" \"This repository is configured for Git LFS but 'git-lfs' was not found on your path. If you no longer wish to use Git LFS, remove this hook by deleting the '{{Command}}' file in the hooks directory (set by 'core.hookspath'; usually '.git/hooks').\"; exit 2; }\ngit lfs {{Command}} \"$@\"";
+const git_lfs_hook_older = [_][]const u8{
+    "#!/bin/sh\ncommand -v git-lfs >/dev/null 2>&1 || { echo >&2 \"\\nThis repository is configured for Git LFS but 'git-lfs' was not found on your path. If you no longer wish to use Git LFS, remove this hook by deleting the '{{Command}}' file in the hooks directory (set by 'core.hookspath'; usually '.git/hooks').\\n\"; exit 2; }\ngit lfs {{Command}} \"$@\"",
+    "#!/bin/sh\ncommand -v git-lfs >/dev/null 2>&1 || { echo >&2 \"\\nThis repository is configured for Git LFS but 'git-lfs' was not found on your path. If you no longer wish to use Git LFS, remove this hook by deleting '.git/hooks/{{Command}}'.\\n\"; exit 2; }\ngit lfs {{Command}} \"$@\"",
+    "#!/bin/sh\ncommand -v git-lfs >/dev/null 2>&1 || { echo >&2 \"\\nThis repository is configured for Git LFS but 'git-lfs' was not found on your path. If you no longer wish to use Git LFS, remove this hook by deleting .git/hooks/{{Command}}.\\n\"; exit 2; }\ngit lfs {{Command}} \"$@\"",
+};
+/// The pre-push hooks git-lfs wrote before it wrote the others.
+const git_lfs_pre_push_oldest = [_][]const u8{
+    "#!/bin/sh\ngit lfs push --stdin $*",
+    "#!/bin/sh\ngit lfs push --stdin \"$@\"",
+    "#!/bin/sh\ngit lfs pre-push \"$@\"",
+    "#!/bin/sh\ncommand -v git-lfs >/dev/null 2>&1 || { echo >&2 \"\\nThis repository has been set up with Git LFS but Git LFS is not installed.\\n\"; exit 0; }\ngit lfs pre-push \"$@\"",
+    "#!/bin/sh\ncommand -v git-lfs >/dev/null 2>&1 || { echo >&2 \"\\nThis repository has been set up with Git LFS but Git LFS is not installed.\\n\"; exit 2; }\ngit lfs pre-push \"$@\"",
+};
+
+/// The events git-lfs writes a hook for.
+pub const git_lfs_events = [_][]const u8{ "pre-push", "post-checkout", "post-commit", "post-merge" };
+
+/// Whether `contents` is a hook git-lfs wrote for `event`, in this release
+/// or an earlier one, compared as git-lfs compares it: white space at the
+/// start of each line and at either end ignored.
+pub fn isGitLfsHook(event: []const u8, contents: []const u8) bool {
+    for (git_lfs_events) |e| {
+        if (std.mem.eql(u8, e, event)) break;
+    } else return false;
+    var buf: [1024]u8 = undefined;
+    const normal = undent(&buf, contents) orelse return false;
+    if (matchesTemplate(normal, git_lfs_hook_current, event)) return true;
+    for (git_lfs_hook_older) |t| {
+        if (matchesTemplate(normal, t, event)) return true;
+    }
+    if (std.mem.eql(u8, event, "pre-push")) {
+        for (git_lfs_pre_push_oldest) |t| {
+            if (std.mem.eql(u8, normal, t)) return true;
+        }
+    }
+    return false;
+}
+
+/// `contents` with every line's leading blanks taken off and the whole
+/// trimmed, into `buf`; `null` for a file longer than git-lfs reads.
+fn undent(buf: *[1024]u8, contents: []const u8) ?[]const u8 {
+    if (contents.len > buf.len) return null;
+    var len: usize = 0;
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) {
+            buf[len] = '\n';
+            len += 1;
+        }
+        first = false;
+        const kept = std.mem.trimStart(u8, line, " \t");
+        @memcpy(buf[len..][0..kept.len], kept);
+        len += kept.len;
+    }
+    return std.mem.trim(u8, buf[0..len], " \t\r\n");
+}
+
+/// Whether `text` is `template` with each `{{Command}}` as `event`.
+fn matchesTemplate(text: []const u8, template: []const u8, event: []const u8) bool {
+    var rest = text;
+    var parts = std.mem.splitSequence(u8, template, "{{Command}}");
+    var first = true;
+    while (parts.next()) |part| {
+        if (!first) {
+            if (!std.mem.startsWith(u8, rest, event)) return false;
+            rest = rest[event.len..];
+        }
+        first = false;
+        if (!std.mem.startsWith(u8, rest, part)) return false;
+        rest = rest[part.len..];
+    }
+    return rest.len == 0;
+}
 
 /// What a runner needs to know about the repository.
 pub const Place = struct {
@@ -131,6 +224,9 @@ pub const Ran = struct {
     /// executable, so it did not run. git prints advice when this happens;
     /// here it is a value for the caller to show.
     passed_over: bool = false,
+    /// The file was git-lfs's own hook, and `Options.lfs` did its work in
+    /// its place.
+    lfs_native: bool = false,
 
     /// Whether every hook that ran succeeded.
     pub fn succeeded(r: Ran) bool {
@@ -284,7 +380,19 @@ pub const Runner = struct {
         switch (try runner.findFile(io, event, &path_buf)) {
             .missing => {},
             .not_executable => ran.passed_over = true,
-            .found => |path| try runner.runOne(io, event, &ran, request, path, false),
+            .found => |path| {
+                if (runner.options.lfs) |lfs_hooks| {
+                    if (gitLfsHookFile(io, event, path)) {
+                        ran.count += 1;
+                        ran.lfs_native = true;
+                        if (!lfs_hooks.run(lfs_hooks.context, io, event, request.args, request.input) and ran.failure == null) {
+                            ran.failure = .init(event, .{ .exited = 1 });
+                        }
+                        return ran;
+                    }
+                }
+                try runner.runOne(io, event, &ran, request, path, false);
+            },
         }
         return ran;
     }
@@ -641,6 +749,16 @@ pub const Runner = struct {
         return runner.run(io, "post-rewrite", .{ .args = &.{@tagName(command)}, .input = input.written() });
     }
 };
+
+/// Whether the file at `path` is git-lfs's own hook for `event`.
+fn gitLfsHookFile(io: Io, event: []const u8, path: []const u8) bool {
+    var buf: [1025]u8 = undefined;
+    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    defer file.close(io);
+    const n = file.readPositionalAll(io, &buf, 0) catch return false;
+    if (n > 1024) return false;
+    return isGitLfsHook(event, buf[0..n]);
+}
 
 fn writeValue(w: *Io.Writer, kind: hash.Kind, value: ?Runner.RefUpdate.Value) Io.Writer.Error!void {
     var hex: [hash.max_hex_len]u8 = undefined;
@@ -1106,4 +1224,16 @@ fn gitStderr(gpa: Allocator, io: Io, repo: *testgit.Repo, args: []const []const 
     const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = repo.dir } });
     gpa.free(result.stdout);
     return result.stderr;
+}
+
+test "git-lfs's hooks are known by their text from every release, and nothing else is" {
+    const current = "#!/bin/sh\ncommand -v git-lfs >/dev/null 2>&1 || { printf >&2 \"\\n%s\\n\\n\" \"This repository is configured for Git LFS but 'git-lfs' was not found on your path. If you no longer wish to use Git LFS, remove this hook by deleting the 'post-merge' file in the hooks directory (set by 'core.hookspath'; usually '.git/hooks').\"; exit 2; }\ngit lfs post-merge \"$@\"\n";
+    try testing.expect(isGitLfsHook("post-merge", current));
+    try testing.expect(!isGitLfsHook("post-commit", current));
+    // Indented, as git-lfs's own comparison forgives.
+    try testing.expect(isGitLfsHook("pre-push", "  #!/bin/sh\n\tgit lfs pre-push \"$@\"\n\n"));
+    try testing.expect(isGitLfsHook("pre-push", "#!/bin/sh\ngit lfs push --stdin $*"));
+    try testing.expect(!isGitLfsHook("post-checkout", "#!/bin/sh\ngit lfs pre-push \"$@\"\n"));
+    try testing.expect(!isGitLfsHook("post-merge", "#!/bin/sh\ngit lfs post-merge \"$@\"\necho more\n"));
+    try testing.expect(!isGitLfsHook("pre-commit", current));
 }

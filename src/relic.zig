@@ -46,6 +46,7 @@ pub const lfsapi = @import("lfsapi.zig");
 pub const lfstransfer = @import("lfstransfer.zig");
 pub const lfslocks = @import("lfslocks.zig");
 pub const lfspush = @import("lfspush.zig");
+pub const lfshooks = @import("lfshooks.zig");
 pub const convert = @import("convert.zig");
 pub const refspec = @import("refspec.zig");
 pub const url = @import("url.zig");

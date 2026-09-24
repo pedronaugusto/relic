@@ -250,3 +250,81 @@ test "a server with no locking API is named" {
     try testing.expectError(error.LockingUnsupported, lfslocks.verify(server, &repo, .{ .ref = "refs/heads/main" }));
     try testing.expectError(error.LockingUnsupported, lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" }));
 }
+
+test "a repository with git-lfs's hooks works on a machine without git-lfs" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const hooks = @import("hooks.zig");
+    const lfshooks = @import("lfshooks.zig");
+    var pair = try Pair.init(gpa, io);
+    defer pair.deinit();
+    const fx = pair.fx;
+
+    // The hooks are the ones `git lfs install` writes, and relic knows each.
+    try fx.gitIn(pair.theirs, &.{ "lfs", "install", "--local" });
+    var home_hooks = try fx.tmp.dir.openDir(io, "home/hooks", .{});
+    defer home_hooks.close(io);
+    try pair.ours.createDirPath(io, ".git/hooks");
+    for (hooks.git_lfs_events) |event| {
+        const text = try home_hooks.readFileAlloc(io, event, gpa, .limited(4096));
+        defer gpa.free(text);
+        try testing.expect(hooks.isGitLfsHook(event, text));
+        var path_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, ".git/hooks/{s}", .{event});
+        try pair.ours.writeFile(io, .{ .sub_path = path, .data = text });
+        const file = try pair.ours.openFile(io, path, .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    }
+
+    // No git-lfs anywhere on the path the hooks are run with.
+    try fx.tmp.dir.createDirPath(io, "empty-path");
+    const empty = try fx.path("empty-path");
+    defer gpa.free(empty);
+    var bare_env = try fx.env.clone(gpa);
+    defer bare_env.deinit();
+    try bare_env.put("PATH", empty);
+
+    var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
+    defer repo.deinit(io);
+    const head = (try repo.head(io)).?;
+    defer gpa.free(head.name);
+    const zero = @import("hash.zig").Oid.zero(repo.kind);
+    const place: hooks.Place = .{ .config = &repo.config, .git_dir = repo.git_dir, .common_dir = repo.common_dir, .work_dir = repo.work_dir };
+
+    // Run as they are, they stop: git-lfs was not found.
+    {
+        var runner = try hooks.Runner.init(gpa, io, place, .{ .environ = &bare_env }, .{ .output = .capture });
+        defer runner.deinit();
+        const ran = try runner.postCheckout(io, zero, head.oid, .branch);
+        try testing.expectEqual(@as(?u8, 2), ran.failure.?.status());
+        try testing.expect(std.mem.indexOf(u8, runner.captured.items, "'git-lfs' was not found") != null);
+    }
+    // Handed to relic, they do git-lfs's work and succeed.
+    var native: lfshooks.Native = .{ .gpa = gpa, .repo = &repo };
+    var runner = try hooks.Runner.init(gpa, io, place, .{ .environ = &bare_env }, .{ .output = .capture, .lfs = native.lfsHooks() });
+    defer runner.deinit();
+    for ([_]hooks.Ran{
+        try runner.postCheckout(io, zero, head.oid, .branch),
+        try runner.postMerge(io, false),
+        try runner.prePush(io, "origin", "http://unused.invalid/", &.{}),
+    }) |ran| {
+        try testing.expect(ran.succeeded());
+        try testing.expect(ran.lfs_native);
+    }
+    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "x.bin") & 0o222);
+    try testing.expect(try mode(io, pair.ours, "plain.txt") & 0o200 != 0);
+
+    // After a commit, the files it changed are set as git-lfs sets them.
+    try pair.ours.deleteFile(io, "y.bin");
+    try pair.ours.writeFile(io, .{ .sub_path = "y.bin", .data = "changed\n" });
+    try fx.gitIn(pair.ours, &.{ "-c", "core.hooksPath=/nonexistent", "commit", "-q", "-am", "change y" });
+    try testing.expect(try mode(io, pair.ours, "y.bin") & 0o200 != 0);
+    const index_path = try fx.path("ours/.git/index");
+    defer gpa.free(index_path);
+    const ran = try runner.postCommit(io, .{ .index_path = index_path });
+    try testing.expect(ran.lfs_native and ran.succeeded());
+    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
+    try testing.expectEqualStrings("", runner.captured.items);
+}
