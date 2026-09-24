@@ -82,12 +82,6 @@ pub const Error = error{
     /// which is what git means by "conflicts in index. Try without
     /// --index."
     IndexConflict,
-    /// A path the stash has as a file and the index has as a directory, or
-    /// the other way round. `Refusal` names it.
-    DirectoryFileConflict,
-    /// A path the stash and the index hold as different kinds of thing: a
-    /// file and a symlink, or either and a submodule. `Refusal` names it.
-    DistinctTypesConflict,
     /// An untracked directory holding a repository of its own, which a stash
     /// would record as a submodule. `Refusal` names it.
     NestedRepository,
@@ -827,48 +821,13 @@ pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
     for (result.conflicts) |c| {
         try conflicted.put(arena, c.path, {});
-        switch (c.kind) {
-            .directory_file => {
-                if (options.refusal) |r| r.set(c.path);
-                return error.DirectoryFileConflict;
-            },
-            .distinct_types => {
-                if (options.refusal) |r| r.set(c.path);
-                return error.DistinctTypesConflict;
-            },
-            .both_modified => {
-                const marked = c.merged orelse continue;
-                const mode = if (c.ours) |o| o.mode else c.theirs.?.mode;
-                try checkWritable(&ctx, c.path, options.refusal);
-                const oid = try db.write(io, .blob, marked);
-                try writes.append(arena, .{ .path = c.path, .blob = .{ .mode = mode, .oid = oid }, .index = false });
-            },
-            .both_added => {
-                const o = c.ours.?;
-                const t = c.theirs.?;
-                if (!o.mode.isBlob() or !t.mode.isBlob() or o.mode == .symlink or t.mode == .symlink) continue;
-                const ours_blob = try db.read(io, o.oid);
-                defer gpa.free(ours_blob.bytes);
-                const theirs_blob = try db.read(io, t.oid);
-                defer gpa.free(theirs_blob.bytes);
-                var marked = merge.blobs(gpa, "", ours_blob.bytes, theirs_blob.bytes, .{ .labels = labels }) catch |err| switch (err) {
-                    error.BinaryBlob => continue,
-                    else => |e| return e,
-                };
-                defer marked.deinit();
-                try checkWritable(&ctx, c.path, options.refusal);
-                const oid = try db.write(io, .blob, marked.bytes);
-                try writes.append(arena, .{ .path = c.path, .blob = .{ .mode = o.mode, .oid = oid }, .index = false });
-            },
-            .modify_delete => {
-                // The side that kept the file keeps it in the working tree:
-                // ours is there already; theirs has to be written.
-                if (c.ours != null) continue;
-                const t = c.theirs.?;
-                try checkWritable(&ctx, c.path, options.refusal);
-                try writes.append(arena, .{ .path = c.path, .blob = .{ .mode = t.mode, .oid = t.oid }, .index = false });
-            },
-        }
+        // What git's merge leaves in the working tree for the path: the
+        // marked file, the side a modify/delete kept, a file moved aside
+        // from a directory.
+        const want = c.result orelse continue;
+        if (sameSide(mapSide(&current_map, c.path), want)) continue;
+        try checkWritable(&ctx, c.path, options.refusal);
+        try writes.append(arena, .{ .path = c.path, .blob = .{ .mode = want.mode, .oid = want.oid }, .index = false });
     }
     var merged_paths: std.StringHashMapUnmanaged(void) = .empty;
     for (result.index.entries.items) |e| {

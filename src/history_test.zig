@@ -18,6 +18,7 @@ const object = @import("object.zig");
 const repo_mod = @import("repo.zig");
 const merging = @import("merging.zig");
 const threeway = @import("threeway.zig");
+const ort = @import("ort.zig");
 
 const Oid = hash.Oid;
 
@@ -109,6 +110,8 @@ fn expectSameOutput(gpa: Allocator, io: Io, a: *testgit.Repo, b: *testgit.Repo, 
 fn readOrMissing(gpa: Allocator, io: Io, repo: *testgit.Repo, path: []const u8) ![]u8 {
     return repo.dir.readFileAlloc(io, path, gpa, .limited(1 << 24)) catch |err| switch (err) {
         error.FileNotFound => gpa.dupe(u8, "<missing>"),
+        // A submodule's checkout, which `git status` has already compared.
+        error.IsDir => gpa.dupe(u8, "<directory>"),
         else => |e| return e,
     };
 }
@@ -1339,8 +1342,8 @@ test "the messages a person would edit come from the caller, and land as an edit
     try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
 }
 
-/// `topic` renames a file and `main` edits it; `topic` also renames a file
-/// `main` leaves alone.
+/// `topic` renames a file and `main` edits it; before that, `topic`
+/// renamed a file `main` leaves alone.
 fn renameScript(repo: *testgit.Repo, io: Io) anyerror!void {
     try repo.writeFile(io, "moved", "1\n2\n3\n4\n5\n6\n7\n8\n");
     try repo.writeFile(io, "quiet", "q1\nq2\nq3\n");
@@ -1359,7 +1362,7 @@ fn renameScript(repo: *testgit.Repo, io: Io) anyerror!void {
     try repo.exec(io, &.{ "commit", "-q", "-am", "edit in place" });
 }
 
-test "a merge git would carry across a rename is refused by name, and one it would not is git's" {
+test "a merge carries one side's edit across the other side's rename, as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try testgit.requireGit(gpa, io);
@@ -1368,31 +1371,26 @@ test "a merge git would carry across a rename is refused by name, and one it wou
     defer pair.deinit();
 
     // git follows `moved` to `elsewhere` and merges the edit into it.
+    try pair.git.exec(io, &.{ "merge", "--no-edit", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
         const target = try merging.resolve(gpa, io, &repo, "topic");
-        var blocked: threeway.Blocked = .{};
-        try std.testing.expectError(error.RenameNotFollowed, merging.start(gpa, io, &repo, target, .{ .who = who, .blocked = &blocked }));
-        try std.testing.expectEqualStrings("moved", blocked.path());
-    }
-    // Nothing was touched but `ORIG_HEAD`, which git writes before any
-    // merge it tries.
-    try expectSameState(&pair, io, &.{ "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE" }, &main_logs);
-
-    // The quiet rename changes nothing git's merge would do without it.
-    try pair.git.exec(io, &.{ "merge", "--no-edit", "quiet" });
-    {
-        var repo = try pair.open(io);
-        defer repo.deinit(io);
-        const target = try merging.resolve(gpa, io, &repo, "quiet");
         var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
         defer outcome.deinit();
         try std.testing.expectEqual(merging.Outcome.Result.merged, outcome.result);
     }
     try expectSameState(&pair, io, &merge_state, &main_logs);
+}
 
-    // With renames off, git's answer is the one this merge gives.
+test "with renames off the same merge conflicts as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, renameScript);
+    defer pair.deinit();
+
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "merge.renames", "false" });
     try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
     {
@@ -1476,4 +1474,259 @@ test "a cherry-pick sequence refused for an untracked file leaves what git's lea
         try sequencer.abort(gpa, io, &repo, who, null);
     }
     try expectSameState(&pair, io, &pick_state, &main_logs);
+}
+
+/// Paths each side turns into something the other cannot take as it is: a
+/// file where the other made a directory, a symlink where the other kept a
+/// file, and a file both sides renamed differently.
+fn shapesScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "df", "a file\n");
+    try repo.writeFile(io, "kind", "a regular file\n");
+    try repo.writeFile(io, "twice", "one\ntwo\nthree\nfour\nfive\nsix\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.exec(io, &.{ "rm", "-q", "df" });
+    try repo.writeFile(io, "df/inside", "now a directory\n");
+    try repo.exec(io, &.{ "mv", "twice", "twice-topic" });
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "topic" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "df", "a file, changed\n");
+    try repo.exec(io, &.{ "rm", "-q", "kind" });
+    const link = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "somewhere");
+    defer repo.gpa.free(link);
+    const cacheinfo = try std.fmt.allocPrint(repo.gpa, "120000,{s},kind", .{std.mem.trimEnd(u8, link, "\n")});
+    defer repo.gpa.free(cacheinfo);
+    try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", cacheinfo });
+    try repo.exec(io, &.{ "mv", "twice", "twice-main" });
+    try repo.exec(io, &.{ "commit", "-q", "-am", "main" });
+    try repo.exec(io, &.{ "checkout", "-q", "-f", "main" });
+}
+
+test "a file meeting a directory, a symlink meeting a file and a double rename stop as git's merge does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, shapesScript);
+    defer pair.deinit();
+
+    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(merging.Outcome.Result.conflicted, outcome.result);
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+
+    // Each side aborts its own, and they agree on what is left.
+    try pair.git.exec(io, &.{ "merge", "--abort" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try merging.abort(gpa, io, &repo, who, null);
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+}
+
+/// Two branches that each merged the other, with conflicting changes to
+/// one file before, so their two merge bases conflict with each other.
+fn conflictingBasesScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "f", "1\n2\n3\n4\n5\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.writeFile(io, "f", "1\ntopic\n3\n4\n5\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "topic one" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "f", "1\nmain\n3\n4\n5\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "main one" });
+    try repo.exec(io, &.{ "merge", "-q", "-s", "ours", "--no-edit", "topic" });
+    try repo.writeFile(io, "f", "1\nmain\n3\n4\nmain five\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "main two" });
+    try repo.exec(io, &.{ "checkout", "-q", "topic" });
+    try repo.exec(io, &.{ "merge", "-q", "-s", "ours", "--no-edit", "main~2" });
+    try repo.writeFile(io, "f", "one\ntopic\n3\n4\n5\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "topic two" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+}
+
+test "a criss-cross merge whose bases conflict leaves git's nested markers" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, conflictingBasesScript);
+    defer pair.deinit();
+
+    for ([_][]const u8{ "merge", "diff3" }) |style| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "merge.conflictStyle", style });
+        try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const target = try merging.resolve(gpa, io, &repo, "topic");
+            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+            defer outcome.deinit();
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "merge", "--abort" });
+    }
+}
+
+/// `main` moves a directory; `topic` edits a file in it and adds one.
+fn movedDirectoryScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "lib/a", "a1\na2\na3\na4\na5\na6\n");
+    try repo.writeFile(io, "lib/b", "b1\nb2\nb3\nb4\nb5\nb6\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.writeFile(io, "lib/a", "a1\na2\nA3\na4\na5\na6\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "edit a" });
+    try repo.writeFile(io, "lib/c", "new\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "add c" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.exec(io, &.{ "mv", "lib", "src" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "move lib" });
+}
+
+test "cherry-picks and a rebase follow a moved directory as git's do" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, movedDirectoryScript);
+    defer pair.deinit();
+
+    // The edit follows `lib/a` to `src/a`; the new file is a location
+    // conflict, as git's default `merge.directoryRenames` makes it.
+    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const commits = try revList(gpa, io, &pair.ours, "main..topic");
+        defer gpa.free(commits);
+        var outcome = try sequencer.pick(gpa, io, &repo, commits, .{ .who = who });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "cherry-pick", "--abort" });
+
+    // Rebased the other way, the moved directory takes topic's commits.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "config", "merge.directoryRenames", "true" });
+        try r.exec(io, &.{ "checkout", "-q", "topic" });
+    }
+    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+}
+
+/// A submodule checked out in place, which `main` moves one commit on and
+/// `topic` two.
+fn submoduleScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "top", "top\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "init", "-q", "-b", "main", "sub" });
+    try repo.writeFile(io, "sub/s", "s1\n");
+    try repo.exec(io, &.{ "-C", "sub", "add", "-A" });
+    try repo.exec(io, &.{ "-C", "sub", "commit", "-q", "-m", "s1" });
+    try repo.exec(io, &.{ "submodule", "add", "-q", "./sub", "sub" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "add sub" });
+    try repo.writeFile(io, "sub/s", "s2\n");
+    try repo.exec(io, &.{ "-C", "sub", "commit", "-q", "-am", "s2" });
+    try repo.writeFile(io, "sub/s", "s3\n");
+    try repo.exec(io, &.{ "-C", "sub", "commit", "-q", "-am", "s3" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.exec(io, &.{ "add", "sub" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "sub to s3" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.exec(io, &.{ "-C", "sub", "checkout", "-q", "HEAD~1" });
+    try repo.exec(io, &.{ "add", "sub" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "sub to s2" });
+}
+
+test "a submodule both sides moved forward is fast-forwarded as git's merge does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, submoduleScript);
+    defer pair.deinit();
+
+    try pair.git.exec(io, &.{ "merge", "--no-edit", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(merging.Outcome.Result.merged, outcome.result);
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+}
+
+/// The submodule's two sides diverge, and a merge of them exists in it.
+fn divergedSubmoduleScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "top", "top\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "init", "-q", "-b", "main", "sub" });
+    try repo.writeFile(io, "sub/s", "s1\n");
+    try repo.exec(io, &.{ "-C", "sub", "add", "-A" });
+    try repo.exec(io, &.{ "-C", "sub", "commit", "-q", "-m", "s1" });
+    try repo.exec(io, &.{ "submodule", "add", "-q", "./sub", "sub" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "add sub" });
+    try repo.exec(io, &.{ "-C", "sub", "checkout", "-q", "-b", "left" });
+    try repo.writeFile(io, "sub/left", "l\n");
+    try repo.exec(io, &.{ "-C", "sub", "add", "-A" });
+    try repo.exec(io, &.{ "-C", "sub", "commit", "-q", "-m", "left" });
+    try repo.exec(io, &.{ "-C", "sub", "checkout", "-q", "-b", "right", "main" });
+    try repo.writeFile(io, "sub/right", "r\n");
+    try repo.exec(io, &.{ "-C", "sub", "add", "-A" });
+    try repo.exec(io, &.{ "-C", "sub", "commit", "-q", "-m", "right" });
+    try repo.exec(io, &.{ "-C", "sub", "checkout", "-q", "-b", "joined" });
+    try repo.exec(io, &.{ "-C", "sub", "merge", "-q", "--no-edit", "left" });
+    try repo.exec(io, &.{ "-C", "sub", "checkout", "-q", "right" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.exec(io, &.{ "add", "sub" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "sub to right" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.exec(io, &.{ "-C", "sub", "checkout", "-q", "left" });
+    try repo.exec(io, &.{ "add", "sub" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "sub to left" });
+}
+
+test "a submodule the two sides took different ways is a conflict as git's merge leaves it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedSubmoduleScript);
+    defer pair.deinit();
+
+    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(merging.Outcome.Result.conflicted, outcome.result);
+        try std.testing.expectEqual(ort.MessageKind.submodule_possible_resolution, outcome.messages[0].kind);
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
 }

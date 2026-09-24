@@ -395,12 +395,26 @@ pub fn parentsOf(db: *const odb_mod.Odb, oid: Oid, parents: []const Oid) []const
 /// The result is the caller's. An empty result means the two commits share
 /// no history, which is what an unrelated-histories merge looks like.
 pub fn mergeBases(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid) Error![]Oid {
+    return mergeBasesWith(gpa, io, db, a, b, &.{});
+}
+
+/// A commit that exists only for the length of a computation: a recursive
+/// merge's merged base, whose parents are the two bases it merged and whose
+/// date is git's zero.
+pub const Virtual = struct {
+    oid: Oid,
+    parents: []const Oid,
+};
+
+/// `mergeBases`, with `virtuals` read in place of the object database
+/// wherever their names come up.
+pub fn mergeBasesWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid, virtuals: []const Virtual) Error![]Oid {
     if (a.eql(b)) {
         const out = try gpa.alloc(Oid, 1);
         out[0] = a;
         return out;
     }
-    var painter: Painter = .{ .gpa = gpa, .io = io, .db = db };
+    var painter: Painter = .{ .gpa = gpa, .io = io, .db = db, .virtuals = virtuals };
     defer painter.deinit();
 
     var found: std.ArrayList(Oid) = .empty;
@@ -455,6 +469,7 @@ const Painter = struct {
     gpa: Allocator,
     io: Io,
     db: *odb_mod.Odb,
+    virtuals: []const Virtual = &.{},
     commits: std.AutoHashMapUnmanaged(OidKey, Loaded) = .empty,
     flags: std.AutoHashMapUnmanaged(OidKey, Flags) = .empty,
 
@@ -479,6 +494,13 @@ const Painter = struct {
 
     fn load(p: *Painter, oid: Oid) Error!Loaded {
         if (p.commits.get(OidKey.of(oid))) |loaded| return loaded;
+        for (p.virtuals) |v| {
+            if (!v.oid.eql(oid)) continue;
+            const loaded: Loaded = .{ .parents = try p.gpa.dupe(Oid, v.parents), .time = 0 };
+            errdefer p.gpa.free(loaded.parents);
+            try p.commits.put(p.gpa, OidKey.of(oid), loaded);
+            return loaded;
+        }
         const found = try p.db.read(p.io, oid);
         defer p.gpa.free(found.bytes);
         if (found.type != .commit) return error.NotACommit;

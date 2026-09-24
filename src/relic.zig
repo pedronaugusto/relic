@@ -91,6 +91,7 @@ pub const todo = @import("todo.zig");
 pub const sequencer = @import("sequencer.zig");
 pub const patchid = @import("patchid.zig");
 pub const similarity = @import("similarity.zig");
+pub const ort = @import("ort.zig");
 pub const rebase = @import("rebase.zig");
 
 const builtin = @import("builtin");
@@ -125,5 +126,6 @@ test {
         _ = @import("shallow_test.zig");
         _ = @import("partial_test.zig");
         _ = @import("history_test.zig");
+        _ = @import("ort_test.zig");
     }
 }

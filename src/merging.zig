@@ -8,8 +8,8 @@
 //! `ORIG_HEAD` and `AUTO_MERGE` written, so `git commit` or `git merge
 //! --continue` finishes it and `git merge --abort` undoes it -- and the same
 //! is true the other way round. Several merge bases are merged into one
-//! first, as git does, as long as they merge cleanly; an octopus of several
-//! heads is not done here.
+//! first, as git does, nested conflict markers and all; an octopus of
+//! several heads is not done here.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -21,10 +21,10 @@ const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const revwalk = @import("revwalk.zig");
 const threeway = @import("threeway.zig");
+const ort = @import("ort.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
 const message = @import("message.zig");
-const abbrev = @import("abbrev.zig");
 const wildmatch = @import("wildmatch.zig");
 const worktree = @import("worktree.zig");
 const repo_mod = @import("repo.zig");
@@ -48,10 +48,6 @@ pub const Error = error{
     UnrelatedHistories,
     /// `--ff-only` was asked for and the merge is not a fast-forward.
     NotFastForward,
-    /// The merge bases of a criss-cross merge conflict with each other. git
-    /// merges them anyway with nested conflict markers; this release does
-    /// not.
-    ConflictingMergeBases,
     /// The name given does not name a commit.
     NotACommit,
     /// The name given is an annotated tag. git merges its commit and quotes
@@ -157,6 +153,8 @@ pub const Outcome = struct {
     commit: ?Oid = null,
     /// The paths left conflicted, sorted.
     conflicts: []const threeway.Conflict = &.{},
+    /// What git's merge says about the paths it merged, grouped by path.
+    messages: []const ort.Message = &.{},
 
     pub const Result = enum {
         /// The commit was already part of the branch; nothing changed.
@@ -236,23 +234,14 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     }
     if (fast_forward == .only) return error.NotFastForward;
 
-    // One base, or several merged into one, or none at all.
-    var base_tree: ?Oid = null;
-    var base_label: []const u8 = "empty tree";
-    if (bases.len == 1) {
-        base_tree = try repo.commitTree(io, bases[0]);
-        var buf: [hash.max_hex_len]u8 = undefined;
-        base_label = try arena.dupe(u8, try abbrev.unique(io, &repo.odb, bases[0], abbrev.defaultLength(&repo.config, &repo.odb), &buf));
-    } else if (bases.len > 1) {
-        base_tree = try virtualBase(gpa, io, repo, bases, 0);
-        base_label = "merged common ancestors";
-    }
-
+    // The bases oldest first, as git hands them to its recursive merge.
+    const reversed = try arena.alloc(Oid, bases.len);
+    for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
     const style = options.conflict_style orelse configuredStyle(repo);
-    var outcome = try threeway.apply(gpa, io, repo, &index, base_tree, our_tree, their_tree, .{
+    var outcome = try threeway.applyCommits(gpa, io, repo, &index, ours, target.oid, reversed, .{
         .blob = .{
             .conflict_style = style,
-            .labels = .{ .ours = "HEAD", .base = base_label, .theirs = target.name },
+            .labels = .{ .ours = "HEAD", .theirs = target.name },
             .favor = options.favor,
             .algorithm = .histogram,
         },
@@ -272,6 +261,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     }
     const conflicts = try arena.dupe(threeway.Conflict, outcome.conflicts);
     for (conflicts) |*c| c.path = try arena.dupe(u8, c.path);
+    const messages = try ort.dupeMessages(arena, outcome.messages);
 
     if (outcome.isClean() and options.commit) {
         // The sign-off goes on the commit and never into `MERGE_MSG`.
@@ -288,7 +278,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         const log_message = try std.fmt.allocPrint(arena, "{s}: Merge made by the 'ort' strategy.", .{reflog_action});
         try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
         try removeMergeState(io, repo);
-        return .{ .gpa = gpa, .arena = arena_instance.state, .result = .merged, .commit = commit };
+        return .{ .gpa = gpa, .arena = arena_instance.state, .result = .merged, .commit = commit, .messages = messages };
     }
 
     // Stopped: with conflicts, or before committing as asked.
@@ -312,6 +302,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         .arena = arena_instance.state,
         .result = if (outcome.isClean()) .staged else .conflicted,
         .conflicts = conflicts,
+        .messages = messages,
     };
 }
 
@@ -452,33 +443,4 @@ fn title(arena: Allocator, io: Io, repo: *Repository, target: Target, head: head
     }
     if (suppressed) return std.fmt.allocPrint(arena, "Merge {s} '{s}'\n", .{ what, target.name });
     return std.fmt.allocPrint(arena, "Merge {s} '{s}' into {s}\n", .{ what, target.name, current });
-}
-
-/// The tree two merge bases merge into, as git's recursive merge makes it:
-/// the older folded with the newer, against their own merge base. A fold
-/// that conflicts is refused rather than resolved with nested markers, and
-/// so are three bases or more, whose folds git makes against commits that
-/// exist only inside the merge.
-fn virtualBase(gpa: Allocator, io: Io, repo: *Repository, bases: []const Oid, depth: u32) Error!Oid {
-    if (depth > 16 or bases.len != 2) return error.ConflictingMergeBases;
-    // Newest first in, oldest first folded.
-    const older = bases[1];
-    const newer = bases[0];
-    const inner = try revwalk.mergeBases(gpa, io, &repo.odb, older, newer);
-    defer gpa.free(inner);
-    const ancestor: ?Oid = switch (inner.len) {
-        0 => null,
-        1 => try repo.commitTree(io, inner[0]),
-        else => try virtualBase(gpa, io, repo, inner, depth + 1),
-    };
-    var result = try merge.treesWithOptions(gpa, io, &repo.odb, ancestor, try repo.commitTree(io, older), try repo.commitTree(io, newer), .{
-        .content_merge = true,
-        .blob = .{ .algorithm = .histogram },
-    });
-    defer result.deinit();
-    if (!result.isClean()) return error.ConflictingMergeBases;
-    return merge.tree(io, &repo.odb, &result) catch |err| switch (err) {
-        error.MergeConflict => unreachable,
-        else => |e| return e,
-    };
 }

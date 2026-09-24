@@ -1,12 +1,11 @@
 //! Three-way merges of blob contents and trees.
 //!
-//! The blob merge is xdiff's, decision for decision, because the conflict
-//! markers a merge leaves in a file are text a person reads and edits and a
-//! tool compares: independent edits compose, overlapping edits get markers,
-//! and a conflict is narrowed to the lines the two sides really disagree on
-//! exactly where git narrows it. The tree merge is stage-only by default, or
-//! follows the per-path rules of git's merge machinery when content merging
-//! is asked for.
+//! The blob merge is `blobmerge.zig`'s, xdiff's decision for decision. The
+//! tree merge here is stage-only by default: every path both sides changed
+//! differently is left at stages 1, 2 and 3, which is not what any git
+//! command does, and is for a caller that wants to decide every path
+//! itself. With `content_merge` it is git's merge, `ort.zig`'s: renames
+//! followed, files merged, conflicts recorded as git records them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -17,8 +16,9 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const textdiff = @import("textdiff.zig");
-const similarity = @import("similarity.zig");
 const attributes = @import("attributes.zig");
+const blobmerge = @import("blobmerge.zig");
+const ort = @import("ort.zig");
 
 const Oid = hash.Oid;
 
@@ -28,497 +28,25 @@ pub const Error = error{
     NotATree,
     /// The trees nest deeper than the walk will go.
     TreeTooDeep,
-    /// A path's `merge` attribute names a driver `merge.<name>.driver`
-    /// configures, which is a program this merge does not run.
-    UnsupportedMergeDriver,
-    /// git's merge would pair a path one side deleted with a path that side
-    /// added, and merge across the rename; this merge does not follow
-    /// renames, and its result would differ. `TreeOptions.blocked` gets
-    /// the deleted path.
-    RenameNotFollowed,
-} || attributes.Error || Allocator.Error || odb_mod.Error || object.TreeParseError ||
+} || ort.Error || attributes.Error || Allocator.Error || odb_mod.Error || object.TreeParseError ||
     object.Tree.Builder.AddError || index_mod.ReadError;
 
 /// A content merge refuses data git classifies as binary.
-pub const BlobError = error{BinaryBlob} || Allocator.Error;
-
-/// Which conflict body to write, which is what `merge.conflictStyle` names.
-pub const ConflictStyle = enum {
-    /// Ours and theirs, separated by `=======`.
-    merge,
-    /// Also show the common ancestor after `||||||| base`.
-    diff3,
-    /// `diff3`, with the lines both sides agree on at either end of a
-    /// conflict moved out of it.
-    zdiff3,
-
-    /// The style a `merge.conflictStyle` value names, or `null` for one
-    /// this release does not know.
-    pub fn parse(text: []const u8) ?ConflictStyle {
-        if (std.mem.eql(u8, text, "merge")) return .merge;
-        if (std.mem.eql(u8, text, "diff3")) return .diff3;
-        if (std.mem.eql(u8, text, "zdiff3")) return .zdiff3;
-        return null;
-    }
-};
-
-/// Which side a conflict resolves to without markers: `-X ours`, `-X
-/// theirs`, or `merge=union`, which keeps both.
-pub const Favor = enum { none, ours, theirs, union_ };
-
+pub const BlobError = blobmerge.BlobError;
+/// Which conflict body to write: `merge.conflictStyle`.
+pub const ConflictStyle = blobmerge.ConflictStyle;
+/// Which side a conflict resolves to without markers.
+pub const Favor = blobmerge.Favor;
 /// The words after the markers.
-pub const Labels = struct {
-    ours: []const u8 = "ours",
-    base: []const u8 = "base",
-    theirs: []const u8 = "theirs",
-};
-
+pub const Labels = blobmerge.Labels;
 /// Options for a blob merge.
-pub const BlobOptions = struct {
-    conflict_style: ConflictStyle = .merge,
-    labels: Labels = .{},
-    /// How many characters each marker is: git's `conflict-marker-size`
-    /// attribute.
-    marker_size: u8 = 7,
-    favor: Favor = .none,
-    /// The line diff the two sides are taken with. `git merge-file`
-    /// uses Myers; the merge machinery behind `merge`, `cherry-pick`,
-    /// `revert` and `rebase` uses histogram.
-    algorithm: textdiff.Algorithm = .myers,
-};
-
+pub const BlobOptions = blobmerge.BlobOptions;
 /// The owned bytes produced by a blob merge.
-pub const BlobResult = struct {
-    gpa: Allocator,
-    bytes: []u8,
-    status: Status,
-
-    pub const Status = enum { clean, conflicted };
-
-    pub fn isClean(result: *const BlobResult) bool {
-        return result.status == .clean;
-    }
-
-    pub fn deinit(result: *BlobResult) void {
-        result.gpa.free(result.bytes);
-        result.* = undefined;
-    }
-};
-
-/// Merge `ours` and `theirs` against `ancestor`.
-///
-/// This is xdiff's merge at the level git uses, decision for decision: the
-/// two sides are diffed against the ancestor, changes that touch or overlap
-/// become one conflict, and a conflict whose two sides share lines is diffed
-/// again and split around them, with conflicts fewer than four lines apart
-/// joined back together. `diff3` shows the ancestor and so refines nothing;
-/// `zdiff3` moves only the shared lines at either end out. Binary data is
-/// refused when the three inputs need an actual merge; an unchanged side
-/// still takes the other side byte for byte.
-pub fn blobs(
-    gpa: Allocator,
-    ancestor: []const u8,
-    ours: []const u8,
-    theirs: []const u8,
-    options: BlobOptions,
-) BlobError!BlobResult {
-    if (std.mem.eql(u8, ours, theirs)) return ownedBlob(gpa, ours, .clean);
-    if (std.mem.eql(u8, ours, ancestor)) return ownedBlob(gpa, theirs, .clean);
-    if (std.mem.eql(u8, theirs, ancestor)) return ownedBlob(gpa, ours, .clean);
-    if (textdiff.isBinary(ancestor) or textdiff.isBinary(ours) or textdiff.isBinary(theirs)) {
-        return error.BinaryBlob;
-    }
-
-    const base_lines = try textdiff.splitLines(gpa, ancestor);
-    defer gpa.free(base_lines);
-    const our_lines = try textdiff.splitLines(gpa, ours);
-    defer gpa.free(our_lines);
-    const their_lines = try textdiff.splitLines(gpa, theirs);
-    defer gpa.free(their_lines);
-    // The merge machinery diffs with no indentation heuristic: the slide it
-    // wants is the plain one.
-    const diff_options: textdiff.Options = .{ .algorithm = options.algorithm, .indent_heuristic = false };
-    const our_changes = try textdiff.diffLines(gpa, base_lines, our_lines, diff_options);
-    defer gpa.free(our_changes);
-    const their_changes = try textdiff.diffLines(gpa, base_lines, their_lines, diff_options);
-    defer gpa.free(their_changes);
-
-    if (our_changes.len == 0) return ownedBlob(gpa, theirs, .clean);
-    if (their_changes.len == 0) return ownedBlob(gpa, ours, .clean);
-
-    var hunks: std.ArrayList(Hunk) = .empty;
-    defer hunks.deinit(gpa);
-    const lines: Sides = .{ .base = base_lines, .ours = our_lines, .theirs = their_lines };
-    try collectHunks(gpa, &hunks, lines, our_changes, their_changes);
-
-    switch (options.conflict_style) {
-        .zdiff3 => trimConflicts(hunks.items, our_lines, their_lines),
-        .merge => {
-            try refineConflicts(gpa, &hunks, our_lines, their_lines, diff_options);
-            joinCloseConflicts(&hunks);
-        },
-        .diff3 => {},
-    }
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    var conflicts: usize = 0;
-    var at: isize = 0;
-    for (hunks.items) |*h| {
-        if (options.favor != .none and h.mode == .conflict) h.mode = switch (options.favor) {
-            .ours => .ours,
-            .theirs => .theirs,
-            .union_ => .both,
-            .none => unreachable,
-        };
-        switch (h.mode) {
-            .conflict => {
-                conflicts += 1;
-                try writeConflict(gpa, &out, lines, at, h.*, options);
-            },
-            .ours, .theirs, .both => {
-                try copyLines(gpa, &out, span(our_lines, at, h.at1 - at), false, false);
-                if (h.mode != .theirs) {
-                    try copyLines(gpa, &out, span(our_lines, h.at1, h.len1), crNeeded(lines, h.*), h.mode == .both);
-                }
-                if (h.mode != .ours) {
-                    try copyLines(gpa, &out, span(their_lines, h.at2, h.len2), false, false);
-                }
-            },
-            .identical => continue,
-        }
-        at = h.at1 + h.len1;
-    }
-    try copyLines(gpa, &out, our_lines[@intCast(at)..], false, false);
-    return .{
-        .gpa = gpa,
-        .bytes = try out.toOwnedSlice(gpa),
-        .status = if (conflicts == 0) .clean else .conflicted,
-    };
-}
-
-/// One region of the merge: where each of the three texts has it, and which
-/// of them it is taken from. `0` is the ancestor, `1` ours and `2` theirs,
-/// and each pair is a first line and a count of lines.
-///
-/// Signed, as xdiff's are: a region appended only to be joined into the one
-/// before it can start before the first line.
-const Hunk = struct {
-    mode: Mode,
-    at0: isize,
-    len0: isize,
-    at1: isize,
-    len1: isize,
-    at2: isize,
-    len2: isize,
-
-    fn make(mode: Mode, at0: isize, len0: isize, at1: isize, len1: isize, at2: isize, len2: isize) Hunk {
-        return .{ .mode = mode, .at0 = at0, .len0 = len0, .at1 = at1, .len1 = len1, .at2 = at2, .len2 = len2 };
-    }
-
-    const Mode = enum {
-        conflict,
-        /// Only our side changed it.
-        ours,
-        /// Only their side changed it.
-        theirs,
-        /// Both, kept one after the other: what a union merge asks for.
-        both,
-        /// Both sides made the same change, found when refining.
-        identical,
-    };
-};
-
-const Sides = struct {
-    base: []const textdiff.Line,
-    ours: []const textdiff.Line,
-    theirs: []const textdiff.Line,
-};
-
-/// `xdl_append_merge`: a region that touches the previous one joins it, and
-/// the joined region is a conflict unless both came from the same side.
-fn appendHunk(gpa: Allocator, hunks: *std.ArrayList(Hunk), h: Hunk) Allocator.Error!void {
-    if (hunks.items.len != 0) {
-        const m = &hunks.items[hunks.items.len - 1];
-        if (h.at1 <= m.at1 + m.len1 or h.at2 <= m.at2 + m.len2) {
-            if (h.mode != m.mode) m.mode = .conflict;
-            m.len0 = h.at0 + h.len0 - m.at0;
-            m.len1 = h.at1 + h.len1 - m.at1;
-            m.len2 = h.at2 + h.len2 - m.at2;
-            return;
-        }
-    }
-    try hunks.append(gpa, h);
-}
-
-/// Walk the two edit scripts together, as `xdl_do_merge` does. Changes
-/// that touch or overlap become one conflict; the same change made on both
-/// sides is no change at all.
-fn collectHunks(
-    gpa: Allocator,
-    hunks: *std.ArrayList(Hunk),
-    lines: Sides,
-    ours: []const textdiff.Change,
-    theirs: []const textdiff.Change,
-) Allocator.Error!void {
-    const base_len: isize = @intCast(lines.base.len);
-    const our_len: isize = @intCast(lines.ours.len);
-    const their_len: isize = @intCast(lines.theirs.len);
-    var oi: usize = 0;
-    var ti: usize = 0;
-    while (oi < ours.len and ti < theirs.len) {
-        const x1 = Script.of(ours[oi]);
-        const x2 = Script.of(theirs[ti]);
-        if (x1.old_at + x1.old_len < x2.old_at) {
-            try appendHunk(gpa, hunks, .make(.ours, x1.old_at, x1.old_len, x1.new_at, x1.new_len, x2.new_at - x2.old_at + x1.old_at, x1.old_len));
-            oi += 1;
-            continue;
-        }
-        if (x2.old_at + x2.old_len < x1.old_at) {
-            try appendHunk(gpa, hunks, .make(.theirs, x2.old_at, x2.old_len, x1.new_at - x1.old_at + x2.old_at, x2.old_len, x2.new_at, x2.new_len));
-            ti += 1;
-            continue;
-        }
-        const identical = x1.old_at == x2.old_at and x1.old_len == x2.old_len and x1.new_len == x2.new_len and
-            sameLines(span(lines.ours, x1.new_at, x1.new_len), span(lines.theirs, x2.new_at, x2.new_len));
-        if (!identical) {
-            const off = x1.old_at - x2.old_at;
-            const ffo = off + x1.old_len - x2.old_len;
-            var at0 = x1.old_at;
-            var at1 = x1.new_at;
-            var at2 = x2.new_at;
-            if (off > 0) {
-                at0 -= off;
-                at1 -= off;
-            } else at2 += off;
-            var len0 = x1.old_at + x1.old_len - at0;
-            var len1 = x1.new_at + x1.new_len - at1;
-            var len2 = x2.new_at + x2.new_len - at2;
-            if (ffo < 0) {
-                len0 -= ffo;
-                len1 -= ffo;
-            } else len2 += ffo;
-            try appendHunk(gpa, hunks, .make(.conflict, at0, len0, at1, len1, at2, len2));
-        }
-        const end1 = x1.old_at + x1.old_len;
-        const end2 = x2.old_at + x2.old_len;
-        if (end1 >= end2) ti += 1;
-        if (end2 >= end1) oi += 1;
-    }
-    while (oi < ours.len) : (oi += 1) {
-        const x1 = Script.of(ours[oi]);
-        try appendHunk(gpa, hunks, .make(.ours, x1.old_at, x1.old_len, x1.new_at, x1.new_len, x1.old_at + their_len - base_len, x1.old_len));
-    }
-    while (ti < theirs.len) : (ti += 1) {
-        const x2 = Script.of(theirs[ti]);
-        try appendHunk(gpa, hunks, .make(.theirs, x2.old_at, x2.old_len, x2.old_at + our_len - base_len, x2.old_len, x2.new_at, x2.new_len));
-    }
-}
-
-/// One change of an edit script in xdiff's terms, signed, because the
-/// offsets the walk computes pass through negative values on the way.
-const Script = struct {
-    old_at: isize,
-    old_len: isize,
-    new_at: isize,
-    new_len: isize,
-
-    fn of(c: textdiff.Change) Script {
-        return .{
-            .old_at = @intCast(c.old_start),
-            .old_len = @intCast(c.old_count),
-            .new_at = @intCast(c.new_start),
-            .new_len = @intCast(c.new_count),
-        };
-    }
-};
-
-/// Lines `at .. at + len` of `lines`.
-fn span(lines: []const textdiff.Line, at: isize, len: isize) []const textdiff.Line {
-    return lines[@intCast(at)..][0..@intCast(len)];
-}
-
-fn sameLines(a: []const textdiff.Line, b: []const textdiff.Line) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| if (!std.mem.eql(u8, x, y)) return false;
-    return true;
-}
-
-/// `xdl_refine_conflicts`: diff the two sides of each conflict against each
-/// other and keep only the runs where they differ as conflicts. Nothing is
-/// refined when one side is empty.
-fn refineConflicts(
-    gpa: Allocator,
-    hunks: *std.ArrayList(Hunk),
-    our_lines: []const textdiff.Line,
-    their_lines: []const textdiff.Line,
-    diff_options: textdiff.Options,
-) Allocator.Error!void {
-    var at: usize = 0;
-    while (at < hunks.items.len) : (at += 1) {
-        const m = hunks.items[at];
-        if (m.mode != .conflict or m.len1 == 0 or m.len2 == 0) continue;
-        const changes = try textdiff.diffLines(
-            gpa,
-            span(our_lines, m.at1, m.len1),
-            span(their_lines, m.at2, m.len2),
-            diff_options,
-        );
-        defer gpa.free(changes);
-        if (changes.len == 0) {
-            hunks.items[at].mode = .identical;
-            continue;
-        }
-        for (changes, 0..) |c, n| {
-            const piece: Hunk = .{
-                .mode = .conflict,
-                .at0 = m.at0,
-                .len0 = m.len0,
-                .at1 = m.at1 + @as(isize, @intCast(c.old_start)),
-                .len1 = @intCast(c.old_count),
-                .at2 = m.at2 + @as(isize, @intCast(c.new_start)),
-                .len2 = @intCast(c.new_count),
-            };
-            if (n == 0) {
-                hunks.items[at] = piece;
-            } else {
-                at += 1;
-                try hunks.insert(gpa, at, piece);
-            }
-        }
-    }
-}
-
-/// `xdl_simplify_non_conflicts`: two conflicts with three lines or fewer
-/// between them read more easily as one.
-fn joinCloseConflicts(hunks: *std.ArrayList(Hunk)) void {
-    var at: usize = 0;
-    while (at + 1 < hunks.items.len) {
-        const m = &hunks.items[at];
-        const next = hunks.items[at + 1];
-        const begin = m.at1 + m.len1;
-        if (m.mode != .conflict or next.mode != .conflict or next.at1 - begin > 3) {
-            at += 1;
-            continue;
-        }
-        m.len1 = next.at1 + next.len1 - m.at1;
-        m.len2 = next.at2 + next.len2 - m.at2;
-        _ = hunks.orderedRemove(at + 1);
-    }
-}
-
-/// `xdl_refine_zdiff3_conflicts`: move the lines both sides agree on at the
-/// start and the end of each conflict out of it.
-fn trimConflicts(hunks: []Hunk, our_lines: []const textdiff.Line, their_lines: []const textdiff.Line) void {
-    for (hunks) |*m| {
-        if (m.mode != .conflict) continue;
-        while (m.len1 != 0 and m.len2 != 0 and
-            std.mem.eql(u8, our_lines[@intCast(m.at1)], their_lines[@intCast(m.at2)]))
-        {
-            m.len1 -= 1;
-            m.len2 -= 1;
-            m.at1 += 1;
-            m.at2 += 1;
-        }
-        while (m.len1 != 0 and m.len2 != 0 and
-            std.mem.eql(u8, our_lines[@intCast(m.at1 + m.len1 - 1)], their_lines[@intCast(m.at2 + m.len2 - 1)]))
-        {
-            m.len1 -= 1;
-            m.len2 -= 1;
-        }
-    }
-}
-
-/// Append lines; with `add_newline`, end the last one with a newline if it
-/// has none, as a carriage return and a newline under `crlf`.
-fn copyLines(
-    gpa: Allocator,
-    out: *std.ArrayList(u8),
-    lines: []const textdiff.Line,
-    crlf: bool,
-    add_newline: bool,
-) Allocator.Error!void {
-    if (lines.len == 0) return;
-    for (lines) |line| try out.appendSlice(gpa, line);
-    if (add_newline) {
-        const last = lines[lines.len - 1];
-        if (last.len == 0 or last[last.len - 1] != '\n') {
-            if (crlf) try out.append(gpa, '\r');
-            try out.append(gpa, '\n');
-        }
-    }
-}
-
-/// `is_eol_crlf`: whether line `i` ends in a carriage return and a newline,
-/// looking at the line before when the last has no newline at all. `null`
-/// when there is nothing to tell by.
-fn endsCrlf(lines: []const textdiff.Line, i: isize) ?bool {
-    const n: isize = @intCast(lines.len);
-    if (i < n - 1) return crlfLine(lines[@intCast(i)]);
-    if (n == 0) return null;
-    const line = lines[@intCast(i)];
-    if (line.len != 0 and line[line.len - 1] == '\n') return crlfLine(line);
-    if (i == 0) return null;
-    return crlfLine(lines[@intCast(i - 1)]);
-}
-
-fn crlfLine(line: []const u8) bool {
-    return line.len > 1 and line[line.len - 2] == '\r';
-}
-
-/// `is_cr_needed`: markers end in a carriage return when both sides' lines
-/// before the conflict, and the ancestor's first line, do.
-fn crNeeded(lines: Sides, h: Hunk) bool {
-    var needs = endsCrlf(lines.ours, if (h.at1 > 0) h.at1 - 1 else 0);
-    if (needs != false) needs = endsCrlf(lines.theirs, if (h.at2 > 0) h.at2 - 1 else 0);
-    if (needs != false) needs = endsCrlf(lines.base, 0);
-    return needs orelse false;
-}
-
-fn writeMarker(
-    gpa: Allocator,
-    out: *std.ArrayList(u8),
-    c: u8,
-    size: u8,
-    label: []const u8,
-    crlf: bool,
-) Allocator.Error!void {
-    try out.appendNTimes(gpa, c, size);
-    if (label.len != 0) {
-        try out.append(gpa, ' ');
-        try out.appendSlice(gpa, label);
-    }
-    if (crlf) try out.append(gpa, '\r');
-    try out.append(gpa, '\n');
-}
-
-/// `fill_conflict_hunk`: the lines before the conflict, then the markers
-/// around each side.
-fn writeConflict(
-    gpa: Allocator,
-    out: *std.ArrayList(u8),
-    lines: Sides,
-    at: isize,
-    h: Hunk,
-    options: BlobOptions,
-) Allocator.Error!void {
-    const crlf = crNeeded(lines, h);
-    const size = if (options.marker_size == 0) 7 else options.marker_size;
-    try copyLines(gpa, out, span(lines.ours, at, h.at1 - at), false, false);
-    try writeMarker(gpa, out, '<', size, options.labels.ours, crlf);
-    try copyLines(gpa, out, span(lines.ours, h.at1, h.len1), crlf, true);
-    if (options.conflict_style != .merge) {
-        try writeMarker(gpa, out, '|', size, options.labels.base, crlf);
-        try copyLines(gpa, out, span(lines.base, h.at0, h.len0), crlf, true);
-    }
-    try writeMarker(gpa, out, '=', size, "", crlf);
-    try copyLines(gpa, out, span(lines.theirs, h.at2, h.len2), crlf, true);
-    try writeMarker(gpa, out, '>', size, options.labels.theirs, crlf);
-}
-
-fn ownedBlob(gpa: Allocator, bytes: []const u8, status: BlobResult.Status) Allocator.Error!BlobResult {
-    return .{ .gpa = gpa, .bytes = try gpa.dupe(u8, bytes), .status = status };
-}
+pub const BlobResult = blobmerge.BlobResult;
+/// Merge `ours` and `theirs` against `ancestor`: `blobmerge.blobs`.
+pub const blobs = blobmerge.blobs;
+/// Where a refusal writes the path that caused it.
+pub const Blocked = blobmerge.Blocked;
 
 /// One side's view of a path.
 pub const Side = struct {
@@ -537,30 +65,40 @@ pub const Conflict = struct {
     /// Absent when their side deleted it.
     theirs: ?Side,
     kind: Kind,
-    /// Conflict-marked content for a text conflict, or the surviving content
-    /// of a modify/delete conflict, when content merging was requested.
-    /// Owned by the result.
-    merged: ?[]const u8 = null,
     /// What git leaves in the working tree for the path, and records in
     /// `AUTO_MERGE`, when content merging was requested: the conflict-marked
-    /// blob, which is written to the object database; the surviving side of
-    /// a modify/delete; our side where nothing could be merged.
+    /// blob, the surviving side of a modify/delete, our side where nothing
+    /// could be merged. `null` where the merged tree has nothing there.
     result: ?Side = null,
 
-    /// Why the two sides could not be reconciled.
+    /// Which stages the index holds for the path -- the shapes `git status`
+    /// names, from `UU` to `DD`.
     pub const Kind = enum {
-        /// Both sides changed the content, or the mode, differently.
+        /// Stages 1, 2 and 3: both sides changed it. `UU`.
         both_modified,
-        /// One side changed it and the other deleted it.
+        /// Stage 1 and one of 2 and 3: one side changed it and the other
+        /// deleted it. `UD` and `DU`.
         modify_delete,
-        /// Both sides added it, with different content.
+        /// Stages 2 and 3: both sides added it. `AA`.
         both_added,
-        /// One side has a file where the other has a directory, and neither
-        /// went away.
-        directory_file,
-        /// The two sides hold different kinds of thing at the path: a file
-        /// and a symlink, or either and a submodule.
-        distinct_types,
+        /// Stage 1 alone: both sides took it away, one of them by a rename
+        /// the other does not share. `DD`.
+        deleted_by_both,
+        /// Stage 2 alone: ours put it there, and where it goes is the
+        /// conflict. `AU`.
+        added_by_ours,
+        /// Stage 3 alone: theirs put it there. `UA`.
+        added_by_theirs,
+
+        /// The shape of these stages.
+        pub fn of(base: bool, ours: bool, theirs: bool) Kind {
+            if (base and ours and theirs) return .both_modified;
+            if (ours and theirs) return .both_added;
+            if (base and (ours or theirs)) return .modify_delete;
+            if (base) return .deleted_by_both;
+            if (ours) return .added_by_ours;
+            return .added_by_theirs;
+        }
     };
 };
 
@@ -572,6 +110,13 @@ pub const Result = struct {
     index: index_mod.Index,
     arena: std.heap.ArenaAllocator.State,
     conflicts: []Conflict,
+    /// The merged tree, conflict markers and moved-aside files included,
+    /// when content merging was asked for: what git's merge leaves in the
+    /// working tree.
+    tree: ?Oid = null,
+    /// What git's merge says about the paths it merged, when content
+    /// merging was asked for.
+    messages: []const ort.Message = &.{},
 
     /// Whether every path reconciled.
     pub fn isClean(r: *const Result) bool {
@@ -589,24 +134,6 @@ pub const Result = struct {
 
 const Entries = std.StringHashMapUnmanaged(Side);
 
-/// Where a refusal writes the path that caused it, so a caller can say which
-/// file stood in the way without anything being allocated.
-pub const Blocked = struct {
-    buffer: [4096]u8 = undefined,
-    len: usize = 0,
-
-    /// The path. Empty when nothing was refused.
-    pub fn path(b: *const Blocked) []const u8 {
-        return b.buffer[0..b.len];
-    }
-
-    /// Record `text` as the path that caused a refusal.
-    pub fn set(b: *Blocked, text: []const u8) void {
-        b.len = @min(text.len, b.buffer.len);
-        @memcpy(b.buffer[0..b.len], text[0..b.len]);
-    }
-};
-
 /// Options for a tree merge.
 pub const TreeOptions = struct {
     /// Resolve what can be resolved the way git's merge machinery does:
@@ -616,7 +143,9 @@ pub const TreeOptions = struct {
     /// place. Without it every path both sides changed differently is left
     /// at stages 1, 2 and 3.
     content_merge: bool = false,
-    blob: BlobOptions = .{},
+    /// The labels, conflict style, favoured side and line diff of the
+    /// content merges.
+    blob: BlobOptions = .{ .algorithm = .histogram },
     /// The attributes that decide how a path is content-merged: `merge`
     /// (`-merge` and `merge=binary` keep our side as a conflict,
     /// `merge=union` keeps both, `merge=text` and an unknown name merge as
@@ -631,13 +160,10 @@ pub const TreeOptions = struct {
     /// Such a driver is a program; a path whose `merge` attribute names one
     /// is `error.UnsupportedMergeDriver`.
     configured_drivers: []const []const u8 = &.{},
-    /// Whether git would follow renames here: `merge.renames`, and off
-    /// for `-X no-renames`. This merge never follows one; with this on, a
-    /// content merge whose result a rename would change is
-    /// `error.RenameNotFollowed` instead of a different answer.
-    renames: bool = true,
-    /// Where a refusal writes the path that caused it.
-    blocked: ?*Blocked = null,
+    /// Everything else git's merge takes: renames, directory renames,
+    /// submodules. Its labels and content options come from `blob` and
+    /// the fields above.
+    ort: ort.Options = .{},
 };
 
 /// Merge `ours` and `theirs` against their common ancestor `base`.
@@ -665,7 +191,7 @@ pub fn treesWithOptions(
     theirs: Oid,
     options: TreeOptions,
 ) Error!Result {
-    if (options.content_merge) return ortMerge(gpa, io, db, base, ours, theirs, options);
+    if (options.content_merge) return contentMerge(gpa, io, db, base, ours, theirs, options);
 
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
@@ -706,7 +232,7 @@ pub fn treesWithOptions(
                 .base = b,
                 .ours = o,
                 .theirs = t,
-                .kind = .directory_file,
+                .kind = Conflict.Kind.of(b != null, o != null, t != null),
             });
             try stageAll(&index, path, b, o, t);
             continue;
@@ -717,7 +243,7 @@ pub fn treesWithOptions(
                 .base = b,
                 .ours = o,
                 .theirs = t,
-                .kind = .directory_file,
+                .kind = Conflict.Kind.of(b != null, o != null, t != null),
             });
             try stageAll(&index, path, b, o, t);
             continue;
@@ -764,26 +290,11 @@ pub fn treesWithOptions(
 
 //=========================================================================
 // The merge git's commands make
-//
-// merge-ort's per-path rules, which are what `git merge`, `cherry-pick`,
-// `revert` and `rebase` leave behind. A side that did not change a path
-// takes the other side's version; the same change on both sides is taken
-// once; two different changes to a regular file are content-merged, with an
-// empty ancestor when the file is new on both sides or was something else
-// before; the executable bit is merged on its own, so one side's mode change
-// and the other's content change compose. A file meeting a directory is
-// resolved when either of them goes away in the merge, and is otherwise a
-// conflict of its own kind.
 //=========================================================================
 
-/// What the per-path rules decided for one path.
-const Resolution = struct {
-    result: ?Side,
-    kind: ?Conflict.Kind = null,
-    merged: ?[]const u8 = null,
-};
-
-fn ortMerge(
+/// `ort.mergeTrees`, its answer put in this file's shape: the merged tree's
+/// files at stage 0 and each conflicted path at the stages git gives it.
+fn contentMerge(
     gpa: Allocator,
     io: Io,
     db: *odb_mod.Odb,
@@ -792,365 +303,69 @@ fn ortMerge(
     theirs: Oid,
     options: TreeOptions,
 ) Error!Result {
+    var ort_options = options.ort;
+    ort_options.labels = options.blob.labels;
+    ort_options.conflict_style = options.blob.conflict_style;
+    ort_options.favor = options.blob.favor;
+    ort_options.algorithm = options.blob.algorithm;
+    ort_options.attributes = options.attributes;
+    ort_options.attributes_dir = options.attributes_dir;
+    ort_options.configured_drivers = options.configured_drivers;
+    var merged = try ort.mergeTrees(gpa, io, db, base, ours, theirs, ort_options);
+    defer merged.deinit();
+    return fromOrt(gpa, io, db, &merged);
+}
+
+/// The index and conflicts of an `ort.Result`.
+pub fn fromOrt(gpa: Allocator, io: Io, db: *odb_mod.Odb, merged: *const ort.Result) Error!Result {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    var base_entries: Entries = .empty;
-    if (base) |oid| try flatten(arena, io, db, oid, "", &base_entries, 0);
-    var our_entries: Entries = .empty;
-    try flatten(arena, io, db, ours, "", &our_entries, 0);
-    var their_entries: Entries = .empty;
-    try flatten(arena, io, db, theirs, "", &their_entries, 0);
-
-    var paths: std.ArrayList([]const u8) = .empty;
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    var directories: std.StringHashMapUnmanaged(void) = .empty;
-    inline for (.{ &base_entries, &our_entries, &their_entries }) |set| {
-        var it = set.keyIterator();
-        while (it.next()) |key| {
-            const slot = try seen.getOrPut(arena, key.*);
-            if (!slot.found_existing) try paths.append(arena, key.*);
-            var at = key.len;
-            while (std.mem.lastIndexOfScalar(u8, key.*[0..at], '/')) |slash| {
-                const dir_slot = try directories.getOrPut(arena, key.*[0..slash]);
-                if (dir_slot.found_existing) break;
-                at = slash;
-            }
-        }
-    }
-    std.mem.sort([]const u8, paths.items, {}, lessThanPath);
-
-    if (options.renames) {
-        try refuseRenames(arena, io, db, paths.items, &base_entries, &our_entries, &their_entries, options.blocked);
-        try refuseRenames(arena, io, db, paths.items, &base_entries, &their_entries, &our_entries, options.blocked);
-    }
-
-    const resolutions = try arena.alloc(Resolution, paths.items.len);
-    var loaded_dirs: LoadedDirs = .empty;
-    for (paths.items, resolutions) |path, *resolution| {
-        resolution.* = try resolvePath(
-            arena,
-            io,
-            db,
-            path,
-            base_entries.get(path),
-            our_entries.get(path),
-            their_entries.get(path),
-            options,
-            &loaded_dirs,
-        );
-    }
-
-    // Which directories still hold something once every file is decided.
-    var surviving: std.StringHashMapUnmanaged(void) = .empty;
-    for (paths.items, resolutions) |path, resolution| {
-        if (resolution.result == null) continue;
-        var at = path.len;
-        while (std.mem.lastIndexOfScalar(u8, path[0..at], '/')) |slash| {
-            const slot = try surviving.getOrPut(arena, path[0..slash]);
-            if (slot.found_existing) break;
-            at = slash;
-        }
-    }
-
+    var files: Entries = .empty;
+    try flatten(arena, io, db, merged.tree, "", &files, 0);
+    var conflicted: std.StringHashMapUnmanaged(void) = .empty;
+    var conflicts: std.ArrayList(Conflict) = .empty;
     var index: index_mod.Index = .initEmpty(gpa, db.kind);
     errdefer index.deinit();
-    var conflicts: std.ArrayList(Conflict) = .empty;
-
-    for (paths.items, resolutions) |path, *resolution| {
-        const b = base_entries.get(path);
-        const o = our_entries.get(path);
-        const t = their_entries.get(path);
-        // A file where some side has a directory keeps the path only if
-        // the directory is empty once the merge is done; a file the merge
-        // removes gives the path up to it.
-        if (resolution.result != null and directories.contains(path) and surviving.contains(path)) {
-            resolution.* = .{ .result = resolution.result, .kind = .directory_file };
-            try conflicts.append(arena, .{
-                .path = path,
-                .base = b,
-                .ours = o,
-                .theirs = t,
-                .kind = .directory_file,
-                .result = resolution.result,
-            });
-            continue;
+    for (merged.conflicted) |c| {
+        const path = try arena.dupe(u8, c.path);
+        try conflicted.put(arena, path, {});
+        var sides: [3]?Side = .{ null, null, null };
+        for (c.stages, 0..) |stage_entry, i| {
+            const st = stage_entry orelse continue;
+            // git's index takes a mode of nothing as a regular file.
+            const mode = object.Mode.fromRaw(st.mode) catch .file;
+            sides[i] = .{ .mode = mode, .oid = st.oid };
+            try stage(&index, path, sides[i].?, @intCast(i + 1));
         }
-        if (resolution.kind) |kind| {
-            try conflicts.append(arena, .{
-                .path = path,
-                .base = b,
-                .ours = o,
-                .theirs = t,
-                .kind = kind,
-                .merged = resolution.merged,
-                .result = resolution.result,
-            });
-            try stageAll(&index, path, b, o, t);
-            continue;
-        }
-        if (resolution.result) |side| try stage(&index, path, side, 0);
+        try conflicts.append(arena, .{
+            .path = path,
+            .base = sides[0],
+            .ours = sides[1],
+            .theirs = sides[2],
+            .kind = Conflict.Kind.of(c.stages[0] != null, c.stages[1] != null, c.stages[2] != null),
+            .result = files.get(path),
+        });
     }
-
+    var it = files.iterator();
+    while (it.next()) |entry| {
+        if (conflicted.contains(entry.key_ptr.*)) continue;
+        try stage(&index, entry.key_ptr.*, entry.value_ptr.*, 0);
+    }
+    const messages = try ort.dupeMessages(arena, merged.messages);
     return .{
         .gpa = gpa,
         .index = index,
         .arena = arena_instance.state,
         .conflicts = conflicts.items,
+        .tree = merged.tree,
+        .messages = messages,
     };
-}
-
-/// Whether two modes are the same kind of thing: a regular file whatever its
-/// executable bit, a symlink, or a submodule.
-fn sameType(a: object.Mode, b: object.Mode) bool {
-    const regular_a = a == .file or a == .exec;
-    const regular_b = b == .file or b == .exec;
-    if (regular_a or regular_b) return regular_a and regular_b;
-    return a == b;
-}
-
-/// The directories whose `.gitattributes` a merge has read, so that each is
-/// read once.
-const LoadedDirs = std.StringHashMapUnmanaged(void);
-
-fn resolvePath(
-    arena: Allocator,
-    io: Io,
-    db: *odb_mod.Odb,
-    path: []const u8,
-    o: ?Side,
-    a: ?Side,
-    b: ?Side,
-    options: TreeOptions,
-    loaded_dirs: *LoadedDirs,
-) Error!Resolution {
-    if (sameSide(a, b)) return .{ .result = a };
-    if (sameSide(o, a)) return .{ .result = b };
-    if (sameSide(o, b)) return .{ .result = a };
-
-    const ours = a orelse return .{ .result = b, .kind = .modify_delete, .merged = try survivor(arena, io, db, b.?) };
-    const theirs = b orelse return .{ .result = a, .kind = .modify_delete, .merged = try survivor(arena, io, db, a.?) };
-    if (!sameType(ours.mode, theirs.mode)) return .{ .result = ours, .kind = .distinct_types };
-
-    const kind: Conflict.Kind = if (o == null) .both_added else .both_modified;
-    var clean = true;
-
-    // The executable bit merges on its own.
-    var mode = theirs.mode;
-    if (!(ours.mode == theirs.mode or (o != null and ours.mode == o.?.mode))) {
-        mode = ours.mode;
-        clean = o != null and theirs.mode == o.?.mode;
-    }
-
-    if (ours.oid.eql(theirs.oid) or (o != null and ours.oid.eql(o.?.oid))) {
-        return .{ .result = .{ .mode = mode, .oid = theirs.oid }, .kind = if (clean) null else kind };
-    }
-    if (o != null and theirs.oid.eql(o.?.oid)) {
-        return .{ .result = .{ .mode = mode, .oid = ours.oid }, .kind = if (clean) null else kind };
-    }
-    if (ours.mode == .symlink or ours.mode == .gitlink) {
-        // Two different symlinks cannot be merged, and a submodule's
-        // commits are merged in the submodule's own repository; either way
-        // our side is what stays.
-        return .{ .result = .{ .mode = mode, .oid = ours.oid }, .kind = kind };
-    }
-
-    var blob_options = options.blob;
-    var binary = false;
-    if (options.attributes) |attrs| {
-        if (options.attributes_dir) |dir| {
-            var depth: u32 = 0;
-            var at: usize = 0;
-            while (true) : (depth += 1) {
-                const base = path[0..at];
-                if (!loaded_dirs.contains(base)) {
-                    try loaded_dirs.put(arena, try arena.dupe(u8, base), {});
-                    try attrs.addDirectory(io, dir, base, depth);
-                }
-                const slash = std.mem.indexOfScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
-                at = slash;
-            }
-        }
-        const applied = try attrs.lookup(arena, path, false);
-        if (applied.value("conflict-marker-size")) |text| {
-            if (std.fmt.parseInt(u8, text, 10)) |size| {
-                if (size > 0) blob_options.marker_size = size;
-            } else |_| {}
-        }
-        if (applied.get("merge")) |state| switch (state) {
-            .unset => binary = true,
-            .set, .unspecified => {},
-            .value => |name| {
-                for (options.configured_drivers) |configured| {
-                    if (std.mem.eql(u8, configured, name)) {
-                        if (options.blocked) |where| where.set(path);
-                        return error.UnsupportedMergeDriver;
-                    }
-                }
-                if (std.mem.eql(u8, name, "binary")) binary = true;
-                if (std.mem.eql(u8, name, "union")) blob_options.favor = .union_;
-            },
-        };
-    }
-
-    // An ancestor of another kind is no ancestor: the merge is two-way.
-    const ancestor: ?Side = if (o != null and sameType(o.?.mode, ours.mode)) o else null;
-    const base_found: ?odb_mod.Odb.Read = if (ancestor) |side| try db.read(io, side.oid) else null;
-    defer if (base_found) |found| db.gpa.free(found.bytes);
-    const our_found = try db.read(io, ours.oid);
-    defer db.gpa.free(our_found.bytes);
-    const their_found = try db.read(io, theirs.oid);
-    defer db.gpa.free(their_found.bytes);
-    const base_bytes: []const u8 = if (base_found) |found| found.bytes else "";
-
-    var merged_bytes: []const u8 = undefined;
-    var content_clean = false;
-    var owned: ?BlobResult = null;
-    defer if (owned) |*r| r.deinit();
-    if (binary) {
-        merged_bytes = switch (blob_options.favor) {
-            .theirs => their_found.bytes,
-            else => our_found.bytes,
-        };
-        content_clean = blob_options.favor == .ours or blob_options.favor == .theirs;
-    } else if (blobs(arena, base_bytes, our_found.bytes, their_found.bytes, blob_options)) |result| {
-        owned = result;
-        merged_bytes = result.bytes;
-        content_clean = result.isClean();
-    } else |err| switch (err) {
-        error.BinaryBlob => {
-            merged_bytes = switch (blob_options.favor) {
-                .theirs => their_found.bytes,
-                else => our_found.bytes,
-            };
-            content_clean = blob_options.favor == .ours or blob_options.favor == .theirs;
-        },
-        error.OutOfMemory => return error.OutOfMemory,
-    }
-    const oid = try db.write(io, .blob, merged_bytes);
-    clean = clean and content_clean;
-    return .{
-        .result = .{ .mode = mode, .oid = oid },
-        .kind = if (clean) null else kind,
-        .merged = if (clean) null else try arena.dupe(u8, merged_bytes),
-    };
-}
-
-/// The bytes of the side a modify/delete conflict keeps, when it is a
-/// regular file.
-fn survivor(arena: Allocator, io: Io, db: *odb_mod.Odb, side: Side) Error!?[]const u8 {
-    if (side.mode != .file and side.mode != .exec) return null;
-    const found = try db.read(io, side.oid);
-    defer db.gpa.free(found.bytes);
-    if (found.type != .blob) return null;
-    return try arena.dupe(u8, found.bytes);
 }
 
 fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
-}
-
-/// Refuse a merge whose result git's rename detection would change, as
-/// seen from `side`, which deleted a path and added another.
-///
-/// git looks for renames only where they matter, and the answer is the
-/// same without them everywhere else; this is the same test. A path `side`
-/// deleted is worth pairing when `other` changed or deleted it, or when it
-/// lies in a directory `side` emptied and `other` added to -- the case
-/// where git would move the addition after the directory. Such a path is
-/// paired with an added one that is identical to it, or, for regular files,
-/// scores at least half by git's similarity measure. An identical pair
-/// matters too when `other` added a file where `side` put the renamed one.
-/// Any pairing is `error.RenameNotFollowed`: which pairs git would choose,
-/// and what it would make of them, is not worked out here.
-fn refuseRenames(
-    arena: Allocator,
-    io: Io,
-    db: *odb_mod.Odb,
-    paths: []const []const u8,
-    base: *const Entries,
-    side: *const Entries,
-    other: *const Entries,
-    blocked: ?*Blocked,
-) Error!void {
-    var targets: std.ArrayList([]const u8) = .empty;
-    for (paths) |path| {
-        if (side.contains(path) and !base.contains(path)) try targets.append(arena, path);
-    }
-    if (targets.items.len == 0) return;
-
-    // Directories `side` emptied that `other` added something beneath.
-    var side_dirs: std.StringHashMapUnmanaged(void) = .empty;
-    var base_dirs: std.StringHashMapUnmanaged(void) = .empty;
-    inline for (.{ .{ side, &side_dirs }, .{ base, &base_dirs } }) |pair| {
-        var it = pair[0].keyIterator();
-        while (it.next()) |key| {
-            var at = key.len;
-            while (std.mem.lastIndexOfScalar(u8, key.*[0..at], '/')) |slash| {
-                const slot = try pair[1].getOrPut(arena, key.*[0..slash]);
-                if (slot.found_existing) break;
-                at = slash;
-            }
-        }
-    }
-    var emptied: std.StringHashMapUnmanaged(void) = .empty;
-    var other_it = other.keyIterator();
-    while (other_it.next()) |key| {
-        if (base.contains(key.*)) continue;
-        var at = key.len;
-        while (std.mem.lastIndexOfScalar(u8, key.*[0..at], '/')) |slash| {
-            const dir = key.*[0..slash];
-            if (base_dirs.contains(dir) and !side_dirs.contains(dir)) try emptied.put(arena, dir, {});
-            at = slash;
-        }
-    }
-
-    var target_bytes: std.StringHashMapUnmanaged([]const u8) = .empty;
-    for (paths) |path| {
-        const was = base.get(path) orelse continue;
-        if (side.contains(path)) continue;
-        const content_relevant = !sameSide(other.get(path), was);
-        var location_relevant = false;
-        var at = path.len;
-        while (std.mem.lastIndexOfScalar(u8, path[0..at], '/')) |slash| {
-            if (emptied.contains(path[0..slash])) location_relevant = true;
-            at = slash;
-        }
-        const relevant = content_relevant or location_relevant;
-
-        var source_bytes: ?[]const u8 = null;
-        for (targets.items) |target| {
-            const now = side.get(target).?;
-            const identical = now.oid.eql(was.oid) and
-                ((isRegular(now.mode) and isRegular(was.mode)) or now.mode == was.mode);
-            const paired = if (identical)
-                relevant or other.contains(target)
-            else if (!relevant or !isRegular(now.mode) or !isRegular(was.mode))
-                false
-            else blk: {
-                if (source_bytes == null) source_bytes = try readBlob(arena, io, db, was.oid);
-                const slot = try target_bytes.getOrPut(arena, target);
-                if (!slot.found_existing) slot.value_ptr.* = try readBlob(arena, io, db, now.oid);
-                const got = try similarity.score(arena, source_bytes.?, slot.value_ptr.*, similarity.default_minimum);
-                break :blk got >= similarity.default_minimum;
-            };
-            if (paired) {
-                if (blocked) |b| b.set(path);
-                return error.RenameNotFollowed;
-            }
-        }
-    }
-}
-
-fn isRegular(mode: object.Mode) bool {
-    return mode == .file or mode == .exec;
-}
-
-fn readBlob(arena: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid) Error![]const u8 {
-    const found = try db.read(io, oid);
-    defer db.gpa.free(found.bytes);
-    return arena.dupe(u8, found.bytes);
 }
 
 fn sameSide(a: ?Side, b: ?Side) bool {
@@ -1228,13 +443,12 @@ pub fn tree(
     return cache_tree.rebuild(io, result.index.entries.items, db);
 }
 
-/// The tree of what a content-merging merge leaves behind, conflicts and
-/// all: every resolved path as it was resolved and every conflicted one as
-/// the working tree gets it, markers included. This is the tree git records
-/// as `AUTO_MERGE` and the one `git merge-tree --write-tree` prints; a
-/// conflict with nothing to put there -- a file that met a directory -- is
-/// left out.
+/// The tree of what a merge leaves behind, conflicts and all: for a
+/// content merge the tree it wrote, which is the one git records as
+/// `AUTO_MERGE` and `git merge-tree --write-tree` prints; for a stage-only
+/// one, every resolved path and our side of every conflicted one.
 pub fn conflictedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, result: *const Result) Error!Oid {
+    if (result.tree) |merged| return merged;
     var index: index_mod.Index = .initEmpty(gpa, db.kind);
     defer index.deinit();
     var entries: std.ArrayList(index_mod.Entry) = .empty;
@@ -1243,7 +457,6 @@ pub fn conflictedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, result: *const R
         if (entry.stage == 0) try entries.append(gpa, .{ .path = entry.path, .oid = entry.oid, .mode = entry.mode });
     }
     for (result.conflicts) |conflict| {
-        if (conflict.kind == .directory_file) continue;
         const side = conflict.result orelse continue;
         try entries.append(gpa, .{ .path = conflict.path, .oid = side.oid, .mode = side.mode });
     }
@@ -1322,14 +535,7 @@ fn gitMergeFile(
         "ours", "ancestor",          "theirs",
     });
     // A conflict is a non-zero exit, and the merged text is still printed.
-    var git_argv: std.ArrayList([]const u8) = .empty;
-    defer git_argv.deinit(gpa);
-    try git_argv.append(gpa, "git");
-    try git_argv.appendSlice(gpa, repo.defaults);
-    try git_argv.appendSlice(gpa, argv.items);
-    const result = try std.process.run(gpa, io, .{ .argv = git_argv.items, .cwd = .{ .dir = repo.dir } });
-    gpa.free(result.stderr);
-    return result.stdout;
+    return repo.runInput(io, argv.items, "");
 }
 
 test "blob conflicts match git merge-file in merge and diff3 styles" {
@@ -1573,13 +779,10 @@ test "the content-merging tree merge writes the tree and the stages git merge-tr
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "theirs" });
 
-    repo.report_failures = false;
-    const git_out = try std.process.run(gpa, io, .{
-        .argv = &.{ "git", "merge-tree", "--write-tree", "main", "theirs" },
-        .cwd = .{ .dir = repo.dir },
-    });
-    defer gpa.free(git_out.stdout);
-    defer gpa.free(git_out.stderr);
+    // `merge-tree` exits 1 on a conflicted merge; its output is what is
+    // compared.
+    const git_stdout = try repo.runInput(io, &.{ "merge-tree", "--write-tree", "main", "theirs" }, "");
+    defer gpa.free(git_stdout);
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
@@ -1604,7 +807,7 @@ test "the content-merging tree merge writes the tree and the stages git merge-tr
     defer result.deinit();
 
     // The first line is the tree, then one line per conflicted stage.
-    var lines = std.mem.splitScalar(u8, git_out.stdout, '\n');
+    var lines = std.mem.splitScalar(u8, git_stdout, '\n');
     const tree_line = lines.next().?;
     const merged_tree = try conflictedTree(gpa, io, &db, &result);
     var hex: [hash.max_hex_len]u8 = undefined;

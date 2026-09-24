@@ -93,8 +93,6 @@ pub const Error = error{
     MergeCommit,
     /// The message left after cleanup is empty.
     EmptyMessage,
-    /// A `merge` line's two sides have more than one merge base.
-    ConflictingMergeBases,
 } || sequencer.Error || program.Error || patchid.Error || revwalk.Error || worktrees.Error;
 
 /// A message a person would be shown in an editor, and what they would
@@ -2064,15 +2062,15 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
 
     var index = try repo.openIndex(io);
     defer index.deinit();
-    const base_tree: ?Oid = if (bases.len == 1) try repo.commitTree(io, bases[0]) else if (bases.len == 0) null else return error.ConflictingMergeBases;
+    // The bases oldest first, as git hands them to its recursive merge.
+    const reversed = try r.arena.alloc(Oid, bases.len);
+    for (bases, 0..) |base, i| reversed[bases.len - 1 - i] = base;
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
-    var buf: [hash.max_hex_len]u8 = undefined;
-    const base_label = if (bases.len == 1) try r.arena.dupe(u8, try abbrev.unique(io, &repo.odb, bases[0], r.abbrev_len, &buf)) else "empty tree";
     const ref_name = try std.fmt.allocPrint(r.arena, "refs/rewritten/{s}", .{name});
-    var outcome = try threeway.apply(gpa, io, repo, &index, base_tree, try repo.commitTree(io, head_oid), try repo.commitTree(io, merge_head), .{
+    var outcome = try threeway.applyCommits(gpa, io, repo, &index, head_oid, merge_head, reversed, .{
         .blob = .{
             .conflict_style = style,
-            .labels = .{ .ours = "HEAD", .base = base_label, .theirs = if (lookupRewritten(r, name)) ref_name else name },
+            .labels = .{ .ours = "HEAD", .theirs = if (lookupRewritten(r, name)) ref_name else name },
             .algorithm = .histogram,
         },
         .blocked = r.options.blocked,
