@@ -26,6 +26,7 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const pktline = @import("pktline.zig");
 const connection = @import("connection.zig");
+const warning = @import("warning.zig");
 const protocol = @import("protocol.zig");
 const sideband = @import("sideband.zig");
 const indexpack = @import("indexpack.zig");
@@ -50,10 +51,6 @@ pub const Error = error{
     /// that does not speak of shallow history — or does not have the kind of
     /// deepening asked for.
     ShallowUnsupportedByServer,
-    /// A partial-clone filter asked of a server that does not filter —
-    /// git's `uploadpack.allowFilter` is off. git would fetch everything
-    /// and say so; relic does not fetch what the caller asked it not to.
-    FilterUnsupportedByServer,
 } || protocol.Error || indexpack.Error || odb_mod.Error || object.ParseError;
 
 /// What to ask for.
@@ -129,6 +126,9 @@ pub const Options = struct {
     /// Where the server's word on the shallow boundary goes. A request that
     /// deepens, or names a boundary, needs one.
     shallow_info: ?*ShallowInfo = null,
+    /// Where a filter the server does not know is noted, as git warns of
+    /// it: the fetch goes on without the filter and takes everything.
+    warnings: ?*warning.Warnings = null,
 };
 
 /// Fetch a pack for `request` over `conn`, which opened with `adv`, into
@@ -150,9 +150,22 @@ pub fn fetch(
 
     var receive_options = options.receive;
     receive_options.progress = options.progress;
+    // A server that does not filter is asked for everything, as git asks
+    // it: "filtering not recognized by server, ignoring".
+    var asked = request;
+    if (asked.filter != null) {
+        const filters = switch (adv.version) {
+            .v2 => adv.commandHas("fetch", "filter"),
+            else => adv.has("filter"),
+        };
+        if (!filters) {
+            try warning.note(options.warnings, .filter_not_supported);
+            asked.filter = null;
+        }
+    }
     return switch (adv.version) {
-        .v2 => fetchV2(gpa, io, conn, adv, db, pack_dir, request, &negotiator, options.progress, receive_options, options.shallow_info),
-        .v0, .v1 => fetchV0(gpa, io, conn, adv, db, pack_dir, request, &negotiator, options.progress, receive_options, options.shallow_info),
+        .v2 => fetchV2(gpa, io, conn, adv, db, pack_dir, asked, &negotiator, options.progress, receive_options, options.shallow_info),
+        .v0, .v1 => fetchV0(gpa, io, conn, adv, db, pack_dir, asked, &negotiator, options.progress, receive_options, options.shallow_info),
     };
 }
 
@@ -181,7 +194,6 @@ fn fetchV2(
     if (request.deepen != null or request.shallow.len != 0) {
         if (!adv.commandHas("fetch", "shallow")) return error.ShallowUnsupportedByServer;
     }
-    if (request.filter != null and !adv.commandHas("fetch", "filter")) return error.FilterUnsupportedByServer;
     var common: std.ArrayList(Oid) = .empty;
     defer common.deinit(gpa);
     var haves_to_send: usize = 16;
@@ -460,7 +472,6 @@ fn fetchV0(
             if (d.relative and !adv.has("deepen-relative")) return error.ShallowUnsupportedByServer;
         }
     }
-    if (request.filter != null and !adv.has("filter")) return error.FilterUnsupportedByServer;
     const band: enum { none, small, large } = if (adv.has("side-band-64k"))
         .large
     else if (adv.has("side-band"))

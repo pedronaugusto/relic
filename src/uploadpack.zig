@@ -26,6 +26,8 @@ const odb_mod = @import("odb.zig");
 const pktline = @import("pktline.zig");
 const protocol = @import("protocol.zig");
 const objectwalk = @import("objectwalk.zig");
+const filterspec = @import("filterspec.zig");
+const ignore = @import("ignore.zig");
 const revwalk = @import("revwalk.zig");
 const local = @import("local.zig");
 const connection = @import("connection.zig");
@@ -296,7 +298,7 @@ pub const Server = struct {
                 // Recorded.
             } else if (std.mem.startsWith(u8, arg, "filter ")) {
                 if (!s.allow_filter) return s.refuse(out, "unexpected line: 'filter'");
-                n.filter = parseFilter(arena, arg["filter ".len..]) catch return s.refuse(out, "invalid filter-spec");
+                n.filter = try n.readFilter(out, arg["filter ".len..]);
             } else if (std.mem.startsWith(u8, arg, "packfile-uris ") or std.mem.startsWith(u8, arg, "want-ref ")) {
                 return s.refuse(out, "unexpected line");
             }
@@ -377,7 +379,7 @@ pub const Server = struct {
                 // Recorded.
             } else if (std.mem.startsWith(u8, line, "filter ")) {
                 if (!s.allow_filter) return s.refuse(out, "filtering not allowed");
-                n.filter = parseFilter(arena, line["filter ".len..]) catch return s.refuse(out, "invalid filter-spec");
+                n.filter = try n.readFilter(out, line["filter ".len..]);
             } else return s.refuse(out, "protocol error: unexpected line");
         }
         if (n.wants.items.len == 0) return;
@@ -828,6 +830,99 @@ const Negotiation = struct {
     // The pack
     // --------------------------------------------------------------
 
+    /// The filter a client asked for, read as git reads it
+    /// (`filterspec.zig`), or the request refused as git's upload-pack
+    /// refuses it. A `sparse:oid=` blob is named by its object name or
+    /// `<ref>:<path>`.
+    fn readFilter(n: *Negotiation, out: *Io.Writer, text: []const u8) Error!objectwalk.Filter {
+        const spec = filterspec.parse(n.arena, text) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidFilter => return n.server.refuse(out, "invalid filter-spec"),
+        };
+        var sparse_seen = false;
+        return n.walkFilter(out, spec, text, &sparse_seen);
+    }
+
+    fn walkFilter(n: *Negotiation, out: *Io.Writer, spec: filterspec.Spec, text: []const u8, sparse_seen: *bool) Error!objectwalk.Filter {
+        return switch (spec) {
+            .blob_none => .blob_none,
+            .blob_limit => |v| .{ .blob_limit = v },
+            .tree_depth => |v| .{ .tree_depth = v },
+            .object_type => |v| .{ .object_type = v },
+            .sparse_oid => |name| {
+                // One set of patterns to a walk.
+                if (sparse_seen.*) return n.server.refuse(out, "invalid filter-spec");
+                sparse_seen.* = true;
+                const rules = try n.sparseRules(name) orelse {
+                    var buf: [512]u8 = undefined;
+                    return n.server.refuse(out, std.fmt.bufPrint(&buf, "unable to access sparse blob in '{s}'", .{name}) catch "unable to access sparse blob");
+                };
+                return .{ .sparse = rules };
+            },
+            .combine => |parts| {
+                const walked = try n.arena.alloc(objectwalk.Filter, parts.len);
+                for (parts, walked) |part, *w| w.* = try n.walkFilter(out, part, text, sparse_seen);
+                return .{ .combine = walked };
+            },
+        };
+    }
+
+    /// The patterns in the blob `name` names, or `null` when there is no
+    /// such blob.
+    fn sparseRules(n: *Negotiation, name: []const u8) Error!?*const ignore.Rules {
+        const s = n.server;
+        const repo = &s.remote.repo;
+        const oid = (try n.resolveBlob(name)) orelse return null;
+        const found = repo.odb.read(s.io, oid) catch |err| switch (err) {
+            error.ObjectNotFound => return null,
+            else => |e| return e,
+        };
+        defer repo.odb.gpa.free(found.bytes);
+        if (found.type != .blob) return null;
+        const rules = try n.arena.create(ignore.Rules);
+        rules.* = try .init(n.arena, false);
+        // The rules keep slices of the text.
+        try rules.addText(try n.arena.dupe(u8, found.bytes), "", "sparse:oid", 0);
+        return rules;
+    }
+
+    /// An object name, or `<ref>:<path>`: the forms a `sparse:oid=` is
+    /// given in.
+    fn resolveBlob(n: *Negotiation, name: []const u8) Error!?Oid {
+        const s = n.server;
+        const repo = &s.remote.repo;
+        const colon = std.mem.indexOfScalar(u8, name, ':') orelse return n.resolveRev(name);
+        var current = (try n.resolveRev(name[0..colon])) orelse return null;
+        current = repo.peel(s.io, current) catch return null;
+        current = repo.commitTree(s.io, current) catch current;
+        var parts = std.mem.tokenizeScalar(u8, name[colon + 1 ..], '/');
+        while (parts.next()) |part| {
+            const found = repo.odb.read(s.io, current) catch return null;
+            defer repo.odb.gpa.free(found.bytes);
+            if (found.type != .tree) return null;
+            const entry = (object.Tree.parse(repo.kind, found.bytes).find(part) catch return null) orelse return null;
+            current = entry.oid;
+        }
+        return current;
+    }
+
+    /// A full object name, or a ref by git's own search: as written, then
+    /// under `refs/`, `refs/tags/`, `refs/heads/` and `refs/remotes/`.
+    fn resolveRev(n: *Negotiation, rev: []const u8) Error!?Oid {
+        const s = n.server;
+        const repo = &s.remote.repo;
+        if (Oid.parse(repo.kind, rev)) |oid| return oid else |_| {}
+        for ([_][]const u8{ "", "refs/", "refs/tags/", "refs/heads/", "refs/remotes/" }) |prefix| {
+            const full = try std.fmt.allocPrint(n.arena, "{s}{s}", .{ prefix, rev });
+            const resolved = repo.refs.resolve(s.gpa, s.io, full) catch continue;
+            if (resolved) |r| {
+                s.gpa.free(r.name);
+                return r.oid;
+            }
+        }
+        return null;
+    }
+
     fn sendPack(n: *Negotiation, out: *Io.Writer, band: Band) Error!void {
         const s = n.server;
         var include: std.ArrayList(Oid) = .empty;
@@ -951,59 +1046,6 @@ const Sideband = struct {
     }
 };
 
-/// A filter as a client writes it: `blob:none`, `blob:limit=<n>[kmg]`,
-/// `tree:<depth>`, `object:type=<type>`, and `combine:` of those, each
-/// part percent-encoded.
-pub fn parseFilter(arena: Allocator, spec: []const u8) error{ InvalidFilter, OutOfMemory }!objectwalk.Filter {
-    if (std.mem.eql(u8, spec, "blob:none")) return .blob_none;
-    if (std.mem.startsWith(u8, spec, "blob:limit=")) return .{ .blob_limit = try parseSize(spec["blob:limit=".len..]) };
-    if (std.mem.startsWith(u8, spec, "tree:")) return .{ .tree_depth = std.fmt.parseUnsigned(u64, spec["tree:".len..], 10) catch return error.InvalidFilter };
-    if (std.mem.startsWith(u8, spec, "object:type=")) {
-        const name = spec["object:type=".len..];
-        return .{ .object_type = std.meta.stringToEnum(object.Type, name) orelse return error.InvalidFilter };
-    }
-    if (std.mem.startsWith(u8, spec, "combine:")) {
-        var parts: std.ArrayList(objectwalk.Filter) = .empty;
-        var it = std.mem.splitScalar(u8, spec["combine:".len..], '+');
-        while (it.next()) |encoded| {
-            const decoded = try percentDecode(arena, encoded);
-            const part = try parseFilter(arena, decoded);
-            if (part == .combine or part == .none) return error.InvalidFilter;
-            try parts.append(arena, part);
-        }
-        if (parts.items.len < 2) return error.InvalidFilter;
-        return .{ .combine = parts.items };
-    }
-    return error.InvalidFilter;
-}
-
-fn parseSize(text: []const u8) error{InvalidFilter}!u64 {
-    if (text.len == 0) return error.InvalidFilter;
-    const unit: u64 = switch (std.ascii.toLower(text[text.len - 1])) {
-        'k' => 1024,
-        'm' => 1024 * 1024,
-        'g' => 1024 * 1024 * 1024,
-        else => 1,
-    };
-    const digits = if (unit == 1) text else text[0 .. text.len - 1];
-    const n = std.fmt.parseUnsigned(u64, digits, 10) catch return error.InvalidFilter;
-    return std.math.mul(u64, n, unit) catch error.InvalidFilter;
-}
-
-fn percentDecode(arena: Allocator, text: []const u8) error{ InvalidFilter, OutOfMemory }![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '%') {
-            if (i + 2 >= text.len + 0 and i + 2 > text.len - 1) return error.InvalidFilter;
-            const byte = std.fmt.parseInt(u8, text[i + 1 .. i + 3], 16) catch return error.InvalidFilter;
-            try out.append(arena, byte);
-            i += 2;
-        } else try out.append(arena, text[i]);
-    }
-    return out.items;
-}
-
 fn writeError(err: anyerror) Error {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -1120,32 +1162,6 @@ const InProcess = struct {
         c.gpa.destroy(c);
     }
 };
-
-test "a filter is read as git's upload-pack reads it" {
-    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    try std.testing.expectEqual(objectwalk.Filter.blob_none, try parseFilter(arena, "blob:none"));
-    try std.testing.expectEqual(@as(u64, 2048), (try parseFilter(arena, "blob:limit=2k")).blob_limit);
-    try std.testing.expectEqual(@as(u64, 0), (try parseFilter(arena, "tree:0")).tree_depth);
-    try std.testing.expectEqual(object.Type.blob, (try parseFilter(arena, "object:type=blob")).object_type);
-    const combined = try parseFilter(arena, "combine:blob%3Anone+tree%3A3");
-    try std.testing.expectEqual(@as(usize, 2), combined.combine.len);
-    try std.testing.expectError(error.InvalidFilter, parseFilter(arena, "sparse:oid=abc"));
-    try std.testing.expectError(error.InvalidFilter, parseFilter(arena, "combine:blob:none"));
-}
-
-test "fuzz: a filter-spec is a filter or a named refusal" {
-    try std.testing.fuzz({}, fuzzFilter, .{});
-}
-
-fn fuzzFilter(_: void, smith: *std.testing.Smith) anyerror!void {
-    var scratch: [128]u8 = undefined;
-    const input = scratch[0..smith.slice(&scratch)];
-    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena_state.deinit();
-    _ = parseFilter(arena_state.allocator(), input) catch return;
-}
 
 test "fuzz: whatever a client sends is answered or refused, in v2 and v0" {
     const gpa = std.testing.allocator;

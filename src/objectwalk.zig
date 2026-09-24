@@ -26,6 +26,7 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
 const revwalk = @import("revwalk.zig");
+const ignore = @import("ignore.zig");
 
 const Oid = hash.Oid;
 const Odb = odb_mod.Odb;
@@ -82,8 +83,37 @@ pub const Filter = union(enum) {
     tree_depth: u64,
     /// `object:type=<type>`: only objects of the type.
     object_type: object.Type,
+    /// `sparse:oid=<blob>`: every tree, and the blobs the blob's
+    /// sparse-checkout patterns take in, a path no pattern decides taking
+    /// its directory's answer, as git's sparse filter decides. One to a
+    /// filter.
+    sparse: *const ignore.Rules,
     /// `combine:<a>+<b>…`: what every one of them keeps.
     combine: []const Filter,
+
+    /// Whether what the filter keeps depends on where an object is met —
+    /// its depth or its path — so a tree met again at another path is
+    /// walked again.
+    fn positional(f: Filter) bool {
+        return switch (f) {
+            .tree_depth, .sparse => true,
+            .combine => |all| for (all) |part| {
+                if (part.positional()) break true;
+            } else false,
+            else => false,
+        };
+    }
+
+    /// The sparse patterns in the filter, when it has some.
+    fn sparseRules(f: Filter) ?*const ignore.Rules {
+        return switch (f) {
+            .sparse => |rules| rules,
+            .combine => |all| for (all) |part| {
+                if (part.sparseRules()) |rules| break rules;
+            } else null,
+            else => null,
+        };
+    }
 };
 
 /// How `missingWith` walks.
@@ -98,7 +128,16 @@ pub const MissingOptions = struct {
 
 /// `missing`, walked with `options`.
 pub fn missingWith(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid, options: MissingOptions) Error!Odb.Collected {
-    var walk: Walk = .{ .gpa = gpa, .io = io, .db = db, .arena = .init(gpa), .boundary = options.boundary, .filter = options.filter };
+    var walk: Walk = .{
+        .gpa = gpa,
+        .io = io,
+        .db = db,
+        .arena = .init(gpa),
+        .boundary = options.boundary,
+        .filter = options.filter,
+        .positional = options.filter.positional(),
+        .sparse = options.filter.sparseRules(),
+    };
     defer walk.deinit();
     var collected: Odb.Collected = .{ .arena = .init(gpa), .entries = &.{} };
     errdefer collected.arena.deinit();
@@ -131,7 +170,12 @@ pub fn missingWith(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclu
             try entries.append(gpa, .{ .oid = tag });
         }
         switch (peeled.type) {
-            .commit => try walk.enqueue(peeled.oid, 0),
+            .commit => {
+                // Asked for by name: sent whatever the filter says, as git
+                // sends a wanted commit under `object:type=blob`.
+                try walk.named.put(gpa, peeled.oid, {});
+                try walk.enqueue(peeled.oid, 0);
+            },
             .tree, .blob => {
                 // Asked for by name: sent whatever the filter says.
                 try walk.named.put(gpa, peeled.oid, {});
@@ -156,7 +200,7 @@ pub fn missingWith(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclu
     for (commits) |oid| {
         const node = walk.nodes.getPtr(oid).?;
         if (node.flags & flag_uninteresting != 0) continue;
-        if (try walk.keeps(oid, .commit, 0)) try entries.append(gpa, .{ .oid = oid });
+        if (try walk.keeps(oid, .commit, 0, true)) try entries.append(gpa, .{ .oid = oid });
         try walk.addTree(node.tree, "", &entries, out_arena);
     }
     for (pending_trees.items) |tree| try walk.addTree(tree, "", &entries, out_arena);
@@ -183,10 +227,17 @@ const Walk = struct {
     had: Oid.Set = .empty,
     /// Objects already listed.
     added: Oid.Set = .empty,
-    /// Trees and blobs named in `include`, which no filter leaves out.
+    /// Objects named in `include`, which no filter leaves out.
     named: Oid.Set = .empty,
     boundary: ?*const Oid.Set = null,
     filter: Filter = .none,
+    /// `Filter.positional`: trees are walked once for every path they are
+    /// met at, and an object is listed the first time the filter keeps it.
+    positional: bool = false,
+    /// `Filter.sparseRules`.
+    sparse: ?*const ignore.Rules = null,
+    /// A positional walk's trees, by name and path, already walked.
+    visited: std.StringHashMapUnmanaged(void) = .empty,
 
     fn deinit(w: *Walk) void {
         w.nodes.deinit(w.gpa);
@@ -194,28 +245,40 @@ const Walk = struct {
         w.had.deinit(w.gpa);
         w.added.deinit(w.gpa);
         w.named.deinit(w.gpa);
+        w.visited.deinit(w.gpa);
         w.arena.deinit();
     }
 
     /// Whether the filter keeps an object of `kind` at `depth` from its
-    /// commit's root tree.
-    fn keeps(w: *Walk, oid: Oid, kind: object.Type, depth: u64) Error!bool {
+    /// commit's root tree; `in_sparse` is whether the sparse patterns take
+    /// its path in.
+    fn keeps(w: *Walk, oid: Oid, kind: object.Type, depth: u64, in_sparse: bool) Error!bool {
         if (w.named.contains(oid)) return true;
-        return w.keepsWith(w.filter, oid, kind, depth);
+        return w.keepsWith(w.filter, oid, kind, depth, in_sparse);
     }
 
-    fn keepsWith(w: *Walk, filter: Filter, oid: Oid, kind: object.Type, depth: u64) Error!bool {
+    fn keepsWith(w: *Walk, filter: Filter, oid: Oid, kind: object.Type, depth: u64, in_sparse: bool) Error!bool {
         return switch (filter) {
             .none => true,
             .blob_none => kind != .blob,
             .blob_limit => |limit| kind != .blob or (try w.db.readHeader(w.io, oid)).size <= limit,
             .tree_depth => |max| (kind != .tree and kind != .blob) or depth < max,
             .object_type => |t| kind == t,
+            .sparse => kind != .blob or in_sparse,
             .combine => |all| {
-                for (all) |f| if (!try w.keepsWith(f, oid, kind, depth)) return false;
+                for (all) |f| if (!try w.keepsWith(f, oid, kind, depth, in_sparse)) return false;
                 return true;
             },
         };
+    }
+
+    /// The sparse patterns' answer for `path`: theirs when one decides,
+    /// `inherited` — its directory's — when none does.
+    fn sparseMatch(w: *const Walk, path: []const u8, is_dir: bool, inherited: bool) bool {
+        const rules = w.sparse orelse return true;
+        if (path.len == 0) return inherited;
+        const m = rules.match(path, is_dir);
+        return if (m.by != null) m.excluded else inherited;
     }
 
     /// Whether a tree at `depth` is walked into: `tree:<n>` stops walking
@@ -378,14 +441,29 @@ const Walk = struct {
         out: *std.ArrayList(odb_mod.PackEntry),
         arena: Allocator,
     ) Error!void {
-        const Item = struct { oid: Oid, path: []const u8, depth: u64 };
+        // `inherited` is the sparse answer of the directory a tree is in;
+        // the walk's root is outside every pattern, as git's is.
+        const Item = struct { oid: Oid, path: []const u8, depth: u64, inherited: bool };
         var stack: std.ArrayList(Item) = .empty;
         defer stack.deinit(w.gpa);
-        try stack.append(w.gpa, .{ .oid = root, .path = root_path, .depth = 0 });
+        try stack.append(w.gpa, .{ .oid = root, .path = root_path, .depth = 0, .inherited = false });
         while (stack.pop()) |item| {
-            if (w.had.contains(item.oid) or w.added.contains(item.oid)) continue;
-            try w.added.put(w.gpa, item.oid, {});
-            if (try w.keeps(item.oid, .tree, item.depth)) try out.append(w.gpa, .{ .oid = item.oid, .hint = item.path });
+            if (w.had.contains(item.oid)) continue;
+            var own = item.inherited;
+            if (w.positional) {
+                // Met again at this path: the same answers as before.
+                const key = try std.mem.concat(arena, u8, &.{ item.oid.bytes[0..item.oid.kind.rawLen()], item.path });
+                if ((try w.visited.getOrPut(w.gpa, key)).found_existing) continue;
+                own = w.sparseMatch(item.path, true, item.inherited);
+                if (!w.added.contains(item.oid) and try w.keeps(item.oid, .tree, item.depth, true)) {
+                    try w.added.put(w.gpa, item.oid, {});
+                    try out.append(w.gpa, .{ .oid = item.oid, .hint = item.path });
+                }
+            } else {
+                if (w.added.contains(item.oid)) continue;
+                try w.added.put(w.gpa, item.oid, {});
+                if (try w.keeps(item.oid, .tree, item.depth, true)) try out.append(w.gpa, .{ .oid = item.oid, .hint = item.path });
+            }
             if (!w.named.contains(item.oid) and !w.descends(item.depth + 1)) continue;
             const found = try w.db.read(w.io, item.oid);
             defer w.db.gpa.free(found.bytes);
@@ -397,13 +475,22 @@ const Walk = struct {
                 else
                     try std.fmt.allocPrint(arena, "{s}/{s}", .{ item.path, entry.name });
                 switch (entry.mode) {
-                    .tree => try stack.append(w.gpa, .{ .oid = entry.oid, .path = path, .depth = item.depth + 1 }),
+                    .tree => try stack.append(w.gpa, .{ .oid = entry.oid, .path = path, .depth = item.depth + 1, .inherited = own }),
                     // A gitlink names a commit in another repository.
                     .gitlink => {},
                     else => {
                         if (w.had.contains(entry.oid) or w.added.contains(entry.oid)) continue;
-                        try w.added.put(w.gpa, entry.oid, {});
-                        if (try w.keeps(entry.oid, .blob, item.depth + 1)) try out.append(w.gpa, .{ .oid = entry.oid, .hint = path });
+                        if (w.positional) {
+                            // Left out here, it may be kept where it is met
+                            // again.
+                            if (try w.keeps(entry.oid, .blob, item.depth + 1, w.sparseMatch(path, false, own))) {
+                                try w.added.put(w.gpa, entry.oid, {});
+                                try out.append(w.gpa, .{ .oid = entry.oid, .hint = path });
+                            }
+                        } else {
+                            try w.added.put(w.gpa, entry.oid, {});
+                            if (try w.keeps(entry.oid, .blob, item.depth + 1, true)) try out.append(w.gpa, .{ .oid = entry.oid, .hint = path });
+                        }
                     },
                 }
             }

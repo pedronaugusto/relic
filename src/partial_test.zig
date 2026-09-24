@@ -150,7 +150,7 @@ const Twins = struct {
     }
 };
 
-test "a partial clone is the one git makes, filtered by blob:none, blob:limit and tree:0" {
+test "a partial clone is the one git makes, filtered by blob:none, blob:limit, tree:0, combine:, sparse:oid= and object:type=" {
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -163,7 +163,7 @@ test "a partial clone is the one git makes, filtered by blob:none, blob:limit an
     const url = try server.url(gpa, "repo.git");
     defer gpa.free(url);
 
-    for ([_][]const u8{ "blob:none", "blob:limit=1k", "tree:0" }) |spec| {
+    for ([_][]const u8{ "blob:none", "blob:limit=1k", "tree:0", "combine:blob:none+tree:1", "sparse:oid=main:big.txt", "object:type=tree" }) |spec| {
         var twins = try Twins.init(gpa, io);
         defer twins.deinit(gpa, io);
         const filter_arg = try std.fmt.allocPrint(gpa, "--filter={s}", .{spec});
@@ -175,7 +175,10 @@ test "a partial clone is the one git makes, filtered by blob:none, blob:limit an
         // Which trees a tree:0 checkout fetches, and in how many packs, is
         // the lazy fetch's own business; what is there after is compared
         // for the blob filters.
-        try expectSame(gpa, io, twins.by_git, twins.by_relic, !std.mem.startsWith(u8, spec, "tree:"));
+        expectSame(gpa, io, twins.by_git, twins.by_relic, !std.mem.startsWith(u8, spec, "tree:") and !std.mem.startsWith(u8, spec, "combine:")) catch |err| {
+            std.debug.print("with --filter={s}\n", .{spec});
+            return err;
+        };
     }
 
     // From a path the filter is ignored — everything is copied — and its
@@ -297,4 +300,128 @@ test "a fetch into a partial clone is filtered, and its pack is a promisor's, as
     const ours = try twins.by_relic.readFileAlloc(io, ".git/FETCH_HEAD", gpa, .unlimited);
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
+}
+
+test "a filter the server does not know is left off with a warning and everything fetched, as git does, in v2 and v0" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, root.dir);
+    {
+        var bare = try root.dir.openDir(io, "repo.git", .{});
+        defer bare.close(io);
+        const out = try git(gpa, io, bare, &.{ "config", "uploadpack.allowFilter", "false" });
+        gpa.free(out);
+    }
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+
+    for ([_][]const u8{ "2", "0" }) |version| {
+        var twins = try Twins.init(gpa, io);
+        defer twins.deinit(gpa, io);
+        const setting = try std.fmt.allocPrint(gpa, "protocol.version={s}", .{version});
+        defer gpa.free(setting);
+        const out = try testremote.gitInputEnv(gpa, io, twins.tmp.dir, &env, &.{ "-c", setting, "clone", "-q", "--filter=blob:none", url, twins.git_path }, "", true);
+        gpa.free(out);
+        const text = try std.fmt.allocPrint(gpa, "[protocol]\n\tversion = {s}\n", .{version});
+        defer gpa.free(text);
+        var settings = try @import("config.zig").Config.parseText(gpa, text, .command);
+        defer settings.deinit();
+        var warnings: @import("warning.zig").Warnings = .init(gpa);
+        defer warnings.deinit();
+        var repo = try clone_mod.clone(gpa, io, url, twins.by_relic, .{
+            .who = test_who,
+            .filter = "blob:none",
+            .programs = .{ .environ = &env },
+            .config = &settings,
+            .warnings = &warnings,
+        });
+        repo.deinit(io);
+        // Marked partial and its pack a promisor's, with nothing left out.
+        try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
+        try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
+        try testing.expect(warnings.items.items[0] == .filter_not_supported);
+    }
+}
+
+test "a promised object is fetched from the next promisor remote when one fails, as git's lazy fetch goes on" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, root.dir);
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    const origin = try std.fmt.allocPrint(gpa, "file://{s}/repo.git", .{root_path});
+    defer gpa.free(origin);
+    const mirror = try std.fmt.allocPrint(gpa, "file://{s}/mirror.git", .{root_path});
+    defer gpa.free(mirror);
+    const mirror_path = try std.fmt.allocPrint(gpa, "{s}/mirror.git", .{root_path});
+    defer gpa.free(mirror_path);
+    {
+        const out = try git(gpa, io, root.dir, &.{ "clone", "-q", "--mirror", origin, mirror_path });
+        gpa.free(out);
+        var m = try root.dir.openDir(io, "mirror.git", .{});
+        defer m.close(io);
+        for ([_][]const u8{ "uploadpack.allowFilter", "uploadpack.allowAnySHA1InWant" }) |key| {
+            const set = try git(gpa, io, m, &.{ "config", key, "true" });
+            gpa.free(set);
+        }
+    }
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var twins = try Twins.init(gpa, io);
+    defer twins.deinit(gpa, io);
+    // Two promisor remotes, the clone's own first and no longer there.
+    for ([_][]const u8{ "by-git", "by-relic" }) |name| {
+        const out = try testremote.gitInputEnv(gpa, io, twins.tmp.dir, &env, &.{ "clone", "-q", "--no-checkout", "--filter=blob:none", origin, name }, "", true);
+        gpa.free(out);
+        var d = try twins.tmp.dir.openDir(io, name, .{});
+        defer d.close(io);
+        for ([_][]const []const u8{
+            &.{ "remote", "add", "mirror", mirror },
+            &.{ "config", "remote.mirror.promisor", "true" },
+            &.{ "config", "remote.origin.url", "file:///nowhere/repo.git" },
+        }) |args| {
+            const set = try git(gpa, io, d, args);
+            gpa.free(set);
+        }
+    }
+    const checked_out = try testremote.gitInputEnv(gpa, io, twins.by_git, &env, &.{ "checkout", "-q", "main" }, "", true);
+    gpa.free(checked_out);
+
+    var repo = try repo_mod.Repository.open(gpa, io, twins.by_relic, .{});
+    defer repo.deinit(io);
+    const names = blk: {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const list = try partial.promisorRemotes(arena.allocator(), &repo.config);
+        var joined: std.ArrayList(u8) = .empty;
+        for (list) |n| try joined.print(gpa, "{s} ", .{n});
+        break :blk try joined.toOwnedSlice(gpa);
+    };
+    defer gpa.free(names);
+    try testing.expectEqualStrings("origin mirror ", names);
+    const head = (try repo.headTree(io)).?;
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+    var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
+    defer lazy.deinit();
+    lazy.install();
+    try lazy.prefetchTree(io, head);
+    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = repo.worktreeRules() });
+    try index.write(io, repo.git_dir, "index", .{});
+    try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
+
+    // With no promisor remote that has them, the read fails by name.
+    const set = try git(gpa, io, twins.by_relic, &.{ "config", "remote.mirror.url", "file:///nowhere/mirror.git" });
+    gpa.free(set);
+    try repo.config.set("remote.mirror.url", "file:///nowhere/mirror.git");
+    const missing = try Oid.parse(repo.kind, "1111111111111111111111111111111111111111");
+    try testing.expectError(error.PromisorFetchFailed, repo.odb.read(io, missing));
 }

@@ -311,11 +311,13 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .progress = options.progress,
         .receive = .{ .check_objects = options.check_objects },
         .shallow_info = &shallow_info,
+        .warnings = options.warnings,
     });
-    // A partial clone's pack is a promisor pack, and says for which refs.
+    // A partial clone's pack is a promisor pack, and says for which refs —
+    // also when the server did not filter it, as git marks it.
     if (send_filter != null) if (fetched.pack) |name| {
         var sought: std.ArrayList(partial.PromisorRef) = .empty;
-        for (remote_refs.refs) |ref| {
+        if (session.promisorNamesRefs()) for (remote_refs.refs) |ref| {
             if (ref.unborn or std.mem.endsWith(u8, ref.name, "^{}")) continue;
             const listed = if (std.mem.eql(u8, ref.name, "HEAD"))
                 true
@@ -323,7 +325,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
                 if (want.eql(ref.oid)) break (std.mem.startsWith(u8, ref.name, "refs/heads/") or std.mem.startsWith(u8, ref.name, "refs/tags/"));
             } else false;
             if (listed) try sought.append(arena, .{ .oid = ref.oid, .name = ref.name });
-        }
+        };
         try partial.writePromisor(io, pack_dir, name, sought.items);
     };
     if (deepen == null) try shallow_info.shallow.appendSlice(gpa, session.advertisedShallow());

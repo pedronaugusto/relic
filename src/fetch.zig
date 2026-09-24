@@ -477,6 +477,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .shallow = boundary,
         .filter = filter_spec,
     }, .{
+        .warnings = options.warnings,
         .progress = options.progress,
         .receive = .{ .check_objects = options.check_objects },
         .shallow_info = &shallow_info,

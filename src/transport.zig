@@ -222,6 +222,16 @@ pub const Session = struct {
         };
     }
 
+    /// Whether git's fetch-pack names the refs in a promisor pack's
+    /// `.promisor` over this conversation. Over HTTP in protocol v0 it does
+    /// not: there its index-pack writes the file, empty.
+    pub fn promisorNamesRefs(s: *const Session) bool {
+        return switch (s.impl) {
+            .local => true,
+            .smart => |smart| !(smart.conn.stateless and smart.advertisement.version != .v2),
+        };
+    }
+
     /// The protocol the remote spoke, or `null` for a repository on this
     /// machine, which speaks none.
     pub fn protocolVersion(s: *const Session) ?protocol.Version {

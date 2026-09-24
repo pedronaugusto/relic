@@ -1,15 +1,19 @@
 //! Partial clone: a repository that holds some of its objects and is
 //! promised the rest.
 //!
-//! A clone with a filter — `blob:none`, `blob:limit=<size>`, `tree:<depth>`
-//! — asks the server to leave objects out of the pack, and marks the
+//! A clone with a filter — `blob:none`, `blob:limit=<size>`, `tree:<depth>`,
+//! `object:type=<type>`, `sparse:oid=<blob>`, or several of them together
+//! with `combine:` — asks the server to leave objects out of the pack, and
+//! marks the
 //! remote as the one that will give them later: `remote.<name>.promisor`
 //! and `remote.<name>.partialclonefilter`, at repository format version 1.
 //! Every pack from that remote is a promisor pack, with a `.promisor` file
 //! beside it, and an object it names that the repository lacks is not
 //! missing but promised. When something reads one — a checkout wants a
 //! file's contents — the remote is asked for it, as git's lazy fetch asks:
-//! the objects by name, `filter blob:none`, no negotiation, no tags.
+//! the objects by name, `filter blob:none`, no negotiation, no tags. With
+//! several promisor remotes each is asked in git's order until one gives
+//! them (`promisorRemotes`).
 //!
 //! That fetch is a program's work for ssh and a credential helper's for
 //! HTTP, so relic does it only when the caller installs a `Lazy` on the
@@ -30,43 +34,19 @@ const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const transport = @import("transport.zig");
 const repo_mod = @import("repo.zig");
+const filterspec = @import("filterspec.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 
 /// Errors from reading a filter.
-pub const FilterError = error{
-    /// A filter git does not have, or one of its forms written wrong.
-    InvalidFilter,
-    /// `combine:`, `sparse:oid=` and `object:type=` — filters git has and
-    /// this release does not send.
-    FilterUnsupported,
-} || Allocator.Error;
+pub const FilterError = filterspec.Error;
 
-/// The filter as git sends it: `blob:limit` in bytes, the rest as written.
-/// The result is `arena`'s, or `spec` itself.
+/// The filter as git sends it, after reading it as git's
+/// `list-objects-filter-options` reads it: `filterspec.sendForm`. The
+/// result is `arena`'s, or `spec` itself.
 pub fn normalize(arena: Allocator, spec: []const u8) FilterError![]const u8 {
-    if (std.mem.eql(u8, spec, "blob:none")) return spec;
-    if (std.mem.startsWith(u8, spec, "blob:limit=")) {
-        const text = spec["blob:limit=".len..];
-        if (text.len == 0) return error.InvalidFilter;
-        const unit: u64 = switch (std.ascii.toLower(text[text.len - 1])) {
-            'k' => 1024,
-            'm' => 1024 * 1024,
-            'g' => 1024 * 1024 * 1024,
-            else => 1,
-        };
-        const digits = if (unit == 1) text else text[0 .. text.len - 1];
-        const n = std.fmt.parseUnsigned(u64, digits, 10) catch return error.InvalidFilter;
-        return std.fmt.allocPrint(arena, "blob:limit={d}", .{std.math.mul(u64, n, unit) catch return error.InvalidFilter});
-    }
-    if (std.mem.startsWith(u8, spec, "tree:")) {
-        _ = std.fmt.parseUnsigned(u64, spec["tree:".len..], 10) catch return error.InvalidFilter;
-        return spec;
-    }
-    if (std.mem.startsWith(u8, spec, "combine:") or std.mem.startsWith(u8, spec, "sparse:oid=") or
-        std.mem.startsWith(u8, spec, "object:type=")) return error.FilterUnsupported;
-    return error.InvalidFilter;
+    return filterspec.sendForm(arena, spec);
 }
 
 /// The remote a partial clone was promised its objects by: the first with
@@ -82,11 +62,44 @@ pub fn promisorRemote(config: *const config_mod.Config) ?[]const u8 {
     return config.get("extensions.partialclone");
 }
 
-/// Whether `name` is a promisor remote of `config`'s repository.
+/// Every promisor remote, in the order git's lazy fetch asks them: each
+/// remote with `remote.<name>.promisor` true or a
+/// `remote.<name>.partialclonefilter`, as the configuration first names it,
+/// and the one `extensions.partialClone` names last. The names borrow
+/// `config`; the list is `arena`'s.
+pub fn promisorRemotes(arena: Allocator, config: *const config_mod.Config) Allocator.Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (config.entries.items) |entry| {
+        if (!std.ascii.eqlIgnoreCase(entry.section, "remote") or !entry.has_subsection) continue;
+        const promises = if (std.ascii.eqlIgnoreCase(entry.name, "promisor"))
+            entry.value == null or (config_mod.parseBool(entry.value.?) catch false)
+        else
+            std.ascii.eqlIgnoreCase(entry.name, "partialclonefilter");
+        if (!promises) continue;
+        for (out.items) |name| {
+            if (std.mem.eql(u8, name, entry.subsection)) break;
+        } else try out.append(arena, entry.subsection);
+    }
+    if (config.get("extensions.partialclone")) |named| {
+        for (out.items, 0..) |name, i| {
+            if (std.mem.eql(u8, name, named)) {
+                _ = out.orderedRemove(i);
+                break;
+            }
+        }
+        try out.append(arena, named);
+    }
+    return out.items;
+}
+
+/// Whether `name` is a promisor remote of `config`'s repository: one
+/// `promisorRemotes` lists.
 pub fn isPromisor(config: *const config_mod.Config, name: []const u8) bool {
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "remote.{s}.promisor", .{name}) catch return false;
     if (config.getBool(key, false) catch false) return true;
+    const filter_key = std.fmt.bufPrint(&buf, "remote.{s}.partialclonefilter", .{name}) catch return false;
+    if (config.get(filter_key) != null) return true;
     const named = config.get("extensions.partialclone") orelse return false;
     return std.mem.eql(u8, named, name);
 }
@@ -171,7 +184,10 @@ pub const Lazy = struct {
         };
     }
 
-    /// Ask the promisor remote for `oids`, all in one request.
+    /// Ask the promisor remotes for `oids`, all in one request to each, as
+    /// git's lazy fetch asks them: in `promisorRemotes`' order, the next one
+    /// asked only when a request fails, and then for what is still missing.
+    /// The last failure is the one returned when none gives everything.
     pub fn fetch(l: *Lazy, io: Io, oids: []const Oid) !void {
         if (oids.len == 0) return;
         const repo = l.repo;
@@ -179,7 +195,51 @@ pub const Lazy = struct {
         const saved = repo.odb.lazy;
         repo.odb.lazy = null;
         defer repo.odb.lazy = saved;
-        const name = promisorRemote(&repo.config) orelse return error.NotAPartialClone;
+        var arena_state: std.heap.ArenaAllocator = .init(l.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const names = try promisorRemotes(arena, &repo.config);
+        if (names.len == 0) return error.NotAPartialClone;
+        var remaining = try arena.dupe(Oid, oids);
+        var last_error: anyerror = error.NotAPartialClone;
+        for (names) |name| {
+            if (l.fetchFrom(io, name, remaining)) |_| {
+                l.fetches += 1;
+                l.objects += @intCast(remaining.len);
+                return;
+            } else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => last_error = err,
+            }
+            // What came before the failure is not asked for again.
+            try repo.odb.refresh(io);
+            var kept: usize = 0;
+            for (remaining) |oid| {
+                if (!try repo.odb.exists(io, oid)) {
+                    remaining[kept] = oid;
+                    kept += 1;
+                }
+            }
+            remaining = remaining[0..kept];
+            if (remaining.len == 0) return;
+        }
+        return last_error;
+    }
+
+    /// One request to the promisor remote `name`. A promisor remote with no
+    /// `partialclonefilter` is given `blob:none` first, in the repository's
+    /// configuration, as git's lazy fetch registers it.
+    fn fetchFrom(l: *Lazy, io: Io, name: []const u8, oids: []const Oid) !void {
+        const repo = l.repo;
+        {
+            var buf: [256]u8 = undefined;
+            const key = try std.fmt.bufPrint(&buf, "remote.{s}.partialclonefilter", .{name});
+            if (repo.config.get(key) == null) {
+                try repo.config.set(key, "blob:none");
+                try repo.config.write(io, repo.common_dir, "config");
+            }
+        }
         var remote = try @import("remote.zig").Remote.get(l.gpa, &repo.config, name);
         defer remote.deinit();
         if (remote.urls.len == 0) return error.NotAPartialClone;
@@ -200,8 +260,6 @@ pub const Lazy = struct {
             .filter = "blob:none",
         }, .{ .receive = .{ .check_objects = l.options.check_objects } });
         if (fetched.pack) |pack_name| try writePromisor(io, pack_dir, pack_name, &.{});
-        l.fetches += 1;
-        l.objects += @intCast(oids.len);
     }
 
     /// Fetch, in one request, every blob below `tree` that the repository
@@ -241,7 +299,7 @@ pub const Lazy = struct {
     }
 };
 
-test "filters are sent as git sends them, and the ones not sent are refused by name" {
+test "filters are read and sent as git reads and sends them, and the ones git does not have are refused by name" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -251,7 +309,17 @@ test "filters are sent as git sends them, and the ones not sent are refused by n
     try std.testing.expectEqualStrings("tree:0", try normalize(arena, "tree:0"));
     try std.testing.expectError(error.InvalidFilter, normalize(arena, "blob:some"));
     try std.testing.expectError(error.InvalidFilter, normalize(arena, "tree:x"));
-    try std.testing.expectError(error.FilterUnsupported, normalize(arena, "combine:blob:none+tree:3"));
+    try std.testing.expectEqualStrings("combine:blob:none+tree:3", try normalize(arena, "combine:blob:none+tree:3"));
+    try std.testing.expectEqualStrings("combine:blob:limit=1k+tree:3", try normalize(arena, "combine:blob:limit=1k+tree:3"));
+    try std.testing.expectEqualStrings("combine:blob:none+sparse:oid=main%3aspec", try normalize(arena, "combine:blob:none+sparse:oid=main%3aspec"));
+    try std.testing.expectEqualStrings("object:type=tree", try normalize(arena, "object:type=tree"));
+    try std.testing.expectEqualStrings("sparse:oid=main:spec", try normalize(arena, "sparse:oid=main:spec"));
+    try std.testing.expectError(error.InvalidFilter, normalize(arena, "object:type=file"));
+    try std.testing.expectEqualStrings("combine:blob:none+", try normalize(arena, "combine:blob:none+"));
+    try std.testing.expectError(error.InvalidFilter, normalize(arena, "combine:"));
+    try std.testing.expectError(error.InvalidFilter, normalize(arena, "combine:blob:none+tree:x"));
+    try std.testing.expectError(error.InvalidFilter, normalize(arena, "combine:blob:none+sparse:oid=a~b"));
+    try std.testing.expectError(error.InvalidFilter, normalize(arena, "sparse:path=x"));
 }
 
 test "fuzz: a filter is sent as git spells it or refused by name" {
@@ -264,7 +332,7 @@ fn fuzzFilter(_: void, smith: *std.testing.Smith) anyerror!void {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     _ = normalize(arena_state.allocator(), input) catch |err| switch (err) {
-        error.InvalidFilter, error.FilterUnsupported => return,
+        error.InvalidFilter => return,
         else => |e| return e,
     };
 }

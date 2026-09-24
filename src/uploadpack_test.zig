@@ -21,6 +21,8 @@ const testremote = @import("testremote.zig");
 const helper = @import("build_options").upload_pack_helper_path;
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
+const sparse_spec = "/file\n/dir/\n!/dir/deep/\n";
+
 /// Eight commits a day apart on `main`, a branch, a lightweight and an
 /// annotated tag, a file large enough for `blob:limit`, and filters
 /// allowed: `<root>/repo.git`.
@@ -44,6 +46,9 @@ fn served(gpa: Allocator, io: Io, root: Io.Dir) ![]u8 {
         try stream.print(gpa, "M 100644 inline file\ndata 2\n{d}\n", .{mark});
         try stream.print(gpa, "M 100644 inline dir/deep/note\ndata 2\n{d}\n", .{mark});
         if (mark == 3) try stream.print(gpa, "M 100644 inline big\ndata {d}\n{s}\n", .{ big.items.len, big.items });
+        // Sparse patterns for `sparse:oid=`: a file, and a directory with
+        // a part taken back out.
+        if (mark == 1) try stream.print(gpa, "M 100644 inline spec\ndata {d}\n{s}\n", .{ sparse_spec.len, sparse_spec });
         try stream.appendSlice(gpa, "\n");
     }
     try stream.print(gpa, "commit refs/heads/side\nmark :20\ncommitter C <c@example.com> {d} +0000\ndata 5\nside\nfrom :4\nM 100644 inline side\ndata 5\nside\n\n", .{1_600_000_000 + 20 * day});
@@ -134,6 +139,10 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
         &.{"--filter=blob:limit=1k"},
         &.{"--filter=tree:1"},
         &.{ "--filter=blob:none", "--depth=2" },
+        &.{"--filter=sparse:oid=main:spec"},
+        &.{"--filter=combine:blob:none+tree:2"},
+        &.{"--filter=combine:tree:2+sparse:oid=main%3Aspec"},
+        &.{"--filter=object:type=blob"},
     };
     for ([_][]const u8{ "2", "0" }) |version| for (cases) |extra| {
         var tmp = testing.tmpDir(.{ .iterate = true });
@@ -147,14 +156,22 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
             if (upload_pack) |p| try args.appendSlice(gpa, &.{ "--upload-pack", p });
             try args.appendSlice(gpa, extra);
             try args.appendSlice(gpa, &.{ url, name });
-            const out = try git(gpa, io, tmp.dir, &env, args.items);
+            const out = git(gpa, io, tmp.dir, &env, args.items) catch |err| {
+                for (extra) |arg| std.debug.print("{s} ", .{arg});
+                std.debug.print("in protocol v{s}, cloned by {s}\n", .{ version, name });
+                return err;
+            };
             gpa.free(out);
         }
         var a = try tmp.dir.openDir(io, "by-git", .{});
         defer a.close(io);
         var b = try tmp.dir.openDir(io, "by-relic", .{});
         defer b.close(io);
-        try expectSame(gpa, io, &env, a, b);
+        expectSame(gpa, io, &env, a, b) catch |err| {
+            for (extra) |arg| std.debug.print("{s} ", .{arg});
+            std.debug.print("in protocol v{s}\n", .{version});
+            return err;
+        };
     };
 }
 
@@ -304,7 +321,11 @@ test "git and relic clone over HTTP from relic's upload-pack, one request at a t
             try args.appendSlice(gpa, &.{ "-c", version_setting, "clone", "-q", "--no-checkout" });
             try args.appendSlice(gpa, extra);
             try args.appendSlice(gpa, &.{ url, name });
-            const out = try git(gpa, io, tmp.dir, &env, args.items);
+            const out = git(gpa, io, tmp.dir, &env, args.items) catch |err| {
+                for (extra) |arg| std.debug.print("{s} ", .{arg});
+                std.debug.print("in protocol v{s}, cloned by {s}\n", .{ version, name });
+                return err;
+            };
             gpa.free(out);
         }
         var a = try tmp.dir.openDir(io, "by-git", .{});

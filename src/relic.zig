@@ -74,6 +74,7 @@ pub const httpclient = @import("httpclient.zig");
 pub const smarthttp = @import("smarthttp.zig");
 pub const shallow = @import("shallow.zig");
 pub const partial = @import("partial.zig");
+pub const filterspec = @import("filterspec.zig");
 pub const uploadpack = @import("uploadpack.zig");
 pub const transport = @import("transport.zig");
 pub const fetch = @import("fetch.zig");
