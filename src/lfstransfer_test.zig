@@ -934,3 +934,97 @@ test "a download that breaks off goes on from where it stopped, as git-lfs's doe
         try testing.expectError(error.FileNotFound, dirs[1].access(io, part, .{}));
     }
 }
+
+/// The object names in the store of the repository at `d`, sorted, one per
+/// line. The caller's.
+fn storeListing(fx: *Fixture, d: Io.Dir) ![]u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (names.items) |n| fx.gpa.free(n);
+        names.deinit(fx.gpa);
+    }
+    var objects = d.openDir(fx.io, ".git/lfs/objects", .{ .iterate = true }) catch return fx.gpa.dupe(u8, "");
+    defer objects.close(fx.io);
+    var walker = try objects.walk(fx.gpa);
+    defer walker.deinit();
+    while (try walker.next(fx.io)) |e| {
+        if (e.kind == .file) try names.append(fx.gpa, try fx.gpa.dupe(u8, e.basename));
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+    var out: std.ArrayList(u8) = .empty;
+    for (names.items) |n| {
+        try out.appendSlice(fx.gpa, n);
+        try out.append(fx.gpa, '\n');
+    }
+    return out.toOwnedSlice(fx.gpa);
+}
+
+test "a recent fetch brings what git lfs fetch --recent brings, counted from the time the caller gives" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    // The suite reads the clock; the library is handed it.
+    const now: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    const day = 86400;
+
+    var seed = try fx.workRepo("seed", nobody);
+    defer seed.close(io);
+    try seed.writeFile(io, .{ .sub_path = ".gitattributes", .data = attributes });
+    const Step = struct { days_ago: i64, path: []const u8, content: []const u8, branch: ?[]const []const u8 = null };
+    const steps = [_]Step{
+        .{ .days_ago = 20, .path = "big.bin", .content = "version one\n" },
+        .{ .days_ago = 30, .path = "o.bin", .content = "an old branch's\n", .branch = &.{ "checkout", "-q", "-b", "old" } },
+        .{ .days_ago = 10, .path = "big.bin", .content = "version two\n", .branch = &.{ "checkout", "-q", "main" } },
+        .{ .days_ago = 3, .path = "big.bin", .content = "version three\n" },
+        .{ .days_ago = 1, .path = "big.bin", .content = "version four\n" },
+        .{ .days_ago = 2, .path = "r.bin", .content = "a recent branch's\n", .branch = &.{ "checkout", "-q", "-b", "recent" } },
+    };
+    for (steps) |step| {
+        if (step.branch) |args| try fx.gitIn(seed, args);
+        try seed.writeFile(io, .{ .sub_path = step.path, .data = step.content });
+        try fx.gitIn(seed, &.{ "add", "-A" });
+        var date_buf: [32]u8 = undefined;
+        const date = try std.fmt.bufPrint(&date_buf, "@{d} +0000", .{now - step.days_ago * day});
+        try fx.gitWith(seed, &.{ .{ "GIT_AUTHOR_DATE", date }, .{ "GIT_COMMITTER_DATE", date } }, &.{ "commit", "-q", "-m", step.path });
+    }
+    try fx.gitIn(seed, &.{ "checkout", "-q", "main" });
+    try fx.gitIn(seed, &.{ "lfs", "push", "--all", "origin" });
+    try fx.gitIn(seed, &.{ "push", "-q", "--no-verify", "--all", "origin" });
+
+    var listings: [2][]u8 = .{ &.{}, &.{} };
+    defer for (listings) |l| gpa.free(l);
+    for ([_][]const u8{ "by-git", "by-relic" }, 0..) |name, i| {
+        var d = try fx.cloneRepo(name, nobody);
+        defer d.close(io);
+        try fx.gitIn(d, &.{ "config", "lfs.fetchrecentcommitsdays", "5" });
+        if (i == 0) {
+            try fx.gitIn(d, &.{ "lfs", "fetch", "--recent" });
+        } else {
+            var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+            defer repo.deinit(io);
+            const server = try openServer(fx, &repo);
+            defer server.close();
+            try testing.expectError(error.LfsRecentNeedsTime, lfstransfer.fetch(server, &repo, .{ .recent = true }));
+            var fetched = try lfstransfer.fetch(server, &repo, .{ .recent = true, .now = now });
+            defer fetched.deinit();
+            try expectNoFailures(&fetched);
+        }
+        listings[i] = try storeListing(fx, d);
+    }
+    try testing.expectEqualStrings(listings[0], listings[1]);
+    // The tips of main and of the recent branch, and the two versions the
+    // last five days' commits replaced; nothing older.
+    for ([_][]const u8{ "version four\n", "a recent branch's\n", "version three\n", "version two\n" }) |c| {
+        try testing.expect(std.mem.indexOf(u8, listings[1], &testlfs.sha256Hex(c)) != null);
+    }
+    for ([_][]const u8{ "version one\n", "an old branch's\n" }) |c| {
+        try testing.expect(std.mem.indexOf(u8, listings[1], &testlfs.sha256Hex(c)) == null);
+    }
+}

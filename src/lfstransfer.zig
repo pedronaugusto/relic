@@ -1210,6 +1210,16 @@ pub const FetchOptions = struct {
     /// Leave `lfs.fetchinclude` and `lfs.fetchexclude` out of it, as
     /// `git lfs fetch --all` does.
     all_paths: bool = false,
+    /// `git lfs fetch --recent`: also the tips of the refs with a commit in
+    /// the last `lfs.fetchrecentrefsdays` days — the remote's branches too
+    /// unless `lfs.fetchrecentremoterefs` is false — and the versions of
+    /// files the commits of the `lfs.fetchrecentcommitsdays` days before
+    /// each tip replaced. `null` takes `lfs.fetchrecentalways`.
+    recent: ?bool = null,
+    /// Now, in seconds since 1970, which the recent refs' days are counted
+    /// back from. relic reads no clock, so a recent fetch that looks at
+    /// refs needs the caller's.
+    now: ?i64 = null,
     transfer: Options = .{},
 };
 
@@ -1217,7 +1227,10 @@ pub const FetchOptions = struct {
 pub const FetchError = Error || objectwalk.Error || repo_mod.Error || error{
     /// A name in `refs` or `exclude` that names nothing here.
     RefNotFound,
-} || index_mod.ReadError || index_mod.WriteError || fs.AtomicWriteError || fs.StatError;
+    /// A recent fetch counts `lfs.fetchrecentrefsdays` back from now, and
+    /// `FetchOptions.now` was not given.
+    LfsRecentNeedsTime,
+} || @import("revwalk.zig").Error || @import("diff.zig").Error || index_mod.ReadError || index_mod.WriteError || fs.AtomicWriteError || fs.StatError;
 
 /// Bring the LFS objects the trees at `options.refs` point at into the
 /// store, as `git lfs fetch <remote> <refs>` does. A path
@@ -1229,18 +1242,117 @@ pub fn fetch(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) F
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var transfer = options.transfer;
-    const pointers = try scan(arena, server.io, repo, options, &transfer.ref);
+    var tips: std.ArrayList(Oid) = .empty;
+    var pointers: std.ArrayList(Object) = .empty;
+    try pointers.appendSlice(arena, try scan(arena, server.io, repo, options, &transfer.ref, &tips));
+    const recent = options.recent orelse server.settings.getBool("lfs.fetchrecentalways", false);
+    if (recent and !options.history) {
+        try pointers.appendSlice(arena, try recentPointers(arena, server, repo, tips.items, options.now));
+    }
     var objects: std.ArrayList(Object) = .empty;
-    for (pointers) |p| {
+    for (pointers.items) |p| {
         if (!options.all_paths and !server.lfs.settings.fetchAllowed(p.name)) continue;
         try objects.append(arena, p);
     }
     return download(server, objects.items, transfer);
 }
 
+/// What `git lfs fetch --recent` adds: the tips of the recent refs, and the
+/// versions the recent commits before each tip replaced.
+fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, tips: []const Oid, now: ?i64) FetchError![]Object {
+    const io = server.io;
+    const settings = &server.settings;
+    const refs_days = settings.getInt("lfs.fetchrecentrefsdays", 7);
+    const commits_days = settings.getInt("lfs.fetchrecentcommitsdays", 0);
+    const remote_refs = settings.getBool("lfs.fetchrecentremoterefs", true);
+    var out: std.ArrayList(Object) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var unique: std.ArrayList(Oid) = .empty;
+    for (tips) |t| {
+        if (!containsOid(unique.items, t)) try unique.append(arena, t);
+    }
+
+    if (refs_days > 0) {
+        const since = (now orelse return error.LfsRecentNeedsTime) - refs_days * 86400;
+        var listing = try repo.refs.list(server.gpa, io, "refs/");
+        defer listing.deinit();
+        const remote_prefix = try std.fmt.allocPrint(arena, "refs/remotes/{s}/", .{server.remote});
+        for (listing.entries) |entry| {
+            // git-lfs's pattern takes `refs/<kind>/<name>`: a branch, a
+            // tag, a remote's branch.
+            if (std.mem.count(u8, entry.name, "/") < 2) continue;
+            if (std.mem.startsWith(u8, entry.name, "refs/remotes/")) {
+                if (!remote_refs or !std.mem.startsWith(u8, entry.name, remote_prefix)) continue;
+            }
+            const resolved = (try repo.refs.resolve(arena, io, entry.name)) orelse continue;
+            const when = commitTime(arena, io, repo, resolved.oid) orelse continue;
+            if (when < since) continue;
+            if (containsOid(unique.items, resolved.oid)) continue;
+            try unique.append(arena, resolved.oid);
+            const found = try repo.odb.read(io, resolved.oid);
+            defer repo.odb.gpa.free(found.bytes);
+            var commit = try object_mod.Commit.parse(arena, repo.kind, found.bytes);
+            defer commit.deinit();
+            try scanTree(arena, io, repo, commit.tree, "", &out, &seen);
+        }
+    }
+
+    if (commits_days > 0) {
+        for (unique.items) |tip| {
+            const tip_time = commitTime(arena, io, repo, tip) orelse continue;
+            const since = tip_time - commits_days * 86400;
+            var walk = @import("revwalk.zig").Walk.init(server.gpa, &repo.odb);
+            defer walk.deinit();
+            try walk.push(tip);
+            while (try walk.next(io)) |c| {
+                if (c.time < since) continue;
+                // git log -p shows no diff for a merge, and a root commit
+                // replaced nothing.
+                if (c.parents.len != 1) continue;
+                const old_tree = try treeOfCommit(arena, io, repo, c.parents[0]);
+                const new_tree = try treeOfCommit(arena, io, repo, c.oid);
+                var changes = try @import("diff.zig").tree(server.gpa, io, &repo.odb, old_tree, new_tree, .{});
+                defer changes.deinit();
+                for (changes.items) |change| {
+                    const old = change.old orelse continue;
+                    if (old.mode != .file and old.mode != .exec) continue;
+                    const header = try repo.odb.readHeader(io, old.oid);
+                    try addPointer(arena, io, repo, old.oid, header.size, try arena.dupe(u8, old.path), &out, &seen);
+                }
+            }
+        }
+    }
+    return out.items;
+}
+
+fn containsOid(list: []const Oid, oid: Oid) bool {
+    for (list) |o| {
+        if (o.eql(oid)) return true;
+    }
+    return false;
+}
+
+/// The committer time of `oid` when it is a commit.
+fn commitTime(arena: Allocator, io: Io, repo: *Repository, oid: Oid) ?i64 {
+    const found = repo.odb.read(io, oid) catch return null;
+    defer repo.odb.gpa.free(found.bytes);
+    if (found.type != .commit) return null;
+    var commit = object_mod.Commit.parse(arena, repo.kind, found.bytes) catch return null;
+    defer commit.deinit();
+    return commit.committer.when_secs;
+}
+
+fn treeOfCommit(arena: Allocator, io: Io, repo: *Repository, oid: Oid) FetchError!Oid {
+    const found = try repo.odb.read(io, oid);
+    defer repo.odb.gpa.free(found.bytes);
+    var commit = try object_mod.Commit.parse(arena, repo.kind, found.bytes);
+    defer commit.deinit();
+    return commit.tree;
+}
+
 /// The pointers in the trees `options` asks for, each with a path it is at.
-fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, ref_out: *?[]const u8) FetchError![]Object {
-    var tips: std.ArrayList(Oid) = .empty;
+fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, ref_out: *?[]const u8, tips_out: *std.ArrayList(Oid)) FetchError![]Object {
+    const tips = tips_out;
     for (options.refs) |name| {
         const found = try resolve(arena, io, repo, name);
         if (ref_out.* == null) {
