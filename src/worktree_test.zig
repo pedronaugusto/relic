@@ -636,7 +636,8 @@ test "checkout and writePaths apply every .gitattributes on the way down, as git
     var index = try repo.openIndex(io);
     defer index.deinit();
     const tree = (try repo.headTree(io)).?;
-    _ = try worktree.checkout(gpa, io, here.dir, &index, &repo.odb, tree, .{ .rules = rules });
+    // The deleted files come back, as `git checkout -- .` brings them.
+    _ = try worktree.checkout(gpa, io, here.dir, &index, &repo.odb, tree, .{ .rules = rules, .force = true });
     // What `enter` loaded is given back.
     try std.testing.expectEqual(@as(usize, 0), attrs.levels.items.len);
 

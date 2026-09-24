@@ -539,10 +539,13 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     var index = try repo.openIndex(io);
     defer index.deinit();
     const lfs_configured = repo.config.get("filter.lfs.process") != null or repo.config.get("filter.lfs.smudge") != null;
+    // A new clone's working tree has nothing in it to lose, as git's
+    // clone takes it.
     _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, tree, .{
         .rules = rules,
         .programs = programs,
         .lfs_fetch = if (lfs_configured) lfs_fetch.fetcher() else null,
+        .force = true,
     });
     try index.write(io, repo.git_dir, "index", .{});
 }

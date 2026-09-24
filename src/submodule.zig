@@ -1635,7 +1635,9 @@ fn checkoutCommit(
     }
 
     var refusal: worktree.Refusal = .{};
-    _ = worktree.checkout(gpa, io, work, &index, &sub.odb, tree, .{ .rules = rules, .refusal = &refusal }) catch |err| switch (err) {
+    // `git checkout`, or with `--force` `git checkout -f`, as git's
+    // submodule update runs it.
+    _ = worktree.checkout(gpa, io, work, &index, &sub.odb, tree, .{ .rules = rules, .refusal = &refusal, .force = force }) catch |err| switch (err) {
         error.UnsafePath => return refuse(options.refusal, display, refusal.path(), error.UnsafePath),
         else => |e| return e,
     };

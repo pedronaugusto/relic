@@ -547,7 +547,8 @@ test "checkout fetches what the store lacks through the server, many at once, an
     defer index.deinit();
     const tree = (try repo.headTree(io)).?;
     const worktree = @import("worktree.zig");
-    const outcome = try worktree.checkout(gpa, io, ours, &index, &repo.odb, tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher() });
+    // Every file is written again, as `git checkout -f` writes it.
+    const outcome = try worktree.checkout(gpa, io, ours, &index, &repo.odb, tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher(), .force = true });
     try testing.expectEqual(@as(u32, 0), outcome.lfs_pointers);
     for (files) |f| try expectFile(fx, ours, f[0], f[1]);
     try testing.expectEqual(@as(u64, files.len), heard.objects);
@@ -1228,7 +1229,8 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
                 defer index.deinit();
                 const tree = (try repo.headTree(io)).?;
                 const worktree = @import("worktree.zig");
-                const done = worktree.checkout(gpa, io, d, &index, &repo.odb, tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher() });
+                // Every file is written again, as `git checkout -f` writes it.
+                const done = worktree.checkout(gpa, io, d, &index, &repo.odb, tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher(), .force = true });
                 if (skip) {
                     try testing.expectEqual(@as(u32, 1), (try done).lfs_pointers);
                 } else {

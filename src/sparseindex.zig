@@ -654,7 +654,8 @@ test "checkout and reset on a sparse index leave what they leave on the full one
     // file on the disk, which git calls clean.
     var checked_out = try repo.openIndex(io);
     defer checked_out.deinit();
-    _ = try worktree.checkout(gpa, io, git.dir, &checked_out, &repo.odb, head, .{});
+    // Every path written, as `read-tree --reset -u` writes them.
+    _ = try worktree.checkout(gpa, io, git.dir, &checked_out, &repo.odb, head, .{ .force = true });
     try std.testing.expect(!checked_out.sparse and !hasSparseDirectories(&checked_out));
     try git.dir.access(io, "D/E/F/f.txt", .{});
     try checked_out.write(io, repo.git_dir, "index", .{});

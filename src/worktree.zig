@@ -1376,13 +1376,13 @@ pub const Refusal = struct {
 /// How `checkout` behaves.
 pub const CheckoutOptions = struct {
     rules: Rules = .{},
-    /// `read-tree --reset -u`, the default: rewrite files with changes of
-    /// their own and replace untracked files where the tree puts one.
-    /// `false` is `read-tree -m -u`: a checkout that would lose either is
-    /// refused before anything is touched, with every such path in
-    /// `obstructions`, and a file the tree does not change keeps its local
-    /// changes.
-    force: bool = true,
+    /// `true` is `read-tree --reset -u`: rewrite files with changes of
+    /// their own and replace untracked files where the tree puts one. The
+    /// default is `read-tree -m -u`, as `git checkout` is: a checkout that
+    /// would lose either is refused before anything is touched, with every
+    /// such path in `obstructions`, and a file the tree does not change
+    /// keeps its local changes. A caller that means to discard work says so.
+    force: bool = false,
     /// Where a refusal lists the paths that caused it.
     obstructions: ?*Obstructions = null,
     /// Ignore rules for the root, for telling an ignored file in the way,

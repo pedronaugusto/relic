@@ -635,7 +635,10 @@ fn resetAfterPush(
 ) Error!void {
     const io = ctx.io;
     const db = &ctx.repo.odb;
-    const checkout_options = ctx.checkoutOptions();
+    var checkout_options = ctx.checkoutOptions();
+    // The working tree goes back to `HEAD` as `reset --hard` takes it: what
+    // it gives up is in the stash just written.
+    checkout_options.force = true;
 
     if (options.paths.len == 0) {
         for (untracked) |path| {
