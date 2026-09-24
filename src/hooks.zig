@@ -1221,7 +1221,7 @@ fn gitStderr(gpa: Allocator, io: Io, repo: *testgit.Repo, args: []const []const 
     try argv.append(gpa, "git");
     try argv.appendSlice(gpa, repo.defaults);
     try argv.appendSlice(gpa, args);
-    const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = repo.dir } });
+    const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = repo.dir }, .environ_map = repo.environMap() });
     gpa.free(result.stdout);
     return result.stderr;
 }

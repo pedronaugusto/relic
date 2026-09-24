@@ -1749,6 +1749,7 @@ fn runWithInput(repo: *testgit.Repo, io: Io, args: []const []const u8, input: []
     var child = try std.process.spawn(io, .{
         .argv = argv.items,
         .cwd = .{ .dir = repo.dir },
+        .environ_map = repo.environMap(),
         .stdin = .pipe,
         .stdout = .ignore,
         .stderr = .inherit,
