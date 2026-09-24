@@ -1651,7 +1651,15 @@ test "deleting a ref takes its log and its empty directories with it, as git doe
     defer git.deinit();
     var here = try testgit.Repo.init(gpa, io, &.{});
     defer here.deinit();
+    // One date for both, so both commits have one name however long the
+    // two setups take between them.
+    var environ = try testgit.programEnviron(gpa);
+    defer environ.deinit();
+    try environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
+    try environ.put("GIT_COMMITTER_DATE", "@1700000000 +0000");
     inline for (.{ &git, &here }) |r| {
+        r.environ = &environ;
+        defer r.environ = null;
         try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
         try r.exec(io, &.{ "branch", "a/b/c" });
         try r.exec(io, &.{ "branch", "d" });
