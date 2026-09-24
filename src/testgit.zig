@@ -6,15 +6,26 @@
 //! that a format change in git arrives as a red build rather than as a silent
 //! divergence. A machine with no `git` skips the tests that need one.
 //!
-//! Every invocation carries a fixed set of `-c` settings, so a person's own
-//! `~/.gitconfig` cannot change the bytes a fixture holds. A test that wants
-//! one of those settings — the line-ending fixture wants `core.autocrlf` —
-//! takes it out of `defaults` and puts it in the repository's own config,
-//! which is where the library reads it from.
+//! Every invocation carries a fixed set of `-c` settings, so a fixture's
+//! bytes do not depend on git's defaults drifting. A test that wants one of
+//! those settings — the line-ending fixture wants `core.autocrlf` — takes it
+//! out of `defaults` and puts it in the repository's own config, which is
+//! where the library reads it from.
+//!
+//! And every git the harness starts runs in an environment of its own: a
+//! scratch home, no system or global config, no repository variables
+//! inherited from whoever ran the suite, no ssh or gpg agent, and no prompt.
+//! A test is a guest on the person's machine. It must not read their
+//! `~/.gitconfig`, reach their credential helper and store a test password
+//! in their keychain, sign with their keys, or push through their ssh agent
+//! — and an environment that merely leaves those out by convention, test by
+//! test, is one forgotten line from doing all of it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const Environ = std.process.Environ;
 
 /// The settings every invocation carries unless a test changes them.
 pub const default_settings = [_][]const u8{
@@ -54,8 +65,16 @@ pub const Repo = struct {
     report_failures: bool = true,
     /// The environment git runs in, when a test needs one of its own — a
     /// fixed commit date, or a `GNUPGHOME` that is not the person's. `null`
-    /// is this process's.
-    environ: ?*const std.process.Environ.Map = null,
+    /// is the harness's isolated one; a test building its own starts from
+    /// `isolatedEnviron` or passes its map through `isolate`.
+    environ: ?*const Environ.Map = null,
+    /// The scratch home the isolated environment points at: empty, and
+    /// removed with the repository. A harness made around a directory the
+    /// test owns, rather than by `init`, has none, and its git runs with
+    /// `no_home`.
+    home: ?std.testing.TmpDir = null,
+    /// The isolated environment itself, made by `init`.
+    isolated: ?Environ.Map = null,
 
     /// Make a temporary directory and run `git init` in it.
     ///
@@ -65,8 +84,14 @@ pub const Repo = struct {
         try requireGit(gpa, io);
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         errdefer tmp.cleanup();
+        var home = std.testing.tmpDir(.{ .iterate = true });
+        errdefer home.cleanup();
+        const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(home_path);
+        var isolated = try isolatedEnviron(gpa, home_path);
+        errdefer isolated.deinit();
 
-        var repo: Repo = .{ .gpa = gpa, .tmp = tmp, .dir = tmp.dir };
+        var repo: Repo = .{ .gpa = gpa, .tmp = tmp, .dir = tmp.dir, .home = home, .isolated = isolated };
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
         try argv.appendSlice(gpa, &.{ "init", "-q", "-b", "main" });
@@ -78,6 +103,8 @@ pub const Repo = struct {
 
     /// Remove the directory and release everything.
     pub fn deinit(r: *Repo) void {
+        if (r.isolated) |*map| map.deinit();
+        if (r.home) |*home| home.cleanup();
         r.tmp.cleanup();
         r.* = undefined;
     }
@@ -92,10 +119,16 @@ pub const Repo = struct {
         try argv.appendSlice(r.gpa, r.defaults);
         try argv.appendSlice(r.gpa, args);
 
+        var own: ?Environ.Map = null;
+        defer if (own) |*map| map.deinit();
+        const environ_map = r.environ orelse if (r.isolated) |*map| map else blk: {
+            own = try isolatedEnviron(r.gpa, no_home);
+            break :blk &own.?;
+        };
         const result = try std.process.run(r.gpa, io, .{
             .argv = argv.items,
             .cwd = .{ .dir = r.dir },
-            .environ_map = r.environ,
+            .environ_map = environ_map,
         });
         defer r.gpa.free(result.stderr);
         switch (result.term) {
@@ -112,6 +145,13 @@ pub const Repo = struct {
             },
         }
         return result.stdout;
+    }
+
+    /// The environment `run` starts git in: the test's own when it set one,
+    /// the isolated one otherwise. For a test that starts git itself, in a
+    /// repository `init` made.
+    pub fn environMap(r: *const Repo) *const Environ.Map {
+        return r.environ orelse &r.isolated.?;
     }
 
     /// Run `git` and discard its output.
@@ -146,15 +186,70 @@ pub const Repo = struct {
     }
 };
 
+/// A home that does not exist, for an environment built where there is no
+/// directory to spare. git reads nothing from it and can write nothing to
+/// it, which is what isolation asks.
+pub const no_home = if (builtin.os.tag == .windows) "C:\\relic-test-no-home" else "/nonexistent/relic-test-home";
+
+/// The variables `isolate` removes besides every `GIT_*` one: the agents
+/// that hold a person's keys, the programs that would ask them for a
+/// password, and the settings that move git's own config elsewhere.
+const personal_variables = [_][]const u8{
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "SSH_ASKPASS",
+    "SSH_ASKPASS_REQUIRE",
+    "GPG_AGENT_INFO",
+    "GPG_TTY",
+    "GNUPGHOME",
+    "XDG_CONFIG_HOME",
+    "EMAIL",
+};
+
+/// Make `map` an environment no setting of the person's reaches: every
+/// `GIT_*` variable and every entry of `personal_variables` removed, `HOME`
+/// set to `home`, the global config read from `home` alone, the system
+/// config not read at all, and no terminal prompt. What else the map holds
+/// — `PATH`, the locale, a test's own additions made afterwards — stays.
+pub fn isolate(map: *Environ.Map, home: []const u8) !void {
+    var i = map.count();
+    while (i > 0) {
+        i -= 1;
+        const key = map.keys()[i];
+        const personal = for (personal_variables) |name| {
+            if (std.ascii.eqlIgnoreCase(key, name)) break true;
+        } else false;
+        if (personal or (key.len >= 4 and std.ascii.eqlIgnoreCase(key[0..4], "GIT_"))) {
+            _ = map.swapRemove(key);
+        }
+    }
+    try map.put("HOME", home);
+    var global_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const sep = if (builtin.os.tag == .windows) "\\" else "/";
+    try map.put("GIT_CONFIG_GLOBAL", try std.fmt.bufPrint(&global_buf, "{s}" ++ sep ++ ".gitconfig", .{home}));
+    try map.put("GIT_CONFIG_NOSYSTEM", "1");
+    try map.put("GIT_TERMINAL_PROMPT", "0");
+}
+
+/// The test process's environment, isolated: see `isolate`.
+pub fn isolatedEnviron(gpa: Allocator, home: []const u8) !Environ.Map {
+    var map = try std.testing.environ.createMap(gpa);
+    errdefer map.deinit();
+    try isolate(&map, home);
+    return map;
+}
+
 /// The environment a program the library starts runs in during a test: the
-/// machine's `PATH` and nothing else, so no setting of the person's reaches
-/// it. `error.SkipZigTest` where there is no `PATH`.
+/// machine's `PATH`, isolated as `isolate` isolates git, and nothing else,
+/// so no setting of the person's reaches it. `error.SkipZigTest` where
+/// there is no `PATH`.
 pub fn programEnviron(gpa: Allocator) !std.process.Environ.Map {
     var map: std.process.Environ.Map = .init(gpa);
     errdefer map.deinit();
     const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
     defer gpa.free(path);
     try map.put("PATH", path);
+    try isolate(&map, no_home);
     return map;
 }
 
@@ -167,7 +262,9 @@ var git_minor: u32 = 0;
 pub fn requireGit(gpa: Allocator, io: Io) !void {
     if (!git_checked) {
         git_checked = true;
-        const result = std.process.run(gpa, io, .{ .argv = &.{ "git", "--version" } }) catch {
+        var env = try isolatedEnviron(gpa, no_home);
+        defer env.deinit();
+        const result = std.process.run(gpa, io, .{ .argv = &.{ "git", "--version" }, .environ_map = &env }) catch {
             git_present = false;
             return error.SkipZigTest;
         };
@@ -211,4 +308,83 @@ fn parseVersion(line: []const u8) void {
         git_major = 0;
         return;
     };
+}
+
+test "a git the harness runs reads no configuration but the harness's own" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var repo = try Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    const listed = try repo.run(io, &.{ "config", "--list", "--show-scope" });
+    defer gpa.free(listed);
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, listed, "\n"), '\n');
+    while (lines.next()) |entry| {
+        const scope = entry[0 .. std.mem.indexOfScalar(u8, entry, '\t') orelse entry.len];
+        if (!std.mem.eql(u8, scope, "command") and !std.mem.eql(u8, scope, "local")) {
+            std.debug.print("a setting from outside the fixture: {s}\n", .{entry});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // The home git sees is the scratch one, and it is empty.
+    const home = try repo.line(io, &.{ "var", "GIT_CONFIG_GLOBAL" });
+    defer gpa.free(home);
+    try std.testing.expect(std.mem.startsWith(u8, home, repo.isolated.?.get("HOME").?));
+    var it = repo.home.?.dir.iterate();
+    try std.testing.expectEqual(@as(?Io.Dir.Entry, null), try it.next(io));
+}
+
+test "isolation takes out a person's repository variables, agents and prompts, and keeps the rest" {
+    const gpa = std.testing.allocator;
+    var map: Environ.Map = .init(gpa);
+    defer map.deinit();
+    for ([_][2][]const u8{
+        .{ "PATH", "/bin" },
+        .{ "LANG", "C" },
+        .{ "GIT_DIR", "/elsewhere/.git" },
+        .{ "GIT_WORK_TREE", "/elsewhere" },
+        .{ "GIT_INDEX_FILE", "/elsewhere/index" },
+        .{ "GIT_ASKPASS", "/usr/bin/ask" },
+        .{ "GIT_SSH_COMMAND", "ssh -i key" },
+        .{ "GIT_CONFIG_COUNT", "1" },
+        .{ "SSH_AUTH_SOCK", "/tmp/agent" },
+        .{ "SSH_ASKPASS", "/usr/bin/ask" },
+        .{ "GPG_AGENT_INFO", "/tmp/gpg" },
+        .{ "GNUPGHOME", "/home/person/.gnupg" },
+        .{ "XDG_CONFIG_HOME", "/home/person/.config" },
+        .{ "HOME", "/home/person" },
+    }) |pair| try map.put(pair[0], pair[1]);
+    try isolate(&map, "/scratch");
+
+    for ([_][]const u8{
+        "GIT_DIR",          "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_ASKPASS",    "GIT_SSH_COMMAND",
+        "GIT_CONFIG_COUNT", "SSH_AUTH_SOCK", "SSH_ASKPASS",    "GPG_AGENT_INFO", "GNUPGHOME",
+        "XDG_CONFIG_HOME",
+    }) |name| try std.testing.expect(map.get(name) == null);
+    try std.testing.expectEqualStrings("/bin", map.get("PATH").?);
+    try std.testing.expectEqualStrings("C", map.get("LANG").?);
+    try std.testing.expectEqualStrings("/scratch", map.get("HOME").?);
+    try std.testing.expectEqualStrings("1", map.get("GIT_CONFIG_NOSYSTEM").?);
+    try std.testing.expectEqualStrings("0", map.get("GIT_TERMINAL_PROMPT").?);
+    try std.testing.expect(std.mem.startsWith(u8, map.get("GIT_CONFIG_GLOBAL").?, "/scratch"));
+}
+
+test "a repository variable in the environment cannot send the harness's git to another repository" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var repo = try Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    var other = try Repo.init(gpa, io, &.{});
+    defer other.deinit();
+    const other_git = try other.dir.realPathFileAlloc(io, ".git", gpa);
+    defer gpa.free(other_git);
+
+    // What a hook or a shell would have left behind, run through `isolate`.
+    var env = try repo.isolated.?.clone(gpa);
+    defer env.deinit();
+    try env.put("GIT_DIR", other_git);
+    try isolate(&env, repo.isolated.?.get("HOME").?);
+    repo.environ = &env;
+    const git_dir = try repo.line(io, &.{ "rev-parse", "--absolute-git-dir" });
+    defer gpa.free(git_dir);
+    try std.testing.expect(!std.mem.eql(u8, git_dir, other_git));
 }

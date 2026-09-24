@@ -399,7 +399,7 @@ test "git refuses the same objects and names the same problem" {
         try argv.append(gpa, "git");
         try argv.appendSlice(gpa, repo.defaults);
         try argv.appendSlice(gpa, &.{ "hash-object", "-t", case.t.name(), "object" });
-        const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = repo.dir } });
+        const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = repo.dir }, .environ_map = repo.environMap() });
         defer gpa.free(result.stdout);
         defer gpa.free(result.stderr);
         try testing.expect(result.term != .exited or result.term.exited != 0);

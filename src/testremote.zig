@@ -16,18 +16,15 @@ const Environ = std.process.Environ;
 const program = @import("program.zig");
 const testgit = @import("testgit.zig");
 
-/// The environment a program started by a test sees: the test's own `PATH`
-/// and nothing else, so a person's settings cannot reach a fixture.
+/// The environment a program started by a test sees: the test's own `PATH`,
+/// isolated as `testgit.isolate` isolates git, and nothing else.
 pub fn environ(gpa: Allocator) !Environ.Map {
     var map: Environ.Map = .init(gpa);
     errdefer map.deinit();
     const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
     defer gpa.free(path);
     try map.put("PATH", path);
-    // git refuses to run with no idea of a home directory on some systems;
-    // one that holds nothing is enough.
-    try map.put("HOME", if (builtin.os.tag == .windows) "C:\\" else "/nonexistent");
-    try map.put("GIT_CONFIG_NOSYSTEM", "1");
+    try testgit.isolate(&map, testgit.no_home);
     return map;
 }
 

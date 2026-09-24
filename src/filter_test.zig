@@ -23,10 +23,10 @@ const lfs = @import("lfs.zig");
 const Oid = hash.Oid;
 const testing = std.testing;
 
-/// The whole of the test process's environment, which is what a filter
-/// program is started from.
+/// The test process's environment with nothing of the person's in it,
+/// which is what a filter program is started from.
 pub fn environ(gpa: std.mem.Allocator) !std.process.Environ.Map {
-    return testing.environ.createMap(gpa);
+    return testgit.isolatedEnviron(gpa, testgit.no_home);
 }
 
 /// What relic is handed for one operation.
