@@ -15,11 +15,18 @@
 //! a plain file listing — git's dumb protocol — is refused by name.
 //!
 //! `https://` goes through the same client with TLS from `std.crypto.tls`,
-//! against the system's root certificates. That check needs the time, and
-//! it is the one place a clock is read, by the standard library's TLS
-//! client. What that client cannot do is refused by name rather than
-//! ignored: turning certificate checks off with `http.sslVerify=false`,
-//! a certificate file of one's own, and a client certificate.
+//! against the system's root certificates, or against `http.sslCAInfo` in
+//! their place and `http.sslCAPath` besides — a company's own authority, a
+//! self-hosted server's. That check needs the time, and it is the one place
+//! a clock is read. The settings are git's, scoped by `http.<url>.*` and
+//! overridden by git's environment variables (`httpsettings.zig`), and a
+//! proxy is `http.proxy` or the one curl would find in the environment.
+//! What the standard library's client cannot do is refused by name rather
+//! than done wrong: it always checks the server's certificate, so
+//! `http.sslVerify=false` is refused rather than quietly checked anyway; it
+//! cannot present a client certificate, so `http.sslCert` and `http.sslKey`
+//! are refused too; and it speaks plain HTTP inside a `CONNECT` tunnel, so
+//! an `https` URL with a proxy is refused rather than sent in the clear.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -33,6 +40,7 @@ const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
+const httpsettings = @import("httpsettings.zig");
 
 const Connection = connection.Connection;
 const Service = connection.Service;
@@ -49,13 +57,24 @@ pub const Error = error{
     /// The server speaks git's dumb HTTP protocol, a listing of files,
     /// which relic does not read.
     DumbHttpUnsupported,
-    /// `http.sslVerify` is false. The standard library's TLS client always
-    /// checks the server's certificate, and turning that off silently is
-    /// not something relic does on its behalf.
+    /// `http.sslVerify` is false, or `GIT_SSL_NO_VERIFY` is set. The
+    /// standard library's HTTP client always checks the server's
+    /// certificate; the way to trust a server of one's own is
+    /// `http.sslCAInfo`.
     SslVerifyUnsupported,
-    /// `http.sslCAInfo`, `http.sslCAPath`, `http.sslCert` or `http.sslKey`:
-    /// certificates the standard library's TLS client cannot be given.
-    SslCertificateSettingUnsupported,
+    /// `http.sslCert` or `http.sslKey`: the standard library's TLS client
+    /// cannot present a client certificate.
+    SslClientCertificateUnsupported,
+    /// `http.sslCAInfo` or `http.sslCAPath` names a file or directory that
+    /// could not be read as certificates.
+    SslCertificateUnreadable,
+    /// An `http.*` value that does not parse.
+    InvalidHttpSetting,
+    /// An `https` URL and a proxy to reach it through. The standard
+    /// library's client opens the `CONNECT` tunnel and then speaks plain
+    /// HTTP inside it, which would hand the request — credentials and all
+    /// — to the proxy unencrypted; relic refuses rather than send it.
+    HttpsProxyUnsupported,
     /// An `http.extraHeader` that is not `Name: value`, or that holds a line
     /// break.
     InvalidHttpHeader,
@@ -114,14 +133,10 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, optio
     errdefer h.credentials.deinit();
     errdefer h.endRequest();
 
-    try h.configure(url);
+    const settings = try h.configure(url);
     h.transfer_buffer = try arena.alloc(u8, pktline.max_line + 16);
     h.redirect_buffer = try arena.alloc(u8, 8 * 1024);
-    const post_len: usize = if (options.config) |c|
-        @intCast(std.math.clamp(c.getInt("http.postbuffer", 1 << 20) catch (1 << 20), 1024, 1 << 30))
-    else
-        1 << 20;
-    h.post_buffer = try arena.alloc(u8, post_len);
+    h.post_buffer = try arena.alloc(u8, @intCast(settings.post_buffer));
     h.post = .{ .vtable = &.{ .drain = Http.drainPost }, .buffer = h.post_buffer };
     // The advertisement is asked for here, so that what can go wrong with
     // the first request — a credential refused, no repository, a dumb
@@ -143,6 +158,8 @@ const Http = struct {
     options: Options,
     /// `http.extraHeader`, and the ones the protocol adds.
     extra_headers: []const http.Header = &.{},
+    /// `http.userAgent`, or relic's own.
+    user_agent: []const u8 = user_agent,
     in_flight: ?http.Client.Request = null,
     /// The URL of the request in flight, which it borrows.
     request_url: []u8 = &.{},
@@ -174,8 +191,9 @@ const Http = struct {
     }
 
     /// The settings: TLS options relic cannot honour are refused, the
-    /// extra headers read, and a proxy set up.
-    fn configure(h: *Http, url: url_mod.Url) Error!void {
+    /// certificates to trust loaded, the extra headers read, and a proxy
+    /// set up.
+    fn configure(h: *Http, url: url_mod.Url) Error!httpsettings.Settings {
         const arena = h.arena.allocator();
         // The base URL, without the userinfo, which becomes the credential.
         var base: std.ArrayList(u8) = .empty;
@@ -189,77 +207,78 @@ const Http = struct {
         try base.appendSlice(arena, path);
         h.base = base.items;
 
+        const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
+        const settings = try httpsettings.resolve(arena, h.options.config, environ, url);
+        if (url.scheme == .https) {
+            if (!settings.ssl_verify) return h.fail(error.SslVerifyUnsupported, settings.ssl_verify_from orelse "http.sslVerify");
+            if (settings.ssl_cert != null or settings.ssl_key != null) return h.fail(error.SslClientCertificateUnsupported, if (settings.ssl_cert != null) "http.sslCert" else "http.sslKey");
+            if (settings.ca_info != null or settings.ca_path != null) try h.trust(settings, environ);
+        }
+
         var headers: std.ArrayList(http.Header) = .empty;
-        if (h.options.config) |config| {
-            if (config.has("http.sslverify") and !(config.getBool("http.sslverify", true) catch true)) {
-                return error.SslVerifyUnsupported;
-            }
-            for ([_][]const u8{ "http.sslcainfo", "http.sslcapath", "http.sslcert", "http.sslkey" }) |key| {
-                if (config.has(key)) return error.SslCertificateSettingUnsupported;
-            }
-            const values = try config.all("http.extraheader");
-            defer config.gpa.free(values);
-            for (values) |raw| {
-                const text = config_mod.unquote(arena, raw) catch return error.InvalidHttpHeader;
-                // An empty value clears the ones before it, as in git.
-                if (text.len == 0) {
-                    headers.clearRetainingCapacity();
-                    continue;
-                }
-                if (std.mem.indexOfAny(u8, text, "\r\n") != null) return error.InvalidHttpHeader;
-                const colon = std.mem.indexOfScalar(u8, text, ':') orelse return error.InvalidHttpHeader;
-                const name = std.mem.trim(u8, text[0..colon], " \t");
-                if (name.len == 0) return error.InvalidHttpHeader;
-                try headers.append(arena, .{ .name = name, .value = std.mem.trim(u8, text[colon + 1 ..], " \t") });
-            }
+        for (settings.extra_headers) |text| {
+            if (std.mem.indexOfAny(u8, text, "\r\n") != null) return error.InvalidHttpHeader;
+            const colon = std.mem.indexOfScalar(u8, text, ':') orelse return error.InvalidHttpHeader;
+            const name = std.mem.trim(u8, text[0..colon], " \t");
+            if (name.len == 0) return error.InvalidHttpHeader;
+            try headers.append(arena, .{ .name = name, .value = std.mem.trim(u8, text[colon + 1 ..], " \t") });
         }
         if (h.v2) try headers.append(arena, .{ .name = "Git-Protocol", .value = "version=2" });
         h.extra_headers = headers.items;
+        if (settings.user_agent) |agent| h.user_agent = agent;
 
-        try h.configureProxy(url);
+        if (settings.proxy) |text| {
+            if (url.scheme == .https) return h.fail(error.HttpsProxyUnsupported, text);
+            try h.configureProxy(url, text);
+        }
+        return settings;
     }
 
-    fn configureProxy(h: *Http, url: url_mod.Url) Error!void {
+    /// Trust `http.sslCAInfo` in place of the system's certificates, and
+    /// `http.sslCAPath` besides them, as curl does for git.
+    fn trust(h: *Http, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) Error!void {
+        const io = h.io;
+        const now = Io.Clock.real.now(io);
+        const bundle = &h.client.ca_bundle;
+        const cwd = Io.Dir.cwd();
+        if (settings.ca_info) |raw| {
+            const file = try expandHome(h.arena.allocator(), raw, environ);
+            bundle.addCertsFromFilePath(h.gpa, io, now, cwd, file) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => return h.fail(error.SslCertificateUnreadable, settings.ca_info_from orelse "http.sslCAInfo"),
+            };
+        } else {
+            bundle.rescan(h.gpa, io, now) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => return h.fail(error.SslCertificateUnreadable, "the system's certificates"),
+            };
+        }
+        if (settings.ca_path) |raw| {
+            const dir_path = try expandHome(h.arena.allocator(), raw, environ);
+            var dir = cwd.openDir(io, dir_path, .{ .iterate = true }) catch return h.fail(error.SslCertificateUnreadable, "http.sslCAPath");
+            defer dir.close(io);
+            bundle.addCertsFromDir(h.gpa, io, now, dir) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => return h.fail(error.SslCertificateUnreadable, "http.sslCAPath"),
+            };
+        }
+        // Set, the client neither rescans the system nor reads the clock
+        // again.
+        h.client.now = now;
+    }
+
+    fn expandHome(arena: Allocator, path: []const u8, environ: ?*const std.process.Environ.Map) Allocator.Error![]const u8 {
+        if (!std.mem.startsWith(u8, path, "~/")) return path;
+        const env = environ orelse return path;
+        const home = env.get("HOME") orelse return path;
+        return std.fs.path.join(arena, &.{ home, path[2..] });
+    }
+
+    fn configureProxy(h: *Http, url: url_mod.Url, text: []const u8) Error!void {
         const arena = h.arena.allocator();
-        var proxy_text: ?[]const u8 = null;
-        if (h.options.config) |config| {
-            if (config.get("http.proxy")) |raw| {
-                const text = config_mod.unquote(arena, raw) catch return error.InvalidProxy;
-                if (text.len != 0) proxy_text = text;
-            }
-        }
-        if (proxy_text == null) {
-            const programs = h.options.programs orelse return;
-            const names: []const []const u8 = if (url.scheme == .https)
-                &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }
-            else
-                &.{ "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY" };
-            for (names) |name| {
-                if (programs.environ.get(name)) |value| {
-                    if (value.len != 0) {
-                        proxy_text = value;
-                        break;
-                    }
-                }
-            }
-            // `no_proxy` is honoured for the host exactly, and for a
-            // domain it ends with.
-            if (proxy_text != null) {
-                for ([_][]const u8{ "no_proxy", "NO_PROXY" }) |name| {
-                    const list = programs.environ.get(name) orelse continue;
-                    var it = std.mem.tokenizeAny(u8, list, ", ");
-                    while (it.next()) |entry| {
-                        const domain = std.mem.trimStart(u8, entry, ".");
-                        if (std.mem.eql(u8, entry, "*") or std.ascii.eqlIgnoreCase(url.host, domain) or
-                            (url.host.len > domain.len and std.ascii.endsWithIgnoreCase(url.host, domain) and url.host[url.host.len - domain.len - 1] == '.'))
-                        {
-                            proxy_text = null;
-                        }
-                    }
-                }
-            }
-        }
-        const text = proxy_text orelse return;
         const uri = std.Uri.parse(text) catch std.Uri.parseAfterScheme("http", text) catch return error.InvalidProxy;
         const protocol = http.Client.Protocol.fromUri(uri) orelse return error.InvalidProxy;
         const host = uri.getHostAlloc(arena) catch return error.InvalidProxy;
@@ -274,10 +293,12 @@ const Http = struct {
             .host = host,
             .authorization = authorization,
             .port = uri.port orelse switch (protocol) {
-                .plain => 80,
+                .plain => 1080,
                 .tls => 443,
             },
-            .supports_connect = true,
+            // curl hands an http request to the proxy whole, with its
+            // absolute URL, rather than asking for a tunnel.
+            .supports_connect = false,
         };
         switch (url.scheme) {
             .https => h.client.https_proxy = proxy,
@@ -303,9 +324,9 @@ const Http = struct {
         h.streaming = false;
     }
 
-    fn headersFor(authorization: ?[]const u8) http.Client.Request.Headers {
+    fn headersFor(h: *const Http, authorization: ?[]const u8) http.Client.Request.Headers {
         return .{
-            .user_agent = .{ .override = user_agent },
+            .user_agent = .{ .override = h.user_agent },
             .authorization = if (authorization) |a| .{ .override = a } else .omit,
         };
     }
@@ -336,7 +357,7 @@ const Http = struct {
         // outlive it: kept in the arena.
         const headers = try h.arena.allocator().dupe(http.Header, extra.items);
         h.in_flight = h.client.request(method, uri, .{
-            .headers = headersFor(authorization),
+            .headers = h.headersFor(authorization),
             .extra_headers = headers,
             .keep_alive = true,
             .redirect_behavior = if (method == .GET) @enumFromInt(5) else .unhandled,

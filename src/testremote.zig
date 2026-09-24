@@ -352,3 +352,256 @@ pub const HttpServer = struct {
         });
     }
 };
+
+/// A TLS front for a server on this machine: `python3`'s `ssl` module
+/// terminating TLS on 127.0.0.1 with a certificate made here by `openssl`
+/// for `127.0.0.1`, and handing the bytes to `backend_port`. The standard
+/// library has a TLS client and no TLS server, and a test of what a client
+/// trusts needs one. `error.SkipZigTest` where either program is missing.
+pub const TlsFront = struct {
+    gpa: Allocator,
+    running: program.Running,
+    env: Environ.Map,
+    dir: std.testing.TmpDir,
+    /// The port TLS is served on.
+    port: u16,
+    /// The certificate, which is its own authority: a PEM file.
+    cert_path: []u8,
+    /// A directory holding the certificate under its OpenSSL hash name,
+    /// as `http.sslCAPath` wants one.
+    ca_dir: []u8,
+
+    const script =
+        \\import select, socket, ssl, sys, threading
+        \\cert, key, backend = sys.argv[1], sys.argv[2], int(sys.argv[3])
+        \\ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        \\ctx.load_cert_chain(cert, key)
+        \\ls = socket.socket()
+        \\ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        \\ls.bind(("127.0.0.1", 0))
+        \\ls.listen(16)
+        \\print(ls.getsockname()[1], flush=True)
+        \\# One thread per connection, and one TLS state used by it alone.
+        \\def serve(c):
+        \\    try: s = ctx.wrap_socket(c, server_side=True)
+        \\    except Exception:
+        \\        c.close(); return
+        \\    u = socket.create_connection(("127.0.0.1", backend))
+        \\    try:
+        \\        while True:
+        \\            ready = [s] if s.pending() else select.select([s, u], [], [])[0]
+        \\            if s in ready:
+        \\                d = s.recv(65536)
+        \\                if not d: break
+        \\                u.sendall(d)
+        \\            if u in ready:
+        \\                d = u.recv(65536)
+        \\                if not d: break
+        \\                s.sendall(d)
+        \\    except Exception: pass
+        \\    s.close(); u.close()
+        \\while True:
+        \\    c, _ = ls.accept()
+        \\    threading.Thread(target=serve, args=(c,), daemon=True).start()
+        \\
+    ;
+
+    /// Make a certificate and start serving TLS in front of `backend_port`.
+    pub fn start(gpa: Allocator, io: Io, backend_port: u16) !*TlsFront {
+        if (builtin.os.tag == .windows) return error.SkipZigTest;
+        const f = try gpa.create(TlsFront);
+        errdefer gpa.destroy(f);
+        var env = try environ(gpa);
+        errdefer env.deinit();
+        var dir = std.testing.tmpDir(.{ .iterate = true });
+        errdefer dir.cleanup();
+        const base = try absolutePath(gpa, io, dir.dir);
+        defer gpa.free(base);
+        const cert_path = try std.fs.path.join(gpa, &.{ base, "cert.pem" });
+        errdefer gpa.free(cert_path);
+        const key_path = try std.fs.path.join(gpa, &.{ base, "key.pem" });
+        defer gpa.free(key_path);
+        const ca_dir = try std.fs.path.join(gpa, &.{ base, "ca" });
+        errdefer gpa.free(ca_dir);
+
+        // An EC key, which the standard library's TLS client verifies, and
+        // the address as both an IP and a DNS name: curl matches the first,
+        // the standard library the second.
+        var made = program.run(.{ .environ = &env }, gpa, io, .{ .argv = &.{
+            "openssl",       "req",                          "-x509",                                     "-newkey", "ec",
+            "-pkeyopt",      "ec_paramgen_curve:prime256v1", "-nodes",                                    "-keyout", key_path,
+            "-out",          cert_path,                      "-days",                                     "2",       "-subj",
+            "/CN=127.0.0.1", "-addext",                      "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1",
+        } }, "", .{}) catch return error.SkipZigTest;
+        defer made.deinit(gpa);
+        if (!made.succeeded()) return error.SkipZigTest;
+        try dir.dir.createDirPath(io, "ca");
+        try dir.dir.copyFile("cert.pem", dir.dir, "ca/cert.pem", io, .{});
+        var rehash = program.run(.{ .environ = &env }, gpa, io, .{ .argv = &.{ "openssl", "rehash", ca_dir } }, "", .{}) catch null;
+        if (rehash) |*r| r.deinit(gpa);
+
+        var port_buf: [8]u8 = undefined;
+        const backend = try std.fmt.bufPrint(&port_buf, "{d}", .{backend_port});
+        var running = program.start(.{ .environ = &env }, gpa, io, .{
+            .argv = &.{ "python3", "-c", script, cert_path, key_path, backend },
+            .stderr = .ignore,
+        }) catch return error.SkipZigTest;
+        errdefer running.deinit(io);
+        var line_buf: [32]u8 = undefined;
+        var reader = running.child.stdout.?.readerStreaming(io, &line_buf);
+        const line = reader.interface.takeDelimiterExclusive('\n') catch return error.SkipZigTest;
+        const port = std.fmt.parseUnsigned(u16, std.mem.trim(u8, line, " \r"), 10) catch return error.SkipZigTest;
+        f.* = .{ .gpa = gpa, .running = running, .env = env, .dir = dir, .port = port, .cert_path = cert_path, .ca_dir = ca_dir };
+        return f;
+    }
+
+    /// Stop serving and release everything.
+    pub fn stop(f: *TlsFront, io: Io) void {
+        f.running.deinit(io);
+        f.env.deinit();
+        f.gpa.free(f.cert_path);
+        f.gpa.free(f.ca_dir);
+        f.dir.cleanup();
+        f.gpa.destroy(f);
+    }
+};
+
+/// A proxy on 127.0.0.1, as a company runs one: `CONNECT host:port` opens a
+/// tunnel, and a request with an absolute URL is passed on to its host. It
+/// notes each request's first line, so a test can say what went through it.
+/// One connection at a time; every server the suite starts closes its
+/// connections after one answer.
+pub const Proxy = struct {
+    gpa: Allocator,
+    io: Io,
+    listener: Io.net.Server,
+    port: u16,
+    task: Io.Future(void) = undefined,
+    stopping: std.atomic.Value(bool) = .init(false),
+    log: std.ArrayList(u8) = .empty,
+    log_mutex: Io.Mutex = .init,
+
+    /// Listen on an ephemeral port.
+    pub fn start(gpa: Allocator, io: Io) !*Proxy {
+        const p = try gpa.create(Proxy);
+        errdefer gpa.destroy(p);
+        const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+        var listener = try address.listen(io, .{ .reuse_address = true });
+        errdefer listener.deinit(io);
+        p.* = .{ .gpa = gpa, .io = io, .listener = listener, .port = listener.socket.address.getPort() };
+        p.task = io.concurrent(serve, .{p}) catch return error.SkipZigTest;
+        return p;
+    }
+
+    /// Stop and release everything.
+    pub fn stop(p: *Proxy) void {
+        const io = p.io;
+        p.stopping.store(true, .release);
+        const address = Io.net.IpAddress.parse("127.0.0.1", p.port) catch unreachable;
+        if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
+        p.task.await(io);
+        p.listener.deinit(io);
+        p.log.deinit(p.gpa);
+        p.gpa.destroy(p);
+    }
+
+    /// `http://127.0.0.1:<port>`. The result is the caller's.
+    pub fn url(p: *const Proxy, gpa: Allocator) ![]u8 {
+        return std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{p.port});
+    }
+
+    /// The first line of every request so far, one per line, and forget
+    /// them. The result is the caller's.
+    pub fn take(p: *Proxy, gpa: Allocator) ![]u8 {
+        p.log_mutex.lockUncancelable(p.io);
+        defer p.log_mutex.unlock(p.io);
+        defer p.log.clearRetainingCapacity();
+        return gpa.dupe(u8, p.log.items);
+    }
+
+    fn serve(p: *Proxy) void {
+        while (!p.stopping.load(.acquire)) {
+            const stream = p.listener.accept(p.io) catch return;
+            defer stream.close(p.io);
+            if (p.stopping.load(.acquire)) return;
+            p.handle(stream) catch {};
+        }
+    }
+
+    fn handle(p: *Proxy, client: Io.net.Stream) !void {
+        const io = p.io;
+        var client_read: [16 * 1024]u8 = undefined;
+        var client_write: [16 * 1024]u8 = undefined;
+        var from_client = client.reader(io, &client_read);
+        var to_client = client.writer(io, &client_write);
+        // The request's head.
+        var head_len: usize = 0;
+        while (true) {
+            const seen = from_client.interface.buffered();
+            if (std.mem.indexOf(u8, seen, "\r\n\r\n")) |end| {
+                head_len = end + 4;
+                break;
+            }
+            try from_client.interface.fillMore();
+        }
+        const head = from_client.interface.buffered()[0..head_len];
+        const line_end = std.mem.indexOf(u8, head, "\r\n").?;
+        const first = head[0..line_end];
+        var words = std.mem.tokenizeScalar(u8, first, ' ');
+        const method = words.next() orelse return error.BadRequest;
+        const target = words.next() orelse return error.BadRequest;
+        {
+            p.log_mutex.lockUncancelable(io);
+            defer p.log_mutex.unlock(io);
+            try p.log.print(p.gpa, "{s} {s}\n", .{ method, target });
+        }
+
+        var host_port: []const u8 = undefined;
+        var rewritten: ?[]const u8 = null;
+        var line_buf: [4096]u8 = undefined;
+        if (std.mem.eql(u8, method, "CONNECT")) {
+            host_port = target;
+        } else {
+            const prefix = "http://";
+            if (!std.mem.startsWith(u8, target, prefix)) return error.BadRequest;
+            const rest = target[prefix.len..];
+            const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+            host_port = rest[0..slash];
+            rewritten = try std.fmt.bufPrint(&line_buf, "{s} {s} {s}", .{ method, if (slash < rest.len) rest[slash..] else "/", words.rest() });
+        }
+        const colon = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return error.BadRequest;
+        const port = try std.fmt.parseUnsigned(u16, host_port[colon + 1 ..], 10);
+        const address = try Io.net.IpAddress.parse(host_port[0..colon], port);
+        const upstream = try address.connect(io, .{ .mode = .stream });
+        defer upstream.close(io);
+        var up_read: [16 * 1024]u8 = undefined;
+        var up_write: [16 * 1024]u8 = undefined;
+        var from_up = upstream.reader(io, &up_read);
+        var to_up = upstream.writer(io, &up_write);
+
+        if (rewritten) |line| {
+            try to_up.interface.writeAll(line);
+            try to_up.interface.writeAll(head[line_end..]);
+        } else {
+            try to_client.interface.writeAll("HTTP/1.1 200 Connection established\r\n\r\n");
+            try to_client.interface.flush();
+        }
+        from_client.interface.toss(head_len);
+        try to_up.interface.writeAll(from_client.interface.buffered());
+        from_client.interface.tossBuffered();
+        try to_up.interface.flush();
+
+        var upward = try io.concurrent(copy, .{ &from_client.interface, &to_up.interface });
+        copy(&from_up.interface, &to_client.interface);
+        upward.cancel(io);
+    }
+
+    fn copy(from: *Io.Reader, to: *Io.Writer) void {
+        while (true) {
+            from.fillMore() catch return;
+            to.writeAll(from.buffered()) catch return;
+            from.tossBuffered();
+            to.flush() catch return;
+        }
+    }
+};

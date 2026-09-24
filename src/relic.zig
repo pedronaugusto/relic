@@ -62,6 +62,7 @@ pub const ssh = @import("ssh.zig");
 pub const credential = @import("credential.zig");
 pub const auth = @import("auth.zig");
 pub const userconfig = @import("userconfig.zig");
+pub const httpsettings = @import("httpsettings.zig");
 pub const smarthttp = @import("smarthttp.zig");
 pub const transport = @import("transport.zig");
 pub const fetch = @import("fetch.zig");
