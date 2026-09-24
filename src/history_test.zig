@@ -3030,3 +3030,160 @@ test "merges, picks, reverts and rebases are signed with an ssh key as git signs
 test "merges, picks, reverts and rebases are signed with an OpenPGP key as git signs them" {
     try signedHistory(.openpgp);
 }
+
+//=========================================================================
+// merge.default, the upstream, and the merge's own attributes
+//=========================================================================
+
+test "merge.default decides a path the attributes say nothing about, as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "before" });
+
+    for ([_][]const u8{ "union", "binary", "text" }) |driver| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+            try r.exec(io, &.{ "config", "merge.default", driver });
+        }
+        try gitMayFail(&pair.git, io, &.{ "merge", "--no-edit", "topic" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const target = try merging.resolve(gpa, io, &repo, "topic");
+            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+            defer outcome.deinit();
+        }
+        expectSameState(&pair, io, &merge_state, &main_logs) catch |err| {
+            std.debug.print("with merge.default={s}\n", .{driver});
+            return err;
+        };
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| gitMayFail(r, io, &.{ "merge", "--abort" }) catch {};
+    }
+}
+
+test "a merge with no commit named merges the branch's upstream, as git merge does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, cleanScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "tag", "before" });
+        try r.exec(io, &.{ "update-ref", "refs/remotes/origin/clean", "clean" });
+        try r.exec(io, &.{ "config", "remote.origin.url", "/nonexistent" });
+        try r.exec(io, &.{ "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*" });
+        try r.exec(io, &.{ "config", "branch.main.merge", "refs/heads/clean" });
+    }
+    // Through a remote's tracking ref, and from the repository itself.
+    for ([_][]const u8{ "origin", "." }) |remote| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+            try r.exec(io, &.{ "config", "branch.main.remote", remote });
+        }
+        try pair.git.exec(io, &.{ "merge", "--no-edit" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            const target = try merging.upstream(gpa, io, &repo, arena.allocator());
+            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+            defer outcome.deinit();
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+    }
+    // No upstream, or asked not to use it: the two refusals git makes.
+    {
+        try pair.ours.exec(io, &.{ "config", "merge.defaultToUpstream", "false" });
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        try std.testing.expectError(error.NoMergeTarget, merging.upstream(gpa, io, &repo, arena.allocator()));
+    }
+    {
+        try pair.ours.exec(io, &.{ "config", "--unset", "merge.defaultToUpstream" });
+        try pair.ours.exec(io, &.{ "config", "--unset", "branch.main.merge" });
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        try std.testing.expectError(error.NoDefaultUpstream, merging.upstream(gpa, io, &repo, arena.allocator()));
+    }
+}
+
+/// `file.txt` committed with CRLF endings and no attributes; `topic`
+/// brings `text=auto` in and stores it again normalized, while `main`
+/// edits a line and keeps its endings.
+fn attributesArriveScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "file.txt", "a\r\nb\r\nc\r\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.writeFile(io, ".gitattributes", "* text=auto\n");
+    try repo.exec(io, &.{ "add", "--renormalize", "." });
+    try repo.exec(io, &.{ "add", ".gitattributes" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "normalize" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "file.txt", "a\r\nB\r\nc\r\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "edit" });
+}
+
+/// As `attributesArriveScript`, but the base has a `.gitattributes` that
+/// `topic` rewrites and `main` deletes, so the merge's copy is in conflict.
+fn attributesContestedScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, ".gitattributes", "*.md text\n");
+    try repo.writeFile(io, "file.txt", "a\r\nb\r\nc\r\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.writeFile(io, ".gitattributes", "* text=auto\n");
+    try repo.exec(io, &.{ "add", "--renormalize", "." });
+    try repo.exec(io, &.{ "add", ".gitattributes" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "normalize" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.exec(io, &.{ "rm", "-q", ".gitattributes" });
+    try repo.writeFile(io, "file.txt", "a\r\nB\r\nc\r\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "edit" });
+}
+
+test "a renormalizing merge reads the attributes the merge brings when the working tree has none" {
+    for ([_]*const fn (*testgit.Repo, Io) anyerror!void{ attributesArriveScript, attributesContestedScript }) |script| {
+        try renormalizeWithMergedAttributes(script);
+    }
+}
+
+fn renormalizeWithMergedAttributes(script: *const fn (*testgit.Repo, Io) anyerror!void) !void {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, script);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "before" });
+    for ([_][]const []const u8{ &.{}, &.{"renormalize"} }) |words| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            gitMayFail(r, io, &.{ "merge", "--abort" }) catch {};
+            try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+        }
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "merge", "--no-edit" });
+        for (words) |w| try args.appendSlice(gpa, &.{ "-X", w });
+        try args.append(gpa, "topic");
+        try gitMayFail(&pair.git, io, args.items);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const target = try merging.resolve(gpa, io, &repo, "topic");
+            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who, .strategy_options = words });
+            defer outcome.deinit();
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+    }
+}

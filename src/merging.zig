@@ -21,6 +21,7 @@ const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const revwalk = @import("revwalk.zig");
 const threeway = @import("threeway.zig");
+const refspec = @import("refspec.zig");
 const signing_mod = @import("signing.zig");
 const hooks_mod = @import("hooks.zig");
 const commithooks = @import("commithooks.zig");
@@ -62,6 +63,16 @@ pub const Error = error{
     /// `merge.log` or `merge.branchdesc` asks for a message this release
     /// does not write.
     UnsupportedMergeMessage,
+    /// No commit was named and `merge.defaultToUpstream` is off.
+    NoMergeTarget,
+    /// No commit was named and the current branch has no upstream:
+    /// `branch.<name>.remote` and `branch.<name>.merge`.
+    NoDefaultUpstream,
+    /// The upstream names more than one branch, which is an octopus merge.
+    MultipleUpstreams,
+    /// The upstream's remote-tracking ref is not there: nothing has been
+    /// fetched for it.
+    UpstreamNotFetched,
     /// The index still has conflicts; they are resolved before a merge is
     /// concluded.
     UnresolvedConflicts,
@@ -111,6 +122,46 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Erro
     }
     const oid = repo.odb.findPrefix(io, name) catch return error.NotACommit;
     return targetOf(io, repo, oid, name, .commit);
+}
+
+/// What `git merge` with no commit merges: the upstream of the current
+/// branch, `branch.<name>.merge`, as the remote-tracking ref the remote's
+/// fetch refspecs map it to -- or the ref itself for a remote of `.` --
+/// named by its full name, as git names it in the message. The name lives
+/// in `arena`.
+pub fn upstream(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error!Target {
+    if (!(repo.config.getBool("merge.defaulttoupstream", true) catch true)) return error.NoMergeTarget;
+    var head = try head_mod.read(gpa, io, repo);
+    defer head.deinit(gpa);
+    const branch = head.shortName() orelse return error.NoDefaultUpstream;
+    const remote = repo.config.get(try std.fmt.allocPrint(arena, "branch.{s}.remote", .{branch})) orelse
+        return error.NoDefaultUpstream;
+    const merges = try repo.config.all(try std.fmt.allocPrint(arena, "branch.{s}.merge", .{branch}));
+    defer repo.config.gpa.free(merges);
+    if (merges.len == 0) return error.NoDefaultUpstream;
+    // More than one is an octopus, which this merge does not make.
+    if (merges.len > 1) return error.MultipleUpstreams;
+    var name: []const u8 = try arena.dupe(u8, merges[0]);
+    if (!std.mem.eql(u8, remote, ".")) {
+        const specs = try repo.config.all(try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{remote}));
+        defer repo.config.gpa.free(specs);
+        const tracking: ?[]const u8 = for (specs) |text| {
+            const spec = refspec.Refspec.parse(text, .fetch) catch continue;
+            if (try spec.mapSource(arena, name)) |mapped| break mapped;
+        } else null;
+        name = tracking orelse return error.UpstreamNotFetched;
+    }
+    const resolved = (try repo.refs.resolve(gpa, io, name)) orelse return error.UpstreamNotFetched;
+    defer gpa.free(resolved.name);
+    const kind: Kind = if (std.mem.startsWith(u8, name, "refs/heads/"))
+        .branch
+    else if (std.mem.startsWith(u8, name, "refs/tags/"))
+        .tag
+    else if (std.mem.startsWith(u8, name, "refs/remotes/"))
+        .remote_branch
+    else
+        .commit;
+    return targetOf(io, repo, resolved.oid, name, kind);
 }
 
 fn targetOf(io: Io, repo: *Repository, oid: Oid, name: []const u8, kind: Kind) Error!Target {

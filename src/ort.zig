@@ -130,6 +130,9 @@ pub const Options = struct {
     /// The names of the merge drivers `merge.<name>.driver` configures;
     /// a path whose `merge` attribute names one is refused.
     configured_drivers: []const []const u8 = &.{},
+    /// The driver for a path whose `merge` attribute says nothing:
+    /// `merge.default`. Text when `null`.
+    default_driver: ?[]const u8 = null,
     submodules: ?Submodules = null,
     /// How long the ancestor's short name is in a merge of commits:
     /// `core.abbrev`.
@@ -148,6 +151,9 @@ pub const Options = struct {
     /// merged, and a modify/delete whose modification that undoes is no
     /// conflict. `null` merges the blobs as they are.
     renormalize: ?*convert.Session = null,
+    /// The working tree has no top-level `.gitattributes`: a renormalizing
+    /// merge then reads the merge's own there, as git's does.
+    attributes_from_merge: bool = false,
 };
 
 /// What a message is about: git's conflict types, whose short names
@@ -871,13 +877,37 @@ const Merge = struct {
                 const base = path[0..at];
                 if (!m.loaded_attr_dirs.contains(base)) {
                     try m.loaded_attr_dirs.put(m.arena, try m.arena.dupe(u8, base), {});
-                    try attrs.addDirectory(m.io, dir, base, depth);
+                    if (base.len == 0 and m.options.renormalize != null and m.options.attributes_from_merge) {
+                        try m.addMergedAttributes(attrs);
+                    } else try attrs.addDirectory(m.io, dir, base, depth);
                 }
                 const slash = std.mem.indexOfScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
                 at = slash;
             }
         }
         return try attrs.lookup(m.arena, path, false);
+    }
+
+    /// `initialize_attr_index`: the top-level `.gitattributes` a
+    /// renormalizing merge reads when the working tree has none. Resolved,
+    /// it is the merge's own. Still open -- as it is whenever a side added
+    /// or changed it, since the paths are processed in reverse and it sorts
+    /// early -- git puts each side it has in an index at a stage numbered
+    /// from zero, and reading that index takes stage 0, which is the base,
+    /// or else stage 2, which is theirs; our side is never read.
+    fn addMergedAttributes(m: *Merge, attrs: *attributes.Attrs) Error!void {
+        const ci = m.paths.get(".gitattributes") orelse return;
+        const version: Version = if (ci.clean)
+            (if (ci.is_null) return else ci.result)
+        else if (ci.filemask & 1 != 0)
+            ci.stages[0]
+        else if (ci.filemask & 4 != 0)
+            ci.stages[2]
+        else
+            return;
+        if (!isReg(version.mode)) return;
+        const text = try attrs.arena.allocator().dupe(u8, try m.readBlob(version.oid));
+        try attrs.addText(text, "", ".gitattributes", 1);
     }
 
     /// `renormalize_buffer`, when the merge renormalizes; `bytes` as they
@@ -901,41 +931,37 @@ const Merge = struct {
     fn driverFor(m: *Merge, path: []const u8) Error!struct { driver: Driver, marker_size: u32 } {
         var driver: Driver = .text;
         var marker_size: u32 = 7;
-        const attrs = m.options.attributes orelse return .{ .driver = driver, .marker_size = marker_size };
-        if (m.options.attributes_dir) |dir| {
-            var depth: u32 = 0;
-            var at: usize = 0;
-            while (true) : (depth += 1) {
-                const base = path[0..at];
-                if (!m.loaded_attr_dirs.contains(base)) {
-                    try m.loaded_attr_dirs.put(m.arena, try m.arena.dupe(u8, base), {});
-                    try attrs.addDirectory(m.io, dir, base, depth);
-                }
-                const slash = std.mem.indexOfScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
-                at = slash;
-            }
-        }
-        const applied = try attrs.lookup(m.arena, path, false);
+        const applied = (try m.attributesOf(path)) orelse
+            return .{ .driver = try m.namedDriver(path, m.options.default_driver), .marker_size = marker_size };
         if (applied.value("conflict-marker-size")) |text| {
             if (std.fmt.parseInt(i32, text, 10)) |size| {
                 if (size > 0) marker_size = @intCast(size);
             } else |_| {}
         }
-        if (applied.get("merge")) |state| switch (state) {
-            .unset => driver = .binary,
-            .set, .unspecified => {},
-            .value => |name| {
-                for (m.options.configured_drivers) |configured| {
-                    if (std.mem.eql(u8, configured, name)) {
-                        if (m.options.blocked) |where| where.set(path);
-                        return error.UnsupportedMergeDriver;
-                    }
-                }
-                if (std.mem.eql(u8, name, "binary")) driver = .binary;
-                if (std.mem.eql(u8, name, "union")) driver = .union_;
-            },
-        };
+        // `find_ll_merge_driver`: set is text, unset binary, a name the
+        // driver of that name, and nothing said `merge.default`.
+        driver = if (applied.get("merge")) |state| switch (state) {
+            .unset => .binary,
+            .set => .text,
+            .unspecified => try m.namedDriver(path, m.options.default_driver),
+            .value => |name| try m.namedDriver(path, name),
+        } else try m.namedDriver(path, m.options.default_driver);
         return .{ .driver = driver, .marker_size = marker_size };
+    }
+
+    /// The driver `name` names: a configured one is a program, refused; a
+    /// built-in one is itself; anything else, or none, is text.
+    fn namedDriver(m: *Merge, path: []const u8, name_in: ?[]const u8) Error!Driver {
+        const name = name_in orelse return .text;
+        for (m.options.configured_drivers) |configured| {
+            if (std.mem.eql(u8, configured, name)) {
+                if (m.options.blocked) |where| where.set(path);
+                return error.UnsupportedMergeDriver;
+            }
+        }
+        if (std.mem.eql(u8, name, "binary")) return .binary;
+        if (std.mem.eql(u8, name, "union")) return .union_;
+        return .text;
     }
 
     const LlStatus = enum { ok, conflict, binary_conflict };

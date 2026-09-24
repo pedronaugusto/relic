@@ -240,10 +240,12 @@ fn run(
         .attributes = &attrs,
         .attributes_dir = wt,
         .configured_drivers = try configuredDrivers(arena, repo),
+        .default_driver = repo.config.get("merge.default"),
         .submodules = .{ .context = &submodules, .openFn = SubmoduleOpener.open },
         .abbrev_len = @import("abbrev.zig").defaultLength(&repo.config, db),
         .blocked = options.blocked,
         .renormalize = if (settings.renormalize) &normalizer else null,
+        .attributes_from_merge = if (wt.access(io, ".gitattributes", .{})) |_| false else |_| true,
         .inner_messages = options.inner_messages or (repo.config.getInt("merge.verbosity", 2) catch 2) >= 5,
     };
     var merged = switch (sides) {

@@ -544,21 +544,25 @@ fn tryMerge(r: *Run, vid: Id, path: []const u8, cur: []const u8, size: usize) Er
 /// `ll_merge` with its defaults: the driver the path's attributes name,
 /// Myers, and `merge.conflictStyle`.
 fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs: []const u8, size: usize, labels: blobmerge.Labels) Error!struct { bytes: []const u8, clean: bool } {
-    var favor: blobmerge.Favor = .none;
+    // `find_ll_merge_driver`: set is text, unset binary, a name the driver
+    // of that name, and nothing said `merge.default`.
+    var name: ?[]const u8 = r.repo.config.get("merge.default");
     if (r.rules.attrs) |attrs| {
         const applied = try attrs.lookup(r.arena, path, false);
         if (applied.get("merge")) |state| switch (state) {
             .unset => return .{ .bytes = ours, .clean = false },
-            .value => |name| {
-                if (std.mem.eql(u8, name, "binary")) return .{ .bytes = ours, .clean = false };
-                if (std.mem.eql(u8, name, "union")) {
-                    favor = .union_;
-                } else if (!std.mem.eql(u8, name, "text") and r.repo.config.get(try std.fmt.allocPrint(r.arena, "merge.{s}.driver", .{name})) != null) {
-                    return error.UnsupportedMergeDriver;
-                }
-            },
-            else => {},
+            .set => name = null,
+            .value => |named| name = named,
+            .unspecified => {},
         };
+    }
+    var favor: blobmerge.Favor = .none;
+    if (name) |driver| {
+        if (r.repo.config.get(try std.fmt.allocPrint(r.arena, "merge.{s}.driver", .{driver})) != null) {
+            return error.UnsupportedMergeDriver;
+        } else if (std.mem.eql(u8, driver, "binary")) {
+            return .{ .bytes = ours, .clean = false };
+        } else if (std.mem.eql(u8, driver, "union")) favor = .union_;
     }
     const style_text = r.repo.config.get("merge.conflictstyle");
     const style = if (style_text) |text| blobmerge.ConflictStyle.parse(text) orelse .merge else .merge;
