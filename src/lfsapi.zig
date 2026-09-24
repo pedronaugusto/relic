@@ -231,13 +231,18 @@ pub const Settings = struct {
 
     /// git-lfs's URL-scoped lookup: `<section>.<url>.<key>` for the
     /// configured URL that matches `url` best, else `<section>.<key>`. Every
-    /// value of the winning key, oldest first, unquoted into `a`.
-    pub fn urlGetAll(s: *const Settings, a: Allocator, section: []const u8, url: []const u8, key: []const u8) Error![]const []const u8 {
+    /// value of the winning key, oldest first, unquoted into `a`. A
+    /// `section` with a dot in it, as `lfs.transfer`, is a section and the
+    /// start of the subsection the URL follows.
+    pub fn urlGetAll(s: *const Settings, a: Allocator, full_section: []const u8, url: []const u8, key: []const u8) Error![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
+        const dot = std.mem.indexOfScalar(u8, full_section, '.');
+        const section = full_section[0 .. dot orelse full_section.len];
+        const prefix: ?[]const u8 = if (dot) |d| full_section[d + 1 ..] else null;
         const sources = [_]?*const Config{ s.config, if (s.file) |*f| f else null };
         for (sources, 0..) |maybe, source_index| {
             const config = maybe orelse continue;
-            const best = bestUrlMatch(config, section, url, key, source_index == 1);
+            const best = bestUrlMatch(config, section, prefix, url, key, source_index == 1);
             if (best) |subsection| {
                 for (config.entries.items) |entry| {
                     if (!entry.matches(section, subsection, key)) continue;
@@ -250,7 +255,7 @@ pub const Settings = struct {
         for (sources, 0..) |maybe, source_index| {
             const config = maybe orelse continue;
             for (config.entries.items) |entry| {
-                if (!entry.matches(section, null, key)) continue;
+                if (!entry.matches(section, prefix, key)) continue;
                 if (source_index == 1 and !fileMayHold(entry)) continue;
                 try out.append(a, try unquoteValue(a, entry.value orelse ""));
             }
@@ -374,7 +379,7 @@ pub const UrlParts = struct {
 /// git-lfs's rules: the scheme exactly, the host exactly or by `*` labels —
 /// an exact label beating a wildcard — the port, the path by whole
 /// components, and a user when the configured URL names one.
-fn bestUrlMatch(config: *const Config, section: []const u8, url: []const u8, key: []const u8, from_file: bool) ?[]const u8 {
+fn bestUrlMatch(config: *const Config, section: []const u8, prefix: ?[]const u8, url: []const u8, key: []const u8, from_file: bool) ?[]const u8 {
     const search = UrlParts.parse(url) orelse return null;
     var best: ?[]const u8 = null;
     var best_host: usize = 0;
@@ -385,7 +390,12 @@ fn bestUrlMatch(config: *const Config, section: []const u8, url: []const u8, key
         if (!std.ascii.eqlIgnoreCase(entry.section, section)) continue;
         if (!std.ascii.eqlIgnoreCase(entry.name, key)) continue;
         if (from_file and !Settings.fileMayHold(entry)) continue;
-        const configured = UrlParts.parse(entry.subsection) orelse continue;
+        var configured_url = entry.subsection;
+        if (prefix) |p| {
+            if (configured_url.len <= p.len or !std.mem.startsWith(u8, configured_url, p) or configured_url[p.len] != '.') continue;
+            configured_url = configured_url[p.len + 1 ..];
+        }
+        const configured = UrlParts.parse(configured_url) orelse continue;
         if (!std.mem.eql(u8, search.scheme, configured.scheme)) continue;
         const host_score = compareHosts(search.host, configured.host);
         if (host_score == 0 or host_score < best_host) continue;
@@ -1226,15 +1236,27 @@ pub const Client = struct {
         access_url: ?[]const u8 = null,
         /// How often a request that could not be made at all is made again.
         network_retries: u32 = 0,
-        /// Ask for the body as it is stored, not compressed on the way: an
-        /// object, whose bytes a `Range` counts.
-        identity: bool = false,
+        /// The `Accept-Encoding` an object's download sends.
+        accept: Accept = .default,
         /// Told of every chunk of an `object` body as it goes out.
         on_bytes: ?BytesSent = null,
         /// Where the bytes of an `object` body sent so far are counted, so a
         /// caller can take them back off its progress when the request
         /// fails.
         sent: ?*u64 = null,
+    };
+
+    /// What a download asks to have its body compressed with, as git-lfs's
+    /// Go client asks.
+    pub const Accept = enum {
+        /// The HTTP client's own list, for the API.
+        default,
+        /// No `Accept-Encoding` at all: a request with a `Range`, whose
+        /// bytes count from the object's start.
+        none,
+        gzip,
+        /// Only when `lfs.transfer.httpDownloadEncoding` asks for it.
+        zstd,
     };
 
     /// A callback for the bytes of a body as they go out.
@@ -1409,7 +1431,12 @@ pub const Client = struct {
                 .user_agent = .{ .override = user_agent },
                 .authorization = if (auth_header) |h| .{ .override = h } else .omit,
                 .content_type = if (content_type) |t| .{ .override = t } else .default,
-                .accept_encoding = if (request.identity) .{ .override = "identity" } else .default,
+                .accept_encoding = switch (request.accept) {
+                    .default => .default,
+                    .none => .omit,
+                    .gzip => .{ .override = "gzip" },
+                    .zstd => .{ .override = "zstd" },
+                },
             },
             .extra_headers = headers.items,
             .keep_alive = true,
@@ -1417,6 +1444,7 @@ pub const Client = struct {
         }) catch |err| return c.fail(mapRequestError(err), "{s}: {s}", .{ @errorName(err), stripQuery(request_url) });
         ex.in_flight = true;
         errdefer ex.request.deinit();
+        if (request.accept == .zstd) ex.request.accept_encoding[@intFromEnum(http.ContentEncoding.zstd)] = true;
 
         switch (request.body) {
             .none => {
@@ -1646,6 +1674,12 @@ pub const Exchange = struct {
             .identity => res.reader(&ex.transfer_buffer),
             .gzip, .deflate => blk: {
                 ex.decompress_buffer = try ex.arena.allocator().alloc(u8, std.compress.flate.max_window_len);
+                break :blk res.readerDecompressing(&ex.transfer_buffer, &ex.decompress, ex.decompress_buffer);
+            },
+            // Only asked for by `Request.Accept.zstd`. A frame whose window
+            // is wider than the decoder's 8 MiB fails as a read.
+            .zstd => blk: {
+                ex.decompress_buffer = try ex.arena.allocator().alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
                 break :blk res.readerDecompressing(&ex.transfer_buffer, &ex.decompress, ex.decompress_buffer);
             },
             else => return ex.client.fail(error.MalformedResponse, "unsupported content encoding", .{}),
@@ -1955,6 +1989,21 @@ test "URL-scoped settings match as git-lfs matches them" {
     }) |case| {
         try testing.expectEqualStrings(case[1], (try t.settings.urlGet(a, "lfs", case[0], "locksverify")).?);
     }
+
+    // A section with more in its name before the URL, as
+    // `lfs.transfer.<url>.httpDownloadEncoding`.
+    var u = try testSettings(
+        \\[lfs "transfer"]
+        \\    httpDownloadEncoding = gzip
+        \\[lfs "transfer.https://git.example.com/org"]
+        \\    httpDownloadEncoding = zstd
+        \\[lfs "https://git.example.com/org"]
+        \\    httpDownloadEncoding = not this
+        \\
+    , null);
+    defer freeSettings(&u);
+    try testing.expectEqualStrings("zstd", (try u.settings.urlGet(a, "lfs.transfer", "https://git.example.com/org/repo", "httpdownloadencoding")).?);
+    try testing.expectEqualStrings("gzip", (try u.settings.urlGet(a, "lfs.transfer", "https://elsewhere.example.com/x", "httpdownloadencoding")).?);
 }
 
 test "ssh is started as git-lfs starts it for git-lfs-authenticate" {

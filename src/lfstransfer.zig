@@ -822,6 +822,16 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
         error.OutOfMemory => return error.OutOfMemory,
     };
 
+    // `lfs.transfer.<url>.httpDownloadEncoding`, which git-lfs reads for
+    // the action's own URL: gzip unless it says zstd.
+    const encoding = try server.settings.urlGet(scratch, "lfs.transfer", action.href, "httpdownloadencoding");
+    const accept: lfsapi.Client.Accept = if (encoding == null or encoding.?.len == 0 or std.mem.eql(u8, encoding.?, "gzip"))
+        .gzip
+    else if (std.mem.eql(u8, encoding.?, "zstd"))
+        .zstd
+    else
+        return .{ .fail = try state.dupe(try std.fmt.allocPrint(scratch, "unsupported lfs.transfer.httpDownloadEncoding value \"{s}\": must be \"gzip\" or \"zstd\"", .{encoding.?})) };
+
     // The download goes into `<lfs>/incomplete`, as git-lfs's does, and a
     // download that breaks off leaves `<oid>.part` there for the next
     // attempt — this operation's or a later one's — to go on from.
@@ -884,7 +894,9 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
             .headers = all.items,
             .authenticated = authenticated,
             .access_url = accessUrl(action.href, &r.oid),
-            .identity = true,
+            // git-lfs asks for no encoding with a Range, and its client
+            // asks for gzip itself without one.
+            .accept = if (attempt_range) .none else accept,
         }) catch |err| switch (err) {
             error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects => {
                 keep_part = from > 0;

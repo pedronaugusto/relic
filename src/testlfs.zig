@@ -154,6 +154,9 @@ pub const Server = struct {
         href_base: ?[]const u8 = null,
         /// The transfer adapter the batch answer names.
         transfer: []const u8 = "basic",
+        /// Send a whole object compressed when the client asks: zstd when
+        /// its `Accept-Encoding` names zstd, else gzip when it names gzip.
+        encode: bool = false,
     };
 
     /// Listen on an ephemeral port.
@@ -358,8 +361,10 @@ pub const Server = struct {
         var content_type: ?[]const u8 = null;
         var git_protocol: ?[]const u8 = null;
         var range: ?[]const u8 = null;
+        var accept_encoding: ?[]const u8 = null;
         var headers = request.iterateHeaders();
         while (headers.next()) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) accept_encoding = try arena.dupe(u8, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "authorization")) authorization = try arena.dupe(u8, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "content-type")) content_type = try arena.dupe(u8, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "git-protocol")) git_protocol = try arena.dupe(u8, h.value);
@@ -415,6 +420,7 @@ pub const Server = struct {
         if (std.mem.startsWith(u8, route, "/objects/") and route.len == "/objects/".len + 64) {
             const oid = route["/objects/".len..];
             if (method == .GET) {
+                try s.logObject(method, oid, "accept-encoding", accept_encoding);
                 const fault = s.takeFault(.download);
                 if (fault) |f| if (!f.cut) return respondFault(&request, f);
                 const bytes = try s.object(arena, oid) orelse return request.respond("", .{ .status = .not_found, .keep_alive = false });
@@ -438,6 +444,17 @@ pub const Server = struct {
                         .{ .name = "Content-Type", .value = "application/octet-stream" },
                         .{ .name = "Content-Range", .value = content_range },
                     } });
+                }
+                if (s.options.encode and accept_encoding != null) {
+                    const accepted = accept_encoding.?;
+                    const zstd = std.mem.indexOf(u8, accepted, "zstd") != null;
+                    if (zstd or std.mem.indexOf(u8, accepted, "gzip") != null) {
+                        const encoded = if (zstd) try encodeZstd(arena, bytes) else try encodeGzip(arena, bytes);
+                        return request.respond(encoded, .{ .keep_alive = false, .extra_headers = &.{
+                            .{ .name = "Content-Type", .value = "application/octet-stream" },
+                            .{ .name = "Content-Encoding", .value = if (zstd) "zstd" else "gzip" },
+                        } });
+                    }
                 }
                 return request.respond(bytes, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/octet-stream" }} });
             }
@@ -745,6 +762,55 @@ fn percentDecode(a: Allocator, text: []const u8) ![]const u8 {
 }
 
 /// The SHA-256 of `bytes`, in lower-case hexadecimal.
+/// `bytes` as a gzip stream of stored deflate blocks: framed, not made
+/// smaller, which is all a client's decoder needs to be shown.
+fn encodeGzip(arena: Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, &.{ 0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0xff });
+    var at: usize = 0;
+    while (true) {
+        const n = @min(bytes.len - at, 65535);
+        const last = at + n == bytes.len;
+        try out.append(arena, if (last) 1 else 0);
+        var lens: [4]u8 = undefined;
+        std.mem.writeInt(u16, lens[0..2], @intCast(n), .little);
+        std.mem.writeInt(u16, lens[2..4], ~@as(u16, @intCast(n)), .little);
+        try out.appendSlice(arena, &lens);
+        try out.appendSlice(arena, bytes[at .. at + n]);
+        at += n;
+        if (last) break;
+    }
+    var footer: [8]u8 = undefined;
+    std.mem.writeInt(u32, footer[0..4], std.hash.Crc32.hash(bytes), .little);
+    std.mem.writeInt(u32, footer[4..8], @truncate(bytes.len), .little);
+    try out.appendSlice(arena, &footer);
+    return out.items;
+}
+
+/// `bytes` as one zstd frame of raw blocks, with its size in the header.
+fn encodeZstd(arena: Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, &.{ 0x28, 0xb5, 0x2f, 0xfd });
+    // A four-byte content size, one segment, no checksum, no dictionary.
+    try out.append(arena, 0xa0);
+    var size: [4]u8 = undefined;
+    std.mem.writeInt(u32, &size, @intCast(bytes.len), .little);
+    try out.appendSlice(arena, &size);
+    var at: usize = 0;
+    while (true) {
+        const n: usize = @min(bytes.len - at, 128 * 1024);
+        const last = at + n == bytes.len;
+        const header: u24 = @intCast((n << 3) | @intFromBool(last));
+        var h: [3]u8 = undefined;
+        std.mem.writeInt(u24, &h, header, .little);
+        try out.appendSlice(arena, &h);
+        try out.appendSlice(arena, bytes[at .. at + n]);
+        at += n;
+        if (last) break;
+    }
+    return out.items;
+}
+
 pub fn sha256Hex(bytes: []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});

@@ -1128,3 +1128,51 @@ test "an upload is sent as the type its first bytes name, as git-lfs sends it, u
         }
     }
 }
+
+test "a download asks for gzip, or for zstd when lfs.transfer.httpDownloadEncoding says, as git-lfs's does, and comes out whole" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const content = try noise(gpa, 300 * 1024, 22);
+    defer gpa.free(content);
+    const oid = testlfs.sha256Hex(content);
+    var path_buf: [128]u8 = undefined;
+    const object_path = try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+    for ([_]?[]const u8{ null, "zstd", "brotli" }) |setting| {
+        const fx = try Fixture.init(gpa, io, .{ .encode = true });
+        defer fx.deinit();
+        const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+        defer gpa.free(nobody);
+        try fx.server.putObject(&oid, content);
+        var logs: [2][]u8 = .{ &.{}, &.{} };
+        defer for (logs) |l| gpa.free(l);
+        for ([_][]const u8{ "by-git", "by-relic" }, 0..) |name, i| {
+            var d = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
+            defer d.close(io);
+            try emptyStore(fx, d);
+            if (setting) |v| try fx.gitIn(d, &.{ "config", "lfs.transfer.httpDownloadEncoding", v });
+            fx.server.clearLog();
+            const refused = setting != null and std.mem.eql(u8, setting.?, "brotli");
+            if (i == 0) {
+                if (refused) {
+                    try testing.expectError(error.GitFailed, testlfs.git(gpa, io, d, &fx.env, &.{ "lfs", "fetch" }, false));
+                } else try fx.gitIn(d, &.{ "lfs", "fetch" });
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try openServer(fx, &repo);
+                defer server.close();
+                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer fetched.deinit();
+                if (refused) {
+                    try testing.expectEqual(@as(usize, 1), fetched.failures());
+                    try testing.expectEqualStrings("unsupported lfs.transfer.httpDownloadEncoding value \"brotli\": must be \"gzip\" or \"zstd\"", fetched.results[0].message.?);
+                } else try expectNoFailures(&fetched);
+            }
+            if (!refused) try expectFile(fx, d, object_path, content);
+            logs[i] = try fx.server.objectHeaders(gpa);
+        }
+        try testing.expectEqualStrings(logs[0], logs[1]);
+        if (setting == null) try testing.expect(std.mem.indexOf(u8, logs[1], "accept-encoding=gzip\n") != null);
+        if (setting != null and std.mem.eql(u8, setting.?, "zstd")) try testing.expect(std.mem.indexOf(u8, logs[1], "accept-encoding=zstd\n") != null);
+    }
+}
