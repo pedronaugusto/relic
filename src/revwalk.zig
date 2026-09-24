@@ -813,7 +813,7 @@ test "a walk comes out in git rev-list's order: by date with its ties, hidden co
     for (0..walk_seeds) |seed| try walkLikeRevList(gpa, io, seed);
 }
 
-const walk_seeds = 8;
+const walk_seeds = testgit.corpusCases(8);
 
 fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
     var repo = try testgit.Repo.init(gpa, io, &.{});

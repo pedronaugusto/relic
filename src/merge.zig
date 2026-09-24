@@ -661,7 +661,7 @@ test "a random corpus of three-way merges matches git merge-file in every style 
     var texts: [3]std.ArrayList(u8) = .{ .empty, .empty, .empty };
     defer for (&texts) |*t| t.deinit(gpa);
 
-    for (0..24) |case| {
+    for (0..testgit.corpusCases(24)) |case| {
         const alphabet: u8 = 2 + rng.uintLessThan(u8, 5);
         texts[0].clearRetainingCapacity();
         for (0..rng.uintLessThan(usize, 18)) |_| {

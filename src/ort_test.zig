@@ -489,7 +489,7 @@ test "random histories merge to git's trees, stages and messages" {
     for (0..scenario_count) |seed| try runScenario(gpa, io, seed, true);
 }
 
-const scenario_count = 40;
+const scenario_count = testgit.corpusCases(40);
 
 /// Two branches that each merged the other once, with more changes after,
 /// so the merge has two bases to merge first.
@@ -542,7 +542,7 @@ test "criss-cross histories merge their bases first, as git's recursive merge do
     for (0..criss_cross_count) |seed| try runCrissCross(gpa, io, seed);
 }
 
-const criss_cross_count = 30;
+const criss_cross_count = testgit.corpusCases(30);
 
 test "submodules merge by fast-forward, or say which merge would join them, as git's do" {
     const gpa = std.testing.allocator;
@@ -704,4 +704,4 @@ test "diff -M, -M30%, -C and --find-copies-harder pair what git's do" {
     for (0..diff_scenario_count) |seed| try runDiffScenario(gpa, io, seed);
 }
 
-const diff_scenario_count = 60;
+const diff_scenario_count = testgit.corpusCases(60);

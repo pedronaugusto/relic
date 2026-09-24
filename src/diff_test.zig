@@ -521,7 +521,7 @@ test "the histogram, patience and minimal diffs land on the lines git's do, over
     try expectCorpusLikeGit(gpa, io, &repo, "--minimal", .{ .minimal = true }, 0x6d696e69, corpus_cases);
 }
 
-const corpus_cases = 40;
+const corpus_cases = testgit.corpusCases(40);
 
 /// Random pairs of texts diffed by `git diff <flag>` and by `options`, the
 /// hunks compared.

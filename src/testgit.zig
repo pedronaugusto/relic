@@ -350,6 +350,14 @@ pub fn setDate(map: *Environ.Map, secs: i64) !void {
     try map.put("GIT_COMMITTER_DATE", text);
 }
 
+/// How many cases a random parity corpus runs: every one, or an eighth of
+/// them under ThreadSanitizer, whose every allocation records a stack and
+/// which is there to check threads, not the corpora's answers. The full
+/// count runs in every other build.
+pub fn corpusCases(full: usize) usize {
+    return if (builtin.sanitize_thread) @max(2, full / 8) else full;
+}
+
 var git_checked: bool = false;
 var git_present: bool = false;
 var git_major: u32 = 0;
