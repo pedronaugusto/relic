@@ -1470,6 +1470,10 @@ test "an https server is reached through a proxy's tunnel, and unchecked where t
             const first_lines = try proxy.take(gpa);
             gpa.free(first_lines);
             connects[i] = try proxy.takeConnects(gpa);
+            // git-lfs's requests and relic's go through the tunnel as TLS,
+            // never in the clear.
+            const tunnels = try proxy.expectTlsInTunnels();
+            try testing.expectEqual(case.tunneled, tunnels != 0);
         }
         try testing.expectEqualStrings(logs[0], logs[1]);
         // The tunnel is asked for in Go's words, as git-lfs asks for it.

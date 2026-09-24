@@ -1862,8 +1862,10 @@ pub const Client = struct {
         const host = uri.getHostAlloc(arena) catch return c.fail(error.InvalidProxy, "{s}", .{text});
         var authorization: ?[]const u8 = null;
         if (uri.user != null or uri.password != null) {
-            const value = try arena.alloc(u8, http.Client.basic_authorization.valueLengthFromUri(uri));
-            authorization = http.Client.basic_authorization.value(uri, value);
+            // Percent-decoded, as Go's client decodes the proxy URL's user.
+            const user = if (uri.user) |u| try u.toRawMaybeAlloc(arena) else "";
+            const password = if (uri.password) |p| try p.toRawMaybeAlloc(arena) else "";
+            authorization = try httpclient.basicAuthorization(arena, user, password);
         }
         var lines: std.ArrayList(http.Header) = .empty;
         try lines.append(arena, .{ .name = "User-Agent", .value = "Go-http-client/1.1" });

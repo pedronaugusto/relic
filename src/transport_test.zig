@@ -612,6 +612,10 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
         // A tunnel is asked for in curl's words, line for line.
         try testing.expectEqual(case.through and case.url.ptr == secure.ptr, their_connects.len != 0);
         try testing.expectEqualStrings(their_connects, our_connects);
+        // And what goes through it is TLS from the first byte, git's and
+        // relic's alike: no request in the clear inside the tunnel.
+        const tunnels = try proxy.expectTlsInTunnels();
+        try testing.expectEqual(case.through and case.url.ptr == secure.ptr, tunnels != 0);
     }
 }
 

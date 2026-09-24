@@ -557,6 +557,8 @@ pub const Proxy = struct {
     log_mutex: Io.Mutex = .init,
     /// Every `CONNECT`'s whole head, its user agent's version left out.
     connects: std.ArrayList(u8) = .empty,
+    /// The first bytes the client sent inside each tunnel, up to 512.
+    tunnel_starts: std.ArrayList([]u8) = .empty,
     /// `user:password` the proxy requires with `Proxy-Authorization: Basic`,
     /// answering 407 without it.
     basic: ?[]const u8 = null,
@@ -584,6 +586,8 @@ pub const Proxy = struct {
         p.listener.deinit(io);
         p.log.deinit(p.gpa);
         p.connects.deinit(p.gpa);
+        for (p.tunnel_starts.items) |b| p.gpa.free(b);
+        p.tunnel_starts.deinit(p.gpa);
         p.gpa.destroy(p);
     }
 
@@ -608,6 +612,25 @@ pub const Proxy = struct {
         defer p.log_mutex.unlock(p.io);
         defer p.connects.clearRetainingCapacity();
         return gpa.dupe(u8, p.connects.items);
+    }
+
+    /// Check that every tunnel so far carried TLS from its first byte — a
+    /// handshake record, `0x16 0x03` — and no request line in the clear,
+    /// and forget them. Returns how many there were.
+    pub fn expectTlsInTunnels(p: *Proxy) !usize {
+        p.log_mutex.lockUncancelable(p.io);
+        defer p.log_mutex.unlock(p.io);
+        defer {
+            for (p.tunnel_starts.items) |b| p.gpa.free(b);
+            p.tunnel_starts.clearRetainingCapacity();
+        }
+        for (p.tunnel_starts.items) |bytes| {
+            try std.testing.expect(bytes.len >= 2);
+            try std.testing.expectEqual(@as(u8, 0x16), bytes[0]);
+            try std.testing.expectEqual(@as(u8, 0x03), bytes[1]);
+            try std.testing.expect(std.mem.indexOf(u8, bytes, " HTTP/1.") == null);
+        }
+        return p.tunnel_starts.items.len;
     }
 
     fn serve(p: *Proxy) void {
@@ -706,6 +729,18 @@ pub const Proxy = struct {
             try to_client.interface.flush();
         }
         from_client.interface.toss(head_len);
+        if (rewritten == null) {
+            // What the client says first inside the tunnel.
+            while (from_client.interface.bufferedLen() < 5) from_client.interface.fillMore() catch break;
+            const seen = from_client.interface.buffered();
+            const kept = try p.gpa.dupe(u8, seen[0..@min(seen.len, 512)]);
+            p.log_mutex.lockUncancelable(io);
+            defer p.log_mutex.unlock(io);
+            p.tunnel_starts.append(p.gpa, kept) catch |err| {
+                p.gpa.free(kept);
+                return err;
+            };
+        }
         try to_up.interface.writeAll(from_client.interface.buffered());
         from_client.interface.tossBuffered();
         try to_up.interface.flush();

@@ -341,12 +341,114 @@ pub const Streaming = struct {
     }
 };
 
+/// A response's head, read as HTTP/1.1 says: the status line, and the
+/// headers that decide how the body is read. relic reads it itself, as it
+/// makes every connection itself: nothing here reaches the standard
+/// library's HTTP client.
+pub const Head = struct {
+    /// The head's bytes, which every slice here points into.
+    bytes: []const u8,
+    version: http.Version,
+    status: http.Status,
+    reason: []const u8,
+    location: ?[]const u8 = null,
+    content_type: ?[]const u8 = null,
+    /// Whether the connection may carry another request after this one.
+    keep_alive: bool,
+    content_length: ?u64 = null,
+    transfer_encoding: http.TransferEncoding = .none,
+    content_encoding: http.ContentEncoding = .identity,
+
+    /// A head that is not one HTTP/1.x allows.
+    pub const ParseError = error{MalformedHead};
+
+    /// Read `bytes`, a head up to and including its blank line.
+    pub fn parse(bytes: []const u8) ParseError!Head {
+        var lines = std.mem.splitSequence(u8, bytes, "\r\n");
+        const first = lines.first();
+        if (first.len < 12 or first[8] != ' ') return error.MalformedHead;
+        const version: http.Version = if (std.mem.eql(u8, first[0..8], "HTTP/1.1"))
+            .@"HTTP/1.1"
+        else if (std.mem.eql(u8, first[0..8], "HTTP/1.0"))
+            .@"HTTP/1.0"
+        else
+            return error.MalformedHead;
+        for (first[9..12]) |c| if (!std.ascii.isDigit(c)) return error.MalformedHead;
+        var head: Head = .{
+            .bytes = bytes,
+            .version = version,
+            .status = @enumFromInt(std.fmt.parseUnsigned(u10, first[9..12], 10) catch return error.MalformedHead),
+            .reason = std.mem.trimStart(u8, first[12..], " "),
+            .keep_alive = version == .@"HTTP/1.1",
+        };
+        while (lines.next()) |line| {
+            if (line.len == 0) return head;
+            if (line[0] == ' ' or line[0] == '\t') return error.MalformedHead;
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MalformedHead;
+            const name = line[0..colon];
+            const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+            if (name.len == 0) return error.MalformedHead;
+            if (std.ascii.eqlIgnoreCase(name, "connection")) {
+                head.keep_alive = !std.ascii.eqlIgnoreCase(value, "close");
+            } else if (std.ascii.eqlIgnoreCase(name, "content-type")) {
+                head.content_type = value;
+            } else if (std.ascii.eqlIgnoreCase(name, "location")) {
+                head.location = value;
+            } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
+                // `chunked` last, and at most one coding before it.
+                var codings = std.mem.splitBackwardsScalar(u8, value, ',');
+                const last = std.mem.trim(u8, codings.first(), " ");
+                var before: ?[]const u8 = last;
+                if (std.ascii.eqlIgnoreCase(last, "chunked")) {
+                    if (head.transfer_encoding != .none) return error.MalformedHead;
+                    head.transfer_encoding = .chunked;
+                    before = codings.next();
+                }
+                if (before) |coding| {
+                    if (head.content_encoding != .identity) return error.MalformedHead;
+                    head.content_encoding = http.ContentEncoding.fromString(std.mem.trim(u8, coding, " ")) orelse return error.MalformedHead;
+                }
+                if (codings.next() != null) return error.MalformedHead;
+            } else if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+                const n = std.fmt.parseUnsigned(u64, value, 10) catch return error.MalformedHead;
+                if (head.content_length) |was| if (was != n) return error.MalformedHead;
+                head.content_length = n;
+            } else if (std.ascii.eqlIgnoreCase(name, "content-encoding")) {
+                if (head.content_encoding != .identity) return error.MalformedHead;
+                head.content_encoding = http.ContentEncoding.fromString(value) orelse return error.MalformedHead;
+            }
+        }
+        return error.MalformedHead;
+    }
+
+    /// Every header, in order.
+    pub fn iterateHeaders(h: *const Head) http.HeaderIterator {
+        return .init(h.bytes);
+    }
+};
+
+/// `Basic <base64 of user:password>`: the value of an `Authorization` or a
+/// `Proxy-Authorization`. The result is `gpa`'s.
+pub fn basicAuthorization(gpa: Allocator, user: []const u8, password: []const u8) Allocator.Error![]u8 {
+    const encoder = std.base64.standard.Encoder;
+    const plain_len = user.len + 1 + password.len;
+    const out = try gpa.alloc(u8, "Basic ".len + encoder.calcSize(plain_len));
+    @memcpy(out[0.."Basic ".len], "Basic ");
+    const plain = try gpa.alloc(u8, plain_len);
+    defer gpa.free(plain);
+    @memcpy(plain[0..user.len], user);
+    plain[user.len] = ':';
+    @memcpy(plain[user.len + 1 ..], password);
+    _ = encoder.encode(out["Basic ".len..], plain);
+    return out;
+}
+
 /// A response: its head, owned, and its body, read through `reader`.
 pub const Response = struct {
     conn: ?*Connection,
     /// The head's bytes, which `head` points into.
     head_bytes: []u8,
-    head: http.Client.Response.Head,
+    head: Head,
     state: *Body,
     body: *Io.Reader,
 
@@ -796,7 +898,7 @@ pub const Connection = struct {
             error.ReadFailed => conn.readFailed(),
             else => error.HttpProtocolError,
         };
-        const head = http.Client.Response.Head.parse(bytes) catch return error.HttpProtocolError;
+        const head = Head.parse(bytes) catch return error.HttpProtocolError;
         const status = @intFromEnum(head.status);
         if (status / 100 == 2) return;
         conn.client.note("proxy_status", @as(?u16, status));
@@ -855,7 +957,7 @@ pub const Connection = struct {
         }
         const head_bytes = try gpa.dupe(u8, bytes);
         errdefer gpa.free(head_bytes);
-        const head = http.Client.Response.Head.parse(head_bytes) catch return error.HttpProtocolError;
+        const head = Head.parse(head_bytes) catch return error.HttpProtocolError;
         body.transfer_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(body.transfer_buffer);
         const status = @intFromEnum(head.status);
@@ -1052,4 +1154,65 @@ test "a connection that is not taken within the connect timeout is given up on a
     }
     try std.testing.expect(timed_out);
     try std.testing.expectEqual(@as(u32, 0), client.unwatched);
+}
+
+test "nothing in relic names the standard library's HTTP client, whose CONNECT tunnel carries the request in the clear" {
+    // The standard library's client opens a tunnel through a proxy and
+    // never starts the TLS the https URL asked for inside it, and its
+    // fallback sends the request to the proxy whole: an https request in
+    // the clear either way. relic makes every connection here instead, and
+    // this holds it to that: no source file names that client at all.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const needle = "http." ++ "Client";
+    var src = try Io.Dir.cwd().openDir(io, "src", .{ .iterate = true });
+    defer src.close(io);
+    var walker = try src.walk(gpa);
+    defer walker.deinit();
+    var files: usize = 0;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const text = try entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(16 << 20));
+        defer gpa.free(text);
+        files += 1;
+        if (std.mem.indexOf(u8, text, needle)) |at| {
+            std.debug.print("{s} names the standard library's HTTP client at byte {d}\n", .{ entry.path, at });
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expect(files > 50);
+}
+
+test "a response head is read as HTTP/1.1 says, and one that is not is refused" {
+    const head = try Head.parse("HTTP/1.1 200 OK\r\nContent-Length: 12\r\nContent-Encoding: gzip\r\nLocation: /x\r\n\r\n");
+    try std.testing.expectEqual(http.Status.ok, head.status);
+    try std.testing.expectEqual(@as(?u64, 12), head.content_length);
+    try std.testing.expectEqual(http.ContentEncoding.gzip, head.content_encoding);
+    try std.testing.expect(head.keep_alive);
+    try std.testing.expectEqualStrings("/x", head.location.?);
+    const chunked = try Head.parse("HTTP/1.0 404 Not Found\r\nTransfer-Encoding: gzip, chunked\r\nConnection: keep-alive\r\n\r\n");
+    try std.testing.expectEqual(http.TransferEncoding.chunked, chunked.transfer_encoding);
+    try std.testing.expectEqual(http.ContentEncoding.gzip, chunked.content_encoding);
+    try std.testing.expect(chunked.keep_alive);
+    try std.testing.expect(!(try Head.parse("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")).keep_alive);
+    for ([_][]const u8{
+        "HTTP/2 200 OK\r\n\r\n",
+        "HTTP/1.1 2x0 OK\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+        "HTTP/1.1 200 OK\r\n folded\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nNo-Colon\r\n\r\n",
+        "HTTP/1.1 200 OK",
+    }) |bytes| try std.testing.expectError(error.MalformedHead, Head.parse(bytes));
+}
+
+test "fuzz: any response head is read or refused by name" {
+    try std.testing.fuzz({}, struct {
+        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const bytes = buf[0..smith.slice(&buf)];
+            const head = Head.parse(bytes) catch return;
+            var it = head.iterateHeaders();
+            while (it.next()) |_| {}
+        }
+    }.one, .{ .corpus = &.{"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n"} });
 }

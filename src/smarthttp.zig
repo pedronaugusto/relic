@@ -478,7 +478,7 @@ const Http = struct {
     }
 
     /// Keep the `WWW-Authenticate` values of a refusal for the helpers.
-    fn keepChallenges(h: *Http, head: *const http.Client.Response.Head) Error!void {
+    fn keepChallenges(h: *Http, head: *const httpclient.Head) Error!void {
         var values: std.ArrayList([]const u8) = .empty;
         defer values.deinit(h.gpa);
         var it = head.iterateHeaders();
