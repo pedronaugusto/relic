@@ -1016,3 +1016,40 @@ test "tasks sending at once through one client share the connections it keeps" {
     try std.testing.expect(client.connections <= 4);
     try std.testing.expect(client.idle.items.len <= 4);
 }
+
+test "a connection that is not taken within the connect timeout is given up on as TimedOut" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // A listener that accepts nothing and queues one connection: past the
+    // queue the kernel leaves a connection unanswered, as a host behind a
+    // firewall that drops it does.
+    const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try address.listen(io, .{ .kernel_backlog = 1 });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    var client: Client = .init(gpa, io);
+    defer client.deinit();
+    client.timeouts = .{ .connect = .fromMilliseconds(200) };
+    var held: std.ArrayList(*Connection) = .empty;
+    defer {
+        for (held.items) |conn| conn.close();
+        held.deinit(gpa);
+    }
+    // Fill the queue — its length is the kernel's to choose — until a
+    // connection is not taken.
+    var timed_out = false;
+    for (0..8) |_| {
+        const started = Io.Clock.awake.now(io);
+        const conn = client.connect(.{ .tls = false, .host = "127.0.0.1", .port = port }) catch |err| {
+            try std.testing.expectEqual(error.TimedOut, err);
+            const waited = started.durationTo(Io.Clock.awake.now(io));
+            try std.testing.expect(waited.nanoseconds >= 150 * std.time.ns_per_ms);
+            timed_out = true;
+            break;
+        };
+        try held.append(gpa, conn);
+    }
+    try std.testing.expect(timed_out);
+    try std.testing.expectEqual(@as(u32, 0), client.unwatched);
+}
