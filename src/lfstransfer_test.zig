@@ -1510,3 +1510,179 @@ test "a zstd body is decoded with the window its frame asks for, up to git-lfs's
         }
     }
 }
+
+fn nowSeconds(io: Io) i64 {
+    return @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+}
+
+test "an action that expires within five seconds of the time given is not used, as git-lfs does not use it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const content = "handed out expiring\n";
+    try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    for ([_]testlfs.Server.Expiring{ .in, .at }, 0..) |kind, k| {
+        var logs: [3][]u8 = .{ &.{}, &.{}, &.{} };
+        defer for (logs) |l| gpa.free(l);
+        for ([_][]const u8{ "by-git", "by-relic", "by-relic-untimed" }, 0..) |base, i| {
+            var name_buf: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "{s}-{d}", .{ base, k });
+            var d = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
+            defer d.close(io);
+            try emptyStore(fx, d);
+            fx.server.setExpiring(1, kind);
+            fx.server.clearLog();
+            if (i == 0) {
+                try fx.gitIn(d, &.{ "lfs", "fetch" });
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) nowSeconds(io) else null });
+                defer server.close();
+                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer fetched.deinit();
+                try expectNoFailures(&fetched);
+            }
+            logs[i] = try fx.server.requests(gpa);
+        }
+        // git-lfs and relic with the time ask again for a fresh action;
+        // relic without it uses the one it was given.
+        try testing.expectEqualStrings(logs[0], logs[1]);
+        try testing.expectEqual(@as(usize, 2), std.mem.count(u8, logs[1], "POST /objects/batch"));
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, logs[2], "POST /objects/batch"));
+    }
+}
+
+test "a git-lfs-authenticate token is asked for again when it expires, lfs.defaulttokenttl included, as git-lfs asks" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{ .tokens = &.{.{ .token = "t0k3n", .user = "ada" }} });
+    defer fx.deinit();
+    const fake_ssh = try testremote.fakeSsh(gpa, io, fx.tools);
+    defer gpa.free(fake_ssh);
+    const href = try fx.server.url(gpa, "repo.git/info/lfs");
+    defer gpa.free(href);
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const files = [_][2][]const u8{ .{ "a.bin", "first\n" }, .{ "b.bin", "second\n" }, .{ "c.bin", "third\n" } };
+    for (files) |f| try fx.server.putObject(&testlfs.sha256Hex(f[1]), f[1]);
+    const Case = struct { expiry: []const u8, ttl: ?[]const u8 = null, calls: usize };
+    for ([_]Case{
+        .{ .expiry = ",\"expires_in\":1", .calls = 3 },
+        .{ .expiry = ",\"expires_at\":\"2000-01-01T00:00:00Z\"", .calls = 3 },
+        .{ .expiry = "", .ttl = "1", .calls = 3 },
+        .{ .expiry = "", .calls = 1 },
+    }, 0..) |case, n| {
+        const script = try testlfs.authenticateScriptExpiring(gpa, io, fx.tools, href, "t0k3n", case.expiry);
+        gpa.free(script);
+        var logs: [2][]u8 = .{ &.{}, &.{} };
+        defer for (logs) |l| gpa.free(l);
+        for ([_][]const u8{ "by-git", "by-relic" }, 0..) |base, i| {
+            var name_buf: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "{s}-{d}", .{ base, n });
+            var d = try committed(fx, name, nobody, &files);
+            defer d.close(io);
+            try emptyStore(fx, d);
+            try fx.gitIn(d, &.{ "remote", "set-url", "origin", "ssh://git@example.invalid:2222/org/repo.git" });
+            try fx.gitIn(d, &.{ "config", "core.sshCommand", fake_ssh });
+            try fx.gitIn(d, &.{ "config", "lfs.sshtransfer", "never" });
+            try fx.gitIn(d, &.{ "config", "lfs.transfer.batchSize", "1" });
+            try fx.gitIn(d, &.{ "config", "lfs.concurrenttransfers", "1" });
+            if (case.ttl) |ttl| try fx.gitIn(d, &.{ "config", "lfs.defaulttokenttl", ttl });
+            fx.tools.deleteFile(io, "git-lfs-authenticate.log") catch {};
+            if (i == 0) {
+                try fx.gitIn(d, &.{ "lfs", "fetch" });
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = nowSeconds(io) });
+                defer server.close();
+                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer fetched.deinit();
+                try expectNoFailures(&fetched);
+            }
+            logs[i] = try fx.tools.readFileAlloc(io, "git-lfs-authenticate.log", gpa, .unlimited);
+        }
+        try testing.expectEqualStrings(logs[0], logs[1]);
+        try testing.expectEqual(case.calls, std.mem.count(u8, logs[1], "/org/repo.git download\n"));
+    }
+}
+
+test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time given" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const present = testlfs.sha256Hex("in the store\n");
+    const absent = testlfs.sha256Hex("not in the store\n");
+    var listings: [3][]u8 = .{ &.{}, &.{}, &.{} };
+    defer for (listings) |l| gpa.free(l);
+    for ([_][]const u8{ "by-git", "by-relic", "by-relic-untimed" }, 0..) |name, i| {
+        var d = try committed(fx, name, nobody, &.{.{ "a.bin", "in the store\n" }});
+        defer d.close(io);
+        const now = nowSeconds(io);
+        const Entry = struct { path: []const u8, age_s: i64 };
+        var present_name: [80]u8 = undefined;
+        var absent_name: [80]u8 = undefined;
+        const entries = [_]Entry{
+            .{ .path = "old.tmp", .age_s = 7200 },
+            .{ .path = "young.tmp", .age_s = 600 },
+            .{ .path = try std.fmt.bufPrint(&present_name, "{s}-partial", .{&present}), .age_s = 600 },
+            .{ .path = try std.fmt.bufPrint(&absent_name, "{s}-partial", .{&absent}), .age_s = 600 },
+            .{ .path = "young-dir/old.tmp", .age_s = 7200 },
+            .{ .path = "old-dir/old.tmp", .age_s = 7200 },
+        };
+        var tmp = try d.createDirPathOpen(io, ".git/lfs/tmp", .{});
+        defer tmp.close(io);
+        for (entries) |e| {
+            if (std.fs.path.dirnamePosix(e.path)) |parent| try tmp.createDirPath(io, parent);
+            try tmp.writeFile(io, .{ .sub_path = e.path, .data = "x" });
+            try tmp.setTimestamps(io, e.path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - e.age_s) * std.time.ns_per_s } } });
+        }
+        try tmp.setTimestamps(io, "young-dir", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - 600) * std.time.ns_per_s } } });
+        try tmp.setTimestamps(io, "old-dir", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - 7200) * std.time.ns_per_s } } });
+        if (i == 0) {
+            try fx.gitIn(d, &.{ "lfs", "fetch" });
+        } else {
+            var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+            defer repo.deinit(io);
+            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) now else null });
+            defer server.close();
+            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer fetched.deinit();
+            try expectNoFailures(&fetched);
+            try testing.expect(fetched.sweep_failed == null);
+        }
+        var names: std.ArrayList(u8) = .empty;
+        errdefer names.deinit(gpa);
+        var walker = try tmp.walk(gpa);
+        defer walker.deinit();
+        var found: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (found.items) |f| gpa.free(f);
+            found.deinit(gpa);
+        }
+        while (try walker.next(io)) |e| try found.append(gpa, try gpa.dupe(u8, e.path));
+        std.mem.sort([]const u8, found.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.less);
+        for (found.items) |f| {
+            try names.appendSlice(gpa, f);
+            try names.append(gpa, '\n');
+        }
+        listings[i] = try names.toOwnedSlice(gpa);
+    }
+    try testing.expectEqualStrings(listings[0], listings[1]);
+    var want_buf: [256]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "{s}-partial\nold-dir\nyoung-dir\nyoung-dir/old.tmp\nyoung.tmp\n", .{&absent});
+    try testing.expectEqualStrings(want, listings[1]);
+    // Without the time nothing is swept.
+    try testing.expectEqual(@as(usize, 8), std.mem.count(u8, listings[2], "\n"));
+}

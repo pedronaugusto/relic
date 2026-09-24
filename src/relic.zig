@@ -44,6 +44,7 @@ pub const filter = @import("filter.zig");
 pub const lfs = @import("lfs.zig");
 pub const netrc = @import("netrc.zig");
 pub const mimesniff = @import("mimesniff.zig");
+pub const timetext = @import("timetext.zig");
 pub const lfsapi = @import("lfsapi.zig");
 pub const lfstransfer = @import("lfstransfer.zig");
 pub const lfslocks = @import("lfslocks.zig");

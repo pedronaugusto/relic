@@ -69,6 +69,8 @@ pub const Options = struct {
     /// Write what the server taught to the repository's configuration, as
     /// git-lfs writes it: basic access for its URL, no locking API.
     remember: bool = true,
+    /// The time of the push, in seconds since the epoch: `lfsapi.Options.now`.
+    now: ?i64 = null,
 };
 
 /// What the lock check came to.
@@ -144,7 +146,7 @@ pub fn beforePush(
     if (options.mode == .auto and pointers.len == 0 and !usesLfs(io, repo)) return;
     report.ran = true;
 
-    const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .programs = reach.programs, .prompt = reach.prompt, .auth_failure = reach.auth_failure });
+    const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .programs = reach.programs, .prompt = reach.prompt, .auth_failure = reach.auth_failure, .now = options.now });
     defer server.close();
     defer if (options.remember) server.client.remember(io, repo) catch {};
 

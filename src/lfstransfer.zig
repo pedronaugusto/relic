@@ -50,6 +50,7 @@ const lfs = @import("lfs.zig");
 const lfsapi = @import("lfsapi.zig");
 const objectwalk = @import("objectwalk.zig");
 const progress_mod = @import("progress.zig");
+const timetext = @import("timetext.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -126,6 +127,9 @@ pub const Result = struct {
 pub const Outcome = struct {
     arena: std.heap.ArenaAllocator,
     results: []Result,
+    /// The name of the error the sweep of `lfs/tmp` ended in, when it
+    /// failed; the transfer itself did not, as git-lfs's does not.
+    sweep_failed: ?[]const u8 = null,
 
     /// Release everything.
     pub fn deinit(o: *Outcome) void {
@@ -257,10 +261,19 @@ pub const Actions = struct {
 pub const Action = struct {
     href: []const u8,
     header: ?std.json.ArrayHashMap([]const u8) = null,
-    /// When the action stops working, as RFC 3339 text. relic reads no
-    /// clock; a refused action is retried with a fresh batch instead.
+    /// When the action stops working, as RFC 3339 text, or how many seconds
+    /// after the answer. With `lfsapi.Options.now`, an action that expires
+    /// within five seconds of it is not used, and the object gets a fresh
+    /// batch, as git-lfs does; without it, a refused action gets one.
     expires_at: ?[]const u8 = null,
     expires_in: ?i64 = null,
+
+    /// Whether the action, answered at `now`, expires within five seconds
+    /// of it.
+    pub fn expiredAt(a: Action, now: i64) bool {
+        const at = if (a.expires_at) |t| timetext.parseRfc3339(t) else null;
+        return lfsapi.expiresWithin(now, a.expires_in orelse 0, at, 5);
+    }
 
     /// The action's headers, checked.
     pub fn headers(a: Action, arena: Allocator) (Allocator.Error || error{InvalidHttpHeader})![]const http.Header {
@@ -510,6 +523,63 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
 }
 
 fn run(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
+    var outcome = try runTransfers(server, operation, objects, given);
+    // git-lfs sweeps its temporary files when a command ends.
+    if (server.client.options.now) |now| {
+        sweepTmp(server.gpa, server.io, server.store(), now) catch |err| {
+            outcome.sweep_failed = @errorName(err);
+        };
+    }
+    return outcome;
+}
+
+/// Errors from sweeping `lfs/tmp`.
+pub const SweepError = Allocator.Error || Io.Dir.OpenError || Io.Dir.Iterator.Error || Io.Dir.StatFileError || Io.Dir.DeleteFileError || error{NameTooLong};
+
+/// git-lfs's sweep of `lfs/tmp` at `now`, in seconds since the epoch: a
+/// file named `<oid>-…` whose object the store has goes, and so does any
+/// other file last changed more than an hour before, except in a
+/// directory under it changed within the hour, whose files may be links
+/// something is still using. Directories stay.
+pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now: i64) SweepError!void {
+    var path_buf: [lfs.Store.max_path]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&path_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
+    var tmp = store.base.openDir(io, tmp_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return,
+        else => |e| return e,
+    };
+    defer tmp.close(io);
+    var walker = try tmp.walk(gpa);
+    defer walker.deinit();
+    const hour: i64 = 3600;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind == .directory) continue;
+        const name = entry.basename;
+        if (name.len > 65 and name[64] == '-') {
+            var object_buf: [lfs.Store.max_path]u8 = undefined;
+            if (store.objectPath(&object_buf, name[0..64])) |object_path| {
+                if (store.base.statFile(io, object_path, .{})) |st| {
+                    if (st.kind != .directory) {
+                        try tmp.deleteFile(io, entry.path);
+                        continue;
+                    }
+                } else |_| {}
+            } else |_| {}
+        }
+        if (std.fs.path.dirname(entry.path)) |parent| {
+            const dir_stat = tmp.statFile(io, parent, .{}) catch continue;
+            if (now - epochSeconds(dir_stat.mtime) <= hour) continue;
+        }
+        const st = tmp.statFile(io, entry.path, .{}) catch continue;
+        if (now - epochSeconds(st.mtime) > hour) try tmp.deleteFile(io, entry.path);
+    }
+}
+
+fn epochSeconds(t: Io.Timestamp) i64 {
+    return @intCast(@divFloor(t.nanoseconds, std.time.ns_per_s));
+}
+
+fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
     const gpa = server.gpa;
     // A download names the ref git-lfs names, whatever it is for.
     var options = given;
@@ -715,7 +785,17 @@ fn runJob(state: *Run, job: *Job) Error!void {
     var verify = job.verify;
     var authenticated = job.authenticated;
     while (true) {
-        const attempt = switch (state.operation) {
+        const expired: ?Rel = if (state.server.client.options.now) |now|
+            (if (action.expiredAt(now)) (if (state.operation == .download) Rel.download else Rel.upload) else if (verify != null and verify.?.expiredAt(now)) Rel.verify else null)
+        else
+            null;
+        const attempt: Attempt = if (expired) |rel|
+            .{ .retry = .{ .message = switch (rel) {
+                .download => "the download action has expired",
+                .upload => "the upload action has expired",
+                .verify => "the verify action has expired",
+            } } }
+        else switch (state.operation) {
             .download => try attemptDownload(state, r, action, authenticated),
             .upload => try attemptUpload(state, r, action, verify, authenticated),
         };
@@ -785,7 +865,11 @@ fn runJob(state: *Run, job: *Job) Error!void {
 fn copyAction(state: *Run, a: Action) Error!Action {
     state.arena_mutex.lockUncancelable(state.io());
     defer state.arena_mutex.unlock(state.io());
-    var out: Action = .{ .href = try state.arena.dupe(u8, a.href) };
+    var out: Action = .{
+        .href = try state.arena.dupe(u8, a.href),
+        .expires_at = if (a.expires_at) |t| try state.arena.dupe(u8, t) else null,
+        .expires_in = a.expires_in,
+    };
     if (a.header) |map| {
         var copy: std.json.ArrayHashMap([]const u8) = .{};
         var it = map.map.iterator();
@@ -1363,7 +1447,7 @@ pub fn fetch(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) F
     try pointers.appendSlice(arena, try scan(arena, server.io, repo, options, &tips));
     const recent = options.recent orelse server.settings.getBool("lfs.fetchrecentalways", false);
     if (recent and !options.history) {
-        try pointers.appendSlice(arena, try recentPointers(arena, server, repo, tips.items, options.now));
+        try pointers.appendSlice(arena, try recentPointers(arena, server, repo, tips.items, options.now orelse server.client.options.now));
     }
     var objects: std.ArrayList(Object) = .empty;
     for (pointers.items) |p| {

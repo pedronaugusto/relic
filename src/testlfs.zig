@@ -131,6 +131,10 @@ pub const Server = struct {
     /// headers a test compares.
     object_log: std.ArrayList(u8) = .empty,
     zstd_window_log: ?u6 = null,
+    /// How many download actions still to hand out already expiring, and
+    /// how their expiry is written.
+    expiring: u32 = 0,
+    expiring_kind: Expiring = .in,
     /// One `<operation> <ref>` line per batch: the ref's name in quotes,
     /// `no name`, or `no ref`.
     batch_refs: std.ArrayList(u8) = .empty,
@@ -290,6 +294,26 @@ pub const Server = struct {
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
         return gpa.dupe(u8, s.log.items);
+    }
+
+    /// How an action is made to expire.
+    pub const Expiring = enum { none, in, at };
+
+    /// Hand out the next `count` download actions expiring: in a second,
+    /// or at a time gone by.
+    pub fn setExpiring(s: *Server, count: u32, kind: Expiring) void {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        s.expiring = count;
+        s.expiring_kind = kind;
+    }
+
+    fn takeExpiring(s: *Server) Expiring {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        if (s.expiring == 0) return .none;
+        s.expiring -= 1;
+        return s.expiring_kind;
     }
 
     /// Encode zstd bodies as frames that declare a window of `log` bits,
@@ -594,7 +618,12 @@ pub const Server = struct {
                 if (bytes.len != o.size) {
                     try w.writeAll(",\"error\":{\"code\":422,\"message\":\"Object size does not match\"}");
                 } else {
-                    try w.print(",\"actions\":{{\"download\":{{\"href\":\"{s}/objects/{s}\",\"header\":{{\"X-Relic-Test\":\"download\"{s}}},\"expires_at\":\"2099-01-01T00:00:00Z\"}}}}", .{ base, o.oid, auth_header });
+                    const expiry = switch (s.takeExpiring()) {
+                        .none => "\"expires_at\":\"2099-01-01T00:00:00Z\"",
+                        .in => "\"expires_in\":1,\"expires_at\":\"2099-01-01T00:00:00Z\"",
+                        .at => "\"expires_at\":\"2000-01-01T00:00:00+01:00\"",
+                    };
+                    try w.print(",\"actions\":{{\"download\":{{\"href\":\"{s}/objects/{s}\",\"header\":{{\"X-Relic-Test\":\"download\"{s}}},{s}}}}}", .{ base, o.oid, auth_header, expiry });
                 }
             } else {
                 try w.writeAll(",\"error\":{\"code\":404,\"message\":\"Object does not exist\"}");
@@ -940,14 +969,20 @@ pub fn credentialHelperVerbatim(gpa: Allocator, io: Io, dir: Io.Dir, name: []con
 /// a `RemoteAuth <token>` header, and notes its arguments in
 /// `<dir>/git-lfs-authenticate.log`.
 pub fn authenticateScript(gpa: Allocator, io: Io, dir: Io.Dir, href: []const u8, token: []const u8) ![]u8 {
+    return authenticateScriptExpiring(gpa, io, dir, href, token, ",\"expires_in\":3600");
+}
+
+/// `authenticateScript` with `expiry` — `,"expires_in":1` and the like, or
+/// nothing — written after the header.
+pub fn authenticateScriptExpiring(gpa: Allocator, io: Io, dir: Io.Dir, href: []const u8, token: []const u8, expiry: []const u8) ![]u8 {
     const base = try testremote.absolutePath(gpa, io, dir);
     defer gpa.free(base);
     const text = try std.fmt.allocPrint(gpa,
         \\#!/bin/sh
         \\echo "$@" >> "{s}/git-lfs-authenticate.log"
-        \\printf '{{"href":"{s}","header":{{"Authorization":"RemoteAuth {s}"}},"expires_in":3600}}'
+        \\printf '{{"href":"{s}","header":{{"Authorization":"RemoteAuth {s}"}}{s}}}'
         \\
-    , .{ base, href, token });
+    , .{ base, href, token, expiry });
     defer gpa.free(text);
     return script(gpa, io, dir, "git-lfs-authenticate", text);
 }

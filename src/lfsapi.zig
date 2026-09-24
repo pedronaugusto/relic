@@ -72,6 +72,7 @@ const mimesniff = @import("mimesniff.zig");
 const fs = @import("fs.zig");
 const object = @import("object.zig");
 const netrc_mod = @import("netrc.zig");
+const timetext = @import("timetext.zig");
 
 const Config = config_mod.Config;
 
@@ -762,7 +763,26 @@ fn percentDecode(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
 pub const SshAuth = struct {
     href: ?[]const u8 = null,
     headers: []const http.Header = &.{},
+    /// `expires_in`, in seconds, when not zero; else `lfs.defaulttokenttl`
+    /// when the answer gives no expiry at all.
+    expires_in: i64 = 0,
+    /// `expires_at`, in seconds since the epoch.
+    expires_at: ?i64 = null,
+
+    /// Whether the answer, given at `now`, expires within five seconds of
+    /// it, as git-lfs's cache asks before it reuses one.
+    pub fn expiredAt(a: SshAuth, now: i64) bool {
+        return expiresWithin(now, a.expires_in, a.expires_at, 5);
+    }
 };
+
+/// git-lfs's `IsExpiredAtOrIn` with the start and the check both at `now`:
+/// an `in` that is not zero wins over `at`, and neither is no expiry.
+pub fn expiresWithin(now: i64, in_s: i64, at: ?i64, margin_s: i64) bool {
+    if (in_s != 0) return now + in_s < now + margin_s;
+    const when = at orelse return false;
+    return when < now + margin_s;
+}
 
 /// The program git-lfs runs to reach an ssh remote and the arguments it
 /// hands it, for `git-lfs-authenticate <path> <operation>`. The program
@@ -872,6 +892,8 @@ pub fn parseAuthenticate(arena: Allocator, bytes: []const u8) Error!SshAuth {
     const Answer = struct {
         href: ?[]const u8 = null,
         header: ?std.json.ArrayHashMap([]const u8) = null,
+        expires_in: ?i64 = null,
+        expires_at: ?[]const u8 = null,
     };
     const parsed = std.json.parseFromSliceLeaky(Answer, arena, bytes, .{
         .ignore_unknown_fields = true,
@@ -888,7 +910,12 @@ pub fn parseAuthenticate(arena: Allocator, bytes: []const u8) Error!SshAuth {
             try headers.append(arena, .{ .name = kv.key_ptr.*, .value = kv.value_ptr.* });
         }
     }
-    return .{ .href = parsed.href, .headers = headers.items };
+    return .{
+        .href = parsed.href,
+        .headers = headers.items,
+        .expires_in = parsed.expires_in orelse 0,
+        .expires_at = if (parsed.expires_at) |t| timetext.parseRfc3339(t) else null,
+    };
 }
 
 /// A header the standard library can be handed: a name with no colon and no
@@ -916,6 +943,13 @@ pub const Options = struct {
     /// Filled in when a request fails for want of a credential, or is
     /// forbidden: see `auth.Failure`.
     auth_failure: ?*auth_mod.Failure = null,
+    /// The time of the operation, in seconds since the epoch, which the
+    /// library never reads for itself. With it, as git-lfs does with its
+    /// clock: an action or a `git-lfs-authenticate` token that expires
+    /// within five seconds of it is not used, a `Retry-After` given as a
+    /// date is waited out, and `lfs/tmp` is swept after a transfer. Without
+    /// it, none of that is done.
+    now: ?i64 = null,
 };
 
 /// An access mode git-lfs records for a URL.
@@ -1119,7 +1153,12 @@ pub const Client = struct {
 
     fn sshAuthLocked(c: *Client, e: Endpoint, operation: Operation) Error!SshAuth {
         const i = @intFromEnum(operation);
-        if (c.ssh_auth[i]) |a| return a;
+        if (c.ssh_auth[i]) |a| {
+            // git-lfs keeps an answer until it is five seconds from expiring.
+            const now = c.options.now orelse return a;
+            if (!a.expiredAt(now)) return a;
+            c.ssh_auth[i] = null;
+        }
         const ssh = e.ssh orelse {
             c.ssh_auth[i] = .{};
             return .{};
@@ -1136,7 +1175,10 @@ pub const Client = struct {
             var outcome = try program.run(programs, c.gpa, c.io, invocation, "", .{ .output = .limited(1 << 20) });
             defer outcome.deinit(c.gpa);
             if (outcome.succeeded()) {
-                const auth = try parseAuthenticate(arena, try arena.dupe(u8, outcome.stdout));
+                var auth = try parseAuthenticate(arena, try arena.dupe(u8, outcome.stdout));
+                if (auth.expires_in == 0 and auth.expires_at == null) {
+                    auth.expires_in = @max(0, c.settings.getInt("lfs.defaulttokenttl", 0));
+                }
                 c.ssh_auth[i] = auth;
                 return auth;
             }
@@ -1872,10 +1914,11 @@ pub const Exchange = struct {
         return offers;
     }
 
-    /// `Retry-After` in seconds, when it is given as a number.
+    /// `Retry-After` in seconds: a number, or an HTTP date counted from
+    /// `Options.now` when the caller gave one.
     pub fn retryAfter(ex: *const Exchange) ?u64 {
         const value = ex.header("retry-after") orelse return null;
-        return std.fmt.parseInt(u64, std.mem.trim(u8, value, " \t"), 10) catch null;
+        return retryAfterSeconds(value, ex.client.options.now);
     }
 
     /// The body, read as it arrives.
@@ -2163,6 +2206,16 @@ fn inRange(a: Io.net.IpAddress, base: Io.net.IpAddress, bits: u8) bool {
         if ((x[i / 8] & mask) != (y[i / 8] & mask)) return false;
     }
     return true;
+}
+
+/// A `Retry-After` value in seconds, as git-lfs reads it: a whole number,
+/// or with `now` an HTTP date, a date gone by being no wait at all.
+pub fn retryAfterSeconds(value: []const u8, now: ?i64) ?u64 {
+    const text = std.mem.trim(u8, value, " \t");
+    if (std.fmt.parseInt(u64, text, 10)) |n| return n else |_| {}
+    const at = timetext.parseHttpDate(text) orelse return null;
+    const from = now orelse return null;
+    return @intCast(@max(0, at - from));
 }
 
 /// A boolean as git-lfs reads one: unset or empty is `fallback`, and a
@@ -2474,4 +2527,18 @@ test "NO_PROXY and loopback addresses are read as Go's proxy rules read them" {
             return err;
         };
     }
+}
+
+test "Retry-After is a number of seconds, or a date counted from the time the caller gives" {
+    try testing.expectEqual(@as(?u64, 120), retryAfterSeconds(" 120 ", null));
+    try testing.expectEqual(@as(?u64, null), retryAfterSeconds("Sun, 06 Nov 1994 08:49:37 GMT", null));
+    try testing.expectEqual(@as(?u64, 23), retryAfterSeconds("Sun, 06 Nov 1994 08:49:37 GMT", 784111777 - 23));
+    try testing.expectEqual(@as(?u64, 0), retryAfterSeconds("Sun, 06 Nov 1994 08:49:37 GMT", 784111777 + 60));
+    try testing.expectEqual(@as(?u64, null), retryAfterSeconds("soon", 0));
+    // An expiry wins by `in` over `at`, and five seconds' margin is kept.
+    try testing.expect(expiresWithin(1000, 4, null, 5));
+    try testing.expect(!expiresWithin(1000, 5, 0, 5));
+    try testing.expect(expiresWithin(1000, 0, 1004, 5));
+    try testing.expect(!expiresWithin(1000, 0, 1005, 5));
+    try testing.expect(!expiresWithin(1000, 0, null, 5));
 }
