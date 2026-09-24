@@ -1730,3 +1730,183 @@ test "a submodule the two sides took different ways is a conflict as git's merge
     }
     try expectSameState(&pair, io, &merge_state, &main_logs);
 }
+
+/// Every file under `.git/rr-cache` and `.git/MERGE_RR`, compared between
+/// the two copies.
+fn expectSameRerere(pair: *Pair, io: Io) !void {
+    const gpa = pair.gpa;
+    var listings: [2]std.ArrayList(u8) = .{ .empty, .empty };
+    defer for (&listings) |*l| l.deinit(gpa);
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }, 0..) |r, i| {
+        const mr = try readOrMissing(gpa, io, r, ".git/MERGE_RR");
+        defer gpa.free(mr);
+        try listings[i].print(gpa, "MERGE_RR: {s}\n", .{mr});
+        var cache = r.dir.openDir(io, ".git/rr-cache", .{ .iterate = true }) catch {
+            try listings[i].appendSlice(gpa, "no rr-cache\n");
+            continue;
+        };
+        defer cache.close(io);
+        var names: std.ArrayList([]u8) = .empty;
+        defer {
+            for (names.items) |n| gpa.free(n);
+            names.deinit(gpa);
+        }
+        var walker = try cache.walk(gpa);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            try names.append(gpa, try gpa.dupe(u8, entry.path));
+        }
+        std.mem.sort([]u8, names.items, {}, struct {
+            fn less(_: void, a: []u8, b: []u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.less);
+        for (names.items) |name| {
+            const sub = try std.fmt.allocPrint(gpa, ".git/rr-cache/{s}", .{name});
+            defer gpa.free(sub);
+            const bytes = try readOrMissing(gpa, io, r, sub);
+            defer gpa.free(bytes);
+            try listings[i].print(gpa, "{s}:\n{s}\n", .{ name, bytes });
+        }
+    }
+    try std.testing.expectEqualStrings(listings[0].items, listings[1].items);
+}
+
+test "rerere takes down a conflict, records its resolution and replays it, as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "config", "rerere.enabled", "true" });
+        try r.exec(io, &.{ "tag", "before" });
+    }
+
+    // The conflict is taken down.
+    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(merging.Outcome.Result.conflicted, outcome.result);
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+    try expectSameRerere(&pair, io);
+
+    // Resolved and committed: the resolution is recorded.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "f", "a\nresolved by hand\nc\n");
+        try r.exec(io, &.{ "add", "f" });
+    }
+    try pair.git.exec(io, &.{ "merge", "--continue" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        _ = try merging.conclude(gpa, io, &repo, .{ .who = who });
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+    try expectSameRerere(&pair, io);
+
+    // The same merge again: the resolution is replayed into the file and,
+    // with autoupdate, staged.
+    for ([_]bool{ false, true }) |autoupdate| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+            try r.exec(io, &.{ "config", "rerere.autoUpdate", if (autoupdate) "true" else "false" });
+        }
+        try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const target = try merging.resolve(gpa, io, &repo, "topic");
+            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+            defer outcome.deinit();
+            try std.testing.expectEqual(@as(usize, 1), outcome.reused.len);
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+        try expectSameRerere(&pair, io);
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "merge", "--abort" });
+    }
+}
+
+test "rerere records a cherry-pick's and a rebase's resolutions and replays them, as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "config", "rerere.enabled", "true" });
+        try r.exec(io, &.{ "tag", "before" });
+    }
+    const conflicting = try oidOf(gpa, io, &pair.ours, "topic~1");
+
+    // A cherry-pick stops; its conflict is taken down, resolved, and the
+    // resolution recorded when the pick is continued.
+    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try sequencer.pick(gpa, io, &repo, &.{conflicting}, .{ .who = who });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+    try expectSameRerere(&pair, io);
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "f", "a\nboth, by hand\nc\n");
+        try r.writeFile(io, "shared", "one\n2\n3\n4\n5\n6\nseven\n");
+        try r.exec(io, &.{ "add", "-A" });
+    }
+    try pair.git.exec(io, &.{ "cherry-pick", "--continue" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try sequencer.proceed(gpa, io, &repo, .{ .who = who });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+    try expectSameRerere(&pair, io);
+
+    // Picked again, the resolution is replayed.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try sequencer.pick(gpa, io, &repo, &.{conflicting}, .{ .who = who });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &pick_state, &main_logs);
+    try expectSameRerere(&pair, io);
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "cherry-pick", "--abort" });
+
+    // A rebase of topic meets the same conflict, and the resolution is
+    // replayed and, with autoupdate, staged.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "config", "rerere.autoUpdate", "true" });
+        try r.exec(io, &.{ "checkout", "-q", "topic" });
+    }
+    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" });
+        defer outcome.deinit();
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+    try expectSameRerere(&pair, io);
+    try pair.git.exec(io, &.{ "rebase", "--abort" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try rebase.abort(gpa, io, &repo, who);
+    }
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+    try expectSameRerere(&pair, io);
+}

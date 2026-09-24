@@ -50,6 +50,7 @@ const repo_mod = @import("repo.zig");
 const refs_mod = @import("refs.zig");
 const reflog = @import("reflog.zig");
 const worktrees = @import("worktrees.zig");
+const rerere = @import("rerere.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -174,6 +175,9 @@ pub const Options = struct {
     exec: []const []const u8 = &.{},
     /// Put a failed `exec` back on the sheet: `--reschedule-failed-exec`.
     reschedule_failed_exec: bool = false,
+    /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
+    /// `--no-rerere-autoupdate`, or `rerere.autoUpdate` when `null`.
+    rerere_autoupdate: ?bool = null,
     /// The permission to run `exec` lines.
     programs: ?program.Programs = null,
     /// Where messages a person would edit go.
@@ -893,6 +897,9 @@ fn writeBasicState(r: *Run, tip: Tip, onto: Oid) Error!void {
     if (r.options.reschedule_failed_exec) {
         try r.state("reschedule-failed-exec", "");
     } else try r.state("no-reschedule-failed-exec", "");
+    if (r.options.rerere_autoupdate) |on| {
+        try r.state("allow_rerere_autoupdate", if (on) "--rerere-autoupdate\n" else "--no-rerere-autoupdate\n");
+    }
 }
 
 /// Read back what `writeBasicState` wrote, whoever wrote it.
@@ -906,6 +913,10 @@ fn readBasicState(r: *Run) Error!Tip {
     }
     if (r.hasState("drop_redundant_commits")) r.empty = .drop else if (r.hasState("keep_redundant_commits")) r.empty = .keep else r.empty = .stop;
     r.options.reschedule_failed_exec = r.hasState("reschedule-failed-exec");
+    if (try r.readState("allow_rerere_autoupdate")) |text| {
+        const value = std.mem.trim(u8, text, " \n");
+        if (std.mem.eql(u8, value, "--rerere-autoupdate")) r.options.rerere_autoupdate = true else if (std.mem.eql(u8, value, "--no-rerere-autoupdate")) r.options.rerere_autoupdate = false;
+    }
     if (try r.readState("strategy")) |text| {
         const s = std.mem.trim(u8, text, " \n");
         if (!std.mem.eql(u8, s, "ort") and !std.mem.eql(u8, s, "recursive")) return error.UnsupportedStrategy;
@@ -1401,8 +1412,11 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     }
     try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", r.msg.items);
     // A rebase takes care of the commit itself, so a conflict leaves no
-    // `CHERRY_PICK_HEAD`, as git's leaves none.
-    if (!outcome.isClean()) return .conflict;
+    // `CHERRY_PICK_HEAD`, as git's leaves none. rerere runs on the stop.
+    if (!outcome.isClean()) {
+        _ = try rerere.afterStop(gpa, io, repo, &index, arena, r.options.rerere_autoupdate);
+        return .conflict;
+    }
     if (command == .pick or command == .reword or command == .edit) {
         try head_mod.writeRef(io, repo, "CHERRY_PICK_HEAD", source.oid);
     }
@@ -2082,6 +2096,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         const copied = try r.arena.dupe(threeway.Conflict, outcome.conflicts);
         for (copied) |*c| c.path = try r.arena.dupe(u8, c.path);
         r.conflicts = copied;
+        _ = try rerere.afterStop(gpa, io, repo, &index, r.arena, r.options.rerere_autoupdate);
         if (item.commit) |original| try errorWithPatch(r, original, false) else if (r.have_message and !r.hasState("message")) try r.state("message", r.msg.items);
         _ = r.items.orderedRemove(0);
         return finishOutcome(r, .stopped, .conflict, item.commit);
@@ -2099,8 +2114,8 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     const log = try std.fmt.allocPrint(r.arena, "rebase (merge): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
     // git makes this commit with `git commit`, whose clean-up takes
-    // `AUTO_MERGE` with the merge's other files.
-    try merging.removeMergeState(io, repo);
+    // `AUTO_MERGE` with the merge's other files and runs rerere.
+    try rerere.afterCommit(gpa, io, repo);
     if (item.commit) |original| try recordInRewritten(r, original, peekCommand(r, 1));
     return null;
 }
@@ -2281,7 +2296,8 @@ fn commitStagedChanges(r: *Run) Error!void {
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
     try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
     try r.removeState("amend");
-    try merging.removeMergeState(io, repo);
+    // The commit is `git commit`'s, which records resolutions as it ends.
+    try rerere.afterCommit(r.gpa, io, repo);
 }
 
 /// Leave out the instruction that stopped, with whatever it changed, and
@@ -2290,6 +2306,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!O
     {
         var r = try loadRun(gpa, io, repo, options);
         defer freeRun(&r);
+        try rerere.clear(gpa, io, repo);
         const current = try r.headOid();
         var index = try repo.openIndex(io);
         defer index.deinit();
@@ -2307,6 +2324,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!O
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Error!void {
     var r = try loadRun(gpa, io, repo, .{ .who = who });
     defer freeRun(&r);
+    try rerere.clear(gpa, io, repo);
     const tip = try readBasicState(&r);
     var h = try r.head();
     defer h.deinit(gpa);

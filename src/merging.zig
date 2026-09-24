@@ -22,6 +22,7 @@ const merge = @import("merge.zig");
 const revwalk = @import("revwalk.zig");
 const threeway = @import("threeway.zig");
 const ort = @import("ort.zig");
+const rerere = @import("rerere.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
 const message = @import("message.zig");
@@ -64,7 +65,7 @@ pub const Error = error{
     UnresolvedConflicts,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || threeway.Error || head_mod.Error || revwalk.Error || refs_mod.ReadError || repo_mod.WriteError;
+} || threeway.Error || head_mod.Error || revwalk.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error;
 
 /// When a merge may be a fast-forward: `merge.ff` and `--ff`, `--no-ff`,
 /// `--ff-only`.
@@ -141,6 +142,9 @@ pub const Options = struct {
     favor: merge.Favor = .none,
     /// Where a refusal writes the path that caused it.
     blocked: ?*threeway.Blocked = null,
+    /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
+    /// `--no-rerere-autoupdate`, or `rerere.autoUpdate` when `null`.
+    rerere_autoupdate: ?bool = null,
 };
 
 /// What a merge did.
@@ -155,6 +159,9 @@ pub const Outcome = struct {
     conflicts: []const threeway.Conflict = &.{},
     /// What git's merge says about the paths it merged, grouped by path.
     messages: []const ort.Message = &.{},
+    /// Conflicted paths a resolution rerere recorded before resolved: in
+    /// the working tree, and staged when `rerere_autoupdate` says so.
+    reused: []const []const u8 = &.{},
 
     pub const Result = enum {
         /// The commit was already part of the branch; nothing changed.
@@ -297,12 +304,15 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     }
     try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", msg.items);
     try head_mod.writeState(io, repo.git_dir, "MERGE_MODE", if (fast_forward == .never) "no-ff" else "");
+    var reused: []const []const u8 = &.{};
+    if (!outcome.isClean()) reused = try runRerere(gpa, io, repo, &index, arena, options.rerere_autoupdate);
     return .{
         .gpa = gpa,
         .arena = arena_instance.state,
         .result = if (outcome.isClean()) .staged else .conflicted,
         .conflicts = conflicts,
         .messages = messages,
+        .reused = reused,
     };
 }
 
@@ -359,9 +369,16 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     });
     const log_message = try std.fmt.allocPrint(arena, "commit (merge): {s}", .{message.subjectLine(cleaned)});
     try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
-    try removeMergeState(io, repo);
+    try finishCommit(gpa, io, repo);
     return commit;
 }
+
+/// What `git commit` does to a stop's files once the commit that ends it is
+/// made: `rerere.afterCommit`.
+pub const finishCommit = rerere.afterCommit;
+
+/// Run rerere on a stop: `rerere.afterStop`.
+pub const runRerere = rerere.afterStop;
 
 /// Undo a merge that stopped: `git merge --abort`, which is `git reset
 /// --merge`. Changes a person made before the merge, to paths the merge did

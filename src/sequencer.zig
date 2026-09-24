@@ -29,6 +29,7 @@ const abbrev = @import("abbrev.zig");
 const todo = @import("todo.zig");
 const worktree = @import("worktree.zig");
 const merging = @import("merging.zig");
+const rerere = @import("rerere.zig");
 const config_mod = @import("config.zig");
 const repo_mod = @import("repo.zig");
 const refs_mod = @import("refs.zig");
@@ -78,7 +79,7 @@ pub const Error = error{
     NothingToSkip,
     /// A name given names no commit.
     NotACommit,
-} || threeway.Error || head_mod.Error || todo.ParseError || refs_mod.ReadError ||
+} || threeway.Error || head_mod.Error || todo.ParseError || refs_mod.ReadError || rerere.Error ||
     config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError;
 
 /// Which replay.
@@ -155,6 +156,9 @@ pub const Options = struct {
     sequence: bool = false,
     /// Where a refusal writes the path that caused it.
     blocked: ?*threeway.Blocked = null,
+    /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
+    /// `--no-rerere-autoupdate`, or `rerere.autoUpdate` when `null`.
+    rerere_autoupdate: ?bool = null,
 };
 
 /// Why a replay stopped.
@@ -281,6 +285,11 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
         any = true;
         w.print("\tstrategy-option = {s}\n", .{@tagName(options.favor)}) catch return error.OutOfMemory;
     }
+    if (options.rerere_autoupdate) |on| {
+        if (!any) w.writeAll("[options]\n") catch return error.OutOfMemory;
+        any = true;
+        w.print("\tallow-rerere-auto = {s}\n", .{if (on) "true" else "false"}) catch return error.OutOfMemory;
+    }
     if (options.cleanup) |mode| {
         if (!any) w.writeAll("[options]\n") catch return error.OutOfMemory;
         any = true;
@@ -340,7 +349,7 @@ fn parseOpts(gpa: Allocator, text: []const u8, options: *Options) OptsError!void
         } else if (std.mem.eql(u8, key, "default-msg-cleanup")) {
             options.cleanup = message.Cleanup.parse(value) orelse if (std.mem.eql(u8, value, "default")) null else return error.MalformedState;
         } else if (std.mem.eql(u8, key, "allow-rerere-auto")) {
-            // rerere is not run here; its setting changes nothing.
+            options.rerere_autoupdate = on;
         } else return error.MalformedState;
     }
 }
@@ -522,6 +531,8 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     }
     if (!clean) {
         try updateAbortSafety(gpa, io, repo);
+        // git runs rerere once the pick has stopped.
+        _ = try rerere.afterStop(gpa, io, repo, &index, arena, r.options.rerere_autoupdate);
         return .conflicted;
     }
 
@@ -815,8 +826,8 @@ fn commitStaged(r: *Replay) Error!Oid {
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
     try head_mod.deleteRef(io, repo, "REVERT_HEAD");
-    try head_mod.deleteRef(io, repo, "AUTO_MERGE");
-    try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
+    // The commit is `git commit`'s, which records resolutions as it ends.
+    try rerere.afterCommit(gpa, io, repo);
     try r.made.append(arena, made);
     return made;
 }
