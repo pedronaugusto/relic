@@ -639,6 +639,8 @@ pub const Transaction = struct {
         /// log gains the line, and its own value is left alone. The line's
         /// values are those of the edit at `via`.
         via: ?usize = null,
+        /// This edit's own log text, owned: `EditOptions.message`.
+        message: ?[]const u8 = null,
     };
 
     /// How one edit treats a symbolic ref.
@@ -646,6 +648,11 @@ pub const Transaction = struct {
         /// Change the named ref itself even when it is symbolic, rather than
         /// the ref it names: git's `--no-deref`.
         no_deref: bool = false,
+        /// The text of this edit's log line, in place of the message
+        /// `commit` is given, whose `who` and `policy` still apply: how one
+        /// transaction logs each ref in its own words, as git's atomic
+        /// fetch does. Collapsed as `commit`'s is.
+        message: ?[]const u8 = null,
     };
 
     /// Release the transaction, rolling back anything `prepare` took.
@@ -653,6 +660,7 @@ pub const Transaction = struct {
         tx.abort(io);
         for (tx.edits.items) |edit| {
             tx.gpa.free(edit.name);
+            if (edit.message) |m| tx.gpa.free(m);
             if (edit.new) |new| switch (new) {
                 .symbolic => |target| tx.gpa.free(target),
                 .direct => {},
@@ -681,7 +689,9 @@ pub const Transaction = struct {
     /// choice of whether a symbolic `name` is gone through.
     pub fn change(tx: *Transaction, name: []const u8, new: ?Ref, expected: Expected, options: EditOptions) TransactionError!void {
         try tx.add(name, new, expected);
-        tx.edits.items[tx.edits.items.len - 1].deref = !options.no_deref;
+        const added = &tx.edits.items[tx.edits.items.len - 1];
+        added.deref = !options.no_deref;
+        if (options.message) |m| added.message = try tx.gpa.dupe(u8, m);
     }
 
     fn add(tx: *Transaction, name: []const u8, new: ?Ref, expected: Expected) TransactionError!void {
@@ -1002,8 +1012,8 @@ pub const Transaction = struct {
         }
 
         if (log) |message| {
-            const text = try reflog.normalizeMessage(tx.gpa, message.message);
-            defer tx.gpa.free(text);
+            const shared = try reflog.normalizeMessage(tx.gpa, message.message);
+            defer tx.gpa.free(shared);
             for (tx.edits.items) |edit| {
                 // A deleted ref's log went with it.
                 if (edit.via == null and edit.new == null) continue;
@@ -1025,6 +1035,9 @@ pub const Transaction = struct {
                 };
                 const exists = try reflog.exists(io, tx.store.dirFor(edit.name), tx.gpa, edit.name);
                 if (!reflog.shouldLog(message.policy, edit.name, exists)) continue;
+                // An edit's own words, or the transaction's.
+                const own = if (source.message) |m| try reflog.normalizeMessage(tx.gpa, m) else null;
+                defer if (own) |t| tx.gpa.free(t);
                 try reflog.append(
                     tx.gpa,
                     io,
@@ -1033,7 +1046,7 @@ pub const Transaction = struct {
                     old,
                     new,
                     message.who,
-                    text,
+                    own orelse shared,
                 );
             }
         }
@@ -1747,4 +1760,42 @@ fn fuzzPacked(_: void, smith: *std.testing.Smith) anyerror!void {
     var listing = Store.parsePacked(gpa, .sha1, bytes) catch return;
     defer listing.deinit();
     _ = listing.find("refs/heads/main");
+}
+
+test "one transaction logs each ref in its own words when its edits say so, as git's atomic fetch does, in files and reftable" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_][]const []const u8{ &.{}, &.{"--ref-format=reftable"} }) |args| {
+        var r = try testgit.Repo.init(gpa, io, args);
+        defer r.deinit();
+        try r.writeFile(io, "f", "f\n");
+        try r.exec(io, &.{ "add", "f" });
+        try r.exec(io, &.{ "commit", "-q", "-m", "one" });
+        const head_text = try r.line(io, &.{ "rev-parse", "HEAD" });
+        defer gpa.free(head_text);
+        var repo = try @import("repo.zig").Repository.open(gpa, io, r.dir, .{});
+        defer repo.deinit(io);
+        const oid = try Oid.parse(repo.kind, head_text);
+        {
+            var tx = repo.beginRefs();
+            defer tx.deinit(io);
+            try tx.change("refs/remotes/origin/a", .{ .direct = oid }, .must_not_exist, .{ .message = "fetch: storing head" });
+            try tx.change("refs/remotes/origin/b", .{ .direct = oid }, .must_not_exist, .{ .message = "  fetch:\tsecond  one " });
+            try tx.change("refs/remotes/origin/c", .{ .direct = oid }, .must_not_exist, .{});
+            try tx.commit(io, .{
+                .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 },
+                .message = "the transaction's",
+                .policy = .always,
+            });
+        }
+        for ([_][2][]const u8{
+            .{ "refs/remotes/origin/a", "fetch: storing head\n" },
+            .{ "refs/remotes/origin/b", "fetch: second one\n" },
+            .{ "refs/remotes/origin/c", "the transaction's\n" },
+        }) |case| {
+            const said = try r.run(io, &.{ "reflog", "show", "--format=%gs", case[0] });
+            defer gpa.free(said);
+            try std.testing.expectEqualStrings(case[1], said);
+        }
+    }
 }

@@ -995,8 +995,10 @@ pub const Options = struct {
     /// library never reads for itself. With it, as git-lfs does with its
     /// clock: an action or a `git-lfs-authenticate` token that expires
     /// within five seconds of it is not used, a `Retry-After` given as a
-    /// date is waited out, and `lfs/tmp` is swept after a transfer. Without
-    /// it, none of that is done.
+    /// date is waited out, `lfs/tmp` is swept after a transfer, and a
+    /// credential helper's password past its `password_expiry_utc` is
+    /// neither used nor stored (`credential.Options.now`). Without it, none
+    /// of that is done.
     now: ?i64 = null,
 };
 
@@ -1406,7 +1408,7 @@ pub const Client = struct {
     }
 
     fn credentialOptions(c: *const Client) credential.Options {
-        return .{ .config = c.settings.config, .programs = c.options.programs, .prompt = c.options.prompt };
+        return .{ .config = c.settings.config, .programs = c.options.programs, .prompt = c.options.prompt, .now = c.options.now };
     }
 
     /// Everything a request needs besides its URL and method.

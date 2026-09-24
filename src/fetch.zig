@@ -33,6 +33,7 @@ const pack = @import("pack.zig");
 const revwalk = @import("revwalk.zig");
 const fetchpack = @import("fetchpack.zig");
 const shallow_mod = @import("shallow.zig");
+const revindex = @import("revindex.zig");
 const partial = @import("partial.zig");
 const config_mod = @import("config.zig");
 const refspec_mod = @import("refspec.zig");
@@ -316,6 +317,8 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
         .warnings = options.warnings,
+        // A credential's expiry is checked against the caller's time.
+        .now = options.who.when_secs,
     });
     defer session.close(io);
 
@@ -479,7 +482,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     }, .{
         .warnings = options.warnings,
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects },
+        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config) },
         .shallow_info = &shallow_info,
     });
     outcome.pack = fetched.pack;
@@ -523,7 +526,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
                 .tips = tips.items,
                 .common_tips = common_tips.items,
                 .include_tag = false,
-            }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects } });
+            }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config) } });
         }
     }
 
@@ -624,7 +627,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
             }
         }
     }
-    try writeRefs(gpa, io, repo, pending.items, options, updates.items);
+    try writeRefs(io, repo, pending.items, options, updates.items);
 
     if (follow_head) try createRemoteHead(gpa, io, repo, remote.name.?, remote_refs.refs, configured.items, options.who);
 
@@ -647,7 +650,7 @@ const Pending = struct {
 /// Write the updates: each under its own lock, as git's fetch does, or all
 /// under one when `atomic` asks — in which case a refused update anywhere
 /// leaves every ref as it was, as git's `--atomic` does.
-fn writeRefs(gpa: Allocator, io: Io, repo: *Repository, pending: []const Pending, options: Options, updates: []const Update) Error!void {
+fn writeRefs(io: Io, repo: *Repository, pending: []const Pending, options: Options, updates: []const Update) Error!void {
     if (!options.atomic) {
         for (pending) |p| {
             var tx = repo.beginRefs();
@@ -663,18 +666,9 @@ fn writeRefs(gpa: Allocator, io: Io, repo: *Repository, pending: []const Pending
     if (pending.len == 0) return;
     var tx = repo.beginRefs();
     defer tx.deinit(io);
-    for (pending) |p| try tx.update(p.name, .{ .direct = p.new }, expectation(p.old));
-    // A transaction writes one message for all its refs, and each ref here
-    // has its own; the logs are appended once every ref is in place.
-    try tx.commit(io, null);
-    const policy = repo.reflogPolicy();
-    for (pending) |p| {
-        // Through the store, so a reftable repository's log is where git
-        // reads it.
-        const exists = try repo.refs.logExists(gpa, io, p.name);
-        if (!reflog.shouldLog(policy, p.name, exists)) continue;
-        try repo.refs.appendLog(gpa, io, p.name, p.old orelse .zero(repo.kind), p.new, options.who, p.message);
-    }
+    // One transaction, each ref's log line in its own words.
+    for (pending) |p| try tx.change(p.name, .{ .direct = p.new }, expectation(p.old), .{ .message = p.message });
+    try tx.commit(io, .{ .who = options.who, .policy = repo.reflogPolicy() });
 }
 
 fn expectation(old: ?Oid) refs_mod.Expected {

@@ -570,6 +570,117 @@ test "a helper's bearer token is sent as git sends it, and handed back with its 
     try testing.expect(std.mem.indexOf(u8, ours, "state[]=helper:one") != null);
 }
 
+test "a helper's password past its password_expiry_utc is passed over for the next helper's, and not stored, as git passes it over" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, &root, "repo.git");
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .basic_auth = .{ .user = "ada", .password = "secret" } });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+    // An hour before the epoch's billionth second: long past.
+    const stale = try person.standIn(io, "stale", "username=ada\npassword=old\npassword_expiry_utc=999996400\n");
+    defer gpa.free(stale);
+    const fresh = try person.standIn(io, "fresh", "username=ada\npassword=secret\n");
+    defer gpa.free(fresh);
+    const global = try std.fmt.allocPrint(gpa, "[credential]\n\thelper = {s}\n\thelper = {s}\n", .{ stale, fresh });
+    defer gpa.free(global);
+    try person.writeGlobal(io, global);
+
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+    const names: []const []const u8 = &.{ "stale", "fresh" };
+    person.clearLogs(io, names);
+    var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
+    defer theirs_outcome.deinit(gpa);
+    try testing.expect(theirs_outcome.succeeded());
+    var theirs: [2][]u8 = undefined;
+    for (names, &theirs) |name, *out| out.* = try person.log(io, name);
+    defer for (theirs) |t| gpa.free(t);
+    person.clearLogs(io, names);
+
+    var locations: userconfig.Locations = undefined;
+    var repo = try person.open(io, by_relic.dir, &locations);
+    defer repo.deinit(io);
+    defer locations.deinit();
+    // The caller's clock says when it is.
+    var who = test_who;
+    who.when_secs = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .programs = .{ .environ = &person.env } });
+    outcome.deinit();
+    for (names, theirs) |name, t| {
+        const ours = try person.log(io, name);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(t, ours);
+    }
+}
+
+test "what ssh says on a conversation that succeeds is handed back as a warning, the words git passes on" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    // ssh that adds a host key, says so, and goes on.
+    try person.tools.dir.writeFile(io, .{ .sub_path = "ssh", .data =
+        \\#!/bin/sh
+        \\echo "Warning: Permanently added 'work-github' (ED25519) to the list of known hosts." >&2
+        \\while [ $# -gt 0 ]; do case "$1" in -G) exit 0 ;; -o|-p|-P|-i|-J|-F) shift 2 ;; -*) shift ;; *) break ;; esac; done
+        \\shift
+        \\PATH="$(git --exec-path):$PATH" exec sh -c "$*"
+        \\
+    });
+    {
+        const file = try person.tools.dir.openFile(io, "ssh", .{});
+        defer file.close(io);
+        if (builtin.os.tag != .windows) try file.setPermissions(io, .fromMode(0o755));
+    }
+    const ssh = try std.fs.path.join(gpa, &.{ person.tools_path, "ssh" });
+    defer gpa.free(ssh);
+    try person.env.put("GIT_SSH_COMMAND", ssh);
+    var source = try testremote.historyRepo(gpa, io, 1);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const url = try std.fmt.allocPrint(gpa, "work-github:{s}", .{source_path});
+    defer gpa.free(url);
+
+    var by_git = try testgit.Repo.init(gpa, io, &.{});
+    defer by_git.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
+    var theirs = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
+    defer theirs.deinit(gpa);
+    try testing.expect(theirs.succeeded());
+
+    var locations: userconfig.Locations = undefined;
+    var repo = try person.open(io, by_relic.dir, &locations);
+    defer repo.deinit(io);
+    defer locations.deinit();
+    var warnings: @import("warning.zig").Warnings = .init(gpa);
+    defer warnings.deinit();
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env }, .warnings = &warnings });
+    outcome.deinit();
+    var ours: std.ArrayList(u8) = .empty;
+    defer ours.deinit(gpa);
+    for (warnings.items.items) |w| try ours.print(gpa, "{s}\n", .{try w.message(warnings.arena.allocator())});
+    // ssh is asked twice by git — once for the refs, once for the pack —
+    // and relic once, so each says it the times it is asked.
+    var lines = std.mem.tokenizeScalar(u8, theirs.stderr, '\n');
+    const first = lines.next().?;
+    try testing.expectEqualStrings("Warning: Permanently added 'work-github' (ED25519) to the list of known hosts.", first);
+    try testing.expect(ours.items.len != 0);
+    var said = std.mem.tokenizeScalar(u8, ours.items, '\n');
+    while (said.next()) |line| try testing.expectEqualStrings(first, line);
+}
+
 /// A stand-in `ssh` at `<tools>/ssh` that notes its arguments and the
 /// agent and home it was started with, then either says `refusal` on its
 /// standard error and exits 255, as ssh does, or runs the command here.

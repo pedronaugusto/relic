@@ -240,7 +240,7 @@ pub const Remote = struct {
         if (needs_pack and objects.len != 0) {
             var pack_dir = try r.repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
             defer pack_dir.close(io);
-            _ = try from.writePack(io, pack_dir, objects, .{});
+            _ = try from.writePack(io, pack_dir, objects, .{ .reverse_index = @import("revindex.zig").wanted(&r.repo.config) });
             try r.repo.odb.refresh(io);
         }
 

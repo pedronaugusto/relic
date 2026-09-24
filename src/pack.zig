@@ -16,6 +16,7 @@ const flate = std.compress.flate;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const delta = @import("delta.zig");
+const revindex = @import("revindex.zig");
 const fs = @import("fs.zig");
 
 const Oid = hash.Oid;
@@ -1327,6 +1328,9 @@ pub const WriteOptions = struct {
     sync: fs.Sync = .none,
     /// How hard the entries are compressed.
     compression: Compression = .default,
+    /// Write `pack-<name>.rev` too, as git's pack-objects does while
+    /// `pack.writeReverseIndex` is on: `revindex.wanted`.
+    reverse_index: bool = false,
 };
 
 /// What a finished pack turned out to be.
@@ -1750,12 +1754,22 @@ pub const Writer = struct {
         const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
         const index_bytes = try w.writeIndex(io, checksum, idx_temp);
         errdefer w.dir.deleteFile(io, idx_temp) catch {};
+        var rev_temp_buf: [64]u8 = undefined;
+        const rev_temp: ?[]const u8 = if (w.options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
+        if (rev_temp) |t| try revindex.write(w.gpa, io, w.dir, t, w.kind, w.entries.items, checksum, w.options.sync);
+        errdefer if (rev_temp) |t| w.dir.deleteFile(io, t) catch {};
 
         fs.renameWithRetry(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
             w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
             w.dir.deleteFile(io, idx_temp) catch {};
             return err;
         };
+        // The reverse index before the index, as git renames them.
+        if (rev_temp) |t| {
+            var rev_name_buf: [64]u8 = undefined;
+            const rev_name = std.fmt.bufPrint(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
+            try fs.renameWithRetry(io, w.dir, t, rev_name);
+        }
         fs.renameWithRetry(io, w.dir, idx_temp, idx_name) catch |err| {
             w.dir.deleteFile(io, idx_temp) catch {};
             return err;

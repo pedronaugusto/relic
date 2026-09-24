@@ -1103,6 +1103,7 @@ pub const Odb = struct {
         const write_options: pack.WriteOptions = .{
             .sync = options.sync,
             .compression = options.compression,
+            .reverse_index = options.reverse_index,
         };
         var writer = switch (target) {
             .dir => |pack_dir| try pack.Writer.init(gpa, io, pack_dir, odb.kind, @intCast(entries.len), write_options),
@@ -1718,6 +1719,8 @@ pub const PackOptions = struct {
     sync: fs.Sync = .none,
     /// How hard the entries are compressed.
     compression: pack.Compression = .default,
+    /// Write the pack's reverse index too: `pack.WriteOptions.reverse_index`.
+    reverse_index: bool = false,
 };
 
 /// One object held in the delta window.

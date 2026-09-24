@@ -30,6 +30,7 @@ const repo_mod = @import("repo.zig");
 const pack = @import("pack.zig");
 const fetchpack = @import("fetchpack.zig");
 const shallow_mod = @import("shallow.zig");
+const revindex = @import("revindex.zig");
 const partial = @import("partial.zig");
 const worktree = @import("worktree.zig");
 const filter = @import("filter.zig");
@@ -202,6 +203,8 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
         .warnings = options.warnings,
+        // A credential's expiry is checked against the caller's time.
+        .now = options.who.when_secs,
     });
     defer session.close(io);
 
@@ -309,7 +312,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .filter = send_filter,
     }, .{
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects },
+        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(settings) },
         .shallow_info = &shallow_info,
         .warnings = options.warnings,
     });

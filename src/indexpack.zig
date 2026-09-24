@@ -27,6 +27,7 @@ const flate = std.compress.flate;
 
 const hash = @import("hash.zig");
 const object = @import("object.zig");
+const revindex = @import("revindex.zig");
 const pack = @import("pack.zig");
 const delta = @import("delta.zig");
 const fs = @import("fs.zig");
@@ -104,6 +105,9 @@ pub const Options = struct {
     progress: ?Progress = null,
     /// Where the object behind a refusal is named, when the caller wants it.
     diagnostic: ?*Diagnostic = null,
+    /// Write `pack-<name>.rev` beside the index, as git does while
+    /// `pack.writeReverseIndex` is on: `revindex.wanted`.
+    reverse_index: bool = true,
 };
 
 /// What went wrong, and where, for a message.
@@ -274,10 +278,23 @@ pub fn receive(
     const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
     _ = try pack.writeIndexFile(gpa, io, pack_dir, idx_temp, kind, index_entries, name, options.sync);
     errdefer pack_dir.deleteFile(io, idx_temp) catch {};
+    var rev_temp_buf: [64]u8 = undefined;
+    const rev_temp: ?[]const u8 = if (options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
+    if (rev_temp) |t| try revindex.write(gpa, io, pack_dir, t, kind, index_entries, name, options.sync);
+    errdefer if (rev_temp) |t| pack_dir.deleteFile(io, t) catch {};
 
-    // Pack first, index second: a reader finds a pack by its index.
+    // Pack first, then the reverse index, index last, as git renames them:
+    // a reader finds a pack by its index.
     try fs.renameWithRetry(io, pack_dir, temp, pack_name);
     kept = true;
+    if (rev_temp) |t| {
+        var rev_name_buf: [96]u8 = undefined;
+        const rev_name = std.fmt.bufPrint(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
+        fs.renameWithRetry(io, pack_dir, t, rev_name) catch |err| {
+            pack_dir.deleteFile(io, pack_name) catch {};
+            return err;
+        };
+    }
     fs.renameWithRetry(io, pack_dir, idx_temp, idx_name) catch |err| {
         pack_dir.deleteFile(io, pack_name) catch {};
         return err;
@@ -1127,12 +1144,20 @@ test "a thin pack is completed from the database, and git indexes the result ide
     defer gpa.free(pack_path);
     const idx_path = try std.fmt.allocPrint(gpa, "objects/pack/pack-{s}.idx", .{result.name.?.hex(&hex)});
     defer gpa.free(idx_path);
-    try target.exec(io, &.{ "index-pack", "-o", "check.idx", pack_path });
+    try target.exec(io, &.{ "index-pack", "--rev-index", "-o", "check.idx", pack_path });
     const ours = try target.readFile(io, idx_path);
     defer gpa.free(ours);
     const theirs = try target.readFile(io, "check.idx");
     defer gpa.free(theirs);
     try testing.expectEqualSlices(u8, theirs, ours);
+    // And the reverse index beside it, as git's index-pack writes it.
+    const rev_path = try std.fmt.allocPrint(gpa, "objects/pack/pack-{s}.rev", .{result.name.?.hex(&hex)});
+    defer gpa.free(rev_path);
+    const our_rev = try target.readFile(io, rev_path);
+    defer gpa.free(our_rev);
+    const their_rev = try target.readFile(io, "check.rev");
+    defer gpa.free(their_rev);
+    try testing.expectEqualSlices(u8, their_rev, our_rev);
     try target.exec(io, &.{ "verify-pack", idx_path });
     try target.exec(io, &.{ "update-ref", "refs/heads/main", new });
     try target.exec(io, &.{ "fsck", "--strict", "--no-dangling" });

@@ -267,6 +267,8 @@ fn pushTo(
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
         .warnings = options.warnings,
+        // A credential's expiry is checked against the caller's time.
+        .now = options.who.when_secs,
     });
     defer session.close(io);
     var remote_refs = try session.listRefs(gpa, io, &.{});

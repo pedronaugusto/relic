@@ -106,6 +106,8 @@ pub const Options = struct {
     /// Answers the credential prompt git would show on a terminal, when no
     /// helper has the answer. Without it nothing is asked.
     prompt: ?credential.Prompt = null,
+    /// The caller's time, for a credential's expiry: `credential.Options.now`.
+    now: ?i64 = null,
     /// Filled in when the conversation fails for want of a credential.
     auth_failure: ?*auth.Failure = null,
     /// Where what git would print as a warning goes: certificate checks
@@ -370,7 +372,7 @@ const Http = struct {
     }
 
     fn credentialOptions(h: *const Http) credential.Options {
-        return .{ .config = h.options.config, .programs = h.options.programs, .prompt = h.options.prompt };
+        return .{ .config = h.options.config, .programs = h.options.programs, .prompt = h.options.prompt, .now = h.options.now };
     }
 
     fn fail(h: *Http, err: Error, text: []const u8) Error {

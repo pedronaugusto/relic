@@ -76,6 +76,8 @@ pub const Options = struct {
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
     auth_failure: ?*auth.Failure = null,
+    /// The caller's time, for a credential's expiry: `credential.Options.now`.
+    now: ?i64 = null,
     /// Read a repository on this machine directly, as git's local clone
     /// copies one, rather than through upload-pack. Only a fetch reads it.
     local_copy: bool = false,
@@ -164,6 +166,7 @@ pub const Session = struct {
                     .prompt = options.prompt,
                     .auth_failure = options.auth_failure,
                     .warnings = options.warnings,
+                    .now = options.now,
                 });
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind);
@@ -326,7 +329,7 @@ pub const Session = struct {
         if (request.wants.len == 0) return .{ .pack = null, .objects = 0 };
         switch (s.impl) {
             .local => |remote| {
-                const report = try remote.copyObjects(io, db, pack_dir, request.wants, request.tips, request.include_tag, .{});
+                const report = try remote.copyObjects(io, db, pack_dir, request.wants, request.tips, request.include_tag, .{ .reverse_index = options.receive.reverse_index });
                 const written = report orelse return .{ .pack = null, .objects = 0 };
                 return .{ .pack = written.name, .objects = written.objects };
             },

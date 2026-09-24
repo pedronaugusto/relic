@@ -1045,15 +1045,21 @@ fn addTable(
         try logs.append(arena, .{
             .name = edit.name,
             .update_index = update_index,
-            .value = .{ .update = .{
-                .old = source.old orelse Oid.zero(store.kind),
-                .new = new_oid,
-                .name = message.who.name,
-                .email = message.who.email,
-                .time = std.math.cast(u64, message.who.when_secs) orelse 0,
-                .tz_offset = zoneFromMinutes(message.who.offset_minutes),
-                .message = text.?,
-            } },
+            .value = .{
+                .update = .{
+                    .old = source.old orelse Oid.zero(store.kind),
+                    .new = new_oid,
+                    .name = message.who.name,
+                    .email = message.who.email,
+                    .time = std.math.cast(u64, message.who.when_secs) orelse 0,
+                    .tz_offset = zoneFromMinutes(message.who.offset_minutes),
+                    // An edit's own words, or the transaction's.
+                    .message = if (source.message) |m|
+                        try logMessage(arena, try reflog.normalizeMessage(arena, m), store.reftable_options.write.block_size)
+                    else
+                        text.?,
+                },
+            },
         });
     }
     if (records.items.len == 0 and logs.items.len == 0) return;

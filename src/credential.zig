@@ -75,6 +75,11 @@ pub const Options = struct {
     config: ?*const config_mod.Config = null,
     programs: ?program.Programs = null,
     prompt: ?Prompt = null,
+    /// The time, in seconds since the epoch, by the caller's clock: a
+    /// helper's password whose `password_expiry_utc` is before it is
+    /// neither used nor stored, as git uses and stores neither. `null`
+    /// checks nothing; relic reads no clock of its own.
+    now: ?i64 = null,
 };
 
 /// The credential for one URL, over the life of one conversation.
@@ -97,7 +102,7 @@ pub const Session = struct {
     credential: ?[]u8 = null,
     ephemeral: bool = false,
     oauth_refresh_token: ?[]u8 = null,
-    password_expiry_utc: ?u64 = null,
+    password_expiry_utc: ?i64 = null,
     state: std.ArrayList([]u8) = .empty,
     /// The capabilities the answering helper announced.
     capa_authtype: bool = false,
@@ -260,6 +265,7 @@ pub const Session = struct {
                 return error.ProgramsNotGranted;
             };
             const outcome = try s.runHelper(io, programs, arena, helper, .get, settings.use_http_path);
+            s.dropExpired(opts.now);
             const answer: auth.Failure.Answer = switch (outcome) {
                 .failed => .failed,
                 .answered => |a| if (a.quit) .quit else if (s.hasCredential()) .credential else if (a.any) .partial else .nothing,
@@ -292,9 +298,22 @@ pub const Session = struct {
         try s.asked.append(s.gpa, .{ .command = command, .answer = answer });
     }
 
-    /// The credential worked: every helper is told to `store` it.
+    /// A password past its `password_expiry_utc` is forgotten, as git's
+    /// `credential_fill` forgets it after each helper.
+    fn dropExpired(s: *Session, now: ?i64) void {
+        const t = now orelse return;
+        const expiry = s.password_expiry_utc orelse return;
+        if (expiry >= t) return;
+        secretFree(s.gpa, s.password);
+        s.password = null;
+        s.password_expiry_utc = null;
+    }
+
+    /// The credential worked: every helper is told to `store` it — unless
+    /// it has expired, which git does not store.
     pub fn approve(s: *Session, io: Io, opts: Options) Error!void {
         if (!s.hasCredential()) return;
+        if (opts.now) |t| if (s.password_expiry_utc) |expiry| if (expiry < t) return;
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const settings = try applyConfig(arena_state.allocator(), opts.config, s.url);
@@ -466,7 +485,9 @@ pub const Session = struct {
                 secretFree(s.gpa, s.oauth_refresh_token);
                 s.oauth_refresh_token = try s.gpa.dupe(u8, value);
             } else if (std.mem.eql(u8, key, "password_expiry_utc")) {
-                s.password_expiry_utc = std.fmt.parseUnsigned(u64, value, 10) catch null;
+                // Zero, or a number too large, is no expiry, as git reads it.
+                s.password_expiry_utc = std.fmt.parseUnsigned(i64, value, 10) catch null;
+                if (s.password_expiry_utc == 0) s.password_expiry_utc = null;
             } else if (std.mem.eql(u8, key, "state[]")) {
                 const owned = try s.gpa.dupe(u8, value);
                 errdefer s.gpa.free(owned);

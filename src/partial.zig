@@ -34,6 +34,7 @@ const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const transport = @import("transport.zig");
 const repo_mod = @import("repo.zig");
+const revindex = @import("revindex.zig");
 const filterspec = @import("filterspec.zig");
 
 const Oid = hash.Oid;
@@ -258,7 +259,7 @@ pub const Lazy = struct {
             .tips = &.{},
             .include_tag = false,
             .filter = "blob:none",
-        }, .{ .receive = .{ .check_objects = l.options.check_objects } });
+        }, .{ .receive = .{ .check_objects = l.options.check_objects, .reverse_index = revindex.wanted(&repo.config) } });
         if (fetched.pack) |pack_name| try writePromisor(io, pack_dir, pack_name, &.{});
     }
 
