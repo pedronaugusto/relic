@@ -143,3 +143,56 @@ test "a clone given no settings of its own reaches the remote with the person's,
     defer gpa.free(local);
     try testing.expect(std.mem.indexOf(u8, local, "sshCommand") == null);
 }
+
+test "a clone goes where url.<base>.insteadOf sends it and records the URL as given, as git clone does" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var source = try testremote.historyRepo(gpa, io, 2);
+    defer source.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
+    defer gpa.free(bare);
+    try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
+    // The person's own file names a short form for the server.
+    const text = try std.fmt.allocPrint(gpa, "[url \"file://{s}/\"]\n\tinsteadOf = here:\n", .{root_path});
+    defer gpa.free(text);
+    try root.dir.writeFile(io, .{ .sub_path = "gitconfig", .data = text });
+    const global = try std.fmt.allocPrint(gpa, "{s}/gitconfig", .{root_path});
+    defer gpa.free(global);
+    try env.put("GIT_CONFIG_GLOBAL", global);
+
+    const by_git = try std.fmt.allocPrint(gpa, "{s}/by-git", .{root_path});
+    defer gpa.free(by_git);
+    const cloned = try testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "clone", "-q", "here:repo.git", by_git }, "", true);
+    gpa.free(cloned);
+    try root.dir.createDirPath(io, "by-relic");
+    var d = try root.dir.openDir(io, "by-relic", .{ .iterate = true });
+    defer d.close(io);
+    var repo = try clone_mod.clone(gpa, io, "here:repo.git", d, .{
+        .who = test_who,
+        .programs = .{ .environ = &env },
+        .user_config = .{ .global = .{ .dir = root.dir, .sub_path = "gitconfig" } },
+    });
+    defer repo.deinit(io);
+    var git_dir = try root.dir.openDir(io, "by-git", .{});
+    defer git_dir.close(io);
+    for ([_][]const []const u8{
+        &.{ "config", "--local", "remote.origin.url" },
+        &.{ "for-each-ref", "--format=%(refname) %(objectname)" },
+        &.{ "status", "--porcelain" },
+    }) |args| {
+        const theirs = try testremote.gitInputEnv(gpa, io, git_dir, &env, args, "", true);
+        defer gpa.free(theirs);
+        const ours = try testremote.gitInputEnv(gpa, io, d, &env, args, "", true);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+    }
+}

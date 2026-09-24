@@ -42,6 +42,7 @@ const transport = @import("transport.zig");
 const objectwalk = @import("objectwalk.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
+const remote_mod = @import("remote.zig");
 const warning = @import("warning.zig");
 const clonelfs = @import("clonelfs.zig");
 const progress_mod = @import("progress.zig");
@@ -159,26 +160,6 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     const arena = arena_state.allocator();
     const filter_spec: ?[]const u8 = if (options.filter) |spec| try partial.normalize(arena, spec) else null;
 
-    // A path is recorded absolute, as git records it.
-    const parsed = url_mod.Url.parse(url) catch |err| return err;
-    // A path is a local clone, copied as it is: git ignores a depth and a
-    // filter there, says so, and keeps what they decided besides — one
-    // branch, the promisor settings. `file://` goes through upload-pack.
-    const local_copy = parsed.scheme == .local and !try isShallowSource(io, parsed.path);
-    var send_filter = filter_spec;
-    if (local_copy) {
-        if (options.depth != null) try warning.note(options.warnings, .{ .ignored_for_local = "--depth" });
-        if (options.shallow_since != null) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-since" });
-        if (options.shallow_exclude.len != 0) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-exclude" });
-        if (filter_spec != null) try warning.note(options.warnings, .{ .ignored_for_local = "--filter" });
-        deepen = null;
-        send_filter = null;
-    }
-    const recorded = if (parsed.scheme == .local)
-        try Io.Dir.cwd().realPathFileAlloc(io, url, arena)
-    else
-        url;
-
     // Before the repository exists, the caller's own configuration is what
     // git reads.
     const user = options.user_config;
@@ -196,7 +177,36 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     }
     const settings: ?*const config_mod.Config = options.config orelse if (user_settings) |*c| c else null;
 
-    var session = try transport.Session.open(gpa, io, url, .upload_pack, null, .{
+    // What `url.<base>.insteadOf` makes of the URL is where the clone goes;
+    // the URL as given is what the new configuration records, as git's
+    // does.
+    const rewritten = if (settings) |c| remote_mod.rewrite(arena, c, url, .fetch) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.MalformedValue,
+    } else null;
+    const reached = rewritten orelse url;
+
+    // A path is recorded absolute, as git records it.
+    const parsed = url_mod.Url.parse(reached) catch |err| return err;
+    // A path is a local clone, copied as it is: git ignores a depth and a
+    // filter there, says so, and keeps what they decided besides — one
+    // branch, the promisor settings. `file://` goes through upload-pack.
+    const local_copy = parsed.scheme == .local and !try isShallowSource(io, parsed.path);
+    var send_filter = filter_spec;
+    if (local_copy) {
+        if (options.depth != null) try warning.note(options.warnings, .{ .ignored_for_local = "--depth" });
+        if (options.shallow_since != null) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-since" });
+        if (options.shallow_exclude.len != 0) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-exclude" });
+        if (filter_spec != null) try warning.note(options.warnings, .{ .ignored_for_local = "--filter" });
+        deepen = null;
+        send_filter = null;
+    }
+    const recorded = if (reached.ptr == url.ptr and parsed.scheme == .local)
+        try Io.Dir.cwd().realPathFileAlloc(io, url, arena)
+    else
+        url;
+
+    var session = try transport.Session.open(gpa, io, reached, .upload_pack, null, .{
         .local_copy = local_copy,
         .programs = options.programs,
         .config = settings,
