@@ -1028,3 +1028,58 @@ test "a recent fetch brings what git lfs fetch --recent brings, counted from the
         try testing.expect(std.mem.indexOf(u8, listings[1], &testlfs.sha256Hex(c)) == null);
     }
 }
+
+test "a clone made with --shared takes its objects from the other repository's store, linked, as git-lfs takes them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    // The objects are only in the first repository's store: the server
+    // has none, so an object asked of it fails.
+    var seed = try committed(fx, "seed", nobody, &.{ .{ "a.bin", "shared once\n" }, .{ "b.bin", "shared twice\n" } });
+    defer seed.close(io);
+    const seed_path = try fx.path("seed");
+    defer gpa.free(seed_path);
+    const u = try fx.url();
+    defer gpa.free(u);
+    const oid = testlfs.sha256Hex("shared once\n");
+    var path_buf: [128]u8 = undefined;
+    const object_path = try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+    const seed_stat = try seed.statFile(io, object_path, .{});
+
+    var listings: [2][]u8 = .{ &.{}, &.{} };
+    defer for (listings) |l| gpa.free(l);
+    for ([_][]const u8{ "by-git", "by-relic" }, 0..) |name, i| {
+        const dest = try fx.path(name);
+        defer gpa.free(dest);
+        try fx.gitWith(fx.tmp.dir, &.{.{ "GIT_LFS_SKIP_SMUDGE", "1" }}, &.{ "clone", "-q", "--shared", seed_path, dest });
+        var d = try fx.tmp.dir.openDir(io, name, .{ .iterate = true });
+        defer d.close(io);
+        try fx.lfsFilters(d);
+        try fx.gitIn(d, &.{ "remote", "set-url", "origin", u });
+        try fx.gitIn(d, &.{ "config", "credential.helper", nobody });
+        fx.server.clearLog();
+        if (i == 0) {
+            try fx.gitIn(d, &.{ "lfs", "fetch" });
+        } else {
+            var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+            defer repo.deinit(io);
+            const server = try openServer(fx, &repo);
+            defer server.close();
+            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer fetched.deinit();
+            try expectNoFailures(&fetched);
+        }
+        const seen = try fx.server.requests(gpa);
+        defer gpa.free(seen);
+        try testing.expectEqualStrings("", seen);
+        listings[i] = try storeListing(fx, d);
+        // The same file, not a copy of it.
+        try testing.expectEqual(seed_stat.inode, (try d.statFile(io, object_path, .{})).inode);
+    }
+    try testing.expectEqualStrings(listings[0], listings[1]);
+    try testing.expect(std.mem.indexOf(u8, listings[1], &oid) != null);
+    try testing.expect(std.mem.indexOf(u8, listings[1], &testlfs.sha256Hex("shared twice\n")) != null);
+}

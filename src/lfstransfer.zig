@@ -436,6 +436,77 @@ const Run = struct {
     }
 };
 
+/// git-lfs's reference directories: the `lfs/objects` beside each object
+/// directory `objects/info/alternates` names — what `git clone --reference`
+/// and `--shared` leave — where one is there. A relative line is taken from
+/// `objects`, as git takes it; a line in double quotes has its backslash
+/// escapes undone, as git-lfs undoes them.
+fn referenceDirs(arena: Allocator, io: Io, store: *const lfs.Store) Allocator.Error![]const []const u8 {
+    const text = fs.readFileAlloc(arena, io, store.base, "objects/info/alternates", 1 << 20) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // An alternates file that cannot be read names no reference, as
+        // git-lfs, which only notes it in its trace, takes it.
+        else => return &.{},
+    } orelse return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        var line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (line[0] == '"') {
+            const close = std.mem.lastIndexOfScalar(u8, line, '"').?;
+            if (close == 0) continue;
+            var unquoted: std.ArrayList(u8) = .empty;
+            var i: usize = 1;
+            while (i < close) : (i += 1) {
+                if (line[i] == '\\' and i + 1 < close) i += 1;
+                try unquoted.append(arena, line[i]);
+            }
+            line = unquoted.items;
+        }
+        line = std.mem.trimEnd(u8, line, "/");
+        const parent = std.fs.path.dirname(line) orelse continue;
+        const dir = if (std.fs.path.isAbsolute(parent))
+            try std.fmt.allocPrint(arena, "{s}/lfs/objects", .{parent})
+        else
+            try std.fmt.allocPrint(arena, "objects/{s}/lfs/objects", .{parent});
+        const stat = store.base.statFile(io, dir, .{}) catch continue;
+        if (stat.kind == .directory) try out.append(arena, dir);
+    }
+    return out.items;
+}
+
+/// Put the object in the store from the first reference directory that
+/// has it at its size — a hard link, or a copy where one cannot be made —
+/// as git-lfs's `LinkOrCopyFromReference` does before it asks a server.
+/// A copy is checked against its name on the way in. One that cannot be
+/// linked or copied is left for the server, as git-lfs leaves it.
+fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8, pointer: *const lfs.Pointer) Error!bool {
+    if (references.len == 0) return false;
+    var object_buf: [lfs.Store.max_path]u8 = undefined;
+    const object_path = try store.objectPath(&object_buf, &pointer.oid);
+    for (references) |dir| {
+        var ref_buf: [lfs.Store.max_path]u8 = undefined;
+        const ref_path = std.fmt.bufPrint(&ref_buf, "{s}/{s}/{s}/{s}", .{ dir, pointer.oid[0..2], pointer.oid[2..4], &pointer.oid }) catch continue;
+        const stat = store.base.statFile(io, ref_path, .{}) catch continue;
+        if (stat.kind != .file or stat.size != pointer.size) continue;
+        try store.base.createDirPath(io, std.fs.path.dirnamePosix(object_path).?);
+        if (store.base.hardLink(ref_path, store.base, object_path, io, .{})) {
+            return true;
+        } else |_| {}
+        const file = store.base.openFile(io, ref_path, .{}) catch continue;
+        defer file.close(io);
+        var buf: [64 * 1024]u8 = undefined;
+        var reader = file.reader(io, &buf);
+        _ = store.install(io, &reader.interface, pointer) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
+        return true;
+    }
+    return false;
+}
+
 fn run(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, options: Options) Error!Outcome {
     const gpa = server.gpa;
     const io = server.io;
@@ -457,13 +528,16 @@ fn run(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Obj
     outcome.results = results.items;
     const store = server.store();
 
-    // A download of what the store has, or a pointer to nothing, moves
-    // nothing.
+    // A download of what the store has, or a reference directory has, or
+    // of a pointer to nothing, moves nothing.
     var pending: std.ArrayList(usize) = .empty;
     var missing_here: std.ArrayList(bool) = .empty;
     try missing_here.resize(arena, outcome.results.len);
+    const references: []const []const u8 = if (operation == .download) try referenceDirs(arena, io, store) else &.{};
     for (outcome.results, 0..) |*r, i| {
-        const here = try store.contains(io, &Object.asPointer(.{ .oid = r.oid, .size = r.size }));
+        const pointer = Object.asPointer(.{ .oid = r.oid, .size = r.size });
+        var here = try store.contains(io, &pointer);
+        if (!here and r.size != 0) here = try fromReference(io, store, references, &pointer);
         missing_here.items[i] = !here;
         if (r.size == 0 or (operation == .download and here)) {
             r.status = .present;
