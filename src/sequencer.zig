@@ -22,6 +22,7 @@ const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
+const signing_mod = @import("signing.zig");
 const hooks_mod = @import("hooks.zig");
 const commithooks = @import("commithooks.zig");
 const program = @import("program.zig");
@@ -67,9 +68,6 @@ pub const Error = error{
     /// The sequence names a merge strategy other than `ort` or
     /// `recursive`.
     UnsupportedStrategy,
-    /// `commit.gpgSign`, or a sequence started with `-S`, asks for signed
-    /// commits.
-    SigningRequested,
     /// `revert.reference` asks for a message a person is meant to finish in
     /// an editor.
     RevertReferenceNeedsEditor,
@@ -162,6 +160,10 @@ pub const Options = struct {
     /// `false` skips `pre-commit` and `commit-msg` when a stop is committed:
     /// `--no-verify`.
     verify: bool = true,
+    /// Whether and how the commits are signed: `-S`, `-S<key>`,
+    /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
+    /// that sign. What was decided is kept between steps, as git keeps it.
+    signing: signing_mod.Request = .{},
     /// `--cleanup`: how the message is cleaned, in place of the default.
     cleanup: ?message.Cleanup = null,
     /// `null` asks `merge.conflictStyle`.
@@ -297,6 +299,14 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
         any = true;
         w.print("\tmainline = {d}\n", .{m}) catch return error.OutOfMemory;
     }
+    // The signing decided on, with its key when one was named.
+    if (signs(repo, options.signing)) {
+        if (!any) w.writeAll("[options]\n") catch return error.OutOfMemory;
+        any = true;
+        const value = try config_mod.escapeValue(gpa, options.signing.key orelse "");
+        defer gpa.free(value);
+        w.print("\tgpg-sign = {s}\n", .{value}) catch return error.OutOfMemory;
+    }
     for (options.strategy_options) |word| {
         if (!any) w.writeAll("[options]\n") catch return error.OutOfMemory;
         any = true;
@@ -325,7 +335,7 @@ fn readOpts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, options
 }
 
 /// Errors from reading the `opts` file.
-const OptsError = error{ MalformedState, EditorRequested, SigningRequested, UnsupportedStrategy, OutOfMemory };
+const OptsError = error{ MalformedState, EditorRequested, UnsupportedStrategy, OutOfMemory };
 
 /// Read the settings in an `opts` file's text into `options`. The strategy
 /// options are added to the ones `options` has, copied into `arena`.
@@ -366,7 +376,8 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
         } else if (std.mem.eql(u8, key, "strategy")) {
             if (!std.mem.eql(u8, value, "ort") and !std.mem.eql(u8, value, "recursive")) return error.UnsupportedStrategy;
         } else if (std.mem.eql(u8, key, "gpg-sign")) {
-            return error.SigningRequested;
+            options.signing.sign = .always;
+            options.signing.key = if (value.len == 0) null else try arena.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "strategy-option")) {
             try words.append(arena, try arena.dupe(u8, value));
         } else if (std.mem.eql(u8, key, "default-msg-cleanup")) {
@@ -609,6 +620,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         .author = author orelse r.options.who,
         .committer = r.options.who,
         .message = cleaned,
+        .signing = r.options.signing,
     });
     const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
@@ -665,7 +677,6 @@ fn revertMessage(r: *Replay, msg: *std.ArrayList(u8), subject: []const u8, oid: 
 //=========================================================================
 
 fn newReplay(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, action: Action, options: Options) Error!Replay {
-    if (repo.config.getBool("commit.gpgsign", false) catch false) return error.SigningRequested;
     return .{
         .gpa = gpa,
         .arena = arena,
@@ -855,6 +866,7 @@ fn commitStaged(r: *Replay) Error!Oid {
         .author = author,
         .committer = r.options.who,
         .message = cleaned,
+        .signing = r.options.signing,
     });
     const log = if (picked != null)
         try std.fmt.allocPrint(arena, "commit (cherry-pick): {s}", .{firstLine(cleaned)})
@@ -1033,7 +1045,7 @@ fn fuzzOpts(_: void, smith: *std.testing.Smith) anyerror!void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     parseOpts(std.testing.allocator, arena.allocator(), text, &options) catch |err| switch (err) {
-        error.MalformedState, error.EditorRequested, error.SigningRequested, error.UnsupportedStrategy => return,
+        error.MalformedState, error.EditorRequested, error.UnsupportedStrategy => return,
         error.OutOfMemory => return err,
     };
 }
@@ -1046,4 +1058,14 @@ test "an opts file with a mainline past any parent number is malformed" {
     try parseOpts(std.testing.allocator, arena.allocator(), "[options]\n\tmainline = 2\n\tsignoff = true\n", &options);
     try std.testing.expectEqual(@as(?u32, 2), options.mainline);
     try std.testing.expect(options.signoff);
+}
+
+/// Whether `request` signs, `commit.gpgSign` deciding when it does not say:
+/// what git records for the rest of a sequence.
+pub fn signs(repo: *Repository, request: signing_mod.Request) bool {
+    return switch (request.sign) {
+        .always => true,
+        .never => false,
+        .config => repo.config.getBool("commit.gpgsign", false) catch false,
+    };
 }

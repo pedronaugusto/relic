@@ -33,6 +33,7 @@ const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
+const signing_mod = @import("signing.zig");
 const hooks_mod = @import("hooks.zig");
 const commithooks = @import("commithooks.zig");
 const filter = @import("filter.zig");
@@ -81,9 +82,6 @@ pub const Error = error{
     NothingToDo,
     /// The sheet has an `exec` line and no `Programs` were handed in.
     ExecNotPermitted,
-    /// `commit.gpgSign`, or a rebase started with `-S`, asks for signed
-    /// commits.
-    SigningRequested,
     /// A state file does not say what git writes there.
     MalformedState,
     /// A label or commit a `reset` or `merge` names does not resolve.
@@ -154,6 +152,10 @@ pub const Options = struct {
     hooks: ?*hooks_mod.Runner = null,
     /// `false` skips `pre-rebase`: `--no-verify`.
     verify: bool = true,
+    /// Whether and how the commits are signed: `-S`, `-S<key>`,
+    /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
+    /// that sign. What was decided is kept between steps, as git keeps it.
+    signing: signing_mod.Request = .{},
     /// The sheet to work through in place of the one git would write: an
     /// interactive rebase, with the sheet a person would have left in the
     /// editor. `plan` gives the sheet to start from.
@@ -342,7 +344,6 @@ const Run = struct {
 };
 
 fn newRun(gpa: Allocator, arena_state: *std.heap.ArenaAllocator, io: Io, repo: *Repository, options: Options) Error!Run {
-    if (repo.config.getBool("commit.gpgsign", false) catch false) return error.SigningRequested;
     const interactive = options.interactive or options.todo != null;
     return .{
         .gpa = gpa,
@@ -914,6 +915,10 @@ fn writeBasicState(r: *Run, tip: Tip, onto: Oid) Error!void {
         try r.state("strategy_opts", try std.fmt.allocPrint(r.arena, "{s}\n", .{line}));
     }
     if (r.options.signoff) try r.state("signoff", "--signoff\n");
+    // The signing decided on, as git's rebase records it: `-S` and the key.
+    if (sequencer.signs(r.repo, r.options.signing)) {
+        try r.state("gpg_sign_opt", try std.fmt.allocPrint(r.arena, "-S{s}\n", .{r.options.signing.key orelse ""}));
+    }
     switch (r.empty) {
         .drop => try r.state("drop_redundant_commits", ""),
         .keep => try r.state("keep_redundant_commits", ""),
@@ -954,7 +959,15 @@ fn readBasicState(r: *Run) Error!Tip {
             r.options.strategy_options = try std.mem.concat(r.arena, []const u8, &.{ r.options.strategy_options, words });
         }
     }
-    if (r.hasState("gpg_sign_opt")) return error.SigningRequested;
+    if (try r.readState("gpg_sign_opt")) |text| {
+        const line = std.mem.trimEnd(u8, text, "\n");
+        if (std.mem.eql(u8, line, "--no-gpg-sign")) {
+            r.options.signing.sign = .never;
+        } else if (std.mem.startsWith(u8, line, "-S")) {
+            r.options.signing.sign = .always;
+            r.options.signing.key = if (line.len == 2) null else try r.arena.dupe(u8, line[2..]);
+        } else return error.MalformedState;
+    }
     if (try r.readState("current-fixups")) |text| {
         try r.fixups.appendSlice(r.arena, text);
         if (text.len != 0) r.fixup_count = std.mem.count(u8, text, "\n") + 1;
@@ -1529,6 +1542,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         .committer = r.options.who,
         .message = final_text,
         .extra = extra,
+        .signing = r.options.signing,
     });
     const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ reflog_action, firstLine(final_text) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
@@ -1634,6 +1648,7 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
         .author = current.commit.author,
         .committer = r.options.who,
         .message = text,
+        .signing = r.options.signing,
     });
     const log = try std.fmt.allocPrint(r.arena, "{s}: {s}", .{ reflog_action, firstLine(text) });
     try head_mod.advance(r.io, r.repo, head, made, .{ .who = r.options.who, .message = log });
@@ -2208,6 +2223,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         .author = author,
         .committer = r.options.who,
         .message = text,
+        .signing = r.options.signing,
     });
     const log = try std.fmt.allocPrint(r.arena, "rebase (merge): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
@@ -2408,6 +2424,7 @@ fn commitStagedChanges(r: *Run) Error!void {
         .committer = r.options.who,
         .message = text,
         .extra = if (amend) try extraHeadersOf(r, head_oid) else &.{},
+        .signing = r.options.signing,
     });
     const log = try std.fmt.allocPrint(r.arena, "rebase (continue): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });

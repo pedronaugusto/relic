@@ -21,6 +21,7 @@ const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const revwalk = @import("revwalk.zig");
 const threeway = @import("threeway.zig");
+const signing_mod = @import("signing.zig");
 const hooks_mod = @import("hooks.zig");
 const commithooks = @import("commithooks.zig");
 const program = @import("program.zig");
@@ -61,9 +62,6 @@ pub const Error = error{
     /// `merge.log` or `merge.branchdesc` asks for a message this release
     /// does not write.
     UnsupportedMergeMessage,
-    /// `commit.gpgSign` asks for a signed commit, which this release does
-    /// not make.
-    SigningRequested,
     /// The index still has conflicts; they are resolved before a merge is
     /// concluded.
     UnresolvedConflicts,
@@ -156,6 +154,10 @@ pub const Options = struct {
     hooks: ?*hooks_mod.Runner = null,
     /// `false` skips `pre-merge-commit` and `commit-msg`: `--no-verify`.
     verify: bool = true,
+    /// Whether and how the commits are signed: `-S`, `-S<key>`,
+    /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
+    /// that sign.
+    signing: signing_mod.Request = .{},
     /// Where a refusal writes the path that caused it.
     blocked: ?*threeway.Blocked = null,
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
@@ -217,7 +219,6 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     if (inProgress(io, repo)) return error.MergeInProgress;
     if (head_mod.stateExists(io, repo.git_dir, "CHERRY_PICK_HEAD") or
         head_mod.stateExists(io, repo.git_dir, "REVERT_HEAD")) return error.SequencerInProgress;
-    try refuseSigning(repo);
     if (repo.config.getBool("merge.log", false) catch true) return error.UnsupportedMergeMessage;
     if (repo.config.getBool("merge.branchdesc", false) catch true) return error.UnsupportedMergeMessage;
 
@@ -324,6 +325,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
             .author = options.author orelse options.who,
             .committer = options.who,
             .message = cleaned,
+            .signing = options.signing,
         });
         const log_message = try std.fmt.allocPrint(arena, "{s}: Merge made by the 'ort' strategy.", .{reflog_action});
         try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
@@ -377,6 +379,10 @@ pub const ConcludeOptions = struct {
     hooks: ?*hooks_mod.Runner = null,
     /// `false` skips `pre-commit` and `commit-msg`: `--no-verify`.
     verify: bool = true,
+    /// Whether and how the commits are signed: `-S`, `-S<key>`,
+    /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
+    /// that sign.
+    signing: signing_mod.Request = .{},
 };
 
 /// Commit the merge `MERGE_HEAD` describes, from the index as it stands:
@@ -388,7 +394,6 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     const arena = arena_instance.allocator();
 
     const heads_text = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_HEAD")) orelse return error.NoMergeInProgress;
-    try refuseSigning(repo);
     var parents: std.ArrayList(Oid) = .empty;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
@@ -419,6 +424,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
         .author = options.author orelse options.who,
         .committer = options.who,
         .message = cleaned,
+        .signing = options.signing,
     });
     const log_message = try std.fmt.allocPrint(arena, "commit (merge): {s}", .{message.subjectLine(cleaned)});
     try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
@@ -460,11 +466,6 @@ pub fn removeMergeState(io: Io, repo: *Repository) head_mod.Error!void {
         try head_mod.removeState(io, repo.git_dir, name);
     }
     try head_mod.deleteRef(io, repo, "AUTO_MERGE");
-}
-
-/// `commit.gpgSign` asks for a signature this release cannot make.
-pub fn refuseSigning(repo: *Repository) error{SigningRequested}!void {
-    if (repo.config.getBool("commit.gpgsign", false) catch false) return error.SigningRequested;
 }
 
 fn configuredFastForward(repo: *Repository) FastForward {
