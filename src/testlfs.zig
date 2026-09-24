@@ -127,6 +127,9 @@ pub const Server = struct {
     next_lock: u32 = 1,
     faults: std.ArrayList(Fault) = .empty,
     log: std.ArrayList(u8) = .empty,
+    /// One `<method> <oid> <header>=<value>` line per object moved, for the
+    /// headers a test compares.
+    object_log: std.ArrayList(u8) = .empty,
 
     /// How the server behaves.
     pub const Options = struct {
@@ -196,6 +199,7 @@ pub const Server = struct {
         s.locks.deinit(s.gpa);
         s.faults.deinit(s.gpa);
         s.log.deinit(s.gpa);
+        s.object_log.deinit(s.gpa);
         s.gpa.destroy(s);
     }
 
@@ -282,6 +286,36 @@ pub const Server = struct {
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
         s.log.clearRetainingCapacity();
+        s.object_log.clearRetainingCapacity();
+    }
+
+    /// The headers of the object requests seen so far, sorted, one
+    /// `<method> <oid> <header>=<value>` line each. The caller's.
+    pub fn objectHeaders(s: *Server, gpa: Allocator) ![]u8 {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        var lines: std.ArrayList([]const u8) = .empty;
+        defer lines.deinit(gpa);
+        var it = std.mem.tokenizeScalar(u8, s.object_log.items, '\n');
+        while (it.next()) |line| try lines.append(gpa, line);
+        std.mem.sort([]const u8, lines.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.less);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        for (lines.items) |line| {
+            try out.appendSlice(gpa, line);
+            try out.append(gpa, '\n');
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    fn logObject(s: *Server, method: http.Method, oid: []const u8, name: []const u8, value: ?[]const u8) !void {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        try s.object_log.print(s.gpa, "{s} {s} {s}={s}\n", .{ @tagName(method), oid, name, value orelse "-" });
     }
 
     fn serve(s: *Server) void {
@@ -408,6 +442,7 @@ pub const Server = struct {
                 return request.respond(bytes, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/octet-stream" }} });
             }
             if (method == .PUT) {
+                try s.logObject(method, oid, "content-type", content_type);
                 if (s.takeFault(.upload)) |f| return respondFault(&request, f);
                 if (!std.mem.eql(u8, &sha256Hex(body), oid)) return request.respond("", .{ .status = .bad_request, .keep_alive = false });
                 try s.putObject(oid, body);

@@ -1083,3 +1083,48 @@ test "a clone made with --shared takes its objects from the other repository's s
     try testing.expect(std.mem.indexOf(u8, listings[1], &oid) != null);
     try testing.expect(std.mem.indexOf(u8, listings[1], &testlfs.sha256Hex("shared twice\n")) != null);
 }
+
+test "an upload is sent as the type its first bytes name, as git-lfs sends it, unless lfs.contenttype is false" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const binary = try noise(gpa, 2048, 21);
+    defer gpa.free(binary);
+    const files = [_][2][]const u8{
+        .{ "image.bin", "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" },
+        .{ "doc.bin", "%PDF-1.7\n%\xe2\xe3\xcf\xd3\n" },
+        .{ "page.bin", "\n  <html><body>hello</body></html>\n" },
+        .{ "archive.bin", "PK\x03\x04\x14\x00\x00\x00" },
+        .{ "words.bin", "just some words\n" },
+        .{ "noise.bin", binary },
+    };
+    for ([_]?[]const u8{ null, "false" }) |setting| {
+        var logs: [2][]u8 = .{ &.{}, &.{} };
+        defer for (logs) |l| gpa.free(l);
+        for (0..2) |i| {
+            const fx = try Fixture.init(gpa, io, .{});
+            defer fx.deinit();
+            const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+            defer gpa.free(nobody);
+            var d = try committed(fx, "work", nobody, &files);
+            defer d.close(io);
+            if (setting) |v| try fx.gitIn(d, &.{ "config", "lfs.contenttype", v });
+            if (i == 0) {
+                try fx.gitIn(d, &.{ "lfs", "push", "origin", "main" });
+            } else {
+                var outcome = try relicUploadHead(fx, d, .{});
+                defer outcome.deinit();
+                try expectNoFailures(&outcome);
+            }
+            logs[i] = try fx.server.objectHeaders(gpa);
+        }
+        try testing.expectEqualStrings(logs[0], logs[1]);
+        const want: []const []const u8 = if (setting == null)
+            &.{ "image/png", "application/pdf", "text/html; charset=utf-8", "application/zip", "text/plain; charset=utf-8", "application/octet-stream" }
+        else
+            &.{"application/octet-stream"};
+        for (want) |t| {
+            var buf: [64]u8 = undefined;
+            try testing.expect(std.mem.indexOf(u8, logs[1], try std.fmt.bufPrint(&buf, "content-type={s}\n", .{t})) != null);
+        }
+    }
+}

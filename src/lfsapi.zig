@@ -44,6 +44,7 @@ const url_mod = @import("url.zig");
 const remote_mod = @import("remote.zig");
 const repo_mod = @import("repo.zig");
 const lfs = @import("lfs.zig");
+const mimesniff = @import("mimesniff.zig");
 const fs = @import("fs.zig");
 const object = @import("object.zig");
 const netrc_mod = @import("netrc.zig");
@@ -1399,7 +1400,7 @@ pub const Client = struct {
             try headers.append(a, .{ .name = "Accept", .value = media_type });
             if (request.body != .none) content_type = media_type ++ "; charset=utf-8";
         } else if (request.body == .object and !hasHeader(request.headers, "content-type")) {
-            content_type = "application/octet-stream";
+            content_type = try c.objectContentType(a, request_url, request.body.object.store, &request.body.object.pointer);
         }
         if (hasHeader(request.headers, "content-type")) content_type = null;
 
@@ -1453,6 +1454,20 @@ pub const Client = struct {
         }
         ex.response = ex.request.receiveHead(&.{}) catch |err| return c.fail(mapRequestError(err), "{s}: {s}", .{ @errorName(err), stripQuery(request_url) });
         return ex;
+    }
+
+    /// The type an upload is sent as when its action names none: told from
+    /// the object's first bytes, as git-lfs tells it, unless
+    /// `lfs.<url>.contenttype` turns that off.
+    fn objectContentType(c: *Client, a: Allocator, url: []const u8, store: *const lfs.Store, pointer: *const lfs.Pointer) Error![]const u8 {
+        const setting = try c.settings.urlGet(a, "lfs", url, "contenttype");
+        if (!gitLfsBool(setting, true)) return "application/octet-stream";
+        const file = (store.open(c.io, pointer) catch |err| return c.fail(error.ConnectionFailed, "{s}", .{@errorName(err)})) orelse
+            return c.fail(error.HttpStatus, "object {s} is not in the store", .{&pointer.oid});
+        defer file.close(c.io);
+        var head: [mimesniff.sniff_len]u8 = undefined;
+        const n = file.readPositionalAll(c.io, &head, 0) catch return c.fail(error.ConnectionFailed, "upload: reading the object", .{});
+        return mimesniff.contentType(head[0..n]);
     }
 
     fn extraHeaders(c: *Client, a: Allocator, url: []const u8) Error![]const http.Header {
@@ -1748,6 +1763,17 @@ pub const Server = struct {
         return &s.lfs.store;
     }
 };
+
+/// A boolean as git-lfs reads one: unset or empty is `fallback`, and a
+/// word it does not know is false.
+pub fn gitLfsBool(value: ?[]const u8, fallback: bool) bool {
+    const v = value orelse return fallback;
+    if (v.len == 0) return fallback;
+    for ([_][]const u8{ "true", "1", "on", "yes", "t" }) |word| {
+        if (std.ascii.eqlIgnoreCase(v, word)) return true;
+    }
+    return false;
+}
 
 fn hasHeader(headers: []const http.Header, name: []const u8) bool {
     for (headers) |h| {
