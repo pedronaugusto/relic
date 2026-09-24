@@ -416,8 +416,9 @@ pub const CacheTree = struct {
     }
 };
 
-/// The `REUC` extension: what a conflict replaced, so `checkout --merge` can
-/// put it back. Read, written back, never created here.
+/// The `REUC` extension: what a conflict replaced, so `checkout --merge` and
+/// `rerere forget` can put it back. Read and written back; a stage is added
+/// to it with `Index.recordResolveUndo`.
 pub const ResolveUndo = struct {
     gpa: Allocator,
     entries: std.ArrayList(Item),
@@ -1093,6 +1094,38 @@ pub const Index = struct {
             removed += 1;
         }
         return removed;
+    }
+
+    /// Remember a conflict stage that is leaving the index, as git's
+    /// `record_resolve_undo` does when a resolution replaces one: the
+    /// `REUC` extension gains the path, kept in path order, with the
+    /// stage's mode and object. A stage-0 entry is not recorded.
+    pub fn recordResolveUndo(index: *Index, entry: Entry) Allocator.Error!void {
+        if (entry.stage == 0) return;
+        if (index.resolve_undo == null) index.resolve_undo = .{ .gpa = index.gpa, .entries = .empty };
+        const undo = &index.resolve_undo.?;
+        var lo: usize = 0;
+        var hi: usize = undo.entries.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (std.mem.order(u8, undo.entries.items[mid].path, entry.path) == .lt) lo = mid + 1 else hi = mid;
+        }
+        if (lo == undo.entries.items.len or !std.mem.eql(u8, undo.entries.items[lo].path, entry.path)) {
+            const path = try index.gpa.dupe(u8, entry.path);
+            errdefer index.gpa.free(path);
+            try undo.entries.insert(index.gpa, lo, .{ .path = path, .modes = @splat(0), .oids = @splat(null) });
+        }
+        const item = &undo.entries.items[lo];
+        item.modes[entry.stage - 1] = entry.mode.raw();
+        item.oids[entry.stage - 1] = entry.oid;
+    }
+
+    /// Forget what resolutions replaced, as git's `unpack_trees` does when
+    /// its result becomes the index: a checkout, a reset or a merge leaves
+    /// no `REUC` behind.
+    pub fn dropResolveUndo(index: *Index) void {
+        if (index.resolve_undo) |*undo| undo.deinit();
+        index.resolve_undo = null;
     }
 
     /// Drop every entry, leaving the extensions alone.

@@ -17,6 +17,7 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const repo_mod = @import("repo.zig");
 const merging = @import("merging.zig");
+const rerere = @import("rerere.zig");
 const threeway = @import("threeway.zig");
 const ort = @import("ort.zig");
 
@@ -131,6 +132,7 @@ pub fn expectSameState(
     try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "rev-parse", "HEAD" });
     try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "symbolic-ref", "-q", "HEAD" });
     try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "ls-files", "--stage" });
+    try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "ls-files", "--resolve-undo" });
     try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "status", "--porcelain=v2", "--untracked-files=all" });
     try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "log", "--format=%H %P%n%an <%ae> %ad%n%cn <%ce> %cd%n%B", "--date=raw", "-5" });
 
@@ -1755,6 +1757,10 @@ fn expectSameRerere(pair: *Pair, io: Io) !void {
         var walker = try cache.walk(gpa);
         defer walker.deinit();
         while (try walker.next(io)) |entry| {
+            if (entry.kind == .directory) {
+                try listings[i].print(gpa, "directory {s}\n", .{entry.path});
+                continue;
+            }
             if (entry.kind != .file) continue;
             try names.append(gpa, try gpa.dupe(u8, entry.path));
         }
@@ -2036,4 +2042,234 @@ test "diff.algorithm and the strategy options choose the line diff of a merge, a
             try r.exec(io, &.{ "checkout", "-q", "main" });
         }
     }
+}
+
+/// What `forget` did, in the words `git rerere forget` writes to its
+/// standard error.
+fn forgetWords(gpa: Allocator, forgotten: *const rerere.Forgotten) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (forgotten.unparsable) |p| try out.print(gpa, "error: could not parse conflict hunks in '{s}'\n", .{p});
+    for (forgotten.unremembered) |p| try out.print(gpa, "error: no remembered resolution for '{s}'\n", .{p});
+    for (forgotten.forgotten) |p| try out.print(gpa, "Updated preimage for '{s}'\nForgot resolution for '{s}'\n", .{ p, p });
+    return out.toOwnedSlice(gpa);
+}
+
+fn joinLines(gpa: Allocator, paths: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (paths) |p| try out.print(gpa, "{s}\n", .{p});
+    return out.toOwnedSlice(gpa);
+}
+
+/// `git rerere status`, `remaining` and `diff` on git's copy, and the same
+/// questions asked of this package on the other.
+fn expectSameRerereReport(pair: *Pair, io: Io) !void {
+    const gpa = pair.gpa;
+    var repo = try pair.open(io);
+    defer repo.deinit(io);
+    {
+        const want = try pair.git.run(io, &.{ "rerere", "status" });
+        defer gpa.free(want);
+        var got = try rerere.status(gpa, io, &repo);
+        defer got.deinit();
+        const text = try joinLines(gpa, got.paths);
+        defer gpa.free(text);
+        try std.testing.expectEqualStrings(want, text);
+    }
+    {
+        const want = try pair.git.run(io, &.{ "rerere", "remaining" });
+        defer gpa.free(want);
+        var got = try rerere.remaining(gpa, io, &repo);
+        defer got.deinit();
+        const text = try joinLines(gpa, got.paths);
+        defer gpa.free(text);
+        try std.testing.expectEqualStrings(want, text);
+    }
+    {
+        const want = try pair.git.run(io, &.{ "rerere", "diff" });
+        defer gpa.free(want);
+        const got = try rerere.diff(gpa, io, &repo);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings(want, got);
+    }
+}
+
+test "rerere's status, remaining, diff, forget and gc answer as git's do" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "config", "rerere.enabled", "true" });
+        try r.exec(io, &.{ "tag", "before" });
+        try gitMayFail(r, io, &.{ "merge", "topic" });
+    }
+    try expectSameRerereReport(&pair, io);
+    // Half resolved in the working tree: the diff from the preimage.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        const text = try readOrMissing(gpa, io, r, "f");
+        defer gpa.free(text);
+        const edited = try std.mem.replaceOwned(u8, gpa, text, "=======\n", "=======\nand one more line\n");
+        defer gpa.free(edited);
+        try r.writeFile(io, "f", edited);
+    }
+    try expectSameRerereReport(&pair, io);
+
+    // Resolved and staged by git on both copies, which remembers the
+    // stages; committed, which records the resolution.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "f", "a\nresolved by hand\nc\n");
+        try r.exec(io, &.{ "add", "-A" });
+    }
+    try expectSameRerereReport(&pair, io);
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "commit", "-q", "--no-edit" });
+    try expectSameRerere(&pair, io);
+
+    const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    // Nothing is old enough for the default ages.
+    try pair.git.exec(io, &.{ "rerere", "gc" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try rerere.gc(gpa, io, &repo, now_s);
+    }
+    try expectSameRerere(&pair, io);
+
+    // Forgotten: the conflict comes back from what the index remembers,
+    // the resolution goes, and the preimage is written again. Forgotten a
+    // second time, there is nothing left to forget.
+    for (0..2) |_| {
+        var git = try pair.git.capture(io, &.{ "rerere", "forget", "f" });
+        defer git.deinit(gpa);
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var forgotten = try rerere.forget(gpa, io, &repo, &.{"f"});
+        defer forgotten.deinit();
+        const words = try forgetWords(gpa, &forgotten);
+        defer gpa.free(words);
+        try std.testing.expectEqualStrings(git.stderr, words);
+        try expectSameRerere(&pair, io);
+        try expectSameRerereReport(&pair, io);
+    }
+
+    // Run again, rerere records the resolution the working tree holds.
+    try pair.git.exec(io, &.{"rerere"});
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var index = try repo.openIndex(io);
+        defer index.deinit();
+        var outcome = try rerere.run(gpa, io, &repo, &index, .{});
+        defer outcome.deinit();
+        try std.testing.expectEqual(@as(usize, 1), outcome.recorded_resolution.len);
+    }
+    try expectSameRerere(&pair, io);
+
+    // A resolution a day in the future is already too old; a conflict
+    // never resolved is kept for ever.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "config", "gc.rerereResolved", "-1" });
+        try r.exec(io, &.{ "config", "gc.rerereUnresolved", "never" });
+    }
+    try pair.git.exec(io, &.{ "rerere", "gc" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try rerere.gc(gpa, io, &repo, now_s);
+    }
+    try expectSameRerere(&pair, io);
+
+    // The conflict met again is taken down again; kept while unresolved
+    // conflicts are kept, pruned once they are not.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+        try gitMayFail(r, io, &.{ "merge", "topic" });
+    }
+    for ([_][]const u8{ "never", "-1" }) |age| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "gc.rerereUnresolved", age });
+        try pair.git.exec(io, &.{ "rerere", "gc" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            try rerere.gc(gpa, io, &repo, now_s);
+        }
+        try expectSameRerere(&pair, io);
+    }
+}
+
+test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "config", "rerere.enabled", "true" });
+        try r.exec(io, &.{ "tag", "before" });
+    }
+    const commits = [_]Oid{ try oidOf(gpa, io, &pair.ours, "topic~1"), try oidOf(gpa, io, &pair.ours, "topic") };
+
+    for ([_][]const u8{ "--abort", "--skip", "--quit" }) |op| {
+        try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1", "topic" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try sequencer.pick(gpa, io, &repo, &commits, .{ .who = who });
+            defer outcome.deinit();
+        }
+        try expectSameRerere(&pair, io);
+        try gitMayFail(&pair.git, io, &.{ "cherry-pick", op });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            if (std.mem.eql(u8, op, "--abort")) {
+                try sequencer.abort(gpa, io, &repo, who, null);
+            } else if (std.mem.eql(u8, op, "--skip")) {
+                var outcome = try sequencer.skip(gpa, io, &repo, .{ .who = who });
+                outcome.deinit();
+            } else try sequencer.quit(io, &repo);
+        }
+        try expectSameRerere(&pair, io);
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+            try gitMayFail(r, io, &.{ "cherry-pick", "--quit" });
+        }
+    }
+
+    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+    }
+    try pair.git.exec(io, &.{ "merge", "--abort" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try merging.abort(gpa, io, &repo, who, null);
+    }
+    try expectSameRerere(&pair, io);
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
+    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main" });
+        defer outcome.deinit();
+    }
+    try expectSameRerere(&pair, io);
+    try pair.git.exec(io, &.{ "rebase", "--quit" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try rebase.quit(gpa, io, &repo);
+    }
+    try expectSameRerere(&pair, io);
 }

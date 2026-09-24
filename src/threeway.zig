@@ -367,6 +367,9 @@ fn run(
         cache_tree.root.entry_count = @intCast(index.entries.items.len);
         cache_tree.root.oid = merged.tree;
     }
+    // The merge's index is `unpack_trees`' result in git, which remembers
+    // no resolutions.
+    index.dropResolveUndo();
     try db.syncBatch(io);
 
     return .{

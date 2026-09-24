@@ -1319,11 +1319,13 @@ pub fn resetIndex(
     }
     try index.addMany(fresh.items);
 
-    // The index now describes exactly this tree.
+    // The index now describes exactly this tree, and, as git's
+    // `unpack_trees` leaves it, remembers no resolutions.
     const cache_tree = try index.cacheTree();
     cache_tree.invalidateAll();
     cache_tree.root.entry_count = @intCast(index.entries.items.len);
     cache_tree.root.oid = tree_oid;
+    index.dropResolveUndo();
     return outcome;
 }
 
@@ -1651,6 +1653,8 @@ pub fn checkout(
     tree.invalidateAll();
     tree.root.entry_count = @intCast(index.entries.items.len);
     tree.root.oid = tree_oid;
+    // As git's `unpack_trees` leaves it: no resolutions remembered.
+    index.dropResolveUndo();
 
     return outcome;
 }

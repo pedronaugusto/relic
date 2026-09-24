@@ -157,6 +157,8 @@ pub fn toTree(
     cache_tree.invalidateAll();
     cache_tree.root.entry_count = @intCast(index.entries.items.len);
     cache_tree.root.oid = tree;
+    // As git's `unpack_trees` leaves it: no resolutions remembered.
+    index.dropResolveUndo();
 }
 
 fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
