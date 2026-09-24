@@ -21,6 +21,8 @@ const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const revwalk = @import("revwalk.zig");
 const threeway = @import("threeway.zig");
+const hooks_mod = @import("hooks.zig");
+const commithooks = @import("commithooks.zig");
 const program = @import("program.zig");
 const filter = @import("filter.zig");
 const ort = @import("ort.zig");
@@ -67,7 +69,7 @@ pub const Error = error{
     UnresolvedConflicts,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || threeway.Error || head_mod.Error || revwalk.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error;
+} || threeway.Error || head_mod.Error || revwalk.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error || commithooks.Error;
 
 /// When a merge may be a fast-forward: `merge.ff` and `--ff`, `--no-ff`,
 /// `--ff-only`.
@@ -148,6 +150,12 @@ pub const Options = struct {
     filters: ?*const filter.Drivers = null,
     /// The permission to run the filters' programs.
     programs: ?program.Programs = null,
+    /// The hooks to run, or `null` for none: `pre-merge-commit`,
+    /// `prepare-commit-msg`, `commit-msg` and `post-merge`, as `git merge`
+    /// runs them.
+    hooks: ?*hooks_mod.Runner = null,
+    /// `false` skips `pre-merge-commit` and `commit-msg`: `--no-verify`.
+    verify: bool = true,
     /// Where a refusal writes the path that caused it.
     blocked: ?*threeway.Blocked = null,
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
@@ -247,6 +255,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         try index.write(io, repo.git_dir, "index", .{});
         const log_message = try std.fmt.allocPrint(arena, "{s}: Fast-forward", .{reflog_action});
         try head_mod.advance(io, repo, head, target.oid, .{ .who = options.who, .message = log_message });
+        if (options.hooks) |runner| _ = try runner.postMerge(io, false);
         try removeMergeState(io, repo);
         return .{ .gpa = gpa, .arena = arena_instance.state, .result = .fast_forward, .commit = target.oid };
     }
@@ -285,9 +294,29 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     const messages = try ort.dupeMessages(arena, outcome.messages);
 
     if (outcome.isClean() and options.commit) {
-        // The sign-off goes on the commit and never into `MERGE_MSG`.
+        // `prepare_to_commit`: `pre-merge-commit` first, then the message,
+        // signed off, into `MERGE_MSG` beside `MERGE_HEAD` for the message
+        // hooks, and back out of it.
+        const h = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
+        // git's merge message has no newline of its own at the end.
+        while (msg.items.len != 0 and msg.items[msg.items.len - 1] == '\n') msg.items.len -= 1;
         if (options.signoff) try message.appendSignoff(arena, &msg, options.who, comment);
-        const cleaned = try message.cleanup(arena, msg.items, cleanupMode(repo, false), comment);
+        var text: []const u8 = msg.items;
+        if (h.runner) |runner| {
+            const e = try h.env(arena, null);
+            if (h.verify) _ = try runner.block(io, "pre-merge-commit", .{ .set = &.{
+                .{ .name = "GIT_INDEX_FILE", .value = e.index_path },
+                .{ .name = "GIT_EDITOR", .value = ":" },
+            } });
+            var hex: [hash.max_hex_len]u8 = undefined;
+            try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", try std.fmt.allocPrint(arena, "{s}\n", .{target.oid.hex(&hex)}));
+            try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", text);
+            const message_path = try h.path(arena, "MERGE_MSG");
+            _ = try runner.prepareCommitMsg(io, e, message_path, .merge, null);
+            if (h.verify) _ = try runner.commitMsg(io, e, message_path);
+            text = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_MSG")) orelse "";
+        }
+        const cleaned = try message.cleanup(arena, text, cleanupMode(repo, false), comment);
         if (cleaned.len == 0) return error.EmptyMessage;
         const commit = try repo.writeCommit(io, .{
             .tree = outcome.tree.?,
@@ -298,6 +327,8 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         });
         const log_message = try std.fmt.allocPrint(arena, "{s}: Merge made by the 'ort' strategy.", .{reflog_action});
         try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
+        // `post-merge` runs before the merge's files go, as in git.
+        if (options.hooks) |runner| _ = try runner.postMerge(io, false);
         try removeMergeState(io, repo);
         return .{ .gpa = gpa, .arena = arena_instance.state, .result = .merged, .commit = commit, .messages = messages };
     }
@@ -341,6 +372,11 @@ pub const ConcludeOptions = struct {
     /// an editor; `git commit --no-edit` keeps comments and cleans only
     /// whitespace.
     cleanup: message.Cleanup = .strip,
+    /// The hooks to run, or `null` for none: `git commit`'s `pre-commit`,
+    /// `prepare-commit-msg` with `merge`, `commit-msg` and `post-commit`.
+    hooks: ?*hooks_mod.Runner = null,
+    /// `false` skips `pre-commit` and `commit-msg`: `--no-verify`.
+    verify: bool = true,
 };
 
 /// Commit the merge `MERGE_HEAD` describes, from the index as it stands:
@@ -370,7 +406,10 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
     try index.write(io, repo.git_dir, "index", .{});
 
-    const raw = options.message orelse ((try head_mod.readState(arena, io, repo.git_dir, "MERGE_MSG")) orelse "");
+    const h = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
+    const author = options.author orelse options.who;
+    const given = options.message orelse ((try head_mod.readState(arena, io, repo.git_dir, "MERGE_MSG")) orelse "");
+    const raw = try h.beforeCommit(arena, io, repo, given, .merge, author);
     const comment = message.commentString(repo.config.get("core.commentchar"), raw);
     const cleaned = try message.cleanup(arena, raw, options.cleanup, comment);
     if (cleaned.len == 0) return error.EmptyMessage;
@@ -384,6 +423,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     const log_message = try std.fmt.allocPrint(arena, "commit (merge): {s}", .{message.subjectLine(cleaned)});
     try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
     try finishCommit(gpa, io, repo);
+    try h.postCommit(arena, io, author);
     return commit;
 }
 

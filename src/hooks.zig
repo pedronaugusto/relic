@@ -521,6 +521,10 @@ pub const Runner = struct {
         /// The author git exports as `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`
         /// and `GIT_AUTHOR_DATE` while it commits, when there is one.
         author: ?object.Signature = null,
+        /// Whether the message went through an editor. git then leaves
+        /// `GIT_EDITOR` as the hook's environment has it, where otherwise
+        /// it sets `:`.
+        editor: bool = false,
     };
 
     fn commitRequest(
@@ -535,8 +539,10 @@ pub const Runner = struct {
         vars[n] = .{ .name = "GIT_INDEX_FILE", .value = env.index_path };
         n += 1;
         // No editor runs here, and git tells the hook so.
-        vars[n] = .{ .name = "GIT_EDITOR", .value = ":" };
-        n += 1;
+        if (!env.editor) {
+            vars[n] = .{ .name = "GIT_EDITOR", .value = ":" };
+            n += 1;
+        }
         if (env.author) |who| {
             const date = formatDate(&scratch[0], who);
             vars[n] = .{ .name = "GIT_AUTHOR_NAME", .value = who.name };
@@ -737,6 +743,21 @@ pub const Runner = struct {
     /// `post-rewrite <command>`, after `commit --amend` or a rebase has
     /// rewritten commits. It cannot undo anything.
     pub fn postRewrite(runner: *Runner, io: Io, command: RewriteCommand, rewrites: []const Rewrite) Error!Ran {
+        return runner.postRewriteBy(io, command, rewrites, null);
+    }
+
+    /// `postRewrite` from a `git commit --amend`, which exports its author
+    /// as the commit hooks see it.
+    pub fn postRewriteBy(runner: *Runner, io: Io, command: RewriteCommand, rewrites: []const Rewrite, author: ?object.Signature) Error!Ran {
+        var date_buf: [64]u8 = undefined;
+        var vars: [3]program.Var = undefined;
+        var n: usize = 0;
+        if (author) |who| {
+            vars[0] = .{ .name = "GIT_AUTHOR_NAME", .value = who.name };
+            vars[1] = .{ .name = "GIT_AUTHOR_EMAIL", .value = who.email };
+            vars[2] = .{ .name = "GIT_AUTHOR_DATE", .value = formatDate(&date_buf, who) };
+            n = 3;
+        }
         var input: std.Io.Writer.Allocating = .init(runner.gpa);
         defer input.deinit();
         var a: [hash.max_hex_len]u8 = undefined;
@@ -746,7 +767,7 @@ pub const Runner = struct {
             if (r.extra.len != 0) input.writer.print(" {s}", .{r.extra}) catch return error.OutOfMemory;
             input.writer.writeByte('\n') catch return error.OutOfMemory;
         }
-        return runner.run(io, "post-rewrite", .{ .args = &.{@tagName(command)}, .input = input.written() });
+        return runner.run(io, "post-rewrite", .{ .args = &.{@tagName(command)}, .input = input.written(), .set = vars[0..n] });
     }
 };
 

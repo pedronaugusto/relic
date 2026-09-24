@@ -22,6 +22,8 @@ const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
+const hooks_mod = @import("hooks.zig");
+const commithooks = @import("commithooks.zig");
 const program = @import("program.zig");
 const filter = @import("filter.zig");
 const reset = @import("reset.zig");
@@ -82,7 +84,7 @@ pub const Error = error{
     /// A name given names no commit.
     NotACommit,
 } || threeway.Error || head_mod.Error || todo.ParseError || refs_mod.ReadError || rerere.Error ||
-    config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError;
+    config_mod.ParseError || config_mod.ValueError || repo_mod.WriteError || commithooks.Error;
 
 /// Which replay.
 pub const Action = enum {
@@ -153,6 +155,13 @@ pub const Options = struct {
     filters: ?*const filter.Drivers = null,
     /// The permission to run the filters' programs.
     programs: ?program.Programs = null,
+    /// The hooks to run, or `null` for none: `prepare-commit-msg` and
+    /// `post-commit` around each commit the sequence makes, and `git
+    /// commit`'s four when a stop is continued, as git runs them.
+    hooks: ?*hooks_mod.Runner = null,
+    /// `false` skips `pre-commit` and `commit-msg` when a stop is committed:
+    /// `--no-verify`.
+    verify: bool = true,
     /// `--cleanup`: how the message is cleaned, in place of the default.
     cleanup: ?message.Cleanup = null,
     /// `null` asks `merge.conflictStyle`.
@@ -583,7 +592,16 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
 
     const cleanup: message.Cleanup = r.options.cleanup orelse
         if (r.options.signoff or r.options.record_origin) .whitespace else configuredCleanup(repo);
-    const cleaned = try message.cleanup(arena, msg.items, cleanup, r.comment);
+    // `try_to_commit`: `prepare-commit-msg` sees the message before it is
+    // cleaned, in `COMMIT_EDITMSG`, when the hook is there at all.
+    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
+    var text: []const u8 = msg.items;
+    if (commit_hooks.exists(io, "prepare-commit-msg")) {
+        try head_mod.writeState(io, repo.git_dir, "COMMIT_EDITMSG", text);
+        _ = try commit_hooks.runner.?.prepareCommitMsg(io, try commit_hooks.env(arena, null), try commit_hooks.path(arena, "COMMIT_EDITMSG"), .message, null);
+        text = (try head_mod.readState(arena, io, repo.git_dir, "COMMIT_EDITMSG")) orelse "";
+    }
+    const cleaned = try message.cleanup(arena, text, cleanup, r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
     const made = try repo.writeCommit(io, .{
         .tree = outcome.tree.?,
@@ -594,6 +612,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     });
     const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
+    try commit_hooks.postCommit(arena, io, null);
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
     try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
     try updateAbortSafety(gpa, io, repo);
@@ -825,7 +844,9 @@ fn commitStaged(r: *Replay) Error!Oid {
     const head_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(repo, io);
     if (tree.eql(head_tree) and !r.options.allow_empty and r.options.empty != .keep) return error.EmptyCommit;
 
-    const raw = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_MSG")) orelse "";
+    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
+    const given = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_MSG")) orelse "";
+    const raw = try commit_hooks.beforeCommit(arena, io, repo, given, .merge, author);
     const cleaned = try message.cleanup(arena, raw, .strip, r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
     const made = try repo.writeCommit(io, .{
@@ -844,6 +865,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     try head_mod.deleteRef(io, repo, "REVERT_HEAD");
     // The commit is `git commit`'s, which records resolutions as it ends.
     try rerere.afterCommit(gpa, io, repo);
+    try commit_hooks.postCommit(arena, io, author);
     try r.made.append(arena, made);
     return made;
 }

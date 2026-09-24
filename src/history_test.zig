@@ -2384,3 +2384,395 @@ test "a merge renormalizes when asked and writes its files through their attribu
         }
     }
 }
+
+//=========================================================================
+// Hooks
+//=========================================================================
+
+/// A hook that records what it was given: its arguments as they are, where
+/// it runs, git's variables for it, which of a command's state files are
+/// there, its standard input, and a message hook's file.
+const recorder =
+    \\#!/bin/sh
+    \\{
+    \\  printf '%s' "$(basename "$0")"
+    \\  for a in "$@"; do printf ' %s' "$a"; done
+    \\  [ "$(pwd -P)" = "$(cd "$(git rev-parse --show-toplevel)" && pwd -P)" ] && printf ' top'
+    \\  printf ' index=%s editor=%s author=%s <%s> %s' "$GIT_INDEX_FILE" "$GIT_EDITOR" "$GIT_AUTHOR_NAME" "$GIT_AUTHOR_EMAIL" "$GIT_AUTHOR_DATE"
+    \\  for f in MERGE_HEAD MERGE_MSG CHERRY_PICK_HEAD REVERT_HEAD REBASE_HEAD COMMIT_EDITMSG; do [ -f ".git/$f" ] && printf ' %s' "$f"; done
+    \\  printf ' stdin=['; tr '\n' ';'; printf ']'
+    \\  case "$(basename "$0")" in prepare-commit-msg|commit-msg)
+    \\    # Behind an editor the file also holds git's help for the person,
+    \\    # which the commit strips; what is compared then is what it keeps.
+    \\    if [ "$GIT_EDITOR" = ":" ]; then printf ' msg=['; tr '\n' '|' < "$1"; else printf ' edited=['; git stripspace -s < "$1" | tr '\n' '|'; fi
+    \\    printf ']';;
+    \\  esac
+    \\  printf '\n'
+    \\} >> .git/hook.log
+    \\
+;
+
+const recorded_hooks = [_][]const u8{
+    "pre-merge-commit", "prepare-commit-msg", "commit-msg",   "pre-commit",
+    "post-commit",      "post-merge",         "post-rewrite", "post-checkout",
+    "pre-rebase",
+};
+
+/// Put the recorder in place for every hook a history command may run, in
+/// both copies, and start both logs empty.
+fn installRecorders(pair: *Pair, io: Io) !void {
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        for (recorded_hooks) |name| {
+            const path = try std.fmt.allocPrint(pair.gpa, ".git/hooks/{s}", .{name});
+            defer pair.gpa.free(path);
+            try r.writeFile(io, path, recorder);
+            const file = try r.dir.openFile(io, path, .{ .mode = .read_write });
+            defer file.close(io);
+            try file.setPermissions(io, .fromMode(0o755));
+        }
+        try r.writeFile(io, ".git/hook.log", "");
+    }
+}
+
+/// The two hook logs are the same; both are emptied for what comes next.
+fn expectSameHooks(pair: *Pair, io: Io) !void {
+    const a = try readOrMissing(pair.gpa, io, &pair.git, ".git/hook.log");
+    defer pair.gpa.free(a);
+    const b = try readOrMissing(pair.gpa, io, &pair.ours, ".git/hook.log");
+    defer pair.gpa.free(b);
+    std.testing.expectEqualStrings(a, b) catch |err| {
+        std.debug.print("hook logs differ\n", .{});
+        return err;
+    };
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.writeFile(io, ".git/hook.log", "");
+}
+
+/// git's side of a command, with the hooks on: the harness turns them off.
+fn gitWithHooks(pair: *Pair, io: Io, args: []const []const u8) !void {
+    const full = try std.mem.concat(pair.gpa, []const u8, &.{ &.{ "-c", "core.hooksPath=.git/hooks" }, args });
+    defer pair.gpa.free(full);
+    try gitMayFail(&pair.git, io, full);
+}
+
+test "a merge runs git merge's hooks, and a stopped one git commit's, as git's do" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, cleanScript);
+    defer pair.deinit();
+    try installRecorders(&pair, io);
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "before" });
+
+    // A merge that commits, with and without --no-verify.
+    for ([_]bool{ true, false }) |verify| {
+        try gitWithHooks(&pair, io, if (verify) &.{ "merge", "--no-edit", "clean" } else &.{ "merge", "--no-edit", "--no-verify", "clean" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+            defer runner.deinit();
+            const target = try merging.resolve(gpa, io, &repo, "clean");
+            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who, .hooks = &runner, .verify = verify });
+            defer outcome.deinit();
+            try std.testing.expectEqual(merging.Outcome.Result.merged, outcome.result);
+        }
+        try expectSameHooks(&pair, io);
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+    }
+
+    // A fast-forward runs post-merge alone.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "checkout", "-q", "-b", "behind", "main~1" });
+        try r.writeFile(io, ".git/hook.log", "");
+    }
+    try gitWithHooks(&pair, io, &.{ "merge", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+        defer runner.deinit();
+        const target = try merging.resolve(gpa, io, &repo, "main");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who, .hooks = &runner });
+        defer outcome.deinit();
+        try std.testing.expectEqual(merging.Outcome.Result.fast_forward, outcome.result);
+    }
+    try expectSameHooks(&pair, io);
+    try expectSameState(&pair, io, &merge_state, &.{ "HEAD", "refs/heads/behind" });
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "checkout", "-q", "main" });
+        try r.writeFile(io, ".git/hook.log", "");
+    }
+
+    // A merge that stops runs nothing; the git commit that concludes it
+    // runs its own four.
+    try gitWithHooks(&pair, io, &.{ "merge", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+        defer runner.deinit();
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who, .hooks = &runner });
+        defer outcome.deinit();
+        try std.testing.expectEqual(merging.Outcome.Result.conflicted, outcome.result);
+    }
+    try expectSameHooks(&pair, io);
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "f", "a\nresolved\nc\n");
+        try r.exec(io, &.{ "add", "f" });
+    }
+    try gitWithHooks(&pair, io, &.{ "commit", "-q", "--no-edit" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+        defer runner.deinit();
+        _ = try merging.conclude(gpa, io, &repo, .{ .who = who, .hooks = &runner, .cleanup = .whitespace });
+    }
+    try expectSameHooks(&pair, io);
+    try expectSameState(&pair, io, &(merge_state ++ .{"COMMIT_EDITMSG"}), &main_logs);
+}
+
+test "a cherry-pick and a revert run the sequencer's hooks, and a continued stop git commit's, as git's do" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    try installRecorders(&pair, io);
+
+    const Step = struct { git: []const []const u8, action: sequencer.Action, rev: []const u8 };
+    for ([_]Step{
+        .{ .git = &.{ "cherry-pick", "topic~2" }, .action = .pick, .rev = "topic~2" },
+        .{ .git = &.{ "revert", "--no-edit", "HEAD" }, .action = .revert, .rev = "HEAD" },
+        .{ .git = &.{ "cherry-pick", "topic~1" }, .action = .pick, .rev = "topic~1" },
+    }) |step| {
+        const oid = try oidOf(gpa, io, &pair.ours, step.rev);
+        try gitWithHooks(&pair, io, step.git);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+            defer runner.deinit();
+            const options: sequencer.Options = .{ .who = who, .hooks = &runner };
+            var outcome = switch (step.action) {
+                .pick => try sequencer.pick(gpa, io, &repo, &.{oid}, options),
+                .revert => try sequencer.revert(gpa, io, &repo, &.{oid}, options),
+            };
+            defer outcome.deinit();
+        }
+        try expectSameHooks(&pair, io);
+        try expectSameState(&pair, io, &(pick_state ++ .{"COMMIT_EDITMSG"}), &main_logs);
+    }
+
+    // The last one stopped: resolved, and continued.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "f", "a\nboth\nc\n");
+        try r.writeFile(io, "shared", "one\n2\n3\n4\n5\n6\nseven\n");
+        try r.exec(io, &.{ "add", "-A" });
+    }
+    try gitWithHooks(&pair, io, &.{ "cherry-pick", "--continue" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+        defer runner.deinit();
+        var outcome = try sequencer.proceed(gpa, io, &repo, .{ .who = who, .hooks = &runner });
+        defer outcome.deinit();
+    }
+    try expectSameHooks(&pair, io);
+    try expectSameState(&pair, io, &(pick_state ++ .{"COMMIT_EDITMSG"}), &main_logs);
+}
+
+test "a rebase runs git rebase's hooks, stopped, continued and finished, as git's does" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "checkout", "-q", "topic" });
+        try r.exec(io, &.{ "tag", "before" });
+    }
+    try installRecorders(&pair, io);
+
+    try gitWithHooks(&pair, io, &.{ "rebase", "main" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+        defer runner.deinit();
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .upstream_name = "main", .hooks = &runner });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Stop.conflict, outcome.stopped.?);
+    }
+    try expectSameHooks(&pair, io);
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "f", "a\nresolved\nc\n");
+        try r.exec(io, &.{ "add", "f" });
+    }
+    try gitWithHooks(&pair, io, &.{ "rebase", "--continue" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+        defer runner.deinit();
+        var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who, .hooks = &runner });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameHooks(&pair, io);
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+
+    // With --no-verify pre-rebase is passed over; up to date, nothing runs.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+    for ([_][]const u8{ "main~1", "main" }) |upstream| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.writeFile(io, ".git/hook.log", "");
+        try gitWithHooks(&pair, io, &.{ "rebase", "--no-verify", upstream });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+            defer runner.deinit();
+            var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, upstream), .{ .who = who, .onto_name = upstream, .upstream_name = upstream, .hooks = &runner, .verify = false });
+            defer outcome.deinit();
+        }
+        try expectSameHooks(&pair, io);
+        try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| gitMayFail(r, io, &.{ "rebase", "--abort" }) catch {};
+    }
+}
+
+/// `topic` carries a commit, a `fixup!` of it and one more, off `main`.
+fn fixupScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "f", "a\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.writeFile(io, "f", "b\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "one" });
+    try repo.writeFile(io, "f", "c\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "fixup! one" });
+    try repo.writeFile(io, "g", "d\n");
+    try repo.exec(io, &.{ "add", "g" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "h", "e\n");
+    try repo.exec(io, &.{ "add", "h" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "main moves" });
+    try repo.exec(io, &.{ "checkout", "-q", "topic" });
+}
+
+test "a rebase's fixup runs the hooks of the amend it makes, as git's does" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, fixupScript);
+    defer pair.deinit();
+    try installRecorders(&pair, io);
+
+    try pair.env.put("GIT_SEQUENCE_EDITOR", "true");
+    try gitWithHooks(&pair, io, &.{ "rebase", "-i", "--autosquash", "main" });
+    _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+        defer runner.deinit();
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{
+            .who = who,
+            .onto_name = "main",
+            .upstream_name = "main",
+            .interactive = true,
+            .autosquash = true,
+            .hooks = &runner,
+        });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameHooks(&pair, io);
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+}
+
+test "a rebase's squash and reword run the hooks of the commits git makes for them" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, fixupScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "commit", "-q", "--amend", "-m", "squash! one" });
+        try r.exec(io, &.{ "tag", "before" });
+    }
+    try installRecorders(&pair, io);
+
+    // The squash, through the editor the person has.
+    try pair.env.put("GIT_SEQUENCE_EDITOR", "true");
+    try gitWithHooks(&pair, io, &.{ "rebase", "-i", "--autosquash", "main" });
+    _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+        defer runner.deinit();
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{
+            .who = who,
+            .onto_name = "main",
+            .upstream_name = "main",
+            .interactive = true,
+            .autosquash = true,
+            .hooks = &runner,
+        });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameHooks(&pair, io);
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+
+    // A reword of the last commit.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+        try r.writeFile(io, ".git/hook.log", "");
+    }
+    const one = try oidOf(gpa, io, &pair.ours, "topic~2");
+    const squash = try oidOf(gpa, io, &pair.ours, "topic~1");
+    const two = try oidOf(gpa, io, &pair.ours, "topic");
+    var hex: [3][hash.max_hex_len]u8 = undefined;
+    const sheet = try std.fmt.allocPrint(gpa, "pick {s} one\npick {s} squash! one\nreword {s} two\n", .{ one.hex(&hex[0]), squash.hex(&hex[1]), two.hex(&hex[2]) });
+    defer gpa.free(sheet);
+    try pair.git.writeFile(io, ".git/relic-sheet", sheet);
+    try pair.env.put("GIT_SEQUENCE_EDITOR", "cp .git/relic-sheet");
+    try gitWithHooks(&pair, io, &.{ "rebase", "-i", "main" });
+    _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
+    try pair.git.dir.deleteFile(io, ".git/relic-sheet");
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        var runner = try repo.hookRunner(io, .{ .environ = &pair.env }, .{ .output = .ignore });
+        defer runner.deinit();
+        var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{
+            .who = who,
+            .onto_name = "main",
+            .upstream_name = "main",
+            .todo = sheet,
+            .hooks = &runner,
+        });
+        defer outcome.deinit();
+        try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+    }
+    try expectSameHooks(&pair, io);
+    try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+}

@@ -104,6 +104,7 @@ pub const similarity = @import("similarity.zig");
 pub const ort = @import("ort.zig");
 pub const rename = @import("rename.zig");
 pub const rerere = @import("rerere.zig");
+pub const commithooks = @import("commithooks.zig");
 pub const strategy = @import("strategy.zig");
 pub const rebase = @import("rebase.zig");
 

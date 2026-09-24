@@ -30,6 +30,7 @@ const repo_mod = @import("repo.zig");
 const worktree = @import("worktree.zig");
 const index_mod = @import("index.zig");
 const hooks = @import("hooks.zig");
+const commithooks = @import("commithooks.zig");
 const fs = @import("fs.zig");
 const signing = @import("signing.zig");
 
@@ -55,7 +56,7 @@ pub const Error = error{
     OperationInProgress,
     /// `commit.cleanup` names no mode git knows.
     InvalidCleanupMode,
-} || hooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
+} || hooks.Error || commithooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
     index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError ||
     error{NameTooLong};
 
@@ -131,11 +132,11 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     const current: ?Oid = if (try repo.refs.resolve(arena, io, "HEAD")) |r| r.oid else null;
     if (options.amend and current == null) return error.NothingToAmend;
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_path = try arena.dupe(u8, buf[0..try repo.git_dir.realPath(io, &buf)]);
-    const index_path = try std.fs.path.join(arena, &.{ git_path, "index" });
-    const message_path = try std.fs.path.join(arena, &.{ git_path, "COMMIT_EDITMSG" });
-    const env: hooks.Runner.CommitEnv = .{ .index_path = index_path, .author = request.author };
+    // The files named as git names them to a hook: `.git/index` and
+    // `.git/COMMIT_EDITMSG` from the top of the working tree.
+    const names = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
+    const message_path = try names.path(arena, "COMMIT_EDITMSG");
+    const env = try names.env(arena, request.author);
 
     if (options.hooks) |runner| {
         if (options.verify) _ = try runner.preCommit(io, env);

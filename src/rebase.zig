@@ -33,6 +33,8 @@ const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
+const hooks_mod = @import("hooks.zig");
+const commithooks = @import("commithooks.zig");
 const filter = @import("filter.zig");
 const strategy = @import("strategy.zig");
 const reset = @import("reset.zig");
@@ -143,6 +145,15 @@ pub const Options = struct {
     /// The branch to rebase, by its short name, in place of the current
     /// one: `git rebase <upstream> <branch>`.
     branch: ?[]const u8 = null,
+    /// The upstream as it was given, which `pre-rebase` is told. The full
+    /// object name when `null`.
+    upstream_name: ?[]const u8 = null,
+    /// The hooks to run, or `null` for none: `pre-rebase`, `post-checkout`
+    /// when `onto` is checked out, `prepare-commit-msg` and `post-commit`
+    /// around each commit, and `post-rewrite` at the end, as git runs them.
+    hooks: ?*hooks_mod.Runner = null,
+    /// `false` skips `pre-rebase`: `--no-verify`.
+    verify: bool = true,
     /// The sheet to work through in place of the one git would write: an
     /// interactive rebase, with the sheet a person would have left in the
     /// editor. `plan` gives the sheet to start from.
@@ -809,6 +820,11 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
         return finishOutcome(&r, .up_to_date, null, null);
     }
 
+    // `pre-rebase` may refuse, before anything is written.
+    if (options.hooks) |runner| {
+        if (options.verify) _ = try runner.preRebase(io, options.upstream_name orelse try r.hex(upstream), options.branch);
+    }
+
     // The sheet.
     var items: []todo.Item = try makeScript(&r, upstream, tip.orig_head);
     try repo.git_dir.createDirPath(io, state_dir);
@@ -1001,6 +1017,7 @@ fn checkoutOnto(r: *Run, base: Oid, orig_head: Oid, onto_name: []const u8) Error
     try head_mod.writeRef(r.io, r.repo, "ORIG_HEAD", orig_head);
     const log = try r.reflogMessage("start", try std.fmt.allocPrint(r.arena, "checkout {s}", .{onto_name}));
     try head_mod.detach(r.io, r.repo, h.oid, base, .{ .who = r.options.who, .message = log });
+    if (r.options.hooks) |runner| _ = try runner.postCheckout(r.io, h.oid orelse Oid.zero(r.repo.kind), base, .branch);
 }
 
 /// Switch to the branch being rebased when there is nothing else to do:
@@ -1463,6 +1480,11 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     // sign-off, unless `commit.cleanup` says otherwise; an edited message
     // is cleaned of comments as an editor's is.
     const cleanup: message.Cleanup = if (r.options.signoff) .whitespace else configuredCleanup(repo);
+    const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
+    // An edited message is `git commit -n -e`'s: its hooks see the author
+    // and the editor the person has.
+    var edit_env = try commit_hooks.env(arena, author);
+    edit_env.editor = true;
     const text: []const u8 = switch (msg_source) {
         .merge_msg => try message.cleanup(arena, r.msg.items, cleanup, r.comment),
         .squash => try message.cleanup(arena, (try r.readState("message-squash")).?, cleanup, r.comment),
@@ -1470,21 +1492,59 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         .squash_edit => blk: {
             const proposed = (try r.readState("message-squash")).?;
             try head_mod.writeState(io, repo.git_dir, "SQUASH_MSG", proposed);
-            try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
-            break :blk try edited(r, .squash, proposed);
+            // git points `REBASE_HEAD` at the commit before it runs `git
+            // commit` for the message.
+            try head_mod.writeRef(io, repo, "REBASE_HEAD", item.commit.?);
+            var shown = proposed;
+            if (commit_hooks.runner) |runner| {
+                try head_mod.writeState(io, repo.git_dir, "COMMIT_EDITMSG", proposed);
+                _ = try runner.prepareCommitMsg(io, edit_env, try commit_hooks.path(arena, "COMMIT_EDITMSG"), .message, null);
+                shown = (try head_mod.readState(arena, io, repo.git_dir, "COMMIT_EDITMSG")) orelse "";
+            }
+            break :blk try edited(r, .squash, shown);
         },
     };
+    // `try_to_commit`: `prepare-commit-msg` sees the message before it is
+    // cleaned, in `COMMIT_EDITMSG`, when the hook is there at all.
+    var final_text = text;
+    if (msg_source != .squash_edit and commit_hooks.exists(io, "prepare-commit-msg")) {
+        const raw: []const u8 = switch (msg_source) {
+            .merge_msg => r.msg.items,
+            .squash => (try r.readState("message-squash")).?,
+            .fixup => (try r.readState("message-fixup")).?,
+            .squash_edit => unreachable,
+        };
+        try head_mod.writeState(io, repo.git_dir, "COMMIT_EDITMSG", raw);
+        const e = try commit_hooks.env(arena, null);
+        const file = try commit_hooks.path(arena, "COMMIT_EDITMSG");
+        _ = try commit_hooks.runner.?.prepareCommitMsg(io, e, file, .message, null);
+        const back = (try head_mod.readState(arena, io, repo.git_dir, "COMMIT_EDITMSG")) orelse "";
+        final_text = try message.cleanup(arena, back, cleanup, r.comment);
+    }
     const extra: []const object.ExtraHeader = if (amending) try extraHeadersOf(r, head_oid) else &.{};
     const made = try repo.writeCommit(io, .{
         .tree = outcome.tree.?,
         .parents = parents,
         .author = author,
         .committer = r.options.who,
-        .message = text,
+        .message = final_text,
         .extra = extra,
     });
-    const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ reflog_action, firstLine(text) });
+    const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ reflog_action, firstLine(final_text) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
+    if (msg_source == .squash_edit) {
+        // `git commit` takes the message's files away before its last hooks.
+        try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+        try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
+    }
+    if (commit_hooks.runner) |runner| {
+        if (msg_source == .squash_edit) {
+            _ = try runner.postCommit(io, edit_env);
+        } else try commit_hooks.postCommit(arena, io, null);
+        // An amend in place tells `post-rewrite` so, as `commit --amend`
+        // does, with its author when it is `git commit`'s.
+        if (amending) _ = try runner.postRewriteBy(io, .amend, &.{.{ .old = head_oid, .new = made }}, if (msg_source == .squash_edit) author else null);
+    }
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
     try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
     if (msg_source == .squash_edit) {
@@ -1493,7 +1553,6 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         // commit first, and it stays there until the next instruction.
         try head_mod.removeState(io, repo.git_dir, "SQUASH_MSG");
         try head_mod.deleteRef(io, repo, "AUTO_MERGE");
-        try head_mod.writeRef(io, repo, "REBASE_HEAD", item.commit.?);
     }
     if (command == .reword) try reword(r, reflog_action);
     if (final_fixup) {
@@ -1549,7 +1608,26 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
     var head = try r.head();
     defer head.deinit(r.gpa);
     const current = try readSource(r, head.oid.?);
-    const text = try edited(r, .reword, message.fromSubject(current.commit.message));
+    // `git commit --amend` behind an editor: all four of its hooks, told
+    // the commit it amends, with the author it keeps.
+    const commit_hooks = try commithooks.Hooks.init(r.arena, r.io, r.repo, r.options.hooks, true);
+    var e = try commit_hooks.env(r.arena, current.commit.author);
+    e.editor = true;
+    var proposed = message.fromSubject(current.commit.message);
+    const file = try commit_hooks.path(r.arena, "COMMIT_EDITMSG");
+    if (commit_hooks.runner) |runner| {
+        _ = try runner.preCommit(r.io, e);
+        try head_mod.writeState(r.io, r.repo.git_dir, "COMMIT_EDITMSG", proposed);
+        _ = try runner.prepareCommitMsg(r.io, e, file, .commit, "HEAD");
+        proposed = (try head_mod.readState(r.arena, r.io, r.repo.git_dir, "COMMIT_EDITMSG")) orelse "";
+    }
+    var text = try edited(r, .reword, proposed);
+    if (commit_hooks.runner) |runner| {
+        try head_mod.writeState(r.io, r.repo.git_dir, "COMMIT_EDITMSG", text);
+        _ = try runner.commitMsg(r.io, e, file);
+        const back = (try head_mod.readState(r.arena, r.io, r.repo.git_dir, "COMMIT_EDITMSG")) orelse "";
+        text = try message.cleanup(r.arena, back, .strip, r.comment);
+    }
     const made = try r.repo.writeCommit(r.io, .{
         .tree = current.commit.tree,
         .parents = current.commit.parents,
@@ -1561,6 +1639,10 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
     try head_mod.advance(r.io, r.repo, head, made, .{ .who = r.options.who, .message = log });
     // The amend is `git commit --amend`, which takes `AUTO_MERGE` away.
     try head_mod.deleteRef(r.io, r.repo, "AUTO_MERGE");
+    if (commit_hooks.runner) |runner| {
+        _ = try runner.postCommit(r.io, e);
+        _ = try runner.postRewriteBy(r.io, .amend, &.{.{ .old = head.oid.?, .new = made }}, current.commit.author);
+    }
 }
 
 //=========================================================================
@@ -2176,6 +2258,13 @@ fn finish(r: *Run) Error!Outcome {
             });
         }
     }
+    // `post-rewrite`, told on its standard input what `rewritten-list`
+    // says, once the branch has moved.
+    if (r.options.hooks) |runner| {
+        if (try r.readState("rewritten-list")) |list| {
+            if (list.len != 0) _ = try runner.run(io, "post-rewrite", .{ .args = &.{"rebase"}, .input = list });
+        }
+    }
     if (try r.readState("update-refs")) |text| {
         const records = try parseUpdateRefs(r, text);
         for (records.items) |rec| {
@@ -2298,7 +2387,20 @@ fn commitStagedChanges(r: *Run) Error!void {
         author = parseAuthorScript(script, &name_buf) catch return error.MalformedState;
     } else return error.StagedWithoutMessage;
     const proposed = (try r.readState("message")).?;
-    const text = try edited(r, .resolved, proposed);
+    // `git commit -n -e -F message`: only the message hooks around it, an
+    // editor's as the person's editor left it.
+    const commit_hooks = try commithooks.Hooks.init(r.arena, io, repo, r.options.hooks, false);
+    var hook_env: hooksEnv = null;
+    var shown = proposed;
+    if (commit_hooks.runner) |runner| {
+        var e = try commit_hooks.env(r.arena, author);
+        e.editor = true;
+        hook_env = e;
+        try head_mod.writeState(io, repo.git_dir, "COMMIT_EDITMSG", proposed);
+        _ = try runner.prepareCommitMsg(io, e, try commit_hooks.path(r.arena, "COMMIT_EDITMSG"), .message, null);
+        shown = (try head_mod.readState(r.arena, io, repo.git_dir, "COMMIT_EDITMSG")) orelse "";
+    }
+    const text = try edited(r, .resolved, shown);
     const made = try repo.writeCommit(io, .{
         .tree = tree,
         .parents = parents.items,
@@ -2314,7 +2416,10 @@ fn commitStagedChanges(r: *Run) Error!void {
     try r.removeState("amend");
     // The commit is `git commit`'s, which records resolutions as it ends.
     try rerere.afterCommit(r.gpa, io, repo);
+    if (hook_env) |e| _ = try commit_hooks.runner.?.postCommit(io, e);
 }
+
+const hooksEnv = ?hooks_mod.Runner.CommitEnv;
 
 /// Leave out the instruction that stopped, with whatever it changed, and
 /// carry on: `--skip`.
