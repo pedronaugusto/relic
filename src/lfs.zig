@@ -568,6 +568,10 @@ pub const Lfs = struct {
     pub const Options = struct {
         /// Leave every pointer as it is on checkout.
         skip_smudge: bool = false,
+        /// `.lfsconfig` as git-lfs finds it when the working tree has none —
+        /// from the index, else from `HEAD` — for a caller that has read it
+        /// there. `lfsapi.lfsconfigText` does.
+        lfsconfig: ?[]const u8 = null,
     };
 
     /// Read the settings: `lfs.storage` from the configuration, and
@@ -594,6 +598,9 @@ pub const Lfs = struct {
             if (try fs.readFileAlloc(a, io, wd, ".lfsconfig", 1 << 20)) |text| {
                 file_config = try config_mod.Config.parseText(gpa, text, .local);
             }
+        }
+        if (file_config == null) {
+            if (options.lfsconfig) |text| file_config = try config_mod.Config.parseText(gpa, text, .local);
         }
 
         const root = (try config.getPath(a, "lfs.storage")) orelse "lfs";

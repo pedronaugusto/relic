@@ -688,3 +688,41 @@ test "an action's URL is rewritten by insteadOf when git-lfs's setting asks, and
     defer server.close();
     try testing.expectError(error.LfsTransferUnsupported, lfstransfer.fetch(server, &repo, .{}));
 }
+
+test "an .lfsconfig missing from the working tree is read from the index, then from HEAD, as git-lfs reads it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    var d = try fx.dir("r");
+    defer d.close(io);
+    try fx.gitIn(d, &.{ "init", "-q", "-b", "main" });
+    try fx.gitIn(d, &.{ "config", "remote.origin.url", "https://git.example.com/r.git" });
+    try d.writeFile(io, .{ .sub_path = ".lfsconfig", .data = "[lfs]\n\turl = https://from-head.example.com/lfs\n" });
+    try fx.gitIn(d, &.{ "add", ".lfsconfig" });
+    try fx.gitIn(d, &.{ "commit", "-q", "-m", "lfsconfig" });
+    try d.writeFile(io, .{ .sub_path = ".lfsconfig", .data = "[lfs]\n\turl = https://from-index.example.com/lfs\n" });
+    try fx.gitIn(d, &.{ "add", ".lfsconfig" });
+    try d.writeFile(io, .{ .sub_path = ".lfsconfig", .data = "[lfs]\n\turl = https://from-tree.example.com/lfs\n" });
+
+    const stages = [_]struct { step: ?[]const []const u8, want: []const u8 }{
+        .{ .step = null, .want = "https://from-tree.example.com/lfs" },
+        .{ .step = &.{"rm-file"}, .want = "https://from-index.example.com/lfs" },
+        .{ .step = &.{ "rm", "-q", "--cached", ".lfsconfig" }, .want = "https://from-head.example.com/lfs" },
+    };
+    for (stages) |stage| {
+        if (stage.step) |args| {
+            if (args.len == 1) try d.deleteFile(io, ".lfsconfig") else try fx.gitIn(d, args);
+        }
+        const env = try fx.gitOut(d, &.{ "lfs", "env" });
+        defer gpa.free(env);
+        var want_buf: [128]u8 = undefined;
+        const want = try std.fmt.bufPrint(&want_buf, "\nEndpoint={s} (auth=none)\n", .{stage.want});
+        try testing.expect(std.mem.indexOf(u8, env, want) != null);
+        var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+        defer repo.deinit(io);
+        const server = try openServer(fx, &repo);
+        defer server.close();
+        try testing.expectEqualStrings(stage.want, (try server.client.endpoint(.download)).url);
+    }
+}
