@@ -289,26 +289,46 @@ pub fn receive(
         if (!kept) pack_dir.deleteFile(io, temp) catch {};
     }
 
-    const copied = try copyIn(io, file, in, kind, options);
-    if (copied.size < 12 + raw_len) return error.TruncatedPack;
+    // The stream is read once: each entry as it arrives, its bytes kept in
+    // the file on the way, as git's index-pack reads its input, so that
+    // naming the objects goes on while the rest is still coming.
+    const tee_buffer = try gpa.alloc(u8, 64 * 1024);
+    defer gpa.free(tee_buffer);
+    var tee: Tee = .init(io, file, in, kind, tee_buffer, options);
     var header: [12]u8 = undefined;
-    if (try file.readPositionalAll(io, &header, 0) != header.len) return error.TruncatedPack;
+    tee.interface.readSliceAll(&header) catch |err| return switch (err) {
+        error.EndOfStream => error.TruncatedPack,
+        error.ReadFailed => tee.err orelse error.ReadFailed,
+    };
     if (!std.mem.eql(u8, header[0..4], "PACK")) return error.NotAPack;
     const version = std.mem.readInt(u32, header[4..8], .big);
     if (version != 2 and version != 3) return error.UnsupportedPackVersion;
     const count = std.mem.readInt(u32, header[8..12], .big);
-    const trailer = Oid.fromRaw(kind, copied.tail[0..raw_len]) catch unreachable;
-    if (!trailer.eql(copied.checksum)) return error.PackChecksumMismatch;
-    const body_end = copied.size - raw_len;
-
-    if (count == 0) {
-        if (body_end != 12) return error.PackTrailingGarbage;
-        return .{ .name = null, .objects = 0, .deltas = 0, .appended = 0 };
-    }
 
     var indexer: Indexer = try .init(gpa, io, db, file, options);
     defer indexer.deinit();
-    try indexer.parse(count, body_end);
+    const parsed_end = indexer.parse(&tee, count) catch |err| switch (err) {
+        error.OutOfMemory, error.Canceled, error.ReadFailed, error.PackTooLarge => return err,
+        // A damaged stream is named by its checksum, as when it was read
+        // whole before any entry was looked at.
+        else => {
+            tee.drain() catch return err;
+            const whole = tee.finish();
+            if (whole.size >= 12 + raw_len and !whole.trailerMatches(kind)) return error.PackChecksumMismatch;
+            return err;
+        },
+    };
+    try tee.drain();
+    const copied = tee.finish();
+    if (copied.size < 12 + raw_len) return error.TruncatedPack;
+    if (!copied.trailerMatches(kind)) return error.PackChecksumMismatch;
+    const trailer = Oid.fromRaw(kind, copied.tail[0..raw_len]) catch unreachable;
+    const body_end = copied.size - raw_len;
+    if (parsed_end > body_end) return error.TruncatedPack;
+    if (parsed_end != body_end) return error.PackTrailingGarbage;
+
+    if (count == 0) return .{ .name = null, .objects = 0, .deltas = 0, .appended = 0 };
+    try indexer.findBases();
     try indexer.resolve();
 
     var name = trailer;
@@ -399,51 +419,114 @@ const Copied = struct {
     checksum: Oid,
     /// The last `rawLen` bytes, which should be that hash.
     tail: [hash.max_raw_len]u8,
+
+    fn trailerMatches(c: *const Copied, kind: Kind) bool {
+        const trailer = Oid.fromRaw(kind, c.tail[0..kind.rawLen()]) catch unreachable;
+        return trailer.eql(c.checksum);
+    }
 };
 
-/// Copy the stream into the temporary, hashing everything but its last
-/// `rawLen` bytes as it goes — which bytes those are is only known at the
-/// end, so a window of that many is held back from the hash.
-fn copyIn(io: Io, file: Io.File, in: *Io.Reader, kind: Kind, options: Options) Error!Copied {
-    const raw_len = kind.rawLen();
-    var buffer: [64 * 1024]u8 = undefined;
-    var hasher: hash.Hasher = .init(kind);
-    var tail: [hash.max_raw_len]u8 = undefined;
-    var tail_len: usize = 0;
-    var total: u64 = 0;
-    while (true) {
-        const n = in.readSliceShort(&buffer) catch return error.ReadFailed;
-        if (n == 0) break;
-        const chunk = buffer[0..n];
-        try file.writePositionalAll(io, chunk, total);
-        total += n;
-        if (options.max_pack_bytes) |most| {
-            if (total > most) return error.PackTooLarge;
+/// The stream as the entries are read from it: every byte taken is written
+/// to the file at its offset and hashed — all but the last `rawLen`, which
+/// are only known to be the trailer at the end, so a window of that many is
+/// held back from the hash.
+const Tee = struct {
+    interface: Io.Reader,
+    io: Io,
+    file: Io.File,
+    in: *Io.Reader,
+    kind: Kind,
+    options: Options,
+    /// Bytes taken from `in` and written, which is where the next go.
+    written: u64 = 0,
+    hasher: hash.Hasher,
+    tail: [hash.max_raw_len]u8 = undefined,
+    tail_len: usize = 0,
+    err: ?Error = null,
+
+    fn init(io: Io, file: Io.File, in: *Io.Reader, kind: Kind, buffer: []u8, options: Options) Tee {
+        return .{
+            .interface = .{ .vtable = &.{ .stream = stream }, .buffer = buffer, .seek = 0, .end = 0 },
+            .io = io,
+            .file = file,
+            .in = in,
+            .kind = kind,
+            .options = options,
+            .hasher = .init(kind),
+        };
+    }
+
+    /// Where in the pack the next byte read is.
+    fn position(t: *const Tee) u64 {
+        return t.written - t.interface.bufferedLen();
+    }
+
+    fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const t: *Tee = @alignCast(@fieldParentPtr("interface", r));
+        const dest = limit.slice(try w.writableSliceGreedy(1));
+        const n = t.pull(dest) catch |err| {
+            t.err = err;
+            return error.ReadFailed;
+        };
+        if (n == 0) return error.EndOfStream;
+        w.advance(n);
+        return n;
+    }
+
+    /// Take from `in` into `dest` — read straight into it, as a reader
+    /// with no buffer of its own, like the side-band's, needs — until it is
+    /// full or the stream ends; zero at the end.
+    fn pull(t: *Tee, dest: []u8) Error!usize {
+        const n = t.in.readSliceShort(dest) catch return error.ReadFailed;
+        try t.keep(dest[0..n]);
+        return n;
+    }
+
+    fn keep(t: *Tee, chunk: []const u8) Error!void {
+        const raw_len = t.kind.rawLen();
+        try t.file.writePositionalAll(t.io, chunk, t.written);
+        t.written += chunk.len;
+        if (t.options.max_pack_bytes) |most| {
+            if (t.written > most) return error.PackTooLarge;
         }
-        const held = tail_len + n;
+        const n = chunk.len;
+        const held = t.tail_len + n;
         if (held <= raw_len) {
-            @memcpy(tail[tail_len..][0..n], chunk);
-            tail_len = held;
+            @memcpy(t.tail[t.tail_len..][0..n], chunk);
+            t.tail_len = held;
         } else {
             const release = held - raw_len;
-            if (release <= tail_len) {
-                hasher.update(tail[0..release]);
-                std.mem.copyForwards(u8, tail[0 .. tail_len - release], tail[release..tail_len]);
-                tail_len -= release;
-                @memcpy(tail[tail_len..][0..n], chunk);
-                tail_len += n;
+            if (release <= t.tail_len) {
+                t.hasher.update(t.tail[0..release]);
+                std.mem.copyForwards(u8, t.tail[0 .. t.tail_len - release], t.tail[release..t.tail_len]);
+                t.tail_len -= release;
+                @memcpy(t.tail[t.tail_len..][0..n], chunk);
+                t.tail_len += n;
             } else {
-                hasher.update(tail[0..tail_len]);
-                hasher.update(chunk[0 .. release - tail_len]);
-                @memcpy(tail[0..raw_len], chunk[n - raw_len ..]);
-                tail_len = raw_len;
+                t.hasher.update(t.tail[0..t.tail_len]);
+                t.hasher.update(chunk[0 .. release - t.tail_len]);
+                @memcpy(t.tail[0..raw_len], chunk[n - raw_len ..]);
+                t.tail_len = raw_len;
             }
         }
-        Progress.emit(options.progress, .{ .received = total });
-        if (n < buffer.len) break;
+        Progress.emit(t.options.progress, .{ .received = t.written });
     }
-    return .{ .size = total, .checksum = hasher.final(), .tail = tail };
-}
+
+    /// Read the rest of the stream into the file: the trailer, and
+    /// anything after it.
+    fn drain(t: *Tee) Error!void {
+        var chunk: [64 * 1024]u8 = undefined;
+        while (true) {
+            const n = try t.pull(&chunk);
+            if (n == 0) return;
+        }
+    }
+
+    /// Everything read, and its hash.
+    fn finish(t: *Tee) Copied {
+        return .{ .size = t.written, .checksum = t.hasher.final(), .tail = t.tail };
+    }
+};
 
 /// The state of one receive after the copy: the entries, and the file they
 /// are read back from.
@@ -465,6 +548,8 @@ const Indexer = struct {
     thin_bases: std.ArrayList(Oid) = .empty,
     deltas: u32 = 0,
     resolved_count: u64 = 0,
+    /// The stream, while `parse` reads from it.
+    tee: ?*Tee = null,
 
     fn init(gpa: Allocator, io: Io, db: *odb_mod.Odb, file: Io.File, options: Options) Allocator.Error!Indexer {
         const read_buffer = try gpa.alloc(u8, 64 * 1024);
@@ -507,29 +592,41 @@ const Indexer = struct {
     }
 
     fn takeByte(x: *Indexer) Error!u8 {
-        return x.reader.interface.takeByte() catch |err| switch (err) {
+        return x.input().takeByte() catch |err| switch (err) {
             error.EndOfStream => error.TruncatedPack,
-            error.ReadFailed => x.reader.err orelse error.ReadFailed,
+            error.ReadFailed => x.inputError() orelse error.ReadFailed,
         };
     }
 
-    /// Read every entry in order: its header, and its zlib stream to the
-    /// end so the next one's offset is known. Whole objects are named here.
-    fn parse(x: *Indexer, count: u32, body_end: u64) Error!void {
+    /// What entries are read from: the stream while it is parsed, the file
+    /// after.
+    fn input(x: *Indexer) *Io.Reader {
+        return if (x.tee) |t| &t.interface else &x.reader.interface;
+    }
+
+    fn inputError(x: *const Indexer) ?Error {
+        if (x.tee) |t| return t.err;
+        return x.reader.err;
+    }
+
+    /// Read every entry in order from the stream, as it arrives: its
+    /// header, and its zlib stream to the end so the next one's offset is
+    /// known. Whole objects are named here. Returns where the last entry
+    /// ends, which the caller checks against the trailer once the stream
+    /// is all in.
+    fn parse(x: *Indexer, tee: *Tee, count: u32) Error!u64 {
         const gpa = x.gpa;
-        // An entry is at least a header byte and a two-byte zlib header, so
-        // a count larger than the body can hold is not believed for the
-        // allocation.
-        const plausible: usize = @intCast(@min(@as(u64, count), (body_end - 12) / 3 + 1));
-        try x.entries.ensureTotalCapacity(gpa, plausible);
-        try x.seek(12);
+        // A count is not believed for the allocation beyond this; the list
+        // grows as the entries come.
+        try x.entries.ensureTotalCapacity(gpa, @min(count, 1 << 16));
+        x.tee = tee;
+        defer x.tee = null;
 
         var i: u32 = 0;
         while (i < count) : (i += 1) {
-            const offset = x.reader.logicalPos();
-            if (offset >= body_end) return error.TruncatedPack;
+            const offset = tee.position();
             var entry = try x.readHeader(offset);
-            entry.data_at = x.reader.logicalPos();
+            entry.data_at = tee.position();
             switch (entry.kind) {
                 .whole => try x.inflateWhole(&entry),
                 .ofs_delta, .ref_delta => {
@@ -538,15 +635,17 @@ const Indexer = struct {
                     try x.inflate(entry.size, .discard, null);
                 },
             }
-            const end = x.reader.logicalPos();
-            if (end > body_end) return error.TruncatedPack;
+            const end = tee.position();
             entry.crc = try x.crcOf(offset, end);
             try x.entries.append(gpa, entry);
             Progress.emit(x.options.progress, .{ .indexed = .{ .done = i + 1, .total = count } });
         }
-        if (x.reader.logicalPos() != body_end) return error.PackTrailingGarbage;
+        return tee.position();
+    }
 
-        // Where each delta's base is.
+    /// Where each delta's base is.
+    fn findBases(x: *Indexer) Error!void {
+        const gpa = x.gpa;
         for (x.entries.items, 0..) |entry, at| {
             switch (entry.kind) {
                 .whole => {},
@@ -637,14 +736,14 @@ const Indexer = struct {
     /// Inflate the stream at the reader's position, which must yield
     /// exactly `size` bytes and then end.
     fn inflate(x: *Indexer, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
-        var d: flate.Decompress = .init(&x.reader.interface, .zlib, x.window);
+        var d: flate.Decompress = .init(x.input(), .zlib, x.window);
         var chunk: [16 * 1024]u8 = undefined;
         var done: u64 = 0;
         while (true) {
             const remaining = size - done;
             const want: usize = @intCast(@min(@as(u64, chunk.len), remaining + 1));
             const n = d.reader.readSliceShort(chunk[0..want]) catch {
-                if (x.reader.err) |err| return err;
+                if (x.inputError()) |err| return err;
                 return if (d.err) |err| switch (err) {
                     error.EndOfStream => error.TruncatedPack,
                     else => error.CorruptPackEntry,
