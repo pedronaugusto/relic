@@ -41,6 +41,7 @@ pub const gitlink = @import("gitlink.zig");
 pub const submodule = @import("submodule.zig");
 pub const filter = @import("filter.zig");
 pub const lfs = @import("lfs.zig");
+pub const lfsapi = @import("lfsapi.zig");
 pub const convert = @import("convert.zig");
 pub const refspec = @import("refspec.zig");
 pub const url = @import("url.zig");
