@@ -592,9 +592,13 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
         gpa.free(fetched);
         const theirs = try proxy.take(gpa);
         defer gpa.free(theirs);
+        const their_connects = try proxy.takeConnects(gpa);
+        defer gpa.free(their_connects);
         try relicFetch(gpa, io, by_relic.dir, &env);
         const ours = try proxy.take(gpa);
         defer gpa.free(ours);
+        const our_connects = try proxy.takeConnects(gpa);
+        defer gpa.free(our_connects);
         try expectSameFetch(gpa, io, &by_git, &by_relic);
         try testing.expectEqual(case.through, theirs.len != 0);
         try testing.expectEqual(case.through, ours.len != 0);
@@ -605,6 +609,9 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
         const ours_lines = try firstLines(gpa, ours);
         defer gpa.free(ours_lines);
         try testing.expectEqualStrings(theirs_lines, ours_lines);
+        // A tunnel is asked for in curl's words, line for line.
+        try testing.expectEqual(case.through and case.url.ptr == secure.ptr, their_connects.len != 0);
+        try testing.expectEqualStrings(their_connects, our_connects);
     }
 }
 

@@ -15,8 +15,15 @@
 //!
 //! A connection whose response was read to its end and did not ask to be
 //! closed is kept, and the next request to the same place goes over it, as
-//! curl keeps one for git. The time, which a certificate check needs, is
-//! read once per client.
+//! curl keeps one for git; a client used by several tasks at once keeps up
+//! to `max_idle`, one per task, as Go's transport keeps them for git-lfs.
+//! The time, which a certificate check needs, is read once per client.
+//!
+//! Timeouts, when a caller sets them, are kept by a watchdog task beside
+//! each connection: a connection that takes too long to make, a handshake
+//! that takes too long, or a read or write that moves nothing for too long
+//! has its socket shut, and the request fails as `TimedOut`. The standard
+//! library's own connect timeout is not there yet on any system.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -42,7 +49,26 @@ pub const Error = error{
     HttpProtocolError,
     /// The system's certificates could not be read.
     CertificateBundleUnreadable,
+    /// A timeout in `Client.timeouts` ran out.
+    TimedOut,
+    /// A body sent with a length was ended before that many bytes.
+    BodyIncomplete,
 } || Allocator.Error || Io.Cancelable;
+
+/// How long each step may take; `null` is no limit.
+pub const Timeouts = struct {
+    /// Making the TCP connection, the name looked up included.
+    connect: ?Io.Duration = null,
+    /// One TLS handshake.
+    handshake: ?Io.Duration = null,
+    /// One read or write that moves no bytes: an answer that stops
+    /// arriving, a server that stops taking a body.
+    activity: ?Io.Duration = null,
+
+    fn any(t: Timeouts) bool {
+        return t.handshake != null or t.activity != null;
+    }
+};
 
 /// Where a request goes.
 pub const Target = struct {
@@ -65,6 +91,11 @@ pub const Proxy = struct {
     tls: bool = false,
     /// The `Proxy-Authorization` value, `Basic <base64>`, when there is one.
     authorization: ?[]const u8 = null,
+    /// The lines of a `CONNECT` after its `Host`, in order, as the caller's
+    /// HTTP stack writes them. `null` is curl's without a user agent:
+    /// `Proxy-Authorization` when there is one, then
+    /// `Proxy-Connection: Keep-Alive`.
+    connect_headers: ?[]const http.Header = null,
 };
 
 /// A client: its proxy, what it trusts, and the connection it keeps.
@@ -84,38 +115,71 @@ pub const Client = struct {
     /// The time certificates are checked against, read at the first TLS
     /// connection.
     now: ?Io.Timestamp = null,
-    /// The connection kept for the next request.
-    idle: ?*Connection = null,
-    /// The proxy's status when it refused a tunnel.
+    /// How long each step may take.
+    timeouts: Timeouts = .{},
+    /// How many connections may be kept for the requests to come.
+    max_idle: usize = 1,
+    /// The connections kept, the most recently used last.
+    idle: std.ArrayList(*Connection) = .empty,
+    /// Held for `idle`, `now`, `connections` and the two answers below, so
+    /// several tasks can send at once.
+    lock: Io.Mutex = .init,
+    /// The proxy's status when it last refused a tunnel.
     proxy_status: ?u16 = null,
     /// Why the last TLS handshake failed.
     tls_error: ?anyerror = null,
     /// How many connections were made, for a caller that watches reuse.
     connections: u32 = 0,
+    /// How many connections were made without their timeouts, because the
+    /// `Io` could not run a watchdog beside them.
+    unwatched: u32 = 0,
 
     /// A client with no proxy that checks certificates against the system's.
     pub fn init(gpa: Allocator, io: Io) Client {
         return .{ .gpa = gpa, .io = io };
     }
 
-    /// Close the kept connection and release everything.
+    /// Close the kept connections and release everything.
     pub fn deinit(c: *Client) void {
-        if (c.idle) |conn| conn.close();
-        c.idle = null;
+        for (c.idle.items) |conn| conn.close();
+        c.idle.deinit(c.gpa);
         c.bundle.deinit(c.gpa);
         c.* = undefined;
     }
 
     fn clock(c: *Client) Io.Timestamp {
+        c.lock.lockUncancelable(c.io);
+        defer c.lock.unlock(c.io);
         if (c.now) |t| return t;
         const t = Io.Clock.real.now(c.io);
         c.now = t;
         return t;
     }
 
+    fn note(c: *Client, comptime field: []const u8, value: anytype) void {
+        c.lock.lockUncancelable(c.io);
+        defer c.lock.unlock(c.io);
+        @field(c, field) = value;
+    }
+
+    /// The system's certificates, read at the first handshake that needs
+    /// them when nothing was trusted before.
+    fn ensureTrusted(c: *Client) Error!void {
+        c.bundle_lock.lockUncancelable(c.io);
+        defer c.bundle_lock.unlock(c.io);
+        if (c.trusted) return;
+        try c.rescan();
+    }
+
     /// Read the system's certificates into the bundle, which is then what
     /// is trusted, together with anything added after.
     pub fn trustSystem(c: *Client) Error!void {
+        c.bundle_lock.lockUncancelable(c.io);
+        defer c.bundle_lock.unlock(c.io);
+        try c.rescan();
+    }
+
+    fn rescan(c: *Client) Error!void {
         c.bundle.rescan(c.gpa, c.io, c.clock()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
@@ -128,6 +192,8 @@ pub const Client = struct {
     /// then holds in place of the system's unless `trustSystem` is called
     /// too.
     pub fn trustFile(c: *Client, path: []const u8) (Error || error{CertificateFileUnreadable})!void {
+        c.bundle_lock.lockUncancelable(c.io);
+        defer c.bundle_lock.unlock(c.io);
         c.bundle.addCertsFromFilePath(c.gpa, c.io, c.clock(), Io.Dir.cwd(), path) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
@@ -140,6 +206,8 @@ pub const Client = struct {
     pub fn trustDirectory(c: *Client, path: []const u8) (Error || error{CertificateFileUnreadable})!void {
         var dir = Io.Dir.cwd().openDir(c.io, path, .{ .iterate = true }) catch return error.CertificateFileUnreadable;
         defer dir.close(c.io);
+        c.bundle_lock.lockUncancelable(c.io);
+        defer c.bundle_lock.unlock(c.io);
         c.bundle.addCertsFromDir(c.gpa, c.io, c.clock(), dir) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
@@ -148,41 +216,59 @@ pub const Client = struct {
         c.trusted = true;
     }
 
-    /// A connection to `target`: the kept one when it goes there, a new one
+    /// A connection to `target`: a kept one when one goes there, a new one
     /// otherwise.
     pub fn connect(c: *Client, target: Target) Error!*Connection {
-        if (c.idle) |conn| {
-            c.idle = null;
-            if (conn.target.eql(target)) return conn;
-            conn.close();
+        return (try c.connectNoting(target)).conn;
+    }
+
+    fn connectNoting(c: *Client, target: Target) Error!struct { conn: *Connection, reused: bool } {
+        if (c.takeIdle(target)) |conn| return .{ .conn = conn, .reused = true };
+        return .{ .conn = try Connection.open(c, target), .reused = false };
+    }
+
+    fn takeIdle(c: *Client, target: Target) ?*Connection {
+        c.lock.lockUncancelable(c.io);
+        defer c.lock.unlock(c.io);
+        var i = c.idle.items.len;
+        while (i > 0) {
+            i -= 1;
+            const conn = c.idle.items[i];
+            if (conn.target.eql(target)) return c.idle.orderedRemove(i);
         }
-        return Connection.open(c, target);
+        return null;
     }
 
     /// Give back a connection after its exchange: kept when `reusable`,
-    /// closed otherwise.
+    /// closed otherwise. The oldest kept one is closed to make room.
     pub fn release(c: *Client, conn: *Connection, reusable: bool) void {
-        if (!reusable) return conn.close();
-        if (c.idle) |old| old.close();
-        c.idle = conn;
+        if (!reusable or conn.timed_out.load(.acquire) or c.max_idle == 0) return conn.close();
+        const evicted = evicted: {
+            c.lock.lockUncancelable(c.io);
+            defer c.lock.unlock(c.io);
+            c.idle.append(c.gpa, conn) catch break :evicted conn;
+            if (c.idle.items.len > c.max_idle) break :evicted c.idle.orderedRemove(0);
+            break :evicted null;
+        };
+        if (evicted) |old| old.close();
     }
 
     /// Send a request and read the head of its response. `body` is sent
     /// whole with its length; `null` sends none. The response is the
     /// caller's to read and `deinit`.
     pub fn send(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8) Error!Response {
-        const reused = c.idle != null and c.idle.?.target.eql(target);
-        return c.sendOnce(method, target, path, headers, body) catch |err| switch (err) {
+        const first = try c.connectNoting(target);
+        return c.sendOn(first.conn, method, path, headers, body) catch |err| switch (err) {
             // A kept connection the server closed while it waited is
             // noticed only now; the request goes again on a new one, as
             // curl sends it again.
-            error.ConnectionFailed => if (reused) c.sendOnce(method, target, path, headers, body) else err,
+            error.ConnectionFailed => if (first.reused) c.sendOn(try Connection.open(c, target), method, path, headers, body) else err,
             else => err,
         };
     }
 
-    fn sendOnce(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8) Error!Response {
-        const conn = try c.connect(target);
+    fn sendOn(c: *Client, conn: *Connection, method: http.Method, path: []const u8, headers: []const http.Header, body: ?[]const u8) Error!Response {
+        _ = c;
         var ok = false;
         defer if (!ok) conn.close();
         try conn.writeHead(method, path, headers, if (body) |b| .{ .content_length = b.len } else .none);
@@ -193,21 +279,25 @@ pub const Client = struct {
         return response;
     }
 
-    /// Start a request whose body is sent in chunks as it is written:
+    /// Start a request whose body is sent as it is written: in chunks, or
+    /// with `length` as its `Content-Length` when it is given.
     /// `Streaming.writer`, then `Streaming.finish` for the response.
-    pub fn stream(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, buffer: []u8) Error!Streaming {
+    pub fn stream(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, length: ?u64, buffer: []u8) Error!Streaming {
         const conn = try c.connect(target);
         errdefer conn.close();
-        try conn.writeHead(method, path, headers, .chunked);
+        try conn.writeHead(method, path, headers, if (length) |n| .{ .content_length = n } else .chunked);
         return .{
             .conn = conn,
             .method = method,
             .body = .{
                 .http_protocol_output = conn.writer(),
-                .state = .init_chunked,
+                .state = if (length) |n| .{ .content_length = n } else .init_chunked,
                 .writer = .{
                     .buffer = buffer,
-                    .vtable = &.{
+                    .vtable = if (length != null) &.{
+                        .drain = http.BodyWriter.contentLengthDrain,
+                        .sendFile = http.BodyWriter.contentLengthSendFile,
+                    } else &.{
                         .drain = http.BodyWriter.chunkedDrain,
                         .sendFile = http.BodyWriter.chunkedSendFile,
                     },
@@ -228,8 +318,18 @@ pub const Streaming = struct {
         return &s.body.writer;
     }
 
-    /// End the body and read the head of the response.
+    /// End the body and read the head of the response. A body with a
+    /// length that is short of it is `BodyIncomplete`, and the connection
+    /// is closed.
     pub fn finish(s: *Streaming) Error!Response {
+        s.body.writer.flush() catch return s.conn.writeFailed();
+        switch (s.body.state) {
+            .content_length => |left| if (left != 0) {
+                s.conn.close();
+                return error.BodyIncomplete;
+            },
+            else => {},
+        }
         s.body.endUnflushed() catch return s.conn.writeFailed();
         s.conn.flush() catch return s.conn.writeFailed();
         return s.conn.receive(s.method);
@@ -278,6 +378,15 @@ pub const Response = struct {
         return r.state.http_reader.state == .ready;
     }
 
+    /// Why a read of the body failed: `TimedOut`, a TLS or HTTP framing
+    /// failure, or the connection breaking.
+    pub fn failure(r: *const Response) Error {
+        const conn = r.conn orelse return error.ConnectionFailed;
+        if (conn.timed_out.load(.acquire)) return error.TimedOut;
+        if (r.state.http_reader.body_err != null) return error.HttpProtocolError;
+        return conn.readFailed();
+    }
+
     /// Release the response. Its connection is kept for the next request
     /// when the body was read to its end and the server did not ask to
     /// close.
@@ -316,6 +425,18 @@ pub const Connection = struct {
     /// Whether requests name the whole URL: through a proxy, to an `http`
     /// target.
     absolute_form: bool = false,
+    /// When the read or write under way began, on the awake clock, plus
+    /// one; zero when none is. Kept only when there is an activity timeout.
+    busy_since: std.atomic.Value(u64) = .init(0),
+    /// When the handshake under way must be done by, likewise.
+    handshake_until: std.atomic.Value(u64) = .init(0),
+    /// Set by the watchdog when it shut the socket.
+    timed_out: std.atomic.Value(bool) = .init(false),
+    watchdog: ?Io.Future(void) = null,
+    /// The standard library's own reader and writer functions, which the
+    /// metered ones call.
+    plain_reader: *const Io.Reader.VTable = undefined,
+    plain_writer: *const Io.Writer.VTable = undefined,
 
     fn open(c: *Client, target: Target) Error!*Connection {
         const gpa = c.gpa;
@@ -331,13 +452,13 @@ pub const Connection = struct {
 
         const first_host = if (c.proxy) |p| p.host else target.host;
         const first_port = if (c.proxy) |p| p.port else target.port;
-        const host_name = Io.net.HostName.init(first_host) catch return error.ConnectionFailed;
-        var net_stream = host_name.connect(io, first_port, .{ .mode = .stream }) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return error.ConnectionFailed,
-        };
+        var net_stream = try dial(c, first_host, first_port);
         errdefer net_stream.close(io);
-        c.connections += 1;
+        {
+            c.lock.lockUncancelable(io);
+            defer c.lock.unlock(io);
+            c.connections += 1;
+        }
 
         conn.* = .{
             .client = c,
@@ -351,6 +472,16 @@ pub const Connection = struct {
         };
         errdefer conn.freeLayers();
 
+        if (c.timeouts.any()) {
+            if (c.timeouts.activity != null) conn.meter();
+            if (io.concurrent(watch, .{conn})) |future| {
+                conn.watchdog = future;
+            } else |_| {
+                c.note("unwatched", c.unwatched + 1);
+            }
+        }
+        errdefer conn.stopWatching();
+
         if (c.proxy) |p| {
             if (p.tls) try conn.startTls(0, p.host);
             if (target.tls) {
@@ -359,6 +490,145 @@ pub const Connection = struct {
         }
         if (target.tls) try conn.startTls(1, target.host);
         return conn;
+    }
+
+    /// Make the TCP connection, within `Timeouts.connect` when there is
+    /// one: the connect runs as its own task, raced against a sleep.
+    fn dial(c: *Client, host: []const u8, port: u16) Error!Io.net.Stream {
+        const io = c.io;
+        const host_name = Io.net.HostName.init(host) catch return error.ConnectionFailed;
+        const limit = c.timeouts.connect orelse return plainDial(io, host_name, port);
+        const Race = union(enum) {
+            connected: Io.net.HostName.ConnectError!Io.net.Stream,
+            expired: Io.Cancelable!void,
+        };
+        var buffer: [2]Race = undefined;
+        var race: Io.Select(Race) = .init(io, &buffer);
+        race.concurrent(.connected, Io.net.HostName.connect, .{ host_name, io, port, .{ .mode = .stream } }) catch {
+            c.note("unwatched", c.unwatched + 1);
+            return plainDial(io, host_name, port);
+        };
+        race.concurrent(.expired, Io.sleep, .{ io, limit, .awake }) catch {
+            while (race.cancel()) |late| switch (late) {
+                .connected => |result| if (result) |stream| return stream else |_| {},
+                .expired => {},
+            };
+            c.note("unwatched", c.unwatched + 1);
+            return plainDial(io, host_name, port);
+        };
+        const first = race.await() catch |err| {
+            while (race.cancel()) |late| switch (late) {
+                .connected => |result| if (result) |stream| stream.close(io) else |_| {},
+                .expired => {},
+            };
+            return err;
+        };
+        // Whatever finished second is closed.
+        while (race.cancel()) |late| switch (late) {
+            .connected => |result| if (result) |stream| stream.close(io) else |_| {},
+            .expired => {},
+        };
+        return switch (first) {
+            .connected => |result| result catch |err| switch (err) {
+                error.Canceled => error.Canceled,
+                else => error.ConnectionFailed,
+            },
+            .expired => error.TimedOut,
+        };
+    }
+
+    fn plainDial(io: Io, host_name: Io.net.HostName, port: u16) Error!Io.net.Stream {
+        return host_name.connect(io, port, .{ .mode = .stream }) catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            else => error.ConnectionFailed,
+        };
+    }
+
+    /// Put the metered functions in front of the stream's own, so the
+    /// watchdog sees when a read or write is under way.
+    fn meter(conn: *Connection) void {
+        conn.plain_reader = conn.stream_reader.interface.vtable;
+        conn.plain_writer = conn.stream_writer.interface.vtable;
+        conn.stream_reader.interface.vtable = &metered_reader;
+        conn.stream_writer.interface.vtable = &metered_writer;
+    }
+
+    const metered_reader: Io.Reader.VTable = .{ .stream = meteredStream, .readVec = meteredReadVec };
+    const metered_writer: Io.Writer.VTable = .{ .drain = meteredDrain, .sendFile = meteredSendFile };
+
+    fn ofReader(r: *Io.Reader) *Connection {
+        const sr: *Io.net.Stream.Reader = @alignCast(@fieldParentPtr("interface", r));
+        return @alignCast(@fieldParentPtr("stream_reader", sr));
+    }
+
+    fn ofWriter(w: *Io.Writer) *Connection {
+        const sw: *Io.net.Stream.Writer = @alignCast(@fieldParentPtr("interface", w));
+        return @alignCast(@fieldParentPtr("stream_writer", sw));
+    }
+
+    fn awakeNow(io: Io) u64 {
+        return @intCast(Io.Clock.awake.now(io).nanoseconds + 1);
+    }
+
+    fn meteredStream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const conn = ofReader(r);
+        conn.busy_since.store(awakeNow(conn.client.io), .release);
+        defer conn.busy_since.store(0, .release);
+        return conn.plain_reader.stream(r, w, limit);
+    }
+
+    fn meteredReadVec(r: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
+        const conn = ofReader(r);
+        conn.busy_since.store(awakeNow(conn.client.io), .release);
+        defer conn.busy_since.store(0, .release);
+        return conn.plain_reader.readVec(r, data);
+    }
+
+    fn meteredDrain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const conn = ofWriter(w);
+        conn.busy_since.store(awakeNow(conn.client.io), .release);
+        defer conn.busy_since.store(0, .release);
+        return conn.plain_writer.drain(w, data, splat);
+    }
+
+    fn meteredSendFile(w: *Io.Writer, file_reader: *Io.File.Reader, limit: Io.Limit) Io.Writer.FileError!usize {
+        const conn = ofWriter(w);
+        return conn.plain_writer.sendFile(w, file_reader, limit);
+    }
+
+    /// The watchdog: every tenth of the shortest timeout, whether a read or
+    /// write has been under way for longer than `activity`, or a handshake
+    /// is past its time. Either shuts the socket, which ends what was
+    /// waiting on it.
+    fn watch(conn: *Connection) void {
+        const io = conn.client.io;
+        const t = conn.client.timeouts;
+        var shortest: i96 = std.math.maxInt(i96);
+        for ([_]?Io.Duration{ t.handshake, t.activity }) |d| {
+            if (d) |v| shortest = @min(shortest, v.nanoseconds);
+        }
+        const tick: Io.Duration = .{ .nanoseconds = @max(@divTrunc(shortest, 10), std.time.ns_per_ms) };
+        while (true) {
+            io.sleep(tick, .awake) catch return;
+            const now = awakeNow(io);
+            var expired = false;
+            if (t.activity) |limit| {
+                const since = conn.busy_since.load(.acquire);
+                if (since != 0 and now - since >= limit.nanoseconds) expired = true;
+            }
+            const until = conn.handshake_until.load(.acquire);
+            if (until != 0 and now >= until) expired = true;
+            if (expired) {
+                conn.timed_out.store(true, .release);
+                conn.stream.shutdown(io, .both) catch {};
+                return;
+            }
+        }
+    }
+
+    fn stopWatching(conn: *Connection) void {
+        if (conn.watchdog) |*future| future.cancel(conn.client.io);
+        conn.watchdog = null;
     }
 
     fn freeLayers(conn: *Connection) void {
@@ -383,6 +653,7 @@ pub const Connection = struct {
                 conn.flushFrom(i) catch {};
             }
         }
+        conn.stopWatching();
         conn.stream.close(io);
         conn.freeLayers();
         gpa.free(conn.stream_read_buffer);
@@ -444,6 +715,7 @@ pub const Connection = struct {
     }
 
     fn writeFailed(conn: *Connection) Error {
+        if (conn.timed_out.load(.acquire)) return error.TimedOut;
         if (conn.stream_writer.err) |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => {},
@@ -452,6 +724,7 @@ pub const Connection = struct {
     }
 
     fn readFailed(conn: *Connection) Error {
+        if (conn.timed_out.load(.acquire)) return error.TimedOut;
         if (conn.stream_reader.err) |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => {},
@@ -465,7 +738,7 @@ pub const Connection = struct {
     fn startTls(conn: *Connection, slot: usize, host: []const u8) Error!void {
         const c = conn.client;
         const gpa = c.gpa;
-        if (c.verify and !c.trusted) try c.trustSystem();
+        if (c.verify) try c.ensureTrusted();
         const layer = try gpa.create(TlsLayer);
         errdefer gpa.destroy(layer);
         layer.read_buffer = try gpa.alloc(u8, tls.Client.min_buffer_len);
@@ -474,6 +747,10 @@ pub const Connection = struct {
         errdefer gpa.free(layer.write_buffer);
         var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
         c.io.random(&entropy);
+        if (c.timeouts.handshake) |limit| {
+            conn.handshake_until.store(awakeNow(c.io) + @as(u64, @intCast(limit.nanoseconds)), .release);
+        }
+        defer conn.handshake_until.store(0, .release);
         layer.client = tls.Client.init(conn.readerBelow(slot), conn.writerBelow(slot), .{
             .host = if (c.verify) .{ .explicit = host } else .no_verification,
             .ca = if (c.verify) .{ .bundle = .{
@@ -490,7 +767,8 @@ pub const Connection = struct {
             // is not a truncation it cannot see.
             .allow_truncation_attacks = true,
         }) catch |err| {
-            c.tls_error = err;
+            if (conn.timed_out.load(.acquire)) return error.TimedOut;
+            c.note("tls_error", err);
             return switch (err) {
                 error.Canceled => error.Canceled,
                 else => error.TlsFailed,
@@ -503,8 +781,13 @@ pub const Connection = struct {
     fn tunnel(conn: *Connection, proxy: Proxy, target: Target) Error!void {
         const w = conn.writer();
         w.print("CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n", .{ target.host, target.port, target.host, target.port }) catch return conn.writeFailed();
-        if (proxy.authorization) |a| w.print("Proxy-Authorization: {s}\r\n", .{a}) catch return conn.writeFailed();
-        w.writeAll("Proxy-Connection: Keep-Alive\r\n\r\n") catch return conn.writeFailed();
+        if (proxy.connect_headers) |lines| {
+            for (lines) |h| w.print("{s}: {s}\r\n", .{ h.name, h.value }) catch return conn.writeFailed();
+        } else {
+            if (proxy.authorization) |a| w.print("Proxy-Authorization: {s}\r\n", .{a}) catch return conn.writeFailed();
+            w.writeAll("Proxy-Connection: Keep-Alive\r\n") catch return conn.writeFailed();
+        }
+        w.writeAll("\r\n") catch return conn.writeFailed();
         conn.flush() catch return conn.writeFailed();
         var r: http.Reader = .{ .in = conn.reader(), .interface = undefined, .state = .ready, .max_head_len = 16 * 1024 };
         const bytes = r.receiveHead() catch |err| return switch (err) {
@@ -514,7 +797,7 @@ pub const Connection = struct {
         const head = http.Client.Response.Head.parse(bytes) catch return error.HttpProtocolError;
         const status = @intFromEnum(head.status);
         if (status / 100 == 2) return;
-        conn.client.proxy_status = status;
+        conn.client.note("proxy_status", @as(?u16, status));
         return if (status == 407) error.ProxyAuthenticationRequired else error.ProxyRefused;
     }
 
@@ -558,7 +841,7 @@ pub const Connection = struct {
         while (true) {
             bytes = r.receiveHead() catch |err| return switch (err) {
                 error.ReadFailed => conn.readFailed(),
-                error.HttpConnectionClosing => error.ConnectionFailed,
+                error.HttpConnectionClosing => if (conn.timed_out.load(.acquire)) error.TimedOut else error.ConnectionFailed,
                 else => error.HttpProtocolError,
             };
             // An interim `100 Continue` is followed by the real answer.
@@ -581,6 +864,12 @@ pub const Connection = struct {
             .identity => r.bodyReader(body.transfer_buffer, transfer, content_length),
             .gzip, .deflate => blk: {
                 body.decompress_buffer = try gpa.alloc(u8, std.compress.flate.max_window_len);
+                break :blk r.bodyReaderDecompressing(body.transfer_buffer, transfer, content_length, head.content_encoding, &body.decompress, body.decompress_buffer);
+            },
+            // A frame whose window is wider than the decoder's fails as a
+            // read.
+            .zstd => blk: {
+                body.decompress_buffer = try gpa.alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
                 break :blk r.bodyReaderDecompressing(body.transfer_buffer, transfer, content_length, head.content_encoding, &body.decompress, body.decompress_buffer);
             },
             else => return error.HttpProtocolError,
@@ -606,4 +895,125 @@ test "a request's head is written as curl writes it, direct and through a proxy"
             "Host: git.example.com:8080\r\nProxy-Authorization: Basic YTpi\r\nGit-Protocol: version=2\r\n\r\n",
         conn.stream_writer.interface.buffered(),
     );
+}
+
+/// Test-only: a server on 127.0.0.1 that answers every request on a
+/// connection with `ok`, or, `silent`, reads and never answers.
+const TestServer = struct {
+    io: Io,
+    listener: Io.net.Server,
+    port: u16,
+    silent: bool,
+    task: Io.Future(void) = undefined,
+    group: Io.Group = .init,
+    stopping: std.atomic.Value(bool) = .init(false),
+
+    fn start(gpa: Allocator, io: Io, silent: bool) !*TestServer {
+        const s = try gpa.create(TestServer);
+        errdefer gpa.destroy(s);
+        const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+        var listener = try address.listen(io, .{ .reuse_address = true });
+        errdefer listener.deinit(io);
+        s.* = .{ .io = io, .listener = listener, .port = listener.socket.address.getPort(), .silent = silent };
+        s.task = io.concurrent(serve, .{s}) catch return error.SkipZigTest;
+        return s;
+    }
+
+    fn stop(s: *TestServer, gpa: Allocator) void {
+        const io = s.io;
+        s.stopping.store(true, .release);
+        const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable;
+        if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
+        s.task.await(io);
+        s.group.cancel(io);
+        s.listener.deinit(io);
+        gpa.destroy(s);
+    }
+
+    fn serve(s: *TestServer) void {
+        while (true) {
+            const stream = s.listener.accept(s.io) catch return;
+            if (s.stopping.load(.acquire)) return stream.close(s.io);
+            s.group.concurrent(s.io, handle, .{ s, stream }) catch stream.close(s.io);
+        }
+    }
+
+    fn handle(s: *TestServer, stream: Io.net.Stream) void {
+        defer stream.close(s.io);
+        var read_buffer: [4096]u8 = undefined;
+        var write_buffer: [256]u8 = undefined;
+        var r = stream.reader(s.io, &read_buffer);
+        var w = stream.writer(s.io, &write_buffer);
+        while (true) {
+            // One request's head, then the answer, unless silent.
+            while (std.mem.indexOf(u8, r.interface.buffered(), "\r\n\r\n") == null) {
+                r.interface.fillMore() catch return;
+            }
+            const end = std.mem.indexOf(u8, r.interface.buffered(), "\r\n\r\n").? + 4;
+            r.interface.toss(end);
+            if (s.silent) {
+                while (true) r.interface.fillMore() catch return;
+            }
+            w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch return;
+            w.interface.flush() catch return;
+        }
+    }
+};
+
+test "a handshake or an answer that does not come is given up on as TimedOut, and the connection is not kept" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const server = try TestServer.start(gpa, io, true);
+    defer server.stop(gpa);
+    const limit: Io.Duration = .fromMilliseconds(100);
+
+    var handshaking: Client = .init(gpa, io);
+    defer handshaking.deinit();
+    handshaking.verify = false;
+    handshaking.timeouts = .{ .handshake = limit };
+    try std.testing.expectError(error.TimedOut, handshaking.send(.GET, .{ .tls = true, .host = "127.0.0.1", .port = server.port }, "/", &.{}, null));
+
+    var waiting: Client = .init(gpa, io);
+    defer waiting.deinit();
+    waiting.timeouts = .{ .activity = limit };
+    try std.testing.expectError(error.TimedOut, waiting.send(.GET, .{ .tls = false, .host = "127.0.0.1", .port = server.port }, "/", &.{}, null));
+    try std.testing.expectEqual(@as(usize, 0), waiting.idle.items.len);
+    try std.testing.expectEqual(@as(u32, 0), waiting.unwatched);
+}
+
+test "tasks sending at once through one client share the connections it keeps" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const server = try TestServer.start(gpa, io, false);
+    defer server.stop(gpa);
+    var client: Client = .init(gpa, io);
+    defer client.deinit();
+    client.max_idle = 4;
+    client.timeouts = .{ .connect = .fromSeconds(10), .activity = .fromSeconds(10) };
+    const target: Target = .{ .tls = false, .host = "127.0.0.1", .port = server.port };
+
+    const Task = struct {
+        fn run(c: *Client, t: Target) Error!void {
+            for (0..5) |_| {
+                var response = try c.send(.GET, t, "/", &.{}, null);
+                defer response.deinit();
+                var body: [8]u8 = undefined;
+                const n = response.reader().readSliceShort(&body) catch return response.failure();
+                if (!std.mem.eql(u8, body[0..n], "ok")) return error.HttpProtocolError;
+            }
+        }
+    };
+    var group: Io.Group = .init;
+    var results: [4]Error!void = undefined;
+    const Wrap = struct {
+        fn run(c: *Client, t: Target, out: *Error!void) void {
+            out.* = Task.run(c, t);
+        }
+    };
+    for (&results) |*out| group.concurrent(io, Wrap.run, .{ &client, target, out }) catch return error.SkipZigTest;
+    try group.await(io);
+    for (results) |result| try result;
+    // Twenty requests, no more connections than tasks.
+    try std.testing.expect(client.connections <= 4);
+    try std.testing.expect(client.idle.items.len <= 4);
 }

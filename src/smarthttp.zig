@@ -295,6 +295,13 @@ const Http = struct {
             }
             if (session.authorization()) |value| proxy.authorization = try arena.dupe(u8, value);
         }
+        // curl's CONNECT: the proxy's credential, git's user agent, and a
+        // keep-alive the tunnel asks for.
+        var lines: std.ArrayList(http.Header) = .empty;
+        if (proxy.authorization) |value| try lines.append(arena, .{ .name = "Proxy-Authorization", .value = value });
+        try lines.append(arena, .{ .name = "User-Agent", .value = h.user_agent });
+        try lines.append(arena, .{ .name = "Proxy-Connection", .value = "Keep-Alive" });
+        proxy.connect_headers = lines.items;
         h.client.proxy = proxy;
     }
 
@@ -385,6 +392,9 @@ const Http = struct {
             },
             error.HttpProtocolError => h.fail(error.ProtocolError, "not an HTTP response"),
             error.CertificateBundleUnreadable => h.fail(error.SslCertificateUnreadable, "the system's certificates"),
+            // git sets no timeout of these kinds, so none is set here.
+            error.TimedOut => h.fail(error.ConnectionFailed, "timed out"),
+            error.BodyIncomplete => h.fail(error.ConnectionFailed, "the body was cut short"),
         };
     }
 
@@ -612,7 +622,7 @@ const Http = struct {
         const arena = h.arena.allocator();
         if (h.stream_buffer.len == 0) h.stream_buffer = try arena.alloc(u8, 64 * 1024);
         const list = try h.headers(arena, .POST, h.credentials.authorization(), false);
-        h.streaming = h.client.stream(.POST, h.target, try h.pathFor(suffix), list, h.stream_buffer) catch |err| return h.clientFailed(err);
+        h.streaming = h.client.stream(.POST, h.target, try h.pathFor(suffix), list, null, h.stream_buffer) catch |err| return h.clientFailed(err);
     }
 
     fn response(context: *anyopaque, _: *Connection) connection.Error!*Io.Reader {

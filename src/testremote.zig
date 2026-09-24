@@ -500,12 +500,13 @@ pub const TlsFront = struct {
 
         // An EC key, which the standard library's TLS client verifies, and
         // the address as both an IP and a DNS name: curl matches the first,
-        // the standard library the second.
+        // the standard library the second. `lfs.example.invalid` is the name
+        // a test reaches it by through a proxy.
         var made = program.run(.{ .environ = &env }, gpa, io, .{ .argv = &.{
-            "openssl",       "req",                          "-x509",                                     "-newkey", "ec",
-            "-pkeyopt",      "ec_paramgen_curve:prime256v1", "-nodes",                                    "-keyout", key_path,
-            "-out",          cert_path,                      "-days",                                     "2",       "-subj",
-            "/CN=127.0.0.1", "-addext",                      "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1",
+            "openssl",       "req",                          "-x509",                                                             "-newkey", "ec",
+            "-pkeyopt",      "ec_paramgen_curve:prime256v1", "-nodes",                                                            "-keyout", key_path,
+            "-out",          cert_path,                      "-days",                                                             "2",       "-subj",
+            "/CN=127.0.0.1", "-addext",                      "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1,DNS:lfs.example.invalid",
         } }, "", .{}) catch return error.SkipZigTest;
         defer made.deinit(gpa);
         if (!made.succeeded()) return error.SkipZigTest;
@@ -554,6 +555,8 @@ pub const Proxy = struct {
     stopping: std.atomic.Value(bool) = .init(false),
     log: std.ArrayList(u8) = .empty,
     log_mutex: Io.Mutex = .init,
+    /// Every `CONNECT`'s whole head, its user agent's version left out.
+    connects: std.ArrayList(u8) = .empty,
     /// `user:password` the proxy requires with `Proxy-Authorization: Basic`,
     /// answering 407 without it.
     basic: ?[]const u8 = null,
@@ -580,6 +583,7 @@ pub const Proxy = struct {
         p.task.await(io);
         p.listener.deinit(io);
         p.log.deinit(p.gpa);
+        p.connects.deinit(p.gpa);
         p.gpa.destroy(p);
     }
 
@@ -595,6 +599,15 @@ pub const Proxy = struct {
         defer p.log_mutex.unlock(p.io);
         defer p.log.clearRetainingCapacity();
         return gpa.dupe(u8, p.log.items);
+    }
+
+    /// Every `CONNECT` head so far, with a `User-Agent: git/` line's value
+    /// cut after `git/`, and forget them. The result is the caller's.
+    pub fn takeConnects(p: *Proxy, gpa: Allocator) ![]u8 {
+        p.log_mutex.lockUncancelable(p.io);
+        defer p.log_mutex.unlock(p.io);
+        defer p.connects.clearRetainingCapacity();
+        return gpa.dupe(u8, p.connects.items);
     }
 
     fn serve(p: *Proxy) void {
@@ -632,6 +645,14 @@ pub const Proxy = struct {
             p.log_mutex.lockUncancelable(io);
             defer p.log_mutex.unlock(io);
             try p.log.print(p.gpa, "{s} {s}\n", .{ method, target });
+            if (std.mem.eql(u8, method, "CONNECT")) {
+                var lines = std.mem.splitSequence(u8, head, "\r\n");
+                while (lines.next()) |line| {
+                    const agent = "User-Agent: git/";
+                    const kept = if (std.mem.startsWith(u8, line, agent)) agent else line;
+                    try p.connects.print(p.gpa, "{s}\n", .{kept});
+                }
+            }
         }
         if (p.basic) |credentials| {
             var expected_buf: [256]u8 = undefined;
@@ -667,7 +688,9 @@ pub const Proxy = struct {
         }
         const colon = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return error.BadRequest;
         const port = try std.fmt.parseUnsigned(u16, host_port[colon + 1 ..], 10);
-        const address = try Io.net.IpAddress.parse(host_port[0..colon], port);
+        // A name that is not an address is this machine: a test names a
+        // host no resolver knows, for a client to send through the proxy.
+        const address = Io.net.IpAddress.parse(host_port[0..colon], port) catch try Io.net.IpAddress.parse("127.0.0.1", port);
         const upstream = try address.connect(io, .{ .mode = .stream });
         defer upstream.close(io);
         var up_read: [16 * 1024]u8 = undefined;
