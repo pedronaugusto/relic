@@ -95,6 +95,39 @@ pub const InitOptions = struct {
 };
 
 /// An open repository.
+/// What `.lfsconfig` was last found from: see `Repository.lfsconfigText`.
+const LfsconfigCache = struct {
+    key: LfsconfigKey,
+    text: ?[]u8,
+};
+
+const LfsconfigKey = struct {
+    /// The working tree's `.lfsconfig`, when there is one: nothing else
+    /// is looked at then.
+    worktree: ?FileStamp = null,
+    index: ?IndexStamp = null,
+    head: ?hash.Oid = null,
+};
+
+/// A file as `stat` sees it, for knowing it has not changed.
+const FileStamp = struct {
+    size: u64,
+    mtime: i96,
+    ctime: i96,
+    inode: Io.File.INode,
+
+    fn of(st: Io.File.Stat) FileStamp {
+        return .{ .size = st.size, .mtime = st.mtime.nanoseconds, .ctime = st.ctime.nanoseconds, .inode = st.inode };
+    }
+};
+
+/// The index as `stat` sees it, and the checksum it ends with, which is
+/// zero when `index.skipHash` leaves it out.
+const IndexStamp = struct {
+    file: FileStamp,
+    checksum: [hash.max_raw_len]u8 = @splat(0),
+};
+
 pub const Repository = struct {
     gpa: Allocator,
     /// The per-worktree directory: `.git`, or a linked worktree's
@@ -125,6 +158,9 @@ pub const Repository = struct {
     /// `error.SigningRequiresPrograms`, for a message. Empty otherwise.
     unsupported: [64]u8 = @splat(0),
     unsupported_len: usize = 0,
+    /// What `lfsconfigText` last found, and what it was found from.
+    lfsconfig_cache: ?LfsconfigCache = null,
+    lfsconfig_mutex: Io.Mutex = .init,
 
     /// Open the repository at `path`, or the first one above it.
     ///
@@ -561,6 +597,7 @@ pub const Repository = struct {
 
     /// Close everything the repository holds.
     pub fn deinit(repo: *Repository, io: Io) void {
+        if (repo.lfsconfig_cache) |c| if (c.text) |t| repo.gpa.free(t);
         repo.refs.deinit();
         repo.odb.deinit(io);
         repo.config.deinit();
@@ -677,15 +714,72 @@ pub const Repository = struct {
 
     /// Errors from finding `.lfsconfig`.
     pub const LfsconfigError = Allocator.Error || Io.Dir.ReadFileAllocError ||
-        index_mod.ReadError || odb_mod.Error || Error;
+        index_mod.ReadError || odb_mod.Error || Error || Io.Dir.StatFileError ||
+        Io.File.OpenError || Io.File.StatError || Io.File.ReadPositionalError || Io.Cancelable;
 
     /// `.lfsconfig` as git-lfs finds it: the file at the top of the working
     /// tree, else its version in the index, else its version in `HEAD`;
     /// only `HEAD`'s in a bare repository. `null` when none of them has
     /// one. The text is the caller's, in the repository's allocator.
+    ///
+    /// What was found is kept with what it was found from — the working
+    /// tree file's size, times and inode, the index's own checksum and
+    /// stat, `HEAD`'s commit — and handed out again while those stay the
+    /// same, so a status that asks each time reads neither the index nor
+    /// `HEAD`'s tree again.
     pub fn lfsconfigText(repo: *Repository, io: Io) LfsconfigError!?[]u8 {
+        try repo.lfsconfig_mutex.lock(io);
+        defer repo.lfsconfig_mutex.unlock(io);
+        const key = try repo.lfsconfigKey(io);
+        if (repo.lfsconfig_cache) |cached| {
+            if (std.meta.eql(cached.key, key)) {
+                return if (cached.text) |t| try repo.gpa.dupe(u8, t) else null;
+            }
+        }
+        const text = try repo.lfsconfigTextUncached(io, key);
+        errdefer if (text) |t| repo.gpa.free(t);
+        const kept = if (text) |t| try repo.gpa.dupe(u8, t) else null;
+        if (repo.lfsconfig_cache) |old| if (old.text) |t| repo.gpa.free(t);
+        repo.lfsconfig_cache = .{ .key = key, .text = kept };
+        return text;
+    }
+
+    fn lfsconfigKey(repo: *Repository, io: Io) LfsconfigError!LfsconfigKey {
+        var key: LfsconfigKey = .{};
         if (repo.work_dir) |wd| {
-            if (try fs.readFileAlloc(repo.gpa, io, wd, ".lfsconfig", 1 << 20)) |text| return text;
+            if (wd.statFile(io, ".lfsconfig", .{})) |st| {
+                if (st.kind != .directory) {
+                    key.worktree = .of(st);
+                    return key;
+                }
+            } else |err| switch (err) {
+                error.FileNotFound, error.NotDir => {},
+                else => |e| return e,
+            }
+            if (repo.git_dir.openFile(io, "index", .{})) |file| {
+                defer file.close(io);
+                const st = try file.stat(io);
+                var stamp: IndexStamp = .{ .file = .of(st) };
+                const n = repo.kind.rawLen();
+                if (st.size >= n) _ = try file.readPositionalAll(io, stamp.checksum[0..n], st.size - n);
+                key.index = stamp;
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            }
+        }
+        if (try repo.head(io)) |h| {
+            repo.gpa.free(h.name);
+            key.head = h.oid;
+        }
+        return key;
+    }
+
+    fn lfsconfigTextUncached(repo: *Repository, io: Io, key: LfsconfigKey) LfsconfigError!?[]u8 {
+        if (repo.work_dir) |wd| {
+            if (key.worktree != null) {
+                if (try fs.readFileAlloc(repo.gpa, io, wd, ".lfsconfig", 1 << 20)) |text| return text;
+            }
             var index = repo.openIndex(io) catch |err| switch (err) {
                 error.FileNotFound => null,
                 else => |e| return e,

@@ -1686,3 +1686,45 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
     // Without the time nothing is swept.
     try testing.expectEqual(@as(usize, 8), std.mem.count(u8, listings[2], "\n"));
 }
+
+test "a repeated .lfsconfig lookup is answered from what it was found from, and a change to any of that is seen" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    var d = try fx.dir("r");
+    defer d.close(io);
+    try fx.gitIn(d, &.{ "init", "-q", "-b", "main" });
+    var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+    defer repo.deinit(io);
+    const Step = struct { run: ?[]const []const u8 = null, write: ?[]const u8 = null, remove: bool = false, want: ?[]const u8 };
+    const steps = [_]Step{
+        .{ .want = null },
+        .{ .write = "[lfs]\n\turl = https://one/\n", .want = "[lfs]\n\turl = https://one/\n" },
+        // The same size, written again: its times change.
+        .{ .write = "[lfs]\n\turl = https://two/\n", .want = "[lfs]\n\turl = https://two/\n" },
+        .{ .run = &.{ "add", ".lfsconfig" }, .want = "[lfs]\n\turl = https://two/\n" },
+        .{ .remove = true, .want = "[lfs]\n\turl = https://two/\n" },
+        .{ .run = &.{ "commit", "-q", "-m", "lfsconfig" }, .want = "[lfs]\n\turl = https://two/\n" },
+        .{ .run = &.{ "rm", "-q", "--cached", ".lfsconfig" }, .want = "[lfs]\n\turl = https://two/\n" },
+        .{ .run = &.{ "commit", "-q", "-m", "gone" }, .want = null },
+    };
+    for (steps) |step| {
+        if (step.write) |text| try d.writeFile(io, .{ .sub_path = ".lfsconfig", .data = text });
+        if (step.remove) try d.deleteFile(io, ".lfsconfig");
+        if (step.run) |args| try fx.gitIn(d, args);
+        // Twice: found, then handed out again.
+        for (0..2) |_| {
+            const text = try repo.lfsconfigText(io);
+            defer if (text) |t| gpa.free(t);
+            if (step.want) |w| try testing.expectEqualStrings(w, text.?) else try testing.expect(text == null);
+        }
+    }
+    // A change the index alone shows: a new version staged over the file's.
+    try d.writeFile(io, .{ .sub_path = ".lfsconfig", .data = "[lfs]\n\turl = https://staged/\n" });
+    try fx.gitIn(d, &.{ "add", ".lfsconfig" });
+    try d.deleteFile(io, ".lfsconfig");
+    const staged = (try repo.lfsconfigText(io)).?;
+    defer gpa.free(staged);
+    try testing.expectEqualStrings("[lfs]\n\turl = https://staged/\n", staged);
+}
