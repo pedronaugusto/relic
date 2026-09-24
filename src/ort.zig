@@ -53,6 +53,15 @@ pub const Error = error{
     /// A path's `merge` attribute names a driver `merge.<name>.driver`
     /// configures, which is a program this merge does not run.
     UnsupportedMergeDriver,
+    /// A content merge was asked of a file and something of another type.
+    /// git's merge-ort reaches this when a file renamed differently on the
+    /// two sides lands, through the other side's directory rename, on a
+    /// path the other side keeps a directory at: splitting that path's file
+    /// from its directory clears the file's own stage, and the rename's
+    /// content merge then meets a file and nothing. git stops there on an
+    /// assertion in `handle_content_merge`, leaving no answer to give, and
+    /// so this stops there too.
+    MergeOfDifferentTypes,
 } || Allocator.Error || odb_mod.Error || object.TreeParseError || object.ParseError ||
     attributes.Error || revwalk.Error;
 
@@ -943,6 +952,7 @@ const Merge = struct {
         extra_marker_size: u32,
         result: *Version,
     ) Error!bool {
+        if ((a.mode & S_IFMT) != (b.mode & S_IFMT)) return error.MergeOfDifferentTypes;
         var clean = true;
         if (a.mode == b.mode or a.mode == o.mode) {
             result.mode = b.mode;

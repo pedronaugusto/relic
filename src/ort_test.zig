@@ -83,11 +83,9 @@ const SubOpener = struct {
 
 /// The merge of `ours` into `theirs` both ways, against git's.
 fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8, theirs: []const u8, options: ort.Options) !void {
-    const expected = try repo.runInput(io, &.{ "merge-tree", "--write-tree", "-z", "--messages", ours, theirs }, "");
-    defer gpa.free(expected);
-    // git's merge stops on an internal check on a few of these histories,
-    // printing nothing; there is no answer to compare with.
-    if (expected.len == 0) return;
+    var git = try repo.capture(io, &.{ "merge-tree", "--write-tree", "-z", "--messages", ours, theirs });
+    defer git.deinit(gpa);
+    const expected = git.stdout;
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
@@ -96,7 +94,23 @@ fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8
     var opts = options;
     opts.labels.ours = ours;
     opts.labels.theirs = theirs;
-    var result = try ort.mergeCommits(gpa, io, &db, try revParse(gpa, io, repo, ours), try revParse(gpa, io, repo, theirs), null, opts);
+    const merged = ort.mergeCommits(gpa, io, &db, try revParse(gpa, io, repo, ours), try revParse(gpa, io, repo, theirs), null, opts);
+    // On a few histories git's merge stops on its own assertion and prints
+    // nothing. There the merge has to stop the same way, on the same check,
+    // and nowhere else.
+    if (expected.len == 0 and git.code > 1) {
+        if (std.mem.indexOf(u8, git.stderr, "handle_content_merge") == null) {
+            std.debug.print("git's merge-tree of {s} and {s} failed: {s}\n", .{ ours, theirs, git.stderr });
+            return error.GitFailed;
+        }
+        if (merged) |r| {
+            var result = r;
+            result.deinit();
+            return error.TestExpectedError;
+        } else |err| try std.testing.expectEqual(error.MergeOfDifferentTypes, err);
+        return;
+    }
+    var result = try merged;
     defer result.deinit();
     const got = try render(gpa, &result);
     defer gpa.free(got);
@@ -186,6 +200,38 @@ test "rename/rename, rename/delete and rename/add conflicts are git's" {
 
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
     try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
+}
+
+test "a rename both ways that a directory rename lands on a directory stops where git's merge stops" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    try repo.writeFile(io, "lib/a.txt", "one\ntwo\nthree\n");
+    try repo.writeFile(io, "lib/util/f5.txt", "x\ny\nz\n");
+    try commitAll(io, &repo, "base");
+    try repo.exec(io, &.{ "branch", "topic" });
+    // main moves the whole of lib/, so lib/util/f5.txt goes with it.
+    try repo.exec(io, &.{ "mv", "lib", "moved" });
+    try commitAll(io, &repo, "main");
+    try repo.exec(io, &.{ "checkout", "-q", "topic" });
+    // topic renames lib/util/f5.txt to lib/util, a file where its
+    // directory was, which main's move then carries to moved/util -- a
+    // directory on main's side.
+    try repo.exec(io, &.{ "rm", "-q", "lib/util/f5.txt" });
+    try repo.writeFile(io, "lib/util", "x\ny\nz\n");
+    try commitAll(io, &repo, "topic");
+
+    // Merged into topic, git stops on its assertion and so does this.
+    var git = try repo.capture(io, &.{ "merge-tree", "--write-tree", "topic", "main" });
+    defer git.deinit(gpa);
+    try std.testing.expectEqualStrings("", git.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, git.stderr, "handle_content_merge") != null);
+    try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
+    // Merged into main the file is on the other side, and both finish.
+    try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
 }
 
 /// A random history for the merge to meet: files in a few directories,
