@@ -331,7 +331,8 @@ test "ssh is started for git-lfs-authenticate as git-lfs starts it, and its toke
     // handed the same arguments by each.
     const ours_path = try fx.path("ours");
     defer gpa.free(ours_path);
-    var logs: [2][]u8 = undefined;
+    var logs: [2][]u8 = .{ &.{}, &.{} };
+    defer for (logs) |l| gpa.free(l);
     for ([_][]const u8{ "by-git", "by-relic" }, 0..) |name, i| {
         const dest = try fx.path(name);
         defer gpa.free(dest);
@@ -357,7 +358,6 @@ test "ssh is started for git-lfs-authenticate as git-lfs starts it, and its toke
         try expectFile(fx, d, "a.bin", content);
         logs[i] = try fx.tools.readFileAlloc(io, "fake-ssh.log", gpa, .unlimited);
     }
-    defer for (logs) |l| gpa.free(l);
     try testing.expectEqualStrings(logs[0], logs[1]);
     try testing.expect(std.mem.indexOf(u8, logs[1], "[git-lfs-authenticate /org/repo.git download]") != null);
     // No request went out without the token.
@@ -867,4 +867,70 @@ test "a .netrc in the home directory is used before any helper, as git-lfs uses 
     const ours = try fx.tools.readFileAlloc(io, "by-relic-helper.log", gpa, .unlimited);
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
+}
+
+test "a download that breaks off goes on from where it stopped, as git-lfs's does, and the name is checked over the whole" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const content = try noise(gpa, 300 * 1024, 14);
+    defer gpa.free(content);
+    try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    var dirs: [2]Io.Dir = undefined;
+    for ([_][]const u8{ "by-git", "by-relic" }, &dirs) |name, *d| {
+        d.* = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
+        try emptyStore(fx, d.*);
+    }
+    defer for (dirs) |d| d.close(io);
+
+    // Each download breaks off half way once, and the retry asks for the
+    // rest with the same Range.
+    var logs: [2][]u8 = .{ &.{}, &.{} };
+    defer for (logs) |l| gpa.free(l);
+    for (dirs, 0..) |d, i| {
+        fx.server.clearLog();
+        try fx.server.fail(.{ .route = .download, .cut = true });
+        if (i == 0) {
+            try fx.gitIn(d, &.{ "lfs", "fetch" });
+        } else {
+            var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+            defer repo.deinit(io);
+            const server = try openServer(fx, &repo);
+            defer server.close();
+            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer fetched.deinit();
+            try expectNoFailures(&fetched);
+        }
+        const oid = testlfs.sha256Hex(content);
+        var path_buf: [128]u8 = undefined;
+        try expectFile(fx, d, try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid }), content);
+        const seen = try fx.server.requests(gpa);
+        defer gpa.free(seen);
+        const at = std.mem.indexOf(u8, seen, "range=") orelse return error.TestUnexpectedResult;
+        logs[i] = try gpa.dupe(u8, seen[at..std.mem.indexOfScalarPos(u8, seen, at, '\n').?]);
+    }
+    try testing.expectEqualStrings(logs[0], logs[1]);
+    try testing.expectEqualStrings("range=bytes=153600-307199", logs[1]);
+
+    // A partial left by an earlier run is gone on from; one that is not
+    // the object's beginning is thrown away and the object fetched whole.
+    const oid = testlfs.sha256Hex(content);
+    var part_buf: [160]u8 = undefined;
+    const part = try std.fmt.bufPrint(&part_buf, ".git/lfs/incomplete/{s}.part", .{&oid});
+    for ([_][]const u8{ content[0 .. 100 * 1024], "not the beginning of it" }) |partial| {
+        try emptyStore(fx, dirs[1]);
+        try dirs[1].createDirPath(io, ".git/lfs/incomplete");
+        try dirs[1].writeFile(io, .{ .sub_path = part, .data = partial });
+        var repo = try repo_mod.Repository.open(gpa, io, dirs[1], .{});
+        defer repo.deinit(io);
+        const server = try openServer(fx, &repo);
+        defer server.close();
+        var fetched = try lfstransfer.fetch(server, &repo, .{});
+        defer fetched.deinit();
+        try expectNoFailures(&fetched);
+        try testing.expectError(error.FileNotFound, dirs[1].access(io, part, .{}));
+    }
 }

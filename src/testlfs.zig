@@ -101,8 +101,11 @@ pub const Lock = struct {
 /// its kind comes.
 pub const Fault = struct {
     route: Route,
-    status: u16,
+    status: u16 = 200,
     retry_after: ?[]const u8 = null,
+    /// For a download: send the status and the whole length, then only
+    /// half the bytes, and close — a connection that breaks off.
+    cut: bool = false,
 
     pub const Route = enum { batch, download, upload, verify, locks };
 };
@@ -320,11 +323,13 @@ pub const Server = struct {
         var authorization: ?[]const u8 = null;
         var content_type: ?[]const u8 = null;
         var git_protocol: ?[]const u8 = null;
+        var range: ?[]const u8 = null;
         var headers = request.iterateHeaders();
         while (headers.next()) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, "authorization")) authorization = try arena.dupe(u8, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "content-type")) content_type = try arena.dupe(u8, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "git-protocol")) git_protocol = try arena.dupe(u8, h.value);
+            if (std.ascii.eqlIgnoreCase(h.name, "range")) range = try arena.dupe(u8, h.value);
         }
         const question = std.mem.indexOfScalar(u8, target, '?');
         const path = target[0 .. question orelse target.len];
@@ -347,7 +352,10 @@ pub const Server = struct {
         const route = path[prefix.len..];
 
         const user = s.authenticate(authorization);
-        try s.logRequest(method, route, user orelse "?");
+        if (range) |r| {
+            const logged = try std.fmt.allocPrint(arena, "{s} range={s}", .{ user orelse "?", r });
+            try s.logRequest(method, route, logged);
+        } else try s.logRequest(method, route, user orelse "?");
         if (user == null) {
             return request.respond("{\"message\":\"Credentials needed\"}", .{
                 .status = .unauthorized,
@@ -373,8 +381,30 @@ pub const Server = struct {
         if (std.mem.startsWith(u8, route, "/objects/") and route.len == "/objects/".len + 64) {
             const oid = route["/objects/".len..];
             if (method == .GET) {
-                if (s.takeFault(.download)) |f| return respondFault(&request, f);
+                const fault = s.takeFault(.download);
+                if (fault) |f| if (!f.cut) return respondFault(&request, f);
                 const bytes = try s.object(arena, oid) orelse return request.respond("", .{ .status = .not_found, .keep_alive = false });
+                if (fault != null) {
+                    const out = request.server.out;
+                    try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{bytes.len});
+                    try out.writeAll(bytes[0 .. bytes.len / 2]);
+                    try out.flush();
+                    return;
+                }
+                if (range) |r| {
+                    // `bytes=<first>-<last>`, as a client resuming asks.
+                    const spec = if (std.mem.startsWith(u8, r, "bytes=")) r["bytes=".len..] else "";
+                    const dash = std.mem.indexOfScalar(u8, spec, '-') orelse spec.len;
+                    const first = std.fmt.parseInt(usize, spec[0..dash], 10) catch bytes.len;
+                    const last = if (dash + 1 < spec.len) std.fmt.parseInt(usize, spec[dash + 1 ..], 10) catch bytes.len - 1 else bytes.len - 1;
+                    if (first >= bytes.len or last < first) return request.respond("", .{ .status = .range_not_satisfiable, .keep_alive = false });
+                    const end = @min(last + 1, bytes.len);
+                    const content_range = try std.fmt.allocPrint(arena, "bytes {d}-{d}/{d}", .{ first, end - 1, bytes.len });
+                    return request.respond(bytes[first..end], .{ .status = .partial_content, .keep_alive = false, .extra_headers = &.{
+                        .{ .name = "Content-Type", .value = "application/octet-stream" },
+                        .{ .name = "Content-Range", .value = content_range },
+                    } });
+                }
                 return request.respond(bytes, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/octet-stream" }} });
             }
             if (method == .PUT) {

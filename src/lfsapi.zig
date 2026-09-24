@@ -1225,6 +1225,9 @@ pub const Client = struct {
         access_url: ?[]const u8 = null,
         /// How often a request that could not be made at all is made again.
         network_retries: u32 = 0,
+        /// Ask for the body as it is stored, not compressed on the way: an
+        /// object, whose bytes a `Range` counts.
+        identity: bool = false,
         /// Told of every chunk of an `object` body as it goes out.
         on_bytes: ?BytesSent = null,
         /// Where the bytes of an `object` body sent so far are counted, so a
@@ -1405,6 +1408,7 @@ pub const Client = struct {
                 .user_agent = .{ .override = user_agent },
                 .authorization = if (auth_header) |h| .{ .override = h } else .omit,
                 .content_type = if (content_type) |t| .{ .override = t } else .default,
+                .accept_encoding = if (request.identity) .{ .override = "identity" } else .default,
             },
             .extra_headers = headers.items,
             .keep_alive = true,

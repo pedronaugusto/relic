@@ -68,7 +68,8 @@ pub const Error = error{
     /// The server chose a transfer adapter other than `basic`, which is
     /// the only one relic offers.
     LfsTransferUnsupported,
-} || lfsapi.Error || lfs.Store.InstallError || lfs.Store.OpenError || Io.ConcurrentError;
+} || lfsapi.Error || lfs.Store.InstallError || lfs.Store.OpenError || Io.ConcurrentError ||
+    Io.File.ReadPositionalError || Io.File.WritePositionalError || Io.File.SetLengthError;
 
 /// An object to move.
 pub const Object = struct {
@@ -736,6 +737,8 @@ fn accessUrl(href: []const u8, oid: []const u8) []const u8 {
 
 fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool) Error!Attempt {
     const server = state.server;
+    const io = server.io;
+    const store = server.store();
     var scratch_state: std.heap.ArenaAllocator = .init(server.gpa);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
@@ -744,33 +747,159 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
         error.InvalidHttpHeader => return .{ .fail = "the server's action has a header with a line break in it" },
         error.OutOfMemory => return error.OutOfMemory,
     };
-    const ex = server.client.send(.{
-        .method = .GET,
-        .url = href,
-        .headers = headers,
-        .authenticated = authenticated,
-        .access_url = accessUrl(action.href, &r.oid),
-    }) catch |err| switch (err) {
-        error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects => return .{ .retry = .{ .message = try state.dupe(server.client.message()) } },
-        error.OutOfMemory, error.Canceled => |e| return e,
-        else => |e| return .{ .fail = @errorName(e) },
+
+    // The download goes into `<lfs>/incomplete`, as git-lfs's does, and a
+    // download that breaks off leaves `<oid>.part` there for the next
+    // attempt — this operation's or a later one's — to go on from.
+    const incomplete = try std.fmt.allocPrint(scratch, "{s}/incomplete", .{store.root});
+    try store.base.createDirPath(io, incomplete);
+    const part_path = try std.fmt.allocPrint(scratch, "{s}/{s}.part", .{ incomplete, &r.oid });
+    var name_buf: [64]u8 = undefined;
+    const temp_path = try std.fmt.allocPrint(scratch, "{s}/{s}", .{ incomplete, fs.tempName(io, &name_buf, "dl-") });
+    var resumed = true;
+    fs.renameWithRetry(io, store.base, part_path, temp_path) catch |err| switch (err) {
+        error.FileNotFound => resumed = false,
+        else => |e| return e,
+    };
+    const file = if (resumed)
+        try store.base.openFile(io, temp_path, .{ .mode = .read_write })
+    else
+        try store.base.createFile(io, temp_path, .{ .exclusive = true, .read = true });
+    var keep_part = false;
+    var installed = false;
+    defer {
+        file.close(io);
+        if (!installed) {
+            if (keep_part) {
+                fs.renameWithRetry(io, store.base, temp_path, part_path) catch {};
+            } else store.base.deleteFile(io, temp_path) catch {};
+        }
+    }
+
+    // What is already there is hashed again, so the name is taken over the
+    // whole object whichever attempt brought each byte.
+    var sha: std.crypto.hash.sha2.Sha256 = .init(.{});
+    var from: u64 = 0;
+    if (resumed) {
+        var buf: [64 * 1024]u8 = undefined;
+        while (true) {
+            const n = try file.readPositionalAll(io, &buf, from);
+            if (n == 0) break;
+            sha.update(buf[0..n]);
+            from += n;
+            if (n < buf.len) break;
+        }
+        if (from >= r.size) {
+            // More than a partial object can be: start again.
+            try file.setLength(io, 0);
+            from = 0;
+            sha = .init(.{});
+        }
+    }
+    const resumed_from = from;
+
+    var range_buf: [64]u8 = undefined;
+    var attempt_range = from > 0;
+    const ex = while (true) {
+        var all: std.ArrayList(http.Header) = .empty;
+        try all.appendSlice(scratch, headers);
+        if (attempt_range) try all.append(scratch, .{ .name = "Range", .value = try std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ from, r.size - 1 }) });
+        const sent = server.client.send(.{
+            .method = .GET,
+            .url = href,
+            .headers = all.items,
+            .authenticated = authenticated,
+            .access_url = accessUrl(action.href, &r.oid),
+            .identity = true,
+        }) catch |err| switch (err) {
+            error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects => {
+                keep_part = from > 0;
+                return .{ .retry = .{ .message = try state.dupe(server.client.message()) } };
+            },
+            error.OutOfMemory, error.Canceled => |e| return e,
+            else => |e| return .{ .fail = @errorName(e) },
+        };
+        const status = sent.status();
+        if (attempt_range and status == .range_not_satisfiable) {
+            // The server will not go on from there: from the start.
+            sent.close();
+            try file.setLength(io, 0);
+            from = 0;
+            sha = .init(.{});
+            attempt_range = false;
+            continue;
+        }
+        if (attempt_range and status == .partial_content) {
+            const content_range = sent.header("content-range") orelse "";
+            var want_buf: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&want_buf, "bytes {d}-", .{from}) catch unreachable;
+            if (!std.mem.startsWith(u8, content_range, want)) {
+                sent.close();
+                try file.setLength(io, 0);
+                from = 0;
+                sha = .init(.{});
+                attempt_range = false;
+                continue;
+            }
+        } else if (attempt_range and status == .ok) {
+            // The Range was passed over and the whole object came.
+            try file.setLength(io, 0);
+            from = 0;
+            sha = .init(.{});
+        }
+        break sent;
     };
     defer ex.close();
     const status = ex.status();
     if (status.class() != .success) {
+        keep_part = from > 0;
         const why = try std.fmt.allocPrint(scratch, "HTTP {d} from {s}", .{ @intFromEnum(status), lfsapi.stripQuery(action.href) });
         if (status == .too_many_requests) return .{ .retry = .{ .message = try state.dupe(why), .after_s = ex.retryAfter() } };
         return .{ .retry = .{ .message = try state.dupe(why) } };
     }
+
+    if (from > 0) state.say(.{ .bytes = from });
     const body = try ex.reader();
     var counting: Counting = .init(body, state);
+    var buf: [64 * 1024]u8 = undefined;
+    var at = from;
+    while (true) {
+        const n = counting.interface.readSliceShort(&buf) catch {
+            // Broken off: what came is kept for the next attempt.
+            keep_part = at > 0;
+            return .{ .retry = .{ .message = try state.dupe(ex.bodyError()) } };
+        };
+        if (n == 0) break;
+        if (at + n > r.size) return .{ .fail = "the server sent more than the object's size" };
+        sha.update(buf[0..n]);
+        try file.writePositionalAll(io, buf[0..n], at);
+        at += n;
+        if (n < buf.len) break;
+    }
+    counting.flush();
+    if (at < r.size) {
+        // The body ended early: what came is kept for the next attempt.
+        keep_part = true;
+        return .{ .retry = .{ .message = "the download broke off" } };
+    }
+    var digest: [32]u8 = undefined;
+    sha.final(&digest);
+    var hex: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    if (!std.mem.eql(u8, &hex, &r.oid)) {
+        // A partial file that was not the start of this object: it is
+        // thrown away, and the next attempt starts from nothing.
+        if (resumed_from > 0) return .{ .retry = .{ .message = "a partial download was not the object's beginning" } };
+        return .{ .fail = "the bytes the server sent are not the object" };
+    }
+
+    var object_buf: [lfs.Store.max_path]u8 = undefined;
     const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
-    _ = server.store().install(server.io, &counting.interface, &pointer) catch |err| switch (err) {
-        error.ReadFailed => return .{ .retry = .{ .message = try state.dupe(ex.bodyError()) } },
-        error.LfsObjectMismatch => return .{ .fail = "the bytes the server sent are not the object" },
-        error.Canceled => return error.Canceled,
-        else => |e| return e,
-    };
+    const object_path = try store.objectPath(&object_buf, &pointer.oid);
+    if (try store.contains(io, &pointer)) return .ok;
+    try store.base.createDirPath(io, std.fs.path.dirnamePosix(object_path).?);
+    try fs.renameWithRetry(io, store.base, temp_path, object_path);
+    installed = true;
     return .ok;
 }
 
