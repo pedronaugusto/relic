@@ -40,6 +40,7 @@ const sendpack = @import("sendpack.zig");
 const objectwalk = @import("objectwalk.zig");
 const credential = @import("credential.zig");
 const progress_mod = @import("progress.zig");
+const lfspush = @import("lfspush.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -66,7 +67,7 @@ pub const Error = error{
     NoPushDestination,
     /// The `pre-push` hook refused the push.
     PrePushRefused,
-} || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error || revwalk.Error;
+} || lfspush.Error || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error || revwalk.Error;
 
 /// What a `pre-push` hook is shown: one line of its input.
 pub const PrePushUpdate = struct {
@@ -116,6 +117,10 @@ pub const Options = struct {
     /// Who the remote-tracking refs' log entries are written as, and when.
     who: object.Signature,
     pre_push: ?PrePush = null,
+    /// What git-lfs's pre-push hook does, done here: other people's locks
+    /// checked and the LFS objects the pushed commits point at uploaded,
+    /// before any ref is sent. A dry run does neither.
+    lfs: lfspush.Options = .{},
     programs: ?program.Programs = null,
     prompt: ?credential.Prompt = null,
     progress: ?progress_mod.Progress = null,
@@ -333,6 +338,16 @@ fn pushTo(
         }
         var objects = try objectwalk.missing(gpa, io, &repo.odb, include.items, exclude.items);
         defer objects.deinit();
+
+        var remote_refs_pushed: std.ArrayList([]const u8) = .empty;
+        for (commands.items) |c| {
+            if (!c.new.isZero()) try remote_refs_pushed.append(arena, c.name);
+        }
+        try lfspush.beforePush(gpa, io, repo, remote.name orelse url, remote_refs_pushed.items, objects.entries, .{
+            .programs = options.programs,
+            .prompt = options.prompt,
+            .progress = options.progress,
+        }, options.lfs);
 
         var report = try session.push(gpa, io, &repo.odb, .{
             .commands = commands.items,
