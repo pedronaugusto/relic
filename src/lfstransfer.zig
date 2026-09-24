@@ -155,6 +155,8 @@ pub const Outcome = struct {
 pub const Options = struct {
     /// The ref the objects are for, sent in the batch as git-lfs sends it —
     /// `refs/heads/main` — so a server that scopes access by branch can.
+    /// A download with none names `Server.download_ref`, as git-lfs's
+    /// downloads all name the current branch's.
     ref: ?[]const u8 = null,
     /// Where `lfs_objects` and `lfs_bytes` events go. They are sent from
     /// the calling task.
@@ -507,8 +509,11 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
     return false;
 }
 
-fn run(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, options: Options) Error!Outcome {
+fn run(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
     const gpa = server.gpa;
+    // A download names the ref git-lfs names, whatever it is for.
+    var options = given;
+    if (options.ref == null and operation == .download) options.ref = server.download_ref;
     const io = server.io;
     var outcome: Outcome = .{ .arena = .init(gpa), .results = &.{} };
     errdefer outcome.arena.deinit();
@@ -1349,10 +1354,10 @@ pub fn fetch(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) F
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var transfer = options.transfer;
+    const transfer = options.transfer;
     var tips: std.ArrayList(Oid) = .empty;
     var pointers: std.ArrayList(Object) = .empty;
-    try pointers.appendSlice(arena, try scan(arena, server.io, repo, options, &transfer.ref, &tips));
+    try pointers.appendSlice(arena, try scan(arena, server.io, repo, options, &tips));
     const recent = options.recent orelse server.settings.getBool("lfs.fetchrecentalways", false);
     if (recent and !options.history) {
         try pointers.appendSlice(arena, try recentPointers(arena, server, repo, tips.items, options.now));
@@ -1459,15 +1464,10 @@ fn treeOfCommit(arena: Allocator, io: Io, repo: *Repository, oid: Oid) FetchErro
 }
 
 /// The pointers in the trees `options` asks for, each with a path it is at.
-fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, ref_out: *?[]const u8, tips_out: *std.ArrayList(Oid)) FetchError![]Object {
+fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips_out: *std.ArrayList(Oid)) FetchError![]Object {
     const tips = tips_out;
     for (options.refs) |name| {
         const found = try resolve(arena, io, repo, name);
-        if (ref_out.* == null) {
-            if (found.ref) |full| {
-                if (std.mem.startsWith(u8, full, "refs/")) ref_out.* = full;
-            }
-        }
         try tips.append(arena, try repo.peel(io, found.oid));
     }
     var out: std.ArrayList(Object) = .empty;

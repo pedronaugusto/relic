@@ -1700,6 +1700,9 @@ pub const Server = struct {
     remote: []u8,
     /// `FETCH_HEAD`, for the endpoint's last resort.
     fetch_head: ?[]u8 = null,
+    /// The ref a download's batch names, as git-lfs names it whatever is
+    /// fetched: `downloadRef`.
+    download_ref: []u8 = &.{},
 
     /// Errors from opening a server.
     pub const OpenError = Error || Settings.LoadError || LfsconfigError || lfs.Lfs.LoadError || Io.Dir.RealPathFileAllocError;
@@ -1743,6 +1746,8 @@ pub const Server = struct {
         errdefer gpa.free(s.remote);
         s.fetch_head = try fs.readFileAlloc(gpa, io, repo.git_dir, "FETCH_HEAD", 1 << 20);
         errdefer if (s.fetch_head) |f| gpa.free(f);
+        s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
+        errdefer gpa.free(s.download_ref);
         s.lfs = try lfs.Lfs.load(gpa, io, &repo.config, repo.common_dir, null, .{ .lfsconfig = lfsconfig });
         errdefer s.lfs.deinit();
         s.client = try Client.init(gpa, io, &s.settings, s.remote, .{ .base = s.base_path, .fetch_head = s.fetch_head }, options);
@@ -1758,6 +1763,7 @@ pub const Server = struct {
         gpa.free(s.base_path);
         gpa.free(s.remote);
         if (s.fetch_head) |f| gpa.free(f);
+        gpa.free(s.download_ref);
         gpa.destroy(s);
     }
 
@@ -1766,6 +1772,22 @@ pub const Server = struct {
         return &s.lfs.store;
     }
 };
+
+/// The ref git-lfs names in every download's batch, whatever the download
+/// is for: the branch `HEAD` is on, or its `branch.<name>.merge` when that
+/// is set; `HEAD` when it is detached; and nothing on a branch with no
+/// commit yet, which git-lfs cannot resolve. The result is the caller's.
+pub fn downloadRef(gpa: Allocator, io: Io, repo: *repo_mod.Repository, settings: *const Settings) (Error || @import("refs.zig").ReadError)![]u8 {
+    const head = (try repo.head(io)) orelse return gpa.dupe(u8, "");
+    defer repo.gpa.free(head.name);
+    if (!std.mem.startsWith(u8, head.name, "refs/heads/")) return gpa.dupe(u8, head.name);
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const key = try std.fmt.allocPrint(a, "branch.{s}.merge", .{head.name["refs/heads/".len..]});
+    if (try settings.get(a, key)) |merge| return gpa.dupe(u8, merge);
+    return gpa.dupe(u8, head.name);
+}
 
 /// A boolean as git-lfs reads one: unset or empty is `fallback`, and a
 /// word it does not know is false.

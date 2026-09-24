@@ -130,6 +130,9 @@ pub const Server = struct {
     /// One `<method> <oid> <header>=<value>` line per object moved, for the
     /// headers a test compares.
     object_log: std.ArrayList(u8) = .empty,
+    /// One `<operation> <ref>` line per batch: the ref's name in quotes,
+    /// `no name`, or `no ref`.
+    batch_refs: std.ArrayList(u8) = .empty,
 
     /// How the server behaves.
     pub const Options = struct {
@@ -203,6 +206,7 @@ pub const Server = struct {
         s.faults.deinit(s.gpa);
         s.log.deinit(s.gpa);
         s.object_log.deinit(s.gpa);
+        s.batch_refs.deinit(s.gpa);
         s.gpa.destroy(s);
     }
 
@@ -290,6 +294,14 @@ pub const Server = struct {
         defer s.mutex.unlock(s.io);
         s.log.clearRetainingCapacity();
         s.object_log.clearRetainingCapacity();
+        s.batch_refs.clearRetainingCapacity();
+    }
+
+    /// The refs the batches seen so far named, one line each. The caller's.
+    pub fn batchRefs(s: *Server, gpa: Allocator) ![]u8 {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        return gpa.dupe(u8, s.batch_refs.items);
     }
 
     /// The headers of the object requests seen so far, sorted, one
@@ -515,9 +527,16 @@ pub const Server = struct {
     fn batch(s: *Server, request: *http.Server.Request, arena: Allocator, base: []const u8, body: []const u8, token: ?[]const u8) !void {
         const auth_header = if (token) |t| try std.fmt.allocPrint(arena, ",\"Authorization\":\"{s}\"", .{t}) else "";
         const Wanted = struct { oid: []const u8, size: u64 };
-        const Batch = struct { operation: []const u8, objects: []const Wanted };
+        const Ref = struct { name: ?[]const u8 = null };
+        const Batch = struct { operation: []const u8, objects: []const Wanted, ref: ?Ref = null };
         const b = std.json.parseFromSliceLeaky(Batch, arena, body, .{ .ignore_unknown_fields = true }) catch
             return request.respond("{\"message\":\"malformed batch\"}", .{ .status = .unprocessable_entity, .keep_alive = false });
+        {
+            s.mutex.lockUncancelable(s.io);
+            defer s.mutex.unlock(s.io);
+            const name: []const u8 = if (b.ref) |r| (if (r.name) |n| try std.fmt.allocPrint(arena, "\"{s}\"", .{n}) else "no name") else "no ref";
+            try s.batch_refs.print(s.gpa, "{s} {s}\n", .{ b.operation, name });
+        }
         const upload = std.mem.eql(u8, b.operation, "upload");
         var out: std.Io.Writer.Allocating = .init(arena);
         const w = &out.writer;

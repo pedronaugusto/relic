@@ -1243,3 +1243,52 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
         }
     }
 }
+
+test "every download's batch names the current branch's ref, as git-lfs's do, whatever is fetched" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const content = "named by a ref\n";
+    try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    const Stage = struct { step: []const []const u8, refs: []const []const u8, want: []const u8 };
+    const stages = [_]Stage{
+        .{ .step = &.{ "branch", "other" }, .refs = &.{}, .want = "download \"refs/heads/main\"\n" },
+        .{ .step = &.{ "config", "branch.main.merge", "refs/heads/trunk" }, .refs = &.{}, .want = "download \"refs/heads/trunk\"\n" },
+        .{ .step = &.{ "config", "branch.main.merge", "refs/heads/trunk" }, .refs = &.{"other"}, .want = "download \"refs/heads/trunk\"\n" },
+        .{ .step = &.{ "checkout", "-q", "--detach" }, .refs = &.{}, .want = "download \"HEAD\"\n" },
+    };
+    var dirs: [2]Io.Dir = undefined;
+    for ([_][]const u8{ "by-git", "by-relic" }, &dirs) |name, *d| d.* = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
+    defer for (dirs) |d| d.close(io);
+    for (stages) |stage| {
+        var logs: [2][]u8 = .{ &.{}, &.{} };
+        defer for (logs) |l| gpa.free(l);
+        for (dirs, 0..) |d, i| {
+            try fx.gitIn(d, stage.step);
+            try emptyStore(fx, d);
+            fx.server.clearLog();
+            if (i == 0) {
+                var args: std.ArrayList([]const u8) = .empty;
+                defer args.deinit(gpa);
+                try args.appendSlice(gpa, &.{ "lfs", "fetch" });
+                if (stage.refs.len != 0) try args.append(gpa, "origin");
+                try args.appendSlice(gpa, stage.refs);
+                try fx.gitIn(d, args.items);
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try openServer(fx, &repo);
+                defer server.close();
+                var fetched = try lfstransfer.fetch(server, &repo, if (stage.refs.len != 0) .{ .refs = stage.refs } else .{});
+                defer fetched.deinit();
+                try expectNoFailures(&fetched);
+            }
+            logs[i] = try fx.server.batchRefs(gpa);
+        }
+        try testing.expectEqualStrings(logs[0], logs[1]);
+        try testing.expectEqualStrings(stage.want, logs[1]);
+    }
+}
