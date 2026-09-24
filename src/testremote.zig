@@ -448,8 +448,14 @@ pub const TlsFront = struct {
     const script =
         \\import select, socket, ssl, sys, threading
         \\cert, key, backend = sys.argv[1], sys.argv[2], int(sys.argv[3])
+        \\client_ca, version = sys.argv[4], sys.argv[5]
         \\ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         \\ctx.load_cert_chain(cert, key)
+        \\if client_ca:
+        \\    ctx.verify_mode = ssl.CERT_REQUIRED
+        \\    ctx.load_verify_locations(client_ca)
+        \\if version == "1.2":
+        \\    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
         \\ls = socket.socket()
         \\ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         \\ls.bind(("127.0.0.1", 0))
@@ -459,6 +465,12 @@ pub const TlsFront = struct {
         \\def serve(c):
         \\    try: s = ctx.wrap_socket(c, server_side=True)
         \\    except Exception:
+        \\        # The alert is sent; close without a reset, which would
+        \\        # take it from the client before it is read.
+        \\        try:
+        \\            c.shutdown(socket.SHUT_WR); c.settimeout(5)
+        \\            while c.recv(65536): pass
+        \\        except Exception: pass
         \\        c.close(); return
         \\    u = socket.create_connection(("127.0.0.1", backend))
         \\    try:
@@ -480,8 +492,25 @@ pub const TlsFront = struct {
         \\
     ;
 
+    /// How the front is set up besides its certificate.
+    pub const Options = struct {
+        /// Require a client certificate signed by the authority in this
+        /// PEM file.
+        client_ca: ?[]const u8 = null,
+        /// Speak TLS 1.2 at most.
+        tls12: bool = false,
+        /// An RSA key for the front's own certificate, which TLS 1.2 needs
+        /// for the ECDHE-RSA suites relic's client speaks.
+        rsa: bool = false,
+    };
+
     /// Make a certificate and start serving TLS in front of `backend_port`.
     pub fn start(gpa: Allocator, io: Io, backend_port: u16) !*TlsFront {
+        return startWith(gpa, io, backend_port, .{});
+    }
+
+    /// `start`, set up as `options` says.
+    pub fn startWith(gpa: Allocator, io: Io, backend_port: u16, options: Options) !*TlsFront {
         if (builtin.os.tag == .windows) return error.SkipZigTest;
         const f = try gpa.create(TlsFront);
         errdefer gpa.destroy(f);
@@ -503,10 +532,11 @@ pub const TlsFront = struct {
         // the standard library the second. `lfs.example.invalid` is the name
         // a test reaches it by through a proxy.
         var made = program.run(.{ .environ = &env }, gpa, io, .{ .argv = &.{
-            "openssl",       "req",                          "-x509",                                                             "-newkey", "ec",
-            "-pkeyopt",      "ec_paramgen_curve:prime256v1", "-nodes",                                                            "-keyout", key_path,
-            "-out",          cert_path,                      "-days",                                                             "2",       "-subj",
-            "/CN=127.0.0.1", "-addext",                      "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1,DNS:lfs.example.invalid",
+            "openssl",                             "req",                                                               "-x509",                                                                     "-newkey",
+            if (options.rsa) "rsa:2048" else "ec", "-pkeyopt",                                                          if (options.rsa) "rsa_keygen_bits:2048" else "ec_paramgen_curve:prime256v1", "-nodes",
+            "-keyout",                             key_path,                                                            "-out",                                                                      cert_path,
+            "-days",                               "2",                                                                 "-subj",                                                                     "/CN=127.0.0.1",
+            "-addext",                             "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1,DNS:lfs.example.invalid",
         } }, "", .{}) catch return error.SkipZigTest;
         defer made.deinit(gpa);
         if (!made.succeeded()) return error.SkipZigTest;
@@ -518,7 +548,7 @@ pub const TlsFront = struct {
         var port_buf: [8]u8 = undefined;
         const backend = try std.fmt.bufPrint(&port_buf, "{d}", .{backend_port});
         var running = program.start(.{ .environ = &env }, gpa, io, .{
-            .argv = &.{ "python3", "-c", script, cert_path, key_path, backend },
+            .argv = &.{ "python3", "-c", script, cert_path, key_path, backend, options.client_ca orelse "", if (options.tls12) "1.2" else "" },
             .stderr = .ignore,
         }) catch return error.SkipZigTest;
         errdefer running.deinit(io);
@@ -538,6 +568,102 @@ pub const TlsFront = struct {
         f.gpa.free(f.ca_dir);
         f.dir.cleanup();
         f.gpa.destroy(f);
+    }
+};
+
+/// Certificates made for one test by `openssl`: an authority for clients,
+/// a stranger no server trusts, a server certificate for 127.0.0.1, and
+/// for each kind of key a client certificate the authority signed, the key
+/// plain and encrypted, and one the stranger signed.
+pub const Pki = struct {
+    gpa: Allocator,
+    dir: std.testing.TmpDir,
+    base: []u8,
+    env: Environ.Map,
+
+    /// The kinds of key: RSA, ECDSA on P-256 and P-384, Ed25519.
+    pub const kinds = [_][]const u8{ "rsa", "p256", "p384", "ed25519" };
+    /// What every encrypted key opens with.
+    pub const passphrase = "correct-horse";
+
+    /// Make them all in a new temporary directory. `error.SkipZigTest`
+    /// without `openssl`.
+    pub fn make(gpa: Allocator, io: Io) !*Pki {
+        if (builtin.os.tag == .windows) return error.SkipZigTest;
+        const p = try gpa.create(Pki);
+        errdefer gpa.destroy(p);
+        var env = try environ(gpa);
+        errdefer env.deinit();
+        var dir = std.testing.tmpDir(.{ .iterate = true });
+        errdefer dir.cleanup();
+        const base = try absolutePath(gpa, io, dir.dir);
+        p.* = .{ .gpa = gpa, .dir = dir, .base = base, .env = env };
+        errdefer gpa.free(base);
+        try p.openssl(io, &.{ "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=relic-test-ca" });
+        try p.openssl(io, &.{ "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "stranger.key", "-out", "stranger.pem", "-days", "2", "-subj", "/CN=relic-test-stranger" });
+        try p.openssl(io, &.{ "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "server.key", "-out", "server.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1,DNS:127.0.0.1" });
+        for (kinds) |kind| {
+            const key = try std.fmt.allocPrint(gpa, "{s}.key", .{kind});
+            defer gpa.free(key);
+            const csr = try std.fmt.allocPrint(gpa, "{s}.csr", .{kind});
+            defer gpa.free(csr);
+            const cert = try std.fmt.allocPrint(gpa, "{s}.pem", .{kind});
+            defer gpa.free(cert);
+            const strange = try std.fmt.allocPrint(gpa, "{s}.stranger.pem", .{kind});
+            defer gpa.free(strange);
+            const enc = try std.fmt.allocPrint(gpa, "{s}.enc.key", .{kind});
+            defer gpa.free(enc);
+            const subject = try std.fmt.allocPrint(gpa, "/CN=client-{s}", .{kind});
+            defer gpa.free(subject);
+            const algorithm: []const []const u8 = if (std.mem.eql(u8, kind, "rsa"))
+                &.{ "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048" }
+            else if (std.mem.eql(u8, kind, "p256"))
+                &.{ "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256" }
+            else if (std.mem.eql(u8, kind, "p384"))
+                &.{ "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-384" }
+            else
+                &.{ "-algorithm", "ED25519" };
+            var genpkey: std.ArrayList([]const u8) = .empty;
+            defer genpkey.deinit(gpa);
+            try genpkey.append(gpa, "genpkey");
+            try genpkey.appendSlice(gpa, algorithm);
+            try genpkey.appendSlice(gpa, &.{ "-out", key });
+            try p.openssl(io, genpkey.items);
+            try p.openssl(io, &.{ "req", "-new", "-key", key, "-subj", subject, "-out", csr });
+            try p.openssl(io, &.{ "x509", "-req", "-in", csr, "-CA", "ca.pem", "-CAkey", "ca.key", "-set_serial", "7", "-days", "2", "-out", cert });
+            try p.openssl(io, &.{ "x509", "-req", "-in", csr, "-CA", "stranger.pem", "-CAkey", "stranger.key", "-set_serial", "8", "-days", "2", "-out", strange });
+            try p.openssl(io, &.{ "pkcs8", "-topk8", "-in", key, "-v2", "aes-256-cbc", "-passout", "pass:" ++ passphrase, "-out", enc });
+        }
+        // OpenSSL's older encrypted PEM, the only encrypted key git-lfs reads.
+        try p.openssl(io, &.{ "rsa", "-in", "rsa.key", "-traditional", "-aes256", "-passout", "pass:" ++ passphrase, "-out", "rsa.legacy.key" });
+        try p.openssl(io, &.{ "ec", "-in", "p256.key", "-aes128", "-passout", "pass:" ++ passphrase, "-out", "p256.legacy.key" });
+        return p;
+    }
+
+    fn openssl(p: *Pki, io: Io, args: []const []const u8) !void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(p.gpa);
+        try argv.append(p.gpa, "openssl");
+        try argv.appendSlice(p.gpa, args);
+        var made = program.run(.{ .environ = &p.env }, p.gpa, io, .{
+            .argv = argv.items,
+            .cwd = .{ .dir = p.dir.dir },
+        }, "", .{}) catch return error.SkipZigTest;
+        defer made.deinit(p.gpa);
+        if (!made.succeeded()) return error.SkipZigTest;
+    }
+
+    /// The absolute path of `name`, in `gpa`.
+    pub fn path(p: *const Pki, name: []const u8) ![]u8 {
+        return std.fs.path.join(p.gpa, &.{ p.base, name });
+    }
+
+    /// Remove them all.
+    pub fn destroy(p: *Pki) void {
+        p.env.deinit();
+        p.dir.cleanup();
+        p.gpa.free(p.base);
+        p.gpa.destroy(p);
     }
 };
 

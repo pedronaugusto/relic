@@ -70,6 +70,7 @@ pub const auth = @import("auth.zig");
 pub const warning = @import("warning.zig");
 pub const userconfig = @import("userconfig.zig");
 pub const httpsettings = @import("httpsettings.zig");
+pub const tls = @import("tls/root.zig");
 pub const httpclient = @import("httpclient.zig");
 pub const httpauth = @import("httpauth.zig");
 pub const ere = @import("ere.zig");
@@ -140,5 +141,6 @@ test {
         _ = @import("ort_test.zig");
         _ = @import("uploadpack_test.zig");
         _ = @import("cloneconfig_test.zig");
+        _ = @import("clientcert_test.zig");
     }
 }

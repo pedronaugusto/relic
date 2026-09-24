@@ -1366,7 +1366,7 @@ test "a proxy is chosen by git-lfs's rules, HTTP_PROXY included, and never for a
     try testing.expect(std.mem.indexOf(u8, logs[1], "proxied-for=127.0.0.1") == null);
 }
 
-test "a client certificate, unreadable authorities and a proxy that is not HTTP's are refused by name before anything is sent" {
+test "an unreadable client certificate, unreadable authorities and a proxy that is not HTTP's are refused by name before anything is sent" {
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{});
@@ -1377,14 +1377,16 @@ test "a client certificate, unreadable authorities and a proxy that is not HTTP'
     defer d.close(io);
     try emptyStore(fx, d);
     try fx.gitIn(d, &.{ "config", "lfs.url", "https://lfs.example.invalid/repo.git/info/lfs" });
-    const Case = struct { config: ?[2][]const u8 = null, env: ?[2][]const u8 = null, want: anyerror };
+    const Case = struct { config: ?[2][]const u8 = null, also: ?[2][]const u8 = null, env: ?[2][]const u8 = null, want: anyerror };
     for ([_]Case{
-        .{ .config = .{ "http.sslCert", "/nowhere/cert.pem" }, .want = error.SslClientCertificateUnsupported },
+        .{ .config = .{ "http.sslCert", "/nowhere/cert.pem" }, .also = .{ "http.sslKey", "/nowhere/key.pem" }, .want = error.SslClientCertificateUnreadable },
         .{ .config = .{ "http.sslCAInfo", "/nowhere/ca.pem" }, .want = error.SslCertificateUnreadable },
         .{ .config = .{ "http.proxy", "socks5://127.0.0.1:9" }, .want = error.InvalidProxy },
     }) |case| {
         if (case.config) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
         defer if (case.config) |kv| fx.gitIn(d, &.{ "config", "--unset", kv[0] }) catch {};
+        if (case.also) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
+        defer if (case.also) |kv| fx.gitIn(d, &.{ "config", "--unset", kv[0] }) catch {};
         var env = try fx.env.clone(gpa);
         defer env.deinit();
         if (case.env) |kv| try env.put(kv[0], kv[1]);
@@ -1481,6 +1483,97 @@ test "an https server is reached through a proxy's tunnel, and unchecked where t
         try testing.expectEqualStrings(connects[0], connects[1]);
     }
     fx.server.options.href_base = null;
+}
+
+test "a client certificate is presented as git-lfs presents it, an encrypted key opened with the helpers' passphrase and a wrong one refused" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const pki = try testremote.Pki.make(gpa, io);
+    defer pki.destroy();
+    const client_ca = try pki.path("ca.pem");
+    defer gpa.free(client_ca);
+    const front = try testremote.TlsFront.startWith(gpa, io, fx.server.port, .{ .client_ca = client_ca });
+    defer front.stop(io);
+    const content = "fetched with a certificate\n";
+    try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    const base = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}", .{front.port});
+    defer gpa.free(base);
+    const lfs_url = try std.fmt.allocPrint(gpa, "{s}/repo.git/info/lfs", .{base});
+    defer gpa.free(lfs_url);
+    fx.server.options.href_base = base;
+    defer fx.server.options.href_base = null;
+
+    const Case = struct { cert: []const u8, key: ?[]const u8, answer: []const u8 = "unused", refused: ?anyerror = null };
+    for ([_]Case{
+        .{ .cert = "p256.pem", .key = "p256.key" },
+        .{ .cert = "rsa.pem", .key = "rsa.legacy.key", .answer = testremote.Pki.passphrase },
+        .{ .cert = "p256.pem", .key = "p256.legacy.key", .answer = "battery-staple", .refused = error.SslClientKeyPassphraseWrong },
+        // Without a key git-lfs presents nothing, and the server refuses.
+        .{ .cert = "p256.pem", .key = null, .refused = error.ClientCertificateRejected },
+    }, 0..) |case, n| {
+        var logs: [2][]u8 = .{ &.{}, &.{} };
+        defer for (logs) |l| gpa.free(l);
+        var helper_logs: [2][]u8 = .{ &.{}, &.{} };
+        defer for (helper_logs) |l| gpa.free(l);
+        for (0..2) |i| {
+            var name_buf: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "cert-{d}-{d}", .{ n, i });
+            const helper = try testlfs.credentialHelper(gpa, io, fx.tools, name, "", case.answer);
+            defer gpa.free(helper);
+            var d = try committed(fx, name, helper, &.{.{ "a.bin", content }});
+            defer d.close(io);
+            try emptyStore(fx, d);
+            try fx.gitIn(d, &.{ "config", "lfs.url", lfs_url });
+            try fx.gitIn(d, &.{ "config", "http.sslCAInfo", front.cert_path });
+            const cert = try pki.path(case.cert);
+            defer gpa.free(cert);
+            try fx.gitIn(d, &.{ "config", "http.sslCert", cert });
+            if (case.key) |k| {
+                const key = try pki.path(k);
+                defer gpa.free(key);
+                try fx.gitIn(d, &.{ "config", "http.sslKey", key });
+            }
+            fx.server.clearLog();
+            if (i == 0) {
+                const out = testlfs.git(gpa, io, d, &fx.env, &.{ "lfs", "fetch" }, case.refused == null);
+                if (out) |o| {
+                    gpa.free(o);
+                    if (case.refused != null) return error.TestUnexpectedResult;
+                } else |err| if (case.refused == null) return err;
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
+                defer server.close();
+                if (case.refused) |want| {
+                    try testing.expectError(want, lfstransfer.fetch(server, &repo, .{}));
+                } else {
+                    var fetched = try lfstransfer.fetch(server, &repo, .{});
+                    defer fetched.deinit();
+                    try expectNoFailures(&fetched);
+                }
+            }
+            if (case.refused == null) {
+                const oid = testlfs.sha256Hex(content);
+                var object_buf: [128]u8 = undefined;
+                const object_path = try std.fmt.bufPrint(&object_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+                try expectFile(fx, d, object_path, content);
+            }
+            logs[i] = try fx.server.requests(gpa);
+            var log_name_buf: [40]u8 = undefined;
+            const log_name = try std.fmt.bufPrint(&log_name_buf, "{s}.log", .{name});
+            helper_logs[i] = fx.tools.readFileAlloc(io, log_name, gpa, .unlimited) catch |err| switch (err) {
+                error.FileNotFound => try gpa.dupe(u8, ""),
+                else => return err,
+            };
+        }
+        try testing.expectEqualStrings(logs[0], logs[1]);
+        // The helpers hear the same: nothing for a plain key, and for an
+        // encrypted one only `get`, with the key's path.
+        try testing.expectEqualStrings(helper_logs[0], helper_logs[1]);
+    }
 }
 
 test "a refused credential is described as git-lfs's helpers hear it, with the server's challenge" {

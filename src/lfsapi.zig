@@ -32,12 +32,15 @@
 //!
 //! The connection settings are git's where git-lfs reads them as git does,
 //! and git-lfs's where it does not. The TLS ones — `http.sslVerify`,
-//! `http.sslCAInfo`, `http.sslCAPath`, `http.sslCert`, `http.sslKey` and
-//! their environment variables — come from `httpsettings.zig` for each
-//! request's URL, as `smarthttp` takes them, and the connections are
-//! relic's own (`httpclient.zig`): TLS inside a proxy's tunnel, a server
-//! left unchecked where the settings say so. A client certificate is
-//! refused by name, as `smarthttp` refuses it. The rest are git-lfs's own:
+//! `http.sslCAInfo`, `http.sslCAPath` and their environment variables —
+//! come from `httpsettings.zig` for each request's URL, as `smarthttp`
+//! takes them, and the connections are relic's own (`httpclient.zig`): TLS
+//! inside a proxy's tunnel, a server left unchecked where the settings say
+//! so. A client certificate is git-lfs's: `http.sslCert` and `http.sslKey`
+//! for `https://<host>/`, both or neither, the key in PEM; a key that is
+//! encrypted is opened with the passphrase the helpers give for
+//! `protocol=cert` and the key's path, as git-lfs asks for it. The rest are
+//! git-lfs's own:
 //! `http.extraHeader` is the values of the one best-matching
 //! `http.<url>.extraHeader` key, by git-lfs's URL match, where git gathers
 //! every matching key's and lets an empty one clear the list; the proxy
@@ -84,6 +87,8 @@ const netrc_mod = @import("netrc.zig");
 const timetext = @import("timetext.zig");
 const lfsssh = @import("lfsssh.zig");
 const httpclient = @import("httpclient.zig");
+const clientcert = @import("clientcert.zig");
+const tls = @import("tls/root.zig");
 
 const Config = config_mod.Config;
 
@@ -139,10 +144,13 @@ pub const Error = error{
     TooManyRedirects,
     /// The connection failed, or broke. `Client.message` holds why.
     ConnectionFailed,
-    /// `http.sslCert` or `http.sslKey`: the standard library's TLS client,
-    /// which relic's connections speak TLS through, answers no server's
-    /// request for a client certificate.
-    SslClientCertificateUnsupported,
+    /// The server asked for a client certificate and refused the one it
+    /// was sent, or wanted one and was sent none. `Client.message` names
+    /// its TLS alert.
+    ClientCertificateRejected,
+    /// The server asked for a client certificate in signature schemes the
+    /// key does not sign with.
+    ClientCertificateSchemeUnsupported,
     /// `http.sslCAInfo` or `http.sslCAPath` names a file or directory that
     /// could not be read as certificates.
     SslCertificateUnreadable,
@@ -162,7 +170,7 @@ pub const Error = error{
     /// A zstd body whose frame asks for a window wider than
     /// `zstd_window_max`, which git-lfs's decoder refuses too.
     LfsZstdWindowTooLarge,
-} || credential.Error || lfsssh.Error || Allocator.Error || Io.Cancelable;
+} || credential.Error || lfsssh.Error || clientcert.Error || Allocator.Error || Io.Cancelable;
 
 //=====================================================================
 // Settings
@@ -1065,6 +1073,7 @@ pub const Client = struct {
         key: []const u8,
         arena: std.heap.ArenaAllocator,
         client: httpclient.Client,
+        client_auth: ?tls.ClientAuth = null,
     };
 
     /// Open a client for `remote`. `settings` is borrowed.
@@ -1132,6 +1141,7 @@ pub const Client = struct {
         c.ssh_failure.deinit(c.gpa);
         for (c.transports.items) |t| {
             t.client.deinit();
+            if (t.client_auth) |*a| a.deinit();
             t.arena.deinit();
             c.gpa.free(t.key);
             c.gpa.destroy(t);
@@ -1735,6 +1745,8 @@ pub const Client = struct {
             error.ProxyAuthMethodUnsupported => c.fail(error.ConnectionFailed, "the proxy asks for {s}: {s}", .{ transport.proxy_offered orelse "?", where }),
             error.HttpProtocolError => c.fail(error.MalformedResponse, "not an HTTP answer, or an encoding it cannot read: {s}", .{where}),
             error.CertificateBundleUnreadable => c.fail(error.SslCertificateUnreadable, "the system's certificates", .{}),
+            error.ClientCertificateRejected => c.fail(error.ClientCertificateRejected, "the server refused the client certificate ({s}): {s}", .{ if (transport.tls_error) |e| @errorName(e) else "?", where }),
+            error.ClientCertificateSchemeUnsupported => c.fail(error.ClientCertificateSchemeUnsupported, "no signature scheme the server takes: {s}", .{where}),
         };
     }
 
@@ -1769,7 +1781,8 @@ pub const Client = struct {
     /// would use for it: git's TLS settings for the URL from
     /// `httpsettings.zig`, which git-lfs reads as git does, the proxy
     /// git-lfs's own rules choose (`proxyFor`), and git-lfs's timeouts
-    /// (`timeoutsFor`). A client certificate is refused by name.
+    /// (`timeoutsFor`), and git-lfs's client certificate for the host
+    /// (`clientCertificate`).
     fn transportFor(c: *Client, scratch: Allocator, request_url: []const u8) Error!*httpclient.Client {
         const url = url_mod.Url.parse(request_url) catch return c.fail(error.MalformedUrl, "malformed URL {s}", .{stripQuery(request_url)});
         const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
@@ -1780,22 +1793,23 @@ pub const Client = struct {
         var ca_info: ?[]const u8 = null;
         var ca_path: ?[]const u8 = null;
         var verify = true;
+        var cert_files: ?clientcert.Files = null;
         if (url.scheme == .https) {
-            if (settings.ssl_cert != null or settings.ssl_key != null) {
-                return c.fail(error.SslClientCertificateUnsupported, "{s} asks for a client certificate", .{if (settings.ssl_cert != null) "http.sslCert" else "http.sslKey"});
-            }
+            cert_files = try c.clientCertificateFiles(scratch, url, environ);
             verify = settings.ssl_verify;
             ca_info = settings.ca_info;
             ca_path = settings.ca_path;
         }
         const proxy = try c.proxyFor(scratch, request_url, url);
         const timeouts = try timeoutsFor(c.settings, scratch, url);
-        const key = try std.fmt.allocPrint(scratch, "{s}\x00{s}\x00{s}\x00{}\x00{d}", .{
+        const key = try std.fmt.allocPrint(scratch, "{s}\x00{s}\x00{s}\x00{}\x00{d}\x00{s}\x00{s}", .{
             proxy orelse "",
             ca_info orelse "",
             ca_path orelse "",
             verify,
             if (timeouts.activity) |d| d.nanoseconds else -1,
+            if (cert_files) |f| f.cert else "",
+            if (cert_files) |f| f.key orelse "" else "",
         });
 
         try c.transport_mutex.lock(c.io);
@@ -1808,17 +1822,68 @@ pub const Client = struct {
         t.* = .{ .key = try c.gpa.dupe(u8, key), .arena = .init(c.gpa), .client = .init(c.gpa, c.io) };
         errdefer {
             t.client.deinit();
+            if (t.client_auth) |*a| a.deinit();
             t.arena.deinit();
             c.gpa.free(t.key);
+        }
+        if (cert_files) |files| {
+            t.client_auth = try c.clientCertificate(t.arena.allocator(), files);
+            t.client.client_auth = &t.client_auth.?;
         }
         t.client.verify = verify;
         t.client.timeouts = timeouts;
         // As many kept as transfers run at once, as git-lfs keeps them.
         t.client.max_idle = @intCast(@max(1, c.settings.getInt("lfs.concurrenttransfers", 8)));
         if (verify and (ca_info != null or ca_path != null)) try c.trust(&t.client, t.arena.allocator(), settings, environ);
-        if (proxy) |text| try c.useProxy(&t.client, t.arena.allocator(), text);
+        if (proxy) |text| {
+            try c.useProxy(&t.client, t.arena.allocator(), text);
+            // Go hands an https proxy the same TLS settings as the target,
+            // the client certificate included.
+            if (t.client_auth) |*a| t.client.proxy.?.client_auth = a;
+        }
         try c.transports.append(c.gpa, t);
         return &t.client;
+    }
+
+    /// git-lfs's client certificate for `url`'s host: `http.sslCert` and
+    /// `http.sslKey` for `https://<host>/`, by git-lfs's URL match, both or
+    /// neither; `~` expanded, as git-lfs expands it.
+    fn clientCertificateFiles(c: *Client, scratch: Allocator, url: url_mod.Url, environ: ?*const std.process.Environ.Map) Error!?clientcert.Files {
+        const host_url = if (url.port) |port|
+            try std.fmt.allocPrint(scratch, "https://{s}:{d}/", .{ url.host, port })
+        else
+            try std.fmt.allocPrint(scratch, "https://{s}/", .{url.host});
+        const key = try c.settings.urlGet(scratch, "http", host_url, "sslkey") orelse return null;
+        const cert = try c.settings.urlGet(scratch, "http", host_url, "sslcert") orelse return null;
+        return .{ .cert = try expandHome(scratch, cert, environ), .key = try expandHome(scratch, key, environ) };
+    }
+
+    /// Read the certificate and key. A key in OpenSSL's encrypted PEM is
+    /// opened as git-lfs opens it: the helpers are asked for
+    /// `cert:///<key's path>` — `protocol=cert`, no host, the key's path,
+    /// an empty username. The helpers are told nothing after: git-lfs's
+    /// approval of a passphrase that opens the key, and its rejection of
+    /// one that does not, go to its own cache in memory and no further.
+    /// relic opens an encrypted PKCS #8 key the same way, which git-lfs
+    /// does not read at all.
+    fn clientCertificate(c: *Client, arena: Allocator, files: clientcert.Files) Error!tls.ClientAuth {
+        const key_path = clientcert.keyPath(files);
+        var session: ?credential.Session = null;
+        defer if (session) |*s| s.deinit();
+        var passphrase: ?[]const u8 = null;
+        if (clientcert.keyIsEncrypted(arena, c.io, files)) {
+            session = .forCertificate(c.gpa, key_path);
+            const s = &session.?;
+            if (try s.fill(c.io, c.credentialOptions())) passphrase = s.password;
+        }
+        return clientcert.load(c.gpa, arena, c.io, files, passphrase) catch |err| {
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.Canceled => error.Canceled,
+                error.SslClientCertificateUnreadable => c.fail(err, "error reading client cert file {s}", .{files.cert}),
+                else => c.fail(err, "error reading client key file {s}: {s}", .{ key_path, @errorName(err) }),
+            };
+        };
     }
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
@@ -1854,7 +1919,7 @@ pub const Client = struct {
     /// proxy's credential from its URL.
     fn useProxy(c: *Client, client: *httpclient.Client, arena: Allocator, text: []const u8) Error!void {
         const uri = std.Uri.parse(text) catch std.Uri.parseAfterScheme("http", text) catch return c.fail(error.InvalidProxy, "{s}", .{text});
-        const tls = if (std.ascii.eqlIgnoreCase(uri.scheme, "http"))
+        const secure = if (std.ascii.eqlIgnoreCase(uri.scheme, "http"))
             false
         else if (std.ascii.eqlIgnoreCase(uri.scheme, "https"))
             true
@@ -1878,8 +1943,8 @@ pub const Client = struct {
         });
         client.proxy = .{
             .host = host.bytes,
-            .port = uri.port orelse if (tls) 443 else 80,
-            .tls = tls,
+            .port = uri.port orelse if (secure) 443 else 80,
+            .tls = secure,
             .credential = proxy_credential,
             .connect_headers = lines,
         };

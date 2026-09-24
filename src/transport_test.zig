@@ -146,11 +146,11 @@ test "a missing repository, a dumb setting and a header that is not one are refu
     defer gpa.free(secure);
     for ([_][]const u8{
         "[http]\nextraHeader = no colon here\n",
-        "[http]\nsslCert = /etc/client.pem\n",
+        "[http]\nsslCert = /nonexistent/client.pem\n",
         "[http]\nsslCAInfo = /nonexistent/ca.pem\n",
         "[http]\nproxy = http://127.0.0.1:1\nproxyAuthMethod = ntlm\n",
     }, [_]anyerror{
-        error.InvalidHttpHeader,        error.SslClientCertificateUnsupported,
+        error.InvalidHttpHeader,        error.SslClientCertificateUnreadable,
         error.SslCertificateUnreadable, error.ProxyAuthMethodUnsupported,
     }) |text, expected| {
         var config = try config_mod.Config.parseText(gpa, text, .local);

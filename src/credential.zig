@@ -126,6 +126,17 @@ pub const Session = struct {
     refused_username: ?[]u8 = null,
     /// Where the refused credential came from.
     refused_source: auth.Failure.Source = .none,
+    /// Set for the passphrase of a client certificate's key, which git asks
+    /// the helpers for as `protocol=cert`, an empty host and username, and
+    /// this as the path; `url` is then not used. Only `credential.*`
+    /// settings without a URL apply to it.
+    cert_path: ?[]const u8 = null,
+
+    /// A session for the passphrase of the key of the certificate at
+    /// `path`, as git's `has_cert_password` asks for it.
+    pub fn forCertificate(gpa: Allocator, path: []const u8) Session {
+        return .{ .gpa = gpa, .url = .{ .scheme = .https, .path = path, .raw = path }, .cert_path = path };
+    }
 
     /// Forget the credential, clearing its bytes, and release everything.
     pub fn deinit(s: *Session) void {
@@ -187,6 +198,12 @@ pub const Session = struct {
     fn fromUrl(s: *Session) Allocator.Error!void {
         if (s.initialised) return;
         s.initialised = true;
+        if (s.cert_path != null) {
+            // git's `cert_auth` starts with an empty username.
+            s.username = try s.gpa.dupe(u8, "");
+            s.username_from_url = true;
+            return;
+        }
         if (s.url.user) |user| {
             s.username = try percentDecode(s.gpa, user);
             s.username_from_url = true;
@@ -250,7 +267,7 @@ pub const Session = struct {
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const settings = try applyConfig(arena, opts.config, s.url);
+        const settings = try s.applyConfig(arena, opts.config);
         if (!s.username_from_url) {
             if (settings.username) |name| {
                 if (s.username) |u| s.gpa.free(u);
@@ -316,7 +333,7 @@ pub const Session = struct {
         if (opts.now) |t| if (s.password_expiry_utc) |expiry| if (expiry < t) return;
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
-        const settings = try applyConfig(arena_state.allocator(), opts.config, s.url);
+        const settings = try s.applyConfig(arena_state.allocator(), opts.config);
         if (settings.helpers.len == 0) return;
         const programs = opts.programs orelse return error.ProgramsNotGranted;
         for (settings.helpers) |helper| {
@@ -329,7 +346,7 @@ pub const Session = struct {
     pub fn reject(s: *Session, io: Io, opts: Options) Error!void {
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
-        const settings = try applyConfig(arena_state.allocator(), opts.config, s.url);
+        const settings = try s.applyConfig(arena_state.allocator(), opts.config);
         if (settings.helpers.len != 0) {
             const programs = opts.programs orelse return error.ProgramsNotGranted;
             for (settings.helpers) |helper| {
@@ -360,7 +377,13 @@ pub const Session = struct {
 
     /// `protocol://[username@]host[/path]`, as git's `credential_describe`
     /// writes it in a prompt.
+    fn applyConfig(s: *const Session, arena: Allocator, config: ?*const config_mod.Config) Allocator.Error!Settings {
+        return settingsFor(arena, config, if (s.cert_path == null) s.url else null);
+    }
+
     fn describe(s: *Session, arena: Allocator, with_user: bool) Allocator.Error![]const u8 {
+        // git's `credential_describe`: `cert://`, no host, `/` and the path.
+        if (s.cert_path) |path| return std.fmt.allocPrint(arena, "cert:///{s}", .{path});
         var out: std.ArrayList(u8) = .empty;
         try out.print(arena, "{s}://", .{@tagName(s.url.scheme)});
         if (with_user) {
@@ -386,6 +409,15 @@ pub const Session = struct {
     fn writeInput(s: *Session, arena: Allocator, out: *std.ArrayList(u8), operation: Operation, use_http_path: bool) Allocator.Error!void {
         // git announces what it can take when it asks, and repeats back only
         // what the helper that answered announced.
+        if (s.cert_path) |path| {
+            // Asked with no capabilities, as git fills `cert_auth`.
+            try out.print(s.gpa, "protocol=cert\nhost=\npath={s}\n", .{path});
+            if (s.username) |u| try out.print(s.gpa, "username={s}\n", .{u});
+            if (operation != .get) {
+                if (s.password) |p| try out.print(s.gpa, "password={s}\n", .{p});
+            }
+            return;
+        }
         const authtype = operation == .get or s.capa_authtype;
         const state = operation == .get or s.capa_state;
         if (authtype) try out.appendSlice(s.gpa, "capability[]=authtype\n");
@@ -567,12 +599,21 @@ const Settings = struct {
 /// The `credential.*` settings that apply to `url`, in configuration
 /// order: every helper, the last username, whether the path is sent.
 fn applyConfig(arena: Allocator, config: ?*const config_mod.Config, url: url_mod.Url) Allocator.Error!Settings {
+    return settingsFor(arena, config, url);
+}
+
+/// The `credential.*` settings for `url`; for no URL, those set without
+/// one.
+fn settingsFor(arena: Allocator, config: ?*const config_mod.Config, url: ?url_mod.Url) Allocator.Error!Settings {
     var helpers: std.ArrayList([]const u8) = .empty;
     var settings: Settings = .{ .helpers = &.{}, .username = null, .use_http_path = false };
     const c = config orelse return settings;
     for (c.entries.items) |entry| {
         if (!std.ascii.eqlIgnoreCase(entry.section, "credential")) continue;
-        if (entry.subsection.len != 0 and !urlMatches(entry.subsection, url)) continue;
+        if (entry.subsection.len != 0) {
+            const u = url orelse continue;
+            if (!urlMatches(entry.subsection, u)) continue;
+        }
         const raw = entry.value orelse "";
         const value = config_mod.unquote(arena, raw) catch continue;
         if (std.ascii.eqlIgnoreCase(entry.name, "helper")) {

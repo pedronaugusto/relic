@@ -13,6 +13,11 @@
 //! the one below, so a tunnel inside TLS inside TCP is the same code as TLS
 //! alone. The parsing and the chunked framing are the standard library's.
 //!
+//! TLS is relic's own client (`tls/`): the standard library's, which
+//! answers no server's request for a certificate, with client certificates
+//! added — `Client.client_auth` for the server, `Proxy.client_auth` for an
+//! `https` proxy. Every TLS connection relic makes goes through it.
+//!
 //! A connection whose response was read to its end and did not ask to be
 //! closed is kept, and the next request to the same place goes over it, as
 //! curl keeps one for git; a client used by several tasks at once keeps up
@@ -29,7 +34,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const http = std.http;
-const tls = std.crypto.tls;
+const tls = @import("tls/root.zig");
 const httpauth = @import("httpauth.zig");
 const Certificate = std.crypto.Certificate;
 
@@ -58,6 +63,13 @@ pub const Error = error{
     ProxyAuthMethodUnsupported,
     /// A body sent with a length was ended before that many bytes.
     BodyIncomplete,
+    /// The server asked for a client certificate and refused the one it
+    /// was sent, or wanted one and was sent none: its TLS alert is in
+    /// `Client.tls_error`.
+    ClientCertificateRejected,
+    /// The server asked for a client certificate in signature schemes the
+    /// key does not sign with.
+    ClientCertificateSchemeUnsupported,
 } || Allocator.Error || Io.Cancelable;
 
 /// How long each step may take; `null` is no limit.
@@ -103,6 +115,14 @@ pub const Proxy = struct {
     /// is one. `null` is curl's without a user agent: the answer, then
     /// `Proxy-Connection: Keep-Alive`.
     connect_headers: ?[]const http.Header = null,
+    /// The certificate and key an `https` proxy that asks for one is
+    /// answered with.
+    client_auth: ?*const tls.ClientAuth = null,
+    /// How an `https` proxy's certificate is checked: as the target's
+    /// is, with `Client.verify` and the same authorities, as Go checks it
+    /// for git-lfs; or always, against `Client.trustProxyFile`'s
+    /// authorities or else the system's, as curl checks it for git.
+    trust: enum { as_target, own } = .as_target,
 
     /// A proxy's credential.
     pub const Credential = struct {
@@ -143,6 +163,12 @@ pub const Client = struct {
     /// caller's in their place.
     trusted: bool = false,
     bundle_lock: Io.RwLock = .init,
+    /// The authorities an `https` proxy is checked against when
+    /// `Proxy.trust` is `own`, under `bundle_lock`: those of
+    /// `trustProxyFile`, or else the system's, read at the first such
+    /// proxy.
+    proxy_bundle: Certificate.Bundle = .empty,
+    proxy_trusted: bool = false,
     /// The time certificates are checked against, read at the first TLS
     /// connection.
     now: ?Io.Timestamp = null,
@@ -165,6 +191,9 @@ pub const Client = struct {
     proxy_offered: ?[]u8 = null,
     /// Why the last TLS handshake failed.
     tls_error: ?anyerror = null,
+    /// The certificate and key a server that asks for one is answered
+    /// with; without it, one that asks is sent none.
+    client_auth: ?*const tls.ClientAuth = null,
     /// How many connections were made, for a caller that watches reuse.
     connections: u32 = 0,
     /// How many connections were made without their timeouts, because the
@@ -183,6 +212,7 @@ pub const Client = struct {
         for (c.idle.items) |conn| conn.close();
         c.idle.deinit(c.gpa);
         c.bundle.deinit(c.gpa);
+        c.proxy_bundle.deinit(c.gpa);
         c.* = undefined;
     }
 
@@ -239,6 +269,32 @@ pub const Client = struct {
             else => return error.CertificateFileUnreadable,
         };
         c.trusted = true;
+    }
+
+    /// Check an `https` proxy whose `trust` is `own` against the
+    /// certificates in the PEM file at `path`, as curl's
+    /// `CURLOPT_PROXY_CAINFO` for git's `http.proxySSLCAInfo`.
+    pub fn trustProxyFile(c: *Client, path: []const u8) (Error || error{CertificateFileUnreadable})!void {
+        c.bundle_lock.lockUncancelable(c.io);
+        defer c.bundle_lock.unlock(c.io);
+        c.proxy_bundle.addCertsFromFilePath(c.gpa, c.io, c.clock(), Io.Dir.cwd(), path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.CertificateFileUnreadable,
+        };
+        c.proxy_trusted = true;
+    }
+
+    fn ensureProxyTrusted(c: *Client) Error!void {
+        c.bundle_lock.lockUncancelable(c.io);
+        defer c.bundle_lock.unlock(c.io);
+        if (c.proxy_trusted) return;
+        c.proxy_bundle.rescan(c.gpa, c.io, c.clock()) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.CertificateBundleUnreadable,
+        };
+        c.proxy_trusted = true;
     }
 
     /// Trust every certificate file in the directory at `path`.
@@ -623,7 +679,36 @@ const TlsLayer = struct {
     client: tls.Client,
     read_buffer: []u8,
     write_buffer: []u8,
+    /// Whether the server asked for a client certificate.
+    certificate_requested: bool = false,
 };
+
+/// A TLS alert's description as an error: `TlsAlertBadCertificate` and
+/// the like.
+fn alertError(description: std.crypto.tls.Alert.Description) anyerror {
+    description.toError() catch |err| return err;
+    return error.TlsAlert;
+}
+
+/// Whether a TLS alert is a server's refusal of a client certificate — or
+/// of none — once it has asked for one. OpenSSL answers a missing one in
+/// TLS 1.2 with `handshake_failure`.
+fn refusesCertificate(description: std.crypto.tls.Alert.Description) bool {
+    return switch (description) {
+        .bad_certificate,
+        .unsupported_certificate,
+        .certificate_revoked,
+        .certificate_expired,
+        .certificate_unknown,
+        .unknown_ca,
+        .access_denied,
+        .certificate_required,
+        .handshake_failure,
+        .decrypt_error,
+        => true,
+        else => false,
+    };
+}
 
 /// One connection: TCP, and the layers on it.
 pub const Connection = struct {
@@ -954,6 +1039,15 @@ pub const Connection = struct {
             error.Canceled => return error.Canceled,
             else => {},
         };
+        // A server that refused the client's certificate after a TLS 1.3
+        // handshake the client thinks is done has sent its alert and
+        // closed: the write that failed is the request, and the alert is
+        // there to be read.
+        for (conn.layers) |slot| if (slot) |layer| {
+            if (!layer.certificate_requested) continue;
+            _ = layer.client.reader.peekByte() catch {};
+            if (layer.client.read_err != null) return conn.readFailed();
+        };
         return error.ConnectionFailed;
     }
 
@@ -964,7 +1058,17 @@ pub const Connection = struct {
             else => {},
         };
         for (conn.layers) |slot| if (slot) |layer| {
-            if (layer.client.read_err != null) return error.TlsFailed;
+            const err = layer.client.read_err orelse continue;
+            // TLS 1.3 finishes the handshake before the server has read
+            // the client's certificate: its refusal is the first thing
+            // read.
+            if (err == error.TlsAlert and layer.certificate_requested) {
+                if (layer.client.alert) |alert| if (refusesCertificate(alert.description)) {
+                    conn.client.note("tls_error", alertError(alert.description));
+                    return error.ClientCertificateRejected;
+                };
+            }
+            return error.TlsFailed;
         };
         return error.ConnectionFailed;
     }
@@ -972,26 +1076,32 @@ pub const Connection = struct {
     fn startTls(conn: *Connection, slot: usize, host: []const u8) Error!void {
         const c = conn.client;
         const gpa = c.gpa;
-        if (c.verify) try c.ensureTrusted();
+        // An `https` proxy of its own trust is always checked, as curl
+        // checks it whatever `http.sslVerify` says.
+        const own = slot == 0 and c.proxy.?.trust == .own;
+        const verify = own or c.verify;
+        if (own) try c.ensureProxyTrusted() else if (verify) try c.ensureTrusted();
         const layer = try gpa.create(TlsLayer);
         errdefer gpa.destroy(layer);
+        layer.* = .{ .client = undefined, .read_buffer = undefined, .write_buffer = undefined };
         layer.read_buffer = try gpa.alloc(u8, tls.Client.min_buffer_len);
         errdefer gpa.free(layer.read_buffer);
         layer.write_buffer = try gpa.alloc(u8, tls.Client.min_buffer_len);
         errdefer gpa.free(layer.write_buffer);
         var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
         c.io.random(&entropy);
+        var alert_storage: std.crypto.tls.Alert = .{ .level = .fatal, .description = .close_notify };
         if (c.timeouts.handshake) |limit| {
             conn.handshake_until.store(awakeNow(c.io) + @as(u64, @intCast(limit.nanoseconds)), .release);
         }
         defer conn.handshake_until.store(0, .release);
         layer.client = tls.Client.init(conn.readerBelow(slot), conn.writerBelow(slot), .{
-            .host = if (c.verify) .{ .explicit = host } else .no_verification,
-            .ca = if (c.verify) .{ .bundle = .{
+            .host = if (verify) .{ .explicit = host } else .no_verification,
+            .ca = if (verify) .{ .bundle = .{
                 .gpa = gpa,
                 .io = c.io,
                 .lock = &c.bundle_lock,
-                .bundle = &c.bundle,
+                .bundle = if (own) &c.proxy_bundle else &c.bundle,
             } } else .no_verification,
             .read_buffer = layer.read_buffer,
             .write_buffer = layer.write_buffer,
@@ -1000,11 +1110,20 @@ pub const Connection = struct {
             // HTTP says where a body ends, so an end without close_notify
             // is not a truncation it cannot see.
             .allow_truncation_attacks = true,
+            .client_auth = if (slot == 0) c.proxy.?.client_auth else c.client_auth,
+            .certificate_requested = &layer.certificate_requested,
+            .alert = &alert_storage,
         }) catch |err| {
             if (conn.timed_out.load(.acquire)) return error.TimedOut;
-            c.note("tls_error", err);
+            const named: anyerror = if (err == error.TlsAlert) alertError(alert_storage.description) else err;
+            c.note("tls_error", named);
+            if (err == error.TlsAlert and layer.certificate_requested and refusesCertificate(alert_storage.description)) {
+                return error.ClientCertificateRejected;
+            }
             return switch (err) {
                 error.Canceled => error.Canceled,
+                error.OutOfMemory => error.OutOfMemory,
+                error.ClientCertificateSchemeUnsupported => error.ClientCertificateSchemeUnsupported,
                 else => error.TlsFailed,
             };
         };
@@ -1325,6 +1444,31 @@ test "nothing in relic names the standard library's HTTP client, whose CONNECT t
             std.debug.print("{s} names the standard library's HTTP client at byte {d}\n", .{ entry.path, at });
             return error.TestUnexpectedResult;
         }
+    }
+    try std.testing.expect(files > 50);
+}
+
+test "every TLS connection is relic's own client: nothing outside src/tls names the standard library's" {
+    // One TLS path: the one that answers a server's request for a client
+    // certificate, and keeps the standard library's checks of the server's.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const needles = [_][]const u8{ "crypto.tls." ++ "Client", "= std.crypto." ++ "tls;" };
+    var src = try Io.Dir.cwd().openDir(io, "src", .{ .iterate = true });
+    defer src.close(io);
+    var walker = try src.walk(gpa);
+    defer walker.deinit();
+    var files: usize = 0;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        if (std.mem.startsWith(u8, entry.path, "tls" ++ std.fs.path.sep_str)) continue;
+        const text = try entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(16 << 20));
+        defer gpa.free(text);
+        files += 1;
+        for (needles) |needle| if (std.mem.indexOf(u8, text, needle)) |at| {
+            std.debug.print("{s} names the standard library's TLS client at byte {d}\n", .{ entry.path, at });
+            return error.TestUnexpectedResult;
+        };
     }
     try std.testing.expect(files > 50);
 }

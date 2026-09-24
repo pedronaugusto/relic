@@ -47,6 +47,8 @@ const auth = @import("auth.zig");
 const httpsettings = @import("httpsettings.zig");
 const httpauth = @import("httpauth.zig");
 const httpclient = @import("httpclient.zig");
+const clientcert = @import("clientcert.zig");
+const tls = @import("tls/root.zig");
 const warning = @import("warning.zig");
 
 const Connection = connection.Connection;
@@ -64,9 +66,13 @@ pub const Error = error{
     /// The server speaks git's dumb HTTP protocol, a listing of files,
     /// which relic does not read.
     DumbHttpUnsupported,
-    /// `http.sslCert` or `http.sslKey`: the standard library's TLS client
-    /// cannot present a client certificate.
-    SslClientCertificateUnsupported,
+    /// The server asked for a client certificate and refused the one it
+    /// was sent — or wanted one and was sent none. `Connection.message`
+    /// names its TLS alert.
+    ClientCertificateRejected,
+    /// The server asked for a client certificate in signature schemes the
+    /// key does not sign with.
+    ClientCertificateSchemeUnsupported,
     /// `http.sslCAInfo` or `http.sslCAPath` names a file or directory that
     /// could not be read as certificates, or the system's could not be read.
     SslCertificateUnreadable,
@@ -92,7 +98,7 @@ pub const Error = error{
     /// `http.proxyAuthMethod` names a scheme other than basic: digest,
     /// negotiate, ntlm.
     ProxyAuthMethodUnsupported,
-} || connection.Error || credential.Error;
+} || connection.Error || credential.Error || clientcert.Error;
 
 /// How the conversation is made.
 pub const Options = struct {
@@ -144,6 +150,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, optio
     errdefer h.credentials.deinit();
     errdefer h.endRequest();
     errdefer if (h.proxy_credentials) |*p| p.deinit();
+    errdefer h.freeClientCertificates();
 
     const settings = try h.configure(url);
     h.post_buffer = try h.arena.allocator().alloc(u8, @intCast(settings.post_buffer));
@@ -181,6 +188,13 @@ const Http = struct {
     credentials: credential.Session,
     /// The proxy's credential, when its URL names a user.
     proxy_credentials: ?credential.Session = null,
+    /// `http.sslCert` and its key, and the passphrase's credential when
+    /// `http.sslCertPasswordProtected` asks for one.
+    client_auth: ?tls.ClientAuth = null,
+    cert_credentials: ?credential.Session = null,
+    /// The same for an `https` proxy.
+    proxy_client_auth: ?tls.ClientAuth = null,
+    proxy_cert_credentials: ?credential.Session = null,
     /// A failure met inside a writer, which can only say that it failed.
     write_error: ?Error = null,
 
@@ -216,7 +230,15 @@ const Http = struct {
         const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
         const settings = try httpsettings.resolve(arena, h.options.config, environ, url);
         if (url.scheme == .https) {
-            if (settings.ssl_cert != null or settings.ssl_key != null) return h.fail(error.SslClientCertificateUnsupported, if (settings.ssl_cert != null) "http.sslCert" else "http.sslKey");
+            if (settings.ssl_cert) |cert| {
+                h.client_auth = try h.clientCertificate(.{
+                    .cert = try expandHome(arena, cert, environ),
+                    .key = if (settings.ssl_key) |k| try expandHome(arena, k, environ) else null,
+                    .cert_type = settings.ssl_cert_type,
+                    .key_type = settings.ssl_key_type,
+                }, settings.ssl_cert_password_protected, &h.cert_credentials);
+                h.client.client_auth = &h.client_auth.?;
+            }
             if (!settings.ssl_verify) {
                 h.client.verify = false;
                 try warning.note(h.options.warnings, .{ .ssl_verify_disabled = settings.ssl_verify_from orelse "http.sslVerify" });
@@ -236,7 +258,71 @@ const Http = struct {
         if (settings.user_agent) |agent| h.user_agent = agent;
 
         if (settings.proxy) |text| try h.configureProxy(text, settings.proxy_auth_method);
+        if (h.client.proxy) |*proxy| if (proxy.tls) {
+            // curl checks an https proxy on its own terms: always, against
+            // `http.proxySSLCAInfo` or the system's authorities.
+            proxy.trust = .own;
+            if (settings.proxy_ssl_ca_info) |file| {
+                h.client.trustProxyFile(file) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.Canceled => error.Canceled,
+                    else => h.fail(error.SslCertificateUnreadable, "http.proxySSLCAInfo"),
+                };
+            }
+            if (settings.proxy_ssl_cert) |cert| {
+                h.proxy_client_auth = try h.clientCertificate(.{
+                    .cert = cert,
+                    .key = settings.proxy_ssl_key,
+                }, settings.proxy_ssl_cert_password_protected, &h.proxy_cert_credentials);
+                proxy.client_auth = &h.proxy_client_auth.?;
+            }
+        };
         return settings;
+    }
+
+    /// Read a client certificate and its key, as curl reads them for git.
+    /// With `ask`, the passphrase is filled first — `protocol=cert`, the
+    /// certificate's path — as git's `has_cert_password` fills it whether
+    /// the key is encrypted or not; a certificate that cannot be used then
+    /// has its passphrase rejected, as git rejects it on
+    /// `CURLE_SSL_CERTPROBLEM`.
+    fn clientCertificate(h: *Http, files: clientcert.Files, ask: bool, session_slot: *?credential.Session) Error!tls.ClientAuth {
+        var passphrase: ?[]const u8 = null;
+        if (ask) {
+            session_slot.* = .forCertificate(h.gpa, files.cert);
+            const session = &session_slot.*.?;
+            if (try session.fill(h.io, h.credentialOptions())) passphrase = session.password;
+        }
+        return clientcert.load(h.gpa, h.arena.allocator(), h.io, files, passphrase) catch |err| {
+            if (session_slot.*) |*session| session.reject(h.io, h.credentialOptions()) catch {};
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.Canceled => error.Canceled,
+                error.SslClientKeyUnreadable, error.SslClientKeyPassphraseRequired, error.SslClientKeyPassphraseWrong => h.fail(err, clientcert.keyPath(files)),
+                else => h.fail(err, files.cert),
+            };
+        };
+    }
+
+    /// The certificate's passphrase worked: the helpers are told, once, as
+    /// git tells them after a request that succeeds. The proxy's is not,
+    /// as git does not.
+    fn approveCertificate(h: *Http) Error!void {
+        const session = &(h.cert_credentials orelse return);
+        if (session.source != .helper and session.source != .prompt) return;
+        try session.approve(h.io, h.credentialOptions());
+        session.source = .url;
+    }
+
+    fn freeClientCertificates(h: *Http) void {
+        if (h.client_auth) |*a| a.deinit();
+        if (h.proxy_client_auth) |*a| a.deinit();
+        if (h.cert_credentials) |*s| s.deinit();
+        if (h.proxy_cert_credentials) |*s| s.deinit();
+        h.client_auth = null;
+        h.proxy_client_auth = null;
+        h.cert_credentials = null;
+        h.proxy_cert_credentials = null;
     }
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
@@ -415,6 +501,8 @@ const Http = struct {
             // git sets no timeout of these kinds, so none is set here.
             error.TimedOut => h.fail(error.ConnectionFailed, "timed out"),
             error.BodyIncomplete => h.fail(error.ConnectionFailed, "the body was cut short"),
+            error.ClientCertificateRejected => h.fail(error.ClientCertificateRejected, if (h.client.tls_error) |e| @errorName(e) else "the server refused the certificate"),
+            error.ClientCertificateSchemeUnsupported => h.fail(error.ClientCertificateSchemeUnsupported, "no signature scheme the server takes"),
         };
     }
 
@@ -467,6 +555,7 @@ const Http = struct {
                 try h.credentials.setChallenges(&.{});
                 try h.credentials.approve(h.io, h.credentialOptions());
             }
+            if (res.head.status.class() == .success) try h.approveCertificate();
             if (redirects > 0 and res.head.status.class() == .success) try h.rebase(path);
             return res;
         }
@@ -714,6 +803,7 @@ const Http = struct {
         h.client.deinit();
         h.credentials.deinit();
         if (h.proxy_credentials) |*p| p.deinit();
+        h.freeClientCertificates();
         h.arena.deinit();
         h.gpa.destroy(h);
     }

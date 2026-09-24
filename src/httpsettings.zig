@@ -38,6 +38,17 @@ pub const Settings = struct {
     /// A client certificate and its key.
     ssl_cert: ?[]const u8 = null,
     ssl_key: ?[]const u8 = null,
+    /// `http.sslCertType` and `http.sslKeyType`: `PEM`, `DER`.
+    ssl_cert_type: ?[]const u8 = null,
+    ssl_key_type: ?[]const u8 = null,
+    /// A client certificate and key for an `https` proxy, and whether its
+    /// key's passphrase is asked for.
+    proxy_ssl_cert: ?[]const u8 = null,
+    proxy_ssl_key: ?[]const u8 = null,
+    proxy_ssl_cert_password_protected: bool = false,
+    /// `http.proxySSLCAInfo`: the authorities an `https` proxy is checked
+    /// against, in place of the system's.
+    proxy_ssl_ca_info: ?[]const u8 = null,
     /// Every `http.extraHeader` value, in order.
     extra_headers: []const []const u8 = &.{},
     /// `http.postBuffer`: the largest request sent whole.
@@ -99,6 +110,18 @@ pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*c
                 s.ssl_cert = value;
             } else if (std.mem.eql(u8, name, "sslkey")) {
                 s.ssl_key = value;
+            } else if (std.mem.eql(u8, name, "sslcerttype")) {
+                s.ssl_cert_type = value;
+            } else if (std.mem.eql(u8, name, "sslkeytype")) {
+                s.ssl_key_type = value;
+            } else if (std.mem.eql(u8, name, "proxysslcert")) {
+                s.proxy_ssl_cert = value;
+            } else if (std.mem.eql(u8, name, "proxysslkey")) {
+                s.proxy_ssl_key = value;
+            } else if (std.mem.eql(u8, name, "proxysslcainfo")) {
+                s.proxy_ssl_ca_info = value;
+            } else if (std.mem.eql(u8, name, "proxysslcertpasswordprotected")) {
+                s.proxy_ssl_cert_password_protected = if (entry.value == null) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
             } else if (std.mem.eql(u8, name, "extraheader")) {
                 if (value.len == 0) headers.clearRetainingCapacity() else try headers.append(arena, value);
             } else if (std.mem.eql(u8, name, "postbuffer")) {
@@ -129,7 +152,15 @@ pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*c
         if (env.get("GIT_SSL_KEY")) |v| s.ssl_key = v;
         if (env.get("GIT_HTTP_USER_AGENT")) |v| s.user_agent = v;
         if (env.get("GIT_HTTP_PROXY_AUTHMETHOD")) |v| s.proxy_auth_method = v;
-        if (env.get("GIT_SSL_CERT_PASSWORD_PROTECTED")) |v| s.ssl_cert_password_protected = config_mod.parseBool(v) catch false;
+        if (env.get("GIT_SSL_CERT_TYPE")) |v| s.ssl_cert_type = v;
+        if (env.get("GIT_SSL_KEY_TYPE")) |v| s.ssl_key_type = v;
+        // Set at all, these turn the prompt on, whatever they say, as git
+        // reads them — the first for an https URL only.
+        if (env.get("GIT_SSL_CERT_PASSWORD_PROTECTED") != null and url.scheme == .https) s.ssl_cert_password_protected = true;
+        if (env.get("GIT_PROXY_SSL_CERT")) |v| s.proxy_ssl_cert = v;
+        if (env.get("GIT_PROXY_SSL_KEY")) |v| s.proxy_ssl_key = v;
+        if (env.get("GIT_PROXY_SSL_CAINFO")) |v| s.proxy_ssl_ca_info = v;
+        if (env.get("GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED") != null) s.proxy_ssl_cert_password_protected = true;
         if (!proxy_set) {
             const names: []const []const u8 = if (url.scheme == .https)
                 &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }
