@@ -41,6 +41,7 @@ const objectwalk = @import("objectwalk.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const warning = @import("warning.zig");
+const clonelfs = @import("clonelfs.zig");
 const progress_mod = @import("progress.zig");
 const config_mod = @import("config.zig");
 
@@ -109,8 +110,20 @@ pub const Options = struct {
     programs: ?program.Programs = null,
     /// Settings that beat the new repository's own, as `git -c` gives them:
     /// `core.sshCommand`, `http.extraHeader` and the like, which the clone
-    /// reads before the repository exists.
+    /// reads before the repository exists. When it is `null`, the clone
+    /// reads `user_config` for them.
     config: ?*const config_mod.Config = null,
+    /// The caller's configuration beyond the new repository's: the
+    /// system, XDG and global files and the environment's values, as
+    /// `userconfig.Locations.sources` gives them; `local` and `worktree`
+    /// are not read. git reads them all during a clone, so the fetch's
+    /// settings — a credential helper, `core.sshCommand` — come from them when
+    /// `config` is `null`, the checkout's filters do — `filter.lfs.*` from
+    /// `~/.gitconfig` — and the repository returned is opened with them.
+    user_config: config_mod.Sources = .{},
+    /// The home directory, for `~/` in `user_config` and its
+    /// `includeIf` conditions.
+    home: ?[]const u8 = null,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
@@ -164,10 +177,27 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     else
         url;
 
+    // Before the repository exists, the caller's own configuration is what
+    // git reads.
+    const user = options.user_config;
+    const has_user_config = user.system != null or user.xdg != null or user.global != null or user.command.len != 0 or user.pairs.len != 0;
+    var user_settings: ?config_mod.Config = null;
+    defer if (user_settings) |*c| c.deinit();
+    if (options.config == null and has_user_config) {
+        user_settings = try config_mod.Config.open(gpa, io, .{
+            .system = user.system,
+            .xdg = user.xdg,
+            .global = user.global,
+            .command = user.command,
+            .pairs = user.pairs,
+        }, .{ .home = options.home });
+    }
+    const settings: ?*const config_mod.Config = options.config orelse if (user_settings) |*c| c else null;
+
     var session = try transport.Session.open(gpa, io, url, .upload_pack, null, .{
         .local_copy = local_copy,
         .programs = options.programs,
-        .config = options.config,
+        .config = settings,
         .progress = options.progress,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
@@ -383,6 +413,23 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     }
     try repo.config.write(io, repo.common_dir, "config");
 
+    // The caller's configuration joins the repository's, as git reads
+    // every level: the checkout's filters come from there.
+    if (has_user_config or options.home != null) {
+        const reopened = try Repository.open(gpa, io, dir, .{
+            .discover = false,
+            .odb = options.odb,
+            .system_config = user.system,
+            .xdg_config = user.xdg,
+            .global_config = user.global,
+            .home = options.home,
+            .config_overrides = user.command,
+            .config_pairs = user.pairs,
+        });
+        repo.deinit(io);
+        repo = reopened;
+    }
+
     if (!options.bare and !options.separate_git_dir and options.checkout) {
         if (head_commit) |commit| {
             // A partial clone's checkout reads what the filter left out:
@@ -393,7 +440,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
                 lazy.install();
                 lazy.prefetchTree(io, try repo.commitTree(io, repo.peel(io, commit) catch commit)) catch |err| return lazyFailed(err);
             }
-            try checkOut(gpa, io, &repo, commit, options.programs);
+            try checkOut(gpa, io, &repo, commit, options);
         }
     }
     return repo;
@@ -434,13 +481,31 @@ fn addUnique(arena: Allocator, list: *std.ArrayList(Oid), oid: Oid) Allocator.Er
 
 /// Check out `commit`'s tree into the empty working tree and write the
 /// index. The attributes the tree carries apply, as they do for git, and
-/// its filters run with the caller's `programs`.
-fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, programs: ?program.Programs) Error!void {
+/// its filters run with the caller's `programs`. When the configuration
+/// names the `lfs` filter — `git lfs install` wrote it, here or in the
+/// person's own files — an LFS object the checkout finds missing is fetched
+/// from the remote's LFS server, as git-lfs's smudge fetches it, unless
+/// `GIT_LFS_SKIP_SMUDGE` says to leave pointers. With no such filter the
+/// pointers stay, as git without git-lfs leaves them.
+fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Options) Error!void {
+    const programs = options.programs;
     const tree = try repo.commitTree(io, repo.peel(io, commit) catch commit);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var drivers = try repo.loadFilters(io, .{});
+    const skip_smudge = if (programs) |p|
+        (if (p.environ.get("GIT_LFS_SKIP_SMUDGE")) |v| config_mod.parseBool(v) catch false else false)
+    else
+        false;
+    var drivers = try repo.loadFilters(io, .{ .lfs_skip_smudge = skip_smudge });
     defer drivers.deinit();
+    var lfs_fetch: clonelfs.Fetcher = .{
+        .gpa = gpa,
+        .io = io,
+        .repo = repo,
+        .remote = options.origin,
+        .options = .{ .programs = programs, .prompt = options.prompt, .auth_failure = options.auth_failure },
+    };
+    defer lfs_fetch.deinit();
     var rules = repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
@@ -449,7 +514,12 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, programs: ?p
     rules.required_filters = required;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, tree, .{ .rules = rules, .programs = programs });
+    const lfs_configured = repo.config.get("filter.lfs.process") != null or repo.config.get("filter.lfs.smudge") != null;
+    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, tree, .{
+        .rules = rules,
+        .programs = programs,
+        .lfs_fetch = if (lfs_configured) lfs_fetch.fetcher() else null,
+    });
     try index.write(io, repo.git_dir, "index", .{});
 }
 

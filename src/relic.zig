@@ -134,5 +134,6 @@ test {
         _ = @import("history_test.zig");
         _ = @import("ort_test.zig");
         _ = @import("uploadpack_test.zig");
+        _ = @import("cloneconfig_test.zig");
     }
 }
