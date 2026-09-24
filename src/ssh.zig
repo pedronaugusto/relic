@@ -26,6 +26,7 @@ const program = @import("program.zig");
 const config_mod = @import("config.zig");
 const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
+const auth = @import("auth.zig");
 
 const Connection = connection.Connection;
 
@@ -41,6 +42,13 @@ pub const Error = error{
     /// A path beginning with `-`, which the remote command would read as an
     /// option.
     SuspiciousPathname,
+    /// `ssh` was refused: `Permission denied (publickey)` and its kin. The
+    /// key the person's agent or config offers is not one the server
+    /// takes.
+    AuthenticationFailed,
+    /// `ssh` does not know the server's host key, or it has changed, and
+    /// will not go on without the person's word.
+    HostKeyVerificationFailed,
 } || connection.Error || program.Error;
 
 /// The option dialect of the ssh program.
@@ -76,9 +84,11 @@ pub const Options = struct {
     service_program: ?[]const u8 = null,
     /// Ask an upload-pack for protocol v2.
     protocol_v2: bool = true,
-    /// Where ssh's own messages go: a password prompt, a host key warning.
-    /// They are the person's, as they are when git runs ssh.
-    stderr: enum { inherit, ignore } = .inherit,
+    /// Where ssh's own messages go. Captured, the last of them is kept so
+    /// that a refusal can say what ssh said (`explain`); a passphrase
+    /// prompt or a host-key question is not among them, because ssh asks
+    /// those on the terminal itself.
+    stderr: enum { capture, inherit, ignore } = .capture,
 };
 
 /// The variables git clears before it runs a program for another
@@ -166,10 +176,50 @@ pub fn connect(
         .set = set,
         .unset = &local_repo_env,
         .stderr = switch (options.stderr) {
+            .capture => .capture,
             .inherit => .inherit,
             .ignore => .ignore,
         },
     });
+}
+
+/// Why a conversation over ssh ended before the remote said anything, as
+/// the error a person can act on: ssh's own refusal of the key
+/// (`AuthenticationFailed`), of the host (`HostKeyVerificationFailed`), or
+/// the remote's last words — `ERROR: Repository not found.` — as the
+/// connection's message on `TransportProgramFailed`. `err` is what the
+/// protocol met, returned when ssh said nothing more telling. With
+/// `failure`, a refusal is described there.
+pub fn explain(gpa: Allocator, conn: *Connection, io: Io, err: anyerror, url: url_mod.Url, failure: ?*auth.Failure) Error {
+    const ended = connection.Process.diagnose(conn, io) catch return error.Canceled;
+    const said = std.mem.trim(u8, ended.stderr, " \t\r\n");
+    const refusal: ?struct { e: Error, reason: auth.Failure.Reason } =
+        if (std.mem.indexOf(u8, said, "Host key verification failed") != null or
+        std.mem.indexOf(u8, said, "REMOTE HOST IDENTIFICATION HAS CHANGED") != null)
+            .{ .e = error.HostKeyVerificationFailed, .reason = .host_key }
+        else if (std.mem.indexOf(u8, said, "Permission denied") != null)
+            .{ .e = error.AuthenticationFailed, .reason = .refused }
+        else
+            null;
+    if (said.len != 0) conn.setMessage(said[if (std.mem.lastIndexOfScalar(u8, said, '\n')) |nl| nl + 1 else 0..]);
+    if (refusal) |r| {
+        if (failure) |f| describe: {
+            f.begin(gpa, r.reason, url.scheme, url.raw) catch break :describe;
+            f.setServerMessage(said) catch {};
+            if (url.user) |user| f.username = f.allocator().dupe(u8, user) catch null;
+        }
+        return r.e;
+    }
+    if (said.len != 0 and (ended.code == null or ended.code.? != 0)) return error.TransportProgramFailed;
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Canceled => error.Canceled,
+        error.RemoteHungUp => error.RemoteHungUp,
+        error.ProtocolError => error.ProtocolError,
+        error.RemoteError => error.RemoteError,
+        error.TransportProgramFailed => error.TransportProgramFailed,
+        else => error.ConnectionFailed,
+    };
 }
 
 fn configValue(arena: Allocator, config: ?*const config_mod.Config, key: []const u8) ?[]const u8 {

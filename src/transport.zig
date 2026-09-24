@@ -27,6 +27,7 @@ const local = @import("local.zig");
 const ssh = @import("ssh.zig");
 const smarthttp = @import("smarthttp.zig");
 const credential = @import("credential.zig");
+const auth = @import("auth.zig");
 const sendpack = @import("sendpack.zig");
 const object = @import("object.zig");
 const progress_mod = @import("progress.zig");
@@ -65,8 +66,12 @@ pub const Options = struct {
     protocol_v2: bool = true,
     progress: ?progress_mod.Progress = null,
     /// What stands in for a terminal when an HTTP server asks for a
-    /// credential no helper has.
+    /// credential no helper has. Without one nothing is asked, and
+    /// askpass runs only when it says so.
     prompt: ?credential.Prompt = null,
+    /// Filled in, when the operation fails for want of a credential, with
+    /// what a person needs to put it right: see `auth.Failure`.
+    auth_failure: ?*auth.Failure = null,
 };
 
 /// An open remote.
@@ -113,7 +118,10 @@ pub const Session = struct {
                     .protocol_v2 = options.protocol_v2,
                 });
                 errdefer conn.close(io);
-                return fromConnection(gpa, conn, service, kind);
+                return fromConnection(gpa, conn, service, kind) catch |err| switch (err) {
+                    error.RemoteHungUp, error.ConnectionFailed, error.ProtocolError => return ssh.explain(gpa, conn, io, err, parsed, options.auth_failure),
+                    else => |e| return e,
+                };
             },
             .http, .https => {
                 const conn = try smarthttp.connect(gpa, io, parsed, service, .{
@@ -121,6 +129,7 @@ pub const Session = struct {
                     .programs = options.programs,
                     .protocol_v2 = options.protocol_v2,
                     .prompt = options.prompt,
+                    .auth_failure = options.auth_failure,
                 });
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind);

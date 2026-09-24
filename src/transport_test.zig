@@ -158,7 +158,7 @@ fn helperScript(gpa: Allocator, io: Io, dir: Io.Dir, password: []const u8) ![]u8
         \\#!/bin/sh
         \\echo "== $1" >> "{s}/helper.log"
         \\while IFS= read -r line; do
-        \\  case "$line" in protocol=*|host=*|username=*|password=*|path=*) echo "$line" >> "{s}/helper.log";; esac
+        \\  echo "$line" >> "{s}/helper.log"
         \\done
         \\if [ "$1" = get ]; then echo username=ada; echo password={s}; fi
         \\
@@ -280,8 +280,11 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     var env = try testremote.environ(gpa);
     defer env.deinit();
     try env.put("GIT_ASKPASS", askpass);
+    // askpass is a window in front of the person: without the caller's
+    // leave it is not run, and there is still nothing to ask.
+    try testing.expectError(error.CredentialsUnavailable, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .programs = .{ .environ = &env } }));
     {
-        var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .programs = .{ .environ = &env } });
+        var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .programs = .{ .environ = &env }, .prompt = .{ .askpass = true } });
         session.close(io);
     }
     const ours = try tools.dir.readFileAlloc(io, "askpass.log", gpa, .unlimited);

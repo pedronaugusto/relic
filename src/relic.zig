@@ -60,6 +60,8 @@ pub const fetchpack = @import("fetchpack.zig");
 pub const local = @import("local.zig");
 pub const ssh = @import("ssh.zig");
 pub const credential = @import("credential.zig");
+pub const auth = @import("auth.zig");
+pub const userconfig = @import("userconfig.zig");
 pub const smarthttp = @import("smarthttp.zig");
 pub const transport = @import("transport.zig");
 pub const fetch = @import("fetch.zig");
@@ -97,5 +99,6 @@ test {
         _ = @import("lfstransfer_test.zig");
         _ = @import("lfslocks_test.zig");
         _ = @import("lfspush_test.zig");
+        _ = @import("auth_test.zig");
     }
 }

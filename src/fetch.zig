@@ -41,6 +41,7 @@ const objectwalk = @import("objectwalk.zig");
 const indexpack = @import("indexpack.zig");
 const progress_mod = @import("progress.zig");
 const credential = @import("credential.zig");
+const auth = @import("auth.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -106,8 +107,12 @@ pub const Options = struct {
     /// credential helper need.
     programs: ?program.Programs = null,
     /// What stands in for a terminal when an HTTP server asks for a
-    /// credential no helper has.
+    /// credential no helper has. Without one nothing is asked, and
+    /// askpass runs only when it says so.
     prompt: ?credential.Prompt = null,
+    /// Filled in, when the operation fails for want of a credential, with
+    /// what a person needs to put it right: see `auth.Failure`.
+    auth_failure: ?*auth.Failure = null,
     progress: ?progress_mod.Progress = null,
     /// Checks received objects the way git's `fsck` does.
     check_objects: bool = true,
@@ -263,6 +268,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .service_program = remote.upload_pack,
         .progress = options.progress,
         .prompt = options.prompt,
+        .auth_failure = options.auth_failure,
     });
     defer session.close(io);
 

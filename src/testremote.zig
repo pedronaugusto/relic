@@ -170,6 +170,11 @@ pub const HttpServer = struct {
     pub const HttpOptions = struct {
         /// Answer 401 unless the request carries this user and password.
         basic_auth: ?struct { user: []const u8, password: []const u8 } = null,
+        /// Also accept `Authorization: Bearer <token>`, and offer it in the
+        /// 401's challenges after `Basic`.
+        bearer: ?[]const u8 = null,
+        /// The `text/plain` body of a 401, as a forge explains a refusal.
+        refusal_text: ?[]const u8 = null,
         /// Pass the client's `Git-Protocol` header to git. Off, git answers
         /// in v0 whatever the client asks.
         protocol_v2: bool = true,
@@ -284,8 +289,19 @@ pub const HttpServer = struct {
             const expected = try arena.alloc(u8, "Basic ".len + encoder.calcSize(expected_plain.len));
             @memcpy(expected[0.."Basic ".len], "Basic ");
             _ = encoder.encode(expected["Basic ".len..], expected_plain);
-            if (authorization == null or !std.mem.eql(u8, authorization.?, expected)) {
-                return request.respond("", .{ .status = .unauthorized, .keep_alive = false, .extra_headers = &.{.{ .name = "WWW-Authenticate", .value = "Basic realm=\"relic\"" }} });
+            const bearer_ok = if (s.options.bearer) |token| blk: {
+                const want = try std.fmt.allocPrint(arena, "Bearer {s}", .{token});
+                break :blk authorization != null and std.mem.eql(u8, authorization.?, want);
+            } else false;
+            if (!bearer_ok and (authorization == null or !std.mem.eql(u8, authorization.?, expected))) {
+                const basic: std.http.Header = .{ .name = "WWW-Authenticate", .value = "Basic realm=\"relic\"" };
+                const bearer: std.http.Header = .{ .name = "WWW-Authenticate", .value = "Bearer realm=\"relic\"" };
+                const plain: std.http.Header = .{ .name = "Content-Type", .value = "text/plain" };
+                var challenge: std.ArrayList(std.http.Header) = .empty;
+                try challenge.append(arena, basic);
+                if (s.options.bearer != null) try challenge.append(arena, bearer);
+                if (s.options.refusal_text != null) try challenge.append(arena, plain);
+                return request.respond(s.options.refusal_text orelse "", .{ .status = .unauthorized, .keep_alive = false, .extra_headers = challenge.items });
             }
             remote_user = auth.user;
         }

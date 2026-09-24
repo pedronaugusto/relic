@@ -32,6 +32,7 @@ const pktline = @import("pktline.zig");
 const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
 const credential = @import("credential.zig");
+const auth = @import("auth.zig");
 
 const Connection = connection.Connection;
 const Service = connection.Service;
@@ -77,8 +78,10 @@ pub const Options = struct {
     /// Ask an upload-pack for protocol v2.
     protocol_v2: bool = true,
     /// Answers the credential prompt git would show on a terminal, when no
-    /// helper has the answer.
+    /// helper has the answer. Without it nothing is asked.
     prompt: ?credential.Prompt = null,
+    /// Filled in when the conversation fails for want of a credential.
+    auth_failure: ?*auth.Failure = null,
 };
 
 /// What the client calls itself. A server that treats git specially looks
@@ -300,15 +303,15 @@ const Http = struct {
         h.streaming = false;
     }
 
-    fn headersFor(auth: ?[]const u8) http.Client.Request.Headers {
+    fn headersFor(authorization: ?[]const u8) http.Client.Request.Headers {
         return .{
             .user_agent = .{ .override = user_agent },
-            .authorization = if (auth) |a| .{ .override = a } else .omit,
+            .authorization = if (authorization) |a| .{ .override = a } else .omit,
         };
     }
 
     /// Open a request to `<base><suffix>`.
-    fn open(h: *Http, method: http.Method, suffix: []const u8, auth: ?[]const u8) Error!void {
+    fn open(h: *Http, method: http.Method, suffix: []const u8, authorization: ?[]const u8) Error!void {
         h.endRequest();
         h.request_url = try std.fmt.allocPrint(h.gpa, "{s}{s}", .{ h.base, suffix });
         const uri = std.Uri.parse(h.request_url) catch return h.fail(error.ConnectionFailed, "malformed URL");
@@ -333,7 +336,7 @@ const Http = struct {
         // outlive it: kept in the arena.
         const headers = try h.arena.allocator().dupe(http.Header, extra.items);
         h.in_flight = h.client.request(method, uri, .{
-            .headers = headersFor(auth),
+            .headers = headersFor(authorization),
             .extra_headers = headers,
             .keep_alive = true,
             .redirect_behavior = if (method == .GET) @enumFromInt(5) else .unhandled,
@@ -357,38 +360,107 @@ const Http = struct {
         };
     }
 
-    /// Send a `GET` and read its head, handling a request for credentials.
+    /// Send a `GET` and read its head, handling a request for credentials
+    /// as git's `http_request_reauth` does: a 401 to a request that carried
+    /// none fills one and tries again; a 401 to one that carried one
+    /// rejects it and ends there.
     fn get(h: *Http, suffix: []const u8) Error!http.Client.Response {
-        var attempt: u8 = 0;
-        while (true) : (attempt += 1) {
-            const auth = h.credentials.authorization();
-            try h.open(.GET, suffix, auth);
+        while (true) {
+            const authorization = h.credentials.authorization();
+            try h.open(.GET, suffix, authorization);
             const req = &h.in_flight.?;
             req.sendBodiless() catch |err| return h.fail(mapRequestError(err), @errorName(err));
-            const head = req.receiveHead(h.redirect_buffer) catch |err| return h.fail(mapRequestError(err), @errorName(err));
+            var head = req.receiveHead(h.redirect_buffer) catch |err| return h.fail(mapRequestError(err), @errorName(err));
             if (head.head.status == .unauthorized) {
-                if (auth != null) try h.credentials.reject(h.io, h.credentialOptions());
-                if (attempt >= 1 or !try h.credentials.fill(h.io, h.credentialOptions())) {
-                    return h.fail(error.AuthenticationFailed, "HTTP 401");
+                try h.keepChallenges(&head.head);
+                const said = try h.serverText(&head);
+                if (authorization != null) {
+                    h.credentials.reject(h.io, h.credentialOptions()) catch |err| return h.authFailed(err, .refused, 401, said);
+                    return h.authFailed(error.AuthenticationFailed, .refused, 401, said);
                 }
+                const filled = h.credentials.fill(h.io, h.credentialOptions()) catch |err| {
+                    return h.authFailed(err, switch (err) {
+                        error.CredentialHelperQuit => .helper_quit,
+                        error.ProgramsNotGranted => .programs_not_granted,
+                        else => .no_credential,
+                    }, 401, said);
+                };
+                if (!filled) return h.authFailed(error.AuthenticationFailed, .declined, 401, said);
                 continue;
             }
-            if (head.head.status.class() == .success and auth != null) try h.credentials.approve(h.io, h.credentialOptions());
+            if (head.head.status.class() == .success and authorization != null) {
+                try h.credentials.setChallenges(&.{});
+                try h.credentials.approve(h.io, h.credentialOptions());
+            }
             return head;
         }
     }
 
-    fn checkStatus(h: *Http, head: *const http.Client.Response.Head) Error!void {
-        switch (head.status) {
+    /// Keep the `WWW-Authenticate` values of a refusal for the helpers.
+    fn keepChallenges(h: *Http, head: *const http.Client.Response.Head) Error!void {
+        var values: std.ArrayList([]const u8) = .empty;
+        defer values.deinit(h.gpa);
+        var it = head.iterateHeaders();
+        while (it.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "www-authenticate")) try values.append(h.gpa, header.value);
+        }
+        try h.credentials.setChallenges(values.items);
+    }
+
+    /// The body of a refusal when it is `text/plain`, which is where a forge
+    /// explains itself and what git shows as `remote:` lines. At most 4 KiB,
+    /// in the connection's arena.
+    fn serverText(h: *Http, res: *http.Client.Response) Error![]const u8 {
+        const content_type = res.head.content_type orelse return "";
+        if (!std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return "";
+        const reader = h.bodyOf(res) catch return "";
+        var out: Io.Writer.Allocating = .init(h.arena.allocator());
+        _ = reader.stream(&out.writer, .limited(4096)) catch |err| switch (err) {
+            error.EndOfStream => {},
+            else => return out.written(),
+        };
+        _ = reader.streamRemaining(&out.writer) catch {};
+        const text = out.written();
+        return text[0..@min(text.len, 4096)];
+    }
+
+    /// End with `err`, describing it in the caller's `auth_failure`.
+    fn authFailed(h: *Http, err: anyerror, reason: auth.Failure.Reason, status: u16, said: []const u8) Error {
+        const trimmed = std.mem.trim(u8, said, " \t\r\n");
+        var status_buf: [16]u8 = undefined;
+        h.connection.setMessage(if (trimmed.len != 0) trimmed else std.fmt.bufPrint(&status_buf, "HTTP {d}", .{status}) catch "HTTP");
+        if (h.options.auth_failure) |described| describe: {
+            described.begin(h.gpa, reason, h.credentials.url.scheme, h.credentials.url.raw) catch break :describe;
+            described.status = status;
+            described.setServerMessage(said) catch {};
+            h.credentials.describeFailure(described, h.options.prompt != null) catch {};
+        }
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+            error.CredentialHelperQuit => error.CredentialHelperQuit,
+            error.CredentialsUnavailable => error.CredentialsUnavailable,
+            error.CredentialMultistageUnsupported => error.CredentialMultistageUnsupported,
+            error.ProgramsNotGranted => error.ProgramsNotGranted,
+            error.AuthenticationFailed => error.AuthenticationFailed,
+            else => error.AuthenticationFailed,
+        };
+    }
+
+    fn checkStatus(h: *Http, res: *http.Client.Response) Error!void {
+        const status = @intFromEnum(res.head.status);
+        switch (res.head.status) {
             .ok => return,
-            .not_found => return h.fail(error.RepositoryNotFound, "HTTP 404"),
             .unauthorized, .forbidden => {
-                var buf: [32]u8 = undefined;
-                return h.fail(error.AuthenticationFailed, std.fmt.bufPrint(&buf, "HTTP {d}", .{@intFromEnum(head.status)}) catch "HTTP");
+                if (res.head.status == .unauthorized) try h.keepChallenges(&res.head);
+                const said = try h.serverText(res);
+                return h.authFailed(error.AuthenticationFailed, if (status == 403) .forbidden else .refused, status, said);
             },
             else => {
+                const said = std.mem.trim(u8, try h.serverText(res), " \t\r\n");
                 var buf: [32]u8 = undefined;
-                return h.fail(error.HttpStatus, std.fmt.bufPrint(&buf, "HTTP {d}", .{@intFromEnum(head.status)}) catch "HTTP");
+                const text = if (said.len != 0) said else std.fmt.bufPrint(&buf, "HTTP {d}", .{status}) catch "HTTP";
+                return h.fail(if (res.head.status == .not_found) error.RepositoryNotFound else error.HttpStatus, text);
             },
         }
     }
@@ -412,7 +484,7 @@ const Http = struct {
         var suffix_buf: [64]u8 = undefined;
         const suffix = std.fmt.bufPrint(&suffix_buf, "/info/refs?service={s}", .{h.service.name()}) catch unreachable;
         var res = try h.get(suffix);
-        try h.checkStatus(&res.head);
+        try h.checkStatus(&res);
         var expected_buf: [64]u8 = undefined;
         const expected = std.fmt.bufPrint(&expected_buf, "application/x-{s}-advertisement", .{h.service.name()}) catch unreachable;
         const content_type = res.head.content_type orelse "";
@@ -509,7 +581,7 @@ const Http = struct {
             h.post.end = 0;
         }
         var res = h.in_flight.?.receiveHead(&.{}) catch |err| return h.fail(mapRequestError(err), @errorName(err));
-        try h.checkStatus(&res.head);
+        try h.checkStatus(&res);
         var expected_buf: [64]u8 = undefined;
         const expected = std.fmt.bufPrint(&expected_buf, "application/x-{s}-result", .{h.service.name()}) catch unreachable;
         if (!std.mem.eql(u8, res.head.content_type orelse "", expected)) return h.fail(error.ProtocolError, "unexpected content type");

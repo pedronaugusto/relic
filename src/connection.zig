@@ -139,6 +139,15 @@ pub const Connection = struct {
 /// A conversation over a program's standard input and output: `ssh`
 /// running the service on another machine, or the service itself on this
 /// one.
+///
+/// What the program says on its standard error — `Permission denied
+/// (publickey).`, `ERROR: Repository not found.` — is, with
+/// `Invocation.stderr = .capture`, read beside the conversation by a task
+/// on the caller's `Io`, and its last four kilobytes kept for `diagnose`,
+/// so a failure can say what the far side said rather than only that it
+/// hung up. Where the caller's `Io` cannot run a second task, the program's
+/// standard error is the caller's own instead, because an unread pipe is a
+/// program that stops when it fills.
 pub const Process = struct {
     gpa: Allocator,
     io: Io,
@@ -149,6 +158,44 @@ pub const Process = struct {
     writer: Io.File.Writer,
     connection: Connection,
     exited: bool = false,
+    term: ?std.process.Child.Term = null,
+    /// The captured standard error, when it is captured.
+    stderr: ?*Tail = null,
+
+    const Tail = struct {
+        buffer: [4096]u8 = undefined,
+        len: usize = 0,
+        task: ?Io.Future(void) = null,
+        /// The read end, taken from the child, whose own clean-up would
+        /// close it under the reading task.
+        file: ?Io.File = null,
+
+        /// Read the program's standard error to its end, keeping the last
+        /// of it.
+        fn drain(tail: *Tail, io: Io, file: Io.File) void {
+            var chunk: [1024]u8 = undefined;
+            while (true) {
+                const n = file.readStreaming(io, &.{&chunk}) catch return;
+                tail.keep(chunk[0..n]);
+            }
+        }
+
+        fn keep(tail: *Tail, bytes: []const u8) void {
+            if (bytes.len >= tail.buffer.len) {
+                @memcpy(&tail.buffer, bytes[bytes.len - tail.buffer.len ..]);
+                tail.len = tail.buffer.len;
+                return;
+            }
+            const room = tail.buffer.len - tail.len;
+            if (bytes.len > room) {
+                const drop = bytes.len - room;
+                std.mem.copyForwards(u8, tail.buffer[0 .. tail.len - drop], tail.buffer[drop..tail.len]);
+                tail.len -= drop;
+            }
+            @memcpy(tail.buffer[tail.len..][0..bytes.len], bytes);
+            tail.len += bytes.len;
+        }
+    };
 
     const vtable: Connection.VTable = .{
         .advertisement = advertisement,
@@ -173,8 +220,30 @@ pub const Process = struct {
         errdefer gpa.free(read_buffer);
         const write_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(write_buffer);
-        var running = try program.start(programs, gpa, io, invocation);
+
+        var effective = invocation;
+        var tail: ?*Tail = null;
+        errdefer if (tail) |t| gpa.destroy(t);
+        if (invocation.stderr == .capture) {
+            if (canRunBeside(io)) {
+                tail = try gpa.create(Tail);
+                tail.?.* = .{};
+            } else effective.stderr = .inherit;
+        }
+        var running = try program.start(programs, gpa, io, effective);
         errdefer running.deinit(io);
+        if (tail) |t| {
+            const file = running.child.stderr.?;
+            running.child.stderr = null;
+            t.file = file;
+            t.task = io.concurrent(Tail.drain, .{ t, io, file }) catch null;
+            if (t.task == null) {
+                // The probe said a task would run and none did: the pipe is
+                // closed rather than left to fill.
+                file.close(io);
+                t.file = null;
+            }
+        }
         p.* = .{
             .gpa = gpa,
             .io = io,
@@ -184,10 +253,21 @@ pub const Process = struct {
             .reader = running.child.stdout.?.readerStreaming(io, read_buffer),
             .writer = running.child.stdin.?.writerStreaming(io, write_buffer),
             .connection = .{ .context = undefined, .vtable = &vtable, .stateless = false },
+            .stderr = tail,
         };
         p.connection.context = p;
         return &p.connection;
     }
+
+    /// Whether `io` runs a second task beside this one, asked by running an
+    /// empty one.
+    fn canRunBeside(io: Io) bool {
+        var probe = io.concurrent(nothing, .{}) catch return false;
+        probe.await(io);
+        return true;
+    }
+
+    fn nothing() void {}
 
     fn advertisement(context: *anyopaque, _: *Connection) Error!*Io.Reader {
         const p: *Process = @ptrCast(@alignCast(context));
@@ -234,6 +314,13 @@ pub const Process = struct {
             p.exited = true;
             _ = p.running.wait(io) catch {};
         }
+        if (p.stderr) |tail| {
+            // Something the program started may still hold its standard
+            // error open; the reading stops here either way.
+            if (tail.task) |*task| task.cancel(io);
+            if (tail.file) |file| file.close(io);
+            p.gpa.destroy(tail);
+        }
         p.running.deinit(io);
         p.gpa.free(p.read_buffer);
         p.gpa.free(p.write_buffer);
@@ -251,9 +338,53 @@ pub const Process = struct {
             error.Canceled => return error.Canceled,
             else => return error.TransportProgramFailed,
         };
+        p.term = term;
         switch (term) {
             .exited => |code| if (code != 0) return error.TransportProgramFailed,
             else => return error.TransportProgramFailed,
         }
     }
+
+    /// How a program that ended the conversation early ended: its exit
+    /// code, `null` when it was killed or could not be waited for, and the
+    /// last of what it wrote on its standard error, empty when that was not
+    /// captured. The program's input is closed and it is waited for.
+    pub fn diagnose(c: *Connection, io: Io) Io.Cancelable!struct { code: ?u8, stderr: []const u8 } {
+        const p: *Process = @ptrCast(@alignCast(c.context));
+        if (!p.exited) {
+            p.exited = true;
+            p.term = p.running.wait(io) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => null,
+            };
+        }
+        var said: []const u8 = "";
+        if (p.stderr) |tail| {
+            // The program has ended, so its standard error is at its end
+            // unless something it started still holds it.
+            if (tail.task) |*task| task.await(io);
+            said = tail.buffer[0..tail.len];
+        }
+        const code: ?u8 = if (p.term) |term| switch (term) {
+            .exited => |value| value,
+            else => null,
+        } else null;
+        return .{ .code = code, .stderr = said };
+    }
 };
+
+test "the last of a program's standard error is what is kept" {
+    var tail: Process.Tail = .{};
+    tail.keep("first line\n");
+    try std.testing.expectEqualStrings("first line\n", tail.buffer[0..tail.len]);
+    var big: [5000]u8 = undefined;
+    @memset(&big, 'x');
+    big[big.len - 1] = '!';
+    tail.keep(&big);
+    try std.testing.expectEqual(@as(usize, 4096), tail.len);
+    try std.testing.expectEqual(@as(u8, '!'), tail.buffer[tail.len - 1]);
+    tail.len = 4000;
+    tail.keep("0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789");
+    try std.testing.expectEqual(@as(usize, 4096), tail.len);
+    try std.testing.expect(std.mem.endsWith(u8, tail.buffer[0..tail.len], "6789"));
+}
