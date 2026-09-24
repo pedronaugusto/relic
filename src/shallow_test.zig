@@ -253,7 +253,7 @@ test "a fetch deepens, and unshallows, as git fetch does, and a plain fetch into
     try testing.expectError(error.NotShallow, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true, .programs = .{ .environ = &env } }));
 }
 
-test "a shallow clone over ssh is git's, and one from a path is refused by name" {
+test "a shallow clone over ssh is git's, and one from a path is a whole local clone, as git's is" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -280,9 +280,18 @@ test "a shallow clone over ssh is git's, and one from a path is refused by name"
     repo.deinit(io);
     try expectSameShallow(gpa, io, twins.by_git, twins.by_relic);
 
-    var local = testing.tmpDir(.{ .iterate = true });
-    defer local.cleanup();
+    // From a path, the depth is ignored and only its one branch kept, as
+    // git's local clone does; the caller is told.
+    var local = try Twins.init(gpa, io);
+    defer local.deinit(gpa, io);
     const path = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
     defer gpa.free(path);
-    try testing.expectError(error.ShallowLocalUnsupported, clone_mod.clone(gpa, io, path, local.dir, .{ .who = test_who, .depth = 1 }));
+    const cloned = try testremote.gitInputEnv(gpa, io, local.tmp.dir, &env, &.{ "clone", "-q", "--depth=1", path, local.git_path }, "", true);
+    gpa.free(cloned);
+    var warnings: @import("warning.zig").Warnings = .init(gpa);
+    defer warnings.deinit();
+    var plain = try clone_mod.clone(gpa, io, path, local.by_relic, .{ .who = test_who, .depth = 1, .warnings = &warnings });
+    plain.deinit(io);
+    try expectSameShallow(gpa, io, local.by_git, local.by_relic);
+    try testing.expectEqualStrings("--depth", warnings.items.items[0].ignored_for_local);
 }

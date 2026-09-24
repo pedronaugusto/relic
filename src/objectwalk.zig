@@ -67,7 +67,38 @@ const Queued = struct {
 /// `exclude` that `db` does not hold is passed over: it is the other
 /// side's, and says nothing about this one.
 pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) Error!Odb.Collected {
-    var walk: Walk = .{ .gpa = gpa, .io = io, .db = db, .arena = .init(gpa) };
+    return missingWith(gpa, io, db, include, exclude, .{});
+}
+
+/// What a server's pack leaves out: git's `--filter` specs.
+pub const Filter = union(enum) {
+    none,
+    /// `blob:none`: no blob.
+    blob_none,
+    /// `blob:limit=<n>`: no blob larger than `n` bytes.
+    blob_limit: u64,
+    /// `tree:<depth>`: no tree or blob at `depth` or deeper, a commit's
+    /// root tree being at depth zero.
+    tree_depth: u64,
+    /// `object:type=<type>`: only objects of the type.
+    object_type: object.Type,
+    /// `combine:<a>+<b>…`: what every one of them keeps.
+    combine: []const Filter,
+};
+
+/// How `missingWith` walks.
+pub const MissingOptions = struct {
+    /// Commits whose parents are not followed: a shallow clone's boundary,
+    /// as the server draws it for one request.
+    boundary: ?*const Oid.Set = null,
+    /// What is left out. An object named in `include` is kept whatever the
+    /// filter says, as git keeps one.
+    filter: Filter = .none,
+};
+
+/// `missing`, walked with `options`.
+pub fn missingWith(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid, options: MissingOptions) Error!Odb.Collected {
+    var walk: Walk = .{ .gpa = gpa, .io = io, .db = db, .arena = .init(gpa), .boundary = options.boundary, .filter = options.filter };
     defer walk.deinit();
     var collected: Odb.Collected = .{ .arena = .init(gpa), .entries = &.{} };
     errdefer collected.arena.deinit();
@@ -101,8 +132,11 @@ pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: 
         }
         switch (peeled.type) {
             .commit => try walk.enqueue(peeled.oid, 0),
-            .tree => try pending_trees.append(gpa, peeled.oid),
-            .blob => try pending_blobs.append(gpa, peeled.oid),
+            .tree, .blob => {
+                // Asked for by name: sent whatever the filter says.
+                try walk.named.put(gpa, peeled.oid, {});
+                if (peeled.type == .tree) try pending_trees.append(gpa, peeled.oid) else try pending_blobs.append(gpa, peeled.oid);
+            },
             .tag => unreachable,
         }
     }
@@ -122,7 +156,7 @@ pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: 
     for (commits) |oid| {
         const node = walk.nodes.getPtr(oid).?;
         if (node.flags & flag_uninteresting != 0) continue;
-        try entries.append(gpa, .{ .oid = oid });
+        if (try walk.keeps(oid, .commit, 0)) try entries.append(gpa, .{ .oid = oid });
         try walk.addTree(node.tree, "", &entries, out_arena);
     }
     for (pending_trees.items) |tree| try walk.addTree(tree, "", &entries, out_arena);
@@ -149,13 +183,56 @@ const Walk = struct {
     had: Oid.Set = .empty,
     /// Objects already listed.
     added: Oid.Set = .empty,
+    /// Trees and blobs named in `include`, which no filter leaves out.
+    named: Oid.Set = .empty,
+    boundary: ?*const Oid.Set = null,
+    filter: Filter = .none,
 
     fn deinit(w: *Walk) void {
         w.nodes.deinit(w.gpa);
         w.queue.deinit(w.gpa);
         w.had.deinit(w.gpa);
         w.added.deinit(w.gpa);
+        w.named.deinit(w.gpa);
         w.arena.deinit();
+    }
+
+    /// Whether the filter keeps an object of `kind` at `depth` from its
+    /// commit's root tree.
+    fn keeps(w: *Walk, oid: Oid, kind: object.Type, depth: u64) Error!bool {
+        if (w.named.contains(oid)) return true;
+        return w.keepsWith(w.filter, oid, kind, depth);
+    }
+
+    fn keepsWith(w: *Walk, filter: Filter, oid: Oid, kind: object.Type, depth: u64) Error!bool {
+        return switch (filter) {
+            .none => true,
+            .blob_none => kind != .blob,
+            .blob_limit => |limit| kind != .blob or (try w.db.readHeader(w.io, oid)).size <= limit,
+            .tree_depth => |max| (kind != .tree and kind != .blob) or depth < max,
+            .object_type => |t| kind == t,
+            .combine => |all| {
+                for (all) |f| if (!try w.keepsWith(f, oid, kind, depth)) return false;
+                return true;
+            },
+        };
+    }
+
+    /// Whether a tree at `depth` is walked into: `tree:<n>` stops walking
+    /// where nothing below can be kept.
+    fn descends(w: *Walk, depth: u64) bool {
+        return descendsWith(w.filter, depth);
+    }
+
+    fn descendsWith(filter: Filter, depth: u64) bool {
+        return switch (filter) {
+            .tree_depth => |max| depth < max,
+            .combine => |all| {
+                for (all) |f| if (!descendsWith(f, depth)) return false;
+                return true;
+            },
+            else => true,
+        };
     }
 
     const Peeled = struct { oid: Oid, type: object.Type };
@@ -190,7 +267,8 @@ const Walk = struct {
         // `load` may have grown the map; the pointer is taken again.
         const again = w.nodes.getPtr(oid).?;
         again.time = commit.committer.when_secs;
-        again.parents = try w.arena.allocator().dupe(Oid, revwalk.parentsOf(w.db, oid, commit.parents));
+        const on_boundary = if (w.boundary) |b| b.contains(oid) else false;
+        again.parents = if (on_boundary) &.{} else try w.arena.allocator().dupe(Oid, revwalk.parentsOf(w.db, oid, commit.parents));
         again.tree = commit.tree;
         again.loaded = true;
         return again;
@@ -300,14 +378,15 @@ const Walk = struct {
         out: *std.ArrayList(odb_mod.PackEntry),
         arena: Allocator,
     ) Error!void {
-        const Item = struct { oid: Oid, path: []const u8 };
+        const Item = struct { oid: Oid, path: []const u8, depth: u64 };
         var stack: std.ArrayList(Item) = .empty;
         defer stack.deinit(w.gpa);
-        try stack.append(w.gpa, .{ .oid = root, .path = root_path });
+        try stack.append(w.gpa, .{ .oid = root, .path = root_path, .depth = 0 });
         while (stack.pop()) |item| {
             if (w.had.contains(item.oid) or w.added.contains(item.oid)) continue;
             try w.added.put(w.gpa, item.oid, {});
-            try out.append(w.gpa, .{ .oid = item.oid, .hint = item.path });
+            if (try w.keeps(item.oid, .tree, item.depth)) try out.append(w.gpa, .{ .oid = item.oid, .hint = item.path });
+            if (!w.named.contains(item.oid) and !w.descends(item.depth + 1)) continue;
             const found = try w.db.read(w.io, item.oid);
             defer w.db.gpa.free(found.bytes);
             if (found.type != .tree) return error.UnexpectedObjectType;
@@ -318,13 +397,13 @@ const Walk = struct {
                 else
                     try std.fmt.allocPrint(arena, "{s}/{s}", .{ item.path, entry.name });
                 switch (entry.mode) {
-                    .tree => try stack.append(w.gpa, .{ .oid = entry.oid, .path = path }),
+                    .tree => try stack.append(w.gpa, .{ .oid = entry.oid, .path = path, .depth = item.depth + 1 }),
                     // A gitlink names a commit in another repository.
                     .gitlink => {},
                     else => {
                         if (w.had.contains(entry.oid) or w.added.contains(entry.oid)) continue;
                         try w.added.put(w.gpa, entry.oid, {});
-                        try out.append(w.gpa, .{ .oid = entry.oid, .hint = path });
+                        if (try w.keeps(entry.oid, .blob, item.depth + 1)) try out.append(w.gpa, .{ .oid = entry.oid, .hint = path });
                     },
                 }
             }

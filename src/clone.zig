@@ -54,9 +54,6 @@ pub const Error = error{
     DestinationNotEmpty,
     /// `Options.branch` names neither a branch nor a tag the remote has.
     RemoteBranchNotFound,
-    /// A partial clone from a repository on this machine, which the local
-    /// transport copies whole.
-    PartialCloneLocalUnsupported,
     /// An object below a fetched ref did not arrive.
     MissingObject,
     /// A remote name git would refuse.
@@ -131,7 +128,7 @@ pub const Options = struct {
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Error!Repository {
-    const deepen: ?fetchpack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
+    var deepen: ?fetchpack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
         .{ .depth = options.depth, .since = options.shallow_since, .not = options.shallow_exclude }
     else
         null;
@@ -149,14 +146,26 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
 
     // A path is recorded absolute, as git records it.
     const parsed = url_mod.Url.parse(url) catch |err| return err;
-    if (filter_spec != null and (parsed.scheme == .local or parsed.scheme == .file)) return error.PartialCloneLocalUnsupported;
-    if (deepen != null and (parsed.scheme == .local or parsed.scheme == .file)) return error.ShallowLocalUnsupported;
+    // A path is a local clone, copied as it is: git ignores a depth and a
+    // filter there, says so, and keeps what they decided besides — one
+    // branch, the promisor settings. `file://` goes through upload-pack.
+    const local_copy = parsed.scheme == .local and !try isShallowSource(io, parsed.path);
+    var send_filter = filter_spec;
+    if (local_copy) {
+        if (options.depth != null) try warning.note(options.warnings, .{ .ignored_for_local = "--depth" });
+        if (options.shallow_since != null) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-since" });
+        if (options.shallow_exclude.len != 0) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-exclude" });
+        if (filter_spec != null) try warning.note(options.warnings, .{ .ignored_for_local = "--filter" });
+        deepen = null;
+        send_filter = null;
+    }
     const recorded = if (parsed.scheme == .local)
         try Io.Dir.cwd().realPathFileAlloc(io, url, arena)
     else
         url;
 
     var session = try transport.Session.open(gpa, io, url, .upload_pack, null, .{
+        .local_copy = local_copy,
         .programs = options.programs,
         .config = options.config,
         .progress = options.progress,
@@ -267,14 +276,14 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .tips = &.{},
         .include_tag = options.tags,
         .deepen = deepen,
-        .filter = filter_spec,
+        .filter = send_filter,
     }, .{
         .progress = options.progress,
         .receive = .{ .check_objects = options.check_objects },
         .shallow_info = &shallow_info,
     });
     // A partial clone's pack is a promisor pack, and says for which refs.
-    if (filter_spec != null) if (fetched.pack) |name| {
+    if (send_filter != null) if (fetched.pack) |name| {
         var sought: std.ArrayList(partial.PromisorRef) = .empty;
         for (remote_refs.refs) |ref| {
             if (ref.unborn or std.mem.endsWith(u8, ref.name, "^{}")) continue;
@@ -314,7 +323,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
             fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
         }
-        objectwalk.checkConnectedWith(gpa, io, &repo.odb, wants.items, if (fresh) |*index| index else null, null, .{ .promisor = filter_spec != null }) catch |err| switch (err) {
+        objectwalk.checkConnectedWith(gpa, io, &repo.odb, wants.items, if (fresh) |*index| index else null, null, .{ .promisor = send_filter != null }) catch |err| switch (err) {
             error.MissingObject => return error.MissingObject,
             else => |e| return e,
         };
@@ -379,7 +388,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             // fetched first, in one request, as git does.
             var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = options.programs, .prompt = options.prompt, .check_objects = options.check_objects });
             defer lazy.deinit();
-            if (filter_spec != null) {
+            if (send_filter != null) {
                 lazy.install();
                 lazy.prefetchTree(io, try repo.commitTree(io, repo.peel(io, commit) catch commit)) catch |err| return lazyFailed(err);
             }
@@ -387,6 +396,17 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         }
     }
     return repo;
+}
+
+/// Whether the repository at `path` is shallow, which git clones through
+/// upload-pack even from a path.
+fn isShallowSource(io: Io, path: []const u8) Io.Cancelable!bool {
+    var dir = Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+    defer dir.close(io);
+    for ([_][]const u8{ "shallow", ".git/shallow" }) |name| {
+        if (dir.access(io, name, .{})) |_| return true else |_| {}
+    }
+    return false;
 }
 
 fn lazyFailed(err: anyerror) Error {

@@ -64,6 +64,19 @@ pub fn build(b: *std.Build) void {
     });
     const install_lfs_transfer_helper = b.addInstallArtifact(lfs_transfer_helper, .{});
 
+    // relic's own upload-pack, as a program real git can be pointed at with
+    // `--upload-pack`, so what git makes of relic's server is compared with
+    // what it makes of its own.
+    const upload_pack_helper = b.addExecutable(.{
+        .name = "relic-upload-pack",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/uploadpack_helper.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_upload_pack_helper = b.addInstallArtifact(upload_pack_helper, .{});
+
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
     build_options.addOption([]const u8, "filter_helper_path", b.getInstallPath(.bin, filter_helper.out_filename));
@@ -76,6 +89,7 @@ pub fn build(b: *std.Build) void {
         "lfs-transfer-server",
         "A git-lfs-transfer server program to prove the pure-ssh client against",
     ) orelse "");
+    build_options.addOption([]const u8, "upload_pack_helper_path", b.getInstallPath(.bin, upload_pack_helper.out_filename));
 
     // Error return traces are off for the test binary, and the reason is
     // `zig build test --fuzz`. Building the suite with fuzzing instrumented
@@ -115,6 +129,7 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&install_lock_helper.step);
     run_tests.step.dependOn(&install_filter_helper.step);
     run_tests.step.dependOn(&install_lfs_transfer_helper.step);
+    run_tests.step.dependOn(&install_upload_pack_helper.step);
 
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);
@@ -127,6 +142,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&lock_helper.step);
     check_step.dependOn(&filter_helper.step);
     check_step.dependOn(&lfs_transfer_helper.step);
+    check_step.dependOn(&upload_pack_helper.step);
 
     //=====================================================================
     // Examples

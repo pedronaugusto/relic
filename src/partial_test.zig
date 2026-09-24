@@ -178,13 +178,22 @@ test "a partial clone is the one git makes, filtered by blob:none, blob:limit an
         try expectSame(gpa, io, twins.by_git, twins.by_relic, !std.mem.startsWith(u8, spec, "tree:"));
     }
 
-    var local = testing.tmpDir(.{ .iterate = true });
-    defer local.cleanup();
+    // From a path the filter is ignored — everything is copied — and its
+    // settings kept, as git's local clone keeps them; the caller is told.
+    var local = try Twins.init(gpa, io);
+    defer local.deinit(gpa, io);
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
     const path = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
     defer gpa.free(path);
-    try testing.expectError(error.PartialCloneLocalUnsupported, clone_mod.clone(gpa, io, path, local.dir, .{ .who = test_who, .filter = "blob:none" }));
+    const cloned = try testremote.gitInputEnv(gpa, io, local.tmp.dir, &env, &.{ "clone", "-q", "--filter=blob:none", path, local.git_path }, "", true);
+    gpa.free(cloned);
+    var warnings: @import("warning.zig").Warnings = .init(gpa);
+    defer warnings.deinit();
+    var plain = try clone_mod.clone(gpa, io, path, local.by_relic, .{ .who = test_who, .filter = "blob:none", .warnings = &warnings });
+    plain.deinit(io);
+    try expectSame(gpa, io, local.by_git, local.by_relic, true);
+    try testing.expectEqualStrings("--filter", warnings.items.items[0].ignored_for_local);
 }
 
 test "git's partial clone is checked out by relic, which fetches what it reads from the promisor remote" {

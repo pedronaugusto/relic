@@ -180,6 +180,9 @@ pub const HttpServer = struct {
         /// Keep a connection open for the next request, as a web server
         /// does; off, every answer closes it.
         keep_alive: bool = false,
+        /// Serve upload-pack with this program — relic's own — as git's
+        /// HTTP backend runs one, rather than with `git http-backend`.
+        upload_pack: ?[]const u8 = null,
         /// Pass the client's `Git-Protocol` header to git. Off, git answers
         /// in v0 whatever the client asks.
         protocol_v2: bool = true,
@@ -267,6 +270,49 @@ pub const HttpServer = struct {
         }
     }
 
+    /// What git's HTTP backend does for upload-pack, with `program` as the
+    /// upload-pack: the advertisement for `info/refs`, behind the service
+    /// line in v0; one stateless request for a `POST`, inflated first when
+    /// it came gzipped.
+    fn serveUploadPack(
+        s: *HttpServer,
+        request: *std.http.Server.Request,
+        arena: Allocator,
+        program_path: []const u8,
+        path: []const u8,
+        body: []const u8,
+        git_protocol: ?[]const u8,
+        content_encoding: ?[]const u8,
+    ) !void {
+        const io = s.io;
+        const info_refs = std.mem.endsWith(u8, path, "/info/refs");
+        const repo_path = path[0 .. path.len - (if (info_refs) "/info/refs".len else "/git-upload-pack".len)];
+        const full = try std.fmt.allocPrint(arena, "{s}{s}", .{ s.root, repo_path });
+        var env = try s.env.clone(arena);
+        const v2 = s.options.protocol_v2 and git_protocol != null and std.mem.indexOf(u8, git_protocol.?, "version=2") != null;
+        if (v2) try env.put("GIT_PROTOCOL", "version=2");
+        var input = body;
+        if (content_encoding) |ce| if (std.ascii.eqlIgnoreCase(ce, "gzip")) {
+            var in: Io.Reader = .fixed(body);
+            var window: [std.compress.flate.max_window_len]u8 = undefined;
+            var inflate: std.compress.flate.Decompress = .init(&in, .gzip, &window);
+            input = try inflate.reader.allocRemaining(arena, .limited(1 << 30));
+        };
+        var outcome = try program.run(.{ .environ = &env }, s.gpa, io, .{
+            .argv = &.{ program_path, if (info_refs) "--advertise-refs" else "--stateless-rpc", full },
+            .stderr = .capture,
+        }, input, .{});
+        defer outcome.deinit(s.gpa);
+        var answer_bytes: std.ArrayList(u8) = .empty;
+        if (info_refs and !v2) try answer_bytes.appendSlice(arena, "001e# service=git-upload-pack\n0000");
+        try answer_bytes.appendSlice(arena, outcome.stdout);
+        const content_type = if (info_refs) "application/x-git-upload-pack-advertisement" else "application/x-git-upload-pack-result";
+        try request.respond(answer_bytes.items, .{
+            .keep_alive = s.options.keep_alive,
+            .extra_headers = &.{.{ .name = "Content-Type", .value = content_type }},
+        });
+    }
+
     fn answer(s: *HttpServer, request: *std.http.Server.Request) !void {
         const io = s.io;
         const gpa = s.gpa;
@@ -330,6 +376,14 @@ pub const HttpServer = struct {
             var body_buffer: [8192]u8 = undefined;
             const body_reader = try request.readerExpectContinue(&body_buffer);
             body = try body_reader.allocRemaining(arena, .limited(1 << 30));
+        }
+
+        if (s.options.upload_pack) |program_path| {
+            if (std.mem.endsWith(u8, path, "/info/refs") and std.mem.eql(u8, query, "service=git-upload-pack") or
+                std.mem.endsWith(u8, path, "/git-upload-pack"))
+            {
+                return s.serveUploadPack(request, arena, program_path, path, body, git_protocol, content_encoding);
+            }
         }
 
         var cgi_env = try s.env.clone(arena);
