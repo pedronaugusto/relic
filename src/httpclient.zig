@@ -367,7 +367,9 @@ pub const Response = struct {
         return null;
     }
 
-    /// The body, decompressed when the server compressed it.
+    /// The body, decompressed when the server compressed it with gzip or
+    /// deflate; a zstd body as it came, for the caller to decode with the
+    /// window it allows.
     pub fn reader(r: *Response) *Io.Reader {
         return r.body;
     }
@@ -866,12 +868,9 @@ pub const Connection = struct {
                 body.decompress_buffer = try gpa.alloc(u8, std.compress.flate.max_window_len);
                 break :blk r.bodyReaderDecompressing(body.transfer_buffer, transfer, content_length, head.content_encoding, &body.decompress, body.decompress_buffer);
             },
-            // A frame whose window is wider than the decoder's fails as a
-            // read.
-            .zstd => blk: {
-                body.decompress_buffer = try gpa.alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
-                break :blk r.bodyReaderDecompressing(body.transfer_buffer, transfer, content_length, head.content_encoding, &body.decompress, body.decompress_buffer);
-            },
+            // Handed over as it came: the window a zstd frame needs is the
+            // caller's to decide, and how much to spend on it.
+            .zstd => r.bodyReader(body.transfer_buffer, transfer, content_length),
             else => return error.HttpProtocolError,
         };
         return .{ .conn = conn, .head_bytes = head_bytes, .head = head, .state = body, .body = reader_ptr };

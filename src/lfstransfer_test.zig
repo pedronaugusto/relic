@@ -1366,7 +1366,7 @@ test "a proxy is chosen by git-lfs's rules, HTTP_PROXY included, and never for a
     try testing.expect(std.mem.indexOf(u8, logs[1], "proxied-for=127.0.0.1") == null);
 }
 
-test "an https URL relic's client cannot reach as asked is refused by name before anything is sent" {
+test "a client certificate, unreadable authorities and a proxy that is not HTTP's are refused by name before anything is sent" {
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{});
@@ -1379,12 +1379,9 @@ test "an https URL relic's client cannot reach as asked is refused by name befor
     try fx.gitIn(d, &.{ "config", "lfs.url", "https://lfs.example.invalid/repo.git/info/lfs" });
     const Case = struct { config: ?[2][]const u8 = null, env: ?[2][]const u8 = null, want: anyerror };
     for ([_]Case{
-        .{ .config = .{ "http.https://lfs.example.invalid.sslVerify", "false" }, .want = error.SslVerifyUnsupported },
-        .{ .env = .{ "GIT_SSL_NO_VERIFY", "1" }, .want = error.SslVerifyUnsupported },
         .{ .config = .{ "http.sslCert", "/nowhere/cert.pem" }, .want = error.SslClientCertificateUnsupported },
         .{ .config = .{ "http.sslCAInfo", "/nowhere/ca.pem" }, .want = error.SslCertificateUnreadable },
-        .{ .env = .{ "HTTPS_PROXY", "http://127.0.0.1:9" }, .want = error.HttpsProxyUnsupported },
-        .{ .config = .{ "http.proxy", "socks5://127.0.0.1:9" }, .want = error.HttpsProxyUnsupported },
+        .{ .config = .{ "http.proxy", "socks5://127.0.0.1:9" }, .want = error.InvalidProxy },
     }) |case| {
         if (case.config) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
         defer if (case.config) |kv| fx.gitIn(d, &.{ "config", "--unset", kv[0] }) catch {};
@@ -1405,6 +1402,81 @@ test "an https URL relic's client cannot reach as asked is refused by name befor
     const server = try openServer(fx, &repo);
     defer server.close();
     try testing.expectError(error.InvalidProxy, lfstransfer.fetch(server, &repo, .{}));
+}
+
+test "an https server is reached through a proxy's tunnel, and unchecked where the settings say, as git-lfs reaches it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const front = try testremote.TlsFront.start(gpa, io, fx.server.port);
+    defer front.stop(io);
+    const proxy = try testremote.Proxy.start(gpa, io, null);
+    defer proxy.stop();
+    const proxy_url = try proxy.url(gpa);
+    defer gpa.free(proxy_url);
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const content = "fetched over TLS\n";
+    try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    const named = try std.fmt.allocPrint(gpa, "https://lfs.example.invalid:{d}", .{front.port});
+    defer gpa.free(named);
+    const direct = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}", .{front.port});
+    defer gpa.free(direct);
+
+    const Case = struct { base: []const u8, config: []const [2][]const u8 = &.{}, env: []const [2][]const u8 = &.{}, tunneled: bool };
+    for ([_]Case{
+        // A name only the proxy can reach, the front's authority trusted.
+        .{ .base = named, .config = &.{.{ "http.sslCAInfo", front.cert_path }}, .env = &.{.{ "HTTPS_PROXY", proxy_url }}, .tunneled = true },
+        .{ .base = direct, .config = &.{.{ "http.sslVerify", "false" }}, .tunneled = false },
+        .{ .base = direct, .env = &.{.{ "GIT_SSL_NO_VERIFY", "1" }}, .tunneled = false },
+    }, 0..) |case, n| {
+        // The actions the server hands out are on the same server.
+        fx.server.options.href_base = case.base;
+        const lfs_url = try std.fmt.allocPrint(gpa, "{s}/repo.git/info/lfs", .{case.base});
+        defer gpa.free(lfs_url);
+        var logs: [2][]u8 = .{ &.{}, &.{} };
+        defer for (logs) |l| gpa.free(l);
+        var connects: [2][]u8 = .{ &.{}, &.{} };
+        defer for (connects) |l| gpa.free(l);
+        for (0..2) |i| {
+            var name_buf: [16]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "tls-{d}-{d}", .{ n, i });
+            var d = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
+            defer d.close(io);
+            try emptyStore(fx, d);
+            try fx.gitIn(d, &.{ "config", "lfs.url", lfs_url });
+            for (case.config) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
+            fx.server.clearLog();
+            if (i == 0) {
+                try fx.gitWith(d, case.env, &.{ "lfs", "fetch" });
+            } else {
+                var env = try fx.env.clone(gpa);
+                defer env.deinit();
+                for (case.env) |kv| try env.put(kv[0], kv[1]);
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &env } });
+                defer server.close();
+                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer fetched.deinit();
+                try expectNoFailures(&fetched);
+            }
+            const oid = testlfs.sha256Hex(content);
+            var object_buf: [128]u8 = undefined;
+            const object_path = try std.fmt.bufPrint(&object_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+            try expectFile(fx, d, object_path, content);
+            logs[i] = try fx.server.requests(gpa);
+            const first_lines = try proxy.take(gpa);
+            gpa.free(first_lines);
+            connects[i] = try proxy.takeConnects(gpa);
+        }
+        try testing.expectEqualStrings(logs[0], logs[1]);
+        // The tunnel is asked for in Go's words, as git-lfs asks for it.
+        try testing.expectEqual(case.tunneled, connects[0].len != 0);
+        try testing.expectEqualStrings(connects[0], connects[1]);
+    }
+    fx.server.options.href_base = null;
 }
 
 test "a refused credential is described as git-lfs's helpers hear it, with the server's challenge" {
