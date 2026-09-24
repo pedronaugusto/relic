@@ -316,6 +316,7 @@ fn contentMerge(
     ort_options.conflict_style = options.blob.conflict_style;
     ort_options.favor = options.blob.favor;
     ort_options.algorithm = options.blob.algorithm;
+    ort_options.minimal = options.blob.minimal;
     ort_options.attributes = options.attributes;
     ort_options.attributes_dir = options.attributes_dir;
     ort_options.configured_drivers = options.configured_drivers;
@@ -527,7 +528,11 @@ fn gitMergeFile(
         .diff3 => try argv.append(gpa, "--diff3"),
         .zdiff3 => try argv.append(gpa, "--zdiff3"),
     }
-    if (options.algorithm == .histogram) try argv.append(gpa, "--diff-algorithm=histogram");
+    switch (options.algorithm) {
+        .myers => if (options.minimal) try argv.append(gpa, "--diff-algorithm=minimal"),
+        .patience => try argv.append(gpa, "--diff-algorithm=patience"),
+        .histogram => try argv.append(gpa, "--diff-algorithm=histogram"),
+    }
     switch (options.favor) {
         .none => {},
         .ours => try argv.append(gpa, "--ours"),
@@ -643,7 +648,7 @@ test "binary blob content is refused like git merge-file" {
     try std.testing.expectError(error.BinaryBlob, blobs(gpa, ancestor, ours, theirs, .{}));
 }
 
-test "a random corpus of three-way merges matches git merge-file in every style and both algorithms" {
+test "a random corpus of three-way merges matches git merge-file in every style and every algorithm" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // `--diff-algorithm` reached merge-file in 2.44; zdiff3 is older.
@@ -679,14 +684,21 @@ test "a random corpus of three-way merges matches git merge-file in every style 
             if (case % 5 == 0 and side.items.len != 0) _ = side.pop();
         }
         for ([_]ConflictStyle{ .merge, .diff3, .zdiff3 }) |style| {
-            for ([_]textdiff.Algorithm{ .myers, .histogram }) |algorithm| {
-                const options: BlobOptions = .{ .conflict_style = style, .algorithm = algorithm };
+            for ([_]BlobOptions{
+                .{ .algorithm = .myers },
+                .{ .algorithm = .myers, .minimal = true },
+                .{ .algorithm = .patience },
+                .{ .algorithm = .histogram },
+            }) |variant| {
+                var options = variant;
+                options.conflict_style = style;
+                const algorithm = if (options.minimal) "minimal" else @tagName(options.algorithm);
                 const expected = try gitMergeFile(gpa, io, &repo, texts[0].items, texts[1].items, texts[2].items, options);
                 defer gpa.free(expected);
                 var got = try blobs(gpa, texts[0].items, texts[1].items, texts[2].items, options);
                 defer got.deinit();
                 std.testing.expectEqualStrings(expected, got.bytes) catch |err| {
-                    std.debug.print("case {d}, {s}, {s}\n", .{ case, @tagName(style), @tagName(algorithm) });
+                    std.debug.print("case {d}, {s}, {s}\n", .{ case, @tagName(style), algorithm });
                     return err;
                 };
             }

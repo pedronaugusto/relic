@@ -33,6 +33,7 @@ const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
+const strategy = @import("strategy.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
 const message = @import("message.zig");
@@ -167,8 +168,10 @@ pub const Options = struct {
     force: bool = false,
     /// `--signoff`.
     signoff: bool = false,
-    /// `-X ours` or `-X theirs`.
-    favor: merge.Favor = .none,
+    /// `-X`: the strategy options, in the order given, as
+    /// `strategy.Settings.apply` reads them. Kept in `strategy_opts`
+    /// between steps, with `strategy` naming ort as git's rebase does.
+    strategy_options: []const []const u8 = &.{},
     /// `null` asks `merge.conflictStyle`.
     conflict_style: ?merge.ConflictStyle = null,
     /// `--exec`: commands to run after each commit.
@@ -885,8 +888,10 @@ fn writeBasicState(r: *Run, tip: Tip, onto: Oid) Error!void {
     try r.state("head-name", try std.fmt.allocPrint(r.arena, "{s}\n", .{tip.head_name orelse "detached HEAD"}));
     try r.state("onto", try std.fmt.allocPrint(r.arena, "{s}\n", .{try r.hex(onto)}));
     try r.state("orig-head", try std.fmt.allocPrint(r.arena, "{s}\n", .{try r.hex(tip.orig_head)}));
-    if (r.options.favor == .ours or r.options.favor == .theirs) {
-        try r.state("strategy_opts", try std.fmt.allocPrint(r.arena, " --{s}\n", .{@tagName(r.options.favor)}));
+    if (r.options.strategy_options.len != 0) {
+        try r.state("strategy", "ort\n");
+        const line = try strategy.quote(r.arena, r.options.strategy_options);
+        try r.state("strategy_opts", try std.fmt.allocPrint(r.arena, "{s}\n", .{line}));
     }
     if (r.options.signoff) try r.state("signoff", "--signoff\n");
     switch (r.empty) {
@@ -917,14 +922,16 @@ fn readBasicState(r: *Run) Error!Tip {
         const value = std.mem.trim(u8, text, " \n");
         if (std.mem.eql(u8, value, "--rerere-autoupdate")) r.options.rerere_autoupdate = true else if (std.mem.eql(u8, value, "--no-rerere-autoupdate")) r.options.rerere_autoupdate = false;
     }
+    // git reads the strategy options only when a strategy is named.
     if (try r.readState("strategy")) |text| {
         const s = std.mem.trim(u8, text, " \n");
         if (!std.mem.eql(u8, s, "ort") and !std.mem.eql(u8, s, "recursive")) return error.UnsupportedStrategy;
-    }
-    if (try r.readState("strategy_opts")) |text| {
-        var it = std.mem.tokenizeAny(u8, text, " \n'");
-        while (it.next()) |opt| {
-            if (std.mem.eql(u8, opt, "--ours")) r.options.favor = .ours else if (std.mem.eql(u8, opt, "--theirs")) r.options.favor = .theirs else return error.UnsupportedStrategy;
+        if (try r.readState("strategy_opts")) |line| {
+            const words = strategy.split(r.arena, std.mem.trimEnd(u8, line, "\n")) catch |err| switch (err) {
+                error.MalformedStrategyOptions => return error.MalformedState,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            r.options.strategy_options = try std.mem.concat(r.arena, []const u8, &.{ r.options.strategy_options, words });
         }
     }
     if (r.hasState("gpg_sign_opt")) return error.SigningRequested;
@@ -1388,9 +1395,9 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = if (parent != null) parent_label else "(empty tree)", .theirs = label },
-            .favor = r.options.favor,
             .algorithm = .histogram,
         },
+        .strategy_options = r.options.strategy_options,
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();
@@ -2087,6 +2094,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
             .labels = .{ .ours = "HEAD", .theirs = if (lookupRewritten(r, name)) ref_name else name },
             .algorithm = .histogram,
         },
+        .strategy_options = r.options.strategy_options,
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();

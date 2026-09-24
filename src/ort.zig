@@ -110,6 +110,8 @@ pub const Options = struct {
     /// The line diff; git's merge machinery uses histogram unless
     /// `diff.algorithm` says otherwise.
     algorithm: @import("textdiff.zig").Algorithm = .histogram,
+    /// Prove the Myers diffs minimal: `diff-algorithm=minimal`.
+    minimal: bool = false,
     /// Whether renames are followed: `merge.renames`, `-X no-renames`.
     renames: bool = true,
     /// How much of a file must survive for a delete and an add to be a
@@ -943,6 +945,7 @@ const Merge = struct {
                 .marker_size = @intCast(@min(marker_size, 255)),
                 .favor = favor,
                 .algorithm = m.options.algorithm,
+                .minimal = m.options.minimal,
             }) catch |err| switch (err) {
                 error.BinaryBlob => unreachable,
                 error.OutOfMemory => return error.OutOfMemory,

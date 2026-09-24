@@ -28,6 +28,7 @@ const repo_mod = @import("repo.zig");
 const ort = @import("ort.zig");
 const revwalk = @import("revwalk.zig");
 const config_mod = @import("config.zig");
+const strategy = @import("strategy.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -44,14 +45,13 @@ pub const Error = error{
     LocalChangesWouldBeOverwritten,
     /// The repository has no working tree.
     BareRepository,
-    /// `diff.algorithm` names a line diff this release does not have:
-    /// `patience` or `minimal`.
-    UnsupportedDiffAlgorithm,
+    /// `diff.algorithm` names no line diff git has.
+    UnknownDiffAlgorithm,
     /// `merge.renormalize` asks for each side to be put through the
     /// line-ending conversion before it is merged, which this release does
     /// not do.
     RenormalizeRequested,
-} || merge.Error || worktree.Error || repo_mod.Error || revwalk.Error;
+} || merge.Error || worktree.Error || repo_mod.Error || revwalk.Error || strategy.Error;
 
 /// Where a refusal writes the path that caused it, so a caller can say which
 /// file stood in the way without anything being allocated.
@@ -59,19 +59,18 @@ pub const Blocked = merge.Blocked;
 
 /// How a merge is carried out.
 pub const Options = struct {
-    /// Labels, conflict style and favoured side for the content merges.
-    /// The algorithm is histogram, which is what git's merge machinery
-    /// diffs with.
+    /// Labels, conflict style and favoured side for the content merges, and
+    /// the line diff they start from: histogram, which is what git's merge
+    /// machinery diffs with. `diff.algorithm` and then `strategy_options`
+    /// have their say over the line diff and the favoured side.
     blob: merge.BlobOptions = .{ .algorithm = .histogram },
-    /// `-X no-renames` when `false`; `merge.renames` when `null`.
-    renames: ?bool = null,
-    /// `-X find-renames=<n>`, out of `similarity.max_score`; zero is git's
-    /// default of half.
-    rename_score: u32 = 0,
+    /// The `-X` words, in the order given: `strategy.Settings.apply`.
+    strategy_options: []const []const u8 = &.{},
     /// Where a refusal writes the path that caused it.
     blocked: ?*Blocked = null,
     /// Keep the inner merges' messages, as git does at
-    /// `GIT_MERGE_VERBOSITY=5`: `ort.Options.inner_messages`.
+    /// `GIT_MERGE_VERBOSITY=5`: `ort.Options.inner_messages`. So does a
+    /// `merge.verbosity` of 5 or more.
     inner_messages: bool = false,
 };
 
@@ -208,16 +207,18 @@ fn run(
     defer attrs.deinit();
     rules.attrs = &attrs;
 
-    if (repo.config.getBool("merge.renormalize", false) catch false) return error.RenormalizeRequested;
+    const settings = try configuredSettings(repo, options);
+    if (settings.renormalize) return error.RenormalizeRequested;
     var submodules: SubmoduleOpener = .{ .gpa = gpa, .io = io, .wt = wt };
     defer submodules.deinit();
     var ort_options: ort.Options = .{
         .labels = options.blob.labels,
         .conflict_style = options.blob.conflict_style,
-        .favor = options.blob.favor,
-        .algorithm = try configuredAlgorithm(repo, options.blob.algorithm),
-        .renames = options.renames orelse configuredRenames(repo),
-        .rename_score = options.rename_score,
+        .favor = settings.favor,
+        .algorithm = settings.algorithm,
+        .minimal = settings.minimal,
+        .renames = settings.renames,
+        .rename_score = settings.rename_score,
         .rename_limit = configuredRenameLimit(repo),
         .directory_renames = configuredDirectoryRenames(repo),
         .attributes = &attrs,
@@ -226,7 +227,7 @@ fn run(
         .submodules = .{ .context = &submodules, .openFn = SubmoduleOpener.open },
         .abbrev_len = @import("abbrev.zig").defaultLength(&repo.config, db),
         .blocked = options.blocked,
-        .inner_messages = options.inner_messages,
+        .inner_messages = options.inner_messages or (repo.config.getInt("merge.verbosity", 2) catch 2) >= 5,
     };
     var merged = switch (sides) {
         .trees => |t| try ort.mergeTrees(gpa, io, db, t.base, t.ours, t.theirs, ort_options),
@@ -433,13 +434,23 @@ const SubmoduleOpener = struct {
     }
 };
 
-/// The line diff git's merge would use: `diff.algorithm`, histogram
-/// otherwise.
-fn configuredAlgorithm(repo: *Repository, fallback: @import("textdiff.zig").Algorithm) Error!@import("textdiff.zig").Algorithm {
-    const text = repo.config.get("diff.algorithm") orelse return fallback;
-    if (std.ascii.eqlIgnoreCase(text, "histogram")) return .histogram;
-    if (std.ascii.eqlIgnoreCase(text, "myers") or std.ascii.eqlIgnoreCase(text, "default")) return .myers;
-    return error.UnsupportedDiffAlgorithm;
+/// What the merge does with content and renames: `options.blob`'s start,
+/// then configuration -- `diff.algorithm`, `merge.renames`,
+/// `merge.renormalize` -- then each strategy option in turn, as git's merge
+/// configuration and `parse_merge_opt` have it.
+fn configuredSettings(repo: *Repository, options: Options) Error!strategy.Settings {
+    var settings: strategy.Settings = .{
+        .favor = options.blob.favor,
+        .algorithm = options.blob.algorithm,
+        .minimal = options.blob.minimal,
+        .renames = configuredRenames(repo),
+        .renormalize = repo.config.getBool("merge.renormalize", false) catch false,
+    };
+    if (repo.config.get("diff.algorithm")) |text| {
+        settings.configureAlgorithm(text) orelse return error.UnknownDiffAlgorithm;
+    }
+    for (options.strategy_options) |word| try settings.apply(word);
+    return settings;
 }
 
 /// `merge.renameLimit`, then `diff.renameLimit`; zero for git's default.

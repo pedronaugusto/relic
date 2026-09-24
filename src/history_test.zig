@@ -792,6 +792,7 @@ const rebase_state = [_][]const u8{
     "REBASE_HEAD",                            "ORIG_HEAD",
     "MERGE_MSG",                              "AUTO_MERGE",
     "CHERRY_PICK_HEAD",                       "MERGE_HEAD",
+    "rebase-merge/strategy",                  "rebase-merge/strategy_opts",
 };
 
 /// The instructions of a sheet, without git's help below them, which says
@@ -1909,4 +1910,130 @@ test "rerere records a cherry-pick's and a rebase's resolutions and replays them
     }
     try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
     try expectSameRerere(&pair, io);
+}
+
+//=========================================================================
+// Strategy options
+//=========================================================================
+
+/// `f` and `g` changed on both sides in a way whose conflict falls
+/// differently under histogram, patience and minimal: `main` changes both
+/// in one commit, `topic` each in a commit of its own.
+fn algorithmScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    const base = "c\nc\ne\nf\nf\ne\nf\ne\nb\nf\n";
+    const ours = "g\nb\nc\ne\ne\nf\nf\nf\nf\nc\n";
+    const theirs = "c\ne\ne\ne\na\ne\nf\n";
+    try repo.writeFile(io, "f", base);
+    try repo.writeFile(io, "g", base);
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.writeFile(io, "f", theirs);
+    try repo.exec(io, &.{ "commit", "-q", "-am", "f" });
+    try repo.writeFile(io, "g", theirs);
+    try repo.exec(io, &.{ "commit", "-q", "-am", "g" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "f", ours);
+    try repo.writeFile(io, "g", ours);
+    try repo.exec(io, &.{ "commit", "-q", "-am", "main" });
+}
+
+test "diff.algorithm and the strategy options choose the line diff of a merge, a cherry-pick and a rebase as git's do" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, algorithmScript);
+    defer pair.deinit();
+
+    const Variant = struct { config: ?[]const u8, words: []const []const u8 };
+    const variants = [_]Variant{
+        .{ .config = "patience", .words = &.{} },
+        .{ .config = null, .words = &.{"diff-algorithm=minimal"} },
+        // `patience` keeps the minimal that `diff.algorithm` asked for.
+        .{ .config = "minimal", .words = &.{"patience"} },
+        .{ .config = "patience", .words = &.{ "histogram", "find-renames=40%" } },
+    };
+    for (variants) |variant| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        for (variant.words) |word| try args.appendSlice(gpa, &.{ "-X", word });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            if (variant.config) |value| {
+                try r.exec(io, &.{ "config", "diff.algorithm", value });
+            } else try gitMayFail(r, io, &.{ "config", "--unset", "diff.algorithm" });
+        }
+
+        // A merge of topic.
+        const merge_args = try std.mem.concat(gpa, []const u8, &.{ &.{"merge"}, args.items, &.{"topic"} });
+        defer gpa.free(merge_args);
+        try gitMayFail(&pair.git, io, merge_args);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const target = try merging.resolve(gpa, io, &repo, "topic");
+            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who, .strategy_options = variant.words });
+            defer outcome.deinit();
+            try std.testing.expectEqual(merging.Outcome.Result.conflicted, outcome.result);
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+        try pair.git.exec(io, &.{ "merge", "--abort" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            try merging.abort(gpa, io, &repo, who, null);
+        }
+
+        // A cherry-pick of both of topic's commits stops on the first.
+        const pick_args = try std.mem.concat(gpa, []const u8, &.{ &.{"cherry-pick"}, args.items, &.{"main..topic"} });
+        defer gpa.free(pick_args);
+        try gitMayFail(&pair.git, io, pick_args);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const commits = [_]Oid{ try oidOf(gpa, io, &pair.ours, "topic~1"), try oidOf(gpa, io, &pair.ours, "topic") };
+            var outcome = try sequencer.pick(gpa, io, &repo, &commits, .{ .who = who, .strategy_options = variant.words });
+            defer outcome.deinit();
+        }
+        try expectSameState(&pair, io, &pick_state, &main_logs);
+        try pair.git.exec(io, &.{ "cherry-pick", "--abort" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            try sequencer.abort(gpa, io, &repo, who, null);
+        }
+
+        // A rebase of topic stops on its first commit; each side finishes
+        // the other's, whose second commit then conflicts under the
+        // options read back from the other's state.
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
+        const rebase_args = try std.mem.concat(gpa, []const u8, &.{ &.{"rebase"}, args.items, &.{"main"} });
+        defer gpa.free(rebase_args);
+        try gitMayFail(&pair.git, io, rebase_args);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .strategy_options = variant.words });
+            defer outcome.deinit();
+            try std.testing.expectEqual(rebase.Stop.conflict, outcome.stopped.?);
+        }
+        try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.writeFile(io, "f", "resolved\n");
+            try r.exec(io, &.{ "add", "f" });
+        }
+        try gitMayFail(&pair.ours, io, &.{ "rebase", "--continue" });
+        {
+            var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+            defer repo.deinit(io);
+            var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+            defer outcome.deinit();
+            try std.testing.expectEqual(rebase.Stop.conflict, outcome.stopped.?);
+        }
+        try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "rebase", "--abort" });
+            try r.exec(io, &.{ "checkout", "-q", "main" });
+        }
+    }
 }

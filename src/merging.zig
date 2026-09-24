@@ -138,8 +138,9 @@ pub const Options = struct {
     allow_unrelated_histories: bool = false,
     /// `null` asks `merge.conflictStyle`.
     conflict_style: ?merge.ConflictStyle = null,
-    /// `-X ours` or `-X theirs`.
-    favor: merge.Favor = .none,
+    /// `-X`: the strategy options, in the order given, as
+    /// `strategy.Settings.apply` reads them.
+    strategy_options: []const []const u8 = &.{},
     /// Where a refusal writes the path that caused it.
     blocked: ?*threeway.Blocked = null,
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
@@ -252,9 +253,9 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .theirs = target.name },
-            .favor = options.favor,
             .algorithm = .histogram,
         },
+        .strategy_options = options.strategy_options,
         .blocked = options.blocked,
         .inner_messages = options.inner_messages,
     });

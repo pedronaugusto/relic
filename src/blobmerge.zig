@@ -60,6 +60,9 @@ pub const BlobOptions = struct {
     /// uses Myers; the merge machinery behind `merge`, `cherry-pick`,
     /// `revert` and `rebase` uses histogram.
     algorithm: textdiff.Algorithm = .myers,
+    /// Prove the Myers diffs minimal, the ones patience and histogram fall
+    /// back to included: git's `diff-algorithm=minimal`.
+    minimal: bool = false,
 };
 
 /// The owned bytes produced by a blob merge.
@@ -112,7 +115,7 @@ pub fn blobs(
     defer gpa.free(their_lines);
     // The merge machinery diffs with no indentation heuristic: the slide it
     // wants is the plain one.
-    const diff_options: textdiff.Options = .{ .algorithm = options.algorithm, .indent_heuristic = false };
+    const diff_options: textdiff.Options = .{ .algorithm = options.algorithm, .minimal = options.minimal, .indent_heuristic = false };
     const our_changes = try textdiff.diffLines(gpa, base_lines, our_lines, diff_options);
     defer gpa.free(our_changes);
     const their_changes = try textdiff.diffLines(gpa, base_lines, their_lines, diff_options);

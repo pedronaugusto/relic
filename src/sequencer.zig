@@ -143,8 +143,9 @@ pub const Options = struct {
     allow_ff: bool = false,
     /// `-m`: which parent of a merge commit is the mainline, from one.
     mainline: ?u32 = null,
-    /// `-X ours` or `-X theirs`.
-    favor: merge.Favor = .none,
+    /// `-X`: the strategy options, in the order given, as
+    /// `strategy.Settings.apply` reads them. Kept in `opts` between steps.
+    strategy_options: []const []const u8 = &.{},
     /// `--cleanup`: how the message is cleaned, in place of the default.
     cleanup: ?message.Cleanup = null,
     /// `null` asks `merge.conflictStyle`.
@@ -280,10 +281,12 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
         any = true;
         w.print("\tmainline = {d}\n", .{m}) catch return error.OutOfMemory;
     }
-    if (options.favor == .ours or options.favor == .theirs) {
+    for (options.strategy_options) |word| {
         if (!any) w.writeAll("[options]\n") catch return error.OutOfMemory;
         any = true;
-        w.print("\tstrategy-option = {s}\n", .{@tagName(options.favor)}) catch return error.OutOfMemory;
+        const value = try config_mod.escapeValue(gpa, word);
+        defer gpa.free(value);
+        w.print("\tstrategy-option = {s}\n", .{value}) catch return error.OutOfMemory;
     }
     if (options.rerere_autoupdate) |on| {
         if (!any) w.writeAll("[options]\n") catch return error.OutOfMemory;
@@ -299,19 +302,23 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
 }
 
 /// Apply what `.git/sequencer/opts` says on top of `options`.
-fn readOpts(gpa: Allocator, io: Io, repo: *Repository, options: *Options) Error!void {
+fn readOpts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, options: *Options) Error!void {
     const text = (try head_mod.readState(gpa, io, repo.git_dir, opts_path)) orelse return;
     defer gpa.free(text);
-    try parseOpts(gpa, text, options);
+    try parseOpts(gpa, arena, text, options);
 }
 
 /// Errors from reading the `opts` file.
 const OptsError = error{ MalformedState, EditorRequested, SigningRequested, UnsupportedStrategy, OutOfMemory };
 
-/// Read the settings in an `opts` file's text into `options`.
-fn parseOpts(gpa: Allocator, text: []const u8, options: *Options) OptsError!void {
+/// Read the settings in an `opts` file's text into `options`. The strategy
+/// options are added to the ones `options` has, copied into `arena`.
+fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Options) OptsError!void {
     var parsed = config_mod.Config.parseText(gpa, text, .local) catch return error.MalformedState;
     defer parsed.deinit();
+    var words: std.ArrayList([]const u8) = .empty;
+    try words.appendSlice(arena, options.strategy_options);
+    defer options.strategy_options = words.items;
     for (parsed.entries.items) |entry| {
         if (!std.ascii.eqlIgnoreCase(entry.section, "options")) continue;
         const value = entry.value orelse "true";
@@ -345,7 +352,7 @@ fn parseOpts(gpa: Allocator, text: []const u8, options: *Options) OptsError!void
         } else if (std.mem.eql(u8, key, "gpg-sign")) {
             return error.SigningRequested;
         } else if (std.mem.eql(u8, key, "strategy-option")) {
-            if (std.mem.eql(u8, value, "ours")) options.favor = .ours else if (std.mem.eql(u8, value, "theirs")) options.favor = .theirs else return error.UnsupportedStrategy;
+            try words.append(arena, try arena.dupe(u8, value));
         } else if (std.mem.eql(u8, key, "default-msg-cleanup")) {
             options.cleanup = message.Cleanup.parse(value) orelse if (std.mem.eql(u8, value, "default")) null else return error.MalformedState;
         } else if (std.mem.eql(u8, key, "allow-rerere-auto")) {
@@ -498,9 +505,9 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = base_label, .theirs = next_label },
-            .favor = r.options.favor,
             .algorithm = .histogram,
         },
+        .strategy_options = r.options.strategy_options,
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();
@@ -841,7 +848,7 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Erro
     const arena = arena_instance.allocator();
     const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
     var opts = options;
-    try readOpts(gpa, io, repo, &opts);
+    try readOpts(gpa, arena, io, repo, &opts);
     var r = try newReplay(gpa, arena, io, repo, action, opts);
 
     if (!head_mod.stateExists(io, repo.git_dir, todo_path)) {
@@ -992,7 +999,9 @@ fn fuzzOpts(_: void, smith: *std.testing.Smith) anyerror!void {
     var input: [256]u8 = undefined;
     const text = input[0..smith.slice(&input)];
     var options: Options = .{ .who = undefined };
-    parseOpts(std.testing.allocator, text, &options) catch |err| switch (err) {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    parseOpts(std.testing.allocator, arena.allocator(), text, &options) catch |err| switch (err) {
         error.MalformedState, error.EditorRequested, error.SigningRequested, error.UnsupportedStrategy => return,
         error.OutOfMemory => return err,
     };
@@ -1000,8 +1009,10 @@ fn fuzzOpts(_: void, smith: *std.testing.Smith) anyerror!void {
 
 test "an opts file with a mainline past any parent number is malformed" {
     var options: Options = .{ .who = undefined };
-    try std.testing.expectError(error.MalformedState, parseOpts(std.testing.allocator, "[options]\n\tmainline = 99999999999\n", &options));
-    try parseOpts(std.testing.allocator, "[options]\n\tmainline = 2\n\tsignoff = true\n", &options);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.MalformedState, parseOpts(std.testing.allocator, arena.allocator(), "[options]\n\tmainline = 99999999999\n", &options));
+    try parseOpts(std.testing.allocator, arena.allocator(), "[options]\n\tmainline = 2\n\tsignoff = true\n", &options);
     try std.testing.expectEqual(@as(?u32, 2), options.mainline);
     try std.testing.expect(options.signoff);
 }
