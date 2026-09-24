@@ -293,48 +293,6 @@ pub fn isBinary(bytes: []const u8) bool {
     return std.mem.indexOfScalar(u8, head, 0) != null;
 }
 
-/// The similarity of two blobs as a percentage, 0 to 100, using git's own
-/// counting: the shared material over the larger size. Used by rename
-/// detection and nothing else.
-///
-/// The count is over chunks, not lines: a chunk ends at a newline or after
-/// sixty-four bytes, whichever comes first, so a file that is one enormous
-/// line still splits into pieces and the comparison stays linear.
-pub fn similarity(gpa: Allocator, a: []const u8, b: []const u8) Allocator.Error!u8 {
-    const biggest = @max(a.len, b.len);
-    if (biggest == 0) return 100;
-
-    var table: std.AutoHashMapUnmanaged(u64, [2]usize) = .empty;
-    defer table.deinit(gpa);
-
-    for ([2][]const u8{ a, b }, 0..) |bytes, side| {
-        var at: usize = 0;
-        while (at < bytes.len) {
-            const chunk = bytes[at..chunkEnd(bytes, at)];
-            at += chunk.len;
-            const gop = try table.getOrPut(gpa, std.hash.Wyhash.hash(0, chunk));
-            if (!gop.found_existing) gop.value_ptr.* = .{ 0, 0 };
-            gop.value_ptr.*[side] += chunk.len;
-        }
-    }
-
-    var shared: usize = 0;
-    var it = table.valueIterator();
-    while (it.next()) |v| shared += @min(v[0], v[1]);
-    return @intCast(@min(100, shared * 100 / biggest));
-}
-
-/// Where the chunk starting at `at` ends: after a newline, or after
-/// sixty-four bytes, or at the end of the blob.
-fn chunkEnd(bytes: []const u8, at: usize) usize {
-    const limit = @min(bytes.len, at + 64);
-    var i = at;
-    while (i < limit) : (i += 1) {
-        if (bytes[i] == '\n') return i + 1;
-    }
-    return limit;
-}
-
 //=========================================================================
 // Line identity
 //
@@ -2116,26 +2074,6 @@ test "isBinary looks only at the first eight thousand bytes" {
     @memset(&buf, 'a');
     buf[8000] = 0;
     try std.testing.expect(!isBinary(&buf));
-}
-
-test "similarity of identical, disjoint and half shared blobs" {
-    const gpa = std.testing.allocator;
-    try std.testing.expectEqual(@as(u8, 100), try similarity(gpa, "", ""));
-    try std.testing.expectEqual(@as(u8, 100), try similarity(gpa, "a\nb\nc\n", "a\nb\nc\n"));
-    try std.testing.expectEqual(@as(u8, 0), try similarity(gpa, "aaaa\n", "bbbb\n"));
-    try std.testing.expectEqual(@as(u8, 0), try similarity(gpa, "a\nb\n", ""));
-    try std.testing.expectEqual(@as(u8, 50), try similarity(gpa, "1\n2\n3\n4\n", "1\n2\nX\nY\n"));
-
-    // Longer on one side: the shared half is measured against the larger.
-    try std.testing.expectEqual(@as(u8, 50), try similarity(gpa, "1\n2\n", "1\n2\nX\nY\n"));
-}
-
-test "similarity is not quadratic in one long line" {
-    const gpa = std.testing.allocator;
-    const big = try gpa.alloc(u8, 1 << 20);
-    defer gpa.free(big);
-    @memset(big, 'z');
-    try std.testing.expectEqual(@as(u8, 100), try similarity(gpa, big, big));
 }
 
 test "fuzz: any two inputs diff without a crash or a hang" {

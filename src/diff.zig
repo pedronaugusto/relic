@@ -13,6 +13,8 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const textdiff = @import("textdiff.zig");
+const rename = @import("rename.zig");
+const similarity = @import("similarity.zig");
 const attributes = @import("attributes.zig");
 const config_mod = @import("config.zig");
 
@@ -27,7 +29,7 @@ pub const Error = error{
     NotATree,
     /// The trees nest deeper than the walk will go.
     TreeTooDeep,
-} || Allocator.Error || odb_mod.Error || object.TreeParseError;
+} || rename.Error || Allocator.Error || odb_mod.Error || object.TreeParseError;
 
 /// What happened to a path.
 pub const Status = enum {
@@ -100,21 +102,25 @@ pub const Changes = struct {
     }
 };
 
-/// How rename and copy detection behaves.
+/// How rename and copy detection behaves: git's `-M`, `-C` and
+/// `--find-copies-harder`, by git's own pairing (`rename.zig`).
 ///
 /// Off by default, which is what `git diff-tree --name-status -r` does
 /// without `-M`. It is a heuristic with a threshold and a limit, and
 /// turning it on changes what a diff means, so it is the caller's decision.
 pub const RenameOptions = struct {
     /// How alike two files must be, as a percentage, before a deletion and
-    /// an addition become a rename. git's own default.
+    /// an addition become a rename: `-M<n>%`. git's own default.
     threshold: u8 = 50,
-    /// How many additions or deletions to consider before giving up on the
-    /// quadratic pass. Exact matches are found whatever this says.
+    /// The most sources times destinations scored, squared: git's
+    /// `diff.renameLimit`. Exact matches are found whatever this says;
+    /// zero is no limit.
     limit: usize = 1000,
-    /// Whether an addition that matches a file which is still there becomes
-    /// a copy. git needs `-C` for this and so does this.
+    /// `-C`: an addition that matches a file this diff modified becomes a
+    /// copy of it.
     detect_copies: bool = false,
+    /// `--find-copies-harder`: an unmodified file is a copy source too.
+    find_copies_harder: bool = false,
 };
 
 /// How a tree comparison behaves.
@@ -228,116 +234,77 @@ fn detectRenames(
     old_entries: *const Flat,
     options: RenameOptions,
 ) Error!void {
-    var deletions: std.ArrayList(usize) = .empty;
-    defer deletions.deinit(gpa);
-    var additions: std.ArrayList(usize) = .empty;
-    defer additions.deinit(gpa);
-    for (changes.items, 0..) |change, i| {
-        switch (change.status) {
-            .deleted => try deletions.append(gpa, i),
-            .added => try additions.append(gpa, i),
-            else => {},
+    _ = gpa;
+    // git's queue: every change in path order, and with
+    // `--find-copies-harder` every unchanged file as well.
+    var queue: std.ArrayList(*rename.Pair) = .empty;
+    var unchanged: std.ArrayList(Change) = .empty;
+    if (options.detect_copies and options.find_copies_harder) {
+        var changed: std.StringHashMapUnmanaged(void) = .empty;
+        for (changes.items) |c| {
+            if (c.old) |o| try changed.put(arena, o.path, {});
+        }
+        for (old_entries.values()) |entry| {
+            if (changed.contains(entry.path)) continue;
+            try unchanged.append(arena, .{ .status = .modified, .old = entry, .new = entry });
         }
     }
-    if (additions.items.len == 0) return;
-
-    var taken = try gpa.alloc(bool, changes.items.len);
-    defer gpa.free(taken);
-    @memset(taken, false);
-
-    // An exact match is free: the two sides have the same object name, so
-    // no content has to be read at all.
-    for (additions.items) |add_at| {
-        const added = changes.items[add_at].new.?;
-        for (deletions.items) |del_at| {
-            if (taken[del_at]) continue;
-            const removed = changes.items[del_at].old.?;
-            if (!removed.oid.eql(added.oid) or removed.mode != added.mode) continue;
-            taken[del_at] = true;
-            taken[add_at] = true;
-            changes.items[add_at] = .{
-                .status = .renamed,
-                .old = removed,
-                .new = added,
-                .similarity = 100,
-            };
-            changes.items[del_at] = .{ .status = .deleted, .old = removed, .new = null, .similarity = 0 };
-            break;
-        }
+    var all: std.ArrayList(Change) = .empty;
+    try all.appendSlice(arena, changes.items);
+    try all.appendSlice(arena, unchanged.items);
+    std.mem.sort(Change, all.items, {}, lessThanChange);
+    for (all.items) |c| {
+        const one = try arena.create(rename.Spec);
+        const two = try arena.create(rename.Spec);
+        one.* = specOf(c.old, if (c.new) |n| n.path else c.old.?.path, db.kind);
+        two.* = specOf(c.new, if (c.old) |o| o.path else c.new.?.path, db.kind);
+        const pair = try arena.create(rename.Pair);
+        pair.* = .{ .one = one, .two = two };
+        try queue.append(arena, pair);
     }
+    const minimum: u32 = @as(u32, options.threshold) * similarity.max_score / 100;
+    _ = try rename.detect(arena, io, db, &queue, .{
+        .copies = options.detect_copies,
+        .minimum_score = if (minimum == 0) 1 else minimum,
+        .rename_limit = @intCast(options.limit),
+        .rename_empty = true,
+    });
 
-    // A copy is an addition that matches a file which is still there; only
-    // exact matches are considered, because an inexact copy is a guess
-    // about intent rather than about content.
-    if (options.detect_copies) {
-        for (additions.items) |add_at| {
-            if (taken[add_at]) continue;
-            const added = changes.items[add_at].new.?;
-            for (old_entries.values()) |candidate| {
-                if (!candidate.oid.eql(added.oid) or candidate.mode != added.mode) continue;
-                taken[add_at] = true;
-                changes.items[add_at] = .{
-                    .status = .copied,
-                    .old = candidate,
-                    .new = added,
-                    .similarity = 100,
-                };
-                break;
-            }
+    // `diff_resolve_rename_copy`: of the destinations sharing a source, all
+    // but the last are copies, and all are when the source is still there.
+    changes.clearRetainingCapacity();
+    for (queue.items) |p| {
+        const old: ?Entry = entryOf(p.one);
+        const new: ?Entry = entryOf(p.two);
+        if (p.renamed) {
+            p.one.rename_used -= 1;
+            const status: Status = if (p.one.rename_used > 0) .copied else .renamed;
+            try changes.append(arena, .{
+                .status = status,
+                .old = old,
+                .new = new,
+                .similarity = @intCast(@as(u64, p.score) * 100 / similarity.max_score),
+            });
+            continue;
         }
+        if (old != null and new != null and old.?.mode == new.?.mode and old.?.oid.eql(new.?.oid)) continue;
+        const status: Status = if (old == null) .added else if (new == null) .deleted else if (typeChanged(old.?.mode, new.?.mode)) .type_changed else .modified;
+        try changes.append(arena, .{ .status = status, .old = old, .new = new });
     }
-
-    // The inexact pass is quadratic, so it is bounded on both sides.
-    if (deletions.items.len > options.limit or additions.items.len > options.limit) {
-        compact(changes, taken);
-        return;
-    }
-
-    for (additions.items) |add_at| {
-        if (taken[add_at]) continue;
-        const added = changes.items[add_at].new.?;
-        if (added.mode == .gitlink) continue;
-        const added_bytes = try db.read(io, added.oid);
-        defer gpa.free(added_bytes.bytes);
-
-        var best_at: ?usize = null;
-        var best_score: u8 = 0;
-        for (deletions.items) |del_at| {
-            if (taken[del_at]) continue;
-            const removed = changes.items[del_at].old.?;
-            if (removed.mode != added.mode) continue;
-            const removed_bytes = try db.read(io, removed.oid);
-            defer gpa.free(removed_bytes.bytes);
-            const score = try textdiff.similarity(gpa, removed_bytes.bytes, added_bytes.bytes);
-            if (score >= options.threshold and score > best_score) {
-                best_score = score;
-                best_at = del_at;
-            }
-        }
-        if (best_at) |del_at| {
-            taken[del_at] = true;
-            taken[add_at] = true;
-            changes.items[add_at] = .{
-                .status = .renamed,
-                .old = changes.items[del_at].old.?,
-                .new = added,
-                .similarity = best_score,
-            };
-        }
-    }
-    compact(changes, taken);
-    _ = arena;
 }
 
-/// Drop the deletions that turned into the old side of a rename.
-fn compact(changes: *std.ArrayList(Change), taken: []const bool) void {
-    var write_at: usize = 0;
-    for (changes.items, 0..) |change, i| {
-        if (taken[i] and change.status == .deleted) continue;
-        changes.items[write_at] = change;
-        write_at += 1;
-    }
-    changes.shrinkRetainingCapacity(write_at);
+fn specOf(entry: ?Entry, path: []const u8, kind: hash.Kind) rename.Spec {
+    const e = entry orelse return .{ .path = path, .oid = Oid.zero(kind) };
+    return .{ .path = e.path, .mode = e.mode.raw(), .oid = e.oid };
+}
+
+fn entryOf(spec: *const rename.Spec) ?Entry {
+    if (!spec.valid()) return null;
+    return .{ .path = spec.path, .mode = object.Mode.fromRaw(spec.mode) catch .file, .oid = spec.oid };
+}
+
+fn typeChanged(a: object.Mode, b: object.Mode) bool {
+    return a.isBlob() != b.isBlob() or (a == .symlink) != (b == .symlink) or (a == .gitlink) != (b == .gitlink);
 }
 
 /// Added and removed line counts for one change.

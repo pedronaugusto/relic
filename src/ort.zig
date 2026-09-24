@@ -33,7 +33,7 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const merge = @import("blobmerge.zig");
-const similarity = @import("similarity.zig");
+const rename = @import("rename.zig");
 const attributes = @import("attributes.zig");
 const revwalk = @import("revwalk.zig");
 const abbrev = @import("abbrev.zig");
@@ -292,127 +292,7 @@ pub fn emptyTree(kind: hash.Kind) Oid {
     return hash.Hasher.object(kind, "tree", "");
 }
 
-//=========================================================================
-// git's hashmap, for iteration order
-//=========================================================================
-
-/// A map that hands its entries back in the order git's `strmap` would:
-/// FNV-1 over the key, a table of 64 buckets growing fourfold past 80%
-/// full, each bucket a list with the newest entry first, and the table
-/// read from the first bucket to the last.
-fn GitMap(comptime V: type) type {
-    return struct {
-        const Self = @This();
-        const Node = struct { key: []const u8, hash: u32, value: V, next: ?u32, live: bool = true };
-
-        nodes: std.ArrayList(Node) = .empty,
-        table: []?u32 = &.{},
-        size: u32 = 0,
-        grow_at: u32 = 0,
-        shrink_at: u32 = 0,
-        index: std.StringHashMapUnmanaged(u32) = .empty,
-
-        fn strhash(key: []const u8) u32 {
-            var h: u32 = 0x811c9dc5;
-            for (key) |c| h = (h *% 0x01000193) ^ c;
-            return h;
-        }
-
-        fn allocTable(self: *Self, arena: Allocator, size: u32) Allocator.Error!void {
-            self.table = try arena.alloc(?u32, size);
-            @memset(self.table, null);
-            self.grow_at = @intCast(@as(u64, size) * 80 / 100);
-            self.shrink_at = if (size <= 64) 0 else self.grow_at / 5;
-        }
-
-        fn rehash(self: *Self, arena: Allocator, new_size: u32) Allocator.Error!void {
-            const old = self.table;
-            try self.allocTable(arena, new_size);
-            for (old) |head| {
-                var at = head;
-                while (at) |i| {
-                    const next = self.nodes.items[i].next;
-                    const b = self.nodes.items[i].hash & (new_size - 1);
-                    self.nodes.items[i].next = self.table[b];
-                    self.table[b] = i;
-                    at = next;
-                }
-            }
-        }
-
-        fn get(self: *const Self, key: []const u8) ?V {
-            const i = self.index.get(key) orelse return null;
-            return self.nodes.items[i].value;
-        }
-
-        fn getPtr(self: *Self, key: []const u8) ?*V {
-            const i = self.index.get(key) orelse return null;
-            return &self.nodes.items[i].value;
-        }
-
-        fn contains(self: *const Self, key: []const u8) bool {
-            return self.index.contains(key);
-        }
-
-        /// `strmap_put`: a new key goes into its bucket; an old one keeps
-        /// its place and takes the new value.
-        fn put(self: *Self, arena: Allocator, key: []const u8, value: V) Allocator.Error!void {
-            if (self.index.get(key)) |i| {
-                self.nodes.items[i].value = value;
-                return;
-            }
-            if (self.table.len == 0) try self.allocTable(arena, 64);
-            const owned = try arena.dupe(u8, key);
-            const h = strhash(owned);
-            const i: u32 = @intCast(self.nodes.items.len);
-            const b = h & @as(u32, @intCast(self.table.len - 1));
-            try self.nodes.append(arena, .{ .key = owned, .hash = h, .value = value, .next = self.table[b] });
-            self.table[b] = i;
-            try self.index.put(arena, owned, i);
-            self.size += 1;
-            if (self.size > self.grow_at) try self.rehash(arena, @intCast(self.table.len << 2));
-        }
-
-        fn remove(self: *Self, arena: Allocator, key: []const u8) Allocator.Error!void {
-            const i = self.index.get(key) orelse return;
-            _ = self.index.remove(key);
-            const b = self.nodes.items[i].hash & @as(u32, @intCast(self.table.len - 1));
-            var link: *?u32 = &self.table[b];
-            while (link.*) |at| {
-                if (at == i) {
-                    link.* = self.nodes.items[at].next;
-                    break;
-                }
-                link = &self.nodes.items[at].next;
-            }
-            self.nodes.items[i].live = false;
-            self.size -= 1;
-            if (self.size < self.shrink_at) try self.rehash(arena, @intCast(self.table.len >> 2));
-        }
-
-        const Iterator = struct {
-            map: *const Self,
-            bucket: usize = 0,
-            at: ?u32 = null,
-
-            fn next(it: *Iterator) ?*const Node {
-                while (true) {
-                    if (it.at) |i| {
-                        it.at = it.map.nodes.items[i].next;
-                        return &it.map.nodes.items[i];
-                    }
-                    if (it.bucket >= it.map.table.len) return null;
-                    it.at = it.map.table[it.bucket];
-                    it.bucket += 1;
-                }
-            }
-        };
-
-        fn iterator(self: *const Self) Iterator {
-            return .{ .map = self };
-        }
-    };
-}
+const GitMap = rename.GitMap;
 
 //=========================================================================
 // The merge
@@ -461,39 +341,17 @@ const Info = struct {
     match_mask: u3 = 0,
 };
 
-/// A version of a path as the rename search sees it.
-const Spec = struct {
-    path: []const u8,
-    mode: Mode = 0,
-    oid: Oid,
-    rename_used: u32 = 0,
-
-    fn valid(s: *const Spec) bool {
-        return s.mode != 0;
-    }
-};
-
-const Pair = struct {
-    one: *Spec,
-    two: *Spec,
-    status: u8 = 0,
-    /// The similarity first, and then the side it was found on.
-    score: u32 = 0,
-    renamed: bool = false,
-};
+const Spec = rename.Spec;
+const Pair = rename.Pair;
 
 const Relevance = struct {
-    // dirs_removed
-    const not_relevant: i64 = 0;
-    const for_ancestor: i64 = 1;
-    const for_self: i64 = 2;
-    // relevant_sources
-    const no_more: i64 = 0;
-    const content: i64 = 1;
-    const location: i64 = 2;
+    const not_relevant = rename.DirRelevance.not_relevant;
+    const for_ancestor = rename.DirRelevance.for_ancestor;
+    const for_self = rename.DirRelevance.for_self;
+    const no_more = rename.SourceRelevance.no_more;
+    const content = rename.SourceRelevance.content;
+    const location = rename.SourceRelevance.location;
 };
-
-const unknown_dir = "/";
 
 const Deferred = struct {
     possible_trivial_merges: GitMap(u3) = .{},
@@ -914,7 +772,6 @@ const Merge = struct {
             m.deferred[side].possible_trivial_merges = .{};
             var it = copy.iterator();
             while (it.next()) |node| {
-                if (!node.live) continue;
                 const path = node.key;
                 const ci = m.paths.get(path).?;
                 if (optimization_okay and !m.deferred[side].target_dirs.contains(path)) {
@@ -932,7 +789,6 @@ const Merge = struct {
             }
             var rest = m.deferred[side].possible_trivial_merges.iterator();
             while (rest.next()) |node| {
-                if (!node.live) continue;
                 const ci = m.paths.get(node.key).?;
                 resolveTrivialDirectoryMerge(ci, side);
             }
@@ -1287,14 +1143,12 @@ const Merge = struct {
     fn getProvisionalDirectoryRenames(m: *Merge, side: usize, clean: *bool) Allocator.Error!void {
         var it = m.dir_rename_count[side].iterator();
         while (it.next()) |entry| {
-            if (!entry.live) continue;
             const source_dir = entry.key;
             var max: i64 = 0;
             var bad_max: i64 = 0;
             var best: ?[]const u8 = null;
             var count_it = entry.value.iterator();
             while (count_it.next()) |count_entry| {
-                if (!count_entry.live) continue;
                 const count = count_entry.value;
                 if (count == max) {
                     bad_max = max;
@@ -1484,440 +1338,6 @@ const Merge = struct {
     // Rename detection: diffcore-rename
     //---------------------------------------------------------------------
 
-    fn emptyBlob(m: *const Merge) Oid {
-        return hash.Hasher.object(m.db.kind, "blob", "");
-    }
-
-    const Src = struct { p: *Pair, score: u32 };
-    const Dst = struct { p: *Pair, is_rename: bool = false };
-    const Score = struct { src: i32 = -1, dst: i32 = -1, score: u32 = 0, name_score: i32 = 0 };
-
-    const RenameRun = struct {
-        m: *Merge,
-        side: usize,
-        src: std.ArrayList(Src) = .empty,
-        dst: std.ArrayList(Dst) = .empty,
-        idx_map: std.StringHashMapUnmanaged(i64) = .empty,
-        dir_rename_guess: std.StringHashMapUnmanaged([]const u8) = .empty,
-        blobs: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty,
-        limit_hit: bool = false,
-
-        fn relevantSources(r: *RenameRun) *std.StringHashMapUnmanaged(i64) {
-            return &r.m.relevant_sources[r.side];
-        }
-
-        fn dirsRemoved(r: *RenameRun) *std.StringHashMapUnmanaged(i64) {
-            return &r.m.dirs_removed[r.side];
-        }
-
-        fn blob(r: *RenameRun, oid: Oid) Error![]const u8 {
-            if (r.blobs.get(oid)) |bytes| return bytes;
-            const bytes = try r.m.readBlob(oid);
-            try r.blobs.put(r.m.arena, oid, bytes);
-            return bytes;
-        }
-
-        /// `estimate_similarity`.
-        fn estimate(r: *RenameRun, one: *const Spec, two: *const Spec, minimum: u32) Error!u32 {
-            if (!isReg(one.mode) or !isReg(two.mode)) return 0;
-            const src_bytes = try r.blob(one.oid);
-            const dst_bytes = try r.blob(two.oid);
-            return similarity.score(r.m.arena, src_bytes, dst_bytes, minimum);
-        }
-
-        fn recordRenamePair(r: *RenameRun, dst_index: usize, src_index: usize, score: u32) void {
-            const src = r.src.items[src_index].p;
-            const dst = r.dst.items[dst_index].p;
-            src.one.rename_used += 1;
-            r.dst.items[dst_index].is_rename = true;
-            dst.one = src.one;
-            dst.renamed = true;
-            dst.score = if (std.mem.eql(u8, dst.one.path, dst.two.path)) r.src.items[src_index].score else score;
-        }
-
-        fn countIncrement(r: *RenameRun, old_dir: []const u8, new_dir: []const u8) Allocator.Error!void {
-            const counts_map = &r.m.dir_rename_count[r.side];
-            const counts = counts_map.get(old_dir) orelse blk: {
-                const created = try r.m.arena.create(GitMap(i64));
-                created.* = .{};
-                try counts_map.put(r.m.arena, old_dir, created);
-                break :blk created;
-            };
-            if (counts.getPtr(new_dir)) |c| {
-                c.* += 1;
-            } else try counts.put(r.m.arena, new_dir, 1);
-        }
-
-        /// `update_dir_rename_counts`.
-        fn updateDirRenameCounts(r: *RenameRun, oldname: []const u8, newname: []const u8) Allocator.Error!void {
-            var old_dir = oldname;
-            var new_dir = newname;
-            var first = true;
-            while (true) {
-                const old_split = splitLast(old_dir);
-                old_dir = old_split.parent;
-                if (!r.dirsRemoved().contains(old_dir)) break;
-                const new_split = splitLast(new_dir);
-                new_dir = new_split.parent;
-                if (!first and !std.mem.eql(u8, old_split.component, new_split.component)) break;
-                const drd_flag = r.dirsRemoved().get(old_dir) orelse Relevance.not_relevant;
-                if (drd_flag == Relevance.for_self or first) try r.countIncrement(old_dir, new_dir);
-                first = false;
-                if (drd_flag == Relevance.not_relevant) break;
-                if (old_dir.len == 0 or new_dir.len == 0) break;
-            }
-        }
-
-        fn splitLast(path: []const u8) struct { parent: []const u8, component: []const u8 } {
-            if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| return .{ .parent = path[0..slash], .component = path[slash + 1 ..] };
-            return .{ .parent = "", .component = path };
-        }
-
-        fn dirname(path: []const u8) []const u8 {
-            return splitLast(path).parent;
-        }
-
-        fn basename(path: []const u8) []const u8 {
-            return splitLast(path).component;
-        }
-
-        /// `find_exact_renames`.
-        fn findExactRenames(r: *RenameRun) usize {
-            var renames: usize = 0;
-            for (r.dst.items, 0..) |d, dst_index| {
-                const target = d.p.two;
-                var best: ?usize = null;
-                var best_score: i32 = -1;
-                var tries: u32 = 100;
-                for (r.src.items, 0..) |s, src_index| {
-                    const source = s.p.one;
-                    if (!source.oid.eql(target.oid)) continue;
-                    if (!isReg(source.mode) or !isReg(target.mode)) {
-                        if (source.mode != target.mode) continue;
-                    }
-                    var score: i32 = if (source.rename_used == 0) 1 else 0;
-                    if (source.rename_used != 0) continue;
-                    score += if (basenameSame(source.path, target.path)) 1 else 0;
-                    if (score > best_score) {
-                        best = src_index;
-                        best_score = score;
-                        if (score == 2) break;
-                    }
-                    tries -= 1;
-                    if (tries == 0) break;
-                }
-                if (best) |src_index| {
-                    r.recordRenamePair(dst_index, src_index, similarity.max_score);
-                    renames += 1;
-                }
-            }
-            return renames;
-        }
-
-        fn removeUnneededPathsFromSrc(r: *RenameRun, interesting: ?*std.StringHashMapUnmanaged(i64)) void {
-            var kept: usize = 0;
-            for (r.src.items) |s| {
-                if (s.p.one.rename_used != 0) continue;
-                if (interesting) |set| {
-                    if (!set.contains(s.p.one.path)) continue;
-                }
-                r.src.items[kept] = s;
-                kept += 1;
-            }
-            r.src.shrinkRetainingCapacity(kept);
-        }
-
-        /// `initialize_dir_rename_info`.
-        fn initializeDirRenameInfo(r: *RenameRun) Allocator.Error!void {
-            for (r.dst.items, 0..) |d, i| {
-                if (!d.is_rename) {
-                    try r.idx_map.put(r.m.arena, d.p.two.path, @intCast(i));
-                    continue;
-                }
-                try r.updateDirRenameCounts(d.p.one.path, d.p.two.path);
-            }
-            var cached = r.m.cached_pairs[r.side].iterator();
-            while (cached.next()) |node| {
-                const new_name = node.value orelse continue;
-                try r.updateDirRenameCounts(node.key, new_name);
-            }
-            var it = r.m.dir_rename_count[r.side].iterator();
-            while (it.next()) |entry| {
-                if (!entry.live) continue;
-                // `get_highest_rename_path`, in git's order.
-                var highest: i64 = 0;
-                var best: ?[]const u8 = null;
-                var count_it = entry.value.iterator();
-                while (count_it.next()) |c| {
-                    if (!c.live) continue;
-                    if (c.value > highest) {
-                        highest = c.value;
-                        best = c.key;
-                    }
-                }
-                try r.dir_rename_guess.put(r.m.arena, entry.key, best orelse "");
-            }
-        }
-
-        fn idxPossibleRename(r: *RenameRun, filename: []const u8) Allocator.Error!i64 {
-            const new_dir = r.dir_rename_guess.get(dirname(filename)) orelse return -1;
-            const new_path = try std.mem.concat(r.m.arena, u8, &.{ new_dir, "/", basename(filename) });
-            return r.idx_map.get(new_path) orelse -1;
-        }
-
-        /// `find_basename_matches`.
-        fn findBasenameMatches(r: *RenameRun, minimum_score: u32) Error!usize {
-            var renames: usize = 0;
-            var sources: std.StringHashMapUnmanaged(i64) = .empty;
-            var dests: std.StringHashMapUnmanaged(i64) = .empty;
-            for (r.src.items, 0..) |s, i| {
-                const base = basename(s.p.one.path);
-                if (sources.contains(base)) try sources.put(r.m.arena, base, -1) else try sources.put(r.m.arena, base, @intCast(i));
-            }
-            for (r.dst.items, 0..) |d, i| {
-                if (d.is_rename) continue;
-                const base = basename(d.p.two.path);
-                if (dests.contains(base)) try dests.put(r.m.arena, base, -1) else try dests.put(r.m.arena, base, @intCast(i));
-            }
-            for (r.src.items, 0..) |s, i| {
-                const filename = s.p.one.path;
-                if (!r.relevantSources().contains(filename)) continue;
-                const base = basename(filename);
-                var src_index: i64 = sources.get(base) orelse -1;
-                if (dests.get(base)) |dest_value| {
-                    var dst_index = dest_value;
-                    if (src_index == -1 or dst_index == -1) {
-                        src_index = @intCast(i);
-                        dst_index = try r.idxPossibleRename(filename);
-                    }
-                    if (dst_index == -1) continue;
-                    const di: usize = @intCast(dst_index);
-                    if (r.dst.items[di].is_rename) continue;
-                    const si: usize = @intCast(src_index);
-                    const one = r.src.items[si].p.one;
-                    const two = r.dst.items[di].p.two;
-                    const score = try r.estimate(one, two, minimum_score);
-                    if (score < minimum_score) continue;
-                    r.recordRenamePair(di, si, score);
-                    renames += 1;
-                    try r.updateDirRenameCounts(one.path, two.path);
-                }
-            }
-            return renames;
-        }
-
-        fn dirRenameAlreadyDeterminable(counts: *const GitMap(i64)) bool {
-            var first: i64 = 0;
-            var second: i64 = 0;
-            var unknown: i64 = 0;
-            var it = counts.iterator();
-            while (it.next()) |c| {
-                if (!c.live) continue;
-                if (std.mem.eql(u8, c.key, unknown_dir)) {
-                    unknown = c.value;
-                } else if (c.value >= first) {
-                    second = first;
-                    first = c.value;
-                } else if (c.value >= second) {
-                    second = c.value;
-                }
-            }
-            return first > second + unknown;
-        }
-
-        /// `handle_early_known_dir_renames`.
-        fn handleEarlyKnownDirRenames(r: *RenameRun) Allocator.Error!void {
-            const dirs_removed = r.dirsRemoved();
-            for (r.src.items) |s| {
-                var old_dir = dirname(s.p.one.path);
-                while (old_dir.len != 0 and (dirs_removed.get(old_dir) orelse Relevance.not_relevant) != Relevance.not_relevant) {
-                    try r.countIncrement(old_dir, unknown_dir);
-                    old_dir = dirname(old_dir);
-                }
-            }
-            var it = r.m.dir_rename_count[r.side].iterator();
-            while (it.next()) |entry| {
-                if (!entry.live) continue;
-                if ((dirs_removed.get(entry.key) orelse Relevance.not_relevant) == Relevance.for_self and dirRenameAlreadyDeterminable(entry.value)) {
-                    try dirs_removed.put(r.m.arena, entry.key, Relevance.for_ancestor);
-                }
-            }
-            var kept: usize = 0;
-            for (r.src.items) |s| {
-                const val = r.relevantSources().get(s.p.one.path).?;
-                if (val == Relevance.location) {
-                    var removable = true;
-                    var dir = dirname(s.p.one.path);
-                    while (true) {
-                        const res = dirs_removed.get(dir) orelse Relevance.not_relevant;
-                        if (res == Relevance.not_relevant) break;
-                        if (res == Relevance.for_self) {
-                            removable = false;
-                            break;
-                        }
-                        dir = dirname(dir);
-                    }
-                    if (removable) {
-                        try r.relevantSources().put(r.m.arena, s.p.one.path, Relevance.no_more);
-                        continue;
-                    }
-                }
-                r.src.items[kept] = s;
-                kept += 1;
-            }
-            r.src.shrinkRetainingCapacity(kept);
-        }
-
-        fn scoreCompare(a: Score, b: Score) i64 {
-            if (a.dst < 0) return if (0 <= b.dst) 1 else 0;
-            if (b.dst < 0) return -1;
-            if (a.score == b.score) return @as(i64, b.name_score) - a.name_score;
-            return @as(i64, b.score) - @as(i64, a.score);
-        }
-
-        fn recordIfBetter(m4: *[4]Score, o: Score) void {
-            var worst: usize = 0;
-            for (1..4) |i| {
-                if (scoreCompare(m4[i], m4[worst]) > 0) worst = i;
-            }
-            if (scoreCompare(m4[worst], o) > 0) m4[worst] = o;
-        }
-
-        fn lessThanScore(_: void, a: Score, b: Score) bool {
-            return scoreCompare(a, b) < 0;
-        }
-
-        /// `diffcore_rename_extended`, as merge-ort calls it: no copies,
-        /// no break detection, empty files never paired.
-        fn run(r: *RenameRun, queue: *std.ArrayList(*Pair)) Error!void {
-            const m = r.m;
-            const empty = m.emptyBlob();
-            var minimum_score = m.options.rename_score;
-            if (minimum_score == 0) minimum_score = similarity.default_minimum;
-            for (queue.items) |p| {
-                if (!p.one.valid()) {
-                    if (!p.two.valid()) continue;
-                    if (p.two.oid.eql(empty)) continue;
-                    try r.dst.append(m.arena, .{ .p = p });
-                } else if (p.one.oid.eql(empty)) {
-                    continue;
-                } else if (!p.two.valid()) {
-                    try r.src.append(m.arena, .{ .p = p, .score = p.score });
-                }
-            }
-            if (r.dst.items.len != 0 and r.src.items.len != 0) try r.detect(minimum_score);
-            try r.cleanupDirRenameInfo();
-
-            // The queue as git writes it back: a rename is kept as its
-            // destination, and a deletion whose file went somewhere goes.
-            var out: std.ArrayList(*Pair) = .empty;
-            for (queue.items) |p| {
-                if (!p.one.valid() and p.two.valid()) {
-                    try out.append(m.arena, p);
-                } else if (p.one.valid() and !p.two.valid()) {
-                    if (p.one.rename_used == 0) try out.append(m.arena, p);
-                } else if (!unmodified(p)) {
-                    try out.append(m.arena, p);
-                }
-            }
-            queue.* = out;
-        }
-
-        fn detect(r: *RenameRun, minimum_score: u32) Error!void {
-            const m = r.m;
-            var rename_count = r.findExactRenames();
-            if (minimum_score == similarity.max_score) return;
-
-            const min_basename_score: u32 = minimum_score + @as(u32, @intFromFloat(0.5 * @as(f64, @floatFromInt(similarity.max_score - minimum_score))));
-            r.removeUnneededPathsFromSrc(null);
-            try r.initializeDirRenameInfo();
-            rename_count += try r.findBasenameMatches(min_basename_score);
-            r.removeUnneededPathsFromSrc(r.relevantSources());
-            try r.handleEarlyKnownDirRenames();
-
-            const num_destinations = r.dst.items.len - rename_count;
-            const num_sources = r.src.items.len;
-            if (num_destinations == 0 or num_sources == 0) return;
-
-            var rename_limit: i64 = m.options.rename_limit;
-            if (rename_limit <= 0) rename_limit = 7000;
-            const limit: u64 = @intCast(rename_limit);
-            if (@as(u128, num_destinations) * num_sources > @as(u128, limit) * limit) {
-                const needed: u64 = @max(num_sources, num_destinations);
-                if (needed > m.needed_limit) m.needed_limit = needed;
-                r.limit_hit = true;
-                return;
-            }
-
-            var mx: std.ArrayList(Score) = .empty;
-            for (r.dst.items, 0..) |d, i| {
-                if (d.is_rename) continue;
-                var m4: [4]Score = .{ .{}, .{}, .{}, .{} };
-                for (r.src.items, 0..) |s, j| {
-                    const one = s.p.one;
-                    const two = d.p.two;
-                    const this: Score = .{
-                        .score = try r.estimate(one, two, minimum_score),
-                        .name_score = if (basenameSame(one.path, two.path)) 1 else 0,
-                        .dst = @intCast(i),
-                        .src = @intCast(j),
-                    };
-                    recordIfBetter(&m4, this);
-                }
-                try mx.appendSlice(m.arena, &m4);
-            }
-            std.mem.sort(Score, mx.items, {}, lessThanScore);
-            for (mx.items) |candidate| {
-                if (candidate.dst < 0 or candidate.score < minimum_score) break;
-                const di: usize = @intCast(candidate.dst);
-                const si: usize = @intCast(candidate.src);
-                if (r.dst.items[di].is_rename) continue;
-                if (r.src.items[si].p.one.rename_used != 0) continue;
-                r.recordRenamePair(di, si, candidate.score);
-                try r.updateDirRenameCounts(r.src.items[si].p.one.path, r.dst.items[di].p.two.path);
-            }
-        }
-
-        /// `cleanup_dir_rename_info`, keeping the counts: a directory that
-        /// was not removed has no rename, and the unknown destinations go.
-        fn cleanupDirRenameInfo(r: *RenameRun) Allocator.Error!void {
-            const counts_map = &r.m.dir_rename_count[r.side];
-            var to_remove: std.ArrayList([]const u8) = .empty;
-            var it = counts_map.iterator();
-            while (it.next()) |entry| {
-                if (!entry.live) continue;
-                if ((r.dirsRemoved().get(entry.key) orelse Relevance.not_relevant) == Relevance.not_relevant) {
-                    try to_remove.append(r.m.arena, entry.key);
-                    continue;
-                }
-                if (entry.value.contains(unknown_dir)) try entry.value.remove(r.m.arena, unknown_dir);
-            }
-            for (to_remove.items) |key| try counts_map.remove(r.m.arena, key);
-        }
-    };
-
-    fn basenameSame(src: []const u8, dst: []const u8) bool {
-        var src_len = src.len;
-        var dst_len = dst.len;
-        while (src_len != 0 and dst_len != 0) {
-            src_len -= 1;
-            dst_len -= 1;
-            const c1 = src[src_len];
-            const c2 = dst[dst_len];
-            if (c1 != c2) return false;
-            if (c1 == '/') return true;
-        }
-        return (src_len == 0 or src[src_len - 1] == '/') and (dst_len == 0 or dst[dst_len - 1] == '/');
-    }
-
-    /// `diff_unmodified_pair`: the same file at the same path.
-    fn unmodified(p: *const Pair) bool {
-        if (p.one.valid() != p.two.valid()) return false;
-        if (p.one.mode != p.two.mode) return false;
-        if (!std.mem.eql(u8, p.one.path, p.two.path)) return false;
-        return p.one.oid.eql(p.two.oid);
-    }
-
     fn resolveStatuses(queue: []const *Pair) void {
         for (queue) |p| {
             p.status = 0;
@@ -1943,11 +1363,18 @@ const Merge = struct {
             return false;
         }
         m.dir_rename_count[side] = .{};
-        const needed_before = m.needed_limit;
-        var r: RenameRun = .{ .m = m, .side = side };
-        try r.run(&m.pairs[side]);
+        const outcome = try rename.detect(m.arena, m.io, m.db, &m.pairs[side], .{
+            .minimum_score = m.options.rename_score,
+            .rename_limit = if (m.options.rename_limit <= 0) 7000 else m.options.rename_limit,
+            .rename_empty = false,
+            .relevant_sources = &m.relevant_sources[side],
+            .dirs_removed = &m.dirs_removed[side],
+            .dir_rename_count = &m.dir_rename_count[side],
+            .cached_pairs = &m.cached_pairs[side],
+        });
         resolveStatuses(m.pairs[side].items);
-        if (r.limit_hit or m.needed_limit != needed_before) m.redo_after_renames = 0;
+        if (outcome.needed_limit > 0) m.redo_after_renames = 0;
+        if (outcome.needed_limit > m.needed_limit) m.needed_limit = outcome.needed_limit;
         return true;
     }
 

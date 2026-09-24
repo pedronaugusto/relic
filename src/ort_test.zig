@@ -547,3 +547,74 @@ test "a rename search too big for merge.renameLimit is skipped as git skips it" 
     try repo.exec(io, &.{ "config", "merge.renameLimit", "4" });
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{ .rename_limit = 4 });
 }
+
+const diff = @import("diff.zig");
+
+fn renderNameStatus(gpa: Allocator, changes: *const diff.Changes) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    const w = &out.writer;
+    for (changes.items) |c| {
+        switch (c.status) {
+            .renamed, .copied => try w.print("{c}{d:0>3}\x00{s}\x00{s}\x00", .{ c.letter(), c.similarity, c.old.?.path, c.new.?.path }),
+            else => try w.print("{c}\x00{s}\x00", .{ c.letter(), c.path() }),
+        }
+    }
+    return out.toOwnedSlice();
+}
+
+fn expectSameDiff(gpa: Allocator, io: Io, repo: *testgit.Repo, flags: []const []const u8, options: diff.RenameOptions) !void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "diff-tree", "-r", "-z", "--name-status" });
+    try argv.appendSlice(gpa, flags);
+    try argv.appendSlice(gpa, &.{ "main~1", "main" });
+    const expected = try repo.run(io, argv.items);
+    defer gpa.free(expected);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    const old_tree = try revParse(gpa, io, repo, "main~1^{tree}");
+    const new_tree = try revParse(gpa, io, repo, "main^{tree}");
+    var changes = try diff.tree(gpa, io, &db, old_tree, new_tree, .{ .renames = options });
+    defer changes.deinit();
+    const got = try renderNameStatus(gpa, &changes);
+    defer gpa.free(got);
+    if (!std.mem.eql(u8, expected, got)) {
+        const e = try visible(gpa, expected);
+        defer gpa.free(e);
+        const g = try visible(gpa, got);
+        defer gpa.free(g);
+        std.debug.print("diff {s} differs\ngit:  {s}\nours: {s}\n", .{ flags[flags.len - 1], e, g });
+        return error.TestExpectedEqual;
+    }
+}
+
+fn runDiffScenario(gpa: Allocator, io: Io, seed: u64) !void {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    var prng: std.Random.DefaultPrng = .init(seed);
+    var s: Scenario = .{ .gpa = gpa, .io = io, .repo = &repo, .random = prng.random(), .arena = .init(gpa), .crowded = seed % 2 == 1 };
+    defer s.arena.deinit();
+    for (0..14) |_| try s.write(try s.pathIn(Scenario.dirs[s.random.uintLessThan(usize, Scenario.dirs.len)]), try s.text(6 + s.random.uintLessThan(usize, 10)));
+    try commitAll(io, &repo, "base");
+    try s.operate(2 + s.random.uintLessThan(usize, 6));
+    try commitAll(io, &repo, "changes");
+
+    errdefer std.debug.print("diff seed {d}\n", .{seed});
+    try expectSameDiff(gpa, io, &repo, &.{"-M"}, .{});
+    try expectSameDiff(gpa, io, &repo, &.{"-M30%"}, .{ .threshold = 30 });
+    try expectSameDiff(gpa, io, &repo, &.{"-C"}, .{ .detect_copies = true });
+    try expectSameDiff(gpa, io, &repo, &.{ "-C", "--find-copies-harder" }, .{ .detect_copies = true, .find_copies_harder = true });
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    for (0..diff_scenario_count) |seed| try runDiffScenario(gpa, io, seed);
+}
+
+const diff_scenario_count = 60;
