@@ -96,7 +96,7 @@ pub const Error = error{
     MergeCommit,
     /// The message left after cleanup is empty.
     EmptyMessage,
-} || sequencer.Error || program.Error || patchid.Error || revwalk.Error || worktrees.Error;
+} || sequencer.Error || merging.Error || program.Error || patchid.Error || revwalk.Error || worktrees.Error;
 
 /// A message a person would be shown in an editor, and what they would
 /// see.
@@ -1315,6 +1315,9 @@ fn writePatch(r: *Run, commit_oid: Oid) Error!void {
     defer r.repo.odb.gpa.free(found.bytes);
     var commit = try object.Commit.parse(r.gpa, r.repo.kind, found.bytes);
     defer commit.deinit();
+    // `log_tree_commit` shows a merge commit no diff at all, so its patch
+    // is empty.
+    if (commit.parents.len > 1) return r.state("patch", "");
     const parent_tree: ?Oid = if (commit.parents.len != 0) try r.repo.commitTree(r.io, commit.parents[0]) else null;
     var changes = try diff.tree(r.gpa, r.io, &r.repo.odb, parent_tree, commit.tree, .{ .renames = .{} });
     defer changes.deinit();
@@ -2181,6 +2184,12 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     const bases = try revwalk.mergeBases(gpa, io, &repo.odb, head_oid, merge_head);
     defer gpa.free(bases);
     if (bases.len != 0 and bases[0].eql(merge_head)) return null;
+
+    // With strategy options git hands the merge to `git merge -s ort -X...
+    // --no-ff -F MERGE_MSG <commit>`, which names it by its object name and
+    // does the rest its own way.
+    if (r.options.strategy_options.len != 0) return mergeAsGitMerge(r, item, merge_head, author);
+
     try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", try r.hex(merge_head));
     try head_mod.writeState(io, repo.git_dir, "MERGE_MODE", "no-ff");
 
@@ -2231,6 +2240,42 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     // `AUTO_MERGE` with the merge's other files and runs rerere.
     try rerere.afterCommit(gpa, io, repo);
     if (item.commit) |original| try recordInRewritten(r, original, peekCommand(r, 1));
+    return null;
+}
+
+/// `do_merge` with a strategy: the merge `git merge` makes of it.
+fn mergeAsGitMerge(r: *Run, item: todo.Item, merge_head: Oid, author: object.Signature) Error!?Outcome {
+    const gpa = r.gpa;
+    const io = r.io;
+    const repo = r.repo;
+    try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+    const name = try r.hex(merge_head);
+    var outcome = try merging.start(gpa, io, repo, .{ .oid = merge_head, .name = name, .kind = .commit }, .{
+        .who = r.options.who,
+        .author = author,
+        .fast_forward = .never,
+        .message = r.msg.items,
+        .strategy_options = r.options.strategy_options,
+        .conflict_style = r.options.conflict_style,
+        .filters = r.options.filters,
+        .programs = r.options.programs,
+        .signing = r.options.signing,
+        .hooks = r.options.hooks,
+        .blocked = r.options.blocked,
+        .rerere_autoupdate = r.options.rerere_autoupdate,
+    });
+    defer outcome.deinit();
+    if (outcome.result == .conflicted) {
+        const copied = try r.arena.dupe(threeway.Conflict, outcome.conflicts);
+        for (copied) |*c| c.path = try r.arena.dupe(u8, c.path);
+        r.conflicts = copied;
+    }
+    if (item.commit) |original| try recordInRewritten(r, original, peekCommand(r, 1));
+    if (outcome.result == .conflicted) {
+        if (item.commit) |original| try errorWithPatch(r, original, false) else if (r.have_message and !r.hasState("message")) try r.state("message", r.msg.items);
+        _ = r.items.orderedRemove(0);
+        return finishOutcome(r, .stopped, .conflict, item.commit);
+    }
     return null;
 }
 

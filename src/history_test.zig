@@ -3187,3 +3187,83 @@ fn renormalizeWithMergedAttributes(script: *const fn (*testgit.Repo, Io) anyerro
         try expectSameState(&pair, io, &merge_state, &main_logs);
     }
 }
+
+/// `side` merged `feature` with a conflict in `a` it resolved by hand;
+/// `main` moved on.
+fn conflictedMergeScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "a", "a\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "feature" });
+    try repo.writeFile(io, "a", "feature\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "feature work" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side", "main" });
+    try repo.writeFile(io, "a", "side\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "side work" });
+    try gitMayFail(repo, io, &.{ "merge", "-q", "--no-ff", "--no-edit", "feature" });
+    try repo.writeFile(io, "a", "resolved\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "Merge branch 'feature' into side" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "m", "m\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "main change" });
+}
+
+test "a merge line under strategy options merges as the git merge git's rebase runs for it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try testgit.requireGit(gpa, io);
+    for ([_]*const fn (*testgit.Repo, Io) anyerror!void{ mergeCommitScript, conflictedMergeScript }) |script| {
+        var pair: Pair = undefined;
+        try Pair.init(gpa, io, &pair, script);
+        defer pair.deinit();
+
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "side" });
+        const sheet = try sheetFor(gpa, io, &pair.git, &.{
+            "label onto",
+            "reset onto",
+            "pick feature",
+            "label feature",
+            "reset onto",
+            "pick side~1",
+            "merge -C side feature # Merge branch 'feature' into side",
+        });
+        defer gpa.free(sheet);
+        try gitRebaseInteractive(&pair.git, io, sheet, &.{ "-X", "diff-algorithm=patience", "main" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{
+                .who = who,
+                .onto_name = "main",
+                .todo = sheet,
+                .strategy_options = &.{"diff-algorithm=patience"},
+            });
+            defer outcome.deinit();
+        }
+        try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+        try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "for-each-ref", "refs/rewritten" });
+        const stopped = stopped: {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            break :stopped rebase.inProgress(io, &repo);
+        };
+        if (!stopped) continue;
+        // Stopped on the merge: resolved and continued, each side the
+        // other's.
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.writeFile(io, "a", "resolved\n");
+            try r.exec(io, &.{ "add", "a" });
+        }
+        try pair.ours.exec(io, &.{ "rebase", "--continue" });
+        {
+            var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+            defer repo.deinit(io);
+            var outcome = try rebase.proceed(gpa, io, &repo, .{ .who = who });
+            defer outcome.deinit();
+            try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+        }
+        try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+    }
+}

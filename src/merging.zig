@@ -335,12 +335,9 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
 
     const comment = message.commentString(repo.config.get("core.commentchar"), "");
     var msg: std.ArrayList(u8) = .empty;
-    if (options.message) |text| {
-        try msg.appendSlice(arena, text);
-        if (msg.items.len != 0 and msg.items[msg.items.len - 1] != '\n') try msg.append(arena, '\n');
-    } else {
-        try msg.appendSlice(arena, try title(arena, io, repo, target, head));
-    }
+    // The message as given, byte for byte; git's own title has no newline
+    // at its end.
+    try msg.appendSlice(arena, options.message orelse try title(arena, io, repo, target, head));
     const conflicts = try arena.dupe(threeway.Conflict, outcome.conflicts);
     for (conflicts) |*c| c.path = try arena.dupe(u8, c.path);
     const messages = try ort.dupeMessages(arena, outcome.messages);
@@ -350,8 +347,6 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         // signed off, into `MERGE_MSG` beside `MERGE_HEAD` for the message
         // hooks, and back out of it.
         const h = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
-        // git's merge message has no newline of its own at the end.
-        while (msg.items.len != 0 and msg.items[msg.items.len - 1] == '\n') msg.items.len -= 1;
         if (options.signoff) try message.appendSignoff(arena, &msg, options.who, comment);
         var text: []const u8 = msg.items;
         if (h.runner) |runner| {
@@ -389,6 +384,8 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     // Stopped: with conflicts, or before committing as asked.
     var hex: [hash.max_hex_len]u8 = undefined;
     try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", try std.fmt.allocPrint(arena, "{s}\n", .{target.oid.hex(&hex)}));
+    // `MERGE_MSG` ends the message with a newline whatever it ended with.
+    try msg.append(arena, '\n');
     if (!outcome.isClean()) {
         try msg.append(arena, '\n');
         try msg.appendSlice(arena, comment);
@@ -564,6 +561,6 @@ fn title(arena: Allocator, io: Io, repo: *Repository, target: Target, head: head
     for (effective.items) |pattern| {
         if (wildmatch.match(pattern, current, .{ .pathname = true }) catch false) suppressed = true;
     }
-    if (suppressed) return std.fmt.allocPrint(arena, "Merge {s} '{s}'\n", .{ what, target.name });
-    return std.fmt.allocPrint(arena, "Merge {s} '{s}' into {s}\n", .{ what, target.name, current });
+    if (suppressed) return std.fmt.allocPrint(arena, "Merge {s} '{s}'", .{ what, target.name });
+    return std.fmt.allocPrint(arena, "Merge {s} '{s}' into {s}", .{ what, target.name, current });
 }
