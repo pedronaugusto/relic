@@ -71,6 +71,11 @@ pub const Options = struct {
     bare: bool = false,
     /// Check the branch out.
     checkout: bool = true,
+    /// Clone into `dir` as the git directory of a working tree that is
+    /// somewhere else, and check nothing out: what `git clone --no-checkout
+    /// --separate-git-dir <dir>` puts in `<dir>`, and what a submodule's
+    /// `modules/<name>` holds. The caller connects the working tree.
+    separate_git_dir: bool = false,
     /// Fetch the remote's tags, and let later fetches follow them.
     tags: bool = true,
     /// The branch `HEAD` names when the remote is empty and does not say
@@ -161,10 +166,16 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     var repo = try Repository.init(gpa, io, dir, .{
         .object_format = session.objectFormat(),
         .default_branch = initial,
-        .bare = options.bare,
+        .bare = options.bare or options.separate_git_dir,
         .odb = options.odb,
     });
     errdefer repo.deinit(io);
+    // A git directory with its working tree elsewhere is not bare, and
+    // logs its refs as `git init` sets a repository with a working tree to.
+    if (options.separate_git_dir) {
+        try repo.config.set("core.bare", "false");
+        try repo.config.set("core.logallrefupdates", "true");
+    }
 
     // The remote, in the new configuration.
     const origin = options.origin;
@@ -273,7 +284,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     }
     try repo.config.write(io, repo.common_dir, "config");
 
-    if (!options.bare and options.checkout) {
+    if (!options.bare and !options.separate_git_dir and options.checkout) {
         if (head_commit) |commit| try checkOut(gpa, io, &repo, commit, options.programs);
     }
     return repo;

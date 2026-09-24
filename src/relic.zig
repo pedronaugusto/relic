@@ -39,6 +39,7 @@ pub const program = @import("program.zig");
 pub const gitmodules = @import("gitmodules.zig");
 pub const gitlink = @import("gitlink.zig");
 pub const submodule = @import("submodule.zig");
+pub const submoduletransport = @import("submoduletransport.zig");
 pub const filter = @import("filter.zig");
 pub const lfs = @import("lfs.zig");
 pub const lfsapi = @import("lfsapi.zig");
