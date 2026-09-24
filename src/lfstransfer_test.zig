@@ -689,7 +689,7 @@ test "an action's URL is rewritten by insteadOf when git-lfs's setting asks, and
     try testing.expectError(error.LfsTransferUnsupported, lfstransfer.fetch(server, &repo, .{}));
 }
 
-test "an .lfsconfig missing from the working tree is read from the index, then from HEAD, as git-lfs reads it" {
+test "an .lfsconfig missing from the working tree is read from the index, then from HEAD, as git-lfs reads it, by the server and by checkout" {
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{});
@@ -724,6 +724,11 @@ test "an .lfsconfig missing from the working tree is read from the index, then f
         const server = try openServer(fx, &repo);
         defer server.close();
         try testing.expectEqualStrings(stage.want, (try server.client.endpoint(.download)).url);
+        // Checkout's own LFS, which smudges with `lfs.fetchinclude` and
+        // `lfs.fetchexclude` from there, finds the same file.
+        var drivers = try repo.loadFilters(io, .{});
+        defer drivers.deinit();
+        try testing.expectEqualStrings(stage.want, drivers.lfs.?.settings.url.?);
     }
 }
 

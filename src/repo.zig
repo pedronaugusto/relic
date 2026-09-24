@@ -660,8 +660,53 @@ pub const Repository = struct {
     /// The filter drivers the configuration defines and relic's own LFS,
     /// for `worktree.Rules.filters`. The result is the caller's, and borrows
     /// the repository's directories for as long as it lives.
-    pub fn loadFilters(repo: *Repository, io: Io, options: filter.Drivers.Options) filter.Drivers.LoadError!filter.Drivers {
-        return filter.Drivers.load(repo.gpa, io, &repo.config, repo.common_dir, repo.work_dir, options);
+    pub fn loadFilters(repo: *Repository, io: Io, options: filter.Drivers.Options) LoadFiltersError!filter.Drivers {
+        var with = options;
+        var text: ?[]u8 = null;
+        defer if (text) |t| repo.gpa.free(t);
+        if (with.native_lfs and with.lfsconfig == null) {
+            text = try repo.lfsconfigText(io);
+            with.lfsconfig = text;
+        }
+        return filter.Drivers.load(repo.gpa, io, &repo.config, repo.common_dir, repo.work_dir, with);
+    }
+
+    /// Errors from `loadFilters`: the drivers', and those of finding
+    /// `.lfsconfig` for relic's own LFS.
+    pub const LoadFiltersError = filter.Drivers.LoadError || LfsconfigError;
+
+    /// Errors from finding `.lfsconfig`.
+    pub const LfsconfigError = Allocator.Error || Io.Dir.ReadFileAllocError ||
+        index_mod.ReadError || odb_mod.Error || Error;
+
+    /// `.lfsconfig` as git-lfs finds it: the file at the top of the working
+    /// tree, else its version in the index, else its version in `HEAD`;
+    /// only `HEAD`'s in a bare repository. `null` when none of them has
+    /// one. The text is the caller's, in the repository's allocator.
+    pub fn lfsconfigText(repo: *Repository, io: Io) LfsconfigError!?[]u8 {
+        if (repo.work_dir) |wd| {
+            if (try fs.readFileAlloc(repo.gpa, io, wd, ".lfsconfig", 1 << 20)) |text| return text;
+            var index = repo.openIndex(io) catch |err| switch (err) {
+                error.FileNotFound => null,
+                else => |e| return e,
+            };
+            if (index) |*ix| {
+                defer ix.deinit();
+                if (ix.find(".lfsconfig")) |entry| {
+                    if (entry.stage == 0 and (entry.mode == .file or entry.mode == .exec)) {
+                        const found = try repo.odb.read(io, entry.oid);
+                        return found.bytes;
+                    }
+                }
+            }
+        }
+        const tree = (try repo.headTree(io)) orelse return null;
+        const found = try repo.odb.read(io, tree);
+        defer repo.odb.gpa.free(found.bytes);
+        const entry = (object.Tree.parse(repo.kind, found.bytes).find(".lfsconfig") catch return null) orelse return null;
+        if (entry.mode != .file and entry.mode != .exec) return null;
+        const blob = try repo.odb.read(io, entry.oid);
+        return blob.bytes;
     }
 
     /// Open the repository's own index.

@@ -570,7 +570,7 @@ pub const Lfs = struct {
         skip_smudge: bool = false,
         /// `.lfsconfig` as git-lfs finds it when the working tree has none —
         /// from the index, else from `HEAD` — for a caller that has read it
-        /// there. `lfsapi.lfsconfigText` does.
+        /// there. `Repository.lfsconfigText` does.
         lfsconfig: ?[]const u8 = null,
     };
 

@@ -157,11 +157,11 @@ pub const Settings = struct {
     }
 
     /// The settings of `repo`, with `.lfsconfig` found where git-lfs finds
-    /// it: `lfsconfigText`. `repo`'s configuration is borrowed.
+    /// it: `Repository.lfsconfigText`. `repo`'s configuration is borrowed.
     pub fn loadRepo(gpa: Allocator, io: Io, repo: *repo_mod.Repository) (LoadError || LfsconfigError)!Settings {
         var s: Settings = .{ .gpa = gpa, .config = &repo.config };
-        const text = (try lfsconfigText(gpa, io, repo)) orelse return s;
-        defer gpa.free(text);
+        const text = (try repo.lfsconfigText(io)) orelse return s;
+        defer repo.gpa.free(text);
         s.file = try Config.parseText(gpa, text, .local);
         return s;
     }
@@ -272,38 +272,7 @@ pub const Settings = struct {
 };
 
 /// Errors from finding `.lfsconfig`.
-pub const LfsconfigError = Allocator.Error || Io.Dir.ReadFileAllocError ||
-    @import("index.zig").ReadError || @import("odb.zig").Error || repo_mod.Error;
-
-/// `.lfsconfig` as git-lfs finds it: the file at the top of the working
-/// tree, else its version in the index, else its version in `HEAD`; only
-/// `HEAD`'s in a bare repository. `null` when none of them has one. The
-/// text is the caller's.
-pub fn lfsconfigText(gpa: Allocator, io: Io, repo: *repo_mod.Repository) LfsconfigError!?[]u8 {
-    if (repo.work_dir) |wd| {
-        if (try fs.readFileAlloc(gpa, io, wd, ".lfsconfig", 1 << 20)) |text| return text;
-        var index = repo.openIndex(io) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => |e| return e,
-        };
-        if (index) |*ix| {
-            defer ix.deinit();
-            if (ix.find(".lfsconfig")) |entry| {
-                if (entry.stage == 0 and (entry.mode == .file or entry.mode == .exec)) {
-                    const found = try repo.odb.read(io, entry.oid);
-                    return found.bytes;
-                }
-            }
-        }
-    }
-    const tree = (try repo.headTree(io)) orelse return null;
-    const found = try repo.odb.read(io, tree);
-    defer repo.odb.gpa.free(found.bytes);
-    const entry = (object.Tree.parse(repo.kind, found.bytes).find(".lfsconfig") catch return null) orelse return null;
-    if (entry.mode != .file and entry.mode != .exec) return null;
-    const blob = try repo.odb.read(io, entry.oid);
-    return blob.bytes;
-}
+pub const LfsconfigError = repo_mod.Repository.LfsconfigError;
 
 fn unquoteValue(a: Allocator, raw: []const u8) Error![]const u8 {
     return config_mod.unquote(a, raw) catch |err| switch (err) {
@@ -1753,8 +1722,8 @@ pub const Server = struct {
         };
         s.base_path = try (repo.work_dir orelse repo.common_dir).realPathFileAlloc(io, ".", gpa);
         errdefer gpa.free(s.base_path);
-        const lfsconfig = try lfsconfigText(gpa, io, repo);
-        defer if (lfsconfig) |t| gpa.free(t);
+        const lfsconfig = try repo.lfsconfigText(io);
+        defer if (lfsconfig) |t| repo.gpa.free(t);
         s.settings = .{ .gpa = gpa, .config = &repo.config };
         if (lfsconfig) |t| s.settings.file = try Config.parseText(gpa, t, .local);
         errdefer s.settings.deinit();

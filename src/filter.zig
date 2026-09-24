@@ -111,6 +111,9 @@ pub const Drivers = struct {
         /// Leave every LFS pointer as it is on checkout, as
         /// `GIT_LFS_SKIP_SMUDGE` does.
         lfs_skip_smudge: bool = false,
+        /// `.lfsconfig` from the index or `HEAD`, for a working tree that
+        /// has none: `lfs.Lfs.Options.lfsconfig`.
+        lfsconfig: ?[]const u8 = null,
     };
 
     /// Errors from reading the drivers.
@@ -178,7 +181,7 @@ pub const Drivers = struct {
         if (options.native_lfs) {
             const skip = options.lfs_skip_smudge or
                 (if (drivers.find("lfs")) |d| d.isGitLfs() and d.skipsSmudge() else false);
-            drivers.lfs = try lfs.Lfs.load(gpa, io, config, common_dir, work_dir, .{ .skip_smudge = skip });
+            drivers.lfs = try lfs.Lfs.load(gpa, io, config, common_dir, work_dir, .{ .skip_smudge = skip, .lfsconfig = options.lfsconfig });
         }
         return drivers;
     }
