@@ -235,6 +235,8 @@ fn run(
         .minimal = settings.minimal,
         .renames = settings.renames,
         .rename_score = settings.rename_score,
+        .whitespace = settings.whitespace,
+        .subtree_shift = settings.subtree_shift,
         .rename_limit = configuredRenameLimit(repo),
         .directory_renames = configuredDirectoryRenames(repo),
         .attributes = &attrs,
@@ -474,6 +476,7 @@ fn configuredSettings(repo: *Repository, options: Options) Error!strategy.Settin
         .favor = options.blob.favor,
         .algorithm = options.blob.algorithm,
         .minimal = options.blob.minimal,
+        .whitespace = options.blob.whitespace,
         .renames = configuredRenames(repo),
         .renormalize = repo.config.getBool("merge.renormalize", false) catch false,
     };

@@ -71,6 +71,8 @@ pub const Options = struct {
     ignore_whitespace_change: bool = false,
     /// Ignore every whitespace difference.
     ignore_all_whitespace: bool = false,
+    /// Ignore a carriage return at the end of a line.
+    ignore_cr_at_eol: bool = false,
     /// Score the places a run of changed lines could sit by the indentation
     /// around them and take the best. On by default because it is on by
     /// default in git, which is where the expected output comes from.
@@ -307,30 +309,114 @@ fn isSpace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0b or c == 0x0c;
 }
 
-/// Append the comparison form of `line` to `out`.
-///
-/// The trailing newline is held back and re-appended, so a final line that
-/// lacks one never equals a line that has one -- the distinction `git diff`
-/// prints as "\\ No newline at end of file". Under `ignore_all_whitespace`
-/// the newline goes with the rest of the whitespace, as it does in git.
-fn normalize(gpa: Allocator, out: *std.ArrayList(u8), line: Line, options: Options) Allocator.Error!void {
-    const has_newline = line.len > 0 and line[line.len - 1] == '\n';
-    const body = if (has_newline) line[0 .. line.len - 1] else line;
+/// Which whitespace differences two lines may have and still be the same
+/// line: git's `XDF_WHITESPACE_FLAGS`. Each takes in everything the ones
+/// after it do.
+pub const Whitespace = struct {
+    /// `-w`, `ignore-all-space`: every whitespace character.
+    all: bool = false,
+    /// `-b`, `ignore-space-change`: how much whitespace, not whether.
+    change: bool = false,
+    /// `--ignore-space-at-eol`: whitespace at the end of the line.
+    at_eol: bool = false,
+    /// `--ignore-cr-at-eol`: a carriage return before the newline.
+    cr_at_eol: bool = false,
 
-    if (options.ignore_all_whitespace) {
-        for (body) |c| {
+    /// The whitespace `options` ignores.
+    pub fn of(options: Options) Whitespace {
+        return .{
+            .all = options.ignore_all_whitespace,
+            .change = options.ignore_whitespace_change,
+            .at_eol = options.ignore_trailing_whitespace,
+            .cr_at_eol = options.ignore_cr_at_eol,
+        };
+    }
+
+    /// Whether any whitespace is ignored at all.
+    pub fn any(ws: Whitespace) bool {
+        return ws.all or ws.change or ws.at_eol or ws.cr_at_eol;
+    }
+};
+
+/// Whether `a` and `b` are the same line once the whitespace `ws` ignores
+/// is overlooked: git's `xdl_recmatch`. Each line's newline, when it has
+/// one, is part of it; under any whitespace option a line that lacks one
+/// can still match a line that has one, as in git.
+pub fn sameLine(a: Line, b: Line, ws: Whitespace) bool {
+    if (std.mem.eql(u8, a, b)) return true;
+    if (!ws.any()) return false;
+    var i: usize = 0;
+    var j: usize = 0;
+    if (ws.all) {
+        while (true) {
+            while (i < a.len and isSpace(a[i])) i += 1;
+            while (j < b.len and isSpace(b[j])) j += 1;
+            if (i == a.len or j == b.len) break;
+            if (a[i] != b[j]) return false;
+            i += 1;
+            j += 1;
+        }
+    } else if (ws.change) {
+        while (i < a.len and j < b.len) {
+            if (isSpace(a[i]) and isSpace(b[j])) {
+                while (i < a.len and isSpace(a[i])) i += 1;
+                while (j < b.len and isSpace(b[j])) j += 1;
+                continue;
+            }
+            if (a[i] != b[j]) return false;
+            i += 1;
+            j += 1;
+        }
+    } else if (ws.at_eol) {
+        while (i < a.len and j < b.len and a[i] == b[j]) {
+            i += 1;
+            j += 1;
+        }
+    } else {
+        while (i < a.len and j < b.len and a[i] == b[j]) {
+            i += 1;
+            j += 1;
+        }
+        return (i == a.len or endsWithOptionalCr(a, i)) and (j == b.len or endsWithOptionalCr(b, j));
+    }
+    // One side has run out: what is left of the other has to be
+    // whitespace. At the end of a line that stops early the rest of both
+    // may be left.
+    while (i < a.len and isSpace(a[i])) i += 1;
+    while (j < b.len and isSpace(b[j])) j += 1;
+    return i == a.len and j == b.len;
+}
+
+/// Whether `line` from `at` on is its newline, perhaps after a carriage
+/// return. A line with no newline keeps its carriage return.
+fn endsWithOptionalCr(line: Line, at: usize) bool {
+    const complete = line.len != 0 and line[line.len - 1] == '\n';
+    const end = if (complete) line.len - 1 else line.len;
+    if (end == at) return true;
+    return complete and end == at + 1 and line[at] == '\r';
+}
+
+/// Append the comparison form of `line` to `out`: two lines have the same
+/// form exactly when `sameLine` matches them.
+///
+/// With no whitespace option the form is the line, newline and all, so a
+/// final line that lacks one never equals a line that has one -- the
+/// distinction `git diff` prints as "\\ No newline at end of file". Under
+/// any whitespace option the newline is whitespace like the rest and goes
+/// with it, as it does in git.
+fn normalize(gpa: Allocator, out: *std.ArrayList(u8), line: Line, options: Options) Allocator.Error!void {
+    const ws: Whitespace = .of(options);
+    if (ws.all) {
+        for (line) |c| {
             if (!isSpace(c)) try out.append(gpa, c);
         }
         return;
     }
-
-    var end = body.len;
-    if (options.ignore_whitespace_change or options.ignore_trailing_whitespace) {
-        while (end > 0 and isSpace(body[end - 1])) end -= 1;
-    }
-    const trimmed = body[0..end];
-
-    if (options.ignore_whitespace_change) {
+    if (ws.change or ws.at_eol) {
+        var end = line.len;
+        while (end > 0 and isSpace(line[end - 1])) end -= 1;
+        const trimmed = line[0..end];
+        if (!ws.change) return out.appendSlice(gpa, trimmed);
         var i: usize = 0;
         while (i < trimmed.len) {
             if (isSpace(trimmed[i])) {
@@ -341,11 +427,19 @@ fn normalize(gpa: Allocator, out: *std.ArrayList(u8), line: Line, options: Optio
                 i += 1;
             }
         }
-    } else {
-        try out.appendSlice(gpa, trimmed);
+        return;
     }
-
-    if (has_newline) try out.append(gpa, '\n');
+    if (ws.cr_at_eol) {
+        // A newline goes, and a carriage return before it; a line with no
+        // newline keeps its carriage return.
+        var end = line.len;
+        if (end > 0 and line[end - 1] == '\n') {
+            end -= 1;
+            if (end > 0 and line[end - 1] == '\r') end -= 1;
+        }
+        return out.appendSlice(gpa, line[0..end]);
+    }
+    try out.appendSlice(gpa, line);
 }
 
 /// Identity numbers for `old` then `new`, in one slice of `old.len +
@@ -1894,6 +1988,61 @@ test "whitespace options change what counts as equal" {
     const all = try diffLines(gpa, all_old, all_new, .{ .ignore_all_whitespace = true });
     defer gpa.free(all);
     try std.testing.expectEqual(@as(usize, 0), all.len);
+}
+
+test "lines match under each whitespace option as git's xdl_recmatch matches them" {
+    const change: Whitespace = .{ .change = true };
+    try std.testing.expect(sameLine("a  b\n", "a\tb\n", change));
+    try std.testing.expect(sameLine("a b \n", "a b", change));
+    try std.testing.expect(!sameLine(" a\n", "a\n", change));
+    try std.testing.expect(!sameLine("ab\n", "a b\n", change));
+    try std.testing.expect(sameLine("ab\n", "a b\n", .{ .all = true }));
+    try std.testing.expect(sameLine("a \t\n", "a", .{ .at_eol = true }));
+    try std.testing.expect(!sameLine("a  b\n", "a b\n", .{ .at_eol = true }));
+    const cr: Whitespace = .{ .cr_at_eol = true };
+    try std.testing.expect(sameLine("a\r\n", "a\n", cr));
+    try std.testing.expect(sameLine("a\r\n", "a", cr));
+    try std.testing.expect(!sameLine("a\r", "a\n", cr));
+    try std.testing.expect(!sameLine("a \n", "a\n", cr));
+    // git's comparison matches these two though its line classes part
+    // them: a carriage return at the very end is kept, and one before a
+    // newline is not.
+    try std.testing.expect(sameLine("a\r", "a\r\n", cr));
+    try std.testing.expect(!sameLine("a\n", "a \n", .{}));
+}
+
+fn fuzzSameLine(_: void, smith: *std.testing.Smith) anyerror!void {
+    const gpa = std.testing.allocator;
+    var buf: [64]u8 = undefined;
+    const len = smith.slice(&buf);
+    const split_at = if (len == 0) 0 else buf[0] % (len + 1);
+    // Two lines, each with a newline only at its end, if at all.
+    var lines: [2][]u8 = .{ buf[0..split_at], buf[split_at..len] };
+    for (&lines) |*l| {
+        if (std.mem.indexOfScalar(u8, l.*, '\n')) |nl| l.* = l.*[0 .. nl + 1];
+    }
+    const sets = [_]Whitespace{ .{}, .{ .all = true }, .{ .change = true }, .{ .at_eol = true }, .{ .cr_at_eol = true }, .{ .change = true, .cr_at_eol = true } };
+    for (sets) |ws| {
+        const options: Options = .{
+            .ignore_all_whitespace = ws.all,
+            .ignore_whitespace_change = ws.change,
+            .ignore_trailing_whitespace = ws.at_eol,
+            .ignore_cr_at_eol = ws.cr_at_eol,
+        };
+        var forms: [2]std.ArrayList(u8) = .{ .empty, .empty };
+        defer for (&forms) |*f| f.deinit(gpa);
+        for (lines, &forms) |l, *f| try normalize(gpa, f, l, options);
+        const same = sameLine(lines[0], lines[1], ws);
+        try std.testing.expectEqual(same, sameLine(lines[1], lines[0], ws));
+        // One form is one line class, and a class never joins lines the
+        // comparison tells apart.
+        if (std.mem.eql(u8, forms[0].items, forms[1].items)) try std.testing.expect(same);
+        try std.testing.expect(sameLine(lines[0], lines[0], ws));
+    }
+}
+
+test "fuzz: lines of one comparison form always match, and matching is symmetric" {
+    try std.testing.fuzz({}, fuzzSameLine, .{});
 }
 
 test "a changed range still indexes the real lines under a whitespace option" {

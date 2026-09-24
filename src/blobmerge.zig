@@ -63,6 +63,13 @@ pub const BlobOptions = struct {
     /// Prove the Myers diffs minimal, the ones patience and histogram fall
     /// back to included: git's `diff-algorithm=minimal`.
     minimal: bool = false,
+    /// The whitespace differences the merge overlooks, as the strategy
+    /// options `ignore-all-space`, `ignore-space-change`,
+    /// `ignore-space-at-eol` and `ignore-cr-at-eol` ask. A region the two
+    /// sides differ in only by such whitespace is no change: an unchanged
+    /// region keeps our side's lines, and a side whose every change is
+    /// whitespace leaves the file to the other side.
+    whitespace: textdiff.Whitespace = .{},
 };
 
 /// The owned bytes produced by a blob merge.
@@ -115,7 +122,16 @@ pub fn blobs(
     defer gpa.free(their_lines);
     // The merge machinery diffs with no indentation heuristic: the slide it
     // wants is the plain one.
-    const diff_options: textdiff.Options = .{ .algorithm = options.algorithm, .minimal = options.minimal, .indent_heuristic = false };
+    const ws = options.whitespace;
+    const diff_options: textdiff.Options = .{
+        .algorithm = options.algorithm,
+        .minimal = options.minimal,
+        .indent_heuristic = false,
+        .ignore_all_whitespace = ws.all,
+        .ignore_whitespace_change = ws.change,
+        .ignore_trailing_whitespace = ws.at_eol,
+        .ignore_cr_at_eol = ws.cr_at_eol,
+    };
     const our_changes = try textdiff.diffLines(gpa, base_lines, our_lines, diff_options);
     defer gpa.free(our_changes);
     const their_changes = try textdiff.diffLines(gpa, base_lines, their_lines, diff_options);
@@ -127,10 +143,10 @@ pub fn blobs(
     var hunks: std.ArrayList(Hunk) = .empty;
     defer hunks.deinit(gpa);
     const lines: Sides = .{ .base = base_lines, .ours = our_lines, .theirs = their_lines };
-    try collectHunks(gpa, &hunks, lines, our_changes, their_changes);
+    try collectHunks(gpa, &hunks, lines, our_changes, their_changes, ws);
 
     switch (options.conflict_style) {
-        .zdiff3 => trimConflicts(hunks.items, our_lines, their_lines),
+        .zdiff3 => trimConflicts(hunks.items, our_lines, their_lines, ws),
         .merge => {
             try refineConflicts(gpa, &hunks, our_lines, their_lines, diff_options);
             joinCloseConflicts(&hunks);
@@ -238,6 +254,7 @@ fn collectHunks(
     lines: Sides,
     ours: []const textdiff.Change,
     theirs: []const textdiff.Change,
+    ws: textdiff.Whitespace,
 ) Allocator.Error!void {
     const base_len: isize = @intCast(lines.base.len);
     const our_len: isize = @intCast(lines.ours.len);
@@ -258,7 +275,7 @@ fn collectHunks(
             continue;
         }
         const identical = x1.old_at == x2.old_at and x1.old_len == x2.old_len and x1.new_len == x2.new_len and
-            sameLines(span(lines.ours, x1.new_at, x1.new_len), span(lines.theirs, x2.new_at, x2.new_len));
+            sameLines(span(lines.ours, x1.new_at, x1.new_len), span(lines.theirs, x2.new_at, x2.new_len), ws);
         if (!identical) {
             const off = x1.old_at - x2.old_at;
             const ffo = off + x1.old_len - x2.old_len;
@@ -316,9 +333,11 @@ fn span(lines: []const textdiff.Line, at: isize, len: isize) []const textdiff.Li
     return lines[@intCast(at)..][0..@intCast(len)];
 }
 
-fn sameLines(a: []const textdiff.Line, b: []const textdiff.Line) bool {
+/// `xdl_merge_cmp_lines`: the two runs line for line the same, the
+/// whitespace `ws` ignores overlooked.
+fn sameLines(a: []const textdiff.Line, b: []const textdiff.Line, ws: textdiff.Whitespace) bool {
     if (a.len != b.len) return false;
-    for (a, b) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+    for (a, b) |x, y| if (!textdiff.sameLine(x, y, ws)) return false;
     return true;
 }
 
@@ -387,11 +406,11 @@ fn joinCloseConflicts(hunks: *std.ArrayList(Hunk)) void {
 
 /// `xdl_refine_zdiff3_conflicts`: move the lines both sides agree on at the
 /// start and the end of each conflict out of it.
-fn trimConflicts(hunks: []Hunk, our_lines: []const textdiff.Line, their_lines: []const textdiff.Line) void {
+fn trimConflicts(hunks: []Hunk, our_lines: []const textdiff.Line, their_lines: []const textdiff.Line, ws: textdiff.Whitespace) void {
     for (hunks) |*m| {
         if (m.mode != .conflict) continue;
         while (m.len1 != 0 and m.len2 != 0 and
-            std.mem.eql(u8, our_lines[@intCast(m.at1)], their_lines[@intCast(m.at2)]))
+            textdiff.sameLine(our_lines[@intCast(m.at1)], their_lines[@intCast(m.at2)], ws))
         {
             m.len1 -= 1;
             m.len2 -= 1;
@@ -399,7 +418,7 @@ fn trimConflicts(hunks: []Hunk, our_lines: []const textdiff.Line, their_lines: [
             m.at2 += 1;
         }
         while (m.len1 != 0 and m.len2 != 0 and
-            std.mem.eql(u8, our_lines[@intCast(m.at1 + m.len1 - 1)], their_lines[@intCast(m.at2 + m.len2 - 1)]))
+            textdiff.sameLine(our_lines[@intCast(m.at1 + m.len1 - 1)], their_lines[@intCast(m.at2 + m.len2 - 1)], ws))
         {
             m.len1 -= 1;
             m.len2 -= 1;

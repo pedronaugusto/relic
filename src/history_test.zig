@@ -3267,3 +3267,91 @@ test "a merge line under strategy options merges as the git merge git's rebase r
         try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
     }
 }
+
+//=========================================================================
+// The whitespace and subtree strategy options
+//=========================================================================
+
+/// A project that took a library in under `lib/`, the library's history
+/// going on at the top level, and each side's edits, some of them only to
+/// whitespace.
+fn subtreeScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.exec(io, &.{ "checkout", "-q", "--orphan", "library" });
+    try repo.writeFile(io, "a", "one\ntwo\nthree\n");
+    try repo.writeFile(io, "b", "b\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "library" });
+    try repo.exec(io, &.{ "checkout", "-q", "--orphan", "main" });
+    try repo.exec(io, &.{ "rm", "-rfq", "." });
+    try repo.writeFile(io, "README", "project\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "project" });
+    try repo.exec(io, &.{ "merge", "-q", "-s", "ours", "--no-commit", "--allow-unrelated-histories", "library" });
+    try repo.exec(io, &.{ "read-tree", "--prefix=lib/", "-u", "library" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "take the library in" });
+    try repo.writeFile(io, "lib/a", "one  \ntwo\nthree\n");
+    try repo.writeFile(io, "README", "project, edited\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "project edits" });
+    try repo.exec(io, &.{ "checkout", "-q", "library" });
+    try repo.writeFile(io, "a", "one\ntwo\n\tthree\n");
+    try repo.writeFile(io, "b", "b, edited\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "library edits" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+}
+
+test "merge and cherry-pick with subtree and whitespace options end as git's do" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, subtreeScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "before" });
+
+    const word_sets = [_][]const []const u8{
+        &.{"subtree=lib"},
+        &.{"subtree"},
+        &.{ "subtree", "ignore-space-change" },
+        &.{ "subtree", "ignore-all-space" },
+    };
+    for (word_sets) |words| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "merge", "--no-edit" });
+        for (words) |word| try args.appendSlice(gpa, &.{ "-X", word });
+        try args.append(gpa, "library");
+        try gitMayFail(&pair.git, io, args.items);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const target = try merging.resolve(gpa, io, &repo, "library");
+            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who, .strategy_options = words });
+            defer outcome.deinit();
+        }
+        expectSameState(&pair, io, &merge_state, &main_logs) catch |err| {
+            std.debug.print("merging with {s}\n", .{words[words.len - 1]});
+            return err;
+        };
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| gitMayFail(r, io, &.{ "merge", "--abort" }) catch {};
+
+        // The library's last commit picked onto the project.
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+        args.clearRetainingCapacity();
+        try args.append(gpa, "cherry-pick");
+        for (words) |word| try args.appendSlice(gpa, &.{ "-X", word });
+        try args.append(gpa, "library");
+        try gitMayFail(&pair.git, io, args.items);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try sequencer.pick(gpa, io, &repo, &.{try oidOf(gpa, io, &pair.ours, "library")}, .{ .who = who, .strategy_options = words });
+            defer outcome.deinit();
+        }
+        expectSameState(&pair, io, &pick_state, &main_logs) catch |err| {
+            std.debug.print("picking with {s}\n", .{words[words.len - 1]});
+            return err;
+        };
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| gitMayFail(r, io, &.{ "cherry-pick", "--abort" }) catch {};
+    }
+}

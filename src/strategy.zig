@@ -20,9 +20,6 @@ const similarity = @import("similarity.zig");
 pub const Error = error{
     /// A word git's `-X` does not take.
     UnknownStrategyOption,
-    /// A word git takes that this merge does not do: `subtree` and the
-    /// whitespace options.
-    UnsupportedStrategyOption,
 };
 
 /// A line diff as `diff.algorithm` and `-X diff-algorithm` name it: an
@@ -61,6 +58,15 @@ pub const Settings = struct {
     /// Whether each side goes through the line-ending conversion before it
     /// is merged: `merge.renormalize`, `-X renormalize`.
     renormalize: bool = false,
+    /// The whitespace differences the content merges overlook:
+    /// `ignore-all-space`, `ignore-space-change`, `ignore-space-at-eol`,
+    /// `ignore-cr-at-eol`. Each word adds to what the others set.
+    whitespace: textdiff.Whitespace = .{},
+    /// `subtree` and `subtree=<path>`: the other side and the base shifted
+    /// to line up with our tree before the merge. Empty to have the shift
+    /// worked out from the trees, a path to shift by exactly that; `null`
+    /// for no shift. Borrows the word it came from.
+    subtree_shift: ?[]const u8 = null,
 
     /// Take `diff.algorithm`'s value, as git's merge configuration does:
     /// the algorithm replaced, `minimal` set only by `minimal` itself.
@@ -101,11 +107,18 @@ pub const Settings = struct {
             if (parsed.rest.len != 0) return error.UnknownStrategyOption;
             s.rename_score = parsed.score;
             s.renames = true;
-        } else if (std.mem.eql(u8, word, "subtree") or std.mem.startsWith(u8, word, "subtree=") or
-            std.mem.eql(u8, word, "ignore-space-change") or std.mem.eql(u8, word, "ignore-all-space") or
-            std.mem.eql(u8, word, "ignore-space-at-eol") or std.mem.eql(u8, word, "ignore-cr-at-eol"))
-        {
-            return error.UnsupportedStrategyOption;
+        } else if (std.mem.eql(u8, word, "subtree")) {
+            s.subtree_shift = "";
+        } else if (std.mem.startsWith(u8, word, "subtree=")) {
+            s.subtree_shift = word["subtree=".len..];
+        } else if (std.mem.eql(u8, word, "ignore-space-change")) {
+            s.whitespace.change = true;
+        } else if (std.mem.eql(u8, word, "ignore-all-space")) {
+            s.whitespace.all = true;
+        } else if (std.mem.eql(u8, word, "ignore-space-at-eol")) {
+            s.whitespace.at_eol = true;
+        } else if (std.mem.eql(u8, word, "ignore-cr-at-eol")) {
+            s.whitespace.cr_at_eol = true;
         } else return error.UnknownStrategyOption;
     }
 };
@@ -230,7 +243,19 @@ test "strategy options set what git's parse_merge_opt sets, the later word winni
     try std.testing.expectError(error.UnknownStrategyOption, s.apply("find-renames=40%x"));
     try std.testing.expectError(error.UnknownStrategyOption, s.apply("diff-algorithm=fast"));
     try std.testing.expectError(error.UnknownStrategyOption, s.apply("frobnicate"));
-    try std.testing.expectError(error.UnsupportedStrategyOption, s.apply("ignore-space-change"));
+    // The whitespace words add up; none takes another back.
+    try s.apply("ignore-space-change");
+    try s.apply("ignore-cr-at-eol");
+    try std.testing.expectEqual(textdiff.Whitespace{ .change = true, .cr_at_eol = true }, s.whitespace);
+    try std.testing.expectEqual(@as(?[]const u8, null), s.subtree_shift);
+    try s.apply("subtree=lib/vendored");
+    try std.testing.expectEqualStrings("lib/vendored", s.subtree_shift.?);
+    try s.apply("subtree");
+    try std.testing.expectEqualStrings("", s.subtree_shift.?);
+    try s.apply("subtree=");
+    try std.testing.expectEqualStrings("", s.subtree_shift.?);
+    try std.testing.expectError(error.UnknownStrategyOption, s.apply("subtrees"));
+    try std.testing.expectError(error.UnknownStrategyOption, s.apply("ignore-space"));
 }
 
 test "a rename score is read as git reads one" {

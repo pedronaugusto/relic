@@ -106,6 +106,7 @@ pub const rename = @import("rename.zig");
 pub const rerere = @import("rerere.zig");
 pub const commithooks = @import("commithooks.zig");
 pub const strategy = @import("strategy.zig");
+pub const subtreeshift = @import("subtreeshift.zig");
 pub const rebase = @import("rebase.zig");
 
 const builtin = @import("builtin");
@@ -145,5 +146,6 @@ test {
         _ = @import("cloneconfig_test.zig");
         _ = @import("clientcert_test.zig");
         _ = @import("inflate_test.zig");
+        _ = @import("strategy_test.zig");
     }
 }

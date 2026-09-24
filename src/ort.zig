@@ -34,6 +34,7 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const merge = @import("blobmerge.zig");
+const subtreeshift = @import("subtreeshift.zig");
 const rename = @import("rename.zig");
 const attributes = @import("attributes.zig");
 const revwalk = @import("revwalk.zig");
@@ -67,7 +68,7 @@ pub const Error = error{
     /// two checks.
     DirectoryRenameLostStage,
 } || Allocator.Error || odb_mod.Error || object.TreeParseError || object.ParseError ||
-    attributes.Error || revwalk.Error || convert.Error;
+    attributes.Error || revwalk.Error || convert.Error || subtreeshift.Error;
 
 /// When a file one side added lands in a directory the other side renamed:
 /// `merge.directoryRenames`.
@@ -113,6 +114,14 @@ pub const Options = struct {
     algorithm: @import("textdiff.zig").Algorithm = .histogram,
     /// Prove the Myers diffs minimal: `diff-algorithm=minimal`.
     minimal: bool = false,
+    /// The whitespace differences the content merges overlook: the
+    /// strategy options `ignore-all-space`, `ignore-space-change`,
+    /// `ignore-space-at-eol` and `ignore-cr-at-eol`.
+    whitespace: @import("textdiff.zig").Whitespace = .{},
+    /// `-X subtree` and `-X subtree=<path>`: before each merge the base and
+    /// the second side are shifted to line up with the first side's tree,
+    /// `subtreeshift.shift` with this as its path. `null` shifts nothing.
+    subtree_shift: ?[]const u8 = null,
     /// Whether renames are followed: `merge.renames`, `-X no-renames`.
     renames: bool = true,
     /// How much of a file must survive for a delete and an add to be a
@@ -1018,6 +1027,7 @@ const Merge = struct {
                 .favor = favor,
                 .algorithm = m.options.algorithm,
                 .minimal = m.options.minimal,
+                .whitespace = m.options.whitespace,
             }) catch |err| switch (err) {
                 error.BinaryBlob => unreachable,
                 error.OutOfMemory => return error.OutOfMemory,
@@ -1972,7 +1982,15 @@ const Merge = struct {
     //---------------------------------------------------------------------
 
     /// `merge_ort_nonrecursive_internal`.
-    fn nonrecursive(m: *Merge, base: Oid, side1: Oid, side2: Oid) Error!Outcome {
+    fn nonrecursive(m: *Merge, base_tree: Oid, side1: Oid, side2_tree: Oid) Error!Outcome {
+        var base = base_tree;
+        var side2 = side2_tree;
+        // `-X subtree`: the other side and the base lined up with ours
+        // first, as `merge_ort_nonrecursive_internal` does.
+        if (m.options.subtree_shift) |prefix| {
+            side2 = try subtreeshift.shift(m.db.gpa, m.io, m.db, side1, side2, prefix);
+            base = try subtreeshift.shift(m.db.gpa, m.io, m.db, side1, base, prefix);
+        }
         m.reset();
         var passes: u32 = 0;
         while (true) : (passes += 1) {
