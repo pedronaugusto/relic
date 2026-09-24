@@ -22,6 +22,11 @@ pub const Event = union(enum) {
     resolved: Count,
     /// Objects written into a pack being sent, of how many.
     written: Count,
+    /// LFS objects transferred, of how many: downloaded or uploaded,
+    /// whichever the operation does.
+    lfs_objects: Count,
+    /// Bytes of LFS objects transferred, of how many.
+    lfs_bytes: Count,
 };
 
 /// How far along: `done` of `total`.
