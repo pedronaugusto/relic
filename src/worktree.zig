@@ -1472,7 +1472,7 @@ pub fn checkout(
                 error.FileNotFound, error.NotDir, error.DirNotEmpty => {},
                 else => |e| return e,
             };
-        } else wt.deleteFile(io, entry.path) catch |err| switch (err) {
+        } else fs.deleteFile(io, wt, entry.path) catch |err| switch (err) {
             error.FileNotFound, error.NotDir, error.IsDir => {},
             else => |e| return e,
         };
@@ -1542,7 +1542,7 @@ pub fn checkout(
             .symlink => {
                 const found = try db.read(io, want.oid);
                 defer gpa.free(found.bytes);
-                wt.deleteFile(io, path) catch {};
+                fs.deleteFile(io, wt, path) catch {};
                 if (options.rules.symlinks) {
                     wt.symLink(io, found.bytes, path, .{}) catch {
                         try writeFile(io, wt, path, .{ .bytes = found.bytes }, false);
@@ -1712,7 +1712,7 @@ pub fn writePaths(
 
     for (writes) |w| {
         if (w.blob != null) continue;
-        wt.deleteFile(io, w.path) catch |err| switch (err) {
+        fs.deleteFile(io, wt, w.path) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => {},
             else => |e| return e,
         };
@@ -1756,7 +1756,7 @@ pub fn writePaths(
             .symlink => {
                 const found = try db.read(io, want.oid);
                 defer gpa.free(found.bytes);
-                wt.deleteFile(io, w.path) catch {};
+                fs.deleteFile(io, wt, w.path) catch {};
                 if (options.rules.symlinks) {
                     wt.symLink(io, found.bytes, w.path, .{}) catch {
                         try writeFile(io, wt, w.path, .{ .bytes = found.bytes }, false);
@@ -1988,7 +1988,7 @@ pub fn applySparse(
                         continue;
                     }
                 }
-                wt.deleteFile(io, entry.path) catch |err| switch (err) {
+                fs.deleteFile(io, wt, entry.path) catch |err| switch (err) {
                     error.FileNotFound, error.NotDir, error.IsDir => {},
                     else => |e| return e,
                 };

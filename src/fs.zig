@@ -573,11 +573,19 @@ pub fn renameWithRetry(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []co
         return dir.rename(old_name, dir, new_name, io);
     }
     var attempts: u8 = 0;
+    var cleared = false;
     while (true) {
         if (dir.rename(old_name, dir, new_name, io)) {
             return;
         } else |err| switch (err) {
             error.AccessDenied, error.PermissionDenied, error.FileBusy => {
+                // A read-only file — a lockable one nobody holds the lock
+                // on — cannot be replaced until the attribute is off, which
+                // git for Windows takes off too.
+                if (!cleared) {
+                    cleared = true;
+                    if (clearReadOnly(io, dir, new_name)) continue;
+                }
                 attempts += 1;
                 if (attempts >= 10) return err;
                 Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }, io) catch return err;
@@ -585,6 +593,52 @@ pub fn renameWithRetry(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []co
             else => return err,
         }
     }
+}
+
+/// Take off `sub_path`'s read-only attribute, when it has one, as git for
+/// Windows does before it replaces or removes a file. Returns whether it
+/// did. Elsewhere a file's own write bits do not stop either, and this does
+/// nothing.
+fn clearReadOnly(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+    const st = dir.statFile(io, sub_path, .{}) catch return false;
+    if (!isReadOnly(st.permissions)) return false;
+    dir.setFilePermissions(io, sub_path, withReadOnly(st.permissions, false), .{}) catch return false;
+    return true;
+}
+
+/// Whether nobody may write the file: no write bit at all, or Windows's
+/// read-only attribute. The standard library's own test for it does not
+/// compile for Windows in 0.16.
+pub fn isReadOnly(p: Io.File.Permissions) bool {
+    if (builtin.os.tag == .windows) return @intFromEnum(p) & 1 != 0;
+    if (!Io.File.Permissions.has_executable_bit) return false;
+    return p.toMode() & 0o222 == 0;
+}
+
+/// `p` with every write bit taken away, or the owner's given back — git-lfs's
+/// two moves for a lockable file — or Windows's read-only attribute set or
+/// cleared.
+pub fn withReadOnly(p: Io.File.Permissions, read_only: bool) Io.File.Permissions {
+    if (builtin.os.tag == .windows) {
+        const attributes: u32 = @intFromEnum(p);
+        return @enumFromInt(if (read_only) attributes | 1 else attributes & ~@as(u32, 1));
+    }
+    if (!Io.File.Permissions.has_executable_bit) return p;
+    const mode = p.toMode();
+    return .fromMode(if (read_only) mode & ~@as(std.posix.mode_t, 0o222) else mode | 0o200);
+}
+
+/// Remove a file, taking a read-only attribute off first where the
+/// platform will not remove a read-only file, as git for Windows does.
+pub fn deleteFile(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteFileError!void {
+    dir.deleteFile(io, sub_path) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => {
+            if (!clearReadOnly(io, dir, sub_path)) return err;
+            return dir.deleteFile(io, sub_path);
+        },
+        else => |e| return e,
+    };
 }
 
 /// What can be found out about a lock this process did not take.
@@ -1039,4 +1093,21 @@ test "a batch barrier reports that its file could not be created" {
     try std.testing.expectError(error.PathAlreadyExists, syncBarrierNamed(io, tmp.dir, "occupied"));
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("keep\n", try tmp.dir.readFile(io, "occupied", &buf));
+}
+
+test "a read-only file is replaced and removed, as a lockable one nobody holds must be" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "locked.bin", .data = "old" });
+    const st = try tmp.dir.statFile(io, "locked.bin", .{});
+    try tmp.dir.setFilePermissions(io, "locked.bin", withReadOnly(st.permissions, true), .{});
+    try tmp.dir.writeFile(io, .{ .sub_path = "new.tmp", .data = "new" });
+    try renameWithRetry(io, tmp.dir, "new.tmp", "locked.bin");
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("new", try tmp.dir.readFile(io, "locked.bin", &buf));
+    const again = try tmp.dir.statFile(io, "locked.bin", .{});
+    try tmp.dir.setFilePermissions(io, "locked.bin", withReadOnly(again.permissions, true), .{});
+    try deleteFile(io, tmp.dir, "locked.bin");
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "locked.bin", .{}));
 }

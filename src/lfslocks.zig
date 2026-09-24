@@ -744,10 +744,7 @@ fn setWritable(io: Io, wt: Io.Dir, path: []const u8, writable: bool) Error!bool 
     };
     if (st.kind != .file) return false;
     const now = st.permissions;
-    const wanted: Io.File.Permissions = if (Io.File.Permissions.has_executable_bit) blk: {
-        const mode = now.toMode();
-        break :blk .fromMode(if (writable) mode | 0o200 else mode & ~@as(std.posix.mode_t, 0o222));
-    } else now.setReadOnly(!writable);
+    const wanted = fs.withReadOnly(now, !writable);
     if (wanted != now) try wt.setFilePermissions(io, path, wanted, .{});
     return true;
 }

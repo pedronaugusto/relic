@@ -642,7 +642,7 @@ fn resetAfterPush(
 
     if (options.paths.len == 0) {
         for (untracked) |path| {
-            ctx.wt.deleteFile(io, path) catch |err| switch (err) {
+            fs.deleteFile(io, ctx.wt, path) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => |e| return e,
             };
