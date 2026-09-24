@@ -12,8 +12,11 @@
 //! over ssh has its API at `https://<host><path>` unless the server says
 //! otherwise: `ssh <host> git-lfs-authenticate <path> <operation>`, run with
 //! the person's own ssh through `program.zig`, answers with the URL to use and
-//! a header that authenticates to it. A repository on this machine has no API
-//! at all; its objects are copied between the two stores.
+//! a header that authenticates to it. Before that, as git-lfs does unless
+//! `lfs.<url>.sshtransfer` says `never`, `ssh <host> git-lfs-transfer <path>
+//! <operation>` is tried, and a server that speaks it moves the objects and
+//! the locks over ssh alone (`lfsssh.zig`). A repository on this machine has
+//! no API at all; its objects are copied between the two stores.
 //!
 //! Who the person is follows git-lfs too. A request goes out without
 //! credentials unless `lfs.<url>.access` says `basic`; a 401 turns basic on for
@@ -73,6 +76,7 @@ const fs = @import("fs.zig");
 const object = @import("object.zig");
 const netrc_mod = @import("netrc.zig");
 const timetext = @import("timetext.zig");
+const lfsssh = @import("lfsssh.zig");
 
 const Config = config_mod.Config;
 
@@ -99,10 +103,11 @@ pub const Error = error{
     /// There is no URL to find the server from: no `lfs.url`, no remote of
     /// that name with a URL, and the name is not a URL itself.
     LfsEndpointUnknown,
-    /// `lfs.<url>.sshtransfer` is `always`: git-lfs's pure-ssh protocol,
-    /// which relic does not speak. Its default, `negotiate`, falls back to
-    /// `git-lfs-authenticate`, which is what relic does.
-    LfsSshTransferUnsupported,
+    /// `lfs.<url>.sshtransfer` is neither `negotiate` nor `never` — git-lfs
+    /// takes `always` to mean the pure-ssh protocol and nothing else — and
+    /// the pure-ssh protocol did not start. `Client.message` holds what ssh
+    /// said.
+    LfsAuthenticateDisabled,
     /// `git-lfs-authenticate` over ssh failed, after git-lfs's retries.
     /// `Client.message` holds what it said.
     LfsAuthenticateFailed,
@@ -156,7 +161,7 @@ pub const Error = error{
     /// A zstd body whose frame asks for a window wider than
     /// `zstd_window_max`, which git-lfs's decoder refuses too.
     LfsZstdWindowTooLarge,
-} || credential.Error || Allocator.Error || Io.Cancelable;
+} || credential.Error || lfsssh.Error || Allocator.Error || Io.Cancelable;
 
 //=====================================================================
 // Settings
@@ -797,6 +802,21 @@ pub fn sshArguments(
     ssh: Endpoint.Ssh,
     operation: Operation,
 ) Error!program.Invocation {
+    const remote = try std.fmt.allocPrint(arena, "git-lfs-authenticate {s} {s}", .{ ssh.path, @tagName(operation) });
+    return sshInvocation(arena, environ, settings, ssh, remote, null);
+}
+
+/// The ssh program git-lfs runs, and the option dialect it speaks.
+pub const SshProgram = struct {
+    command: []const u8,
+    shell: bool,
+    variant: enum { ssh, simple, putty, tortoise },
+};
+
+/// Which ssh git-lfs runs: `GIT_SSH_COMMAND`, else `GIT_SSH`, else
+/// `core.sshCommand`, else `ssh`; its variant from `GIT_SSH_VARIANT` or
+/// `ssh.variant`, else from the program's name.
+pub fn sshProgram(arena: Allocator, environ: *const std.process.Environ.Map, settings: *const Settings) Error!SshProgram {
     var command: []const u8 = "";
     var shell = false;
     if (environ.get("GIT_SSH_COMMAND")) |line| {
@@ -821,49 +841,76 @@ pub fn sshArguments(
     if (command.len == 0) command = "ssh";
     const program_name = if (shell) firstField(command).? else command;
 
-    const Variant = enum { ssh, simple, putty, tortoise };
-    var variant: Variant = .ssh;
+    var out: SshProgram = .{ .command = command, .shell = shell, .variant = .ssh };
     var named: ?[]const u8 = environ.get("GIT_SSH_VARIANT");
     if (named == null) named = try settings.get(arena, "ssh.variant");
     var autodetect = true;
-    if (named) |text| {
-        if (std.mem.eql(u8, text, "auto")) {
+    if (named) |name| {
+        if (std.mem.eql(u8, name, "auto")) {
             autodetect = true;
         } else {
             autodetect = false;
-            variant = if (std.mem.eql(u8, text, "simple"))
+            out.variant = if (std.mem.eql(u8, name, "simple"))
                 .simple
-            else if (std.mem.eql(u8, text, "putty") or std.mem.eql(u8, text, "plink"))
+            else if (std.mem.eql(u8, name, "putty") or std.mem.eql(u8, name, "plink"))
                 .putty
-            else if (std.mem.eql(u8, text, "tortoiseplink"))
+            else if (std.mem.eql(u8, name, "tortoiseplink"))
                 .tortoise
             else
                 .ssh;
         }
     }
     if (autodetect) {
-        var base = program_name[if (std.mem.lastIndexOfAny(u8, program_name, "/\\")) |s| s + 1 else 0..];
+        var base = program_name[if (std.mem.lastIndexOfAny(u8, program_name, "/\\")) |sep| sep + 1 else 0..];
         if (!std.mem.eql(u8, base, "ssh")) {
             if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot| base = base[0..dot];
         }
-        if (std.ascii.eqlIgnoreCase(base, "plink")) variant = .putty;
-        if (std.ascii.eqlIgnoreCase(base, "tortoiseplink")) variant = .tortoise;
+        if (std.ascii.eqlIgnoreCase(base, "plink")) out.variant = .putty;
+        if (std.ascii.eqlIgnoreCase(base, "tortoiseplink")) out.variant = .tortoise;
     }
+    return out;
+}
 
+/// OpenSSH's connection sharing, as git-lfs asks for it: the first
+/// connection the master, the rest sharing its socket.
+pub const Multiplex = struct {
+    master: bool,
+    control_path: []const u8,
+};
+
+/// The invocation of ssh that runs `remote_command` on the host, as
+/// git-lfs starts it: the port is `-p`, or `-P` to the PuTTY family; a host
+/// beginning with `-` is fenced off with `--` for OpenSSH and stripped of
+/// its dashes for anything else; `multiplex` is asked of OpenSSH alone.
+pub fn sshInvocation(
+    arena: Allocator,
+    environ: *const std.process.Environ.Map,
+    settings: *const Settings,
+    ssh: Endpoint.Ssh,
+    remote_command: []const u8,
+    multiplex: ?Multiplex,
+) Error!program.Invocation {
+    const prog = try sshProgram(arena, environ, settings);
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.append(arena, command);
-    if (variant == .tortoise) try argv.append(arena, "-batch");
+    try argv.append(arena, prog.command);
+    if (prog.variant == .tortoise) try argv.append(arena, "-batch");
+    if (multiplex) |m| {
+        if (prog.variant == .ssh) {
+            try argv.append(arena, if (m.master) "-oControlMaster=yes" else "-oControlMaster=no");
+            try argv.append(arena, try std.fmt.allocPrint(arena, "-oControlPath={s}", .{m.control_path}));
+        }
+    }
     if (ssh.port) |port| {
-        try argv.append(arena, if (variant == .putty or variant == .tortoise) "-P" else "-p");
+        try argv.append(arena, if (prog.variant == .putty or prog.variant == .tortoise) "-P" else "-p");
         try argv.append(arena, port);
     }
     if (ssh.user_and_host.len != 0 and ssh.user_and_host[0] == '-') {
-        if (variant == .ssh) {
+        if (prog.variant == .ssh) {
             try argv.appendSlice(arena, &.{ "--", ssh.user_and_host });
         } else try argv.append(arena, std.mem.trimStart(u8, ssh.user_and_host, "-"));
     } else try argv.append(arena, ssh.user_and_host);
-    try argv.append(arena, try std.fmt.allocPrint(arena, "git-lfs-authenticate {s} {s}", .{ ssh.path, @tagName(operation) }));
-    return .{ .argv = argv.items, .shell = shell, .stderr = .capture, .unset = &program.repository_variables };
+    try argv.append(arena, remote_command);
+    return .{ .argv = argv.items, .shell = prog.shell, .stderr = .capture, .unset = &program.repository_variables };
 }
 
 /// The first word of a command line, quotes taken off, or `null` for one
@@ -984,6 +1031,11 @@ pub const Client = struct {
     mutex: Io.Mutex = .init,
     endpoints: [2]?Endpoint = .{ null, null },
     ssh_auth: [2]?SshAuth = .{ null, null },
+    /// git-lfs's pure-ssh protocol for each operation: not tried yet, not
+    /// used, or open.
+    ssh_transfers: [2]SshTransferSlot = .{ .untried, .untried },
+    /// What ssh said when the pure-ssh protocol did not start.
+    ssh_failure: std.ArrayList(u8) = .empty,
     access: std.ArrayList(struct { url: []const u8, mode: Access }) = .empty,
     credentials: std.ArrayList(*Cred) = .empty,
     /// `~/.netrc`, read from the home directory in the environment the
@@ -1001,6 +1053,8 @@ pub const Client = struct {
         session: credential.Session,
         approved: bool = false,
     };
+
+    const SshTransferSlot = union(enum) { untried, none, open: *lfsssh.Transfer };
 
     /// An HTTP client and the settings it was made for: a proxy, and the
     /// certificates to trust.
@@ -1068,6 +1122,11 @@ pub const Client = struct {
         c.netrc_refused.deinit(c.gpa);
         c.access.deinit(c.gpa);
         c.learned.deinit(c.gpa);
+        for (&c.ssh_transfers) |*slot| switch (slot.*) {
+            .open => |t| t.close(),
+            else => {},
+        };
+        c.ssh_failure.deinit(c.gpa);
         for (c.transports.items) |t| {
             t.client.deinit();
             t.arena.deinit();
@@ -1084,7 +1143,8 @@ pub const Client = struct {
         return c.message_buf[0..c.message_len];
     }
 
-    fn setMessage(c: *Client, text: []const u8) void {
+    /// Keep `text` as what `message` says.
+    pub fn setMessage(c: *Client, text: []const u8) void {
         c.message_mutex.lockUncancelable(c.io);
         defer c.message_mutex.unlock(c.io);
         c.message_len = @min(text.len, c.message_buf.len);
@@ -1165,7 +1225,15 @@ pub const Client = struct {
         };
         const arena = c.arena.allocator();
         if (try c.settings.urlGet(arena, "lfs", e.original, "sshtransfer")) |mode| {
-            if (std.mem.eql(u8, mode, "always")) return error.LfsSshTransferUnsupported;
+            // git-lfs runs git-lfs-authenticate only for `negotiate` and
+            // `never`; `always` is the pure-ssh protocol or nothing.
+            if (!std.mem.eql(u8, mode, "negotiate") and !std.mem.eql(u8, mode, "never")) {
+                return c.fail(error.LfsAuthenticateDisabled, "git-lfs-authenticate has been disabled by request (lfs.sshtransfer={s}){s}{s}", .{
+                    mode,
+                    if (c.ssh_failure.items.len != 0) ": " else "",
+                    c.ssh_failure.items,
+                });
+            }
         }
         const programs = c.options.programs orelse return error.ProgramsNotGranted;
         const invocation = try sshArguments(arena, programs.environ, c.settings, ssh, operation);
@@ -1205,6 +1273,54 @@ pub const Client = struct {
                 return error.LfsAuthenticateFailed;
             }
         }
+    }
+
+    /// git-lfs's pure-ssh protocol for `operation`, when the remote is
+    /// reached over ssh, `lfs.<url>.sshtransfer` is unset, `negotiate` or
+    /// `always`, and `git-lfs-transfer` starts on the server; `null`
+    /// otherwise, and the API over HTTP is used, as git-lfs uses it. The
+    /// answer is found once per operation.
+    pub fn sshTransfer(c: *Client, operation: Operation) Error!?*lfsssh.Transfer {
+        try c.mutex.lock(c.io);
+        defer c.mutex.unlock(c.io);
+        const i = @intFromEnum(operation);
+        switch (c.ssh_transfers[i]) {
+            .open => |t| return t,
+            .none => return null,
+            .untried => {},
+        }
+        c.ssh_transfers[i] = .none;
+        const e = try c.endpointLocked(operation);
+        const ssh = e.ssh orelse return null;
+        const arena = c.arena.allocator();
+        if (try c.settings.urlGet(arena, "lfs", e.original, "sshtransfer")) |mode| {
+            if (!std.mem.eql(u8, mode, "negotiate") and !std.mem.eql(u8, mode, "always")) return null;
+        }
+        const programs = c.options.programs orelse return error.ProgramsNotGranted;
+        const remote = try std.fmt.allocPrint(arena, "git-lfs-transfer {s} {s}", .{ ssh.path, @tagName(operation) });
+        var first = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, null);
+        var rest = first;
+        var control_dir: ?[]const u8 = null;
+        const prog = try sshProgram(arena, programs.environ, c.settings);
+        if (prog.variant == .ssh and c.settings.getBool("lfs.ssh.automultiplex", builtin.os.tag != .windows)) {
+            if (try controlDir(arena, c.io, programs.environ)) |dir| {
+                control_dir = dir;
+                const path = try std.fmt.allocPrint(arena, "{s}/lfs.sock", .{dir});
+                first = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, .{ .master = true, .control_path = path });
+                rest = try sshInvocation(arena, programs.environ, c.settings, ssh, remote, .{ .master = false, .control_path = path });
+            }
+        }
+        const t = lfsssh.Transfer.open(c.gpa, c.io, programs, first, rest, control_dir, &c.ssh_failure) catch |err| switch (err) {
+            error.OutOfMemory, error.Canceled => |e2| return e2,
+            else => {
+                // Not there, or not speaking it: git-lfs-authenticate and
+                // HTTP, as git-lfs falls back.
+                if (control_dir) |d| Io.Dir.cwd().deleteTree(c.io, d) catch {};
+                return null;
+            },
+        };
+        c.ssh_transfers[i] = .{ .open = t };
+        return t;
     }
 
     /// Forget `git-lfs-authenticate`'s answer, so the next request asks
@@ -2216,6 +2332,23 @@ pub fn retryAfterSeconds(value: []const u8, now: ?i64) ?u64 {
     const at = timetext.parseHttpDate(text) orelse return null;
     const from = now orelse return null;
     return @intCast(@max(0, at - from));
+}
+
+/// A private directory for OpenSSH's control socket, as git-lfs makes one:
+/// in `XDG_RUNTIME_DIR`, else `/tmp` on macOS, whose own temporary
+/// directory makes a socket path too long, else `TMPDIR` or `/tmp`. `null`
+/// when none can be made, and ssh runs unshared.
+fn controlDir(arena: Allocator, io: Io, environ: *const std.process.Environ.Map) Allocator.Error!?[]const u8 {
+    const base = environ.get("XDG_RUNTIME_DIR") orelse if (builtin.os.tag == .macos)
+        "/tmp"
+    else
+        (environ.get("TMPDIR") orelse "/tmp");
+    var name_buf: [64]u8 = undefined;
+    const name = fs.tempName(io, &name_buf, "sock-");
+    const dir = try std.fmt.allocPrint(arena, "{s}/{s}", .{ std.mem.trimEnd(u8, base, "/"), name });
+    const private: Io.File.Permissions = if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700);
+    Io.Dir.cwd().createDir(io, dir, private) catch return null;
+    return dir;
 }
 
 /// A boolean as git-lfs reads one: unset or empty is `fallback`, and a

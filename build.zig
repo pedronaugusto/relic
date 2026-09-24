@@ -51,9 +51,23 @@ pub fn build(b: *std.Build) void {
     });
     const install_filter_helper = b.addInstallArtifact(filter_helper, .{});
 
+    // git-lfs does not ship a `git-lfs-transfer` server, so the suite
+    // brings one: relic and git-lfs are each pointed at it over the same
+    // stand-in ssh and what it was asked is compared.
+    const lfs_transfer_helper = b.addExecutable(.{
+        .name = "relic-lfs-transfer-helper",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lfs_transfer_helper.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_lfs_transfer_helper = b.addInstallArtifact(lfs_transfer_helper, .{});
+
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
     build_options.addOption([]const u8, "filter_helper_path", b.getInstallPath(.bin, filter_helper.out_filename));
+    build_options.addOption([]const u8, "lfs_transfer_helper_path", b.getInstallPath(.bin, lfs_transfer_helper.out_filename));
 
     // Error return traces are off for the test binary, and the reason is
     // `zig build test --fuzz`. Building the suite with fuzzing instrumented
@@ -92,6 +106,7 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&install_lock_helper.step);
     run_tests.step.dependOn(&install_filter_helper.step);
+    run_tests.step.dependOn(&install_lfs_transfer_helper.step);
 
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);
@@ -103,6 +118,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&tests.step);
     check_step.dependOn(&lock_helper.step);
     check_step.dependOn(&filter_helper.step);
+    check_step.dependOn(&lfs_transfer_helper.step);
 
     //=====================================================================
     // Examples

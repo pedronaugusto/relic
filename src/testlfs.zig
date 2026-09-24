@@ -38,6 +38,9 @@ pub fn environ(gpa: Allocator, home: []const u8) !Environ.Map {
     try map.put("PATH", path);
     try map.put("HOME", home);
     try map.put("XDG_CONFIG_HOME", home);
+    // Where git-lfs, and relic after it, make the directory for an ssh
+    // control socket, which git-lfs never removes: the test's own.
+    try map.put("XDG_RUNTIME_DIR", home);
     try map.put("GIT_CONFIG_NOSYSTEM", "1");
     try map.put("GIT_TERMINAL_PROMPT", "0");
     try map.put("GIT_LFS_SKIP_PUSH", "0");
@@ -925,6 +928,45 @@ pub fn script(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, text: []con
     const base = try testremote.absolutePath(gpa, io, dir);
     defer gpa.free(base);
     return std.fmt.allocPrint(gpa, "{s}/{s}", .{ base, name });
+}
+
+/// A stand-in `git-lfs-transfer` in `dir`: relic's own server for the
+/// pure-ssh protocol, keeping repositories under `root` and writing what
+/// each connection was asked into `log_dir`. `extra` goes to it as well:
+/// `--user=<name>`, `--no-version`.
+pub fn transferScript(gpa: Allocator, io: Io, dir: Io.Dir, root: []const u8, log_dir: []const u8, extra: []const u8) ![]u8 {
+    const text = try std.fmt.allocPrint(gpa,
+        \\#!/bin/sh
+        \\exec '{s}' '--root={s}' '--log={s}' {s} "$@"
+        \\
+    , .{ @import("build_options").lfs_transfer_helper_path, root, log_dir, extra });
+    defer gpa.free(text);
+    return script(gpa, io, dir, "git-lfs-transfer", text);
+}
+
+/// What every connection to the stand-in `git-lfs-transfer` was asked,
+/// one connection after another in the order of their text, from
+/// `log_dir`. The caller's.
+pub fn transferLog(gpa: Allocator, io: Io, log_dir: Io.Dir) ![]u8 {
+    var texts: std.ArrayList([]u8) = .empty;
+    defer {
+        for (texts.items) |t| gpa.free(t);
+        texts.deinit(gpa);
+    }
+    var it = log_dir.iterate();
+    while (try it.next(io)) |e| {
+        if (e.kind != .file) continue;
+        try texts.append(gpa, try log_dir.readFileAlloc(io, e.name, gpa, .unlimited));
+    }
+    std.mem.sort([]u8, texts.items, {}, struct {
+        fn less(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (texts.items) |t| try out.appendSlice(gpa, t);
+    return out.toOwnedSlice(gpa);
 }
 
 /// A stand-in credential helper at `<dir>/<name>`: it notes each operation

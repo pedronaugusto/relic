@@ -50,6 +50,7 @@ pub const lfstransfer = @import("lfstransfer.zig");
 pub const lfslocks = @import("lfslocks.zig");
 pub const lfspush = @import("lfspush.zig");
 pub const lfshooks = @import("lfshooks.zig");
+pub const lfsssh = @import("lfsssh.zig");
 pub const convert = @import("convert.zig");
 pub const refspec = @import("refspec.zig");
 pub const url = @import("url.zig");
@@ -107,6 +108,7 @@ test {
         _ = @import("lfstransfer_test.zig");
         _ = @import("lfslocks_test.zig");
         _ = @import("lfspush_test.zig");
+        _ = @import("lfsssh_test.zig");
         _ = @import("auth_test.zig");
         _ = @import("revwalk_test.zig");
         _ = @import("shallow_test.zig");

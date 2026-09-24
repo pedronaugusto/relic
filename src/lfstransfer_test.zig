@@ -165,7 +165,7 @@ pub const attributes = "*.bin filter=lfs diff=lfs merge=lfs -text\n";
 
 /// Every object relic would push from `HEAD` of the repository at `d`,
 /// uploaded as a push uploads them.
-fn relicUploadHead(fx: *Fixture, d: Io.Dir, options: lfstransfer.Options) !lfstransfer.Outcome {
+pub fn relicUploadHead(fx: *Fixture, d: Io.Dir, options: lfstransfer.Options) !lfstransfer.Outcome {
     var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});
     defer repo.deinit(fx.io);
     const head = (try repo.head(fx.io)).?;
@@ -178,7 +178,7 @@ fn relicUploadHead(fx: *Fixture, d: Io.Dir, options: lfstransfer.Options) !lfstr
 }
 
 /// Fail with every failure's message printed.
-fn expectNoFailures(outcome: *const lfstransfer.Outcome) !void {
+pub fn expectNoFailures(outcome: *const lfstransfer.Outcome) !void {
     if (outcome.failures() == 0) return;
     for (outcome.results) |r| {
         if (r.isFailure()) std.debug.print("{s} {s}: {s}\n", .{ r.name, @tagName(r.status), r.message orelse "" });
@@ -186,7 +186,7 @@ fn expectNoFailures(outcome: *const lfstransfer.Outcome) !void {
     return error.TestUnexpectedResult;
 }
 
-fn expectFile(fx: *Fixture, d: Io.Dir, name: []const u8, want: []const u8) !void {
+pub fn expectFile(fx: *Fixture, d: Io.Dir, name: []const u8, want: []const u8) !void {
     const have = try d.readFileAlloc(fx.io, name, fx.gpa, .limited(64 << 20));
     defer fx.gpa.free(have);
     try testing.expectEqualSlices(u8, want, have);
@@ -274,7 +274,7 @@ test "what relic uploads git lfs pull downloads, what git-lfs pushes relic pulls
 }
 
 /// Commit `files` in a fresh work repository `name`, with git-lfs's clean.
-fn committed(fx: *Fixture, name: []const u8, helper: []const u8, files: []const [2][]const u8) !Io.Dir {
+pub fn committed(fx: *Fixture, name: []const u8, helper: []const u8, files: []const [2][]const u8) !Io.Dir {
     var d = try fx.workRepo(name, helper);
     errdefer d.close(fx.io);
     try d.writeFile(fx.io, .{ .sub_path = ".gitattributes", .data = attributes });
@@ -289,11 +289,11 @@ fn committed(fx: *Fixture, name: []const u8, helper: []const u8, files: []const 
 
 /// Delete the LFS store of the repository at `d`, so every object has to
 /// come from somewhere else.
-fn emptyStore(fx: *Fixture, d: Io.Dir) !void {
+pub fn emptyStore(fx: *Fixture, d: Io.Dir) !void {
     d.deleteTree(fx.io, ".git/lfs") catch {};
 }
 
-fn openServer(fx: *Fixture, repo: *repo_mod.Repository) !*lfsapi.Server {
+pub fn openServer(fx: *Fixture, repo: *repo_mod.Repository) !*lfsapi.Server {
     return lfsapi.Server.open(fx.gpa, fx.io, repo, "origin", .{ .programs = fx.programs() });
 }
 
@@ -942,7 +942,7 @@ test "a download that breaks off goes on from where it stopped, as git-lfs's doe
 
 /// The object names in the store of the repository at `d`, sorted, one per
 /// line. The caller's.
-fn storeListing(fx: *Fixture, d: Io.Dir) ![]u8 {
+pub fn storeListing(fx: *Fixture, d: Io.Dir) ![]u8 {
     var names: std.ArrayList([]const u8) = .empty;
     defer {
         for (names.items) |n| fx.gpa.free(n);
@@ -1511,7 +1511,7 @@ test "a zstd body is decoded with the window its frame asks for, up to git-lfs's
     }
 }
 
-fn nowSeconds(io: Io) i64 {
+pub fn nowSeconds(io: Io) i64 {
     return @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
 }
 

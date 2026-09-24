@@ -23,6 +23,10 @@
 //! as git-lfs fails them. What failed is in the outcome, object by object;
 //! the operation itself fails only when it cannot go on at all.
 //!
+//! A remote whose server speaks git-lfs's pure-ssh protocol gets the same
+//! batches and transfers over it instead, one connection per worker, as
+//! git-lfs's `ssh` adapter moves them (`lfsssh.zig`).
+//!
 //! A remote on this machine has no API. Its store is found through its own
 //! configuration and objects are copied between the two stores directly,
 //! which is what git-lfs's `lfs-standalone-file` adapter does for one.
@@ -51,6 +55,7 @@ const lfsapi = @import("lfsapi.zig");
 const objectwalk = @import("objectwalk.zig");
 const progress_mod = @import("progress.zig");
 const timetext = @import("timetext.zig");
+const lfsssh = @import("lfsssh.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -267,6 +272,10 @@ pub const Action = struct {
     /// batch, as git-lfs does; without it, a refused action gets one.
     expires_at: ?[]const u8 = null,
     expires_in: ?i64 = null,
+    /// Over git-lfs's pure-ssh protocol: what the server named the object
+    /// and the transfer by, handed back with each request for it.
+    id: ?[]const u8 = null,
+    token: ?[]const u8 = null,
 
     /// Whether the action, answered at `now`, expires within five seconds
     /// of it.
@@ -392,6 +401,8 @@ const Event = union(enum) {
 const Run = struct {
     server: *lfsapi.Server,
     operation: lfsapi.Operation,
+    /// git-lfs's pure-ssh protocol, when the remote speaks it.
+    ssh: ?*lfsssh.Transfer = null,
     options: Options,
     limits: Limits,
     arena: Allocator,
@@ -632,6 +643,7 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
     var state: Run = .{
         .server = server,
         .operation = operation,
+        .ssh = try server.client.sshTransfer(operation),
         .options = options,
         .limits = limits,
         .arena = arena,
@@ -659,14 +671,26 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
             else => |e| return e,
         };
         if (answer.transfer) |t| {
-            if (t.len != 0 and !std.mem.eql(u8, t, "basic")) return error.LfsTransferUnsupported;
+            if (state.ssh == null and t.len != 0 and !std.mem.eql(u8, t, "basic")) return error.LfsTransferUnsupported;
         }
-        var answered: std.StringHashMapUnmanaged(*const BatchObject) = .empty;
-        defer answered.deinit(gpa);
-        for (answer.objects) |*o| try answered.put(gpa, o.oid, o);
+        // The transfers go in the order of the server's answer, as
+        // git-lfs's queue takes them; an object it left out fails.
+        var asked: std.StringHashMapUnmanaged(usize) = .empty;
+        defer asked.deinit(gpa);
+        for (chunk) |i| try asked.put(gpa, &outcome.results[i].oid, i);
+        var order: std.ArrayList(struct { i: usize, o: ?*const BatchObject }) = .empty;
+        defer order.deinit(gpa);
+        for (answer.objects) |*o| {
+            const kv = asked.fetchRemove(o.oid) orelse continue;
+            try order.append(gpa, .{ .i = kv.value, .o = o });
+        }
         for (chunk) |i| {
+            if (asked.contains(&outcome.results[i].oid)) try order.append(gpa, .{ .i = i, .o = null });
+        }
+        for (order.items) |entry| {
+            const i = entry.i;
             const r = &outcome.results[i];
-            const o = answered.get(&r.oid) orelse {
+            const o = entry.o orelse {
                 r.status = .failed;
                 r.message = "the server's answer left the object out";
                 continue;
@@ -718,7 +742,7 @@ fn runJobs(state: *Run) Error!void {
     const io = state.io();
     const workers = @min(state.limits.concurrency, state.jobs.len);
     if (workers <= 1) {
-        work(state);
+        work(state, 0);
         return;
     }
     var buffer: [256]Event = undefined;
@@ -727,13 +751,13 @@ fn runJobs(state: *Run) Error!void {
     var group: Io.Group = .init;
     var spawned: usize = 0;
     while (spawned < workers) : (spawned += 1) {
-        group.concurrent(io, workerTask, .{state}) catch |err| switch (err) {
+        group.concurrent(io, workerTask, .{ state, spawned }) catch |err| switch (err) {
             error.ConcurrencyUnavailable => break,
         };
     }
     if (spawned == 0) {
         state.events = null;
-        work(state);
+        work(state, 0);
         return;
     }
     var finished: usize = 0;
@@ -754,17 +778,17 @@ fn runJobs(state: *Run) Error!void {
     try group.await(io);
 }
 
-fn workerTask(state: *Run) void {
-    work(state);
+fn workerTask(state: *Run, worker: usize) void {
+    work(state, worker);
     state.say(.worker_done);
 }
 
-fn work(state: *Run) void {
+fn work(state: *Run, worker: usize) void {
     while (true) {
         if (state.fatal != null) return;
         const i = state.next.fetchAdd(1, .monotonic);
         if (i >= state.jobs.len) return;
-        runJob(state, &state.jobs[i]) catch |err| state.setFatal(err);
+        runJob(state, &state.jobs[i], worker) catch |err| state.setFatal(err);
         state.say(.object);
     }
 }
@@ -778,7 +802,7 @@ const Attempt = union(enum) {
     fail: []const u8,
 };
 
-fn runJob(state: *Run, job: *Job) Error!void {
+fn runJob(state: *Run, job: *Job, worker: usize) Error!void {
     const r = job.result;
     var retries: u32 = 0;
     var action = job.action;
@@ -795,7 +819,11 @@ fn runJob(state: *Run, job: *Job) Error!void {
                 .upload => "the upload action has expired",
                 .verify => "the verify action has expired",
             } } }
-        else switch (state.operation) {
+        else if (state.ssh) |t| switch (state.operation) {
+            // One connection per worker, as git-lfs runs them.
+            .download => try attemptDownloadSsh(state, t, worker, r, action),
+            .upload => try attemptUploadSsh(state, t, worker, r, action),
+        } else switch (state.operation) {
             .download => try attemptDownload(state, r, action, authenticated),
             .upload => try attemptUpload(state, r, action, verify, authenticated),
         };
@@ -869,6 +897,8 @@ fn copyAction(state: *Run, a: Action) Error!Action {
         .href = try state.arena.dupe(u8, a.href),
         .expires_at = if (a.expires_at) |t| try state.arena.dupe(u8, t) else null,
         .expires_in = a.expires_in,
+        .id = if (a.id) |v| try state.arena.dupe(u8, v) else null,
+        .token = if (a.token) |v| try state.arena.dupe(u8, v) else null,
     };
     if (a.header) |map| {
         var copy: std.json.ArrayHashMap([]const u8) = .{};
@@ -1226,6 +1256,12 @@ fn batchRequest(
     const a = if (own) arena_state.allocator() else comptime_into;
     if (!own) arena_state.deinit();
 
+    if (try server.client.sshTransfer(operation)) |t| {
+        const response = try sshBatch(server, t, objects, ref, a);
+        if (own) return .{ .arena = arena_state, .response = response };
+        return response;
+    }
+
     var body: Io.Writer.Allocating = .init(server.gpa);
     defer body.deinit();
     writeBatchRequest(&body.writer, operation, objects, ref) catch return error.OutOfMemory;
@@ -1261,6 +1297,268 @@ fn batchRequest(
         return response;
     }
 }
+
+//=====================================================================
+// git-lfs's pure-ssh protocol
+//=====================================================================
+
+/// A batch over the pure-ssh protocol, on the first connection, as
+/// git-lfs asks it: `transfer=ssh`, `hash-algo=sha256` and the ref, then
+/// `<oid> <size>` lines; the answer's lines are `<oid> <size> <action>`
+/// with the action's `id`, `token` and expiry, `noop` for an object with
+/// nothing to do.
+fn sshBatch(server: *lfsapi.Server, t: *lfsssh.Transfer, objects: []const Object, ref: ?[]const u8, a: Allocator) Error!BatchResponse {
+    const io = server.io;
+    const conn = t.connection(0) catch |err| return sshBatchFailed(server, err, t.message.items);
+    try conn.mutex.lock(io);
+    defer conn.mutex.unlock(io);
+    var args: std.ArrayList([]const u8) = .empty;
+    try args.appendSlice(a, &.{ "transfer=ssh", "hash-algo=sha256" });
+    if (ref) |r| try args.append(a, try std.fmt.allocPrint(a, "refname={s}", .{r}));
+    var lines: std.ArrayList([]const u8) = .empty;
+    for (objects) |o| try lines.append(a, try std.fmt.allocPrint(a, "{s} {d}", .{ &o.oid, o.size }));
+    conn.sendLines("batch", args.items, lines.items) catch |err| return sshBatchFailed(server, err, "");
+    const status = conn.readStatus(a) catch |err| return sshBatchFailed(server, err, "");
+    if (status.code != 200) {
+        var buf: [512]u8 = undefined;
+        server.client.setMessage(std.fmt.bufPrint(&buf, "batch response: status {d} from server ({s})", .{
+            status.code,
+            if (status.lines.len != 0) status.lines[0] else "no message provided",
+        }) catch "batch response");
+        return error.LfsBatchFailed;
+    }
+    if (status.arg("hash-algo")) |algo| {
+        if (!std.mem.eql(u8, algo, "sha256")) return error.MalformedResponse;
+    }
+    return parseSshBatch(a, status.lines);
+}
+
+/// Read the lines of a batch answer over ssh, sorted as git-lfs sorts
+/// them: `<oid> <size> <action>` with `id=`, `token=`, `expires-in=` and
+/// `expires-at=`, the lines for one object together, `noop` for one with
+/// nothing to do. A line that is not that is `error.MalformedResponse`.
+pub fn parseSshBatch(a: Allocator, lines: []const []const u8) (Allocator.Error || error{MalformedResponse})!BatchResponse {
+    const sorted = try a.dupe([]const u8, lines);
+    std.mem.sort([]const u8, sorted, {}, struct {
+        fn less(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.less);
+    var out: std.ArrayList(BatchObject) = .empty;
+    for (sorted) |line| {
+        var fields: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.splitScalar(u8, line, ' ');
+        while (it.next()) |f| try fields.append(a, f);
+        if (fields.items.len < 3) return error.MalformedResponse;
+        const oid = fields.items[0];
+        const size = std.fmt.parseInt(u64, fields.items[1], 10) catch return error.MalformedResponse;
+        if (out.items.len == 0 or !std.mem.eql(u8, out.items[out.items.len - 1].oid, oid)) {
+            try out.append(a, .{ .oid = oid, .size = size, .actions = .{} });
+        }
+        const obj = &out.items[out.items.len - 1];
+        obj.size = size;
+        const name = fields.items[2];
+        if (std.mem.eql(u8, name, "noop")) continue;
+        var action: Action = .{ .href = "" };
+        for (fields.items[3..]) |kv| {
+            if (std.mem.startsWith(u8, kv, "id=")) {
+                action.id = kv[3..];
+            } else if (std.mem.startsWith(u8, kv, "token=")) {
+                action.token = kv[6..];
+            } else if (std.mem.startsWith(u8, kv, "expires-in=")) {
+                action.expires_in = std.fmt.parseInt(i64, kv[11..], 10) catch return error.MalformedResponse;
+            } else if (std.mem.startsWith(u8, kv, "expires-at=")) {
+                if (timetext.parseRfc3339(kv[11..]) == null) return error.MalformedResponse;
+                action.expires_at = kv[11..];
+            }
+        }
+        if (std.mem.eql(u8, name, "download")) {
+            obj.actions.?.download = action;
+        } else if (std.mem.eql(u8, name, "upload")) {
+            obj.actions.?.upload = action;
+        } else if (std.mem.eql(u8, name, "verify")) {
+            obj.actions.?.verify = action;
+        }
+    }
+    return .{ .transfer = "ssh", .objects = out.items, .hash_algo = "sha256" };
+}
+
+fn sshBatchFailed(server: *lfsapi.Server, err: lfsssh.Error, said: []const u8) Error {
+    switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
+        else => {},
+    }
+    var buf: [512]u8 = undefined;
+    server.client.setMessage(std.fmt.bufPrint(&buf, "batch request: {s}{s}{s}", .{ @errorName(err), if (said.len != 0) ": " else "", said }) catch "batch request");
+    return error.LfsBatchFailed;
+}
+
+/// `size=`, then `id=` and `token=` when the server gave them: what every
+/// request for an object carries.
+fn sshObjectArgs(a: Allocator, r: *const Result, action: Action) Allocator.Error![]const []const u8 {
+    var args: std.ArrayList([]const u8) = .empty;
+    try args.append(a, try std.fmt.allocPrint(a, "size={d}", .{r.size}));
+    if (action.id) |v| if (v.len != 0) try args.append(a, try std.fmt.allocPrint(a, "id={s}", .{v}));
+    if (action.token) |v| if (v.len != 0) try args.append(a, try std.fmt.allocPrint(a, "token={s}", .{v}));
+    return args.items;
+}
+
+/// An attempt whose connection failed: tried again, as git-lfs's
+/// retriable errors are.
+fn sshRetry(state: *Run, err: anyerror) Error!Attempt {
+    switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
+        else => {},
+    }
+    return .{ .retry = .{ .message = try state.dupe(@errorName(err)) } };
+}
+
+fn attemptDownloadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result, action: Action) Error!Attempt {
+    const io = state.io();
+    var scratch_state: std.heap.ArenaAllocator = .init(state.server.gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    const conn = t.connection(worker) catch |err| return sshRetry(state, err);
+    try conn.mutex.lock(io);
+    defer conn.mutex.unlock(io);
+    const command = try std.fmt.allocPrint(scratch, "get-object {s}", .{&r.oid});
+    conn.send(command, try sshObjectArgs(scratch, r, action)) catch |err| return sshRetry(state, err);
+    const head = conn.readStatusWithData(scratch) catch |err| return sshRetry(state, err);
+    if (head.code < 200 or head.code > 299) {
+        var said: std.ArrayList(u8) = .empty;
+        while (conn.nextData() catch |err| return sshRetry(state, err)) |bytes| {
+            if (said.items.len < 1024) try said.appendSlice(scratch, bytes[0..@min(bytes.len, 1024 - said.items.len)]);
+        }
+        return .{ .retry = .{ .message = try state.dupe(try std.fmt.allocPrint(scratch, "got status {d} when fetching OID {s}: {s}", .{ head.code, &r.oid, said.items })) } };
+    }
+    const size_text = lfsssh.argValue(head.args, "size") orelse {
+        conn.skipData() catch |err| return sshRetry(state, err);
+        return .{ .fail = "the server's answer gave no size" };
+    };
+    _ = std.fmt.parseInt(u64, size_text, 10) catch {
+        conn.skipData() catch |err| return sshRetry(state, err);
+        return .{ .fail = "the server's answer gave a size that is not one" };
+    };
+    var data: SshData = .init(conn);
+    var counting: Counting = .init(&data.interface, state);
+    const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
+    const installed = state.server.store().install(io, &counting.interface, &pointer);
+    counting.flush();
+    if (data.failed) |err| return sshRetry(state, err);
+    if (!data.done) conn.skipData() catch |err| return sshRetry(state, err);
+    _ = installed catch |err| switch (err) {
+        error.LfsObjectMismatch => return .{ .fail = "the bytes the server sent are not the object" },
+        error.ReadFailed => return .{ .retry = .{ .message = "the download broke off" } },
+        else => |e| return e,
+    };
+    return .ok;
+}
+
+fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result, action: Action) Error!Attempt {
+    const io = state.io();
+    var scratch_state: std.heap.ArenaAllocator = .init(state.server.gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    const store = state.server.store();
+    const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
+    const file = (try store.open(io, &pointer)) orelse return .{ .fail = "the object is not in the store" };
+    defer file.close(io);
+    const conn = t.connection(worker) catch |err| return sshRetry(state, err);
+    try conn.mutex.lock(io);
+    defer conn.mutex.unlock(io);
+    const args = try sshObjectArgs(scratch, r, action);
+    var sent: u64 = 0;
+    const put = try std.fmt.allocPrint(scratch, "put-object {s}", .{&r.oid});
+    {
+        conn.beginData(put, args) catch |err| return sshRetry(state, err);
+        var chunk: [32 * 1024]u8 = undefined;
+        var fr = file.reader(io, &.{});
+        var left = r.size;
+        while (left > 0) {
+            const want: usize = @intCast(@min(left, chunk.len));
+            const n = fr.interface.readSliceShort(chunk[0..want]) catch return .{ .fail = "upload: reading the object" };
+            if (n == 0) return .{ .fail = "upload: the object is shorter than its pointer" };
+            conn.writeData(chunk[0..n]) catch |err| {
+                state.say(.{ .unsent = sent });
+                return sshRetry(state, err);
+            };
+            left -= n;
+            sent += n;
+            state.say(.{ .bytes = n });
+        }
+        conn.endData() catch |err| {
+            state.say(.{ .unsent = sent });
+            return sshRetry(state, err);
+        };
+    }
+    const status = conn.readStatus(scratch) catch |err| {
+        state.say(.{ .unsent = sent });
+        return sshRetry(state, err);
+    };
+    if (!status.ok()) {
+        state.say(.{ .unsent = sent });
+        // A 403 is likely a token that expired, and a 429 a server that
+        // asks for a pause: both are tried again, as git-lfs tries them.
+        const why = try state.dupe(try std.fmt.allocPrint(scratch, "got status {d} when uploading OID {s}{s}{s}", .{
+            status.code,
+            &r.oid,
+            if (status.lines.len != 0) ": " else "",
+            if (status.lines.len != 0) status.lines[0] else "",
+        }));
+        if (status.code == 403 or status.code == 429) return .{ .retry = .{ .message = why } };
+        return .{ .fail = why };
+    }
+    // git-lfs verifies every upload over ssh, with the upload's own
+    // arguments.
+    const verify = try std.fmt.allocPrint(scratch, "verify-object {s}", .{&r.oid});
+    conn.send(verify, args) catch |err| return sshRetry(state, err);
+    const verified = conn.readStatus(scratch) catch |err| return sshRetry(state, err);
+    if (!verified.ok()) {
+        return .{ .fail = try state.dupe(try std.fmt.allocPrint(scratch, "got status {d} when verifying upload OID {s}{s}{s}", .{
+            verified.code,
+            &r.oid,
+            if (verified.lines.len != 0) ": " else "",
+            if (verified.lines.len != 0) verified.lines[0] else "",
+        })) };
+    }
+    return .ok;
+}
+
+/// The data of a `get-object` answer, as a reader, to its flush.
+const SshData = struct {
+    conn: *lfsssh.Connection,
+    pending: []const u8 = &.{},
+    done: bool = false,
+    failed: ?lfsssh.Error = null,
+    interface: Io.Reader,
+
+    fn init(conn: *lfsssh.Connection) SshData {
+        return .{
+            .conn = conn,
+            .interface = .{ .vtable = &.{ .stream = stream }, .buffer = &.{}, .seek = 0, .end = 0 },
+        };
+    }
+
+    fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const d: *SshData = @alignCast(@fieldParentPtr("interface", r));
+        while (d.pending.len == 0) {
+            if (d.done) return error.EndOfStream;
+            const next = d.conn.nextData() catch |err| {
+                d.failed = err;
+                return error.ReadFailed;
+            };
+            if (next) |bytes| d.pending = bytes else {
+                d.done = true;
+                return error.EndOfStream;
+            }
+        }
+        const n = try w.write(d.pending[0..limit.minInt(d.pending.len)]);
+        d.pending = d.pending[n..];
+        return n;
+    }
+};
 
 //=====================================================================
 // A remote on this machine
@@ -1831,4 +2129,47 @@ fn fuzzBatch(_: void, smith: *testing.Smith) anyerror!void {
             };
         }
     }
+}
+
+test "fuzz: any lines of an ssh batch answer are read or refused by name" {
+    try testing.fuzz({}, fuzzSshBatch, .{});
+}
+
+fn fuzzSshBatch(_: void, smith: *testing.Smith) anyerror!void {
+    var scratch: [512]u8 = undefined;
+    const len = smith.slice(&scratch);
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, scratch[0..len], '\n');
+    while (it.next()) |line| try lines.append(a, line);
+    _ = parseSshBatch(a, lines.items) catch |err| switch (err) {
+        error.MalformedResponse => return,
+        else => return err,
+    };
+}
+
+test "an ssh batch answer's lines become the objects and actions git-lfs reads from them" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const b = "b" ** 64;
+    const c = "c" ** 64;
+    const got = try parseSshBatch(a, &.{
+        c ++ " 3 noop",
+        b ++ " 5 download id=x token=y expires-in=60",
+        b ++ " 5 verify",
+    });
+    try testing.expectEqual(@as(usize, 2), got.objects.len);
+    try testing.expectEqualStrings(b, got.objects[0].oid);
+    const dl = got.objects[0].action(.download).?;
+    try testing.expectEqualStrings("x", dl.id.?);
+    try testing.expectEqualStrings("y", dl.token.?);
+    try testing.expectEqual(@as(?i64, 60), dl.expires_in);
+    try testing.expect(got.objects[0].action(.verify) != null);
+    try testing.expect(got.objects[1].action(.download) == null);
+    try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{"short line"}));
+    try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{b ++ " x download"}));
+    try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{b ++ " 1 download expires-at=soon"}));
 }

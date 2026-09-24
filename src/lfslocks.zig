@@ -32,6 +32,7 @@ const attributes = @import("attributes.zig");
 const fs = @import("fs.zig");
 const lfs = @import("lfs.zig");
 const lfsapi = @import("lfsapi.zig");
+const lfsssh = @import("lfsssh.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -250,6 +251,14 @@ fn writeRef(s: *std.json.Stringify, ref: ?[]const u8) Io.Writer.Error!void {
 pub fn lock(server: *lfsapi.Server, repo: *Repository, path: []const u8, arena: Allocator, options: Options) Error!Acquired {
     try checkPath(path);
     const ref = try refFor(arena, server.io, repo, options);
+    if (try server.client.sshTransfer(.upload)) |t| {
+        const acquired = try sshLock(server, t, path, ref, arena);
+        switch (acquired) {
+            .locked => |taken| try tookLock(server, repo, taken, ref, arena),
+            .held => {},
+        }
+        return acquired;
+    }
     var body: Io.Writer.Allocating = .init(arena);
     {
         var s: std.json.Stringify = .{ .writer = &body.writer };
@@ -277,11 +286,17 @@ pub fn lock(server: *lfsapi.Server, repo: *Repository, path: []const u8, arena: 
         return error.LockRefused;
     };
     if (status.class() != .success) return error.LockRefused;
+    try tookLock(server, repo, taken, ref, arena);
+    return .{ .locked = taken };
+}
+
+/// A lock taken: the caches say it is the person's, and the file is made
+/// writable.
+fn tookLock(server: *lfsapi.Server, repo: *Repository, taken: Lock, ref: ?[]const u8, arena: Allocator) Error!void {
     var cache = try Cache.load(arena, server, ref);
     cache.addOurs(arena, taken) catch return error.OutOfMemory;
     try cache.save(arena, server, ref);
     if (repo.work_dir) |wt| _ = try setWritable(server.io, wt, taken.path, true);
-    return .{ .locked = taken };
 }
 
 /// Give back the lock with `id`, or break someone else's with `force`, as
@@ -289,6 +304,11 @@ pub fn lock(server: *lfsapi.Server, repo: *Repository, path: []const u8, arena: 
 /// lockable, and the caches forget the lock.
 pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {
     const ref = try refFor(arena, server.io, repo, options);
+    if (try server.client.sshTransfer(.upload)) |t| {
+        const released = try sshUnlock(server, t, id, ref, arena);
+        try gaveBack(server, repo, released, id, ref, arena);
+        return released;
+    }
     var body: Io.Writer.Allocating = .init(arena);
     {
         var s: std.json.Stringify = .{ .writer = &body.writer };
@@ -326,6 +346,13 @@ pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: 
         }
     }
     const released = answer.lock orelse return error.LockRefused;
+    try gaveBack(server, repo, released, id, ref, arena);
+    return released;
+}
+
+/// A lock given back: the caches forget it, and the file is read-only
+/// again when it is lockable.
+fn gaveBack(server: *lfsapi.Server, repo: *Repository, released: Lock, id: []const u8, ref: ?[]const u8, arena: Allocator) Error!void {
     var cache = try Cache.load(arena, server, ref);
     try cache.remove(arena, id);
     try cache.save(arena, server, ref);
@@ -336,7 +363,6 @@ pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: 
             if (try lockables.isLockable(arena, released.path)) _ = try setWritable(server.io, wt, released.path, false);
         }
     }
-    return released;
 }
 
 /// Give back the lock on `path`: its id is asked for first, as `git lfs
@@ -372,7 +398,18 @@ pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: 
     const ref = try refFor(arena, server.io, repo, options);
     var locks: std.ArrayList(Lock) = .empty;
     var cursor: ?[]const u8 = null;
+    const ssh = try server.client.sshTransfer(.download);
     while (true) {
+        if (ssh) |t| {
+            const page = try sshListPage(server, t, arena, .{ .path = filter.path, .id = filter.id, .cursor = cursor, .limit = filter.limit, .refspec = ref, .verify = false });
+            for (page.locks) |l| {
+                try locks.append(arena, l.lock);
+                if (filter.limit != 0 and locks.items.len >= filter.limit) break;
+            }
+            if (filter.limit != 0 and locks.items.len >= filter.limit) break;
+            cursor = page.next_cursor orelse break;
+            continue;
+        }
         var query: std.ArrayList(u8) = .empty;
         try query.appendSlice(arena, "locks");
         var sep: u8 = '?';
@@ -430,7 +467,18 @@ pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Error
     var ours: std.ArrayList(Lock) = .empty;
     var theirs: std.ArrayList(Lock) = .empty;
     var cursor: ?[]const u8 = null;
+    const ssh = try server.client.sshTransfer(.upload);
     while (true) {
+        if (ssh) |t| {
+            const page = try sshListPage(server, t, arena, .{ .cursor = cursor, .refspec = ref, .verify = true });
+            for (page.locks) |l| switch (l.who) {
+                .ours => try ours.append(arena, l.lock),
+                .theirs => try theirs.append(arena, l.lock),
+                .unknown => {},
+            };
+            cursor = page.next_cursor orelse break;
+            continue;
+        }
         var body: Io.Writer.Allocating = .init(arena);
         {
             var s: std.json.Stringify = .{ .writer = &body.writer };
@@ -467,6 +515,155 @@ pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Error
     cache.have_verifiable = true;
     try cache.save(arena, server, ref);
     return out;
+}
+
+//=====================================================================
+// Over git-lfs's pure-ssh protocol
+//=====================================================================
+
+/// The status of a lock answer over ssh, as the HTTP API's would be.
+fn sshFailed(server: *lfsapi.Server, status: lfsssh.Status, what: []const u8) Error {
+    var buf: [512]u8 = undefined;
+    server.client.setMessage(std.fmt.bufPrint(&buf, "{s}: status {d}{s}{s}", .{
+        what,
+        status.code,
+        if (status.lines.len != 0) ": " else "",
+        if (status.lines.len != 0) status.lines[0] else "",
+    }) catch what);
+    return switch (status.code) {
+        404, 501 => error.LockingUnsupported,
+        401 => error.AuthenticationFailed,
+        else => error.LockRefused,
+    };
+}
+
+/// The lock an answer's `id`, `path`, `locked-at` and `ownername`
+/// arguments describe, all four of which git-lfs requires.
+fn sshLockOf(arena: Allocator, status: lfsssh.Status) Error!Lock {
+    const id = status.arg("id") orelse return error.MalformedResponse;
+    const path = status.arg("path") orelse return error.MalformedResponse;
+    const at = status.arg("locked-at") orelse return error.MalformedResponse;
+    const owner = status.arg("ownername") orelse return error.MalformedResponse;
+    return .{ .id = try arena.dupe(u8, id), .path = try arena.dupe(u8, path), .owner = try arena.dupe(u8, owner), .locked_at = try arena.dupe(u8, at) };
+}
+
+fn sshLock(server: *lfsapi.Server, t: *lfsssh.Transfer, path: []const u8, ref: ?[]const u8, arena: Allocator) Error!Acquired {
+    const conn = try t.connection(0);
+    try conn.mutex.lock(server.io);
+    defer conn.mutex.unlock(server.io);
+    var args: std.ArrayList([]const u8) = .empty;
+    try args.append(arena, try std.fmt.allocPrint(arena, "path={s}", .{path}));
+    if (ref) |r| try args.append(arena, try std.fmt.allocPrint(arena, "refname={s}", .{r}));
+    try conn.send("lock", args.items);
+    const status = try conn.readStatus(arena);
+    if (status.code == 409) return .{ .held = try sshLockOf(arena, status) };
+    if (!status.ok()) return sshFailed(server, status, "lock");
+    return .{ .locked = try sshLockOf(arena, status) };
+}
+
+/// git-lfs asks an unlock over ssh with the ref alone — a forced unlock is
+/// no different there, and the server decides — and names the ref as its
+/// `Ref.Name` does, `main` for `refs/heads/main`, where every other request
+/// names it in full.
+fn sshUnlock(server: *lfsapi.Server, t: *lfsssh.Transfer, id: []const u8, ref: ?[]const u8, arena: Allocator) Error!Lock {
+    const conn = try t.connection(0);
+    try conn.mutex.lock(server.io);
+    defer conn.mutex.unlock(server.io);
+    var args: std.ArrayList([]const u8) = .empty;
+    if (ref) |r| {
+        var short = r;
+        for ([_][]const u8{ "refs/heads/", "refs/tags/", "refs/remotes/" }) |prefix| {
+            if (std.mem.startsWith(u8, r, prefix)) short = r[prefix.len..];
+        }
+        try args.append(arena, try std.fmt.allocPrint(arena, "refname={s}", .{short}));
+    }
+    try conn.send(try std.fmt.allocPrint(arena, "unlock {s}", .{id}), args.items);
+    const status = try conn.readStatus(arena);
+    if (!status.ok()) {
+        _ = sshFailed(server, status, "unlock") catch {};
+        return switch (status.code) {
+            404 => error.LockNotFound,
+            403 => error.LockOwnedByOther,
+            501 => error.LockingUnsupported,
+            else => error.LockRefused,
+        };
+    }
+    return sshLockOf(arena, status);
+}
+
+/// A lock a `list-lock` answer names, and whose the server says it is.
+pub const SshListed = struct { lock: Lock, who: enum { ours, theirs, unknown } };
+
+const SshQuery = struct {
+    path: ?[]const u8 = null,
+    id: ?[]const u8 = null,
+    cursor: ?[]const u8 = null,
+    limit: usize = 0,
+    refspec: ?[]const u8 = null,
+    /// A verify, which names the ref `refname`; a listing names it
+    /// `refspec`, as git-lfs's query does.
+    verify: bool,
+};
+
+/// One page of `list-lock`: the locks, each declared by a `lock <id>` line
+/// and described by `path`, `locked-at`, `ownername` and `owner` lines
+/// naming the same id.
+fn sshListPage(server: *lfsapi.Server, t: *lfsssh.Transfer, arena: Allocator, q: SshQuery) Error!struct { locks: []const SshListed, next_cursor: ?[]const u8 } {
+    const conn = try t.connection(0);
+    try conn.mutex.lock(server.io);
+    defer conn.mutex.unlock(server.io);
+    var args: std.ArrayList([]const u8) = .empty;
+    if (q.path) |v| try args.append(arena, try std.fmt.allocPrint(arena, "path={s}", .{v}));
+    if (q.id) |v| try args.append(arena, try std.fmt.allocPrint(arena, "id={s}", .{v}));
+    if (q.verify) {
+        if (q.refspec) |v| try args.append(arena, try std.fmt.allocPrint(arena, "refname={s}", .{v}));
+        if (q.cursor) |v| try args.append(arena, try std.fmt.allocPrint(arena, "cursor={s}", .{v}));
+    } else {
+        if (q.cursor) |v| try args.append(arena, try std.fmt.allocPrint(arena, "cursor={s}", .{v}));
+        if (q.limit != 0) try args.append(arena, try std.fmt.allocPrint(arena, "limit={d}", .{q.limit}));
+        if (q.refspec) |v| try args.append(arena, try std.fmt.allocPrint(arena, "refspec={s}", .{v}));
+    }
+    try conn.send("list-lock", args.items);
+    const status = try conn.readStatus(arena);
+    if (!status.ok()) return sshFailed(server, status, if (q.verify) "locks/verify" else "locks");
+    return .{ .locks = try parseSshLocks(arena, status.lines), .next_cursor = status.arg("next-cursor") };
+}
+
+/// Read the lines of a `list-lock` answer: each lock declared by `lock
+/// <id>` and described by `path`, `locked-at`, `ownername` and `owner`
+/// lines naming the same id, as git-lfs reads them. Anything else is
+/// `error.MalformedResponse`.
+pub fn parseSshLocks(arena: Allocator, lines: []const []const u8) (Allocator.Error || error{MalformedResponse})![]const SshListed {
+    var out: std.ArrayList(SshListed) = .empty;
+    for (lines) |line| {
+        var it = std.mem.splitScalar(u8, line, ' ');
+        const cmd = it.next() orelse return error.MalformedResponse;
+        const id = it.next() orelse return error.MalformedResponse;
+        if (std.mem.eql(u8, cmd, "lock")) {
+            if (it.next() != null) return error.MalformedResponse;
+            if (out.items.len != 0) try sshComplete(out.items[out.items.len - 1]);
+            try out.append(arena, .{ .lock = .{ .id = id, .path = "" }, .who = .unknown });
+            continue;
+        }
+        const value = it.rest();
+        if (out.items.len == 0 or !std.mem.eql(u8, out.items[out.items.len - 1].lock.id, id)) return error.MalformedResponse;
+        const last = &out.items[out.items.len - 1];
+        if (std.mem.eql(u8, cmd, "path")) {
+            last.lock.path = value;
+        } else if (std.mem.eql(u8, cmd, "ownername")) {
+            last.lock.owner = value;
+        } else if (std.mem.eql(u8, cmd, "locked-at")) {
+            last.lock.locked_at = value;
+        } else if (std.mem.eql(u8, cmd, "owner")) {
+            last.who = if (std.mem.eql(u8, value, "ours")) .ours else if (std.mem.eql(u8, value, "theirs")) .theirs else .unknown;
+        }
+    }
+    if (out.items.len != 0) try sshComplete(out.items[out.items.len - 1]);
+    return out.items;
+}
+
+fn sshComplete(l: SshListed) error{MalformedResponse}!void {
+    if (l.lock.path.len == 0 or l.lock.owner == null or l.lock.locked_at == null) return error.MalformedResponse;
 }
 
 fn percentEncode(a: Allocator, out: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
@@ -805,4 +1002,23 @@ fn fuzzLocks(_: void, smith: *testing.Smith) anyerror!void {
         var t = try Table.fromVerified(testing.allocator, page.ours, page.theirs);
         t.deinit();
     } else |err| if (err != error.MalformedResponse) return err;
+}
+
+test "fuzz: any lines of an ssh lock listing are read or refused by name" {
+    try testing.fuzz({}, fuzzSshLocks, .{});
+}
+
+fn fuzzSshLocks(_: void, smith: *testing.Smith) anyerror!void {
+    var scratch: [512]u8 = undefined;
+    const len = smith.slice(&scratch);
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, scratch[0..len], '\n');
+    while (it.next()) |line| try lines.append(a, line);
+    _ = parseSshLocks(a, lines.items) catch |err| switch (err) {
+        error.MalformedResponse => return,
+        else => return err,
+    };
 }
