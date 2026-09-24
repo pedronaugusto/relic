@@ -4,6 +4,15 @@
 //! wanted, and take commits out one at a time. Nothing here needs a
 //! commit-graph; a caller that has one hands it in and the answers do not
 //! change, which is what an accelerator must mean.
+//!
+//! Neither a hidden commit nor an ancestry question walks the whole of
+//! history. A walk with hidden commits takes the pushed and the hidden
+//! together, newest first, as git's `limit_list` does, and stops once
+//! nothing left can still be wanted; `isAncestor` paints down from both
+//! commits as git's `paint_down_to_common` does, and stops once every
+//! commit still queued is below a common one — or, with a commit-graph's
+//! generation numbers, once the walk is below the ancestor's generation,
+//! where it cannot be found. Both cost the commits between the two sides.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -99,35 +108,31 @@ pub const Walk = struct {
         walk.ordered.clearRetainingCapacity();
         walk.position = 0;
 
-        var excluded: Oid.Set = .empty;
-        defer excluded.deinit(walk.gpa);
-        for (walk.hidden.items) |oid| {
-            try walk.collectReachable(io, oid, &excluded);
-        }
-
         var loaded: std.AutoArrayHashMapUnmanaged(OidKey, Commit) = .empty;
         defer loaded.deinit(walk.gpa);
-        var queue: std.ArrayList(Oid) = .empty;
-        defer queue.deinit(walk.gpa);
-        for (walk.roots.items) |oid| try queue.append(walk.gpa, oid);
-
-        while (queue.items.len != 0) {
-            const oid = queue.orderedRemove(0);
-            if (excluded.contains(oid)) continue;
-            const key = OidKey.of(oid);
-            if (loaded.contains(key)) continue;
-            if (loaded.count() >= walk.max_commits) return error.WalkTooLong;
-            const commit = try walk.load(io, oid);
-            try loaded.put(walk.gpa, key, commit);
-            for (commit.parents) |parent| {
-                if (!excluded.contains(parent)) try queue.append(walk.gpa, parent);
+        errdefer for (loaded.values()) |commit| walk.gpa.free(commit.parents);
+        if (walk.hidden.items.len == 0) {
+            var queue: std.ArrayList(Oid) = .empty;
+            defer queue.deinit(walk.gpa);
+            for (walk.roots.items) |oid| try queue.append(walk.gpa, oid);
+            var at: usize = 0;
+            while (at < queue.items.len) : (at += 1) {
+                const oid = queue.items[at];
+                const key = OidKey.of(oid);
+                if (loaded.contains(key)) continue;
+                if (loaded.count() >= walk.max_commits) return error.WalkTooLong;
+                const commit = try walk.load(io, oid);
+                loaded.put(walk.gpa, key, commit) catch |err| {
+                    walk.gpa.free(commit.parents);
+                    return err;
+                };
+                for (commit.parents) |parent| try queue.append(walk.gpa, parent);
             }
-        }
+        } else try walk.limit(io, &loaded);
 
         try walk.ordered.ensureTotalCapacity(walk.gpa, loaded.count());
         for (loaded.values()) |commit| walk.ordered.appendAssumeCapacity(commit);
         loaded.clearRetainingCapacity();
-
         switch (walk.sort) {
             .date => std.mem.sort(Commit, walk.ordered.items, {}, newerFirst),
             .topological => try walk.sortTopologically(),
@@ -135,6 +140,122 @@ pub const Walk = struct {
         if (walk.reverse) std.mem.reverse(Commit, walk.ordered.items);
         walk.prepared = true;
     }
+
+    /// git's `limit_list`: the pushed and the hidden commits taken together,
+    /// newest first, each hidden one's mark carried to its parents and to
+    /// every commit below it already taken. A hidden commit ends the walk
+    /// only once nothing queued is still wanted, nothing queued is as new as
+    /// the last wanted commit, and five more have been taken — commit dates
+    /// tie and drift, and the five are what lets a hidden line reach a
+    /// commit taken as wanted before it. What is left wanted goes to
+    /// `loaded`.
+    fn limit(walk: *Walk, io: Io, loaded: *std.AutoArrayHashMapUnmanaged(OidKey, Commit)) Error!void {
+        var state: Limited = .{ .walk = walk, .io = io };
+        defer state.deinit();
+        for (walk.hidden.items) |oid| try state.enqueue(oid, true);
+        for (walk.roots.items) |oid| try state.enqueue(oid, false);
+
+        const slop_default = 5;
+        var slop: usize = slop_default;
+        var last_wanted: i64 = std.math.maxInt(i64);
+        var taken: std.ArrayList(OidKey) = .empty;
+        defer taken.deinit(walk.gpa);
+        while (state.wanted_queued != 0 or state.queue.count() != 0) {
+            const item = state.queue.pop() orelse break;
+            const node = state.nodes.getPtr(item.key).?;
+            node.popped = true;
+            const hidden = node.hidden;
+            if (!hidden) state.wanted_queued -= 1;
+            for (node.commit.parents) |parent| try state.enqueue(parent, hidden);
+            if (hidden) {
+                const next_item = state.queue.peek() orelse break;
+                if (last_wanted <= next_item.time or state.wanted_queued != 0) {
+                    slop = slop_default;
+                } else {
+                    slop -= 1;
+                    if (slop == 0) break;
+                }
+                continue;
+            }
+            try taken.append(walk.gpa, item.key);
+            last_wanted = item.time;
+        }
+        // A commit taken as wanted and reached by a hidden line afterwards
+        // is left out, as git leaves it.
+        for (taken.items) |key| {
+            const node = state.nodes.getPtr(key).?;
+            if (node.hidden) continue;
+            try loaded.put(walk.gpa, key, node.commit);
+            node.handed_over = true;
+        }
+    }
+
+    const Limited = struct {
+        walk: *Walk,
+        io: Io,
+        nodes: std.AutoHashMapUnmanaged(OidKey, Node) = .empty,
+        queue: std.PriorityQueue(Queued, void, Queued.newerFirst) = .empty,
+        wanted_queued: usize = 0,
+
+        const Node = struct {
+            commit: Commit,
+            hidden: bool,
+            popped: bool = false,
+            handed_over: bool = false,
+        };
+
+        const Queued = struct {
+            time: i64,
+            key: OidKey,
+
+            fn newerFirst(_: void, a: Queued, b: Queued) std.math.Order {
+                if (a.time != b.time) return std.math.order(b.time, a.time);
+                return std.mem.order(u8, &a.key.bytes, &b.key.bytes);
+            }
+        };
+
+        fn deinit(l: *Limited) void {
+            var it = l.nodes.valueIterator();
+            while (it.next()) |node| {
+                if (!node.handed_over) l.walk.gpa.free(node.commit.parents);
+            }
+            l.nodes.deinit(l.walk.gpa);
+            l.queue.deinit(l.walk.gpa);
+        }
+
+        fn enqueue(l: *Limited, oid: Oid, hidden: bool) Error!void {
+            const key = OidKey.of(oid);
+            if (l.nodes.getPtr(key)) |node| {
+                if (hidden and !node.hidden) try l.markHidden(key);
+                return;
+            }
+            if (l.nodes.count() >= l.walk.max_commits) return error.WalkTooLong;
+            const commit = try l.walk.load(l.io, oid);
+            l.nodes.put(l.walk.gpa, key, .{ .commit = commit, .hidden = hidden }) catch |err| {
+                l.walk.gpa.free(commit.parents);
+                return err;
+            };
+            if (!hidden) l.wanted_queued += 1;
+            try l.queue.push(l.walk.gpa, .{ .time = commit.time, .key = key });
+        }
+
+        /// Mark a commit hidden, and every commit below it already taken.
+        fn markHidden(l: *Limited, start: OidKey) Error!void {
+            var stack: std.ArrayList(OidKey) = .empty;
+            defer stack.deinit(l.walk.gpa);
+            try stack.append(l.walk.gpa, start);
+            while (stack.pop()) |key| {
+                const node = l.nodes.getPtr(key) orelse continue;
+                if (node.hidden) continue;
+                node.hidden = true;
+                if (!node.popped) {
+                    l.wanted_queued -= 1;
+                } else {
+                    for (node.commit.parents) |parent| try stack.append(l.walk.gpa, OidKey.of(parent));
+                }
+            }
+        }
+    };
 
     fn load(walk: *Walk, io: Io, oid: Oid) Error!Commit {
         if (walk.graph) |graph| {
@@ -156,20 +277,6 @@ pub const Walk = struct {
             .parents = try walk.gpa.dupe(Oid, commit.parents),
             .time = commit.committer.when_secs,
         };
-    }
-
-    fn collectReachable(walk: *Walk, io: Io, from: Oid, out: *Oid.Set) Error!void {
-        var queue: std.ArrayList(Oid) = .empty;
-        defer queue.deinit(walk.gpa);
-        try queue.append(walk.gpa, from);
-        while (queue.items.len != 0) {
-            const oid = queue.pop().?;
-            if (out.contains(oid)) continue;
-            try out.put(walk.gpa, oid, {});
-            const commit = try walk.load(io, oid);
-            defer walk.gpa.free(commit.parents);
-            for (commit.parents) |parent| try queue.append(walk.gpa, parent);
-        }
     }
 
     fn sortTopologically(walk: *Walk) Error!void {
@@ -320,12 +427,135 @@ pub fn mergeBase(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid) Error
 
 /// Whether `ancestor` is reachable from `descendant`.
 pub fn isAncestor(gpa: Allocator, io: Io, db: *odb_mod.Odb, ancestor: Oid, descendant: Oid) Error!bool {
-    if (ancestor.eql(descendant)) return true;
-    var seen: Oid.Set = .empty;
-    defer seen.deinit(gpa);
-    try reachable(gpa, io, db, descendant, &seen);
-    return seen.contains(ancestor);
+    return isAncestorWith(gpa, io, db, ancestor, descendant, .{});
 }
+
+/// What an ancestry question may use.
+pub const AncestryOptions = struct {
+    /// A commit-graph whose generation numbers bound the walk. Without one,
+    /// or for a commit it does not hold, the walk is bounded by the common
+    /// history instead, and the answer is the same.
+    graph: ?*const commitgraph.Graph = null,
+};
+
+/// `isAncestor`, with a commit-graph to bound the walk: git's
+/// `repo_in_merge_bases`. Both commits are painted down, newest generation
+/// then newest date first; a commit both reach is common and its parents
+/// are not worth going on with; and the walk ends when nothing queued is
+/// still worth it, or when it is below the ancestor's generation.
+pub fn isAncestorWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, ancestor: Oid, descendant: Oid, options: AncestryOptions) Error!bool {
+    if (ancestor.eql(descendant)) return true;
+    var paint: Paint = .{ .gpa = gpa, .io = io, .db = db, .graph = options.graph };
+    defer paint.deinit();
+    // A pointer into the map lasts until the next commit is read; the
+    // values are taken while it does.
+    const min_generation = (try paint.nodeOf(ancestor)).generation;
+    const descendant_generation = (try paint.nodeOf(descendant)).generation;
+    // A commit of a later generation than another cannot be its ancestor.
+    if (min_generation > descendant_generation) return false;
+    try paint.mark(ancestor, Paint.one);
+    try paint.mark(descendant, Paint.two);
+
+    while (paint.hasNonStale()) {
+        const item = paint.queue.pop().?;
+        const node = paint.nodes.getPtr(OidKey.of(item.oid)).?;
+        if (node.generation < min_generation) break;
+        var flags = node.flags & (Paint.one | Paint.two | Paint.stale);
+        if (flags == Paint.one | Paint.two) flags |= Paint.stale;
+        const parents = node.parents;
+        for (parents) |parent| {
+            const p = try paint.nodeOf(parent);
+            if (p.flags & flags == flags) continue;
+            try paint.mark(parent, flags);
+        }
+    }
+    return paint.nodes.get(OidKey.of(ancestor)).?.flags & Paint.two != 0;
+}
+
+/// The state of `isAncestorWith`'s walk.
+const Paint = struct {
+    gpa: Allocator,
+    io: Io,
+    db: *odb_mod.Odb,
+    graph: ?*const commitgraph.Graph,
+    nodes: std.AutoHashMapUnmanaged(OidKey, Node) = .empty,
+    queue: std.PriorityQueue(Queued, void, Queued.order) = .empty,
+
+    const one: u8 = 1;
+    const two: u8 = 2;
+    const stale: u8 = 4;
+    /// A commit the graph does not hold: later than any it does.
+    const infinity = std.math.maxInt(u64);
+
+    const Node = struct {
+        flags: u8 = 0,
+        time: i64,
+        generation: u64,
+        parents: []const Oid,
+    };
+
+    const Queued = struct {
+        generation: u64,
+        time: i64,
+        oid: Oid,
+
+        fn order(_: void, a: Queued, b: Queued) std.math.Order {
+            if (a.generation != b.generation) return std.math.order(b.generation, a.generation);
+            if (a.time != b.time) return std.math.order(b.time, a.time);
+            return a.oid.order(b.oid);
+        }
+    };
+
+    fn deinit(p: *Paint) void {
+        var it = p.nodes.valueIterator();
+        while (it.next()) |node| p.gpa.free(node.parents);
+        p.nodes.deinit(p.gpa);
+        p.queue.deinit(p.gpa);
+    }
+
+    /// The commit, read once. The pointer lasts until the next one is
+    /// read.
+    fn nodeOf(p: *Paint, oid: Oid) Error!*Node {
+        const gop = try p.nodes.getOrPut(p.gpa, OidKey.of(oid));
+        if (gop.found_existing) return gop.value_ptr;
+        errdefer _ = p.nodes.remove(OidKey.of(oid));
+        if (p.graph) |graph| {
+            if (graph.find(oid)) |position| {
+                if (graph.commitAt(position)) |entry| {
+                    if (graph.parentsOf(p.gpa, position)) |parents| {
+                        gop.value_ptr.* = .{ .time = entry.time, .generation = entry.generation orelse infinity, .parents = parents };
+                        return gop.value_ptr;
+                    } else |_| {}
+                } else |_| {}
+            }
+        }
+        const found = try p.db.read(p.io, oid);
+        defer p.gpa.free(found.bytes);
+        if (found.type != .commit) return error.NotACommit;
+        var commit = try object.Commit.parse(p.gpa, p.db.kind, found.bytes);
+        defer commit.deinit();
+        gop.value_ptr.* = .{
+            .time = commit.committer.when_secs,
+            .generation = infinity,
+            .parents = try p.gpa.dupe(Oid, commit.parents),
+        };
+        return gop.value_ptr;
+    }
+
+    fn mark(p: *Paint, oid: Oid, flags: u8) Error!void {
+        const n = try p.nodeOf(oid);
+        n.flags |= flags;
+        try p.queue.push(p.gpa, .{ .generation = n.generation, .time = n.time, .oid = oid });
+    }
+
+    /// git's `queue_has_nonstale`.
+    fn hasNonStale(p: *Paint) bool {
+        for (p.queue.items) |item| {
+            if (p.nodes.get(OidKey.of(item.oid)).?.flags & stale == 0) return true;
+        }
+        return false;
+    }
+};
 
 fn reachable(gpa: Allocator, io: Io, db: *odb_mod.Odb, from: Oid, out: *Oid.Set) Error!void {
     var queue: std.ArrayList(Oid) = .empty;

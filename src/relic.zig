@@ -101,5 +101,6 @@ test {
         _ = @import("lfslocks_test.zig");
         _ = @import("lfspush_test.zig");
         _ = @import("auth_test.zig");
+        _ = @import("revwalk_test.zig");
     }
 }
