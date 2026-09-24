@@ -22,6 +22,8 @@ const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
+const program = @import("program.zig");
+const filter = @import("filter.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
 const message = @import("message.zig");
@@ -146,6 +148,11 @@ pub const Options = struct {
     /// `-X`: the strategy options, in the order given, as
     /// `strategy.Settings.apply` reads them. Kept in `opts` between steps.
     strategy_options: []const []const u8 = &.{},
+    /// The filter drivers and relic's own LFS the merged files go through,
+    /// as `Repository.loadFilters` gives them: `threeway.Options.filters`.
+    filters: ?*const filter.Drivers = null,
+    /// The permission to run the filters' programs.
+    programs: ?program.Programs = null,
     /// `--cleanup`: how the message is cleaned, in place of the default.
     cleanup: ?message.Cleanup = null,
     /// `null` asks `merge.conflictStyle`.
@@ -508,6 +515,8 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
             .algorithm = .histogram,
         },
         .strategy_options = r.options.strategy_options,
+        .filters = r.options.filters,
+        .programs = r.options.programs,
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();

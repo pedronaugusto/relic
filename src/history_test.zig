@@ -2311,3 +2311,76 @@ test "adding a resolved file replaces its conflict and remembers the stages, as 
         try expectSameState(&pair, io, &merge_state, &main_logs);
     }
 }
+
+//=========================================================================
+// Renormalizing, and files written through their attributes
+//=========================================================================
+
+/// `file.txt` and `gone.txt` committed with CRLF endings and no attributes;
+/// `topic` edits the one, deletes the other and edits `id.txt`; `main`
+/// sets `text=auto` and stores both again normalized, and asks for `ident`
+/// on `id.txt`.
+fn renormalizeScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "file.txt", "a\r\nb\r\nc\r\n");
+    try repo.writeFile(io, "gone.txt", "x\r\ny\r\n");
+    try repo.writeFile(io, "id.txt", "$Id$\nold\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.writeFile(io, "file.txt", "a\r\nB\r\nc\r\n");
+    try repo.exec(io, &.{ "rm", "-q", "gone.txt" });
+    try repo.writeFile(io, "id.txt", "$Id$\nnew\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "topic" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, ".gitattributes", "* text=auto\nid.txt ident\n");
+    try repo.exec(io, &.{ "add", "--renormalize", "." });
+    try repo.exec(io, &.{ "add", ".gitattributes" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "normalize" });
+}
+
+test "a merge renormalizes when asked and writes its files through their attributes, as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, renormalizeScript);
+    defer pair.deinit();
+
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "before" });
+    const Variant = struct { config: ?[]const u8, words: []const []const u8, clean: bool };
+    for ([_]Variant{
+        .{ .config = null, .words = &.{}, .clean = false },
+        .{ .config = null, .words = &.{"renormalize"}, .clean = true },
+        .{ .config = "true", .words = &.{}, .clean = true },
+        .{ .config = "true", .words = &.{"no-renormalize"}, .clean = false },
+    }) |variant| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            if (variant.config) |value| {
+                try r.exec(io, &.{ "config", "merge.renormalize", value });
+            } else try gitMayFail(r, io, &.{ "config", "--unset", "merge.renormalize" });
+        }
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.append(gpa, "merge");
+        for (variant.words) |word| try args.appendSlice(gpa, &.{ "-X", word });
+        try args.append(gpa, "topic");
+        try gitMayFail(&pair.git, io, args.items);
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            const target = try merging.resolve(gpa, io, &repo, "topic");
+            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who, .strategy_options = variant.words });
+            defer outcome.deinit();
+            try std.testing.expectEqual(variant.clean, outcome.result != .conflicted);
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+        // The id file went out with its $Id$ expanded, on both sides.
+        const id = try readOrMissing(gpa, io, &pair.ours, "id.txt");
+        defer gpa.free(id);
+        try std.testing.expect(std.mem.startsWith(u8, id, "$Id: "));
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            gitMayFail(r, io, &.{ "merge", "--abort" }) catch {};
+            try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+        }
+    }
+}

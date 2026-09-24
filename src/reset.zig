@@ -20,6 +20,7 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const worktree = @import("worktree.zig");
+const convert = @import("convert.zig");
 const attributes = @import("attributes.zig");
 const fs = @import("fs.zig");
 const repo_mod = @import("repo.zig");
@@ -123,13 +124,21 @@ pub fn toTree(
         i -= 1;
         try worktree.removeEntry(io, wt, remove.items[i]);
     }
+    var conv: convert.Session = .init(gpa, io, .{
+        .wt = wt,
+        .kind = db.kind,
+        .core = rules.core,
+        .required_filters = rules.required_filters,
+        .drivers = rules.filters,
+    });
+    defer conv.deinit();
     var stats: std.StringHashMapUnmanaged(fs.Stat) = .empty;
     for (rewrite.items) |path| {
         const want = wanted.get(path).?;
         if (try fs.statAt(io, wt, path)) |found| {
             if (found.kind == .directory) wt.deleteTree(io, path) catch {};
         }
-        const written = try worktree.writeEntry(gpa, io, wt, db, path, want.mode, want.oid, rules);
+        const written = try worktree.writeEntry(gpa, io, wt, db, &conv, path, want.mode, want.oid, rules);
         try stats.put(arena, path, written.stat);
     }
 

@@ -38,6 +38,7 @@ const rename = @import("rename.zig");
 const attributes = @import("attributes.zig");
 const revwalk = @import("revwalk.zig");
 const abbrev = @import("abbrev.zig");
+const convert = @import("convert.zig");
 
 const Oid = hash.Oid;
 
@@ -66,7 +67,7 @@ pub const Error = error{
     /// two checks.
     DirectoryRenameLostStage,
 } || Allocator.Error || odb_mod.Error || object.TreeParseError || object.ParseError ||
-    attributes.Error || revwalk.Error;
+    attributes.Error || revwalk.Error || convert.Error;
 
 /// When a file one side added lands in a directory the other side renamed:
 /// `merge.directoryRenames`.
@@ -141,6 +142,12 @@ pub const Options = struct {
     /// verbosity 5 and above, `GIT_MERGE_VERBOSITY=5`, and drops them
     /// otherwise.
     inner_messages: bool = false,
+    /// Renormalize, as `merge.renormalize` and `-X renormalize` ask: each
+    /// side of a content merge is taken out to the working tree and back in
+    /// through this session, with the path's attributes, before it is
+    /// merged, and a modify/delete whose modification that undoes is no
+    /// conflict. `null` merges the blobs as they are.
+    renormalize: ?*convert.Session = null,
 };
 
 /// What a message is about: git's conflict types, whose short names
@@ -853,6 +860,44 @@ const Merge = struct {
 
     /// What `path`'s attributes say about merging it: the driver and the
     /// marker size.
+    /// The attributes `path` has, the `.gitattributes` on its way down read
+    /// as they are needed. `null` without attributes to read.
+    fn attributesOf(m: *Merge, path: []const u8) Error!?attributes.Attributes {
+        const attrs = m.options.attributes orelse return null;
+        if (m.options.attributes_dir) |dir| {
+            var depth: u32 = 0;
+            var at: usize = 0;
+            while (true) : (depth += 1) {
+                const base = path[0..at];
+                if (!m.loaded_attr_dirs.contains(base)) {
+                    try m.loaded_attr_dirs.put(m.arena, try m.arena.dupe(u8, base), {});
+                    try attrs.addDirectory(m.io, dir, base, depth);
+                }
+                const slash = std.mem.indexOfScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
+                at = slash;
+            }
+        }
+        return try attrs.lookup(m.arena, path, false);
+    }
+
+    /// `renormalize_buffer`, when the merge renormalizes; `bytes` as they
+    /// are otherwise.
+    fn renormalized(m: *Merge, path: []const u8, bytes: []const u8) Error![]const u8 {
+        const session = m.options.renormalize orelse return bytes;
+        const applied = (try m.attributesOf(path)) orelse attributes.Attributes{ .items = &.{} };
+        return session.renormalize(m.arena, path, bytes, applied);
+    }
+
+    /// `blob_unchanged`: whether `side` is `base` once both are
+    /// renormalized. Different modes are a change.
+    fn blobUnchanged(m: *Merge, base: Version, side: Version, path: []const u8) Error!bool {
+        if (base.mode != side.mode) return false;
+        if (base.oid.eql(side.oid)) return true;
+        const one = try m.renormalized(path, try m.readBlob(base.oid));
+        const two = try m.renormalized(path, try m.readBlob(side.oid));
+        return std.mem.eql(u8, one, two);
+    }
+
     fn driverFor(m: *Merge, path: []const u8) Error!struct { driver: Driver, marker_size: u32 } {
         var driver: Driver = .text;
         var marker_size: u32 = 7;
@@ -910,9 +955,10 @@ const Merge = struct {
         const name1 = if (same) m.branch1 else try std.fmt.allocPrint(m.arena, "{s}:{s}", .{ m.branch1, pathnames[1] });
         const name2 = if (same) m.branch2 else try std.fmt.allocPrint(m.arena, "{s}:{s}", .{ m.branch2, pathnames[2] });
 
-        const orig = try m.readBlob(o);
-        const src1 = try m.readBlob(a);
-        const src2 = try m.readBlob(b);
+        // `ll_merge` renormalizes all three first, when asked to.
+        const orig = try m.renormalized(path, try m.readBlob(o));
+        const src1 = try m.renormalized(path, try m.readBlob(a));
+        const src2 = try m.renormalized(path, try m.readBlob(b));
 
         const found = try m.driverFor(path);
         const marker_size = found.marker_size + extra_marker_size;
@@ -1832,7 +1878,17 @@ const Merge = struct {
             ci.clean = false;
             const modify_branch = if (side == 1) m.branch1 else m.branch2;
             const delete_branch = if (side == 1) m.branch2 else m.branch1;
-            if (ci.path_conflict and ci.stages[0].oid.eql(ci.stages[side].oid)) {
+            if (m.options.renormalize != null and try m.blobUnchanged(ci.stages[0], ci.stages[side], path)) {
+                if (!ci.path_conflict) {
+                    // Unchanged once renormalized: no modify/delete after
+                    // all, and the file goes, taking any directory/file
+                    // conflict with it.
+                    ci.is_null = true;
+                    ci.clean = true;
+                    ci.df_conflict = false;
+                }
+                // A rename/delete stays a conflict, and has said so.
+            } else if (ci.path_conflict and ci.stages[0].oid.eql(ci.stages[side].oid)) {
                 // From a rename/delete, which has said so already.
             } else {
                 try m.pathMsg(.modify_delete, path, null, null, &.{}, "CONFLICT (modify/delete): {s} deleted in {s} and modified in {s}.  Version {s} of {s} left in tree.", .{ path, delete_branch, modify_branch, modify_branch, path });

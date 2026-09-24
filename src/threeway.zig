@@ -29,6 +29,9 @@ const ort = @import("ort.zig");
 const revwalk = @import("revwalk.zig");
 const config_mod = @import("config.zig");
 const strategy = @import("strategy.zig");
+const convert = @import("convert.zig");
+const filter = @import("filter.zig");
+const program = @import("program.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -47,10 +50,6 @@ pub const Error = error{
     BareRepository,
     /// `diff.algorithm` names no line diff git has.
     UnknownDiffAlgorithm,
-    /// `merge.renormalize` asks for each side to be put through the
-    /// line-ending conversion before it is merged, which this release does
-    /// not do.
-    RenormalizeRequested,
 } || merge.Error || worktree.Error || repo_mod.Error || revwalk.Error || strategy.Error;
 
 /// Where a refusal writes the path that caused it, so a caller can say which
@@ -66,6 +65,12 @@ pub const Options = struct {
     blob: merge.BlobOptions = .{ .algorithm = .histogram },
     /// The `-X` words, in the order given: `strategy.Settings.apply`.
     strategy_options: []const []const u8 = &.{},
+    /// The filter drivers and relic's own LFS the merged files are written
+    /// through, and renormalized through, as `Repository.loadFilters` gives
+    /// them. `null` passes every driver over and refuses a required one.
+    filters: ?*const filter.Drivers = null,
+    /// The permission to run the filters' programs.
+    programs: ?program.Programs = null,
     /// Where a refusal writes the path that caused it.
     blocked: ?*Blocked = null,
     /// Keep the inner merges' messages, as git does at
@@ -206,9 +211,20 @@ fn run(
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
     rules.attrs = &attrs;
+    rules.filters = options.filters;
 
     const settings = try configuredSettings(repo, options);
-    if (settings.renormalize) return error.RenormalizeRequested;
+    // Renormalizing takes each side out and back in, and asks no index
+    // whether a stored version kept its CRLF endings.
+    var normalizer: convert.Session = .init(gpa, io, .{
+        .wt = wt,
+        .kind = db.kind,
+        .core = rules.core,
+        .required_filters = rules.required_filters,
+        .drivers = rules.filters,
+        .programs = options.programs,
+    });
+    defer normalizer.deinit();
     var submodules: SubmoduleOpener = .{ .gpa = gpa, .io = io, .wt = wt };
     defer submodules.deinit();
     var ort_options: ort.Options = .{
@@ -227,6 +243,7 @@ fn run(
         .submodules = .{ .context = &submodules, .openFn = SubmoduleOpener.open },
         .abbrev_len = @import("abbrev.zig").defaultLength(&repo.config, db),
         .blocked = options.blocked,
+        .renormalize = if (settings.renormalize) &normalizer else null,
         .inner_messages = options.inner_messages or (repo.config.getInt("merge.verbosity", 2) catch 2) >= 5,
     };
     var merged = switch (sides) {
@@ -300,6 +317,15 @@ fn run(
         outcome_removed += 1;
     }
 
+    var conv: convert.Session = .init(gpa, io, .{
+        .wt = wt,
+        .kind = db.kind,
+        .core = rules.core,
+        .required_filters = rules.required_filters,
+        .drivers = rules.filters,
+        .programs = options.programs,
+    });
+    defer conv.deinit();
     var stats: std.StringHashMapUnmanaged(fs.Stat) = .empty;
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
     for (result.conflicts) |conflict| try conflicted.put(arena, conflict.path, {});
@@ -324,7 +350,7 @@ fn run(
                 wt.deleteTree(io, path) catch {};
             }
         }
-        const written = try worktree.writeEntry(gpa, io, wt, db, path, want.mode, want.oid, rules);
+        const written = try worktree.writeEntry(gpa, io, wt, db, &conv, path, want.mode, want.oid, rules);
         try stats.put(arena, path, written.stat);
         outcome_written += 1;
     }

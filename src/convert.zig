@@ -304,6 +304,53 @@ pub const Session = struct {
         }
     }
 
+    /// git's `renormalize_buffer`: `bytes`, as the repository holds them,
+    /// taken out to the working tree and back in with the attributes
+    /// `applied`, so that a blob stored before an attribute changed
+    /// compares with one stored after. On the way out `ident` is expanded,
+    /// and line endings are converted only when a filter will see them; on
+    /// the way in the index is not asked whether the stored version kept
+    /// its CRLF endings, which is what renormalizing means. A relic LFS
+    /// pointer comes back as its canonical form, which is what the round
+    /// trip through the object gives. Nothing is stored.
+    pub fn renormalize(s: *Session, a: Allocator, path: []const u8, bytes: []const u8, applied: attributes.Attributes) Error![]const u8 {
+        if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
+        const resolved = try s.resolve(path, applied);
+        var out: []const u8 = bytes;
+        if (identOn(applied)) {
+            if (try identToWorktree(a, s.options.kind, out)) |expanded| out = expanded;
+        }
+        switch (resolved) {
+            .none => {},
+            .native_lfs => {
+                if (lfs.Pointer.decode(out)) |pointer| {
+                    if (pointer.extension_count != 0) return error.LfsExtensionUnsupported;
+                    out = try encodePointer(a, &pointer);
+                    return out;
+                } else |_| {}
+            },
+            .program => |driver| {
+                out = (try attributes.toWorktree(a, out, applied, s.options.core)).bytes;
+                switch (try s.smudge(a, path, driver, out, .{})) {
+                    .bytes => |smudged| out = smudged,
+                    .file => |file| {
+                        defer file.close(s.io);
+                        var buf: [4096]u8 = undefined;
+                        var reader = file.reader(s.io, &buf);
+                        var all: std.ArrayList(u8) = .empty;
+                        try reader.interface.appendRemainingUnlimited(a, &all);
+                        out = all.items;
+                    },
+                    .delayed => unreachable,
+                }
+            },
+        }
+        const index = s.options.index;
+        s.options.index = null;
+        defer s.options.index = index;
+        return (try s.convertToGit(a, path, out, applied, resolved, .hash_only)).bytes;
+    }
+
     fn identOn(applied: attributes.Attributes) bool {
         const state = applied.get("ident") orelse return false;
         return state == .set;

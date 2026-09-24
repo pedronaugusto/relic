@@ -21,6 +21,8 @@ const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const revwalk = @import("revwalk.zig");
 const threeway = @import("threeway.zig");
+const program = @import("program.zig");
+const filter = @import("filter.zig");
 const ort = @import("ort.zig");
 const rerere = @import("rerere.zig");
 const reset = @import("reset.zig");
@@ -141,6 +143,11 @@ pub const Options = struct {
     /// `-X`: the strategy options, in the order given, as
     /// `strategy.Settings.apply` reads them.
     strategy_options: []const []const u8 = &.{},
+    /// The filter drivers and relic's own LFS the merged files go through,
+    /// as `Repository.loadFilters` gives them: `threeway.Options.filters`.
+    filters: ?*const filter.Drivers = null,
+    /// The permission to run the filters' programs.
+    programs: ?program.Programs = null,
     /// Where a refusal writes the path that caused it.
     blocked: ?*threeway.Blocked = null,
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
@@ -256,6 +263,8 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
             .algorithm = .histogram,
         },
         .strategy_options = options.strategy_options,
+        .filters = options.filters,
+        .programs = options.programs,
         .blocked = options.blocked,
         .inner_messages = options.inner_messages,
     });

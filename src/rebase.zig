@@ -33,6 +33,7 @@ const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
+const filter = @import("filter.zig");
 const strategy = @import("strategy.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
@@ -172,6 +173,9 @@ pub const Options = struct {
     /// `strategy.Settings.apply` reads them. Kept in `strategy_opts`
     /// between steps, with `strategy` naming ort as git's rebase does.
     strategy_options: []const []const u8 = &.{},
+    /// The filter drivers and relic's own LFS the merged files go through,
+    /// as `Repository.loadFilters` gives them: `threeway.Options.filters`.
+    filters: ?*const filter.Drivers = null,
     /// `null` asks `merge.conflictStyle`.
     conflict_style: ?merge.ConflictStyle = null,
     /// `--exec`: commands to run after each commit.
@@ -181,7 +185,7 @@ pub const Options = struct {
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
     /// `--no-rerere-autoupdate`, or `rerere.autoUpdate` when `null`.
     rerere_autoupdate: ?bool = null,
-    /// The permission to run `exec` lines.
+    /// The permission to run `exec` lines, and the filters' programs.
     programs: ?program.Programs = null,
     /// Where messages a person would edit go.
     messages: ?Messages = null,
@@ -1398,6 +1402,8 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
             .algorithm = .histogram,
         },
         .strategy_options = r.options.strategy_options,
+        .filters = r.options.filters,
+        .programs = r.options.programs,
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();
@@ -2095,6 +2101,8 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
             .algorithm = .histogram,
         },
         .strategy_options = r.options.strategy_options,
+        .filters = r.options.filters,
+        .programs = r.options.programs,
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();

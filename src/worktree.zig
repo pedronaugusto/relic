@@ -1881,15 +1881,18 @@ pub const Written = struct {
 };
 
 /// Write one tree entry into the working tree the way `checkout` writes it:
-/// line endings converted as the attributes say, the executable bit set
+/// a file through `conv` -- `ident`, line endings and the smudge filter or
+/// relic's own LFS, as the attributes say -- with the executable bit set
 /// where the filesystem keeps one, a symlink made or written as a file
 /// holding its target, a gitlink made as an empty directory. Whatever is at
-/// `path` is replaced; the directories above it are made.
+/// `path` is replaced; the directories above it are made. `conv` must not
+/// be one that may hand a file over late.
 pub fn writeEntry(
     gpa: Allocator,
     io: Io,
     wt: Io.Dir,
     db: *Odb,
+    conv: *convert.Session,
     path: []const u8,
     mode: object.Mode,
     oid: Oid,
@@ -1929,17 +1932,10 @@ pub fn writeEntry(
             defer scratch.deinit();
             const a = scratch.allocator();
             const found = try db.read(io, oid);
-            defer gpa.free(found.bytes);
-            var bytes: []const u8 = found.bytes;
-            if (rules.attrs) |attrs| {
-                const applied = try attrs.lookup(a, path, false);
-                if (attributes.unsupported(applied, rules.required_filters)) |_| {
-                    return error.UnsupportedAttribute;
-                }
-                const converted = try attributes.toWorktree(a, found.bytes, applied, rules.core);
-                bytes = converted.bytes;
-            }
-            try writeFile(io, wt, path, .{ .bytes = bytes }, mode == .exec and rules.file_mode);
+            defer db.gpa.free(found.bytes);
+            const applied: attributes.Attributes = if (rules.attrs) |attrs| try attrs.lookup(a, path, false) else .{ .items = &.{} };
+            const smudged = try conv.toWorktree(a, path, found.bytes, applied, .{ .blob = oid });
+            try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
         },
         .tree => return error.UnsupportedEntry,
     }
