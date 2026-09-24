@@ -43,6 +43,7 @@ pub const filter = @import("filter.zig");
 pub const lfs = @import("lfs.zig");
 pub const lfsapi = @import("lfsapi.zig");
 pub const lfstransfer = @import("lfstransfer.zig");
+pub const lfslocks = @import("lfslocks.zig");
 pub const convert = @import("convert.zig");
 pub const refspec = @import("refspec.zig");
 pub const url = @import("url.zig");
@@ -93,5 +94,6 @@ test {
         _ = @import("config_refresh_test.zig");
         _ = @import("testlfs.zig");
         _ = @import("lfstransfer_test.zig");
+        _ = @import("lfslocks_test.zig");
     }
 }
