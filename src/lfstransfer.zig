@@ -1246,9 +1246,18 @@ fn copyLocal(
 //=====================================================================
 
 /// What checkout hands its missing objects to: `lfs.Fetcher` over a server.
+///
+/// An object that does not come fails the checkout with
+/// `error.LfsFetchFailed`, as git-lfs's smudge filter fails it, unless
+/// download errors are skipped: then it is left as its pointer and the
+/// checkout goes on.
 pub const Fetcher = struct {
     server: *lfsapi.Server,
     options: Options = .{},
+    /// Leave an object that did not come as its pointer. `null` asks
+    /// `GIT_LFS_SKIP_DOWNLOAD_ERRORS` in the environment the server's
+    /// programs run with, then `lfs.skipdownloaderrors`, as git-lfs does.
+    skip_download_errors: ?bool = null,
     /// The last fetch's outcome, kept until the fetcher is deinitialised,
     /// so a caller can say which objects did not come and why.
     last: ?Outcome = null,
@@ -1279,6 +1288,19 @@ pub const Fetcher = struct {
         };
         if (f.last) |*o| o.deinit();
         f.last = outcome;
+        if (outcome.failures() != 0 and !f.skipDownloadErrors()) return error.LfsFetchFailed;
+    }
+
+    fn skipDownloadErrors(f: *const Fetcher) bool {
+        if (f.skip_download_errors) |skip| return skip;
+        if (f.server.client.options.programs) |programs| {
+            if (lfsapi.gitLfsBool(programs.environ.get("GIT_LFS_SKIP_DOWNLOAD_ERRORS"), false)) return true;
+        }
+        var buf: [256]u8 = undefined;
+        var fba: std.heap.FixedBufferAllocator = .init(&buf);
+        // A value too long to be a boolean is not one.
+        const value = f.server.settings.get(fba.allocator(), "lfs.skipdownloaderrors") catch return false;
+        return lfsapi.gitLfsBool(value, false);
     }
 };
 

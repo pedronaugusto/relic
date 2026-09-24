@@ -1176,3 +1176,65 @@ test "a download asks for gzip, or for zstd when lfs.transfer.httpDownloadEncodi
         if (setting != null and std.mem.eql(u8, setting.?, "zstd")) try testing.expect(std.mem.indexOf(u8, logs[1], "accept-encoding=zstd\n") != null);
     }
 }
+
+test "an object checkout cannot get fails it, as git-lfs's smudge does, unless download errors are skipped" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    // The server has the first object and not the second.
+    const here = "on the server\n";
+    const gone = "nowhere at all\n";
+    try fx.server.putObject(&testlfs.sha256Hex(here), here);
+    var pointer_buf: [lfs.Pointer.max_encoded_len]u8 = undefined;
+    const gone_pointer: lfs.Pointer = .{ .oid = testlfs.sha256Hex(gone), .size = gone.len };
+    const gone_text = gone_pointer.encodeBuf(&pointer_buf);
+
+    for ([_]bool{ false, true }) |skip| {
+        for ([_][]const u8{ "by-git", "by-relic" }, 0..) |base, i| {
+            var name_buf: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "{s}-{}", .{ base, skip });
+            var d = try committed(fx, name, nobody, &.{ .{ "a.bin", here }, .{ "b.bin", gone } });
+            defer d.close(io);
+            try emptyStore(fx, d);
+            try d.deleteFile(io, "a.bin");
+            try d.deleteFile(io, "b.bin");
+            if (skip) try fx.gitIn(d, &.{ "config", "lfs.skipdownloaderrors", "true" });
+            if (i == 0) {
+                const run = testlfs.git(gpa, io, d, &fx.env, &.{ "checkout", "--", "." }, false);
+                if (skip) gpa.free(try run) else try testing.expectError(error.GitFailed, run);
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try openServer(fx, &repo);
+                defer server.close();
+                var fetcher: lfstransfer.Fetcher = .{ .server = server };
+                defer fetcher.deinit();
+                var attrs = try repo.loadAttrs(io);
+                defer attrs.deinit();
+                var drivers = try repo.loadFilters(io, .{});
+                defer drivers.deinit();
+                var rules = repo.worktreeRules();
+                rules.attrs = &attrs;
+                rules.filters = &drivers;
+                var index = try repo.openIndex(io);
+                defer index.deinit();
+                const tree = (try repo.headTree(io)).?;
+                const worktree = @import("worktree.zig");
+                const done = worktree.checkout(gpa, io, d, &index, &repo.odb, tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher() });
+                if (skip) {
+                    try testing.expectEqual(@as(u32, 1), (try done).lfs_pointers);
+                } else {
+                    try testing.expectError(error.LfsFetchFailed, done);
+                }
+                try testing.expectEqual(@as(usize, 1), fetcher.last.?.failures());
+            }
+            if (skip) {
+                try expectFile(fx, d, "a.bin", here);
+                try expectFile(fx, d, "b.bin", gone_text);
+            }
+        }
+    }
+}
