@@ -24,6 +24,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
+const inflate_mod = @import("inflate.zig");
 
 const hash = @import("hash.zig");
 const object = @import("object.zig");
@@ -539,6 +540,11 @@ const Indexer = struct {
     options: Options,
     read_buffer: []u8,
     window: []u8,
+    /// relic's own decoder, for every entry that fits in memory whole.
+    decoder: *inflate_mod.Decoder,
+    /// Where an entry whose bytes are not kept is decoded: a blob being
+    /// named, a delta being measured.
+    scratch: std.ArrayList(u8) = .empty,
     reader: Io.File.Reader,
     entries: std.ArrayList(Entry) = .empty,
     ofs_bases: std.ArrayList(OfsBase) = .empty,
@@ -555,6 +561,9 @@ const Indexer = struct {
         const read_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(read_buffer);
         const window = try gpa.alloc(u8, flate.max_window_len);
+        errdefer gpa.free(window);
+        const decoder = try gpa.create(inflate_mod.Decoder);
+        decoder.* = .{};
         return .{
             .gpa = gpa,
             .io = io,
@@ -564,6 +573,7 @@ const Indexer = struct {
             .options = options,
             .read_buffer = read_buffer,
             .window = window,
+            .decoder = decoder,
             .reader = file.reader(io, read_buffer),
         };
     }
@@ -575,6 +585,8 @@ const Indexer = struct {
         x.thin_bases.deinit(x.gpa);
         x.gpa.free(x.read_buffer);
         x.gpa.free(x.window);
+        x.gpa.destroy(x.decoder);
+        x.scratch.deinit(x.gpa);
         x.* = undefined;
     }
 
@@ -733,9 +745,40 @@ const Indexer = struct {
         buffer: []u8,
     };
 
+    /// The most bytes an entry whose bytes are not kept is decoded whole
+    /// for; a larger one streams through the standard library's decoder.
+    const scratch_limit = 16 << 20;
+
     /// Inflate the stream at the reader's position, which must yield
     /// exactly `size` bytes and then end.
     fn inflate(x: *Indexer, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
+        const out: ?[]u8 = switch (sink) {
+            .buffer => |b| b,
+            .discard, .hash => if (size <= scratch_limit) blk: {
+                try x.scratch.resize(x.gpa, @intCast(size));
+                break :blk x.scratch.items;
+            } else null,
+        };
+        if (out) |whole| {
+            const n = x.decoder.zlib(x.input(), whole) catch |err| return switch (err) {
+                error.CorruptStream => error.CorruptPackEntry,
+                error.OutputTooLong => error.PackEntrySizeMismatch,
+                error.EndOfStream => x.inputError() orelse error.TruncatedPack,
+                error.ReadFailed => x.inputError() orelse error.ReadFailed,
+            };
+            if (n != size) return error.PackEntrySizeMismatch;
+            switch (sink) {
+                .hash => |h| h.update(whole),
+                .discard, .buffer => {},
+            }
+            if (hasher) |h| h.update(whole);
+            return;
+        }
+        return x.inflateStreaming(size, sink, hasher);
+    }
+
+    /// `inflate` for an entry too large to hold whole.
+    fn inflateStreaming(x: *Indexer, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
         var d: flate.Decompress = .init(x.input(), .zlib, x.window);
         var chunk: [16 * 1024]u8 = undefined;
         var done: u64 = 0;

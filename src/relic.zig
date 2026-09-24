@@ -57,6 +57,7 @@ pub const url = @import("url.zig");
 pub const remote = @import("remote.zig");
 pub const progress = @import("progress.zig");
 pub const fsck = @import("fsck.zig");
+pub const inflate = @import("inflate.zig");
 pub const indexpack = @import("indexpack.zig");
 pub const connection = @import("connection.zig");
 pub const sideband = @import("sideband.zig");
@@ -142,5 +143,6 @@ test {
         _ = @import("uploadpack_test.zig");
         _ = @import("cloneconfig_test.zig");
         _ = @import("clientcert_test.zig");
+        _ = @import("inflate_test.zig");
     }
 }
