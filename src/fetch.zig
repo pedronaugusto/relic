@@ -67,10 +67,6 @@ pub const Error = error{
     /// `unshallow` asked of a repository that is not shallow, which git
     /// refuses as making no sense.
     NotShallow,
-    /// The server is shallow itself and would move this repository's
-    /// boundary on a fetch that did not ask to: git's `--update-shallow`,
-    /// which relic does not do.
-    ShallowUpdateRefused,
     /// A filter asked of a remote that is not the repository's promisor:
     /// the objects it would leave out would be missing, not promised.
     NotAPromisorRemote,
@@ -123,6 +119,11 @@ pub const Options = struct {
     shallow_exclude: []const []const u8 = &.{},
     /// `--unshallow`: the whole history, and no boundary.
     unshallow: bool = false,
+    /// `--update-shallow`: from a shallow remote, take the refs whose
+    /// history ends at its boundary, and that boundary into
+    /// `.git/shallow`. Without it those refs are left, and each is a
+    /// warning, as git leaves and warns.
+    update_shallow: bool = false,
     /// `--filter`, for a partial clone's promisor remote; `null` takes
     /// `remote.<name>.partialclonefilter`, as git does.
     filter: ?[]const u8 = null,
@@ -173,6 +174,10 @@ pub const Update = struct {
         rejected_non_fast_forward,
         /// A tag that already exists here with another value.
         rejected_would_clobber_tag,
+        /// Its history ends at the remote's shallow boundary, and the
+        /// fetch did not ask to take that boundary on. git leaves the ref,
+        /// warns, and does not fail the fetch.
+        rejected_shallow,
     };
 
     /// Whether the ref was left alone because updating it was refused.
@@ -226,6 +231,8 @@ const MapEntry = struct {
     dst: ?[]const u8,
     force: bool,
     status: HeadStatus,
+    /// Its history ends at the remote's boundary, which was not taken.
+    rejected_shallow: bool = false,
 };
 
 /// Fetch from `remote_name`, a configured remote or a URL, into `repo`.
@@ -489,10 +496,15 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         repo.odb.shallow = old_boundary;
         boundary_moved = false;
     };
+    // A shallow remote's boundary, on a fetch that did not ask for one:
+    // walked with for the check below, and kept only as `update_shallow`
+    // says.
+    var remote_roots: std.ArrayList(Oid) = .empty;
+    if (deepen == null) try shallow_info.shallow.appendSlice(gpa, session.advertisedShallow());
     if (shallow_info.shallow.items.len != 0 or shallow_info.unshallow.items.len != 0) {
         if (deepen == null) {
             for (shallow_info.shallow.items) |oid| {
-                if (!repo.odb.shallow.contains(oid)) return error.ShallowUpdateRefused;
+                if (!old_boundary.contains(oid)) try remote_roots.append(arena, oid);
             }
         }
         repo.odb.shallow = try shallow_mod.apply(gpa, &old_boundary, shallow_info.shallow.items, shallow_info.unshallow.items);
@@ -532,6 +544,28 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
             error.MissingObject => return error.MissingObject,
             else => |e| return e,
         };
+        if (remote_roots.items.len != 0) {
+            // Which refs need which of the remote's roots: git's
+            // `assign_shallow_commits_to_refs`, walking what came in the
+            // pack — what was here before is whole below it.
+            var needed: Oid.Set = .empty;
+            var roots: Oid.Set = .empty;
+            for (remote_roots.items) |oid| {
+                const arrived = if (fresh) |*index| (try index.find(oid)) != null else false;
+                if (arrived) try roots.put(arena, oid, {});
+            }
+            for ([_][]MapEntry{ map.items, backfill.items }) |entries| for (entries) |*entry| {
+                const reached = try rootsReached(arena, io, repo, entry.oid, &roots, if (fresh) |*index| index else null, &old_boundary);
+                if (reached.len == 0) continue;
+                if (options.update_shallow) {
+                    for (reached) |r| try needed.put(arena, r, {});
+                } else entry.rejected_shallow = true;
+            };
+            repo.odb.shallow.deinit(gpa);
+            repo.odb.shallow = try old_boundary.clone(gpa);
+            var it = needed.keyIterator();
+            while (it.next()) |r| try repo.odb.shallow.put(gpa, r.*, {});
+        }
     }
 
     if (boundary_moved) try shallow_mod.write(gpa, io, repo.common_dir, &repo.odb.shallow);
@@ -549,6 +583,20 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
                 // Only a commit can be merged.
                 if (entry.status == .merge and !try isCommitish(io, repo, entry.oid)) entry.status = .not_for_merge;
                 if (entry.status != want_status) continue;
+                if (entry.rejected_shallow) {
+                    // Left out of FETCH_HEAD and not written, as git leaves
+                    // it.
+                    const name = entry.dst orelse entry.name;
+                    try warning.note(options.warnings, .{ .shallow_update_rejected = name });
+                    if (entry.dst) |dst| try updates.append(arena, .{
+                        .remote_ref = entry.name,
+                        .local_ref = dst,
+                        .old = if (local.names.get(dst)) |v| v else null,
+                        .new = entry.oid,
+                        .result = .rejected_shallow,
+                    });
+                    continue;
+                }
                 if (entry.status != .ignore) {
                     try fetch_head.append(arena, .{
                         .oid = entry.oid,
@@ -853,6 +901,33 @@ fn removeDuplicates(map: *std.ArrayList(MapEntry)) Error!void {
         kept += 1;
     }
     map.shrinkRetainingCapacity(kept);
+}
+
+/// The remote's boundary commits `tip`'s new history reaches: walked
+/// through the commits the pack brought, stopping at what was here before
+/// and at this repository's own boundary.
+fn rootsReached(arena: Allocator, io: Io, repo: *Repository, tip: Oid, roots: *const Oid.Set, fresh: ?*const pack.Index, boundary: *const Oid.Set) Error![]const Oid {
+    var out: std.ArrayList(Oid) = .empty;
+    const index = fresh orelse return out.items;
+    var seen: Oid.Set = .empty;
+    var stack: std.ArrayList(Oid) = .empty;
+    const start = repo.peel(io, tip) catch return out.items;
+    try stack.append(arena, start);
+    while (stack.pop()) |oid| {
+        if ((try seen.getOrPut(arena, oid)).found_existing) continue;
+        if (roots.contains(oid)) {
+            try out.append(arena, oid);
+            continue;
+        }
+        if (boundary.contains(oid) or (try index.find(oid)) == null) continue;
+        const found = repo.odb.read(io, oid) catch continue;
+        defer repo.odb.gpa.free(found.bytes);
+        if (found.type != .commit) continue;
+        var commit = try object.Commit.parse(arena, repo.kind, found.bytes);
+        defer commit.deinit();
+        for (commit.parents) |p| try stack.append(arena, p);
+    }
+    return out.items;
 }
 
 /// What the options ask of the boundary, as the protocol asks it.

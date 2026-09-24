@@ -213,6 +213,15 @@ pub const Session = struct {
         };
     }
 
+    /// A shallow v0 server's boundary, as its advertisement gave it: what a
+    /// fetch that asks for no depth takes the server's shallow lines to be.
+    pub fn advertisedShallow(s: *const Session) []const Oid {
+        return switch (s.impl) {
+            .local => &.{},
+            .smart => |smart| smart.advertisement.shallow,
+        };
+    }
+
     /// The protocol the remote spoke, or `null` for a repository on this
     /// machine, which speaks none.
     pub fn protocolVersion(s: *const Session) ?protocol.Version {
@@ -259,7 +268,19 @@ pub const Session = struct {
             },
             .smart => |*smart| {
                 smart.done = true;
+                // The boundary, sorted as git's list of grafts is.
+                const shallow = try gpa.alloc(Oid, db.shallow.count());
+                defer gpa.free(shallow);
+                var it = db.shallow.keyIterator();
+                var i: usize = 0;
+                while (it.next()) |oid| : (i += 1) shallow[i] = oid.*;
+                std.mem.sort(Oid, shallow, {}, struct {
+                    fn lessThan(_: void, a: Oid, b: Oid) bool {
+                        return a.order(b) == .lt;
+                    }
+                }.lessThan);
                 return sendpack.send(gpa, io, smart.conn, &smart.advertisement, db, .{
+                    .shallow = shallow,
                     .commands = request.commands,
                     .objects = request.objects,
                     .atomic = request.atomic,

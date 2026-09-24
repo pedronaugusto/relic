@@ -23,6 +23,7 @@ const objectwalk = @import("objectwalk.zig");
 const url_mod = @import("url.zig");
 const object = @import("object.zig");
 const revwalk = @import("revwalk.zig");
+const shallow_mod = @import("shallow.zig");
 const safepath = @import("safepath.zig");
 const sendpack = @import("sendpack.zig");
 const builtin = @import("builtin");
@@ -252,6 +253,9 @@ pub const Remote = struct {
         const deny_deletes = config.getBool("receive.denydeletes", false) catch false;
         const deny_non_ff = config.getBool("receive.denynonfastforwards", false) catch false;
 
+        var pushed: hash.Oid.Set = .empty;
+        for (objects) |entry| try pushed.put(arena, entry.oid, {});
+        var new_roots: hash.Oid.Set = .empty;
         var refs: std.ArrayList(sendpack.RefReport) = .empty;
         var refused = false;
         for (commands) |command| {
@@ -269,6 +273,17 @@ pub const Remote = struct {
             } else {
                 if (is_current and deny_current) reason = "branch is currently checked out";
                 if (reason == null and !try r.repo.odb.exists(io, command.new)) reason = "missing necessary objects";
+                // A shallow pusher's history ends at its boundary; taking a
+                // ref whose history does moves this repository's, which git
+                // allows only with `receive.shallowUpdate`.
+                if (reason == null and from.shallow.count() != 0) {
+                    const roots = try shallowRootsReached(arena, io, from, command.new, &pushed);
+                    if (roots.len != 0) {
+                        if (config.getBool("receive.shallowupdate", false) catch false) {
+                            for (roots) |root| try new_roots.put(arena, root, {});
+                        } else reason = "shallow update not allowed";
+                    }
+                }
                 if (reason == null and deny_non_ff and !command.old.isZero()) {
                     const ok = revwalk.isAncestor(gpa, io, &r.repo.odb, command.old, command.new) catch false;
                     if (!ok) reason = "non-fast-forward";
@@ -309,8 +324,36 @@ pub const Remote = struct {
                 };
             }
         }
+        if (new_roots.count() != 0) {
+            var it = new_roots.keyIterator();
+            while (it.next()) |root| try r.repo.odb.shallow.put(r.repo.gpa, root.*, {});
+            try shallow_mod.write(gpa, io, r.repo.common_dir, &r.repo.odb.shallow);
+        }
         report.refs = refs.items;
         return report;
+    }
+
+    /// The pusher's boundary commits `tip`'s pushed history reaches.
+    fn shallowRootsReached(arena: Allocator, io: Io, from: *odb_mod.Odb, tip: hash.Oid, pushed: *const hash.Oid.Set) (Error || sendpack.Error)![]const hash.Oid {
+        var out: std.ArrayList(hash.Oid) = .empty;
+        var seen: hash.Oid.Set = .empty;
+        var stack: std.ArrayList(hash.Oid) = .empty;
+        try stack.append(arena, tip);
+        while (stack.pop()) |oid| {
+            if ((try seen.getOrPut(arena, oid)).found_existing) continue;
+            if (!pushed.contains(oid)) continue;
+            if (from.shallow.contains(oid)) {
+                try out.append(arena, oid);
+                continue;
+            }
+            const found = from.read(io, oid) catch continue;
+            defer from.gpa.free(found.bytes);
+            if (found.type != .commit) continue;
+            var commit = try @import("object.zig").Commit.parse(arena, from.kind, found.bytes);
+            defer commit.deinit();
+            for (commit.parents) |p| try stack.append(arena, p);
+        }
+        return out.items;
     }
 
     fn stage(tx: *refs_mod.Transaction, command: sendpack.Command) refs_mod.TransactionError!void {

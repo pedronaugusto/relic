@@ -296,6 +296,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         }
         try partial.writePromisor(io, pack_dir, name, sought.items);
     };
+    if (deepen == null) try shallow_info.shallow.appendSlice(gpa, session.advertisedShallow());
     if (shallow_info.shallow.items.len != 0) {
         var empty: Oid.Set = .empty;
         repo.odb.shallow.deinit(gpa);

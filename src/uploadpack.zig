@@ -149,6 +149,18 @@ pub const Server = struct {
             if (ref.peeled) |p| try pktline.print(w, "{f} {s}^{{}}\n", .{ p, ref.name });
         }
         if (first) try pktline.print(w, "{f} capabilities^{{}}\x00{s}\n", .{ Oid.zero(s.kind()), caps.items });
+        // A shallow server says where its history ends, as git's does.
+        const boundary = try s.gpa.alloc(Oid, s.db().shallow.count());
+        defer s.gpa.free(boundary);
+        var it = s.db().shallow.keyIterator();
+        var i: usize = 0;
+        while (it.next()) |oid| : (i += 1) boundary[i] = oid.*;
+        std.mem.sort(Oid, boundary, {}, struct {
+            fn lessThan(_: void, a: Oid, b: Oid) bool {
+                return a.order(b) == .lt;
+            }
+        }.lessThan);
+        for (boundary) |oid| try pktline.print(w, "shallow {f}\n", .{oid});
         try pktline.flush(w);
     }
 
@@ -709,7 +721,8 @@ const Negotiation = struct {
             try stack.append(n.arena, .{ .oid = start, .depth = 0 });
             while (stack.pop()) |item| {
                 const cur = item.depth + 1;
-                if (depth != infinite_depth and cur >= depth) {
+                // The server's own boundary is one for the client too.
+                if ((depth != infinite_depth and cur >= depth) or n.db().shallow.contains(item.oid)) {
                     try result.append(n.arena, item.oid);
                     continue;
                 }

@@ -24,6 +24,10 @@ pub const Warning = union(enum) {
     /// What `ssh` wrote on its standard error, a line to a line, on a
     /// conversation that went on to succeed.
     ssh_said: []const u8,
+    /// A ref from a shallow remote left alone, because taking it would move
+    /// this repository's boundary and the fetch did not say to: the local
+    /// ref's name.
+    shallow_update_rejected: []const u8,
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -33,6 +37,7 @@ pub const Warning = union(enum) {
             .filter_not_supported => "filtering not recognized by server, ignoring",
             .ssl_verify_disabled => |setting| std.fmt.allocPrint(arena, "the server's certificate is not checked ({s})", .{setting}),
             .ssh_said => |text| text,
+            .shallow_update_rejected => |name| std.fmt.allocPrint(arena, "rejected {s} because shallow roots are not allowed to be updated", .{name}),
         };
     }
 };
@@ -61,6 +66,7 @@ pub const Warnings = struct {
             .filter_not_supported => .filter_not_supported,
             .ssl_verify_disabled => |t| .{ .ssl_verify_disabled = try a.dupe(u8, t) },
             .ssh_said => |t| .{ .ssh_said = try a.dupe(u8, t) },
+            .shallow_update_rejected => |t| .{ .shallow_update_rejected = try a.dupe(u8, t) },
         };
         try w.items.append(a, owned);
     }

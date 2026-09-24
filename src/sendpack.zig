@@ -62,6 +62,9 @@ pub const Request = struct {
     /// `--push-option` values, for the server's hooks.
     push_options: []const []const u8 = &.{},
     progress: ?progress_mod.Progress = null,
+    /// This repository's shallow boundary, which the server is told before
+    /// the commands, as git's send-pack tells it.
+    shallow: []const Oid = &.{},
 };
 
 /// What the server said about one ref.
@@ -119,6 +122,7 @@ pub fn send(
     const status = status_v2 or adv.has("report-status");
 
     const w = try conn.request();
+    for (request.shallow) |oid| pktline.print(w, "shallow {f}\n", .{oid}) catch |err| return conn.writeFailed(err);
     writeCommands(w, adv, request, band, status_v2, status) catch |err| return conn.writeFailed(err);
     if (needs_pack) {
         _ = db.writePackTo(io, w, request.objects, .{
@@ -161,9 +165,11 @@ fn writeCommands(
     status_v2: bool,
     status: bool,
 ) pktline.WriteError!void {
+    // As git's send-pack writes them: no newline after a command, and the
+    // capabilities after the NUL each with the space before it.
     for (request.commands, 0..) |command, i| {
         if (i != 0) {
-            try pktline.print(w, "{f} {f} {s}\n", .{ command.old, command.new, command.name });
+            try pktline.print(w, "{f} {f} {s}", .{ command.old, command.new, command.name });
             continue;
         }
         var caps_buffer: [256]u8 = undefined;
@@ -172,16 +178,16 @@ fn writeCommands(
             try caps.writeAll(" report-status-v2");
         } else if (status) try caps.writeAll(" report-status");
         if (band) try caps.writeAll(" side-band-64k");
+        if (request.progress == null and adv.has("quiet")) try caps.writeAll(" quiet");
         if (request.atomic) try caps.writeAll(" atomic");
         if (request.push_options.len != 0) try caps.writeAll(" push-options");
         if (adv.has("object-format")) try caps.print(" object-format={s}", .{adv.kind.name()});
         if (adv.has("agent")) try caps.print(" agent={s}", .{protocol.agent});
-        const list = std.mem.trimStart(u8, caps.buffered(), " ");
-        try pktline.print(w, "{f} {f} {s}\x00{s}\n", .{ command.old, command.new, command.name, list });
+        try pktline.print(w, "{f} {f} {s}\x00{s}", .{ command.old, command.new, command.name, caps.buffered() });
     }
     try pktline.flush(w);
     if (request.push_options.len != 0) {
-        for (request.push_options) |option| try pktline.print(w, "{s}\n", .{option});
+        for (request.push_options) |option| try pktline.print(w, "{s}", .{option});
         try pktline.flush(w);
     }
 }

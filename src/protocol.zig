@@ -63,6 +63,8 @@ pub const Advertisement = struct {
     refs: []const RemoteRef,
     /// The hash the server's object names are written with.
     kind: hash.Kind,
+    /// A shallow v0 server's boundary, from its advertisement.
+    shallow: []const Oid = &.{},
 
     /// Release everything.
     pub fn deinit(adv: *Advertisement) void {
@@ -130,6 +132,7 @@ pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Er
 
     var capabilities: std.ArrayList([]const u8) = .empty;
     var refs: std.ArrayList(RemoteRef) = .empty;
+    var shallow: std.ArrayList(Oid) = .empty;
     var first = true;
     var saw_format = false;
     while (true) {
@@ -174,7 +177,11 @@ pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Er
             }
         }
         first = false;
-        if (std.mem.startsWith(u8, line, "shallow ")) continue;
+        // A shallow server says where its history ends, after its refs.
+        if (std.mem.startsWith(u8, line, "shallow ")) {
+            try shallow.append(arena, Oid.parse(adv.kind, line["shallow ".len..]) catch return error.ProtocolError);
+            continue;
+        }
         const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.ProtocolError;
         const oid = Oid.parse(adv.kind, line[0..space]) catch return error.ProtocolError;
         const name = line[space + 1 ..];
@@ -205,6 +212,7 @@ pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Er
         if (adv.symrefTarget(ref.name)) |target| ref.symref_target = target;
     }
     adv.refs = refs.items;
+    adv.shallow = shallow.items;
     return adv;
 }
 

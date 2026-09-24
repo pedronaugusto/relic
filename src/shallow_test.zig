@@ -295,3 +295,189 @@ test "a shallow clone over ssh is git's, and one from a path is a whole local cl
     try expectSameShallow(gpa, io, local.by_git, local.by_relic);
     try testing.expectEqualStrings("--depth", warnings.items.items[0].ignored_for_local);
 }
+
+test "from a shallow remote a fetch leaves the refs that would move the boundary, or takes it with update_shallow, as git fetch does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedHistory(gpa, io, root.dir);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    const origin = try std.fmt.allocPrint(gpa, "file://{s}/repo.git", .{root_path});
+    defer gpa.free(origin);
+    // The shallow remote: git's own depth-2 clone, with a branch of its own.
+    const shallow_path = try std.fmt.allocPrint(gpa, "{s}/shallow", .{root_path});
+    defer gpa.free(shallow_path);
+    const made = try testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "clone", "-q", "--bare", "--depth=2", origin, shallow_path }, "", true);
+    gpa.free(made);
+
+    for ([_]bool{ false, true }) |update| for ([_][]const u8{ "2", "0" }) |version| {
+        var twins = try Twins.init(gpa, io);
+        defer twins.deinit(gpa, io);
+        for ([_]Io.Dir{ twins.by_git, twins.by_relic }) |dir| {
+            const out = try testremote.gitInputEnv(gpa, io, dir, &env, &.{ "init", "-q", "-b", "main" }, "", true);
+            gpa.free(out);
+            const added = try testremote.gitInputEnv(gpa, io, dir, &env, &.{ "remote", "add", "s", shallow_path }, "", true);
+            gpa.free(added);
+            const set = try testremote.gitInputEnv(gpa, io, dir, &env, &.{ "config", "protocol.version", version }, "", true);
+            gpa.free(set);
+        }
+        const fetched = try testremote.gitInputEnv(gpa, io, twins.by_git, &env, if (update) &.{ "fetch", "-q", "--update-shallow", "s" } else &.{ "fetch", "-q", "s" }, "", true);
+        gpa.free(fetched);
+        var repo = try repo_mod.Repository.open(gpa, io, twins.by_relic, .{});
+        defer repo.deinit(io);
+        var warnings: @import("warning.zig").Warnings = .init(gpa);
+        defer warnings.deinit();
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "s", .{ .who = test_who, .update_shallow = update, .warnings = &warnings, .programs = .{ .environ = &env } });
+        defer outcome.deinit();
+        try testing.expect(!outcome.anyRejected());
+        for ([_][]const u8{ ".git/shallow", ".git/FETCH_HEAD" }) |name| {
+            const theirs = twins.by_git.readFileAlloc(io, name, gpa, .unlimited) catch try gpa.dupe(u8, "(none)");
+            defer gpa.free(theirs);
+            const ours = twins.by_relic.readFileAlloc(io, name, gpa, .unlimited) catch try gpa.dupe(u8, "(none)");
+            defer gpa.free(ours);
+            try testing.expectEqualStrings(theirs, ours);
+        }
+        const theirs = try testremote.gitInputEnv(gpa, io, twins.by_git, &env, &.{ "for-each-ref", "--format=%(refname) %(objectname) %(symref)" }, "", true);
+        defer gpa.free(theirs);
+        const ours = try testremote.gitInputEnv(gpa, io, twins.by_relic, &env, &.{ "for-each-ref", "--format=%(refname) %(objectname) %(symref)" }, "", true);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+        // Left alone, each ref is a warning in git's words.
+        if (!update) {
+            try testing.expect(warnings.items.items.len >= 1);
+            const text = try warnings.items.items[0].message(warnings.arena.allocator());
+            try testing.expect(std.mem.endsWith(u8, text, "because shallow roots are not allowed to be updated"));
+        } else {
+            const checked = try testremote.gitInputEnv(gpa, io, twins.by_relic, &env, &.{ "fsck", "--no-dangling" }, "", true);
+            gpa.free(checked);
+        }
+    };
+}
+
+test "a push from a shallow repository tells the server its boundary, as git's send-pack does, and is refused where git's is" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedHistory(gpa, io, root.dir);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    const origin = try std.fmt.allocPrint(gpa, "file://{s}/repo.git", .{root_path});
+    defer gpa.free(origin);
+
+    // A stand-in ssh that keeps what it is sent.
+    var tools = testing.tmpDir(.{ .iterate = true });
+    defer tools.cleanup();
+    const tools_path = try testremote.absolutePath(gpa, io, tools.dir);
+    defer gpa.free(tools_path);
+    const script = try std.fmt.allocPrint(gpa,
+        \\#!/bin/sh
+        \\while [ $# -gt 0 ]; do case "$1" in -G) exit 0;; -o|-p|-P) shift 2;; -*) shift;; *) break;; esac; done
+        \\shift
+        \\tee -a "{s}/sent" | PATH="$(git --exec-path):$PATH" sh -c "$*"
+        \\
+    , .{tools_path});
+    defer gpa.free(script);
+    try tools.dir.writeFile(io, .{ .sub_path = "ssh", .data = script });
+    {
+        const file = try tools.dir.openFile(io, "ssh", .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    }
+    const ssh = try std.fmt.allocPrint(gpa, "{s}/ssh", .{tools_path});
+    defer gpa.free(ssh);
+    try env.put("GIT_SSH_COMMAND", ssh);
+    // Both sides commit the same commit, whatever second each lands in.
+    try env.put("GIT_AUTHOR_DATE", "1700000000 +0000");
+    try env.put("GIT_COMMITTER_DATE", "1700000000 +0000");
+
+    // To the full history, accepted; to an empty repository, refused.
+    for ([_]bool{ true, false }) |to_origin| {
+        var sent: [2][]u8 = undefined;
+        var statuses: [2][]u8 = undefined;
+        for (0..2) |who| {
+            var tmp = testing.tmpDir(.{ .iterate = true });
+            defer tmp.cleanup();
+            const tmp_path = try testremote.absolutePath(gpa, io, tmp.dir);
+            defer gpa.free(tmp_path);
+            const target = if (to_origin)
+                try std.fmt.allocPrint(gpa, "{s}/target.git", .{tmp_path})
+            else
+                try std.fmt.allocPrint(gpa, "{s}/empty.git", .{tmp_path});
+            defer gpa.free(target);
+            if (to_origin) {
+                const out = try testremote.gitInputEnv(gpa, io, tmp.dir, &env, &.{ "clone", "-q", "--bare", origin, target }, "", true);
+                gpa.free(out);
+            } else {
+                const out = try testremote.gitInputEnv(gpa, io, tmp.dir, &env, &.{ "init", "-q", "--bare", "-b", "main", target }, "", true);
+                gpa.free(out);
+            }
+            const cloned = try testremote.gitInputEnv(gpa, io, tmp.dir, &env, &.{ "clone", "-q", "--depth=2", origin, "work" }, "", true);
+            gpa.free(cloned);
+            var work = try tmp.dir.openDir(io, "work", .{});
+            defer work.close(io);
+            try work.writeFile(io, .{ .sub_path = "new", .data = "new\n" });
+            for ([_][]const []const u8{ &.{ "add", "new" }, &.{ "-c", "user.name=P", "-c", "user.email=p@example.com", "commit", "-q", "-m", "new" } }) |args| {
+                const out = try testremote.gitInputEnv(gpa, io, work, &env, args, "", true);
+                gpa.free(out);
+            }
+            const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}", .{target});
+            defer gpa.free(url);
+            tools.dir.deleteFile(io, "sent") catch {};
+            if (who == 0) {
+                const out = testremote.gitInputEnv(gpa, io, work, &env, &.{ "push", "-q", "--porcelain", url, "main" }, "", false) catch try gpa.dupe(u8, "refused");
+                gpa.free(out);
+                const status = try testremote.gitInputEnv(gpa, io, work, &env, &.{ "--git-dir", target, "for-each-ref" }, "", true);
+                statuses[0] = status;
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, work, .{});
+                defer repo.deinit(io);
+                var outcome = try @import("push.zig").push(gpa, io, &repo, url, .{ .who = test_who, .refspecs = &.{"main"}, .programs = .{ .environ = &env } });
+                defer outcome.deinit();
+                if (!to_origin) {
+                    try testing.expectEqualStrings("shallow update not allowed", outcome.refs[0].message.?);
+                }
+                const status = try testremote.gitInputEnv(gpa, io, work, &env, &.{ "--git-dir", target, "for-each-ref" }, "", true);
+                statuses[1] = status;
+            }
+            const bytes = try tools.dir.readFileAlloc(io, "sent", gpa, .unlimited);
+            defer gpa.free(bytes);
+            // Up to the pack, whose compression is each side's own.
+            const end = std.mem.indexOf(u8, bytes, "PACK") orelse bytes.len;
+            sent[who] = try withoutAgentBytes(gpa, bytes[0..end]);
+        }
+        defer for (sent) |b| gpa.free(b);
+        defer for (statuses) |b| gpa.free(b);
+        try testing.expectEqualStrings(sent[0], sent[1]);
+        try testing.expectEqualStrings(statuses[0], statuses[1]);
+    }
+}
+
+/// `bytes` with the agent's value, and so its line's length, blanked.
+fn withoutAgentBytes(gpa: Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var rest = bytes;
+    while (rest.len >= 4) {
+        const len = std.fmt.parseUnsigned(u16, rest[0..4], 16) catch break;
+        if (len < 4) {
+            try out.print(gpa, "{s}\n", .{rest[0..4]});
+            rest = rest[4..];
+            continue;
+        }
+        if (len > rest.len) break;
+        const payload = rest[4..len];
+        rest = rest[len..];
+        if (std.mem.indexOf(u8, payload, "agent=")) |at| {
+            try out.print(gpa, "????{s}\n", .{payload[0 .. at + "agent=".len]});
+        } else try out.print(gpa, "{d}:{s}\n", .{ len, payload });
+    }
+    return out.toOwnedSlice(gpa);
+}
