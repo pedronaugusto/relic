@@ -54,15 +54,17 @@ pub const Error = error{
     /// A path's `merge` attribute names a driver `merge.<name>.driver`
     /// configures, which is a program this merge does not run.
     UnsupportedMergeDriver,
-    /// A content merge was asked of a file and something of another type.
-    /// git's merge-ort reaches this when a file renamed differently on the
-    /// two sides lands, through the other side's directory rename, on a
-    /// path the other side keeps a directory at: splitting that path's file
-    /// from its directory clears the file's own stage, and the rename's
-    /// content merge then meets a file and nothing. git stops there on an
-    /// assertion in `handle_content_merge`, leaving no answer to give, and
-    /// so this stops there too.
-    MergeOfDifferentTypes,
+    /// A file of ours that the other side's directory rename carried onto
+    /// a path where a directory also stands lost its own stage: git's
+    /// merge-ort splits the file from the directory there and clears stage
+    /// 1 whichever side the file is on. Where the merge later needs that
+    /// stage -- a content merge of the file against the other side's
+    /// rename of the same source, or a rename whose type the empty stage
+    /// seems to change, leaving a moved-aside file inconsistent -- git
+    /// stops on an assertion, in `handle_content_merge` or in
+    /// `process_entry`, and has no answer to give. This stops at the same
+    /// two checks.
+    DirectoryRenameLostStage,
 } || Allocator.Error || odb_mod.Error || object.TreeParseError || object.ParseError ||
     attributes.Error || revwalk.Error;
 
@@ -966,7 +968,7 @@ const Merge = struct {
         extra_marker_size: u32,
         result: *Version,
     ) Error!bool {
-        if ((a.mode & S_IFMT) != (b.mode & S_IFMT)) return error.MergeOfDifferentTypes;
+        if ((a.mode & S_IFMT) != (b.mode & S_IFMT)) return error.DirectoryRenameLostStage;
         var clean = true;
         if (a.mode == b.mode or a.mode == o.mode) {
             result.mode = b.mode;
@@ -1749,6 +1751,7 @@ const Merge = struct {
                 ci.result = ci.stages[side];
                 ci.is_null = ci.result.mode == 0;
                 if (ci.is_null) ci.clean = true;
+                if (ci.is_null != (ci.filemask == ci.match_mask)) return error.DirectoryRenameLostStage;
             }
         } else if (ci.filemask >= 6 and (ci.stages[1].mode & S_IFMT) != (ci.stages[2].mode & S_IFMT)) {
             if (m.call_depth > 0) {

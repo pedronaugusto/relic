@@ -95,19 +95,21 @@ fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8
     opts.labels.ours = ours;
     opts.labels.theirs = theirs;
     const merged = ort.mergeCommits(gpa, io, &db, try revParse(gpa, io, repo, ours), try revParse(gpa, io, repo, theirs), null, opts);
-    // On a few histories git's merge stops on its own assertion and prints
-    // nothing. There the merge has to stop the same way, on the same check,
-    // and nowhere else.
+    // On a few histories git's merge stops on one of its own assertions and
+    // prints nothing. There the merge has to stop the same way, on the same
+    // checks, and nowhere else.
     if (expected.len == 0 and git.code > 1) {
-        if (std.mem.indexOf(u8, git.stderr, "handle_content_merge") == null) {
-            std.debug.print("git's merge-tree of {s} and {s} failed: {s}\n", .{ ours, theirs, git.stderr });
-            return error.GitFailed;
-        }
+        const known = std.mem.indexOf(u8, git.stderr, "function handle_content_merge") != null or
+            std.mem.indexOf(u8, git.stderr, "function process_entry") != null;
         if (merged) |r| {
             var result = r;
             result.deinit();
-            return error.TestExpectedError;
-        } else |err| try std.testing.expectEqual(error.MergeOfDifferentTypes, err);
+        } else |_| {}
+        if (!known) {
+            std.debug.print("git's merge-tree of {s} and {s} failed: {s}\n", .{ ours, theirs, git.stderr });
+            return error.GitFailed;
+        }
+        try std.testing.expectError(error.DirectoryRenameLostStage, merged);
         return;
     }
     var result = try merged;
@@ -232,6 +234,39 @@ test "a rename both ways that a directory rename lands on a directory stops wher
     try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
     // Merged into main the file is on the other side, and both finish.
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
+}
+
+test "a rename a directory rename lands on a directory, whose source is also moved aside, stops where git's merge stops" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    try repo.writeFile(io, "docs", "x\ny\nz\n");
+    try repo.writeFile(io, "src/core/f5.txt/inner.txt", "x\ny\nz\n");
+    try repo.writeFile(io, "src/other.txt", "y\n");
+    try commitAll(io, &repo, "base");
+    try repo.exec(io, &.{ "branch", "topic" });
+    // main renames docs to src/core/f5.txt, where a directory was, and
+    // makes docs a directory.
+    try repo.exec(io, &.{ "rm", "-rq", "docs", "src/core" });
+    try repo.writeFile(io, "docs/f1.txt", "x\ny\nz\n");
+    try repo.writeFile(io, "docs/f3.txt", "w\n");
+    try repo.writeFile(io, "src/core/f5.txt", "x\ny\nz\n");
+    try commitAll(io, &repo, "main");
+    try repo.exec(io, &.{ "checkout", "-q", "topic" });
+    // topic moves src/ to moved1/, which carries main's rename onto its
+    // directory moved1/core/f5.txt.
+    try repo.exec(io, &.{ "mv", "src", "moved1" });
+    try commitAll(io, &repo, "topic");
+
+    var git = try repo.capture(io, &.{ "merge-tree", "--write-tree", "main", "topic" });
+    defer git.deinit(gpa);
+    try std.testing.expectEqualStrings("", git.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, git.stderr, "function process_entry") != null);
+    try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
+    try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
 }
 
 /// A random history for the merge to meet: files in a few directories,
