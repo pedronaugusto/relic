@@ -25,6 +25,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
 const inflate_mod = @import("inflate.zig");
+const config_mod = @import("config.zig");
 
 const hash = @import("hash.zig");
 const object = @import("object.zig");
@@ -113,7 +114,20 @@ pub const Options = struct {
     /// collected, for a caller that checks the pack is connected without
     /// reading it again: `Links`.
     links: ?*Links = null,
+    /// How many threads resolve the deltas: `pack.threads`
+    /// (`configuredThreads`). Zero chooses as git's index-pack does from
+    /// the processors: all of up to three, three of four or five, half of
+    /// fewer than forty, and twenty at most.
+    threads: u32 = 0,
 };
+
+/// `pack.threads`, as index-pack reads it: zero, or unset, to choose from
+/// the processors; a value that is not a number is zero.
+pub fn configuredThreads(config: ?*const config_mod.Config) u32 {
+    const c = config orelse return 0;
+    const n = c.getInt("pack.threads", 0) catch return 0;
+    return std.math.cast(u32, n) orelse 0;
+}
 
 /// The names a received pack's commits, trees and tags hold, collected as
 /// it is indexed — each object is in hand then — so that whether the pack
@@ -241,6 +255,8 @@ const Entry = struct {
     /// The object's type; for a delta, its base's, once resolved.
     type: object.Type = .blob,
     resolved: bool = false,
+    /// A reference delta a thread has taken to resolve.
+    claimed: bool = false,
 };
 
 /// A reference delta and the name of its base.
@@ -540,11 +556,8 @@ const Indexer = struct {
     options: Options,
     read_buffer: []u8,
     window: []u8,
-    /// relic's own decoder, for every entry that fits in memory whole.
-    decoder: *inflate_mod.Decoder,
-    /// Where an entry whose bytes are not kept is decoded: a blob being
-    /// named, a delta being measured.
-    scratch: std.ArrayList(u8) = .empty,
+    /// How the stream's entries are decoded while it is parsed.
+    inflater: Inflater,
     reader: Io.File.Reader,
     entries: std.ArrayList(Entry) = .empty,
     ofs_bases: std.ArrayList(OfsBase) = .empty,
@@ -553,7 +566,16 @@ const Indexer = struct {
     /// are appended.
     thin_bases: std.ArrayList(Oid) = .empty,
     deltas: u32 = 0,
-    resolved_count: u64 = 0,
+    resolved_count: std.atomic.Value(u64) = .init(0),
+    /// Held by the threads resolving deltas for what they share: `Links`,
+    /// the progress, the diagnostic, reference deltas claimed.
+    lock: Io.Mutex = .init,
+    /// The whole objects deltas hang from, and the next one a thread takes.
+    roots: []u32 = &.{},
+    next_root: std.atomic.Value(usize) = .init(0),
+    /// The first failure among the threads, which stops the others.
+    failure: ?Error = null,
+    failed: std.atomic.Value(bool) = .init(false),
     /// The stream, while `parse` reads from it.
     tee: ?*Tee = null,
 
@@ -562,8 +584,7 @@ const Indexer = struct {
         errdefer gpa.free(read_buffer);
         const window = try gpa.alloc(u8, flate.max_window_len);
         errdefer gpa.free(window);
-        const decoder = try gpa.create(inflate_mod.Decoder);
-        decoder.* = .{};
+        const inflater: Inflater = try .init(gpa);
         return .{
             .gpa = gpa,
             .io = io,
@@ -573,7 +594,7 @@ const Indexer = struct {
             .options = options,
             .read_buffer = read_buffer,
             .window = window,
-            .decoder = decoder,
+            .inflater = inflater,
             .reader = file.reader(io, read_buffer),
         };
     }
@@ -585,12 +606,19 @@ const Indexer = struct {
         x.thin_bases.deinit(x.gpa);
         x.gpa.free(x.read_buffer);
         x.gpa.free(x.window);
-        x.gpa.destroy(x.decoder);
-        x.scratch.deinit(x.gpa);
+        x.inflater.deinit();
+        x.gpa.free(x.roots);
         x.* = undefined;
     }
 
+    /// Fail with `err`, saying where for the caller that asked. With
+    /// several threads the first failure is the one returned and said.
     fn fail(x: *Indexer, err: Error, diagnostic: Diagnostic) Error {
+        x.lock.lockUncancelable(x.io);
+        defer x.lock.unlock(x.io);
+        if (x.failure != null) return err;
+        x.failure = err;
+        x.failed.store(true, .release);
         if (x.options.diagnostic) |d| d.* = diagnostic;
         return err;
     }
@@ -739,71 +767,11 @@ const Indexer = struct {
         return entry;
     }
 
-    const Sink = union(enum) {
-        discard,
-        hash: *hash.Hasher,
-        buffer: []u8,
-    };
-
-    /// The most bytes an entry whose bytes are not kept is decoded whole
-    /// for; a larger one streams through the standard library's decoder.
-    const scratch_limit = 16 << 20;
-
-    /// Inflate the stream at the reader's position, which must yield
+    /// Inflate the entry at the stream's position, which must yield
     /// exactly `size` bytes and then end.
     fn inflate(x: *Indexer, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
-        const out: ?[]u8 = switch (sink) {
-            .buffer => |b| b,
-            .discard, .hash => if (size <= scratch_limit) blk: {
-                try x.scratch.resize(x.gpa, @intCast(size));
-                break :blk x.scratch.items;
-            } else null,
-        };
-        if (out) |whole| {
-            const n = x.decoder.zlib(x.input(), whole) catch |err| return switch (err) {
-                error.CorruptStream => error.CorruptPackEntry,
-                error.OutputTooLong => error.PackEntrySizeMismatch,
-                error.EndOfStream => x.inputError() orelse error.TruncatedPack,
-                error.ReadFailed => x.inputError() orelse error.ReadFailed,
-            };
-            if (n != size) return error.PackEntrySizeMismatch;
-            switch (sink) {
-                .hash => |h| h.update(whole),
-                .discard, .buffer => {},
-            }
-            if (hasher) |h| h.update(whole);
-            return;
-        }
-        return x.inflateStreaming(size, sink, hasher);
-    }
-
-    /// `inflate` for an entry too large to hold whole.
-    fn inflateStreaming(x: *Indexer, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
-        var d: flate.Decompress = .init(x.input(), .zlib, x.window);
-        var chunk: [16 * 1024]u8 = undefined;
-        var done: u64 = 0;
-        while (true) {
-            const remaining = size - done;
-            const want: usize = @intCast(@min(@as(u64, chunk.len), remaining + 1));
-            const n = d.reader.readSliceShort(chunk[0..want]) catch {
-                if (x.inputError()) |err| return err;
-                return if (d.err) |err| switch (err) {
-                    error.EndOfStream => error.TruncatedPack,
-                    else => error.CorruptPackEntry,
-                } else error.CorruptPackEntry;
-            };
-            if (n > remaining) return error.PackEntrySizeMismatch;
-            const got = chunk[0..n];
-            switch (sink) {
-                .discard => {},
-                .hash => |h| h.update(got),
-                .buffer => |out| @memcpy(out[@intCast(done)..][0..n], got),
-            }
-            if (hasher) |h| h.update(got);
-            done += n;
-            if (n < want) break;
-        }
-        if (done != size) return error.PackEntrySizeMismatch;
+        const source: Source = if (x.tee) |t| .{ .tee = t } else .{ .file = &x.reader };
+        return x.inflater.run(source, size, sink, hasher);
     }
 
     /// Name a whole object as it is inflated. A blob streams through the
@@ -857,17 +825,6 @@ const Indexer = struct {
         return crc.final();
     }
 
-    /// The bytes of the entry at `at`, inflated. For a delta, the delta.
-    fn load(x: *Indexer, at: u32) Error![]u8 {
-        const entry = x.entries.items[at];
-        if (entry.size > x.options.max_object_bytes) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
-        const bytes = try x.gpa.alloc(u8, @intCast(entry.size));
-        errdefer x.gpa.free(bytes);
-        try x.seek(entry.data_at);
-        try x.inflate(entry.size, .{ .buffer = bytes }, null);
-        return bytes;
-    }
-
     /// The range of `ofs_bases` whose base is `base`.
     fn ofsChildren(x: *const Indexer, base: u32) []const OfsBase {
         const items = x.ofs_bases.items;
@@ -907,40 +864,66 @@ const Indexer = struct {
         next_ref: usize = 0,
     };
 
-    /// Resolve every delta: from each whole object, and then from each
-    /// base a thin pack left out, down every chain, depth first so that
-    /// what is held is one chain's objects.
+    /// How many threads resolve deltas.
+    fn threadCount(x: *const Indexer) usize {
+        if (x.options.threads != 0) return x.options.threads;
+        const cpus = std.Thread.getCpuCount() catch 1;
+        return if (cpus < 4) cpus else if (cpus < 6) 3 else if (cpus < 40) cpus / 2 else 20;
+    }
+
+    /// Resolve every delta: from each whole object, down every chain, depth
+    /// first so that what a thread holds is one chain's objects — the whole
+    /// objects shared among as many threads as `threadCount` says, as git's
+    /// index-pack shares them — and then from each base a thin pack left
+    /// out.
     fn resolve(x: *Indexer) Error!void {
         if (x.deltas == 0) return;
-        var stack: std.ArrayList(Frame) = .empty;
-        defer {
-            for (stack.items) |frame| x.gpa.free(frame.bytes);
-            stack.deinit(x.gpa);
-        }
-
+        var roots: std.ArrayList(u32) = .empty;
+        defer roots.deinit(x.gpa);
         for (x.entries.items, 0..) |entry, at| {
             if (entry.kind != .whole) continue;
             const index: u32 = @intCast(at);
             if (x.ofsChildren(index).len == 0 and x.refChildren(entry.oid).len == 0) continue;
-            const bytes = try x.load(index);
-            try x.walk(&stack, .{ .at = index, .oid = entry.oid, .type = entry.type, .bytes = bytes, .depth = 0 });
+            try roots.append(x.gpa, index);
         }
+        x.roots = try roots.toOwnedSlice(x.gpa);
+
+        const threads = @max(1, @min(x.threadCount(), x.roots.len));
+        const workers = try x.gpa.alloc(Worker, threads);
+        defer x.gpa.free(workers);
+        var made: usize = 0;
+        defer for (workers[0..made]) |*w| w.deinit();
+        while (made < threads) : (made += 1) workers[made] = try .init(x);
+
+        var group: Io.Group = .init;
+        var spawned: usize = 1;
+        while (spawned < threads) : (spawned += 1) {
+            group.concurrent(x.io, Worker.run, .{&workers[spawned]}) catch break;
+        }
+        // This thread is a worker too; with no others it is the only one.
+        workers[0].run();
+        group.await(x.io) catch |err| {
+            group.cancel(x.io);
+            return err;
+        };
+        if (x.failure) |err| return err;
 
         // What is left is reference deltas whose base the pack does not
         // carry: a thin pack, completed from the database. A base may also
         // be a delta in the pack that hangs off such a base, so the groups
         // are gone over until a pass resolves nothing more.
         if (x.options.fix_thin) {
+            const w = &workers[0];
             var progressed = true;
             while (progressed) {
                 progressed = false;
                 var i: usize = 0;
                 while (i < x.ref_bases.items.len) {
                     const base = x.ref_bases.items[i].base;
-                    const group = x.refChildren(base);
-                    i += group.len;
+                    const group_items = x.refChildren(base);
+                    i += group_items.len;
                     var pending = false;
-                    for (group) |ref| {
+                    for (group_items) |ref| {
                         if (!x.entries.items[ref.child].resolved) pending = true;
                     }
                     if (!pending) continue;
@@ -957,7 +940,7 @@ const Indexer = struct {
                         x.gpa.free(bytes);
                         return err;
                     };
-                    try x.walk(&stack, .{ .at = null, .oid = base, .type = found.type, .bytes = bytes, .depth = 0 });
+                    try w.walk(.{ .at = null, .oid = base, .type = found.type, .bytes = bytes, .depth = 0 });
                     progressed = true;
                 }
             }
@@ -974,63 +957,16 @@ const Indexer = struct {
         }
     }
 
-    /// Resolve everything below `root`, which the stack takes ownership of.
-    fn walk(x: *Indexer, stack: *std.ArrayList(Frame), root: Frame) Error!void {
-        stack.append(x.gpa, root) catch |err| {
-            x.gpa.free(root.bytes);
-            return err;
-        };
-        while (stack.items.len != 0) {
-            const top = &stack.items[stack.items.len - 1];
-            const ofs = if (top.at) |at| x.ofsChildren(at) else &.{};
-            const refs = x.refChildren(top.oid);
-            var child: ?u32 = null;
-            while (child == null) {
-                if (top.next_ofs < ofs.len) {
-                    const candidate = ofs[top.next_ofs].child;
-                    top.next_ofs += 1;
-                    if (!x.entries.items[candidate].resolved) child = candidate;
-                } else if (top.next_ref < refs.len) {
-                    const candidate = refs[top.next_ref].child;
-                    top.next_ref += 1;
-                    if (!x.entries.items[candidate].resolved) child = candidate;
-                } else break;
-            }
-            const at = child orelse {
-                const done = stack.pop().?;
-                x.gpa.free(done.bytes);
-                continue;
-            };
-            const entry = &x.entries.items[at];
-            if (top.depth + 1 > x.options.max_delta_depth) return x.fail(error.DeltaChainTooDeep, .{ .offset = entry.offset });
-
-            const patch = try x.load(at);
-            defer x.gpa.free(patch);
-            const sizes = try delta.header(patch);
-            if (sizes.target > x.options.max_object_bytes) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
-            const bytes = delta.apply(x.gpa, top.bytes, patch) catch |err| {
-                if (x.options.diagnostic) |d| d.* = .{ .offset = entry.offset };
-                return err;
-            };
-            var keep = false;
-            defer if (!keep) x.gpa.free(bytes);
-
-            const named = hash.Hasher.nameObject(x.kind, x.hashOptions(), top.type.name(), bytes);
-            if (named.collision_attack) return x.fail(error.CollisionAttack, .{ .oid = named.oid, .offset = entry.offset });
-            entry.oid = named.oid;
-            entry.type = top.type;
-            entry.resolved = true;
-            try x.checkObject(named.oid, top.type, bytes, entry.offset);
-            if (x.options.links) |l| try l.take(x.kind, top.type, named.oid, bytes);
-            x.resolved_count += 1;
-            Progress.emit(x.options.progress, .{ .resolved = .{ .done = x.resolved_count, .total = x.deltas } });
-
-            if (x.ofsChildren(at).len != 0 or x.refChildren(named.oid).len != 0) {
-                const depth = top.depth + 1;
-                try stack.append(x.gpa, .{ .at = at, .oid = named.oid, .type = entry.type, .bytes = bytes, .depth = depth });
-                keep = true;
-            }
-        }
+    /// Take a reference delta to resolve: whether no other thread has. A
+    /// reference delta hangs from a name, which a damaged pack may carry
+    /// twice.
+    fn claimRef(x: *Indexer, at: u32) bool {
+        x.lock.lockUncancelable(x.io);
+        defer x.lock.unlock(x.io);
+        const entry = &x.entries.items[at];
+        if (entry.resolved or entry.claimed) return false;
+        entry.claimed = true;
+        return true;
     }
 
     /// Append the bases a thin pack left out, as whole objects, and make
@@ -1090,6 +1026,257 @@ const Indexer = struct {
         const checksum = hasher.final();
         try x.file.writePositionalAll(io, checksum.raw(), end);
         return checksum;
+    }
+};
+
+/// Where a decoded entry goes.
+const Sink = union(enum) {
+    discard,
+    hash: *hash.Hasher,
+    buffer: []u8,
+};
+
+/// What entries are read from: the stream while it is parsed, a file
+/// reader of its own for each thread after.
+const Source = union(enum) {
+    tee: *Tee,
+    file: *Io.File.Reader,
+
+    fn reader(s: Source) *Io.Reader {
+        return switch (s) {
+            .tee => |t| &t.interface,
+            .file => |f| &f.interface,
+        };
+    }
+
+    fn err(s: Source) ?Error {
+        return switch (s) {
+            .tee => |t| t.err,
+            .file => |f| f.err,
+        };
+    }
+};
+
+/// A decoder and what it decodes into, one to a thread.
+const Inflater = struct {
+    gpa: Allocator,
+    /// relic's own decoder, for every entry that fits in memory whole.
+    decoder: *inflate_mod.Decoder,
+    /// Where an entry whose bytes are not kept is decoded: a blob being
+    /// named, a delta being measured.
+    scratch: std.ArrayList(u8) = .empty,
+    /// The standard library's window, for an entry too large to hold,
+    /// made when one comes.
+    window: ?[]u8 = null,
+
+    /// The most bytes an entry whose bytes are not kept is decoded whole
+    /// for; a larger one streams through the standard library's decoder.
+    const scratch_limit = 16 << 20;
+
+    fn init(gpa: Allocator) Allocator.Error!Inflater {
+        const decoder = try gpa.create(inflate_mod.Decoder);
+        decoder.* = .{};
+        return .{ .gpa = gpa, .decoder = decoder };
+    }
+
+    fn deinit(f: *Inflater) void {
+        f.gpa.destroy(f.decoder);
+        f.scratch.deinit(f.gpa);
+        if (f.window) |w| f.gpa.free(w);
+        f.* = undefined;
+    }
+
+    /// Inflate the entry at `source`'s position, which must yield exactly
+    /// `size` bytes and then end.
+    fn run(f: *Inflater, source: Source, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
+        const out: ?[]u8 = switch (sink) {
+            .buffer => |b| b,
+            .discard, .hash => if (size <= scratch_limit) blk: {
+                try f.scratch.resize(f.gpa, @intCast(size));
+                break :blk f.scratch.items;
+            } else null,
+        };
+        const whole = out orelse return f.streaming(source, size, sink, hasher);
+        const n = f.decoder.zlib(source.reader(), whole) catch |err| return switch (err) {
+            error.CorruptStream => error.CorruptPackEntry,
+            error.OutputTooLong => error.PackEntrySizeMismatch,
+            error.EndOfStream => source.err() orelse error.TruncatedPack,
+            error.ReadFailed => source.err() orelse error.ReadFailed,
+        };
+        if (n != size) return error.PackEntrySizeMismatch;
+        switch (sink) {
+            .hash => |h| h.update(whole),
+            .discard, .buffer => {},
+        }
+        if (hasher) |h| h.update(whole);
+    }
+
+    /// `run` for an entry too large to hold whole.
+    fn streaming(f: *Inflater, source: Source, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
+        const window = f.window orelse blk: {
+            const w = try f.gpa.alloc(u8, flate.max_window_len);
+            f.window = w;
+            break :blk w;
+        };
+        var d: flate.Decompress = .init(source.reader(), .zlib, window);
+        var chunk: [16 * 1024]u8 = undefined;
+        var done: u64 = 0;
+        while (true) {
+            const remaining = size - done;
+            const want: usize = @intCast(@min(@as(u64, chunk.len), remaining + 1));
+            const n = d.reader.readSliceShort(chunk[0..want]) catch {
+                if (source.err()) |err| return err;
+                return if (d.err) |err| switch (err) {
+                    error.EndOfStream => error.TruncatedPack,
+                    else => error.CorruptPackEntry,
+                } else error.CorruptPackEntry;
+            };
+            if (n > remaining) return error.PackEntrySizeMismatch;
+            const got = chunk[0..n];
+            switch (sink) {
+                .discard => {},
+                .hash => |h| h.update(got),
+                .buffer => |b| @memcpy(b[@intCast(done)..][0..n], got),
+            }
+            if (hasher) |h| h.update(got);
+            done += n;
+            if (n < want) break;
+        }
+        if (done != size) return error.PackEntrySizeMismatch;
+    }
+};
+
+/// One thread resolving deltas: its own reader of the pack, its own
+/// decoder, and the chain it holds.
+const Worker = struct {
+    x: *Indexer,
+    read_buffer: []u8,
+    reader: Io.File.Reader,
+    inflater: Inflater,
+    stack: std.ArrayList(Indexer.Frame) = .empty,
+
+    fn init(x: *Indexer) Allocator.Error!Worker {
+        const read_buffer = try x.gpa.alloc(u8, 64 * 1024);
+        errdefer x.gpa.free(read_buffer);
+        return .{
+            .x = x,
+            .read_buffer = read_buffer,
+            .reader = x.file.reader(x.io, read_buffer),
+            .inflater = try .init(x.gpa),
+        };
+    }
+
+    fn deinit(w: *Worker) void {
+        for (w.stack.items) |frame| w.x.gpa.free(frame.bytes);
+        w.stack.deinit(w.x.gpa);
+        w.inflater.deinit();
+        w.x.gpa.free(w.read_buffer);
+        w.* = undefined;
+    }
+
+    /// Take whole objects and resolve what hangs from each until none is
+    /// left, or a thread has failed.
+    fn run(w: *Worker) void {
+        const x = w.x;
+        while (!x.failed.load(.acquire)) {
+            const next = x.next_root.fetchAdd(1, .monotonic);
+            if (next >= x.roots.len) return;
+            const index = x.roots[next];
+            const entry = x.entries.items[index];
+            w.walkFrom(index, entry) catch |err| {
+                x.lock.lockUncancelable(x.io);
+                defer x.lock.unlock(x.io);
+                if (x.failure == null) x.failure = err;
+                x.failed.store(true, .release);
+                return;
+            };
+        }
+    }
+
+    fn walkFrom(w: *Worker, index: u32, entry: Entry) Error!void {
+        const bytes = try w.load(index);
+        try w.walk(.{ .at = index, .oid = entry.oid, .type = entry.type, .bytes = bytes, .depth = 0 });
+    }
+
+    /// The bytes of the entry at `at`, inflated. For a delta, the delta.
+    fn load(w: *Worker, at: u32) Error![]u8 {
+        const x = w.x;
+        const entry = x.entries.items[at];
+        if (entry.size > x.options.max_object_bytes) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
+        const bytes = try x.gpa.alloc(u8, @intCast(entry.size));
+        errdefer x.gpa.free(bytes);
+        w.reader.seekTo(entry.data_at) catch |err| switch (err) {
+            error.EndOfStream => return error.TruncatedPack,
+            error.ReadFailed => return w.reader.err orelse error.ReadFailed,
+            else => return error.TruncatedPack,
+        };
+        try w.inflater.run(.{ .file = &w.reader }, entry.size, .{ .buffer = bytes }, null);
+        return bytes;
+    }
+
+    /// Resolve everything below `root`, which the stack takes ownership of.
+    fn walk(w: *Worker, root: Indexer.Frame) Error!void {
+        const x = w.x;
+        const stack = &w.stack;
+        stack.append(x.gpa, root) catch |err| {
+            x.gpa.free(root.bytes);
+            return err;
+        };
+        while (stack.items.len != 0) {
+            if (x.failed.load(.monotonic)) return;
+            const top = &stack.items[stack.items.len - 1];
+            const ofs = if (top.at) |at| x.ofsChildren(at) else &.{};
+            const refs = x.refChildren(top.oid);
+            var child: ?u32 = null;
+            while (child == null) {
+                if (top.next_ofs < ofs.len) {
+                    // An offset delta hangs from one entry, whose thread
+                    // alone comes to it.
+                    const candidate = ofs[top.next_ofs].child;
+                    top.next_ofs += 1;
+                    if (!x.entries.items[candidate].resolved) child = candidate;
+                } else if (top.next_ref < refs.len) {
+                    const candidate = refs[top.next_ref].child;
+                    top.next_ref += 1;
+                    if (x.claimRef(candidate)) child = candidate;
+                } else break;
+            }
+            const at = child orelse {
+                const done = stack.pop().?;
+                x.gpa.free(done.bytes);
+                continue;
+            };
+            const entry = &x.entries.items[at];
+            if (top.depth + 1 > x.options.max_delta_depth) return x.fail(error.DeltaChainTooDeep, .{ .offset = entry.offset });
+
+            const patch = try w.load(at);
+            defer x.gpa.free(patch);
+            const sizes = try delta.header(patch);
+            if (sizes.target > x.options.max_object_bytes) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
+            const bytes = delta.apply(x.gpa, top.bytes, patch) catch |err| return x.fail(err, .{ .offset = entry.offset });
+            var keep = false;
+            defer if (!keep) x.gpa.free(bytes);
+
+            const named = hash.Hasher.nameObject(x.kind, x.hashOptions(), top.type.name(), bytes);
+            if (named.collision_attack) return x.fail(error.CollisionAttack, .{ .oid = named.oid, .offset = entry.offset });
+            entry.oid = named.oid;
+            entry.type = top.type;
+            entry.resolved = true;
+            try x.checkObject(named.oid, top.type, bytes, entry.offset);
+            {
+                x.lock.lockUncancelable(x.io);
+                defer x.lock.unlock(x.io);
+                if (x.options.links) |l| try l.take(x.kind, top.type, named.oid, bytes);
+                const done = x.resolved_count.fetchAdd(1, .monotonic) + 1;
+                Progress.emit(x.options.progress, .{ .resolved = .{ .done = done, .total = x.deltas } });
+            }
+
+            if (x.ofsChildren(at).len != 0 or x.refChildren(named.oid).len != 0) {
+                const depth = top.depth + 1;
+                try stack.append(x.gpa, .{ .at = at, .oid = named.oid, .type = entry.type, .bytes = bytes, .depth = depth });
+                keep = true;
+            }
+        }
     }
 };
 
@@ -1270,10 +1457,10 @@ fn countEntries(io: Io, dir: Io.Dir) !usize {
     return n;
 }
 
-test "a pack git wrote is received, and its index is byte for byte the one git wrote" {
+test "a pack git wrote is received, and its index is byte for byte the one git wrote, with one thread resolving its deltas or several" {
     const gpa = testing.allocator;
     const io = testing.io;
-    for ([_][]const u8{ "true", "false" }) |offsets| {
+    for ([_][]const u8{ "true", "false", "true", "false" }, [_]u32{ 1, 1, 4, 4 }) |offsets, threads| {
         var source = try historyRepo(gpa, io, 8);
         defer source.deinit();
         // Offset deltas, then reference deltas.
@@ -1303,7 +1490,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         defer pack_dir.close(io);
 
         var in: Io.Reader = .fixed(pack_bytes);
-        const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{});
+        const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{ .threads = threads });
         try testing.expect(result.deltas > 0);
         try testing.expectEqual(@as(u32, 0), result.appended);
 

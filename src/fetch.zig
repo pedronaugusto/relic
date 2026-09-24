@@ -486,7 +486,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     }, .{
         .warnings = options.warnings,
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config), .links = &links },
+        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config), .links = &links, .threads = indexpack.configuredThreads(&repo.config) },
         .shallow_info = &shallow_info,
     });
     outcome.pack = fetched.pack;
@@ -530,7 +530,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
                 .tips = tips.items,
                 .common_tips = common_tips.items,
                 .include_tag = false,
-            }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config) } });
+            }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config), .threads = indexpack.configuredThreads(&repo.config) } });
         }
     }
 

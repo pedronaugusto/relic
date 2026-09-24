@@ -327,7 +327,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .filter = send_filter,
     }, .{
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(settings), .links = &links },
+        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(settings), .links = &links, .threads = indexpack.configuredThreads(settings) },
         .shallow_info = &shallow_info,
         .warnings = options.warnings,
     });
