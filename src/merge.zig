@@ -136,12 +136,12 @@ const Entries = std.StringHashMapUnmanaged(Side);
 
 /// Options for a tree merge.
 pub const TreeOptions = struct {
-    /// Resolve what can be resolved the way git's merge machinery does:
-    /// regular files are content-merged, a file added on both sides is
-    /// merged against an empty ancestor, the executable bit is merged on its
-    /// own, and a file that meets a directory the merge empties takes its
-    /// place. Without it every path both sides changed differently is left
-    /// at stages 1, 2 and 3.
+    /// Merge as git's merge machinery does (`ort.zig`): renames followed,
+    /// files content-merged, and every conflict -- file against directory,
+    /// file against symlink, rename against rename -- resolved or recorded
+    /// as git leaves it. Without it the merge is stage-only: every path
+    /// both sides changed differently is left at stages 1, 2 and 3, which
+    /// is not git's merge.
     content_merge: bool = false,
     /// The labels, conflict style, favoured side and line diff of the
     /// content merges.
@@ -166,10 +166,16 @@ pub const TreeOptions = struct {
     ort: ort.Options = .{},
 };
 
-/// Merge `ours` and `theirs` against their common ancestor `base`.
+/// Stage `ours` and `theirs` against their common ancestor `base`, and
+/// merge nothing.
 ///
-/// `base` may be `null`, which is what an unrelated-histories merge looks
-/// like: every path that is in both sides and differs is a conflict.
+/// A path only one side changed takes that side; a path both changed the
+/// same way takes it once; every other path is left at stages 1, 2 and 3,
+/// contents unread. That is not what any git command does -- git's merge
+/// follows renames and merges files, and `content_merge` asks for that --
+/// but a caller that wants to decide every changed path itself starts
+/// here. `base` may be `null`, which is what an unrelated-histories merge
+/// looks like: every path that is in both sides and differs is a conflict.
 pub fn trees(
     gpa: Allocator,
     io: Io,
@@ -181,7 +187,9 @@ pub fn trees(
     return treesWithOptions(gpa, io, db, base, ours, theirs, .{});
 }
 
-/// `trees` with optional content resolution of regular-file conflicts.
+/// `trees`, or with `options.content_merge` git's own merge of the three
+/// (`ort.mergeTrees`): renames followed, files merged, conflicts recorded
+/// as git records them.
 pub fn treesWithOptions(
     gpa: Allocator,
     io: Io,

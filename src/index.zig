@@ -80,8 +80,9 @@ pub const Entry = struct {
     path: []const u8,
     oid: Oid,
     mode: object.Mode,
-    /// 0 for a merged entry; 1, 2 and 3 are the merge stages, which this
-    /// release reads and writes but never creates.
+    /// 0 for a merged entry; 1, 2 and 3 are a conflict's stages: the
+    /// base's version, ours and theirs, as a merge, cherry-pick, revert or
+    /// rebase that stops leaves them (`threeway.zig`).
     stage: u2 = 0,
     /// git's `assume-valid` bit: the caller has promised the file has not
     /// changed and the stat is not to be trusted against it.
