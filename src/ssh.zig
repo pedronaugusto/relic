@@ -27,6 +27,7 @@ const config_mod = @import("config.zig");
 const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
 const auth = @import("auth.zig");
+const warning = @import("warning.zig");
 
 const Connection = connection.Connection;
 
@@ -89,6 +90,9 @@ pub const Options = struct {
     /// prompt or a host-key question is not among them, because ssh asks
     /// those on the terminal itself.
     stderr: enum { capture, inherit, ignore } = .capture,
+    /// Where what ssh said goes, when the conversation goes on to succeed:
+    /// a host key it added, a banner. git passes those to the person.
+    warnings: ?*warning.Warnings = null,
 };
 
 /// The variables git clears before it runs a program for another
@@ -170,7 +174,7 @@ pub fn connect(
         &.{.{ .name = "GIT_PROTOCOL", .value = "version=2" }}
     else
         &.{};
-    return connection.Process.start(gpa, io, programs, .{
+    const conn = try connection.Process.start(gpa, io, programs, .{
         .argv = argv.items,
         .shell = shell,
         .set = set,
@@ -181,6 +185,8 @@ pub fn connect(
             .ignore => .ignore,
         },
     });
+    connection.Process.sayTo(conn, options.warnings);
+    return conn;
 }
 
 /// Why a conversation over ssh ended before the remote said anything, as

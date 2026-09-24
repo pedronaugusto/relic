@@ -15,6 +15,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const program = @import("program.zig");
+const warning = @import("warning.zig");
 const pktline = @import("pktline.zig");
 
 /// Which service is asked for.
@@ -161,6 +162,9 @@ pub const Process = struct {
     term: ?std.process.Child.Term = null,
     /// The captured standard error, when it is captured.
     stderr: ?*Tail = null,
+    /// Where what the program said goes when the conversation ends without
+    /// `diagnose` having been asked: `warning.Warning.ssh_said`.
+    said_to: ?*warning.Warnings = null,
 
     const Tail = struct {
         buffer: [4096]u8 = undefined,
@@ -319,12 +323,23 @@ pub const Process = struct {
             // error open; the reading stops here either way.
             if (tail.task) |*task| task.cancel(io);
             if (tail.file) |file| file.close(io);
+            if (p.said_to) |sink| {
+                const said = std.mem.trim(u8, tail.buffer[0..tail.len], " \t\r\n");
+                if (said.len != 0) sink.add(.{ .ssh_said = said }) catch {};
+            }
             p.gpa.destroy(tail);
         }
         p.running.deinit(io);
         p.gpa.free(p.read_buffer);
         p.gpa.free(p.write_buffer);
         p.gpa.destroy(p);
+    }
+
+    /// Have what the program writes on its standard error handed to `sink`
+    /// as `ssh_said` when the conversation ends well.
+    pub fn sayTo(c: *Connection, sink: ?*warning.Warnings) void {
+        const p: *Process = @ptrCast(@alignCast(c.context));
+        p.said_to = sink;
     }
 
     /// Close the program's input and wait for it: whether it succeeded.
@@ -351,6 +366,8 @@ pub const Process = struct {
     /// captured. The program's input is closed and it is waited for.
     pub fn diagnose(c: *Connection, io: Io) Io.Cancelable!struct { code: ?u8, stderr: []const u8 } {
         const p: *Process = @ptrCast(@alignCast(c.context));
+        // What it said is the failure's now, not a warning.
+        p.said_to = null;
         if (!p.exited) {
             p.exited = true;
             p.term = p.running.wait(io) catch |err| switch (err) {

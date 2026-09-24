@@ -44,6 +44,11 @@ pub const Settings = struct {
     post_buffer: u64 = 1 << 20,
     /// `http.userAgent`, when set.
     user_agent: ?[]const u8 = null,
+    /// `http.proxyAuthMethod`: `anyauth`, `basic`, `digest`, `negotiate`,
+    /// `ntlm`.
+    proxy_auth_method: []const u8 = "anyauth",
+    /// `http.sslCertPasswordProtected`.
+    ssl_cert_password_protected: bool = false,
     /// Where each setting that was not the default came from, for a
     /// message: `http.https://git.example.com.sslcainfo` and the like.
     /// Only the TLS ones are kept.
@@ -101,6 +106,10 @@ pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*c
                 s.post_buffer = @intCast(std.math.clamp(n, 1024, 1 << 30));
             } else if (std.mem.eql(u8, name, "useragent")) {
                 s.user_agent = value;
+            } else if (std.mem.eql(u8, name, "proxyauthmethod")) {
+                s.proxy_auth_method = value;
+            } else if (std.mem.eql(u8, name, "sslcertpasswordprotected")) {
+                s.ssl_cert_password_protected = if (entry.value == null) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
             }
         }
     }
@@ -119,6 +128,8 @@ pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*c
         if (env.get("GIT_SSL_CERT")) |v| s.ssl_cert = v;
         if (env.get("GIT_SSL_KEY")) |v| s.ssl_key = v;
         if (env.get("GIT_HTTP_USER_AGENT")) |v| s.user_agent = v;
+        if (env.get("GIT_HTTP_PROXY_AUTHMETHOD")) |v| s.proxy_auth_method = v;
+        if (env.get("GIT_SSL_CERT_PASSWORD_PROTECTED")) |v| s.ssl_cert_password_protected = config_mod.parseBool(v) catch false;
         if (!proxy_set) {
             const names: []const []const u8 = if (url.scheme == .https)
                 &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }

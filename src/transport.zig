@@ -28,6 +28,7 @@ const ssh = @import("ssh.zig");
 const smarthttp = @import("smarthttp.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
+const warning = @import("warning.zig");
 const sendpack = @import("sendpack.zig");
 const object = @import("object.zig");
 const progress_mod = @import("progress.zig");
@@ -66,8 +67,10 @@ pub const Options = struct {
     /// `git-upload-pack` or `git-receive-pack`: `remote.<name>.uploadpack`.
     service_program: ?[]const u8 = null,
     /// Ask an upload-pack for protocol v2. A server that does not speak it
-    /// answers in v0, which is read the same.
-    protocol_v2: bool = true,
+    /// answers in v0, which is read the same. `null` takes
+    /// `protocol.version` from `config`, as git does: 2 unless it says 0
+    /// or 1.
+    protocol_v2: ?bool = null,
     progress: ?progress_mod.Progress = null,
     /// What stands in for a terminal when an HTTP server asks for a
     /// credential no helper has. Without one nothing is asked, and
@@ -76,7 +79,17 @@ pub const Options = struct {
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
     auth_failure: ?*auth.Failure = null,
+    /// Where what git would print as a warning goes, as values: see
+    /// `warning.Warnings`.
+    warnings: ?*warning.Warnings = null,
 };
+
+/// Whether `config` leaves protocol v2 on: `protocol.version` unset or 2.
+pub fn wantsV2(config: ?*const config_mod.Config) bool {
+    const c = config orelse return true;
+    const text = c.get("protocol.version") orelse return true;
+    return !(std.mem.eql(u8, text, "0") or std.mem.eql(u8, text, "1"));
+}
 
 /// An open remote.
 pub const Session = struct {
@@ -119,7 +132,8 @@ pub const Session = struct {
                     .programs = options.programs,
                     .config = options.config,
                     .service_program = options.service_program,
-                    .protocol_v2 = options.protocol_v2,
+                    .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
+                    .warnings = options.warnings,
                 });
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind) catch |err| switch (err) {
@@ -131,9 +145,10 @@ pub const Session = struct {
                 const conn = try smarthttp.connect(gpa, io, parsed, service, .{
                     .config = options.config,
                     .programs = options.programs,
-                    .protocol_v2 = options.protocol_v2,
+                    .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
                     .prompt = options.prompt,
                     .auth_failure = options.auth_failure,
+                    .warnings = options.warnings,
                 });
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind);
@@ -273,7 +288,9 @@ pub const Session = struct {
             .smart => |*smart| {
                 // A v0 server sends its pack and is done; a v2 server
                 // waits for the next command.
-                if (smart.advertisement.version != .v2) smart.done = true;
+                // Done with either way: git ends a v2 conversation after
+                // its fetch by closing it, with no flush.
+                smart.done = true;
                 const result = try fetchpack.fetch(gpa, io, smart.conn, &smart.advertisement, db, pack_dir, request, options);
                 return .{ .pack = result.name, .objects = result.objects };
             },

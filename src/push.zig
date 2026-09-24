@@ -40,6 +40,7 @@ const sendpack = @import("sendpack.zig");
 const objectwalk = @import("objectwalk.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
+const warning = @import("warning.zig");
 const progress_mod = @import("progress.zig");
 const lfspush = @import("lfspush.zig");
 
@@ -127,6 +128,9 @@ pub const Options = struct {
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
     auth_failure: ?*auth.Failure = null,
+    /// Where what git would print as a warning goes, as values: see
+    /// `warning.Warnings`.
+    warnings: ?*warning.Warnings = null,
     progress: ?progress_mod.Progress = null,
 };
 
@@ -262,6 +266,7 @@ fn pushTo(
         .progress = options.progress,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
+        .warnings = options.warnings,
     });
     defer session.close(io);
     var remote_refs = try session.listRefs(gpa, io, &.{});

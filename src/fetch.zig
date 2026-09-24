@@ -46,6 +46,7 @@ const indexpack = @import("indexpack.zig");
 const progress_mod = @import("progress.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
+const warning = @import("warning.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -135,6 +136,9 @@ pub const Options = struct {
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
     auth_failure: ?*auth.Failure = null,
+    /// Where what git would print as a warning goes, as values: see
+    /// `warning.Warnings`.
+    warnings: ?*warning.Warnings = null,
     progress: ?progress_mod.Progress = null,
     /// Checks received objects the way git's `fsck` does.
     check_objects: bool = true,
@@ -304,6 +308,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .progress = options.progress,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
+        .warnings = options.warnings,
     });
     defer session.close(io);
 
@@ -429,15 +434,9 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     }
 
     // The objects: everything the map names that is not here yet.
-    var wants: std.ArrayList(Oid) = .empty;
-    var wanted_seen: Oid.Set = .empty;
-    for (map.items) |entry| {
-        // Deepening asks again for what is here: its history is what is
-        // wanted.
-        if (deepen != null) {
-            if (!(try wanted_seen.getOrPut(arena, entry.oid)).found_existing) try wants.append(arena, entry.oid);
-        } else try addWant(arena, io, repo, &wants, &wanted_seen, entry.oid);
-    }
+    // Deepening asks again for what is here: its history is what is
+    // wanted.
+    const wants = try wantsInOrder(arena, io, repo, remote_refs.refs, map.items, deepen != null);
     var tips: std.ArrayList(Oid) = .empty;
     var common_tips: std.ArrayList(Oid) = .empty;
     for (local_refs.entries) |entry| switch (entry.target) {
@@ -463,7 +462,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();
     const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
-        .wants = wants.items,
+        .wants = wants,
         .tips = tips.items,
         .common_tips = common_tips.items,
         .include_tag = tags != .none,
@@ -504,12 +503,10 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     var backfill: std.ArrayList(MapEntry) = .empty;
     if (tags == .auto and autotags) {
         try findNonLocalTags(arena, gpa, io, repo, remote_refs.refs, &local, &backfill, map.items);
-        var missing_tags: std.ArrayList(Oid) = .empty;
-        var missing_seen: Oid.Set = .empty;
-        for (backfill.items) |entry| try addWant(arena, io, repo, &missing_tags, &missing_seen, entry.oid);
-        if (missing_tags.items.len != 0) {
+        const missing_tags = try wantsInOrder(arena, io, repo, remote_refs.refs, backfill.items, false);
+        if (missing_tags.len != 0) {
             _ = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
-                .wants = missing_tags.items,
+                .wants = missing_tags,
                 .tips = tips.items,
                 .common_tips = common_tips.items,
                 .include_tag = false,
@@ -882,10 +879,29 @@ fn shallowList(arena: Allocator, set: *const Oid.Set) Allocator.Error![]const Oi
     return list;
 }
 
-fn addWant(arena: Allocator, io: Io, repo: *Repository, wants: *std.ArrayList(Oid), seen: *Oid.Set, oid: Oid) Error!void {
-    if ((try seen.getOrPut(arena, oid)).found_existing) return;
-    if (try repo.odb.exists(io, oid)) return;
-    try wants.append(arena, oid);
+/// The objects to ask for, as git's fetch-pack asks: each advertised ref
+/// the map fetches, in the order the server advertised them, whose object
+/// is not here — one line per ref, so two refs at one commit ask twice.
+fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const protocol.RemoteRef, entries: []const MapEntry, all: bool) Error![]const Oid {
+    var names: std.StringHashMapUnmanaged(void) = .empty;
+    for (entries) |entry| try names.put(arena, entry.name, {});
+    var wants: std.ArrayList(Oid) = .empty;
+    var listed: std.StringHashMapUnmanaged(void) = .empty;
+    for (advertised) |ref| {
+        if (ref.unborn or !names.contains(ref.name)) continue;
+        if ((try listed.getOrPut(arena, ref.name)).found_existing) continue;
+        if (!all and try repo.odb.exists(io, ref.oid)) continue;
+        try wants.append(arena, ref.oid);
+    }
+    // A name no ref advertised — an object named on the command line — is
+    // asked for after them.
+    for (entries) |entry| {
+        if (listed.contains(entry.name)) continue;
+        if ((try listed.getOrPut(arena, entry.name)).found_existing) continue;
+        if (!all and try repo.odb.exists(io, entry.oid)) continue;
+        try wants.append(arena, entry.oid);
+    }
+    return wants.items;
 }
 
 /// The branches every working tree has checked out, as full ref names.

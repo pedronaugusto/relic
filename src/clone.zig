@@ -40,6 +40,7 @@ const transport = @import("transport.zig");
 const objectwalk = @import("objectwalk.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
+const warning = @import("warning.zig");
 const progress_mod = @import("progress.zig");
 const config_mod = @import("config.zig");
 
@@ -117,6 +118,9 @@ pub const Options = struct {
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
     auth_failure: ?*auth.Failure = null,
+    /// Where what git would print as a warning goes, as values: see
+    /// `warning.Warnings`.
+    warnings: ?*warning.Warnings = null,
     progress: ?progress_mod.Progress = null,
     /// Checks received objects the way git's `fsck` does.
     check_objects: bool = true,
@@ -158,6 +162,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .progress = options.progress,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
+        .warnings = options.warnings,
     });
     defer session.close(io);
 
@@ -241,7 +246,9 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             const chosen = if (head_branch) |b| std.mem.eql(u8, ref.name, b) else if (single_tag) |t| std.mem.eql(u8, ref.name, t) else false;
             if (!chosen) continue;
         }
-        try addUnique(arena, &wants, ref.oid);
+        // One want per ref, as git's fetch-pack asks, two refs at one
+        // commit asking twice.
+        try wants.append(arena, ref.oid);
         const local_name = if (is_branch and !options.bare)
             try std.fmt.allocPrint(arena, "refs/remotes/{s}/{s}", .{ origin, ref.name["refs/heads/".len..] })
         else

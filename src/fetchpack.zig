@@ -262,12 +262,13 @@ fn writeFetchV2(
     done: *bool,
 ) (pktline.WriteError || Negotiator.NegotiateError)!void {
     try protocol.writeCommand(w, adv, "fetch");
-    try pktline.write(w, "thin-pack\n");
-    if (no_progress) try pktline.write(w, "no-progress\n");
-    if (request.include_tag) try pktline.write(w, "include-tag\n");
-    try pktline.write(w, "ofs-delta\n");
-    try writeShallowRequest(w, request);
-    if (request.filter) |spec| try pktline.print(w, "filter {s}\n", .{spec});
+    // Newlines where git's fetch-pack writes them, and none where not.
+    try pktline.write(w, "thin-pack");
+    if (no_progress) try pktline.write(w, "no-progress");
+    if (request.include_tag) try pktline.write(w, "include-tag");
+    try pktline.write(w, "ofs-delta");
+    try writeShallowRequest(w, request, true);
+    if (request.filter) |spec| try pktline.print(w, "filter {s}", .{spec});
     for (request.wants) |oid| try pktline.print(w, "want {f}\n", .{oid});
     for (common) |oid| try pktline.print(w, "have {f}\n", .{oid});
     var added: usize = 0;
@@ -285,13 +286,14 @@ fn writeFetchV2(
 }
 
 /// git's `add_shallow_requests`: the boundary, then how to move it.
-fn writeShallowRequest(w: *Io.Writer, request: Request) pktline.WriteError!void {
+/// In v0 `deepen-relative` is a capability rather than a line.
+fn writeShallowRequest(w: *Io.Writer, request: Request, v2: bool) pktline.WriteError!void {
     for (request.shallow) |oid| try pktline.print(w, "shallow {f}\n", .{oid});
     const deepen = request.deepen orelse return;
-    if (deepen.depth) |depth| try pktline.print(w, "deepen {d}\n", .{depth});
-    if (deepen.since) |since| try pktline.print(w, "deepen-since {d}\n", .{since});
-    for (deepen.not) |name| try pktline.print(w, "deepen-not {s}\n", .{name});
-    if (deepen.relative) try pktline.write(w, "deepen-relative\n");
+    if (deepen.depth) |depth| try pktline.print(w, "deepen {d}", .{depth});
+    if (deepen.since) |since| try pktline.print(w, "deepen-since {d}", .{since});
+    for (deepen.not) |name| try pktline.print(w, "deepen-not {s}", .{name});
+    if (v2 and deepen.relative) try pktline.write(w, "deepen-relative\n");
 }
 
 fn expectSection(conn: *Connection, in: *Io.Reader, name: []const u8) Error!void {
@@ -378,9 +380,64 @@ fn receiveSideband(
     };
 }
 
-/// The most haves a v0 request carries, which is its one round.
-const v0_haves = 256;
+/// What a v0 server says to a round of haves: git's `get_ack`.
+const Ack = enum { nak, ack, common, ready, @"continue" };
 
+fn readAck(conn: *Connection, in: *Io.Reader, kind: hash.Kind, oid_out: *Oid) Error!Ack {
+    const packet = try conn.readPacket(in);
+    const line = switch (packet) {
+        .data => |raw| std.mem.trimEnd(u8, raw, "\n"),
+        else => return error.ProtocolError,
+    };
+    if (std.mem.eql(u8, line, "NAK")) return .nak;
+    if (std.mem.startsWith(u8, line, "ERR ")) {
+        conn.setMessage(line[4..]);
+        return error.RemoteError;
+    }
+    if (!std.mem.startsWith(u8, line, "ACK ")) return error.ProtocolError;
+    const rest = line[4..];
+    const hex_len = kind.hexLen();
+    if (rest.len < hex_len) return error.ProtocolError;
+    oid_out.* = Oid.parse(kind, rest[0..hex_len]) catch return error.ProtocolError;
+    const suffix = rest[hex_len..];
+    if (suffix.len == 0) return .ack;
+    if (std.mem.eql(u8, suffix, " continue")) return .@"continue";
+    if (std.mem.eql(u8, suffix, " common")) return .common;
+    if (std.mem.eql(u8, suffix, " ready")) return .ready;
+    return error.ProtocolError;
+}
+
+/// The `shallow` and `unshallow` lines a server sends after a request that
+/// deepens, up to their flush. Kept the first time; a stateless server
+/// repeats them with every answer.
+fn readShallowList(conn: *Connection, in: *Io.Reader, kind: hash.Kind, shallow_info: ?*ShallowInfo, keep: bool) Error!void {
+    while (true) {
+        switch (try conn.readPacket(in)) {
+            .flush => return,
+            .data => |raw| {
+                const line = std.mem.trimEnd(u8, raw, "\n");
+                if (!keep) continue;
+                const info = shallow_info orelse return error.ProtocolError;
+                if (!try info.take(kind, line)) return error.ProtocolError;
+            },
+            else => return error.ProtocolError,
+        }
+    }
+}
+
+/// git's `next_flush`: how many haves the next round ends at.
+fn nextFlushV0(stateless: bool, count: usize) usize {
+    if (stateless) return if (count < 16384) count * 2 else count * 11 / 10;
+    return if (count < 32) count * 2 else count + 32;
+}
+
+/// git's `find_common`, and the pack after it: the wants, then haves in
+/// rounds of sixteen, thirty-two, sixty-four…, each answered with what the
+/// server has in common (`multi_ack_detailed`), until the server is ready,
+/// the haves run out, or 256 in a row were not acknowledged. Over a pipe
+/// one round is kept in flight ahead of the answers, as git keeps it; over
+/// HTTP every round is a request of its own carrying the wants and every
+/// common commit again.
 fn fetchV0(
     gpa: Allocator,
     io: Io,
@@ -394,7 +451,8 @@ fn fetchV0(
     receive_options: indexpack.Options,
     shallow_info: ?*ShallowInfo,
 ) Error!indexpack.Result {
-    if (request.deepen != null or request.shallow.len != 0) {
+    const deepen = request.deepen != null;
+    if (deepen or request.shallow.len != 0) {
         if (!adv.has("shallow")) return error.ShallowUnsupportedByServer;
         if (request.deepen) |d| {
             if (d.since != null and !adv.has("deepen-since")) return error.ShallowUnsupportedByServer;
@@ -409,55 +467,115 @@ fn fetchV0(
         .small
     else
         .none;
-    const w = try conn.request();
-    writeFetchV0(w, adv, request, negotiator, band != .none, progress == null) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.WriteFailed, error.PacketTooLong => return conn.writeFailed(err),
-        else => |e| return e,
-    };
-    const in = try conn.response();
-
-    // `NAK`, or an `ACK` for each common commit the server chose to
-    // acknowledge, and then the pack. Which is which is only known by
-    // looking: a line of the negotiation begins with its word, a side-band
-    // line with its channel, and a bare pack with `PACK`.
-    var answered = false;
-    while (true) {
-        const head = in.peekArray(4) catch |err| switch (err) {
-            error.EndOfStream => return error.RemoteHungUp,
-            error.ReadFailed => return conn.failure(),
-        };
-        if (answered and std.mem.eql(u8, head, "PACK")) break;
-        const len = pktline.parseLength(head) orelse return error.ProtocolError;
-        // The flush that ends the server's list of the boundary.
-        if (len == 0 and (request.deepen != null or request.shallow.len != 0)) {
-            in.toss(4);
-            continue;
-        }
-        if (len < 4) return error.ProtocolError;
-        const whole = in.peek(len) catch |err| switch (err) {
-            error.EndOfStream => return error.RemoteHungUp,
-            error.ReadFailed => return conn.failure(),
-        };
-        const line = std.mem.trimEnd(u8, whole[4..], "\n");
-        if (std.mem.startsWith(u8, line, "ERR ")) {
-            conn.setMessage(line[4..]);
-            return error.RemoteError;
-        }
-        if (std.mem.startsWith(u8, line, "shallow ") or std.mem.startsWith(u8, line, "unshallow ")) {
-            const info = shallow_info orelse return error.ProtocolError;
-            _ = try info.take(adv.kind, line);
-            in.toss(len);
-            continue;
-        }
-        const negotiation = std.mem.eql(u8, line, "NAK") or std.mem.startsWith(u8, line, "ACK ");
-        if (!negotiation) {
-            if (!answered) return error.ProtocolError;
-            break;
-        }
-        in.toss(len);
-        answered = true;
+    const stateless = conn.stateless;
+    var multi_ack: u2 = if (adv.has("multi_ack_detailed")) 2 else if (adv.has("multi_ack")) 1 else 0;
+    if (stateless and multi_ack != 2) {
+        conn.setMessage("a stateless server must speak multi_ack_detailed");
+        return error.ProtocolError;
     }
+    const no_done = stateless and multi_ack == 2 and adv.has("no-done");
+
+    // What every stateless request begins with: the wants and how deep.
+    var state: Io.Writer.Allocating = .init(gpa);
+    defer state.deinit();
+    writeWantsV0(&state.writer, adv, request, band != .none, progress == null, multi_ack, no_done) catch return error.OutOfMemory;
+    var round: Io.Writer.Allocating = .init(gpa);
+    defer round.deinit();
+    var in: *Io.Reader = undefined;
+    var shallow_kept = false;
+
+    if (!stateless) {
+        const w = try conn.request();
+        w.writeAll(state.written()) catch |err| return conn.writeFailed(err);
+        in = try conn.response();
+        if (deepen) {
+            try readShallowList(conn, in, adv.kind, shallow_info, true);
+            shallow_kept = true;
+        }
+        state.clearRetainingCapacity();
+    }
+    round.writer.writeAll(state.written()) catch return error.OutOfMemory;
+
+    var count: usize = 0;
+    var flushes: usize = 0;
+    var in_vain: usize = 0;
+    var flush_at: usize = 16;
+    var got_continue = false;
+    var got_ready = false;
+    var acked_any = false;
+    var acked: Oid = undefined;
+    negotiate: while (try negotiator.next()) |oid| {
+        pktline.print(&round.writer, "have {f}\n", .{oid}) catch return error.OutOfMemory;
+        in_vain += 1;
+        count += 1;
+        if (count < flush_at) continue;
+        pktline.flush(&round.writer) catch return error.OutOfMemory;
+        const w = try conn.request();
+        w.writeAll(round.written()) catch |err| return conn.writeFailed(err);
+        in = try conn.response();
+        round.clearRetainingCapacity();
+        round.writer.writeAll(state.written()) catch return error.OutOfMemory;
+        flushes += 1;
+        flush_at = nextFlushV0(stateless, count);
+        // One round ahead of the answers, over a pipe.
+        if (!stateless and count == 16) continue;
+        if (stateless and deepen) {
+            try readShallowList(conn, in, adv.kind, shallow_info, !shallow_kept);
+            shallow_kept = true;
+        }
+        while (true) {
+            const ack = try readAck(conn, in, adv.kind, &acked);
+            switch (ack) {
+                .nak => break,
+                .ack => {
+                    flushes = 0;
+                    multi_ack = 0;
+                    acked_any = true;
+                    break :negotiate;
+                },
+                .common, .ready, .@"continue" => {
+                    const was_common = try negotiator.ack(acked);
+                    if (stateless and ack == .common and !was_common) {
+                        // Replayed in every request after, so the server
+                        // keeps knowing it.
+                        pktline.print(&state.writer, "have {f}\n", .{acked}) catch return error.OutOfMemory;
+                        pktline.print(&round.writer, "have {f}\n", .{acked}) catch return error.OutOfMemory;
+                        in_vain = 0;
+                    } else if (!stateless or ack != .common) in_vain = 0;
+                    acked_any = true;
+                    got_continue = true;
+                    if (ack == .ready) got_ready = true;
+                },
+            }
+        }
+        flushes -= 1;
+        if (got_continue and in_vain > max_in_vain) break;
+        if (got_ready) break;
+    }
+
+    if (!got_ready or !no_done) {
+        pktline.write(&round.writer, "done\n") catch return error.OutOfMemory;
+        const w = try conn.request();
+        w.writeAll(round.written()) catch |err| return conn.writeFailed(err);
+        in = try conn.response();
+    }
+    if (!acked_any) {
+        multi_ack = 0;
+        flushes += 1;
+    }
+    if ((!got_ready or !no_done) and stateless and deepen) {
+        try readShallowList(conn, in, adv.kind, shallow_info, !shallow_kept);
+    }
+    while (flushes > 0 or multi_ack != 0) {
+        const ack = try readAck(conn, in, adv.kind, &acked);
+        if (ack != .nak) {
+            if (ack == .ack) break;
+            multi_ack = 1;
+            continue;
+        }
+        flushes -= 1;
+    }
+
     var receive = receive_options;
     receive.progress = progress;
     if (band == .none) {
@@ -469,14 +587,17 @@ fn fetchV0(
     return receiveSideband(gpa, io, conn, in, db, pack_dir, progress, receive);
 }
 
-fn writeFetchV0(
+/// The wants of a v0 request, the first with the capabilities git asks
+/// for in git's order, then the boundary and how to move it, and a flush.
+fn writeWantsV0(
     w: *Io.Writer,
     adv: *const protocol.Advertisement,
     request: Request,
-    negotiator: *Negotiator,
     band: bool,
     no_progress: bool,
-) (pktline.WriteError || Negotiator.NegotiateError)!void {
+    multi_ack: u2,
+    no_done: bool,
+) (pktline.WriteError || Allocator.Error)!void {
     for (request.wants, 0..) |oid, i| {
         if (i != 0) {
             try pktline.print(w, "want {f}\n", .{oid});
@@ -485,6 +606,8 @@ fn writeFetchV0(
         var caps_buffer: [512]u8 = undefined;
         var caps: Io.Writer = .fixed(&caps_buffer);
         const c = &caps;
+        if (multi_ack == 2) try c.writeAll(" multi_ack_detailed") else if (multi_ack == 1) try c.writeAll(" multi_ack");
+        if (no_done) try c.writeAll(" no-done");
         if (adv.has("side-band-64k")) {
             try c.writeAll(" side-band-64k");
         } else if (band) try c.writeAll(" side-band");
@@ -496,18 +619,14 @@ fn writeFetchV0(
         if (adv.has("deepen-since")) try c.writeAll(" deepen-since");
         if (adv.has("deepen-not")) try c.writeAll(" deepen-not");
         if (adv.has("agent")) try c.print(" agent={s}", .{protocol.agent});
-        if (adv.has("object-format")) try c.print(" object-format={s}", .{adv.kind.name()});
+        if (request.filter != null) try c.writeAll(" filter");
+        // git names the hash only when it is not SHA-1.
+        if (adv.has("object-format") and adv.kind != .sha1) try c.print(" object-format={s}", .{adv.kind.name()});
         try pktline.print(w, "want {f}{s}\n", .{ oid, caps.buffered() });
     }
-    try writeShallowRequest(w, request);
-    if (request.filter) |spec| try pktline.print(w, "filter {s}\n", .{spec});
+    try writeShallowRequest(w, request, false);
+    if (request.filter) |spec| try pktline.print(w, "filter {s}", .{spec});
     try pktline.flush(w);
-    var sent: usize = 0;
-    while (sent < v0_haves) : (sent += 1) {
-        const oid = (try negotiator.next()) orelse break;
-        try pktline.print(w, "have {f}\n", .{oid});
-    }
-    try pktline.write(w, "done\n");
 }
 
 /// git's default negotiator: this repository's commits, newest first, less
@@ -782,4 +901,20 @@ fn fuzzShallowInfo(_: void, smith: *testing.Smith) anyerror!void {
         error.ProtocolError => return,
         else => |e| return e,
     };
+}
+
+test "fuzz: a v0 server's answer to haves is an acknowledgment or a named failure" {
+    try testing.fuzz({}, fuzzAck, .{});
+}
+
+fn fuzzAck(_: void, smith: *testing.Smith) anyerror!void {
+    var scratch: [512]u8 = undefined;
+    const input = scratch[0..smith.slice(&scratch)];
+    var fake: protocol.Fake = .init(input);
+    const in = try fake.connection.advertisement();
+    var oid: Oid = undefined;
+    var n: usize = 0;
+    while (n < 64) : (n += 1) {
+        _ = readAck(&fake.connection, in, .sha1, &oid) catch return;
+    }
 }

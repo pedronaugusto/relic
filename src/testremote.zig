@@ -165,6 +165,8 @@ pub const HttpServer = struct {
     /// `auth` when an `Authorization` header came and `-` when not.
     log: std.ArrayList(u8) = .empty,
     log_mutex: Io.Mutex = .init,
+    /// How many connections were accepted.
+    connections: u32 = 0,
 
     /// How the server behaves.
     pub const HttpOptions = struct {
@@ -175,6 +177,9 @@ pub const HttpServer = struct {
         bearer: ?[]const u8 = null,
         /// The `text/plain` body of a 401, as a forge explains a refusal.
         refusal_text: ?[]const u8 = null,
+        /// Keep a connection open for the next request, as a web server
+        /// does; off, every answer closes it.
+        keep_alive: bool = false,
         /// Pass the client's `Git-Protocol` header to git. Off, git answers
         /// in v0 whatever the client asks.
         protocol_v2: bool = true,
@@ -245,14 +250,26 @@ pub const HttpServer = struct {
 
     fn handle(s: *HttpServer, stream: Io.net.Stream) !void {
         const io = s.io;
-        const gpa = s.gpa;
         var read_buffer: [64 * 1024]u8 = undefined;
         var write_buffer: [64 * 1024]u8 = undefined;
         var reader = stream.reader(io, &read_buffer);
         var writer = stream.writer(io, &write_buffer);
         var server = std.http.Server.init(&reader.interface, &writer.interface);
-        var request = try server.receiveHead();
+        {
+            s.log_mutex.lockUncancelable(io);
+            defer s.log_mutex.unlock(io);
+            s.connections += 1;
+        }
+        while (true) {
+            var request = server.receiveHead() catch return;
+            try s.answer(&request);
+            if (!s.options.keep_alive) return;
+        }
+    }
 
+    fn answer(s: *HttpServer, request: *std.http.Server.Request) !void {
+        const io = s.io;
+        const gpa = s.gpa;
         var arena_state: std.heap.ArenaAllocator = .init(gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -261,16 +278,18 @@ pub const HttpServer = struct {
         var git_protocol: ?[]const u8 = null;
         var authorization: ?[]const u8 = null;
         var content_type: ?[]const u8 = null;
+        var content_encoding: ?[]const u8 = null;
         var headers = request.iterateHeaders();
         while (headers.next()) |header| {
             if (std.ascii.eqlIgnoreCase(header.name, "git-protocol")) git_protocol = try arena.dupe(u8, header.value);
             if (std.ascii.eqlIgnoreCase(header.name, "authorization")) authorization = try arena.dupe(u8, header.value);
             if (std.ascii.eqlIgnoreCase(header.name, "content-type")) content_type = try arena.dupe(u8, header.value);
+            if (std.ascii.eqlIgnoreCase(header.name, "content-encoding")) content_encoding = try arena.dupe(u8, header.value);
         }
         {
             s.log_mutex.lockUncancelable(io);
             defer s.log_mutex.unlock(io);
-            try s.log.print(gpa, "{s} {s} {s}\n", .{ @tagName(method), target, if (authorization != null) "auth" else "-" });
+            try s.log.print(gpa, "{s} {s} {s}{s}\n", .{ @tagName(method), target, if (authorization != null) "auth" else "-", if (content_encoding != null) " gzip" else "" });
         }
 
         const question = std.mem.indexOfScalar(u8, target, '?');
@@ -279,7 +298,7 @@ pub const HttpServer = struct {
 
         if (s.options.redirect and method == .GET and std.mem.startsWith(u8, path, "/moved/")) {
             const location = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ path["/moved".len..], if (query.len != 0) "?" else "", query });
-            return request.respond("", .{ .status = .found, .keep_alive = false, .extra_headers = &.{.{ .name = "Location", .value = location }} });
+            return request.respond("", .{ .status = .found, .keep_alive = s.options.keep_alive, .extra_headers = &.{.{ .name = "Location", .value = location }} });
         }
 
         var remote_user: ?[]const u8 = null;
@@ -301,7 +320,7 @@ pub const HttpServer = struct {
                 try challenge.append(arena, basic);
                 if (s.options.bearer != null) try challenge.append(arena, bearer);
                 if (s.options.refusal_text != null) try challenge.append(arena, plain);
-                return request.respond(s.options.refusal_text orelse "", .{ .status = .unauthorized, .keep_alive = false, .extra_headers = challenge.items });
+                return request.respond(s.options.refusal_text orelse "", .{ .status = .unauthorized, .keep_alive = s.options.keep_alive, .extra_headers = challenge.items });
             }
             remote_user = auth.user;
         }
@@ -321,6 +340,7 @@ pub const HttpServer = struct {
         try cgi_env.put("QUERY_STRING", query);
         try cgi_env.put("REMOTE_ADDR", "127.0.0.1");
         if (content_type) |ct| try cgi_env.put("CONTENT_TYPE", ct);
+        if (content_encoding) |ce| try cgi_env.put("HTTP_CONTENT_ENCODING", ce);
         if (method == .POST) try cgi_env.put("CONTENT_LENGTH", try std.fmt.allocPrint(arena, "{d}", .{body.len}));
         if (s.options.protocol_v2) {
             if (git_protocol) |value| try cgi_env.put("GIT_PROTOCOL", value);
@@ -347,7 +367,7 @@ pub const HttpServer = struct {
         }
         try request.respond(output[split + 4 ..], .{
             .status = @enumFromInt(status),
-            .keep_alive = false,
+            .keep_alive = s.options.keep_alive,
             .extra_headers = response_headers.items,
         });
     }
@@ -480,15 +500,19 @@ pub const Proxy = struct {
     stopping: std.atomic.Value(bool) = .init(false),
     log: std.ArrayList(u8) = .empty,
     log_mutex: Io.Mutex = .init,
+    /// `user:password` the proxy requires with `Proxy-Authorization: Basic`,
+    /// answering 407 without it.
+    basic: ?[]const u8 = null,
 
-    /// Listen on an ephemeral port.
-    pub fn start(gpa: Allocator, io: Io) !*Proxy {
+    /// Listen on an ephemeral port. With `basic`, a request without those
+    /// credentials is answered 407.
+    pub fn start(gpa: Allocator, io: Io, basic: ?[]const u8) !*Proxy {
         const p = try gpa.create(Proxy);
         errdefer gpa.destroy(p);
         const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
         var listener = try address.listen(io, .{ .reuse_address = true });
         errdefer listener.deinit(io);
-        p.* = .{ .gpa = gpa, .io = io, .listener = listener, .port = listener.socket.address.getPort() };
+        p.* = .{ .gpa = gpa, .io = io, .listener = listener, .port = listener.socket.address.getPort(), .basic = basic };
         p.task = io.concurrent(serve, .{p}) catch return error.SkipZigTest;
         return p;
     }
@@ -554,6 +578,24 @@ pub const Proxy = struct {
             p.log_mutex.lockUncancelable(io);
             defer p.log_mutex.unlock(io);
             try p.log.print(p.gpa, "{s} {s}\n", .{ method, target });
+        }
+        if (p.basic) |credentials| {
+            var expected_buf: [256]u8 = undefined;
+            const encoder = std.base64.standard.Encoder;
+            const encoded = encoder.encode(&expected_buf, credentials);
+            var authorized = false;
+            var lines = std.mem.splitSequence(u8, head, "\r\n");
+            while (lines.next()) |line| {
+                const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+                if (!std.ascii.eqlIgnoreCase(line[0..colon], "proxy-authorization")) continue;
+                const value = std.mem.trim(u8, line[colon + 1 ..], " ");
+                if (std.mem.startsWith(u8, value, "Basic ") and std.mem.eql(u8, value["Basic ".len..], encoded)) authorized = true;
+            }
+            if (!authorized) {
+                try to_client.interface.writeAll("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                try to_client.interface.flush();
+                return;
+            }
         }
 
         var host_port: []const u8 = undefined;

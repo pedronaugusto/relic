@@ -145,13 +145,13 @@ test "a missing repository, a dumb setting and a header that is not one are refu
     const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{server.port});
     defer gpa.free(secure);
     for ([_][]const u8{
-        "[http]\nsslVerify = false\n",
         "[http]\nextraHeader = no colon here\n",
         "[http]\nsslCert = /etc/client.pem\n",
         "[http]\nsslCAInfo = /nonexistent/ca.pem\n",
+        "[http]\nproxy = http://127.0.0.1:1\nproxyAuthMethod = ntlm\n",
     }, [_]anyerror{
-        error.SslVerifyUnsupported,            error.InvalidHttpHeader,
-        error.SslClientCertificateUnsupported, error.SslCertificateUnreadable,
+        error.InvalidHttpHeader,        error.SslClientCertificateUnsupported,
+        error.SslCertificateUnreadable, error.ProxyAuthMethodUnsupported,
     }) |text, expected| {
         var config = try config_mod.Config.parseText(gpa, text, .local);
         defer config.deinit();
@@ -524,7 +524,22 @@ test "a server's own authority, in http.sslCAInfo or http.sslCAPath, is trusted 
     }
 }
 
-test "a proxy is gone through as git goes through it, and not for a host no_proxy names; https through one is refused" {
+/// The first line of each request a proxy saw, without the ones that
+/// only asked for credentials again, as curl's first try without them does.
+fn firstLines(gpa: Allocator, log: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var previous: []const u8 = "";
+    var lines = std.mem.tokenizeScalar(u8, log, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.eql(u8, line, previous)) continue;
+        previous = line;
+        try out.print(gpa, "{s}\n", .{line});
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "a proxy is gone through as git goes through it: the whole URL for http, CONNECT and TLS inside for https, not where no_proxy says" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -533,26 +548,33 @@ test "a proxy is gone through as git goes through it, and not for a host no_prox
     try servedRepo(gpa, io, &root, 2);
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
     defer server.stop();
-    const proxy = try testremote.Proxy.start(gpa, io);
+    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    defer front.stop(io);
+    const proxy = try testremote.Proxy.start(gpa, io, null);
     defer proxy.stop();
     const proxy_url = try proxy.url(gpa);
     defer gpa.free(proxy_url);
     const plain = try server.url(gpa, "repo.git");
     defer gpa.free(plain);
+    const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+    defer gpa.free(secure);
 
     const Case = struct {
+        url: []const u8,
         env: []const [2][]const u8 = &.{},
         config: []const [2][]const u8 = &.{},
         through: bool,
     };
     for ([_]Case{
-        .{ .env = &.{.{ "http_proxy", proxy_url }}, .through = true },
-        .{ .config = &.{.{ "http.proxy", proxy_url }}, .through = true },
+        .{ .url = plain, .env = &.{.{ "http_proxy", proxy_url }}, .through = true },
+        .{ .url = plain, .config = &.{.{ "http.proxy", proxy_url }}, .through = true },
+        .{ .url = secure, .env = &.{.{ "https_proxy", proxy_url }}, .through = true },
+        .{ .url = secure, .config = &.{.{ "http.proxy", proxy_url }}, .through = true },
         // curl reads no upper-case HTTP_PROXY, and so neither git nor relic
         // goes through it.
-        .{ .env = &.{.{ "HTTP_PROXY", proxy_url }}, .through = false },
-        .{ .env = &.{ .{ "http_proxy", proxy_url }, .{ "no_proxy", "127.0.0.1" } }, .through = false },
-        .{ .env = &.{.{ "http_proxy", proxy_url }}, .config = &.{.{ "http.proxy", "" }}, .through = false },
+        .{ .url = plain, .env = &.{.{ "HTTP_PROXY", proxy_url }}, .through = false },
+        .{ .url = secure, .env = &.{ .{ "https_proxy", proxy_url }, .{ "no_proxy", "127.0.0.1" } }, .through = false },
+        .{ .url = plain, .env = &.{.{ "http_proxy", proxy_url }}, .config = &.{.{ "http.proxy", "" }}, .through = false },
     }) |case| {
         var env = try testremote.environ(gpa);
         defer env.deinit();
@@ -562,7 +584,8 @@ test "a proxy is gone through as git goes through it, and not for a host no_prox
         var by_relic = try testgit.Repo.init(gpa, io, &.{});
         defer by_relic.deinit();
         for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
-            try r.exec(io, &.{ "remote", "add", "origin", plain });
+            try r.exec(io, &.{ "remote", "add", "origin", case.url });
+            try r.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
             for (case.config) |pair| try r.exec(io, &.{ "config", pair[0], pair[1] });
         }
         const fetched = try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true);
@@ -575,22 +598,297 @@ test "a proxy is gone through as git goes through it, and not for a host no_prox
         try expectSameFetch(gpa, io, &by_git, &by_relic);
         try testing.expectEqual(case.through, theirs.len != 0);
         try testing.expectEqual(case.through, ours.len != 0);
-        // The first request reaches the proxy in the same words.
-        if (case.through) {
-            const first_theirs = theirs[0..std.mem.indexOfScalar(u8, theirs, '\n').?];
-            const first_ours = ours[0..std.mem.indexOfScalar(u8, ours, '\n').?];
-            try testing.expectEqualStrings(first_theirs, first_ours);
-        }
+        // Every request reaches the proxy in the same words: an http one
+        // whole, an https one as its tunnel.
+        const theirs_lines = try firstLines(gpa, theirs);
+        defer gpa.free(theirs_lines);
+        const ours_lines = try firstLines(gpa, ours);
+        defer gpa.free(ours_lines);
+        try testing.expectEqualStrings(theirs_lines, ours_lines);
     }
+}
 
-    // https through a proxy: refused by name, and nothing reaches it.
+test "a proxy's credentials come from its URL, or its user's from the helpers, as git's do, and a refusal is named" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    defer front.stop(io);
+    const proxy = try testremote.Proxy.start(gpa, io, "ada:secret");
+    defer proxy.stop();
+    const plain = try server.url(gpa, "repo.git");
+    defer gpa.free(plain);
+    const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+    defer gpa.free(secure);
+
+    var tools = testing.tmpDir(.{ .iterate = true });
+    defer tools.cleanup();
+    const Case = struct { url: []const u8, proxy_user: []const u8, helper_password: ?[]const u8 = null, ok: bool };
+    for ([_]Case{
+        .{ .url = plain, .proxy_user = "ada:secret", .ok = true },
+        .{ .url = secure, .proxy_user = "ada:secret", .ok = true },
+        .{ .url = plain, .proxy_user = "ada", .helper_password = "secret", .ok = true },
+        .{ .url = secure, .proxy_user = "ada", .helper_password = "secret", .ok = true },
+        .{ .url = plain, .proxy_user = "ada:wrong", .ok = false },
+        .{ .url = secure, .proxy_user = "ada", .helper_password = "wrong", .ok = false },
+    }) |case| {
+        const proxy_url = try std.fmt.allocPrint(gpa, "http://{s}@127.0.0.1:{d}", .{ case.proxy_user, proxy.port });
+        defer gpa.free(proxy_url);
+        var env = try testremote.environ(gpa);
+        defer env.deinit();
+        try env.put("http_proxy", proxy_url);
+        try env.put("https_proxy", proxy_url);
+        var logs: [2][]u8 = undefined;
+        var logs_len: usize = 0;
+        defer for (logs[0..logs_len]) |l| gpa.free(l);
+        var results: [2]bool = undefined;
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }, 0..) |r, who| {
+            try r.exec(io, &.{ "remote", "add", "origin", case.url });
+            try r.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
+            if (case.helper_password) |password| {
+                const helper = try helperScript(gpa, io, tools.dir, password);
+                defer gpa.free(helper);
+                try r.exec(io, &.{ "config", "credential.helper", helper });
+            }
+            tools.dir.deleteFile(io, "helper.log") catch {};
+            if (who == 0) {
+                results[0] = if (testremote.gitInputEnv(gpa, io, r.dir, &env, &.{ "fetch", "-q", "origin" }, "", case.ok)) |out| blk: {
+                    gpa.free(out);
+                    break :blk true;
+                } else |_| false;
+            } else {
+                results[1] = if (relicFetch(gpa, io, r.dir, &env)) true else |err| blk: {
+                    try testing.expectEqual(error.ProxyAuthenticationFailed, err);
+                    break :blk false;
+                };
+            }
+            logs[logs_len] = tools.dir.readFileAlloc(io, "helper.log", gpa, .unlimited) catch try gpa.dupe(u8, "");
+            logs_len += 1;
+        }
+        const seen = try proxy.take(gpa);
+        gpa.free(seen);
+        try testing.expectEqual(case.ok, results[0]);
+        try testing.expectEqual(case.ok, results[1]);
+        if (case.ok) try expectSameFetch(gpa, io, &by_git, &by_relic);
+        // The helper was asked for the proxy's password as git asks, and
+        // told to store or erase it as git tells it.
+        try testing.expectEqualStrings(logs[0], logs[1]);
+    }
+}
+
+test "an https server is fetched from unchecked when http.sslVerify says so, and the caller is told" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    defer front.stop(io);
+    const url = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+    defer gpa.free(url);
+    for ([_]bool{ false, true }) |through_env| {
+        var env = try testremote.environ(gpa);
+        defer env.deinit();
+        if (through_env) try env.put("GIT_SSL_NO_VERIFY", "1");
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| {
+            try r.exec(io, &.{ "remote", "add", "origin", url });
+            if (!through_env) try r.exec(io, &.{ "config", "http.sslVerify", "false" });
+        }
+        const fetched = try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true);
+        gpa.free(fetched);
+        var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
+        defer repo.deinit(io);
+        var warnings: @import("warning.zig").Warnings = .init(gpa);
+        defer warnings.deinit();
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
+        outcome.deinit();
+        try expectSameFetch(gpa, io, &by_git, &by_relic);
+        try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
+        try testing.expectEqualStrings(if (through_env) "GIT_SSL_NO_VERIFY" else "http.sslverify", warnings.items.items[0].ssl_verify_disabled);
+    }
+}
+
+test "requests share one connection and a large upload-pack request is gzipped, as git's are" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 3);
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    try env.put("https_proxy", proxy_url);
-    const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{server.port});
-    defer gpa.free(secure);
-    try testing.expectError(error.HttpsProxyUnsupported, transport.Session.open(gpa, io, secure, .upload_pack, .sha1, .{ .programs = .{ .environ = &env } }));
-    const seen = try proxy.take(gpa);
-    defer gpa.free(seen);
-    try testing.expectEqualStrings("", seen);
+    for ([_]bool{ true, false }) |v2| {
+        const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .keep_alive = true, .protocol_v2 = v2 });
+        defer server.stop();
+        const url = try server.url(gpa, "repo.git");
+        defer gpa.free(url);
+        var logs: [2][]u8 = undefined;
+        var connections: [2]u32 = undefined;
+        for (0..2) |who| {
+            // A repository with history of its own, so the negotiation
+            // offers enough to pass a kilobyte.
+            var r = try testgit.Repo.init(gpa, io, &.{});
+            defer r.deinit();
+            try testremote.addCommits(gpa, io, &r, 100, 40);
+            try r.exec(io, &.{ "remote", "add", "origin", url });
+            const before = server.connections;
+            const log_before = try server.requests(gpa);
+            defer gpa.free(log_before);
+            if (who == 0) {
+                const out = try testremote.gitInputEnv(gpa, io, r.dir, &env, &.{ "-c", if (v2) "protocol.version=2" else "protocol.version=0", "fetch", "-q", "origin" }, "", true);
+                gpa.free(out);
+            } else try relicFetchV(gpa, io, r.dir, &env, v2, "origin");
+            const log_after = try server.requests(gpa);
+            defer gpa.free(log_after);
+            logs[who] = try gpa.dupe(u8, log_after[log_before.len..]);
+            connections[who] = server.connections - before;
+        }
+        defer for (logs) |l| gpa.free(l);
+        try testing.expectEqualStrings(logs[0], logs[1]);
+        try testing.expect(std.mem.indexOf(u8, logs[1], " gzip") != null);
+        try testing.expectEqual(connections[0], connections[1]);
+    }
+}
+
+fn relicFetchV(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Environ.Map, v2: bool, remote: []const u8) !void {
+    var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+    defer repo.deinit(io);
+    try repo.config.set("protocol.version", if (v2) "2" else "0");
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, remote, .{ .who = test_who, .programs = .{ .environ = env } });
+    outcome.deinit();
+}
+
+test "the negotiation git's fetch-pack makes is made byte for byte, over a pipe and over HTTP, in v0 and v2" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 3);
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    var tools = testing.tmpDir(.{ .iterate = true });
+    defer tools.cleanup();
+    const tools_path = try testremote.absolutePath(gpa, io, tools.dir);
+    defer gpa.free(tools_path);
+    // A stand-in ssh that keeps what it was sent.
+    const script = try std.fmt.allocPrint(gpa,
+        \\#!/bin/sh
+        \\while [ $# -gt 0 ]; do
+        \\  case "$1" in
+        \\    -G) exit 0 ;;
+        \\    -o|-p|-P) shift 2 ;;
+        \\    -*) shift ;;
+        \\    *) break ;;
+        \\  esac
+        \\done
+        \\shift
+        \\tee -a "{s}/sent" | PATH="$(git --exec-path):$PATH" sh -c "$*"
+        \\
+    , .{tools_path});
+    defer gpa.free(script);
+    try tools.dir.writeFile(io, .{ .sub_path = "ssh", .data = script });
+    {
+        const file = try tools.dir.openFile(io, "ssh", .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    }
+    const ssh_path = try std.fmt.allocPrint(gpa, "{s}/ssh", .{tools_path});
+    defer gpa.free(ssh_path);
+
+    // One history of its own, copied to both sides so the haves are the
+    // same commits in the same order.
+    var local = try testgit.Repo.init(gpa, io, &.{});
+    defer local.deinit();
+    try testremote.addCommits(gpa, io, &local, 100, 50);
+    const local_path = try testremote.absolutePath(gpa, io, local.dir);
+    defer gpa.free(local_path);
+
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const http_url = try server.url(gpa, "repo.git");
+    defer gpa.free(http_url);
+    const ssh_url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}/repo.git", .{root_path});
+    defer gpa.free(ssh_url);
+
+    for ([_][]const u8{ ssh_url, http_url }) |url| for ([_]bool{ false, true }) |v2| {
+        var sent: [2][]u8 = undefined;
+        var requests: [2][]u8 = undefined;
+        for (0..2) |who| {
+            var twin = testing.tmpDir(.{ .iterate = true });
+            defer twin.cleanup();
+            const twin_path = try testremote.absolutePath(gpa, io, twin.dir);
+            defer gpa.free(twin_path);
+            var env = try testremote.environ(gpa);
+            defer env.deinit();
+            try env.put("GIT_SSH_COMMAND", ssh_path);
+            const cloned = try testremote.gitInputEnv(gpa, io, twin.dir, &env, &.{ "clone", "-q", local_path, "." }, "", true);
+            gpa.free(cloned);
+            const added = try testremote.gitInputEnv(gpa, io, twin.dir, &env, &.{ "remote", "add", "far", url }, "", true);
+            gpa.free(added);
+            tools.dir.deleteFile(io, "sent") catch {};
+            const before = try server.requests(gpa);
+            defer gpa.free(before);
+            if (who == 0) {
+                const out = try testremote.gitInputEnv(gpa, io, twin.dir, &env, &.{ "-c", if (v2) "protocol.version=2" else "protocol.version=0", "fetch", "-q", "far" }, "", true);
+                gpa.free(out);
+            } else try relicFetchV(gpa, io, twin.dir, &env, v2, "far");
+            sent[who] = tools.dir.readFileAlloc(io, "sent", gpa, .unlimited) catch try gpa.dupe(u8, "");
+            const after = try server.requests(gpa);
+            defer gpa.free(after);
+            requests[who] = try gpa.dupe(u8, after[before.len..]);
+        }
+        defer for (sent) |b| gpa.free(b);
+        defer for (requests) |b| gpa.free(b);
+        // What was written to ssh, but git's agent and the capabilities
+        // that name it.
+        const theirs = try withoutAgent(gpa, sent[0]);
+        defer gpa.free(theirs);
+        const ours = try withoutAgent(gpa, sent[1]);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
+        try testing.expectEqualStrings(requests[0], requests[1]);
+    };
+}
+
+/// `bytes`, pkt-lines one to a line, with the value of every `agent=`
+/// blanked — each side names itself — and so the length of its line.
+fn withoutAgent(gpa: Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var rest = bytes;
+    while (rest.len >= 4) {
+        const len = std.fmt.parseUnsigned(u16, rest[0..4], 16) catch break;
+        if (len < 4) {
+            try out.print(gpa, "{s}\n", .{rest[0..4]});
+            rest = rest[4..];
+            continue;
+        }
+        if (len > rest.len) break;
+        const payload = rest[4..len];
+        rest = rest[len..];
+        if (std.mem.indexOf(u8, payload, "agent=")) |at| {
+            const value_end = std.mem.indexOfAnyPos(u8, payload, at + "agent=".len, " \n") orelse payload.len;
+            try out.print(gpa, "????{s}{s}", .{ payload[0 .. at + "agent=".len], payload[value_end..] });
+        } else try out.print(gpa, "{s}{s}", .{ rest[0..0], payload });
+        try out.print(gpa, "|{d}\n", .{if (std.mem.indexOf(u8, payload, "agent=") == null) len else 0});
+    }
+    try out.appendSlice(gpa, rest);
+    return out.toOwnedSlice(gpa);
 }

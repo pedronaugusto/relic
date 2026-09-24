@@ -1,4 +1,4 @@
-//! git's smart HTTP protocol, over `std.http.Client`.
+//! git's smart HTTP protocol, over relic's own HTTP/1.1 client.
 //!
 //! The conversation is a `GET` of `<url>/info/refs?service=<service>`, whose
 //! body is the service's advertisement, and then one `POST` to
@@ -12,21 +12,25 @@
 //! A redirect of the first request is followed, as git's default
 //! `http.followRedirects=initial` follows it, and the requests after it go
 //! where it led; a redirect of a `POST` is not. A server that answers with
-//! a plain file listing — git's dumb protocol — is refused by name.
+//! a plain file listing — git's dumb protocol — is refused by name. A
+//! request that fits `http.postBuffer` is sent whole, gzipped when it is an
+//! upload-pack request over a kilobyte, as git sends it; a larger one is
+//! sent in chunks as it is written. Connections are kept between requests.
 //!
-//! `https://` goes through the same client with TLS from `std.crypto.tls`,
-//! against the system's root certificates, or against `http.sslCAInfo` in
-//! their place and `http.sslCAPath` besides — a company's own authority, a
-//! self-hosted server's. That check needs the time, and it is the one place
-//! a clock is read. The settings are git's, scoped by `http.<url>.*` and
-//! overridden by git's environment variables (`httpsettings.zig`), and a
-//! proxy is `http.proxy` or the one curl would find in the environment.
-//! What the standard library's client cannot do is refused by name rather
-//! than done wrong: it always checks the server's certificate, so
-//! `http.sslVerify=false` is refused rather than quietly checked anyway; it
-//! cannot present a client certificate, so `http.sslCert` and `http.sslKey`
-//! are refused too; and it speaks plain HTTP inside a `CONNECT` tunnel, so
-//! an `https` URL with a proxy is refused rather than sent in the clear.
+//! `https://` is TLS from `std.crypto.tls`, against the system's root
+//! certificates, or against `http.sslCAInfo` in their place and
+//! `http.sslCAPath` besides — a company's own authority, a self-hosted
+//! server's — or against nothing at all when `http.sslVerify` is false,
+//! which is then returned as a warning. That check needs the time, and it
+//! is the one place a clock is read. The settings are git's, scoped by
+//! `http.<url>.*` and overridden by git's environment variables
+//! (`httpsettings.zig`), and a proxy is `http.proxy` or the one curl would
+//! find in the environment: an `https` URL goes through it in a `CONNECT`
+//! tunnel with TLS inside, an `http` one as a whole URL. A proxy's
+//! credentials are the ones its URL carries, a username there with the
+//! password from the person's helpers, as git fills them. A client
+//! certificate is refused by name: the standard library's TLS client cannot
+//! present one.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -41,6 +45,8 @@ const connection = @import("connection.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const httpsettings = @import("httpsettings.zig");
+const httpclient = @import("httpclient.zig");
+const warning = @import("warning.zig");
 
 const Connection = connection.Connection;
 const Service = connection.Service;
@@ -57,24 +63,17 @@ pub const Error = error{
     /// The server speaks git's dumb HTTP protocol, a listing of files,
     /// which relic does not read.
     DumbHttpUnsupported,
-    /// `http.sslVerify` is false, or `GIT_SSL_NO_VERIFY` is set. The
-    /// standard library's HTTP client always checks the server's
-    /// certificate; the way to trust a server of one's own is
-    /// `http.sslCAInfo`.
-    SslVerifyUnsupported,
     /// `http.sslCert` or `http.sslKey`: the standard library's TLS client
     /// cannot present a client certificate.
     SslClientCertificateUnsupported,
     /// `http.sslCAInfo` or `http.sslCAPath` names a file or directory that
-    /// could not be read as certificates.
+    /// could not be read as certificates, or the system's could not be read.
     SslCertificateUnreadable,
+    /// The TLS handshake failed: a certificate that is not trusted, a name
+    /// that does not match. `Connection.message` names the reason.
+    TlsFailed,
     /// An `http.*` value that does not parse.
     InvalidHttpSetting,
-    /// An `https` URL and a proxy to reach it through. The standard
-    /// library's client opens the `CONNECT` tunnel and then speaks plain
-    /// HTTP inside it, which would hand the request — credentials and all
-    /// — to the proxy unencrypted; relic refuses rather than send it.
-    HttpsProxyUnsupported,
     /// An `http.extraHeader` that is not `Name: value`, or that holds a line
     /// break.
     InvalidHttpHeader,
@@ -84,6 +83,14 @@ pub const Error = error{
     /// A proxy the configuration or the environment names that does not
     /// parse.
     InvalidProxy,
+    /// The proxy refused the credentials it was given, or wanted some and
+    /// had none: status 407.
+    ProxyAuthenticationFailed,
+    /// The proxy refused the tunnel for another reason.
+    ProxyRefused,
+    /// `http.proxyAuthMethod` names a scheme other than basic: digest,
+    /// negotiate, ntlm.
+    ProxyAuthMethodUnsupported,
 } || connection.Error || credential.Error;
 
 /// How the conversation is made.
@@ -101,6 +108,9 @@ pub const Options = struct {
     prompt: ?credential.Prompt = null,
     /// Filled in when the conversation fails for want of a credential.
     auth_failure: ?*auth.Failure = null,
+    /// Where what git would print as a warning goes: certificate checks
+    /// turned off.
+    warnings: ?*warning.Warnings = null,
 };
 
 /// What the client calls itself. A server that treats git specially looks
@@ -115,28 +125,25 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, optio
         .gpa = gpa,
         .io = io,
         .arena = .init(gpa),
-        .client = .{ .allocator = gpa, .io = io },
-        .base = undefined,
+        .client = .init(gpa, io),
+        .target = undefined,
+        .base_path = undefined,
         .service = service,
         .v2 = options.protocol_v2 and service == .upload_pack,
         .options = options,
-        .transfer_buffer = undefined,
-        .redirect_buffer = undefined,
         .post_buffer = undefined,
         .post = undefined,
         .connection = .{ .context = h, .vtable = &Http.vtable, .stateless = true },
         .credentials = .{ .gpa = gpa, .url = url },
     };
     errdefer h.arena.deinit();
-    const arena = h.arena.allocator();
     errdefer h.client.deinit();
     errdefer h.credentials.deinit();
     errdefer h.endRequest();
+    errdefer if (h.proxy_credentials) |*p| p.deinit();
 
     const settings = try h.configure(url);
-    h.transfer_buffer = try arena.alloc(u8, pktline.max_line + 16);
-    h.redirect_buffer = try arena.alloc(u8, 8 * 1024);
-    h.post_buffer = try arena.alloc(u8, @intCast(settings.post_buffer));
+    h.post_buffer = try h.arena.allocator().alloc(u8, @intCast(settings.post_buffer));
     h.post = .{ .vtable = &.{ .drain = Http.drainPost }, .buffer = h.post_buffer };
     // The advertisement is asked for here, so that what can go wrong with
     // the first request — a credential refused, no repository, a dumb
@@ -149,10 +156,11 @@ const Http = struct {
     gpa: Allocator,
     io: Io,
     arena: std.heap.ArenaAllocator,
-    client: http.Client,
-    /// `scheme://host[:port]/path`, without a trailing slash and without
-    /// the credentials a URL may carry.
-    base: []const u8,
+    client: httpclient.Client,
+    /// Where the repository is, and the path of its URL without a
+    /// trailing slash; a redirect of the first request moves both.
+    target: httpclient.Target,
+    base_path: []const u8,
     service: Service,
     v2: bool,
     options: Options,
@@ -160,21 +168,16 @@ const Http = struct {
     extra_headers: []const http.Header = &.{},
     /// `http.userAgent`, or relic's own.
     user_agent: []const u8 = user_agent,
-    in_flight: ?http.Client.Request = null,
-    /// The URL of the request in flight, which it borrows.
-    request_url: []u8 = &.{},
-    body: http.BodyWriter = undefined,
-    streaming: bool = false,
-    transfer_buffer: []u8,
-    redirect_buffer: []u8,
+    in_flight: ?httpclient.Response = null,
+    streaming: ?httpclient.Streaming = null,
+    stream_buffer: []u8 = &.{},
     post_buffer: []u8,
     post: Io.Writer,
-    decompress: http.Decompress = undefined,
-    decompress_buffer: []u8 = &.{},
     body_reader: *Io.Reader = undefined,
-    advertised: bool = false,
     connection: Connection,
     credentials: credential.Session,
+    /// The proxy's credential, when its URL names a user.
+    proxy_credentials: ?credential.Session = null,
     /// A failure met inside a writer, which can only say that it failed.
     write_error: ?Error = null,
 
@@ -190,84 +193,73 @@ const Http = struct {
         return @ptrCast(@alignCast(context));
     }
 
-    /// The settings: TLS options relic cannot honour are refused, the
-    /// certificates to trust loaded, the extra headers read, and a proxy
-    /// set up.
+    fn targetOf(url: url_mod.Url) httpclient.Target {
+        return .{
+            .tls = url.scheme == .https,
+            .host = url.host,
+            .port = url.port orelse if (url.scheme == .https) 443 else 80,
+        };
+    }
+
+    /// The settings: certificates to trust loaded, checks turned off where
+    /// git's settings say so, the extra headers read, and a proxy set up.
     fn configure(h: *Http, url: url_mod.Url) Error!httpsettings.Settings {
         const arena = h.arena.allocator();
-        // The base URL, without the userinfo, which becomes the credential.
-        var base: std.ArrayList(u8) = .empty;
-        try base.print(arena, "{s}://", .{@tagName(url.scheme)});
-        if (std.mem.indexOfScalar(u8, url.host, ':') != null) {
-            try base.print(arena, "[{s}]", .{url.host});
-        } else try base.appendSlice(arena, url.host);
-        if (url.port) |port| try base.print(arena, ":{d}", .{port});
+        h.target = targetOf(url);
         var path = url.path;
         while (path.len != 0 and path[path.len - 1] == '/') path = path[0 .. path.len - 1];
-        try base.appendSlice(arena, path);
-        h.base = base.items;
+        h.base_path = path;
 
         const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
         const settings = try httpsettings.resolve(arena, h.options.config, environ, url);
         if (url.scheme == .https) {
-            if (!settings.ssl_verify) return h.fail(error.SslVerifyUnsupported, settings.ssl_verify_from orelse "http.sslVerify");
             if (settings.ssl_cert != null or settings.ssl_key != null) return h.fail(error.SslClientCertificateUnsupported, if (settings.ssl_cert != null) "http.sslCert" else "http.sslKey");
-            if (settings.ca_info != null or settings.ca_path != null) try h.trust(settings, environ);
+            if (!settings.ssl_verify) {
+                h.client.verify = false;
+                try warning.note(h.options.warnings, .{ .ssl_verify_disabled = settings.ssl_verify_from orelse "http.sslVerify" });
+            } else if (settings.ca_info != null or settings.ca_path != null) try h.trust(settings, environ);
         }
 
-        var headers: std.ArrayList(http.Header) = .empty;
+        var extra: std.ArrayList(http.Header) = .empty;
         for (settings.extra_headers) |text| {
             if (std.mem.indexOfAny(u8, text, "\r\n") != null) return error.InvalidHttpHeader;
             const colon = std.mem.indexOfScalar(u8, text, ':') orelse return error.InvalidHttpHeader;
             const name = std.mem.trim(u8, text[0..colon], " \t");
             if (name.len == 0) return error.InvalidHttpHeader;
-            try headers.append(arena, .{ .name = name, .value = std.mem.trim(u8, text[colon + 1 ..], " \t") });
+            try extra.append(arena, .{ .name = name, .value = std.mem.trim(u8, text[colon + 1 ..], " \t") });
         }
-        if (h.v2) try headers.append(arena, .{ .name = "Git-Protocol", .value = "version=2" });
-        h.extra_headers = headers.items;
+        if (h.v2) try extra.append(arena, .{ .name = "Git-Protocol", .value = "version=2" });
+        h.extra_headers = extra.items;
         if (settings.user_agent) |agent| h.user_agent = agent;
 
-        if (settings.proxy) |text| {
-            if (url.scheme == .https) return h.fail(error.HttpsProxyUnsupported, text);
-            try h.configureProxy(url, text);
-        }
+        if (settings.proxy) |text| try h.configureProxy(text, settings.proxy_auth_method);
         return settings;
     }
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
     /// `http.sslCAPath` besides them, as curl does for git.
     fn trust(h: *Http, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) Error!void {
-        const io = h.io;
-        const now = Io.Clock.real.now(io);
-        const bundle = &h.client.ca_bundle;
-        const cwd = Io.Dir.cwd();
+        const arena = h.arena.allocator();
         if (settings.ca_info) |raw| {
-            const file = try expandHome(h.arena.allocator(), raw, environ);
-            bundle.addCertsFromFilePath(h.gpa, io, now, cwd, file) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Canceled => return error.Canceled,
-                else => return h.fail(error.SslCertificateUnreadable, settings.ca_info_from orelse "http.sslCAInfo"),
+            h.client.trustFile(try expandHome(arena, raw, environ)) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.Canceled => error.Canceled,
+                else => h.fail(error.SslCertificateUnreadable, settings.ca_info_from orelse "http.sslCAInfo"),
             };
         } else {
-            bundle.rescan(h.gpa, io, now) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Canceled => return error.Canceled,
-                else => return h.fail(error.SslCertificateUnreadable, "the system's certificates"),
+            h.client.trustSystem() catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.Canceled => error.Canceled,
+                else => h.fail(error.SslCertificateUnreadable, "the system's certificates"),
             };
         }
         if (settings.ca_path) |raw| {
-            const dir_path = try expandHome(h.arena.allocator(), raw, environ);
-            var dir = cwd.openDir(io, dir_path, .{ .iterate = true }) catch return h.fail(error.SslCertificateUnreadable, "http.sslCAPath");
-            defer dir.close(io);
-            bundle.addCertsFromDir(h.gpa, io, now, dir) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Canceled => return error.Canceled,
-                else => return h.fail(error.SslCertificateUnreadable, "http.sslCAPath"),
+            h.client.trustDirectory(try expandHome(arena, raw, environ)) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.Canceled => error.Canceled,
+                else => h.fail(error.SslCertificateUnreadable, "http.sslCAPath"),
             };
         }
-        // Set, the client neither rescans the system nor reads the clock
-        // again.
-        h.client.now = now;
     }
 
     fn expandHome(arena: Allocator, path: []const u8, environ: ?*const std.process.Environ.Map) Allocator.Error![]const u8 {
@@ -277,91 +269,97 @@ const Http = struct {
         return std.fs.path.join(arena, &.{ home, path[2..] });
     }
 
-    fn configureProxy(h: *Http, url: url_mod.Url, text: []const u8) Error!void {
+    /// The proxy, and its credential: the user and password its URL
+    /// carries, or a user there and the password from the person's helpers,
+    /// as git's `init_curl_proxy_auth` fills it.
+    fn configureProxy(h: *Http, raw: []const u8, method: []const u8) Error!void {
         const arena = h.arena.allocator();
-        const uri = std.Uri.parse(text) catch std.Uri.parseAfterScheme("http", text) catch return error.InvalidProxy;
-        const protocol = http.Client.Protocol.fromUri(uri) orelse return error.InvalidProxy;
-        const host = uri.getHostAlloc(arena) catch return error.InvalidProxy;
-        var authorization: ?[]const u8 = null;
-        if (uri.user != null or uri.password != null) {
-            const value = try arena.alloc(u8, http.Client.basic_authorization.valueLengthFromUri(uri));
-            authorization = http.Client.basic_authorization.value(uri, value);
+        if (!std.ascii.eqlIgnoreCase(method, "anyauth") and !std.ascii.eqlIgnoreCase(method, "basic")) {
+            return h.fail(error.ProxyAuthMethodUnsupported, method);
         }
-        const proxy = try arena.create(http.Client.Proxy);
-        proxy.* = .{
-            .protocol = protocol,
-            .host = host,
-            .authorization = authorization,
-            .port = uri.port orelse switch (protocol) {
-                .plain => 1080,
-                .tls => 443,
-            },
-            // curl hands an http request to the proxy whole, with its
-            // absolute URL, rather than asking for a tunnel.
-            .supports_connect = false,
+        const text = if (std.mem.indexOf(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else raw;
+        const proxy_url = url_mod.Url.parse(text) catch return error.InvalidProxy;
+        if (proxy_url.scheme != .http and proxy_url.scheme != .https) return error.InvalidProxy;
+        if (proxy_url.host.len == 0) return error.InvalidProxy;
+        var proxy: httpclient.Proxy = .{
+            .host = proxy_url.host,
+            .port = proxy_url.port orelse if (proxy_url.scheme == .https) 443 else 1080,
+            .tls = proxy_url.scheme == .https,
         };
-        switch (url.scheme) {
-            .https => h.client.https_proxy = proxy,
-            else => h.client.http_proxy = proxy,
+        if (proxy_url.user != null) {
+            h.proxy_credentials = .{ .gpa = h.gpa, .url = proxy_url };
+            const session = &h.proxy_credentials.?;
+            if (!session.hasInitial()) {
+                const filled = session.fill(h.io, h.credentialOptions()) catch |err| return h.proxyFailed(err);
+                if (!filled) return h.fail(error.ProxyAuthenticationFailed, "no password for the proxy");
+            }
+            if (session.authorization()) |value| proxy.authorization = try arena.dupe(u8, value);
         }
+        h.client.proxy = proxy;
+    }
+
+    fn proxyFailed(h: *Http, err: anyerror) Error {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+            error.ProgramsNotGranted => error.ProgramsNotGranted,
+            error.CredentialHelperQuit => error.CredentialHelperQuit,
+            error.CredentialsUnavailable => error.CredentialsUnavailable,
+            else => h.fail(error.ProxyAuthenticationFailed, @errorName(err)),
+        };
+    }
+
+    /// The proxy took its credential: the helpers are told, as git tells
+    /// them. Once.
+    fn approveProxy(h: *Http) Error!void {
+        const session = &(h.proxy_credentials orelse return);
+        if (session.source != .helper and session.source != .prompt) return;
+        session.approve(h.io, h.credentialOptions()) catch |err| return h.proxyFailed(err);
+        session.source = .url;
+    }
+
+    /// The proxy refused it: the helpers are told to forget it.
+    fn rejectProxy(h: *Http) Error {
+        if (h.proxy_credentials) |*session| {
+            session.reject(h.io, h.credentialOptions()) catch {};
+        }
+        var buf: [32]u8 = undefined;
+        return h.fail(error.ProxyAuthenticationFailed, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.client.proxy_status orelse 407}) catch "proxy answered 407");
     }
 
     /// Give back the request in flight, reading what is left of its body
-    /// so its connection can be used again.
+    /// so its connection can carry the next one.
     fn endRequest(h: *Http) void {
-        if (h.in_flight) |*req| {
-            req.deinit();
+        if (h.in_flight) |*res| {
+            _ = res.reader().discardRemaining() catch {};
+            res.deinit();
             h.in_flight = null;
         }
-        if (h.request_url.len != 0) {
-            h.gpa.free(h.request_url);
-            h.request_url = &.{};
+        if (h.streaming) |*s| {
+            s.abort();
+            h.streaming = null;
         }
-        if (h.decompress_buffer.len != 0) {
-            h.gpa.free(h.decompress_buffer);
-            h.decompress_buffer = &.{};
-        }
-        h.streaming = false;
     }
 
-    fn headersFor(h: *const Http, authorization: ?[]const u8) http.Client.Request.Headers {
-        return .{
-            .user_agent = .{ .override = h.user_agent },
-            .authorization = if (authorization) |a| .{ .override = a } else .omit,
-        };
-    }
-
-    /// Open a request to `<base><suffix>`.
-    fn open(h: *Http, method: http.Method, suffix: []const u8, authorization: ?[]const u8) Error!void {
-        h.endRequest();
-        h.request_url = try std.fmt.allocPrint(h.gpa, "{s}{s}", .{ h.base, suffix });
-        const uri = std.Uri.parse(h.request_url) catch return h.fail(error.ConnectionFailed, "malformed URL");
-        var extra: std.ArrayList(http.Header) = .empty;
-        defer extra.deinit(h.gpa);
-        try extra.appendSlice(h.gpa, h.extra_headers);
-        try extra.append(h.gpa, .{ .name = "Pragma", .value = "no-cache" });
+    fn headers(h: *Http, arena: Allocator, method: http.Method, authorization: ?[]const u8, gzipped: bool) Allocator.Error![]const http.Header {
+        var list: std.ArrayList(http.Header) = .empty;
+        try list.append(arena, .{ .name = "User-Agent", .value = h.user_agent });
+        if (authorization) |a| try list.append(arena, .{ .name = "Authorization", .value = a });
+        try list.append(arena, .{ .name = "Accept-Encoding", .value = "deflate, gzip" });
+        try list.appendSlice(arena, h.extra_headers);
+        try list.append(arena, .{ .name = "Pragma", .value = "no-cache" });
         if (method == .POST) {
-            // The values live as long as the connection: the request is sent
-            // after this returns.
-            const arena = h.arena.allocator();
-            try extra.append(h.gpa, .{
+            try list.append(arena, .{
                 .name = "Content-Type",
                 .value = try std.fmt.allocPrint(arena, "application/x-{s}-request", .{h.service.name()}),
             });
-            try extra.append(h.gpa, .{
+            try list.append(arena, .{
                 .name = "Accept",
                 .value = try std.fmt.allocPrint(arena, "application/x-{s}-result", .{h.service.name()}),
             });
+            if (gzipped) try list.append(arena, .{ .name = "Content-Encoding", .value = "gzip" });
         }
-        // The headers are copied into the request's own list, which must
-        // outlive it: kept in the arena.
-        const headers = try h.arena.allocator().dupe(http.Header, extra.items);
-        h.in_flight = h.client.request(method, uri, .{
-            .headers = h.headersFor(authorization),
-            .extra_headers = headers,
-            .keep_alive = true,
-            .redirect_behavior = if (method == .GET) @enumFromInt(5) else .unhandled,
-        }) catch |err| return h.fail(mapRequestError(err), @errorName(err));
+        return list.items;
     }
 
     fn credentialOptions(h: *const Http) credential.Options {
@@ -373,28 +371,54 @@ const Http = struct {
         return err;
     }
 
-    fn mapRequestError(err: anyerror) Error {
+    /// An error of the HTTP client's, as this module names it.
+    fn clientFailed(h: *Http, err: httpclient.Error) Error {
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
-            else => error.ConnectionFailed,
+            error.ConnectionFailed => h.fail(error.ConnectionFailed, "the connection failed"),
+            error.TlsFailed => h.fail(error.TlsFailed, if (h.client.tls_error) |e| @errorName(e) else "TLS handshake failed"),
+            error.ProxyAuthenticationRequired => h.rejectProxy(),
+            error.ProxyRefused => {
+                var buf: [32]u8 = undefined;
+                return h.fail(error.ProxyRefused, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.client.proxy_status orelse 0}) catch "proxy refused");
+            },
+            error.HttpProtocolError => h.fail(error.ProtocolError, "not an HTTP response"),
+            error.CertificateBundleUnreadable => h.fail(error.SslCertificateUnreadable, "the system's certificates"),
         };
     }
 
-    /// Send a `GET` and read its head, handling a request for credentials
-    /// as git's `http_request_reauth` does: a 401 to a request that carried
-    /// none fills one and tries again; a 401 to one that carried one
-    /// rejects it and ends there.
-    fn get(h: *Http, suffix: []const u8) Error!http.Client.Response {
+    fn pathFor(h: *Http, suffix: []const u8) Allocator.Error![]const u8 {
+        return std.fmt.allocPrint(h.arena.allocator(), "{s}{s}", .{ h.base_path, suffix });
+    }
+
+    /// Send a `GET` and read its head, following redirects as curl does for
+    /// git and handling a request for credentials as git's
+    /// `http_request_reauth` does: a 401 to a request that carried none
+    /// fills one and tries again; a 401 to one that carried one rejects it
+    /// and ends there.
+    fn get(h: *Http, suffix: []const u8) Error!*httpclient.Response {
+        var path = try h.pathFor(suffix);
+        var redirects: u8 = 0;
         while (true) {
+            h.endRequest();
             const authorization = h.credentials.authorization();
-            try h.open(.GET, suffix, authorization);
-            const req = &h.in_flight.?;
-            req.sendBodiless() catch |err| return h.fail(mapRequestError(err), @errorName(err));
-            var head = req.receiveHead(h.redirect_buffer) catch |err| return h.fail(mapRequestError(err), @errorName(err));
-            if (head.head.status == .unauthorized) {
-                try h.keepChallenges(&head.head);
-                const said = try h.serverText(&head);
+            const list = try h.headers(h.arena.allocator(), .GET, authorization, false);
+            h.in_flight = h.client.send(.GET, h.target, path, list, null) catch |err| return h.clientFailed(err);
+            const res = &h.in_flight.?;
+            if (h.client.proxy != null) try h.approveProxy();
+            const status = @intFromEnum(res.head.status);
+            if (status == 407) return h.rejectProxy();
+            if (status == 301 or status == 302 or status == 303 or status == 307 or status == 308) {
+                const location = res.head.location orelse return h.fail(error.HttpStatus, "a redirect with no Location");
+                redirects += 1;
+                if (redirects > 20) return h.fail(error.HttpStatus, "too many redirects");
+                path = try h.follow(location, path);
+                continue;
+            }
+            if (res.head.status == .unauthorized) {
+                try h.keepChallenges(&res.head);
+                const said = try h.serverText(res);
                 if (authorization != null) {
                     h.credentials.reject(h.io, h.credentialOptions()) catch |err| return h.authFailed(err, .refused, 401, said);
                     return h.authFailed(error.AuthenticationFailed, .refused, 401, said);
@@ -409,12 +433,36 @@ const Http = struct {
                 if (!filled) return h.authFailed(error.AuthenticationFailed, .declined, 401, said);
                 continue;
             }
-            if (head.head.status.class() == .success and authorization != null) {
+            if (res.head.status.class() == .success and authorization != null) {
                 try h.credentials.setChallenges(&.{});
                 try h.credentials.approve(h.io, h.credentialOptions());
             }
-            return head;
+            if (redirects > 0 and res.head.status.class() == .success) try h.rebase(path);
+            return res;
         }
+    }
+
+    /// Where a redirect leads: the target and path after it, from a
+    /// `Location` that is a whole URL or a path.
+    fn follow(h: *Http, location: []const u8, from: []const u8) Error![]const u8 {
+        const arena = h.arena.allocator();
+        if (std.mem.indexOf(u8, location, "://") != null) {
+            const text = try arena.dupe(u8, location);
+            const to = url_mod.Url.parse(text) catch return h.fail(error.HttpStatus, "a redirect to a URL that does not parse");
+            if (to.scheme != .http and to.scheme != .https) return h.fail(error.HttpStatus, "a redirect to another protocol");
+            const moved = targetOf(to);
+            // A credential goes only where it was given.
+            if (!moved.eql(h.target)) {
+                h.credentials.deinit();
+                h.credentials = .{ .gpa = h.gpa, .url = to };
+            }
+            h.target = moved;
+            return if (to.path.len == 0) "/" else to.path;
+        }
+        if (location.len != 0 and location[0] == '/') return arena.dupe(u8, location);
+        // Relative to the directory of the request that was redirected.
+        const dir_end = (std.mem.lastIndexOfScalar(u8, from[0 .. std.mem.indexOfScalar(u8, from, '?') orelse from.len], '/') orelse 0) + 1;
+        return std.fmt.allocPrint(arena, "{s}{s}", .{ from[0..dir_end], location });
     }
 
     /// Keep the `WWW-Authenticate` values of a refusal for the helpers.
@@ -431,10 +479,10 @@ const Http = struct {
     /// The body of a refusal when it is `text/plain`, which is where a forge
     /// explains itself and what git shows as `remote:` lines. At most 4 KiB,
     /// in the connection's arena.
-    fn serverText(h: *Http, res: *http.Client.Response) Error![]const u8 {
+    fn serverText(h: *Http, res: *httpclient.Response) Error![]const u8 {
         const content_type = res.head.content_type orelse return "";
         if (!std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return "";
-        const reader = h.bodyOf(res) catch return "";
+        const reader = res.reader();
         var out: Io.Writer.Allocating = .init(h.arena.allocator());
         _ = reader.stream(&out.writer, .limited(4096)) catch |err| switch (err) {
             error.EndOfStream => {},
@@ -468,7 +516,7 @@ const Http = struct {
         };
     }
 
-    fn checkStatus(h: *Http, res: *http.Client.Response) Error!void {
+    fn checkStatus(h: *Http, res: *httpclient.Response) Error!void {
         const status = @intFromEnum(res.head.status);
         switch (res.head.status) {
             .ok => return,
@@ -477,23 +525,13 @@ const Http = struct {
                 const said = try h.serverText(res);
                 return h.authFailed(error.AuthenticationFailed, if (status == 403) .forbidden else .refused, status, said);
             },
+            .proxy_auth_required => return h.rejectProxy(),
             else => {
                 const said = std.mem.trim(u8, try h.serverText(res), " \t\r\n");
                 var buf: [32]u8 = undefined;
                 const text = if (said.len != 0) said else std.fmt.bufPrint(&buf, "HTTP {d}", .{status}) catch "HTTP";
                 return h.fail(if (res.head.status == .not_found) error.RepositoryNotFound else error.HttpStatus, text);
             },
-        }
-    }
-
-    fn bodyOf(h: *Http, res: *http.Client.Response) Error!*Io.Reader {
-        switch (res.head.content_encoding) {
-            .identity => return res.reader(h.transfer_buffer),
-            .gzip, .deflate => {
-                h.decompress_buffer = try h.gpa.alloc(u8, std.compress.flate.max_window_len);
-                return res.readerDecompressing(h.transfer_buffer, &h.decompress, h.decompress_buffer);
-            },
-            else => return h.fail(error.ProtocolError, "unsupported content encoding"),
         }
     }
 
@@ -504,25 +542,14 @@ const Http = struct {
     fn advertisementInner(h: *Http) Error!*Io.Reader {
         var suffix_buf: [64]u8 = undefined;
         const suffix = std.fmt.bufPrint(&suffix_buf, "/info/refs?service={s}", .{h.service.name()}) catch unreachable;
-        var res = try h.get(suffix);
-        try h.checkStatus(&res);
+        const res = try h.get(suffix);
+        try h.checkStatus(res);
         var expected_buf: [64]u8 = undefined;
         const expected = std.fmt.bufPrint(&expected_buf, "application/x-{s}-advertisement", .{h.service.name()}) catch unreachable;
         const content_type = res.head.content_type orelse "";
         if (!std.mem.eql(u8, content_type, expected)) return error.DumbHttpUnsupported;
 
-        // A redirect moves the base for every request after this one.
-        const final = h.in_flight.?.uri;
-        var final_buf: std.Io.Writer.Allocating = .init(h.gpa);
-        defer final_buf.deinit();
-        final.writeToStream(&final_buf.writer, .{ .scheme = true, .authority = true, .path = true }) catch return error.OutOfMemory;
-        const redirected = final_buf.written();
-        if (!std.mem.eql(u8, redirected, h.request_url[0 .. h.request_url.len - suffix.len + "/info/refs".len])) {
-            if (!std.mem.endsWith(u8, redirected, "/info/refs")) return error.RedirectMismatch;
-            h.base = try h.arena.allocator().dupe(u8, redirected[0 .. redirected.len - "/info/refs".len]);
-        }
-
-        const body = try h.bodyOf(&res);
+        const body = res.reader();
         // A v0 answer begins `# service=<name>` and a flush, which say what
         // the body is and nothing else.
         const first = body.peekArray(4) catch return error.RemoteHungUp;
@@ -536,8 +563,16 @@ const Http = struct {
             }
         }
         h.body_reader = body;
-        h.advertised = true;
         return body;
+    }
+
+    /// Where the `GET` that was followed ended: its path is the new base,
+    /// once `/info/refs` and the query are off it. `RedirectMismatch` when
+    /// it does not end so.
+    fn rebase(h: *Http, final_path: []const u8) Error!void {
+        const without_query = final_path[0 .. std.mem.indexOfScalar(u8, final_path, '?') orelse final_path.len];
+        if (!std.mem.endsWith(u8, without_query, "/info/refs")) return error.RedirectMismatch;
+        h.base_path = without_query[0 .. without_query.len - "/info/refs".len];
     }
 
     fn request(context: *anyopaque, _: *Connection) connection.Error!*Io.Writer {
@@ -552,13 +587,13 @@ const Http = struct {
     /// send whole, so it is sent in chunks from here on.
     fn drainPost(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const h: *Http = @alignCast(@fieldParentPtr("post", w));
-        if (!h.streaming) {
+        if (h.streaming == null) {
             h.startStreaming() catch |err| {
                 h.write_error = err;
                 return error.WriteFailed;
             };
         }
-        const out = &h.body.writer;
+        const out = h.streaming.?.writer();
         out.writeAll(w.buffered()) catch return error.WriteFailed;
         w.end = 0;
         var consumed: usize = 0;
@@ -574,11 +609,10 @@ const Http = struct {
     fn startStreaming(h: *Http) Error!void {
         var suffix_buf: [64]u8 = undefined;
         const suffix = std.fmt.bufPrint(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
-        try h.open(.POST, suffix, h.credentials.authorization());
-        const req = &h.in_flight.?;
-        req.transfer_encoding = .chunked;
-        h.body = req.sendBodyUnflushed(&.{}) catch |err| return h.fail(mapRequestError(err), @errorName(err));
-        h.streaming = true;
+        const arena = h.arena.allocator();
+        if (h.stream_buffer.len == 0) h.stream_buffer = try arena.alloc(u8, 64 * 1024);
+        const list = try h.headers(arena, .POST, h.credentials.authorization(), false);
+        h.streaming = h.client.stream(.POST, h.target, try h.pathFor(suffix), list, h.stream_buffer) catch |err| return h.clientFailed(err);
     }
 
     fn response(context: *anyopaque, _: *Connection) connection.Error!*Io.Reader {
@@ -586,34 +620,56 @@ const Http = struct {
         return h.responseInner() catch |err| return narrow(h, err);
     }
 
+    /// git gzips an upload-pack request that fits in one piece and is
+    /// larger than a kilobyte; a push's pack is compressed already.
+    const gzip_threshold = 1024;
+
     fn responseInner(h: *Http) Error!*Io.Reader {
         if (h.write_error) |err| return err;
-        if (h.streaming) {
-            h.body.writer.writeAll(h.post.buffered()) catch return h.fail(error.ConnectionFailed, "write failed");
+        if (h.streaming) |*s| {
+            s.writer().writeAll(h.post.buffered()) catch return h.fail(error.ConnectionFailed, "write failed");
             h.post.end = 0;
-            h.body.end() catch return h.fail(error.ConnectionFailed, "write failed");
-            h.in_flight.?.connection.?.flush() catch return h.fail(error.ConnectionFailed, "write failed");
+            h.in_flight = s.finish() catch |err| {
+                h.streaming = null;
+                return h.clientFailed(err);
+            };
+            h.streaming = null;
         } else {
             var suffix_buf: [64]u8 = undefined;
             const suffix = std.fmt.bufPrint(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
-            try h.open(.POST, suffix, h.credentials.authorization());
-            const req = &h.in_flight.?;
-            req.sendBodyComplete(h.post.buffered()) catch |err| return h.fail(mapRequestError(err), @errorName(err));
+            var arena_state: std.heap.ArenaAllocator = .init(h.gpa);
+            defer arena_state.deinit();
+            const arena = arena_state.allocator();
+            var body: []const u8 = h.post.buffered();
+            const gzipped = h.service == .upload_pack and body.len > gzip_threshold;
+            if (gzipped) body = try gzip(arena, body);
+            const list = try h.headers(arena, .POST, h.credentials.authorization(), gzipped);
+            h.in_flight = h.client.send(.POST, h.target, try h.pathFor(suffix), list, body) catch |err| return h.clientFailed(err);
             h.post.end = 0;
         }
-        var res = h.in_flight.?.receiveHead(&.{}) catch |err| return h.fail(mapRequestError(err), @errorName(err));
-        try h.checkStatus(&res);
+        const res = &h.in_flight.?;
+        try h.checkStatus(res);
         var expected_buf: [64]u8 = undefined;
         const expected = std.fmt.bufPrint(&expected_buf, "application/x-{s}-result", .{h.service.name()}) catch unreachable;
         if (!std.mem.eql(u8, res.head.content_type orelse "", expected)) return h.fail(error.ProtocolError, "unexpected content type");
-        h.body_reader = try h.bodyOf(&res);
+        h.body_reader = res.reader();
         return h.body_reader;
+    }
+
+    fn gzip(arena: Allocator, bytes: []const u8) Allocator.Error![]const u8 {
+        var out: Io.Writer.Allocating = try .initCapacity(arena, bytes.len / 2 + 64);
+        const window = try arena.alloc(u8, std.compress.flate.max_window_len);
+        var compress = std.compress.flate.Compress.init(&out.writer, window, .gzip, .best) catch return error.OutOfMemory;
+        compress.writer.writeAll(bytes) catch return error.OutOfMemory;
+        compress.writer.flush() catch return error.OutOfMemory;
+        compress.finish() catch return error.OutOfMemory;
+        return out.written();
     }
 
     fn failure(context: *anyopaque, c: *Connection) connection.Error {
         const h = self(context);
-        if (h.in_flight) |*req| {
-            if (req.reader.body_err) |err| {
+        if (h.in_flight) |*res| {
+            if (res.state.http_reader.body_err) |err| {
                 c.setMessage(@errorName(err));
                 return error.ConnectionFailed;
             }
@@ -627,6 +683,7 @@ const Http = struct {
         h.endRequest();
         h.client.deinit();
         h.credentials.deinit();
+        if (h.proxy_credentials) |*p| p.deinit();
         h.arena.deinit();
         h.gpa.destroy(h);
     }

@@ -332,9 +332,14 @@ fn matchesPrefix(name: []const u8, prefixes: []const []const u8) bool {
 /// The head of a v2 command: `command=<name>`, the capabilities this side
 /// sends back, and the delimiter before the arguments.
 pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u8) pktline.WriteError!void {
-    try pktline.print(w, "command={s}\n", .{command});
-    if (adv.has("agent")) try pktline.print(w, "agent={s}\n", .{agent});
-    if (adv.has("object-format")) try pktline.print(w, "object-format={s}\n", .{adv.kind.name()});
+    // As git writes them: `ls-refs` with a newline, `fetch` without (they
+    // are two functions in git), the capabilities without, the arguments
+    // with.
+    if (std.mem.eql(u8, command, "ls-refs")) {
+        try pktline.print(w, "command={s}\n", .{command});
+    } else try pktline.print(w, "command={s}", .{command});
+    if (adv.has("agent")) try pktline.print(w, "agent={s}", .{agent});
+    if (adv.has("object-format")) try pktline.print(w, "object-format={s}", .{adv.kind.name()});
     try pktline.delim(w);
 }
 
