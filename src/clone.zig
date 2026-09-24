@@ -245,7 +245,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     } else if (detached) |oid| {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
-        try tx.update("HEAD", .{ .direct = oid }, .any);
+        try tx.change("HEAD", .{ .direct = oid }, .any, .{ .no_deref = true });
         try tx.commit(io, log);
     }
     // The remote's own `HEAD`, where it points at a branch, whatever was
