@@ -412,3 +412,117 @@ test "each transfer worker has its own git-lfs-transfer, sharing the first's ssh
     const lines = std.mem.count(u8, ssh_log, "\n");
     try testing.expectEqual(lines - 1, std.mem.count(u8, ssh_log, "[-oControlMaster=no]"));
 }
+
+test "against a real git-lfs-transfer server, what git-lfs puts there relic gets, what relic puts there git-lfs gets, and the locks are shared" {
+    const server_program = @import("build_options").lfs_transfer_server;
+    if (server_program.len == 0) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const fake_ssh = try testremote.fakeSsh(gpa, io, fx.tools);
+    defer gpa.free(fake_ssh);
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    {
+        const text = try std.fmt.allocPrint(gpa, "#!/bin/sh\nexec '{s}' \"$@\"\n", .{server_program});
+        defer gpa.free(text);
+        gpa.free(try testlfs.script(gpa, io, fx.tools, "git-lfs-transfer", text));
+    }
+    const remote_path = try fx.path("served/repo.git");
+    defer gpa.free(remote_path);
+    const url = try std.fmt.allocPrint(gpa, "ssh://git@example.invalid:2222{s}", .{remote_path});
+    defer gpa.free(url);
+    const Point = struct {
+        fn at(f: *Fixture, d: Io.Dir, u: []const u8, ssh: []const u8) !void {
+            try f.gitIn(d, &.{ "remote", "set-url", "origin", u });
+            try f.gitIn(d, &.{ "config", "core.sshCommand", ssh });
+        }
+    };
+
+    // git-lfs puts two objects there; relic fetches them.
+    const first = "put there by git-lfs\n";
+    const second = try t.noise(gpa, 150 * 1024, 51);
+    defer gpa.free(second);
+    {
+        var d = try t.committed(fx, "by-git", nobody, &.{ .{ "a.bin", first }, .{ "b.bin", second } });
+        defer d.close(io);
+        try Point.at(fx, d, url, fake_ssh);
+        try fx.gitIn(d, &.{ "lfs", "push", "origin", "main" });
+    }
+    {
+        var d = try t.committed(fx, "relic-fetches", nobody, &.{ .{ "a.bin", first }, .{ "b.bin", second } });
+        defer d.close(io);
+        try Point.at(fx, d, url, fake_ssh);
+        try t.emptyStore(fx, d);
+        var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+        defer repo.deinit(io);
+        const server = try t.openServer(fx, &repo);
+        defer server.close();
+        var fetched = try lfstransfer.fetch(server, &repo, .{});
+        defer fetched.deinit();
+        try t.expectNoFailures(&fetched);
+        // Over the pure-ssh protocol, not a fallback.
+        try testing.expect(try server.client.sshTransfer(.download) != null);
+        for ([_][]const u8{ first, second }) |c| try testing.expect((try server.store().contains(io, &.{ .oid = testlfs.sha256Hex(c), .size = c.len })));
+    }
+
+    // relic puts a third; git-lfs fetches it.
+    const third = "put there by relic\n";
+    {
+        var d = try t.committed(fx, "by-relic", nobody, &.{.{ "c.bin", third }});
+        defer d.close(io);
+        try Point.at(fx, d, url, fake_ssh);
+        try relicPrePush(fx, d);
+    }
+    {
+        var d = try t.committed(fx, "git-fetches", nobody, &.{.{ "c.bin", third }});
+        defer d.close(io);
+        try Point.at(fx, d, url, fake_ssh);
+        try t.emptyStore(fx, d);
+        try fx.gitIn(d, &.{ "lfs", "fetch" });
+        const oid = testlfs.sha256Hex(third);
+        var path_buf: [128]u8 = undefined;
+        try t.expectFile(fx, d, try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid }), third);
+    }
+
+    // A lock relic takes git-lfs lists, and one git-lfs takes relic
+    // verifies as the person's own.
+    var d = try t.committed(fx, "locks", nobody, &.{ .{ "a.bin", first }, .{ "b.bin", "b\n" } });
+    defer d.close(io);
+    try Point.at(fx, d, url, fake_ssh);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+    defer repo.deinit(io);
+    {
+        const server = try t.openServer(fx, &repo);
+        defer server.close();
+        _ = (try lfslocks.lock(server, &repo, "a.bin", arena, .{})).locked;
+    }
+    const listed = try fx.gitOut(d, &.{ "lfs", "locks" });
+    defer gpa.free(listed);
+    try testing.expect(std.mem.indexOf(u8, listed, "a.bin") != null);
+    try fx.gitIn(d, &.{ "lfs", "lock", "b.bin" });
+    {
+        const server = try t.openServer(fx, &repo);
+        defer server.close();
+        var verified = try lfslocks.verify(server, &repo, .{});
+        defer verified.deinit();
+        try testing.expectEqual(@as(usize, 2), verified.ours.len);
+    }
+    {
+        const server = try t.openServer(fx, &repo);
+        defer server.close();
+        _ = try lfslocks.unlockPath(server, &repo, "b.bin", false, arena, .{});
+    }
+    try fx.gitIn(d, &.{ "lfs", "unlock", "a.bin" });
+    {
+        const server = try t.openServer(fx, &repo);
+        defer server.close();
+        var none = try lfslocks.list(server, &repo, .{}, .{});
+        defer none.deinit();
+        try testing.expectEqual(@as(usize, 0), none.locks.len);
+    }
+}

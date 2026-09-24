@@ -68,6 +68,14 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
     build_options.addOption([]const u8, "filter_helper_path", b.getInstallPath(.bin, filter_helper.out_filename));
     build_options.addOption([]const u8, "lfs_transfer_helper_path", b.getInstallPath(.bin, lfs_transfer_helper.out_filename));
+    // A real `git-lfs-transfer` server — Scutiger's is the one git-lfs's
+    // own suite uses — for the tests that prove relic's client against one
+    // rather than against the suite's own; they skip without it.
+    build_options.addOption([]const u8, "lfs_transfer_server", b.option(
+        []const u8,
+        "lfs-transfer-server",
+        "A git-lfs-transfer server program to prove the pure-ssh client against",
+    ) orelse "");
 
     // Error return traces are off for the test binary, and the reason is
     // `zig build test --fuzz`. Building the suite with fuzzing instrumented
