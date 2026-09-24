@@ -140,6 +140,7 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
         &.{"--filter=tree:1"},
         &.{ "--filter=blob:none", "--depth=2" },
         &.{"--filter=sparse:oid=main:spec"},
+        &.{"--filter=sparse:oid=main~3^{tree}:spec"},
         &.{"--filter=combine:blob:none+tree:2"},
         &.{"--filter=combine:tree:2+sparse:oid=main%3Aspec"},
         &.{"--filter=object:type=blob"},

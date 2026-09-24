@@ -26,6 +26,7 @@ const odb_mod = @import("odb.zig");
 const pktline = @import("pktline.zig");
 const protocol = @import("protocol.zig");
 const objectwalk = @import("objectwalk.zig");
+const revparse = @import("revparse.zig");
 const filterspec = @import("filterspec.zig");
 const ignore = @import("ignore.zig");
 const revwalk = @import("revwalk.zig");
@@ -832,8 +833,7 @@ const Negotiation = struct {
 
     /// The filter a client asked for, read as git reads it
     /// (`filterspec.zig`), or the request refused as git's upload-pack
-    /// refuses it. A `sparse:oid=` blob is named by its object name or
-    /// `<ref>:<path>`.
+    /// refuses it.
     fn readFilter(n: *Negotiation, out: *Io.Writer, text: []const u8) Error!objectwalk.Filter {
         const spec = filterspec.parse(n.arena, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -886,41 +886,15 @@ const Negotiation = struct {
         return rules;
     }
 
-    /// An object name, or `<ref>:<path>`: the forms a `sparse:oid=` is
-    /// given in.
+    /// What a `sparse:oid=` names: any revision expression git's server
+    /// resolves there (`revparse.zig`).
     fn resolveBlob(n: *Negotiation, name: []const u8) Error!?Oid {
         const s = n.server;
-        const repo = &s.remote.repo;
-        const colon = std.mem.indexOfScalar(u8, name, ':') orelse return n.resolveRev(name);
-        var current = (try n.resolveRev(name[0..colon])) orelse return null;
-        current = repo.peel(s.io, current) catch return null;
-        current = repo.commitTree(s.io, current) catch current;
-        var parts = std.mem.tokenizeScalar(u8, name[colon + 1 ..], '/');
-        while (parts.next()) |part| {
-            const found = repo.odb.read(s.io, current) catch return null;
-            defer repo.odb.gpa.free(found.bytes);
-            if (found.type != .tree) return null;
-            const entry = (object.Tree.parse(repo.kind, found.bytes).find(part) catch return null) orelse return null;
-            current = entry.oid;
-        }
-        return current;
-    }
-
-    /// A full object name, or a ref by git's own search: as written, then
-    /// under `refs/`, `refs/tags/`, `refs/heads/` and `refs/remotes/`.
-    fn resolveRev(n: *Negotiation, rev: []const u8) Error!?Oid {
-        const s = n.server;
-        const repo = &s.remote.repo;
-        if (Oid.parse(repo.kind, rev)) |oid| return oid else |_| {}
-        for ([_][]const u8{ "", "refs/", "refs/tags/", "refs/heads/", "refs/remotes/" }) |prefix| {
-            const full = try std.fmt.allocPrint(n.arena, "{s}{s}", .{ prefix, rev });
-            const resolved = repo.refs.resolve(s.gpa, s.io, full) catch continue;
-            if (resolved) |r| {
-                s.gpa.free(r.name);
-                return r.oid;
-            }
-        }
-        return null;
+        return revparse.resolve(s.gpa, s.io, &s.remote.repo, name) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+            else => null,
+        };
     }
 
     fn sendPack(n: *Negotiation, out: *Io.Writer, band: Band) Error!void {
