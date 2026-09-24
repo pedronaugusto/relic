@@ -130,6 +130,7 @@ pub const Server = struct {
     /// One `<method> <oid> <header>=<value>` line per object moved, for the
     /// headers a test compares.
     object_log: std.ArrayList(u8) = .empty,
+    zstd_window_log: ?u6 = null,
     /// One `<operation> <ref>` line per batch: the ref's name in quotes,
     /// `no name`, or `no ref`.
     batch_refs: std.ArrayList(u8) = .empty,
@@ -289,6 +290,20 @@ pub const Server = struct {
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
         return gpa.dupe(u8, s.log.items);
+    }
+
+    /// Encode zstd bodies as frames that declare a window of `log` bits,
+    /// or, with `null`, as single-segment frames sized to the object.
+    pub fn setZstdWindowLog(s: *Server, log: ?u6) void {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        s.zstd_window_log = log;
+    }
+
+    fn zstdWindowLog(s: *Server) ?u6 {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        return s.zstd_window_log;
     }
 
     /// Forget the requests seen so far.
@@ -479,7 +494,7 @@ pub const Server = struct {
                     const accepted = accept_encoding.?;
                     const zstd = std.mem.indexOf(u8, accepted, "zstd") != null;
                     if (zstd or std.mem.indexOf(u8, accepted, "gzip") != null) {
-                        const encoded = if (zstd) try encodeZstd(arena, bytes) else try encodeGzip(arena, bytes);
+                        const encoded = if (zstd) try encodeZstd(arena, bytes, s.zstdWindowLog()) else try encodeGzip(arena, bytes);
                         return request.respond(encoded, .{ .keep_alive = false, .extra_headers = &.{
                             .{ .name = "Content-Type", .value = "application/octet-stream" },
                             .{ .name = "Content-Encoding", .value = if (zstd) "zstd" else "gzip" },
@@ -830,14 +845,23 @@ fn encodeGzip(arena: Allocator, bytes: []const u8) ![]u8 {
 }
 
 /// `bytes` as one zstd frame of raw blocks, with its size in the header.
-fn encodeZstd(arena: Allocator, bytes: []const u8) ![]u8 {
+/// With `window_log`, the frame declares a window of that many bits in
+/// place of its size, as a streaming encoder's frames do.
+fn encodeZstd(arena: Allocator, bytes: []const u8, window_log: ?u6) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(arena, &.{ 0x28, 0xb5, 0x2f, 0xfd });
-    // A four-byte content size, one segment, no checksum, no dictionary.
-    try out.append(arena, 0xa0);
-    var size: [4]u8 = undefined;
-    std.mem.writeInt(u32, &size, @intCast(bytes.len), .little);
-    try out.appendSlice(arena, &size);
+    if (window_log) |log| {
+        // No content size, a window descriptor, no checksum.
+        try out.append(arena, 0x00);
+        try out.append(arena, @as(u8, log - 10) << 3);
+    } else {
+        // A four-byte content size, one segment, no checksum, no
+        // dictionary.
+        try out.append(arena, 0xa0);
+        var size: [4]u8 = undefined;
+        std.mem.writeInt(u32, &size, @intCast(bytes.len), .little);
+        try out.appendSlice(arena, &size);
+    }
     var at: usize = 0;
     while (true) {
         const n: usize = @min(bytes.len - at, 128 * 1024);

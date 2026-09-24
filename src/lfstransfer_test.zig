@@ -1460,3 +1460,53 @@ test "a refused credential is described as git-lfs's helpers hear it, with the s
     try testing.expectEqualStrings(logs[0], logs[1]);
     try testing.expect(std.mem.indexOf(u8, logs[1], "wwwauth[]=Basic realm=\"relic-lfs\"\n") != null);
 }
+
+test "a zstd body is decoded with the window its frame asks for, up to git-lfs's limit, as git-lfs decodes it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{ .encode = true });
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    // Ten MiB in one segment is a ten MiB window; 128 MiB is declared by a
+    // window descriptor; 1 GiB is past git-lfs's limit.
+    const big = try noise(gpa, 10 << 20, 31);
+    defer gpa.free(big);
+    const Case = struct { content: []const u8, window_log: ?u6, ok: bool };
+    for ([_]Case{
+        .{ .content = big, .window_log = null, .ok = true },
+        .{ .content = "declared wide\n", .window_log = 27, .ok = true },
+        .{ .content = "declared too wide\n", .window_log = 30, .ok = false },
+    }, 0..) |case, n| {
+        fx.server.setZstdWindowLog(case.window_log);
+        const oid = testlfs.sha256Hex(case.content);
+        try fx.server.putObject(&oid, case.content);
+        var path_buf: [128]u8 = undefined;
+        const object_path = try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid });
+        for ([_][]const u8{ "by-git", "by-relic" }, 0..) |base, i| {
+            var name_buf: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "{s}-{d}", .{ base, n });
+            var d = try committed(fx, name, nobody, &.{.{ "a.bin", case.content }});
+            defer d.close(io);
+            try emptyStore(fx, d);
+            try fx.gitIn(d, &.{ "config", "lfs.transfer.httpDownloadEncoding", "zstd" });
+            try fx.gitIn(d, &.{ "config", "lfs.transfer.maxretries", "1" });
+            if (i == 0) {
+                const run = testlfs.git(gpa, io, d, &fx.env, &.{ "lfs", "fetch" }, false);
+                if (case.ok) gpa.free(try run) else try testing.expectError(error.GitFailed, run);
+            } else {
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try openServer(fx, &repo);
+                defer server.close();
+                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer fetched.deinit();
+                if (case.ok) try expectNoFailures(&fetched) else {
+                    try testing.expectEqual(@as(usize, 1), fetched.failures());
+                    try testing.expectEqualStrings("the server's zstd frame asks for a window wider than 512 MiB", fetched.results[0].message.?);
+                }
+            }
+            if (case.ok) try expectFile(fx, d, object_path, case.content) else try testing.expectError(error.FileNotFound, d.access(io, object_path, .{}));
+        }
+    }
+}

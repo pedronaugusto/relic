@@ -950,7 +950,10 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     }
 
     if (from > 0) state.say(.{ .bytes = from });
-    const body = try ex.reader();
+    const body = ex.reader() catch |err| switch (err) {
+        error.LfsZstdWindowTooLarge => return .{ .fail = "the server's zstd frame asks for a window wider than 512 MiB" },
+        else => |e| return e,
+    };
     var counting: Counting = .init(body, state);
     var buf: [64 * 1024]u8 = undefined;
     var at = from;

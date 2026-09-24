@@ -86,6 +86,10 @@ pub const Operation = enum {
 /// for the `git-lfs/` in front.
 pub const user_agent = "git-lfs/3 (relic)";
 
+/// The widest zstd window a download is decoded with: git-lfs's decoder's
+/// own limit, 512 MiB.
+pub const zstd_window_max: u64 = 512 << 20;
+
 /// The media type of the API's requests and answers.
 pub const media_type = "application/vnd.git-lfs+json";
 
@@ -148,6 +152,9 @@ pub const Error = error{
     MalformedValue,
     /// An answer larger than the operation reads.
     StreamTooLong,
+    /// A zstd body whose frame asks for a window wider than
+    /// `zstd_window_max`, which git-lfs's decoder refuses too.
+    LfsZstdWindowTooLarge,
 } || credential.Error || Allocator.Error || Io.Cancelable;
 
 //=====================================================================
@@ -1881,16 +1888,35 @@ pub const Exchange = struct {
                 ex.decompress_buffer = try ex.arena.allocator().alloc(u8, std.compress.flate.max_window_len);
                 break :blk res.readerDecompressing(&ex.transfer_buffer, &ex.decompress, ex.decompress_buffer);
             },
-            // Only asked for by `Request.Accept.zstd`. A frame whose window
-            // is wider than the decoder's 8 MiB fails as a read.
+            // Only asked for by `Request.Accept.zstd`. The window is the
+            // one the first frame's header asks for, as git-lfs's decoder
+            // gives it, up to the same limit.
             .zstd => blk: {
-                ex.decompress_buffer = try ex.arena.allocator().alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
-                break :blk res.readerDecompressing(&ex.transfer_buffer, &ex.decompress, ex.decompress_buffer);
+                const raw = res.reader(&ex.transfer_buffer);
+                const window = try zstdWindow(raw);
+                ex.decompress_buffer = try ex.arena.allocator().alloc(u8, window + std.compress.zstd.block_size_max);
+                ex.decompress = .{ .zstd = .init(raw, ex.decompress_buffer, .{ .window_len = window }) };
+                break :blk &ex.decompress.zstd.reader;
             },
             else => return ex.client.fail(error.MalformedResponse, "unsupported content encoding", .{}),
         };
         ex.body = r;
         return r;
+    }
+
+    /// The window a zstd body's first frame needs, read from its header
+    /// without taking it off the stream: at least the standard's 8 MiB,
+    /// and at most `zstd_window_max`, past which the body is refused.
+    fn zstdWindow(raw: *Io.Reader) Error!u32 {
+        const Header = std.compress.zstd.Decompress.Frame.Zstandard.Header;
+        const head = raw.peek(18) catch raw.buffered();
+        const default: u32 = std.compress.zstd.default_window_len;
+        if (head.len < 5 or std.mem.readInt(u32, head[0..4], .little) != 0xFD2FB528) return default;
+        var fixed: Io.Reader = .fixed(head[4..]);
+        const frame = Header.decode(&fixed) catch return default;
+        const size = frame.windowSize() orelse return default;
+        if (size > zstd_window_max) return error.LfsZstdWindowTooLarge;
+        return @intCast(@max(size, default));
     }
 
     /// The whole body, up to `limit` bytes, owned by the exchange.
