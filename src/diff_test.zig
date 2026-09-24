@@ -510,22 +510,40 @@ fn parseRange(text: []const u8) !struct { start: usize, count: usize } {
     return .{ .start = try std.fmt.parseInt(usize, text, 10), .count = 1 };
 }
 
-test "the histogram diff lands on the lines git's does, over a random corpus" {
+test "the histogram, patience and minimal diffs land on the lines git's do, over a random corpus" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 
-    // Few distinct lines, so that every choice histogram makes -- which
-    // run anchors, which occurrence comes first, when a region goes to
-    // Myers and when a slid run is diffed again -- is exercised.
-    var prng = std.Random.DefaultPrng.init(0x68697374);
+    try expectCorpusLikeGit(gpa, io, &repo, "--diff-algorithm=histogram", .{ .algorithm = .histogram }, 0x68697374, corpus_cases);
+    try expectCorpusLikeGit(gpa, io, &repo, "--diff-algorithm=patience", .{ .algorithm = .patience }, 0x70617469, corpus_cases);
+    try expectCorpusLikeGit(gpa, io, &repo, "--minimal", .{ .minimal = true }, 0x6d696e69, corpus_cases);
+}
+
+const corpus_cases = 40;
+
+/// Random pairs of texts diffed by `git diff <flag>` and by `options`, the
+/// hunks compared.
+fn expectCorpusLikeGit(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    repo: *testgit.Repo,
+    flag: []const u8,
+    options: textdiff.Options,
+    seed: u64,
+    cases: usize,
+) !void {
+    // Few distinct lines, so that every choice the algorithm makes --
+    // which run anchors, which occurrence comes first, when a region goes
+    // to Myers and when a slid run is diffed again -- is exercised.
+    var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
     var old: std.ArrayList(u8) = .empty;
     defer old.deinit(gpa);
     var new: std.ArrayList(u8) = .empty;
     defer new.deinit(gpa);
-    for (0..40) |case| {
+    for (0..cases) |case| {
         const alphabet: u8 = 2 + rng.uintLessThan(u8, 6);
         old.clearRetainingCapacity();
         for (0..rng.uintLessThan(usize, 40)) |_| {
@@ -551,7 +569,7 @@ test "the histogram diff lands on the lines git's does, over a random corpus" {
         try repo.writeFile(io, "new", new.items);
         // `diff --no-index` exits 1 when the files differ; the output is
         // what is compared.
-        const output = try repo.runInput(io, &.{ "diff", "--no-index", "--diff-algorithm=histogram", "-U0", "old", "new" }, "");
+        const output = try repo.runInput(io, &.{ "diff", "--no-index", flag, "-U0", "old", "new" }, "");
         defer gpa.free(output);
         const expected = try parseZeroContextHunks(gpa, output);
         defer gpa.free(expected);
@@ -560,10 +578,10 @@ test "the histogram diff lands on the lines git's does, over a random corpus" {
         defer gpa.free(old_lines);
         const new_lines = try textdiff.splitLines(gpa, new.items);
         defer gpa.free(new_lines);
-        const got = try textdiff.diffLines(gpa, old_lines, new_lines, .{ .algorithm = .histogram });
+        const got = try textdiff.diffLines(gpa, old_lines, new_lines, options);
         defer gpa.free(got);
         std.testing.expectEqualSlices(textdiff.Change, expected, got) catch |err| {
-            std.debug.print("case {d}\n", .{case});
+            std.debug.print("{s}, case {d}\n", .{ flag, case });
             return err;
         };
     }
