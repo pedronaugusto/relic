@@ -42,6 +42,7 @@ pub const submodule = @import("submodule.zig");
 pub const submoduletransport = @import("submoduletransport.zig");
 pub const filter = @import("filter.zig");
 pub const lfs = @import("lfs.zig");
+pub const netrc = @import("netrc.zig");
 pub const lfsapi = @import("lfsapi.zig");
 pub const lfstransfer = @import("lfstransfer.zig");
 pub const lfslocks = @import("lfslocks.zig");

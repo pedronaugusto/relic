@@ -813,3 +813,58 @@ test "with no remote named, the remote and the endpoint are the ones git-lfs pic
         try testing.expectEqualStrings(line, (try server.client.endpoint(.download)).url);
     }
 }
+
+test "a .netrc in the home directory is used before any helper, as git-lfs uses it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{ .users = &.{.{ .name = "ada", .password = "secret" }} });
+    defer fx.deinit();
+    const content = try noise(gpa, 12 * 1024, 13);
+    defer gpa.free(content);
+    try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    var files: [2]Io.Dir = undefined;
+    for ([_][]const u8{ "by-git", "by-relic" }, &files) |name, *d| {
+        var helper_name: [32]u8 = undefined;
+        const helper = try testlfs.credentialHelper(gpa, io, fx.tools, try std.fmt.bufPrint(&helper_name, "{s}-helper", .{name}), "ada", "wrong");
+        defer gpa.free(helper);
+        d.* = try committed(fx, name, helper, &.{.{ "a.bin", content }});
+        try emptyStore(fx, d.*);
+    }
+    defer for (files) |d| d.close(io);
+    var home = try fx.tmp.dir.openDir(io, "home", .{});
+    defer home.close(io);
+    try home.writeFile(io, .{ .sub_path = ".netrc", .data = "machine 127.0.0.1\n  login ada\n  password secret\n" });
+
+    try fx.gitIn(files[0], &.{ "lfs", "fetch" });
+    var repo = try repo_mod.Repository.open(gpa, io, files[1], .{});
+    defer repo.deinit(io);
+    const server = try openServer(fx, &repo);
+    defer server.close();
+    var fetched = try lfstransfer.fetch(server, &repo, .{});
+    defer fetched.deinit();
+    try expectNoFailures(&fetched);
+    // Neither asked its helper, whose password is wrong.
+    for ([_][]const u8{ "by-git-helper.log", "by-relic-helper.log" }) |log| {
+        try testing.expectError(error.FileNotFound, fx.tools.access(io, log, .{}));
+    }
+
+    // A .netrc the server refuses is passed over for the helpers, by both.
+    try home.writeFile(io, .{ .sub_path = ".netrc", .data = "machine 127.0.0.1 login ada password stale\n" });
+    for ([_][]const u8{ "by-git", "by-relic" }) |name| {
+        var helper_name: [32]u8 = undefined;
+        const helper = try testlfs.credentialHelper(gpa, io, fx.tools, try std.fmt.bufPrint(&helper_name, "{s}-helper", .{name}), "ada", "secret");
+        gpa.free(helper);
+    }
+    for (files) |d| try emptyStore(fx, d);
+    try fx.gitIn(files[0], &.{ "lfs", "fetch" });
+    const server2 = try openServer(fx, &repo);
+    defer server2.close();
+    var again = try lfstransfer.fetch(server2, &repo, .{});
+    defer again.deinit();
+    try expectNoFailures(&again);
+    const theirs = try fx.tools.readFileAlloc(io, "by-git-helper.log", gpa, .unlimited);
+    defer gpa.free(theirs);
+    const ours = try fx.tools.readFileAlloc(io, "by-relic-helper.log", gpa, .unlimited);
+    defer gpa.free(ours);
+    try testing.expectEqualStrings(theirs, ours);
+}

@@ -46,6 +46,7 @@ const repo_mod = @import("repo.zig");
 const lfs = @import("lfs.zig");
 const fs = @import("fs.zig");
 const object = @import("object.zig");
+const netrc_mod = @import("netrc.zig");
 
 const Config = config_mod.Config;
 
@@ -924,6 +925,10 @@ pub const Client = struct {
     ssh_auth: [2]?SshAuth = .{ null, null },
     access: std.ArrayList(struct { url: []const u8, mode: Access }) = .empty,
     credentials: std.ArrayList(*Cred) = .empty,
+    /// `~/.netrc`, read from the home directory in the environment the
+    /// caller granted, and the hosts whose entry a server refused.
+    netrc: ?netrc_mod.Netrc = null,
+    netrc_refused: std.ArrayList([]const u8) = .empty,
     /// What the server taught, for `remember`.
     learned: std.ArrayList(Learned) = .empty,
     message_mutex: Io.Mutex = .init,
@@ -957,7 +962,39 @@ pub const Client = struct {
             if (config.has(key)) return error.SslCertificateSettingUnsupported;
         }
         try c.configureProxies();
+        try c.loadNetrc();
         return c;
+    }
+
+    /// `$HOME/.netrc`, or `_netrc` on Windows when there is no `.netrc`, as
+    /// git-lfs reads it. One that does not parse is not used, as git-lfs
+    /// does not use it.
+    fn loadNetrc(c: *Client) Allocator.Error!void {
+        const programs = c.options.programs orelse return;
+        const home = programs.environ.get("HOME") orelse return;
+        if (home.len == 0) return;
+        var dir = Io.Dir.cwd().openDir(c.io, home, .{}) catch return;
+        defer dir.close(c.io);
+        const text = (fs.readFileAlloc(c.gpa, c.io, dir, ".netrc", 1 << 20) catch null) orelse
+            (if (builtin.os.tag == .windows) (fs.readFileAlloc(c.gpa, c.io, dir, "_netrc", 1 << 20) catch null) else null) orelse
+            return;
+        defer c.gpa.free(text);
+        c.netrc = netrc_mod.Netrc.parse(c.gpa, text) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.MalformedNetrc => null,
+        };
+    }
+
+    /// The `Authorization` a netrc entry gives for `url`'s host, unless the
+    /// server refused it already.
+    fn netrcAuth(c: *Client, a: Allocator, url: []const u8) Allocator.Error!?struct { header: []const u8, host: []const u8 } {
+        const n = &(c.netrc orelse return null);
+        const parts = UrlParts.parse(url) orelse return null;
+        for (c.netrc_refused.items) |h| {
+            if (std.mem.eql(u8, h, parts.host)) return null;
+        }
+        const m = n.find(parts.host, parts.user) orelse return null;
+        return .{ .header = try basicHeader(a, m.login, m.password), .host = parts.host };
     }
 
     /// Release everything, forgetting every credential.
@@ -967,6 +1004,8 @@ pub const Client = struct {
             c.gpa.destroy(cred);
         }
         c.credentials.deinit(c.gpa);
+        if (c.netrc) |*n| n.deinit();
+        c.netrc_refused.deinit(c.gpa);
         c.access.deinit(c.gpa);
         c.learned.deinit(c.gpa);
         c.http.deinit();
@@ -1230,6 +1269,7 @@ pub const Client = struct {
         while (true) {
             var auth_header: ?[]const u8 = null;
             var cred: ?*Cred = null;
+            var netrc_host: ?[]const u8 = null;
             var access: Access = .none;
             const access_url = request.access_url orelse url;
             {
@@ -1238,7 +1278,12 @@ pub const Client = struct {
                 access = try c.accessFor(access_url);
                 if (!request.authenticated and !has_auth and access == .basic) {
                     const found = try c.credentialUrl(url, operation);
-                    if (found.inline_auth) |h| auth_header = try scratch.dupe(u8, h) else if (found.url) |cred_url| {
+                    if (found.inline_auth) |h| auth_header = try scratch.dupe(u8, h) else if (try c.netrcAuth(scratch, found.url.?)) |n| {
+                        // `.netrc` comes before every helper, as in git-lfs,
+                        // and what it gives is not stored with them.
+                        auth_header = n.header;
+                        netrc_host = n.host;
+                    } else if (found.url) |cred_url| {
                         const cr = try c.credentialFor(cred_url);
                         if (cr.session.authorization() == null) {
                             if (!try cr.session.fill(c.io, c.credentialOptions())) {
@@ -1277,6 +1322,10 @@ pub const Client = struct {
                 if (cred) |cr| {
                     cr.approved = false;
                     try cr.session.reject(c.io, c.credentialOptions());
+                }
+                if (netrc_host) |h| {
+                    try c.netrc_refused.append(c.gpa, try c.arena.allocator().dupe(u8, h));
+                    continue;
                 }
                 if (has_auth) {
                     // A header the server itself handed over — an action's,
