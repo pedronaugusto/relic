@@ -65,6 +65,9 @@ pub const Error = error{
     LfsBatchFailed,
     /// A remote on this machine whose repository does not open.
     LfsLocalRemoteUnreadable,
+    /// The server chose a transfer adapter other than `basic`, which is
+    /// the only one relic offers.
+    LfsTransferUnsupported,
 } || lfsapi.Error || lfs.Store.InstallError || lfs.Store.OpenError || Io.ConcurrentError;
 
 /// An object to move.
@@ -505,6 +508,9 @@ fn run(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Obj
             },
             else => |e| return e,
         };
+        if (answer.transfer) |t| {
+            if (t.len != 0 and !std.mem.eql(u8, t, "basic")) return error.LfsTransferUnsupported;
+        }
         var answered: std.StringHashMapUnmanaged(*const BatchObject) = .empty;
         defer answered.deinit(gpa);
         for (answer.objects) |*o| try answered.put(gpa, o.oid, o);
@@ -709,6 +715,18 @@ fn copyAction(state: *Run, a: Action) Error!Action {
     return out;
 }
 
+/// An action's URL, rewritten by `url.<base>.insteadOf` — or
+/// `pushInsteadOf` for an upload — when `lfs.transfer.enablehrefrewrite`
+/// asks, as git-lfs rewrites it.
+fn rewriteHref(state: *Run, scratch: Allocator, href: []const u8) Error![]const u8 {
+    if (!state.server.settings.getBool("lfs.transfer.enablehrefrewrite", false)) return href;
+    const config = state.server.settings.config;
+    const rewrite = @import("remote.zig").rewrite;
+    const pushed = if (state.operation == .upload) rewrite(scratch, config, href, .push) catch return error.MalformedValue else null;
+    if (pushed) |p| return p;
+    return (rewrite(scratch, config, href, .fetch) catch return error.MalformedValue) orelse href;
+}
+
 /// The URL whose access mode a transfer uses, as git-lfs finds it: the
 /// action's up to the object's name.
 fn accessUrl(href: []const u8, oid: []const u8) []const u8 {
@@ -721,13 +739,14 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     var scratch_state: std.heap.ArenaAllocator = .init(server.gpa);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
+    const href = try rewriteHref(state, scratch, action.href);
     const headers = action.headers(scratch) catch |err| switch (err) {
         error.InvalidHttpHeader => return .{ .fail = "the server's action has a header with a line break in it" },
         error.OutOfMemory => return error.OutOfMemory,
     };
     const ex = server.client.send(.{
         .method = .GET,
-        .url = action.href,
+        .url = href,
         .headers = headers,
         .authenticated = authenticated,
         .access_url = accessUrl(action.href, &r.oid),
@@ -760,6 +779,7 @@ fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authe
     var scratch_state: std.heap.ArenaAllocator = .init(server.gpa);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
+    const href = try rewriteHref(state, scratch, action.href);
     const headers = action.headers(scratch) catch |err| switch (err) {
         error.InvalidHttpHeader => return .{ .fail = "the server's action has a header with a line break in it" },
         error.OutOfMemory => return error.OutOfMemory,
@@ -767,7 +787,7 @@ fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authe
     var sent: u64 = 0;
     const ex = server.client.send(.{
         .method = .PUT,
-        .url = action.href,
+        .url = href,
         .headers = headers,
         .body = .{ .object = .{ .store = server.store(), .pointer = .{ .oid = r.oid, .size = r.size } } },
         .authenticated = authenticated,
@@ -804,6 +824,7 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
     var scratch_state: std.heap.ArenaAllocator = .init(server.gpa);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
+    const href = try rewriteHref(state, scratch, action.href);
     const headers = action.headers(scratch) catch |err| switch (err) {
         error.InvalidHttpHeader => return .{ .fail = "the server's verify action has a header with a line break in it" },
         error.OutOfMemory => return error.OutOfMemory,
@@ -814,12 +835,12 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
     while (attempt < state.limits.max_verifies) : (attempt += 1) {
         const ex = server.client.send(.{
             .method = .POST,
-            .url = action.href,
+            .url = href,
             .headers = headers,
             .body = .{ .bytes = body },
             .api = true,
             .authenticated = authenticated,
-            .access_url = action.href,
+            .access_url = href,
         }) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled => |e| return e,
             else => {

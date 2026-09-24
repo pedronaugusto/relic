@@ -143,6 +143,11 @@ pub const Server = struct {
         locking: bool = true,
         /// The most locks one page of a listing holds.
         page_size: usize = 100,
+        /// Where the actions point, in place of the server's own URL: a
+        /// name only `url.<base>.insteadOf` can turn back into this server.
+        href_base: ?[]const u8 = null,
+        /// The transfer adapter the batch answer names.
+        transfer: []const u8 = "basic",
     };
 
     /// Listen on an ephemeral port.
@@ -354,7 +359,10 @@ pub const Server = struct {
             });
         }
 
-        const base = try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}{s}", .{ s.port, prefix });
+        const base = if (s.options.href_base) |b|
+            try std.fmt.allocPrint(arena, "{s}{s}", .{ b, prefix })
+        else
+            try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}{s}", .{ s.port, prefix });
         if (method == .POST and std.mem.eql(u8, route, "/objects/batch")) {
             if (s.takeFault(.batch)) |f| return respondFault(&request, f);
             // A token is handed back in each action, as a hosting service
@@ -431,7 +439,7 @@ pub const Server = struct {
         const upload = std.mem.eql(u8, b.operation, "upload");
         var out: std.Io.Writer.Allocating = .init(arena);
         const w = &out.writer;
-        try w.writeAll("{\"transfer\":\"basic\",\"objects\":[");
+        try w.print("{{\"transfer\":\"{s}\",\"objects\":[", .{s.options.transfer});
         for (b.objects, 0..) |o, i| {
             if (i != 0) try w.writeByte(',');
             const have = try s.object(arena, o.oid);

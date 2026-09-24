@@ -648,3 +648,43 @@ test "a refused credential is erased, as git-lfs erases it, and the transfer say
     defer gpa.free(ours_log);
     try testing.expectEqualStrings(theirs_log, ours_log);
 }
+
+test "an action's URL is rewritten by insteadOf when git-lfs's setting asks, and an adapter relic lacks is refused by name" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{ .href_base = "http://objects.invalid" });
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const content = try noise(gpa, 8 * 1024, 9);
+    defer gpa.free(content);
+    try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    var ours = try committed(fx, "ours", nobody, &.{.{ "a.bin", content }});
+    defer ours.close(io);
+    try emptyStore(fx, ours);
+    const real = try fx.server.url(gpa, "");
+    defer gpa.free(real);
+    const key = try std.fmt.allocPrint(gpa, "url.{s}.insteadOf", .{real[0 .. real.len - 1]});
+    defer gpa.free(key);
+    try fx.gitIn(ours, &.{ "config", key, "http://objects.invalid" });
+    try fx.gitIn(ours, &.{ "config", "lfs.transfer.maxretries", "1" });
+
+    for ([_]bool{ false, true }) |rewrite| {
+        try fx.gitIn(ours, &.{ "config", "lfs.transfer.enablehrefrewrite", if (rewrite) "true" else "false" });
+        var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
+        defer repo.deinit(io);
+        const server = try openServer(fx, &repo);
+        defer server.close();
+        var fetched = try lfstransfer.fetch(server, &repo, .{});
+        defer fetched.deinit();
+        try testing.expectEqual(@as(usize, if (rewrite) 0 else 1), fetched.failures());
+    }
+
+    fx.server.options.transfer = "tus";
+    try emptyStore(fx, ours);
+    var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
+    defer repo.deinit(io);
+    const server = try openServer(fx, &repo);
+    defer server.close();
+    try testing.expectError(error.LfsTransferUnsupported, lfstransfer.fetch(server, &repo, .{}));
+}
