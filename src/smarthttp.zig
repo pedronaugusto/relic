@@ -45,6 +45,7 @@ const connection = @import("connection.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const httpsettings = @import("httpsettings.zig");
+const httpauth = @import("httpauth.zig");
 const httpclient = @import("httpclient.zig");
 const warning = @import("warning.zig");
 
@@ -274,11 +275,23 @@ const Http = struct {
     /// The proxy, and its credential: the user and password its URL
     /// carries, or a user there and the password from the person's helpers,
     /// as git's `init_curl_proxy_auth` fills it.
-    fn configureProxy(h: *Http, raw: []const u8, method: []const u8) Error!void {
+    fn configureProxy(h: *Http, raw: []const u8, method_name: []const u8) Error!void {
         const arena = h.arena.allocator();
-        if (!std.ascii.eqlIgnoreCase(method, "anyauth") and !std.ascii.eqlIgnoreCase(method, "basic")) {
-            return h.fail(error.ProxyAuthMethodUnsupported, method);
-        }
+        // git's `http.proxyAuthMethod`: anyauth, basic, digest; negotiate
+        // and ntlm need the system's security library; anything else git
+        // warns of and treats as anyauth.
+        const method: httpauth.Method = if (std.ascii.eqlIgnoreCase(method_name, "anyauth"))
+            .any
+        else if (std.ascii.eqlIgnoreCase(method_name, "basic"))
+            .basic
+        else if (std.ascii.eqlIgnoreCase(method_name, "digest"))
+            .digest
+        else if (std.ascii.eqlIgnoreCase(method_name, "negotiate") or std.ascii.eqlIgnoreCase(method_name, "ntlm"))
+            return h.fail(error.ProxyAuthMethodUnsupported, method_name)
+        else blk: {
+            try warning.note(h.options.warnings, .{ .proxy_auth_method_unknown = method_name });
+            break :blk .any;
+        };
         const text = if (std.mem.indexOf(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else raw;
         const proxy_url = url_mod.Url.parse(text) catch return error.InvalidProxy;
         if (proxy_url.scheme != .http and proxy_url.scheme != .https) return error.InvalidProxy;
@@ -295,15 +308,19 @@ const Http = struct {
                 const filled = session.fill(h.io, h.credentialOptions()) catch |err| return h.proxyFailed(err);
                 if (!filled) return h.fail(error.ProxyAuthenticationFailed, "no password for the proxy");
             }
-            if (session.authorization()) |value| proxy.authorization = try arena.dupe(u8, value);
+            proxy.credential = .{
+                .user = try arena.dupe(u8, session.username orelse ""),
+                .password = try arena.dupe(u8, session.password orelse ""),
+                .method = method,
+            };
         }
-        // curl's CONNECT: the proxy's credential, git's user agent, and a
+        // curl's CONNECT: the answer to the proxy, git's user agent, and a
         // keep-alive the tunnel asks for.
-        var lines: std.ArrayList(http.Header) = .empty;
-        if (proxy.authorization) |value| try lines.append(arena, .{ .name = "Proxy-Authorization", .value = value });
-        try lines.append(arena, .{ .name = "User-Agent", .value = h.user_agent });
-        try lines.append(arena, .{ .name = "Proxy-Connection", .value = "Keep-Alive" });
-        proxy.connect_headers = lines.items;
+        proxy.connect_headers = try arena.dupe(http.Header, &.{
+            .{ .name = "Proxy-Authorization", .value = "" },
+            .{ .name = "User-Agent", .value = h.user_agent },
+            .{ .name = "Proxy-Connection", .value = "Keep-Alive" },
+        });
         h.client.proxy = proxy;
     }
 
@@ -388,6 +405,7 @@ const Http = struct {
             error.ConnectionFailed => h.fail(error.ConnectionFailed, "the connection failed"),
             error.TlsFailed => h.fail(error.TlsFailed, if (h.client.tls_error) |e| @errorName(e) else "TLS handshake failed"),
             error.ProxyAuthenticationRequired => h.rejectProxy(),
+            error.ProxyAuthMethodUnsupported => h.fail(error.ProxyAuthMethodUnsupported, h.client.proxy_offered orelse "the proxy's scheme"),
             error.ProxyRefused => {
                 var buf: [32]u8 = undefined;
                 return h.fail(error.ProxyRefused, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.client.proxy_status orelse 0}) catch "proxy refused");

@@ -71,6 +71,7 @@ pub const warning = @import("warning.zig");
 pub const userconfig = @import("userconfig.zig");
 pub const httpsettings = @import("httpsettings.zig");
 pub const httpclient = @import("httpclient.zig");
+pub const httpauth = @import("httpauth.zig");
 pub const smarthttp = @import("smarthttp.zig");
 pub const shallow = @import("shallow.zig");
 pub const partial = @import("partial.zig");

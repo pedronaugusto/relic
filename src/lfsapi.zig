@@ -1732,6 +1732,7 @@ pub const Client = struct {
             error.TlsFailed => c.fail(error.ConnectionFailed, "TLS: {s}: {s}", .{ if (transport.tls_error) |e| @errorName(e) else "handshake failed", where }),
             error.ProxyAuthenticationRequired => c.fail(error.ConnectionFailed, "the proxy wants credentials: {s}", .{where}),
             error.ProxyRefused => c.fail(error.ConnectionFailed, "the proxy answered {d}: {s}", .{ transport.proxy_status orelse 0, where }),
+            error.ProxyAuthMethodUnsupported => c.fail(error.ConnectionFailed, "the proxy asks for {s}: {s}", .{ transport.proxy_offered orelse "?", where }),
             error.HttpProtocolError => c.fail(error.MalformedResponse, "not an HTTP answer, or an encoding it cannot read: {s}", .{where}),
             error.CertificateBundleUnreadable => c.fail(error.SslCertificateUnreadable, "the system's certificates", .{}),
         };
@@ -1860,22 +1861,27 @@ pub const Client = struct {
         else
             return c.fail(error.InvalidProxy, "{s} is not an HTTP proxy", .{text});
         const host = uri.getHostAlloc(arena) catch return c.fail(error.InvalidProxy, "{s}", .{text});
-        var authorization: ?[]const u8 = null;
+        // Go sends Basic from the first request, with the proxy URL's user
+        // and password percent-decoded, and nothing else.
+        var proxy_credential: ?httpclient.Proxy.Credential = null;
         if (uri.user != null or uri.password != null) {
-            // Percent-decoded, as Go's client decodes the proxy URL's user.
-            const user = if (uri.user) |u| try u.toRawMaybeAlloc(arena) else "";
-            const password = if (uri.password) |p| try p.toRawMaybeAlloc(arena) else "";
-            authorization = try httpclient.basicAuthorization(arena, user, password);
+            proxy_credential = .{
+                .user = if (uri.user) |u| try u.toRawMaybeAlloc(arena) else "",
+                .password = if (uri.password) |p| try p.toRawMaybeAlloc(arena) else "",
+                .method = .basic,
+            };
         }
-        var lines: std.ArrayList(http.Header) = .empty;
-        try lines.append(arena, .{ .name = "User-Agent", .value = "Go-http-client/1.1" });
-        if (authorization) |value| try lines.append(arena, .{ .name = "Proxy-Authorization", .value = value });
+        // Go's CONNECT: its user agent, then the answer.
+        const lines = try arena.dupe(http.Header, &.{
+            .{ .name = "User-Agent", .value = "Go-http-client/1.1" },
+            .{ .name = "Proxy-Authorization", .value = "" },
+        });
         client.proxy = .{
             .host = host.bytes,
             .port = uri.port orelse if (tls) 443 else 80,
             .tls = tls,
-            .authorization = authorization,
-            .connect_headers = lines.items,
+            .credential = proxy_credential,
+            .connect_headers = lines,
         };
     }
 

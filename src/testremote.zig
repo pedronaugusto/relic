@@ -562,16 +562,27 @@ pub const Proxy = struct {
     /// `user:password` the proxy requires with `Proxy-Authorization: Basic`,
     /// answering 407 without it.
     basic: ?[]const u8 = null,
+    /// How the proxy asks for `basic`'s credentials: Basic, or Digest with
+    /// `qop=auth` and the algorithm named.
+    scheme: enum { basic, digest_md5, digest_sha256 } = .basic,
+    /// Every request's method and how it was answered for — `none`,
+    /// `basic`, `digest` — and whether that was taken, one to a line.
+    auth_log: std.ArrayList(u8) = .empty,
 
     /// Listen on an ephemeral port. With `basic`, a request without those
     /// credentials is answered 407.
     pub fn start(gpa: Allocator, io: Io, basic: ?[]const u8) !*Proxy {
+        return startAsking(gpa, io, basic, .basic);
+    }
+
+    /// `start`, asking for `basic`'s credentials in `scheme`.
+    pub fn startAsking(gpa: Allocator, io: Io, basic: ?[]const u8, scheme: @FieldType(Proxy, "scheme")) !*Proxy {
         const p = try gpa.create(Proxy);
         errdefer gpa.destroy(p);
         const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
         var listener = try address.listen(io, .{ .reuse_address = true });
         errdefer listener.deinit(io);
-        p.* = .{ .gpa = gpa, .io = io, .listener = listener, .port = listener.socket.address.getPort(), .basic = basic };
+        p.* = .{ .gpa = gpa, .io = io, .listener = listener, .port = listener.socket.address.getPort(), .basic = basic, .scheme = scheme };
         p.task = io.concurrent(serve, .{p}) catch return error.SkipZigTest;
         return p;
     }
@@ -585,6 +596,7 @@ pub const Proxy = struct {
         p.task.await(io);
         p.listener.deinit(io);
         p.log.deinit(p.gpa);
+        p.auth_log.deinit(p.gpa);
         p.connects.deinit(p.gpa);
         for (p.tunnel_starts.items) |b| p.gpa.free(b);
         p.tunnel_starts.deinit(p.gpa);
@@ -631,6 +643,90 @@ pub const Proxy = struct {
             try std.testing.expect(std.mem.indexOf(u8, bytes, " HTTP/1.") == null);
         }
         return p.tunnel_starts.items.len;
+    }
+
+    /// The auth log so far, and forget it. The result is the caller's.
+    pub fn takeAuth(p: *Proxy, gpa: Allocator) ![]u8 {
+        p.log_mutex.lockUncancelable(p.io);
+        defer p.log_mutex.unlock(p.io);
+        defer p.auth_log.clearRetainingCapacity();
+        return gpa.dupe(u8, p.auth_log.items);
+    }
+
+    const digest_nonce = "dcd98b7102dd2f0e8b11d0f600bfb0c093";
+
+    /// Whether `value` is a Digest answer to this proxy's challenge for
+    /// `method` to `target`, worked out here from RFC 7616 alone.
+    fn digestTaken(p: *Proxy, value: []const u8, method: []const u8, target: []const u8, credentials: []const u8) bool {
+        var params: [16][2][]const u8 = undefined;
+        var n: usize = 0;
+        var rest = value["Digest ".len..];
+        while (rest.len != 0 and n < params.len) {
+            rest = std.mem.trimStart(u8, rest, " ,");
+            const eq = std.mem.indexOfScalar(u8, rest, '=') orelse break;
+            const key = rest[0..eq];
+            rest = rest[eq + 1 ..];
+            var v: []const u8 = undefined;
+            if (rest.len != 0 and rest[0] == '"') {
+                const end = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return false;
+                v = rest[1..end];
+                rest = rest[end + 1 ..];
+            } else {
+                const end = std.mem.indexOfScalar(u8, rest, ',') orelse rest.len;
+                v = rest[0..end];
+                rest = rest[end..];
+            }
+            params[n] = .{ key, v };
+            n += 1;
+        }
+        const get = struct {
+            fn of(list: []const [2][]const u8, key: []const u8) ?[]const u8 {
+                for (list) |kv| if (std.mem.eql(u8, kv[0], key)) return kv[1];
+                return null;
+            }
+        }.of;
+        const list = params[0..n];
+        const colon = std.mem.indexOfScalar(u8, credentials, ':').?;
+        const user = credentials[0..colon];
+        const password = credentials[colon + 1 ..];
+        if (!std.mem.eql(u8, get(list, "username") orelse return false, user)) return false;
+        if (!std.mem.eql(u8, get(list, "realm") orelse return false, "proxy")) return false;
+        if (!std.mem.eql(u8, get(list, "nonce") orelse return false, digest_nonce)) return false;
+        // curl names a request handed over whole by its path.
+        const uri = if (std.mem.startsWith(u8, target, "http://")) blk: {
+            const slash = std.mem.indexOfScalarPos(u8, target, "http://".len, '/') orelse target.len;
+            break :blk target[slash..];
+        } else target;
+        if (!std.mem.eql(u8, get(list, "uri") orelse return false, uri)) return false;
+        if (!std.mem.eql(u8, get(list, "qop") orelse return false, "auth")) return false;
+        const nc = get(list, "nc") orelse return false;
+        const cnonce = get(list, "cnonce") orelse return false;
+        const given = get(list, "response") orelse return false;
+        var buf: [4][128]u8 = undefined;
+        const Hashes = struct {
+            fn hex(sha256: bool, out: *[128]u8, parts: []const []const u8) []const u8 {
+                if (sha256) {
+                    var h = std.crypto.hash.sha2.Sha256.init(.{});
+                    for (parts) |part| h.update(part);
+                    const d = h.finalResult();
+                    const x = std.fmt.bytesToHex(d, .lower);
+                    @memcpy(out[0..x.len], &x);
+                    return out[0..x.len];
+                }
+                var h = std.crypto.hash.Md5.init(.{});
+                for (parts) |part| h.update(part);
+                var d: [16]u8 = undefined;
+                h.final(&d);
+                const x = std.fmt.bytesToHex(d, .lower);
+                @memcpy(out[0..x.len], &x);
+                return out[0..x.len];
+            }
+        };
+        const sha = p.scheme == .digest_sha256;
+        const ha1 = Hashes.hex(sha, &buf[0], &.{ user, ":proxy:", password });
+        const ha2 = Hashes.hex(sha, &buf[1], &.{ method, ":", uri });
+        const want = Hashes.hex(sha, &buf[2], &.{ ha1, ":", digest_nonce, ":", nc, ":", cnonce, ":auth:", ha2 });
+        return std.mem.eql(u8, want, given);
     }
 
     fn serve(p: *Proxy) void {
@@ -682,15 +778,32 @@ pub const Proxy = struct {
             const encoder = std.base64.standard.Encoder;
             const encoded = encoder.encode(&expected_buf, credentials);
             var authorized = false;
+            var given: []const u8 = "none";
             var lines = std.mem.splitSequence(u8, head, "\r\n");
             while (lines.next()) |line| {
                 const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
                 if (!std.ascii.eqlIgnoreCase(line[0..colon], "proxy-authorization")) continue;
                 const value = std.mem.trim(u8, line[colon + 1 ..], " ");
-                if (std.mem.startsWith(u8, value, "Basic ") and std.mem.eql(u8, value["Basic ".len..], encoded)) authorized = true;
+                if (std.mem.startsWith(u8, value, "Basic ")) {
+                    given = "basic";
+                    if (p.scheme == .basic and std.mem.eql(u8, value["Basic ".len..], encoded)) authorized = true;
+                } else if (std.mem.startsWith(u8, value, "Digest ")) {
+                    given = "digest";
+                    if (p.scheme != .basic and p.digestTaken(value, method, target, credentials)) authorized = true;
+                } else given = "other";
+            }
+            {
+                p.log_mutex.lockUncancelable(io);
+                defer p.log_mutex.unlock(io);
+                try p.auth_log.print(p.gpa, "{s} {s} {s}\n", .{ method, given, if (authorized) "taken" else "refused" });
             }
             if (!authorized) {
-                try to_client.interface.writeAll("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                const challenge = switch (p.scheme) {
+                    .basic => "Basic realm=\"proxy\"",
+                    .digest_md5 => "Digest realm=\"proxy\", nonce=\"" ++ digest_nonce ++ "\", qop=\"auth\", algorithm=MD5",
+                    .digest_sha256 => "Digest realm=\"proxy\", nonce=\"" ++ digest_nonce ++ "\", qop=\"auth\", algorithm=SHA-256",
+                };
+                try to_client.interface.print("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{challenge});
                 try to_client.interface.flush();
                 return;
             }

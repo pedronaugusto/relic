@@ -619,6 +619,77 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
     }
 }
 
+test "a proxy that asks is answered as curl answers for git: nothing first with anyauth, then Basic or Digest, MD5 or SHA-256" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    defer front.stop(io);
+    const plain = try server.url(gpa, "repo.git");
+    defer gpa.free(plain);
+    const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
+    defer gpa.free(secure);
+
+    const Scheme = @FieldType(testremote.Proxy, "scheme");
+    const Case = struct { scheme: Scheme, method: ?[]const u8 = null, ok: bool = true };
+    for ([_]Case{
+        .{ .scheme = .basic },
+        .{ .scheme = .basic, .method = "basic" },
+        .{ .scheme = .digest_md5 },
+        .{ .scheme = .digest_sha256 },
+        .{ .scheme = .digest_md5, .method = "digest" },
+        // Basic only, to a proxy that asks for Digest: refused, as git's is.
+        .{ .scheme = .digest_md5, .method = "basic", .ok = false },
+    }) |case| for ([_][]const u8{ plain, secure }) |url| {
+        const proxy = try testremote.Proxy.startAsking(gpa, io, "ada:secret", case.scheme);
+        defer proxy.stop();
+        const proxy_url = try std.fmt.allocPrint(gpa, "http://ada:secret@127.0.0.1:{d}", .{proxy.port});
+        defer gpa.free(proxy_url);
+        var env = try testremote.environ(gpa);
+        defer env.deinit();
+        try env.put("http_proxy", proxy_url);
+        try env.put("https_proxy", proxy_url);
+        var logs: [2][]u8 = undefined;
+        var results: [2]bool = undefined;
+        var by_git = try testgit.Repo.init(gpa, io, &.{});
+        defer by_git.deinit();
+        var by_relic = try testgit.Repo.init(gpa, io, &.{});
+        defer by_relic.deinit();
+        for ([_]*testgit.Repo{ &by_git, &by_relic }, 0..) |r, who| {
+            try r.exec(io, &.{ "remote", "add", "origin", url });
+            try r.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
+            if (case.method) |m| try r.exec(io, &.{ "config", "http.proxyAuthMethod", m });
+            if (who == 0) {
+                results[0] = if (testremote.gitInputEnv(gpa, io, r.dir, &env, &.{ "fetch", "-q", "origin" }, "", case.ok)) |out| blk: {
+                    gpa.free(out);
+                    break :blk true;
+                } else |_| false;
+            } else {
+                results[1] = if (relicFetch(gpa, io, r.dir, &env)) true else |err| blk: {
+                    try testing.expectEqual(error.ProxyAuthenticationFailed, err);
+                    break :blk false;
+                };
+            }
+            logs[who] = try proxy.takeAuth(gpa);
+        }
+        defer for (logs) |l| gpa.free(l);
+        try testing.expectEqual(case.ok, results[0]);
+        try testing.expectEqual(case.ok, results[1]);
+        if (case.ok) try expectSameFetch(gpa, io, &by_git, &by_relic);
+        // Every request the proxy saw, and how it was answered for, as it
+        // was for git.
+        testing.expectEqualStrings(logs[0], logs[1]) catch |err| {
+            std.debug.print("{s} {?s} {s}\n", .{ @tagName(case.scheme), case.method, url });
+            return err;
+        };
+    };
+}
+
 test "a proxy's credentials come from its URL, or its user's from the helpers, as git's do, and a refusal is named" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;

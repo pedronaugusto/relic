@@ -30,6 +30,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const http = std.http;
 const tls = std.crypto.tls;
+const httpauth = @import("httpauth.zig");
 const Certificate = std.crypto.Certificate;
 
 /// Errors from making a connection or exchanging a request.
@@ -51,6 +52,10 @@ pub const Error = error{
     CertificateBundleUnreadable,
     /// A timeout in `Client.timeouts` ran out.
     TimedOut,
+    /// The proxy asks to be answered only in schemes relic does not speak
+    /// — Negotiate, NTLM — or none the credential's method allows.
+    /// `Client.proxy_offered` names them.
+    ProxyAuthMethodUnsupported,
     /// A body sent with a length was ended before that many bytes.
     BodyIncomplete,
 } || Allocator.Error || Io.Cancelable;
@@ -89,13 +94,39 @@ pub const Proxy = struct {
     port: u16,
     /// An `https://` proxy: TLS to the proxy itself, and a tunnel inside.
     tls: bool = false,
-    /// The `Proxy-Authorization` value, `Basic <base64>`, when there is one.
-    authorization: ?[]const u8 = null,
+    /// The user and password the proxy is answered with, and which of its
+    /// challenges may be answered.
+    credential: ?Credential = null,
     /// The lines of a `CONNECT` after its `Host`, in order, as the caller's
-    /// HTTP stack writes them. `null` is curl's without a user agent:
-    /// `Proxy-Authorization` when there is one, then
+    /// HTTP stack writes them. A line named `Proxy-Authorization` with an
+    /// empty value stands for the answer to the proxy, written when there
+    /// is one. `null` is curl's without a user agent: the answer, then
     /// `Proxy-Connection: Keep-Alive`.
     connect_headers: ?[]const http.Header = null,
+
+    /// A proxy's credential.
+    pub const Credential = struct {
+        user: []const u8,
+        password: []const u8,
+        /// `any` sends nothing until the proxy asks, then answers the
+        /// strongest scheme it offers, as curl's anyauth does; `basic`
+        /// sends Basic from the first request, as curl does when Basic is
+        /// all that is allowed; `digest` waits and answers Digest only.
+        method: httpauth.Method = .any,
+    };
+};
+
+/// How the proxy is being answered, once it has asked.
+const ProxyAnswer = union(enum) {
+    basic: []u8,
+    digest: httpauth.Digest,
+
+    fn deinit(a: *ProxyAnswer, gpa: Allocator) void {
+        switch (a.*) {
+            .basic => |v| gpa.free(v),
+            .digest => |*d| d.deinit(gpa),
+        }
+    }
 };
 
 /// A client: its proxy, what it trusts, and the connection it keeps.
@@ -126,6 +157,12 @@ pub const Client = struct {
     lock: Io.Mutex = .init,
     /// The proxy's status when it last refused a tunnel.
     proxy_status: ?u16 = null,
+    /// The answer to the proxy's challenge, once it has asked.
+    proxy_answer: ?ProxyAnswer = null,
+    /// Set when a tunnel's 407 was taken and is to be asked again.
+    proxy_retry: bool = false,
+    /// The schemes a proxy offered when none could be answered, in `gpa`.
+    proxy_offered: ?[]u8 = null,
     /// Why the last TLS handshake failed.
     tls_error: ?anyerror = null,
     /// How many connections were made, for a caller that watches reuse.
@@ -141,6 +178,8 @@ pub const Client = struct {
 
     /// Close the kept connections and release everything.
     pub fn deinit(c: *Client) void {
+        if (c.proxy_answer) |*a| a.deinit(c.gpa);
+        if (c.proxy_offered) |o| c.gpa.free(o);
         for (c.idle.items) |conn| conn.close();
         c.idle.deinit(c.gpa);
         c.bundle.deinit(c.gpa);
@@ -216,6 +255,80 @@ pub const Client = struct {
         c.trusted = true;
     }
 
+    /// The `Proxy-Authorization` value for a request `method` to `uri` —
+    /// the request target, `host:port` for a `CONNECT` — or `null` when
+    /// the proxy is not answered yet. Into `gpa`.
+    fn proxyAuthorization(c: *Client, method: []const u8, uri: []const u8) Allocator.Error!?[]u8 {
+        const credential = (c.proxy orelse return null).credential orelse return null;
+        c.lock.lockUncancelable(c.io);
+        defer c.lock.unlock(c.io);
+        if (c.proxy_answer == null and credential.method == .basic) {
+            c.proxy_answer = .{ .basic = try httpauth.basic(c.gpa, credential.user, credential.password) };
+        }
+        const answer = &(c.proxy_answer orelse return null);
+        return switch (answer.*) {
+            .basic => |v| try c.gpa.dupe(u8, v),
+            .digest => |*d| try d.answer(c.gpa, credential.user, credential.password, method, uri),
+        };
+    }
+
+    /// Take the challenges of a 407: whether the request is to be made
+    /// again with an answer. `false` when there is no credential to answer
+    /// with, or when the answer given was refused — a Digest nonce gone
+    /// stale is answered again.
+    fn proxyChallenged(c: *Client, head: *const Head) Error!bool {
+        const credential = (c.proxy orelse return false).credential orelse return false;
+        var arena_state: std.heap.ArenaAllocator = .init(c.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var challenges: std.ArrayList(httpauth.Challenge) = .empty;
+        var it = head.iterateHeaders();
+        while (it.next()) |h| {
+            if (!std.ascii.eqlIgnoreCase(h.name, "proxy-authenticate")) continue;
+            const list = httpauth.parse(arena, h.value) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.MalformedChallenge => continue,
+            };
+            try challenges.appendSlice(arena, list);
+        }
+        c.lock.lockUncancelable(c.io);
+        defer c.lock.unlock(c.io);
+        if (c.proxy_answer) |*previous| {
+            // Answered and refused, unless the nonce only went stale.
+            if (previous.* != .digest) return false;
+            const fresh = for (challenges.items) |ch| {
+                if (ch.scheme != .digest) continue;
+                const stale = ch.param("stale") orelse continue;
+                if (std.ascii.eqlIgnoreCase(stale, "true") and httpauth.Digest.speaks(ch)) break ch;
+            } else return false;
+            const next: httpauth.Digest = try .init(c.gpa, fresh, try c.cnonce(arena));
+            previous.deinit(c.gpa);
+            c.proxy_answer = .{ .digest = next };
+            return true;
+        }
+        switch (try httpauth.pick(arena, challenges.items, credential.method)) {
+            .digest => |ch| c.proxy_answer = .{ .digest = try .init(c.gpa, ch, try c.cnonce(arena)) },
+            .basic => c.proxy_answer = .{ .basic = try httpauth.basic(c.gpa, credential.user, credential.password) },
+            .unsupported => |names| {
+                if (c.proxy_offered) |o| c.gpa.free(o);
+                c.proxy_offered = try c.gpa.dupe(u8, names);
+                return error.ProxyAuthMethodUnsupported;
+            },
+        }
+        return true;
+    }
+
+    /// A client nonce for Digest as curl makes one: thirty-two random hex
+    /// digits, in base64.
+    fn cnonce(c: *Client, arena: Allocator) Allocator.Error![]u8 {
+        var raw: [16]u8 = undefined;
+        c.io.random(&raw);
+        const hex = std.fmt.bytesToHex(raw, .lower);
+        const out = try arena.alloc(u8, std.base64.standard.Encoder.calcSize(hex.len));
+        _ = std.base64.standard.Encoder.encode(out, &hex);
+        return out;
+    }
+
     /// A connection to `target`: a kept one when one goes there, a new one
     /// otherwise.
     pub fn connect(c: *Client, target: Target) Error!*Connection {
@@ -257,6 +370,20 @@ pub const Client = struct {
     /// whole with its length; `null` sends none. The response is the
     /// caller's to read and `deinit`.
     pub fn send(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8) Error!Response {
+        var response = try c.sendKept(method, target, path, headers, body);
+        // A proxy that asks, for a request it is handed whole: answered,
+        // and the request made again, as curl makes it again.
+        if (response.head.status == .proxy_auth_required and c.proxy != null and !target.tls) {
+            if (try c.proxyChallenged(&response.head)) {
+                _ = response.reader().discardRemaining() catch {};
+                response.deinit();
+                response = try c.sendKept(method, target, path, headers, body);
+            }
+        }
+        return response;
+    }
+
+    fn sendKept(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8) Error!Response {
         const first = try c.connectNoting(target);
         return c.sendOn(first.conn, method, path, headers, body) catch |err| switch (err) {
             // A kept connection the server closed while it waited is
@@ -427,22 +554,6 @@ pub const Head = struct {
     }
 };
 
-/// `Basic <base64 of user:password>`: the value of an `Authorization` or a
-/// `Proxy-Authorization`. The result is `gpa`'s.
-pub fn basicAuthorization(gpa: Allocator, user: []const u8, password: []const u8) Allocator.Error![]u8 {
-    const encoder = std.base64.standard.Encoder;
-    const plain_len = user.len + 1 + password.len;
-    const out = try gpa.alloc(u8, "Basic ".len + encoder.calcSize(plain_len));
-    @memcpy(out[0.."Basic ".len], "Basic ");
-    const plain = try gpa.alloc(u8, plain_len);
-    defer gpa.free(plain);
-    @memcpy(plain[0..user.len], user);
-    plain[user.len] = ':';
-    @memcpy(plain[user.len + 1 ..], password);
-    _ = encoder.encode(out["Basic ".len..], plain);
-    return out;
-}
-
 /// A response: its head, owned, and its body, read through `reader`.
 pub const Response = struct {
     conn: ?*Connection,
@@ -543,6 +654,25 @@ pub const Connection = struct {
     plain_writer: *const Io.Writer.VTable = undefined,
 
     fn open(c: *Client, target: Target) Error!*Connection {
+        // A proxy that asks for an answer to a tunnel is asked again on a
+        // new connection, as curl asks, with the answer; and once more for
+        // a Digest nonce gone stale.
+        var attempts: u8 = 0;
+        while (true) : (attempts += 1) {
+            return openOnce(c, target) catch |err| switch (err) {
+                error.ProxyAuthenticationRequired => {
+                    if (attempts < 2 and c.proxy_retry) {
+                        c.proxy_retry = false;
+                        continue;
+                    }
+                    return err;
+                },
+                else => return err,
+            };
+        }
+    }
+
+    fn openOnce(c: *Client, target: Target) Error!*Connection {
         const gpa = c.gpa;
         const io = c.io;
         const conn = try gpa.create(Connection);
@@ -883,13 +1013,21 @@ pub const Connection = struct {
 
     /// Ask the proxy for a tunnel to `target` with `CONNECT`, as curl asks.
     fn tunnel(conn: *Connection, proxy: Proxy, target: Target) Error!void {
+        const c = conn.client;
         const w = conn.writer();
-        w.print("CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n", .{ target.host, target.port, target.host, target.port }) catch return conn.writeFailed();
-        if (proxy.connect_headers) |lines| {
-            for (lines) |h| w.print("{s}: {s}\r\n", .{ h.name, h.value }) catch return conn.writeFailed();
-        } else {
-            if (proxy.authorization) |a| w.print("Proxy-Authorization: {s}\r\n", .{a}) catch return conn.writeFailed();
-            w.writeAll("Proxy-Connection: Keep-Alive\r\n") catch return conn.writeFailed();
+        var authority_buf: [300]u8 = undefined;
+        const authority = std.fmt.bufPrint(&authority_buf, "{s}:{d}", .{ target.host, target.port }) catch return error.HttpProtocolError;
+        const answer = try c.proxyAuthorization("CONNECT", authority);
+        defer if (answer) |a| c.gpa.free(a);
+        w.print("CONNECT {s} HTTP/1.1\r\nHost: {s}\r\n", .{ authority, authority }) catch return conn.writeFailed();
+        const default_lines = [_]http.Header{
+            .{ .name = "Proxy-Authorization", .value = "" },
+            .{ .name = "Proxy-Connection", .value = "Keep-Alive" },
+        };
+        for (proxy.connect_headers orelse &default_lines) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "proxy-authorization") and h.value.len == 0) {
+                if (answer) |a| w.print("Proxy-Authorization: {s}\r\n", .{a}) catch return conn.writeFailed();
+            } else w.print("{s}: {s}\r\n", .{ h.name, h.value }) catch return conn.writeFailed();
         }
         w.writeAll("\r\n") catch return conn.writeFailed();
         conn.flush() catch return conn.writeFailed();
@@ -901,8 +1039,10 @@ pub const Connection = struct {
         const head = Head.parse(bytes) catch return error.HttpProtocolError;
         const status = @intFromEnum(head.status);
         if (status / 100 == 2) return;
-        conn.client.note("proxy_status", @as(?u16, status));
-        return if (status == 407) error.ProxyAuthenticationRequired else error.ProxyRefused;
+        c.note("proxy_status", @as(?u16, status));
+        if (status != 407) return error.ProxyRefused;
+        if (try c.proxyChallenged(&head)) c.note("proxy_retry", true);
+        return error.ProxyAuthenticationRequired;
     }
 
     const BodyKind = union(enum) { none, content_length: usize, chunked };
@@ -910,6 +1050,13 @@ pub const Connection = struct {
     fn writeHead(conn: *Connection, method: http.Method, path: []const u8, headers: []const http.Header, body: BodyKind) Error!void {
         const w = conn.writer();
         const t = conn.target;
+        // A request a proxy is handed whole is answered for with its path
+        // as the Digest target, as curl answers.
+        const proxy_answer: ?[]u8 = if (conn.absolute_form)
+            try conn.client.proxyAuthorization(@tagName(method), path)
+        else
+            null;
+        defer if (proxy_answer) |a| conn.client.gpa.free(a);
         (write: {
             w.print("{s} ", .{@tagName(method)}) catch |e| break :write e;
             if (conn.absolute_form) {
@@ -919,9 +1066,7 @@ pub const Connection = struct {
             w.print("{s} HTTP/1.1\r\nHost: {s}", .{ path, t.host }) catch |e| break :write e;
             if (t.port != (if (t.tls) @as(u16, 443) else 80)) w.print(":{d}", .{t.port}) catch |e| break :write e;
             w.writeAll("\r\n") catch |e| break :write e;
-            if (conn.absolute_form) if (conn.client.proxy.?.authorization) |a| {
-                w.print("Proxy-Authorization: {s}\r\n", .{a}) catch |e| break :write e;
-            };
+            if (proxy_answer) |a| w.print("Proxy-Authorization: {s}\r\n", .{a}) catch |e| break :write e;
             for (headers) |h| w.print("{s}: {s}\r\n", .{ h.name, h.value }) catch |e| break :write e;
             switch (body) {
                 .none => {},
@@ -983,7 +1128,8 @@ test "a request's head is written as curl writes it, direct and through a proxy"
     // Written into a fixed buffer through a connection with no socket.
     var out: [512]u8 = undefined;
     var client: Client = .init(std.testing.allocator, std.testing.io);
-    client.proxy = .{ .host = "proxy.example.com", .port = 3128, .authorization = "Basic YTpi" };
+    defer client.deinit();
+    client.proxy = .{ .host = "proxy.example.com", .port = 3128, .credential = .{ .user = "a", .password = "b", .method = .basic } };
     var conn: Connection = undefined;
     conn.client = &client;
     conn.target = .{ .tls = false, .host = "git.example.com", .port = 8080 };

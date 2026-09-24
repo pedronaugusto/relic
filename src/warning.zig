@@ -28,6 +28,9 @@ pub const Warning = union(enum) {
     /// this repository's boundary and the fetch did not say to: the local
     /// ref's name.
     shallow_update_rejected: []const u8,
+    /// `http.proxyAuthMethod` names a method git does not know, and anyauth
+    /// is used: the name.
+    proxy_auth_method_unknown: []const u8,
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -38,6 +41,7 @@ pub const Warning = union(enum) {
             .ssl_verify_disabled => |setting| std.fmt.allocPrint(arena, "the server's certificate is not checked ({s})", .{setting}),
             .ssh_said => |text| text,
             .shallow_update_rejected => |name| std.fmt.allocPrint(arena, "rejected {s} because shallow roots are not allowed to be updated", .{name}),
+            .proxy_auth_method_unknown => |name| std.fmt.allocPrint(arena, "unsupported proxy authentication method {s}: using anyauth", .{name}),
         };
     }
 };
@@ -67,6 +71,7 @@ pub const Warnings = struct {
             .ssl_verify_disabled => |t| .{ .ssl_verify_disabled = try a.dupe(u8, t) },
             .ssh_said => |t| .{ .ssh_said = try a.dupe(u8, t) },
             .shallow_update_rejected => |t| .{ .shallow_update_rejected = try a.dupe(u8, t) },
+            .proxy_auth_method_unknown => |t| .{ .proxy_auth_method_unknown = try a.dupe(u8, t) },
         };
         try w.items.append(a, owned);
     }
