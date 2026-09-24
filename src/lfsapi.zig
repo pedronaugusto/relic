@@ -27,9 +27,31 @@
 //! keys git-lfs writes, so a caller that wants git-lfs's habit of writing them
 //! to the repository's configuration can: `Client.remember` does.
 //!
-//! relic reads no clock. An action or a token the server says will expire is
-//! not checked against one; a request refused because one has is retried with
-//! a fresh batch, which is how git-lfs retries every failed transfer anyway.
+//! The connection settings are git's where git-lfs reads them as git does,
+//! and git-lfs's where it does not. The TLS ones — `http.sslVerify`,
+//! `http.sslCAInfo`, `http.sslCAPath`, `http.sslCert`, `http.sslKey` and
+//! their environment variables — come from `httpsettings.zig` for each
+//! request's URL, as `smarthttp` takes them, and what the standard library's
+//! client cannot do is refused by the same names. Three are git-lfs's own:
+//! `http.extraHeader` is the values of the one best-matching
+//! `http.<url>.extraHeader` key, by git-lfs's URL match, where git gathers
+//! every matching key's and lets an empty one clear the list; the proxy
+//! follows git-lfs's order (`proxyFor`), which is not curl's; and the user
+//! agent is git-lfs's, which `http.userAgent` does not change. The
+//! credential helpers are asked as git asks them (`credential.zig`), with
+//! the server's `LFS-Authenticate` and `WWW-Authenticate` values as
+//! `wwwauth[]` unless `credential.<url>.skipwwwauth` says not to, which is
+//! git-lfs's; where git-lfs's own conversation differs — it announces its
+//! capabilities to a helper's `store` and `erase` too, and writes the keys
+//! in no fixed order — git's is kept. A request that fails for want of a
+//! credential, or that the server forbids, is described in
+//! `Options.auth_failure`.
+//!
+//! relic reads no clock of its own. An action or a token the server says will
+//! expire is not checked against one; a request refused because one has is
+//! retried with a fresh batch, which is how git-lfs retries every failed
+//! transfer anyway. Certificates to trust from `http.sslCAInfo` are checked
+//! against the time when they are loaded, as `smarthttp` checks them.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -40,6 +62,8 @@ const http = std.http;
 const config_mod = @import("config.zig");
 const program = @import("program.zig");
 const credential = @import("credential.zig");
+const auth_mod = @import("auth.zig");
+const httpsettings = @import("httpsettings.zig");
 const url_mod = @import("url.zig");
 const remote_mod = @import("remote.zig");
 const repo_mod = @import("repo.zig");
@@ -98,15 +122,25 @@ pub const Error = error{
     TooManyRedirects,
     /// The connection failed, or broke. `Client.message` holds why.
     ConnectionFailed,
-    /// `http.sslVerify` is false, which the standard library's TLS client
-    /// cannot honour and relic does not pretend to.
+    /// `http.sslVerify` is false for the URL, or `GIT_SSL_NO_VERIFY` is
+    /// set: the standard library's TLS client always checks the server's
+    /// certificate. `Client.message` names the setting.
     SslVerifyUnsupported,
-    /// `http.sslCAInfo`, `http.sslCAPath`, `http.sslCert` or `http.sslKey`.
-    SslCertificateSettingUnsupported,
+    /// `http.sslCert` or `http.sslKey`: the standard library's TLS client
+    /// cannot present a client certificate.
+    SslClientCertificateUnsupported,
+    /// `http.sslCAInfo` or `http.sslCAPath` names a file or directory that
+    /// could not be read as certificates.
+    SslCertificateUnreadable,
+    /// An `https` URL and a proxy to reach it through: the standard
+    /// library's client would speak plain HTTP inside the tunnel.
+    HttpsProxyUnsupported,
+    /// An `http.*` value that does not parse.
+    InvalidHttpSetting,
     /// A header from the configuration or from the server holds a line
     /// break, or has no name.
     InvalidHttpHeader,
-    /// A proxy that does not parse.
+    /// A proxy that does not parse, or that is not an HTTP proxy.
     InvalidProxy,
     /// ssh is a program, and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
@@ -872,6 +906,9 @@ pub const Options = struct {
     /// What stands in for a terminal when a server asks for a credential no
     /// helper has.
     prompt: ?credential.Prompt = null,
+    /// Filled in when a request fails for want of a credential, or is
+    /// forbidden: see `auth.Failure`.
+    auth_failure: ?*auth_mod.Failure = null,
 };
 
 /// An access mode git-lfs records for a URL.
@@ -898,7 +935,10 @@ pub const Client = struct {
     /// What a relative local path is taken against.
     where: Where,
     options: Options,
-    http: http.Client,
+    /// One HTTP client for each set of connection settings the operation's
+    /// URLs need: `transportFor`.
+    transports: std.ArrayList(*Transport) = .empty,
+    transport_mutex: Io.Mutex = .init,
     arena: std.heap.ArenaAllocator,
     mutex: Io.Mutex = .init,
     endpoints: [2]?Endpoint = .{ null, null },
@@ -921,6 +961,14 @@ pub const Client = struct {
         approved: bool = false,
     };
 
+    /// An HTTP client and the settings it was made for: a proxy, and the
+    /// certificates to trust.
+    const Transport = struct {
+        key: []const u8,
+        arena: std.heap.ArenaAllocator,
+        client: http.Client,
+    };
+
     /// Open a client for `remote`. `settings` is borrowed.
     pub fn init(gpa: Allocator, io: Io, settings: *const Settings, remote: []const u8, where: Where, options: Options) Error!Client {
         var c: Client = .{
@@ -930,18 +978,9 @@ pub const Client = struct {
             .remote = remote,
             .where = where,
             .options = options,
-            .http = .{ .allocator = gpa, .io = io },
             .arena = .init(gpa),
         };
         errdefer c.arena.deinit();
-        const config = settings.config;
-        if (config.has("http.sslverify") and !(config.getBool("http.sslverify", true) catch true)) {
-            return error.SslVerifyUnsupported;
-        }
-        for ([_][]const u8{ "http.sslcainfo", "http.sslcapath", "http.sslcert", "http.sslkey" }) |key| {
-            if (config.has(key)) return error.SslCertificateSettingUnsupported;
-        }
-        try c.configureProxies();
         try c.loadNetrc();
         return c;
     }
@@ -988,7 +1027,13 @@ pub const Client = struct {
         c.netrc_refused.deinit(c.gpa);
         c.access.deinit(c.gpa);
         c.learned.deinit(c.gpa);
-        c.http.deinit();
+        for (c.transports.items) |t| {
+            t.client.deinit();
+            t.arena.deinit();
+            c.gpa.free(t.key);
+            c.gpa.destroy(t);
+        }
+        c.transports.deinit(c.gpa);
         c.arena.deinit();
         c.* = undefined;
     }
@@ -1025,6 +1070,19 @@ pub const Client = struct {
             changed = true;
         }
         if (changed) try repo.config.write(io, repo.common_dir, "config");
+    }
+
+    /// Describe a request that failed for want of a credential, or that the
+    /// server forbade, in the caller's `auth_failure`. `cred` is the
+    /// helpers' credential it was made with, when it was.
+    fn describeRefusal(c: *Client, reason: auth_mod.Failure.Reason, status: u16, url: []const u8, said: []const u8, cred: ?*Cred) void {
+        const described = c.options.auth_failure orelse return;
+        const scheme: url_mod.Scheme = if (url_mod.Url.parse(url)) |u| u.scheme else |_| .https;
+        described.begin(c.gpa, reason, scheme, url) catch return;
+        described.status = status;
+        described.setServerMessage(said) catch {};
+        described.prompt_available = c.options.prompt != null;
+        if (cred) |cr| cr.session.describeFailure(described, c.options.prompt != null) catch {};
     }
 
     /// The endpoint for `operation`, found once.
@@ -1261,6 +1319,10 @@ pub const Client = struct {
         var auth_attempts: u8 = 0;
         var retries_left = request.network_retries;
         const has_auth = hasHeader(request.headers, "authorization");
+        // The last refusal's challenges and words, for the helpers and for
+        // a failure's description.
+        var challenges: []const []const u8 = &.{};
+        var said: []const u8 = "";
         while (true) {
             var auth_header: ?[]const u8 = null;
             var cred: ?*Cred = null;
@@ -1281,7 +1343,21 @@ pub const Client = struct {
                     } else if (found.url) |cred_url| {
                         const cr = try c.credentialFor(cred_url);
                         if (cr.session.authorization() == null) {
-                            if (!try cr.session.fill(c.io, c.credentialOptions())) {
+                            // The server's challenges go to the helpers as
+                            // `wwwauth[]`, unless git-lfs's
+                            // `credential.<url>.skipwwwauth` says not.
+                            const skip = gitLfsBool(try c.settings.urlGet(scratch, "credential", cred_url, "skipwwwauth"), false);
+                            try cr.session.setChallenges(if (skip) &.{} else challenges);
+                            const filled = cr.session.fill(c.io, c.credentialOptions()) catch |err| {
+                                c.describeRefusal(switch (err) {
+                                    error.CredentialHelperQuit => .helper_quit,
+                                    error.ProgramsNotGranted => .programs_not_granted,
+                                    else => .no_credential,
+                                }, 401, url, said, cr);
+                                return err;
+                            };
+                            if (!filled) {
+                                c.describeRefusal(.declined, 401, url, said, cr);
                                 return c.fail(error.AuthenticationFailed, "no credential for {s}", .{stripQuery(cred_url)});
                             }
                         }
@@ -1311,6 +1387,8 @@ pub const Client = struct {
             const status = ex.status();
             if (status == .unauthorized) {
                 const offers = ex.authenticateOffers();
+                challenges = try ex.challenges(scratch);
+                said = ex.refusalText(scratch);
                 ex.close();
                 try c.mutex.lock(c.io);
                 defer c.mutex.unlock(c.io);
@@ -1326,6 +1404,7 @@ pub const Client = struct {
                     // A header the server itself handed over — an action's,
                     // or git-lfs-authenticate's — that it no longer takes.
                     c.dropSshAuth(operation);
+                    c.describeRefusal(.refused, 401, url, said, null);
                     return c.fail(error.AuthenticationFailed, "HTTP 401 from {s}", .{stripQuery(url)});
                 }
                 if (access == .none) {
@@ -1334,7 +1413,10 @@ pub const Client = struct {
                     continue;
                 }
                 auth_attempts += 1;
-                if (auth_attempts >= 3) return c.fail(error.AuthenticationFailed, "HTTP 401 from {s}", .{stripQuery(url)});
+                if (auth_attempts >= 3) {
+                    c.describeRefusal(.refused, 401, url, said, cred);
+                    return c.fail(error.AuthenticationFailed, "HTTP 401 from {s}", .{stripQuery(url)});
+                }
                 continue;
             }
             if (status.class() == .success) {
@@ -1343,6 +1425,7 @@ pub const Client = struct {
                     defer c.mutex.unlock(c.io);
                     if (!cr.approved) {
                         cr.approved = true;
+                        try cr.session.setChallenges(&.{});
                         try cr.session.approve(c.io, c.credentialOptions());
                     }
                 }
@@ -1404,7 +1487,9 @@ pub const Client = struct {
         }
         if (hasHeader(request.headers, "content-type")) content_type = null;
 
-        ex.request = c.http.request(request.method, uri, .{
+        const transport = try c.transportFor(a, request_url);
+        ex.url = request_url;
+        ex.request = transport.request(request.method, uri, .{
             .headers = .{
                 .user_agent = .{ .override = user_agent },
                 .authorization = if (auth_header) |h| .{ .override = h } else .omit,
@@ -1489,51 +1574,152 @@ pub const Client = struct {
         return out.items;
     }
 
-    fn configureProxies(c: *Client) Error!void {
-        const arena = c.arena.allocator();
-        var configured: ?[]const u8 = null;
-        if (try c.settings.get(arena, "http.proxy")) |text| {
-            if (text.len != 0) configured = text;
+    /// The HTTP client for a request to `url`, with the settings git-lfs
+    /// would use for it: git's TLS settings for the URL from
+    /// `httpsettings.zig`, which git-lfs reads as git does, and the proxy
+    /// git-lfs's own rules choose (`proxyFor`). What the standard library's
+    /// client cannot do is refused by name, as `smarthttp` refuses it:
+    /// `http.sslVerify=false`, a client certificate, and an `https` URL
+    /// through a proxy, which it would send in the clear inside the tunnel.
+    /// relic's own HTTP/1.1 layer over `std.crypto.tls`, which the
+    /// transport is building, is what will do those three; this is the one
+    /// place lfsapi switches to it.
+    fn transportFor(c: *Client, scratch: Allocator, request_url: []const u8) Error!*http.Client {
+        const url = url_mod.Url.parse(request_url) catch return c.fail(error.MalformedUrl, "malformed URL {s}", .{stripQuery(request_url)});
+        const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
+        const settings = httpsettings.resolve(scratch, c.settings.config, environ, url) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidHttpSetting => return c.fail(error.InvalidHttpSetting, "an http.* setting for {s} does not parse", .{stripQuery(request_url)}),
+        };
+        var ca_info: ?[]const u8 = null;
+        var ca_path: ?[]const u8 = null;
+        if (url.scheme == .https) {
+            if (!settings.ssl_verify) return c.fail(error.SslVerifyUnsupported, "{s} turns certificate checks off", .{settings.ssl_verify_from orelse "http.sslVerify"});
+            if (settings.ssl_cert != null or settings.ssl_key != null) {
+                return c.fail(error.SslClientCertificateUnsupported, "{s} asks for a client certificate", .{if (settings.ssl_cert != null) "http.sslCert" else "http.sslKey"});
+            }
+            ca_info = settings.ca_info;
+            ca_path = settings.ca_path;
         }
-        for ([_]bool{ false, true }) |tls| {
-            var text = configured;
-            if (text == null) {
-                const programs = c.options.programs orelse return;
-                const names: []const []const u8 = if (tls)
-                    &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }
+        const proxy = try c.proxyFor(scratch, request_url, url);
+        if (proxy != null and url.scheme == .https) return c.fail(error.HttpsProxyUnsupported, "{s} through {s}", .{ stripQuery(request_url), proxy.? });
+        const key = try std.fmt.allocPrint(scratch, "{s}\x00{s}\x00{s}", .{ proxy orelse "", ca_info orelse "", ca_path orelse "" });
+
+        try c.transport_mutex.lock(c.io);
+        defer c.transport_mutex.unlock(c.io);
+        for (c.transports.items) |t| {
+            if (std.mem.eql(u8, t.key, key)) return &t.client;
+        }
+        const t = try c.gpa.create(Transport);
+        errdefer c.gpa.destroy(t);
+        t.* = .{ .key = try c.gpa.dupe(u8, key), .arena = .init(c.gpa), .client = .{ .allocator = c.gpa, .io = c.io } };
+        errdefer {
+            t.client.deinit();
+            t.arena.deinit();
+            c.gpa.free(t.key);
+        }
+        if (ca_info != null or ca_path != null) try c.trust(&t.client, t.arena.allocator(), settings, environ);
+        if (proxy) |text| try c.useProxy(&t.client, t.arena.allocator(), text);
+        try c.transports.append(c.gpa, t);
+        return &t.client;
+    }
+
+    /// Trust `http.sslCAInfo` in place of the system's certificates, and
+    /// `http.sslCAPath` besides them, as `smarthttp` does for git.
+    fn trust(c: *Client, client: *http.Client, arena: Allocator, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) Error!void {
+        const io = c.io;
+        const now = Io.Clock.real.now(io);
+        const bundle = &client.ca_bundle;
+        const cwd = Io.Dir.cwd();
+        if (settings.ca_info) |raw| {
+            const file = try expandHome(arena, raw, environ);
+            bundle.addCertsFromFilePath(c.gpa, io, now, cwd, file) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => return c.fail(error.SslCertificateUnreadable, "{s}", .{settings.ca_info_from orelse "http.sslCAInfo"}),
+            };
+        } else {
+            bundle.rescan(c.gpa, io, now) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => return c.fail(error.SslCertificateUnreadable, "the system's certificates", .{}),
+            };
+        }
+        if (settings.ca_path) |raw| {
+            const dir_path = try expandHome(arena, raw, environ);
+            var dir = cwd.openDir(io, dir_path, .{ .iterate = true }) catch return c.fail(error.SslCertificateUnreadable, "http.sslCAPath", .{});
+            defer dir.close(io);
+            bundle.addCertsFromDir(c.gpa, io, now, dir) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                else => return c.fail(error.SslCertificateUnreadable, "http.sslCAPath", .{}),
+            };
+        }
+        // Set, the client neither rescans the system nor reads the clock
+        // again.
+        client.now = now;
+    }
+
+    /// Send `client`'s plain HTTP requests through `text`, whole, with
+    /// their absolute URLs, as Go's client — git-lfs's — sends them.
+    fn useProxy(c: *Client, client: *http.Client, arena: Allocator, text: []const u8) Error!void {
+        const uri = std.Uri.parse(text) catch std.Uri.parseAfterScheme("http", text) catch return c.fail(error.InvalidProxy, "{s}", .{text});
+        const protocol = http.Client.Protocol.fromUri(uri) orelse return c.fail(error.InvalidProxy, "{s} is not an HTTP proxy", .{text});
+        const host = uri.getHostAlloc(arena) catch return c.fail(error.InvalidProxy, "{s}", .{text});
+        var authorization: ?[]const u8 = null;
+        if (uri.user != null or uri.password != null) {
+            const value = try arena.alloc(u8, http.Client.basic_authorization.valueLengthFromUri(uri));
+            authorization = http.Client.basic_authorization.value(uri, value);
+        }
+        const proxy = try arena.create(http.Client.Proxy);
+        proxy.* = .{
+            .protocol = protocol,
+            .host = host,
+            .authorization = authorization,
+            .port = uri.port orelse switch (protocol) {
+                .plain => 80,
+                .tls => 443,
+            },
+            .supports_connect = false,
+        };
+        client.http_proxy = proxy;
+    }
+
+    /// The proxy git-lfs's rules choose for `url`, which are not curl's:
+    /// `http.<url>.proxy` by git-lfs's URL match when it is not empty; else
+    /// for an `https` URL `HTTPS_PROXY`, then `https_proxy`; then for any
+    /// URL `HTTP_PROXY`, then `http_proxy` — never `all_proxy`. None for a
+    /// host `NO_PROXY`, else `no_proxy`, names, or for `localhost` and a
+    /// loopback address: `goProxyAllowed`.
+    fn proxyFor(c: *Client, scratch: Allocator, request_url: []const u8, url: url_mod.Url) Error!?[]const u8 {
+        const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
+        var chosen: ?[]const u8 = null;
+        if (try c.settings.urlGet(scratch, "http", request_url, "proxy")) |v| {
+            if (v.len != 0) chosen = v;
+        }
+        if (chosen == null) {
+            if (environ) |env| {
+                const names: []const []const u8 = if (url.scheme == .https)
+                    &.{ "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy" }
                 else
-                    &.{ "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY" };
+                    &.{ "HTTP_PROXY", "http_proxy" };
                 for (names) |name| {
-                    if (programs.environ.get(name)) |value| {
-                        if (value.len != 0) {
-                            text = value;
-                            break;
-                        }
-                    }
+                    const value = env.get(name) orelse continue;
+                    if (value.len == 0) continue;
+                    chosen = value;
+                    break;
                 }
             }
-            const proxy_text = text orelse continue;
-            const uri = std.Uri.parse(proxy_text) catch std.Uri.parseAfterScheme("http", proxy_text) catch return error.InvalidProxy;
-            const protocol = http.Client.Protocol.fromUri(uri) orelse return error.InvalidProxy;
-            const host = uri.getHostAlloc(arena) catch return error.InvalidProxy;
-            var authorization: ?[]const u8 = null;
-            if (uri.user != null or uri.password != null) {
-                const value = try arena.alloc(u8, http.Client.basic_authorization.valueLengthFromUri(uri));
-                authorization = http.Client.basic_authorization.value(uri, value);
-            }
-            const proxy = try arena.create(http.Client.Proxy);
-            proxy.* = .{
-                .protocol = protocol,
-                .host = host,
-                .authorization = authorization,
-                .port = uri.port orelse switch (protocol) {
-                    .plain => 80,
-                    .tls => 443,
-                },
-                .supports_connect = true,
-            };
-            if (tls) c.http.https_proxy = proxy else c.http.http_proxy = proxy;
         }
+        const proxy = chosen orelse return null;
+        var no_proxy: []const u8 = "";
+        if (environ) |env| {
+            no_proxy = env.get("NO_PROXY") orelse "";
+            if (no_proxy.len == 0) no_proxy = env.get("no_proxy") orelse "";
+        }
+        const port = url.port orelse @as(u16, if (url.scheme == .https) 443 else 80);
+        if (!goProxyAllowed(url.host, port, no_proxy)) return null;
+        return proxy;
     }
 
     /// A request to the API for `operation`: `<endpoint>/<suffix>`, with
@@ -1573,13 +1759,24 @@ pub const Client = struct {
     /// names it.
     pub fn failStatus(c: *Client, ex: *Exchange, what: []const u8) Error {
         const status = ex.status();
-        c.noteStatus(ex, what);
+        const said = c.noteStatusText(ex, what);
+        if (status == .forbidden) {
+            c.mutex.lockUncancelable(c.io);
+            defer c.mutex.unlock(c.io);
+            c.describeRefusal(.forbidden, 403, ex.url, said, null);
+        }
         return if (status == .unauthorized or status == .forbidden) error.AuthenticationFailed else error.HttpStatus;
     }
 
     /// Keep an answer's status and the server's reason as the client's
     /// message.
     pub fn noteStatus(c: *Client, ex: *Exchange, what: []const u8) void {
+        _ = c.noteStatusText(ex, what);
+    }
+
+    /// `noteStatus`, returning the server's reason, in the exchange's
+    /// arena.
+    fn noteStatusText(c: *Client, ex: *Exchange, what: []const u8) []const u8 {
         const status = ex.status();
         const body = ex.readAll(64 * 1024) catch "";
         const Reason = struct { message: ?[]const u8 = null };
@@ -1591,6 +1788,7 @@ pub const Client = struct {
             if (reason.message != null) ": " else "",
             reason.message orelse "",
         }) catch what);
+        return reason.message orelse "";
     }
 };
 
@@ -1598,6 +1796,9 @@ pub const Client = struct {
 pub const Exchange = struct {
     client: *Client,
     arena: std.heap.ArenaAllocator,
+    /// Where the request went, without a credential, in the exchange's
+    /// arena.
+    url: []const u8 = "",
     request: http.Client.Request = undefined,
     response: http.Client.Response = undefined,
     in_flight: bool = false,
@@ -1625,6 +1826,32 @@ pub const Exchange = struct {
     }
 
     const Offers = struct { basic: bool = false, other: bool = false };
+
+    /// The server's `LFS-Authenticate` values, then its `WWW-Authenticate`
+    /// ones, into `a`: what git-lfs hands the helpers as `wwwauth[]`.
+    fn challenges(ex: *const Exchange, a: Allocator) Allocator.Error![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for ([_][]const u8{ "lfs-authenticate", "www-authenticate" }) |name| {
+            var it = ex.response.head.iterateHeaders();
+            while (it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, name)) try out.append(a, try a.dupe(u8, h.value));
+            }
+        }
+        return out.items;
+    }
+
+    /// What the server said in refusing, into `a`: the API's `message`, or
+    /// a `text/plain` body, at most 4 KiB. Empty when it said nothing
+    /// readable.
+    fn refusalText(ex: *Exchange, a: Allocator) []const u8 {
+        const content_type = ex.header("content-type") orelse return "";
+        const body = ex.readAll(4096) catch return "";
+        if (std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return a.dupe(u8, body) catch "";
+        if (std.ascii.indexOfIgnoreCase(content_type, "json") == null) return "";
+        const Reason = struct { message: ?[]const u8 = null };
+        const reason = std.json.parseFromSliceLeaky(Reason, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return "";
+        return reason.message orelse "";
+    }
 
     fn authenticateOffers(ex: *const Exchange) Offers {
         var offers: Offers = .{};
@@ -1796,6 +2023,120 @@ pub fn downloadRef(gpa: Allocator, io: Io, repo: *repo_mod.Repository, settings:
     const key = try std.fmt.allocPrint(a, "branch.{s}.merge", .{head.name["refs/heads/".len..]});
     if (try settings.get(a, key)) |merge| return gpa.dupe(u8, merge);
     return gpa.dupe(u8, head.name);
+}
+
+fn expandHome(arena: Allocator, path: []const u8, environ: ?*const std.process.Environ.Map) Allocator.Error![]const u8 {
+    if (!std.mem.startsWith(u8, path, "~/")) return path;
+    const env = environ orelse return path;
+    const home = env.get("HOME") orelse return path;
+    return std.fs.path.join(arena, &.{ home, path[2..] });
+}
+
+/// Whether a request to `host` on `port` goes through a proxy by Go's
+/// rules, which git-lfs's client follows: never for `localhost` or a
+/// loopback address, and not for a host `no_proxy` names — `*`, a domain
+/// and the hosts under it, `.domain` or `*.domain` for the hosts under it
+/// only, an address, or a range of addresses, each with a port or without.
+pub fn goProxyAllowed(raw_host: []const u8, port: u16, no_proxy: []const u8) bool {
+    const host = std.mem.trim(u8, std.mem.trim(u8, raw_host, " "), "[]");
+    if (std.ascii.eqlIgnoreCase(host, "localhost")) return false;
+    const ip: ?Io.net.IpAddress = Io.net.IpAddress.parse(host, 0) catch null;
+    if (ip) |a| if (isLoopback(a)) return false;
+    var port_buf: [8]u8 = undefined;
+    const port_text = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch unreachable;
+    var it = std.mem.splitScalar(u8, no_proxy, ',');
+    while (it.next()) |raw| {
+        const entry = std.mem.trim(u8, raw, " \t\r\n");
+        if (entry.len == 0) continue;
+        if (std.mem.eql(u8, entry, "*")) return false;
+        if (std.mem.indexOfScalar(u8, entry, '/')) |slash| {
+            // A range: `10.0.0.0/8`, `fd00::/8`.
+            const base = Io.net.IpAddress.parse(entry[0..slash], 0) catch continue;
+            const bits = std.fmt.parseInt(u8, entry[slash + 1 ..], 10) catch continue;
+            if (ip) |a| if (inRange(a, base, bits)) return false;
+            continue;
+        }
+        // `host:port` or `[v6]:port`, else the entry is all host.
+        var entry_host = entry;
+        var entry_port: []const u8 = "";
+        if (splitHostPort(entry)) |hp| {
+            entry_host = hp.host;
+            entry_port = hp.port;
+            if (entry_host.len == 0) continue;
+        }
+        if (Io.net.IpAddress.parse(entry_host, 0)) |entry_ip| {
+            if (ip) |a| if (sameAddress(a, entry_ip) and (entry_port.len == 0 or std.mem.eql(u8, entry_port, port_text))) return false;
+            continue;
+        } else |_| {}
+        if (ip != null) continue;
+        var domain = entry_host;
+        if (std.mem.startsWith(u8, domain, "*.")) domain = domain[1..];
+        const match_host = domain[0] != '.';
+        const suffix_ok = if (match_host)
+            host.len > domain.len and std.ascii.endsWithIgnoreCase(host, domain) and host[host.len - domain.len - 1] == '.'
+        else
+            std.ascii.endsWithIgnoreCase(host, domain);
+        const exact = match_host and std.ascii.eqlIgnoreCase(host, domain);
+        if ((suffix_ok or exact) and (entry_port.len == 0 or std.mem.eql(u8, entry_port, port_text))) return false;
+    }
+    return true;
+}
+
+fn splitHostPort(text: []const u8) ?struct { host: []const u8, port: []const u8 } {
+    if (text.len != 0 and text[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, text, ']') orelse return null;
+        if (close + 1 >= text.len or text[close + 1] != ':') return null;
+        return .{ .host = text[1..close], .port = text[close + 2 ..] };
+    }
+    const colon = std.mem.indexOfScalar(u8, text, ':') orelse return null;
+    // More than one colon is an IPv6 address with no port.
+    if (std.mem.indexOfScalarPos(u8, text, colon + 1, ':') != null) return null;
+    return .{ .host = text[0..colon], .port = text[colon + 1 ..] };
+}
+
+fn addressBytes(a: Io.net.IpAddress, buf: *[16]u8) []const u8 {
+    switch (a) {
+        .ip4 => |v4| {
+            buf[0..4].* = v4.bytes;
+            return buf[0..4];
+        },
+        .ip6 => |v6| {
+            // An IPv4 address written as IPv6 is that IPv4 address.
+            if (std.mem.eql(u8, v6.bytes[0..12], &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff })) {
+                buf[0..4].* = v6.bytes[12..16].*;
+                return buf[0..4];
+            }
+            buf.* = v6.bytes;
+            return buf[0..16];
+        },
+    }
+}
+
+fn isLoopback(a: Io.net.IpAddress) bool {
+    var buf: [16]u8 = undefined;
+    const bytes = addressBytes(a, &buf);
+    if (bytes.len == 4) return bytes[0] == 127;
+    return std.mem.eql(u8, bytes, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+}
+
+fn sameAddress(a: Io.net.IpAddress, b: Io.net.IpAddress) bool {
+    var abuf: [16]u8 = undefined;
+    var bbuf: [16]u8 = undefined;
+    return std.mem.eql(u8, addressBytes(a, &abuf), addressBytes(b, &bbuf));
+}
+
+fn inRange(a: Io.net.IpAddress, base: Io.net.IpAddress, bits: u8) bool {
+    var abuf: [16]u8 = undefined;
+    var bbuf: [16]u8 = undefined;
+    const x = addressBytes(a, &abuf);
+    const y = addressBytes(base, &bbuf);
+    if (x.len != y.len or bits > x.len * 8) return false;
+    var i: usize = 0;
+    while (i < bits) : (i += 1) {
+        const mask = @as(u8, 0x80) >> @intCast(i % 8);
+        if ((x[i / 8] & mask) != (y[i / 8] & mask)) return false;
+    }
+    return true;
 }
 
 /// A boolean as git-lfs reads one: unset or empty is `fallback`, and a
@@ -2074,4 +2415,37 @@ test "FETCH_HEAD's first line names the URL as git-lfs's pattern reads it" {
     try testing.expect(fetchHeadUrl(oid ++ "\t\tbranch 'main' of https://x/a b\n") == null);
     try testing.expect(fetchHeadUrl("xyz\t\tbranch 'main' of https://x\n") == null);
     try testing.expect(fetchHeadUrl("") == null);
+}
+
+test "NO_PROXY and loopback addresses are read as Go's proxy rules read them" {
+    const Case = struct { host: []const u8, port: u16 = 443, list: []const u8, proxied: bool };
+    for ([_]Case{
+        .{ .host = "localhost", .list = "", .proxied = false },
+        .{ .host = "127.0.0.1", .list = "", .proxied = false },
+        .{ .host = "127.8.9.10", .list = "", .proxied = false },
+        .{ .host = "::1", .list = "", .proxied = false },
+        .{ .host = "[::1]", .list = "", .proxied = false },
+        .{ .host = "git.example.com", .list = "", .proxied = true },
+        .{ .host = "git.example.com", .list = "*", .proxied = false },
+        .{ .host = "git.example.com", .list = "example.com", .proxied = false },
+        .{ .host = "example.com", .list = "example.com", .proxied = false },
+        .{ .host = "badexample.com", .list = "example.com", .proxied = true },
+        .{ .host = "example.com", .list = ".example.com", .proxied = true },
+        .{ .host = "git.example.com", .list = ".example.com", .proxied = false },
+        .{ .host = "example.com", .list = "*.example.com", .proxied = true },
+        .{ .host = "git.EXAMPLE.com", .list = " other.org , Example.com ", .proxied = false },
+        .{ .host = "git.example.com", .port = 443, .list = "example.com:8443", .proxied = true },
+        .{ .host = "git.example.com", .port = 8443, .list = "example.com:8443", .proxied = false },
+        .{ .host = "10.1.2.3", .list = "10.0.0.0/8", .proxied = false },
+        .{ .host = "11.1.2.3", .list = "10.0.0.0/8", .proxied = true },
+        .{ .host = "192.168.1.5", .list = "192.168.1.5", .proxied = false },
+        .{ .host = "192.168.1.5", .port = 80, .list = "192.168.1.5:8080", .proxied = true },
+        .{ .host = "fd00::1", .list = "fd00::/8", .proxied = false },
+        .{ .host = "10.1.2.3", .list = "10.1.2.3.example", .proxied = true },
+    }) |case| {
+        testing.expectEqual(case.proxied, goProxyAllowed(case.host, case.port, case.list)) catch |err| {
+            std.debug.print("{s}:{d} with NO_PROXY={s}\n", .{ case.host, case.port, case.list });
+            return err;
+        };
+    }
 }

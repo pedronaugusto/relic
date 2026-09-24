@@ -371,7 +371,15 @@ pub const Server = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
         const method = request.head.method;
-        const target = try arena.dupe(u8, request.head.target);
+        // A request a client sent through this server as its proxy names
+        // the whole URL; the host it was for is noted in the log.
+        var target = try arena.dupe(u8, request.head.target);
+        var proxied_for: ?[]const u8 = null;
+        if (std.mem.startsWith(u8, target, "http://")) {
+            const slash = std.mem.indexOfScalarPos(u8, target, "http://".len, '/') orelse target.len;
+            proxied_for = target["http://".len..slash];
+            target = target[slash..];
+        }
         var authorization: ?[]const u8 = null;
         var content_type: ?[]const u8 = null;
         var git_protocol: ?[]const u8 = null;
@@ -412,6 +420,9 @@ pub const Server = struct {
         const user = s.authenticate(authorization);
         if (range) |r| {
             const logged = try std.fmt.allocPrint(arena, "{s} range={s}", .{ user orelse "?", r });
+            try s.logRequest(method, route, logged);
+        } else if (proxied_for) |host| {
+            const logged = try std.fmt.allocPrint(arena, "{s} proxied-for={s}", .{ user orelse "?", host });
             try s.logRequest(method, route, logged);
         } else try s.logRequest(method, route, user orelse "?");
         if (user == null) {
@@ -876,6 +887,24 @@ pub fn credentialHelper(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, u
         \\while IFS= read -r line; do
         \\  case "$line" in protocol=*|host=*|username=*|password=*|path=*) echo "$line" >> "$log";; esac
         \\done
+        \\if [ "$1" = get ]; then echo username={s}; echo password={s}; fi
+        \\
+    , .{ base, name, user, password });
+    defer gpa.free(text);
+    return script(gpa, io, dir, name, text);
+}
+
+/// A stand-in credential helper like `credentialHelper`, which notes every
+/// line it is given, sorted within each call, since git-lfs writes them in
+/// no fixed order.
+pub fn credentialHelperVerbatim(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, user: []const u8, password: []const u8) ![]u8 {
+    const base = try testremote.absolutePath(gpa, io, dir);
+    defer gpa.free(base);
+    const text = try std.fmt.allocPrint(gpa,
+        \\#!/bin/sh
+        \\log="{s}/{s}.log"
+        \\echo "== $1" >> "$log"
+        \\sed '/^$/q' | grep -v '^$' | LC_ALL=C sort >> "$log"
         \\if [ "$1" = get ]; then echo username={s}; echo password={s}; fi
         \\
     , .{ base, name, user, password });

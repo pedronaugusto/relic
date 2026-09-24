@@ -352,6 +352,7 @@ fn pushTo(
             .programs = options.programs,
             .prompt = options.prompt,
             .progress = options.progress,
+            .auth_failure = options.auth_failure,
         }, options.lfs);
 
         var report = try session.push(gpa, io, &repo.odb, .{

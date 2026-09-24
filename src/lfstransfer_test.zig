@@ -1323,3 +1323,140 @@ test "an upload whose action asks for chunks is sent in chunks, as git-lfs sends
     try testing.expect(std.mem.indexOf(u8, logs[1], "transfer-encoding=chunked\n") != null);
     try testing.expect(std.mem.indexOf(u8, logs[1], "content-length=-\n") != null);
 }
+
+test "a proxy is chosen by git-lfs's rules, HTTP_PROXY included, and never for a loopback address" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const content = "fetched through a proxy\n";
+    try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    // The API is on a host that only the proxy — the test server — can
+    // reach; the actions it hands out are on 127.0.0.1, which goes direct.
+    var proxy_buf: [64]u8 = undefined;
+    const proxy = try std.fmt.bufPrint(&proxy_buf, "http://127.0.0.1:{d}", .{fx.server.port});
+    var logs: [2][]u8 = .{ &.{}, &.{} };
+    defer for (logs) |l| gpa.free(l);
+    for ([_][]const u8{ "by-git", "by-relic" }, 0..) |name, i| {
+        var d = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
+        defer d.close(io);
+        try emptyStore(fx, d);
+        try fx.gitIn(d, &.{ "config", "lfs.url", "http://lfs.example.invalid/repo.git/info/lfs" });
+        fx.server.clearLog();
+        if (i == 0) {
+            try fx.gitWith(d, &.{.{ "HTTP_PROXY", proxy }}, &.{ "lfs", "fetch" });
+        } else {
+            var env = try fx.env.clone(gpa);
+            defer env.deinit();
+            try env.put("HTTP_PROXY", proxy);
+            var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+            defer repo.deinit(io);
+            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &env } });
+            defer server.close();
+            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer fetched.deinit();
+            try expectNoFailures(&fetched);
+        }
+        logs[i] = try fx.server.requests(gpa);
+    }
+    try testing.expectEqualStrings(logs[0], logs[1]);
+    try testing.expect(std.mem.indexOf(u8, logs[1], "POST /objects/batch anonymous proxied-for=lfs.example.invalid\n") != null);
+    try testing.expect(std.mem.indexOf(u8, logs[1], "proxied-for=127.0.0.1") == null);
+}
+
+test "an https URL relic's client cannot reach as asked is refused by name before anything is sent" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    var d = try committed(fx, "r", nobody, &.{.{ "a.bin", "never sent\n" }});
+    defer d.close(io);
+    try emptyStore(fx, d);
+    try fx.gitIn(d, &.{ "config", "lfs.url", "https://lfs.example.invalid/repo.git/info/lfs" });
+    const Case = struct { config: ?[2][]const u8 = null, env: ?[2][]const u8 = null, want: anyerror };
+    for ([_]Case{
+        .{ .config = .{ "http.https://lfs.example.invalid.sslVerify", "false" }, .want = error.SslVerifyUnsupported },
+        .{ .env = .{ "GIT_SSL_NO_VERIFY", "1" }, .want = error.SslVerifyUnsupported },
+        .{ .config = .{ "http.sslCert", "/nowhere/cert.pem" }, .want = error.SslClientCertificateUnsupported },
+        .{ .config = .{ "http.sslCAInfo", "/nowhere/ca.pem" }, .want = error.SslCertificateUnreadable },
+        .{ .env = .{ "HTTPS_PROXY", "http://127.0.0.1:9" }, .want = error.HttpsProxyUnsupported },
+        .{ .config = .{ "http.proxy", "socks5://127.0.0.1:9" }, .want = error.HttpsProxyUnsupported },
+    }) |case| {
+        if (case.config) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
+        defer if (case.config) |kv| fx.gitIn(d, &.{ "config", "--unset", kv[0] }) catch {};
+        var env = try fx.env.clone(gpa);
+        defer env.deinit();
+        if (case.env) |kv| try env.put(kv[0], kv[1]);
+        var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+        defer repo.deinit(io);
+        const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &env } });
+        defer server.close();
+        try testing.expectError(case.want, lfstransfer.fetch(server, &repo, .{}));
+    }
+    // A plain http URL through a proxy that is not an HTTP one.
+    try fx.gitIn(d, &.{ "config", "lfs.url", "http://lfs.example.invalid/repo.git/info/lfs" });
+    try fx.gitIn(d, &.{ "config", "http.proxy", "socks5://127.0.0.1:9" });
+    var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+    defer repo.deinit(io);
+    const server = try openServer(fx, &repo);
+    defer server.close();
+    try testing.expectError(error.InvalidProxy, lfstransfer.fetch(server, &repo, .{}));
+}
+
+test "a refused credential is described as git-lfs's helpers hear it, with the server's challenge" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{ .users = &.{.{ .name = "ada", .password = "secret" }} });
+    defer fx.deinit();
+    const content = "behind a password\n";
+    try fx.server.putObject(&testlfs.sha256Hex(content), content);
+    var logs: [2][]u8 = .{ &.{}, &.{} };
+    defer for (logs) |l| gpa.free(l);
+    for ([_][]const u8{ "git-helper", "relic-helper" }, 0..) |helper_name, i| {
+        const helper = try testlfs.credentialHelperVerbatim(gpa, io, fx.tools, helper_name, "ada", "wrong");
+        defer gpa.free(helper);
+        var d = try committed(fx, helper_name, helper, &.{.{ "a.bin", content }});
+        defer d.close(io);
+        try emptyStore(fx, d);
+        if (i == 0) {
+            try testing.expectError(error.GitFailed, testlfs.git(gpa, io, d, &fx.env, &.{ "lfs", "fetch" }, false));
+        } else {
+            var failure: @import("auth.zig").Failure = .{};
+            defer failure.deinit();
+            var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+            defer repo.deinit(io);
+            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .auth_failure = &failure });
+            defer server.close();
+            var fetched = try lfstransfer.fetch(server, &repo, .{});
+            defer fetched.deinit();
+            try testing.expectEqual(@as(usize, 1), fetched.failures());
+            try testing.expectEqual(.refused, failure.reason);
+            try testing.expectEqual(@as(?u16, 401), failure.status);
+            try testing.expectEqualStrings("ada", failure.username.?);
+            try testing.expectEqualStrings("Credentials needed", failure.server_message);
+            try testing.expectEqual(@as(usize, 1), failure.challenges.len);
+            try testing.expectEqualStrings("Basic realm=\"relic-lfs\"", failure.challenges[0]);
+            try testing.expect(failure.helpers.len != 0);
+            try testing.expectEqual(.credential, failure.helpers[0].answer);
+        }
+        var log_name: [64]u8 = undefined;
+        const log = try fx.tools.readFileAlloc(io, try std.fmt.bufPrint(&log_name, "{s}.log", .{helper_name}), gpa, .unlimited);
+        defer gpa.free(log);
+        // What each `get` was told: the lines of every `get`, in order.
+        var gets: std.ArrayList(u8) = .empty;
+        errdefer gets.deinit(gpa);
+        var blocks = std.mem.splitSequence(u8, log, "== ");
+        while (blocks.next()) |block| {
+            if (!std.mem.startsWith(u8, block, "get\n")) continue;
+            try gets.appendSlice(gpa, "== ");
+            try gets.appendSlice(gpa, block);
+        }
+        logs[i] = try gets.toOwnedSlice(gpa);
+    }
+    try testing.expectEqualStrings(logs[0], logs[1]);
+    try testing.expect(std.mem.indexOf(u8, logs[1], "wwwauth[]=Basic realm=\"relic-lfs\"\n") != null);
+}

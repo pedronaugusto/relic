@@ -116,6 +116,9 @@ pub const Reach = struct {
     programs: ?program.Programs = null,
     prompt: ?credential.Prompt = null,
     progress: ?progress_mod.Progress = null,
+    /// Filled in when the LFS server refuses for want of a credential: see
+    /// `auth.Failure`.
+    auth_failure: ?*@import("auth.zig").Failure = null,
 };
 
 /// git-lfs's pre-push hook for one push URL: check locks for `remote_refs`
@@ -141,7 +144,7 @@ pub fn beforePush(
     if (options.mode == .auto and pointers.len == 0 and !usesLfs(io, repo)) return;
     report.ran = true;
 
-    const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .programs = reach.programs, .prompt = reach.prompt });
+    const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .programs = reach.programs, .prompt = reach.prompt, .auth_failure = reach.auth_failure });
     defer server.close();
     defer if (options.remember) server.client.remember(io, repo) catch {};
 
