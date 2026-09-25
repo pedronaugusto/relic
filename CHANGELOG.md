@@ -4,6 +4,166 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+relic grows from a local repository library into all of git a program needs:
+fetch, clone and push over HTTP(S), ssh and local paths, with the person's
+own credentials; git's merge machinery; hooks, filters, signing, submodules,
+stash; LFS with locks; sparse index and reftable. Every behaviour is checked
+against the git and git-lfs on the machine running the suite.
+
+### Added
+
+**Running programs.**
+- `program`: the one place the library starts a process, and only through a
+  `Programs` value the caller hands in. Without one, a setting that would run
+  a program is a named refusal, as before. Commands read from configuration
+  run as git runs them: through `sh -c` when they hold anything a shell reads,
+  directly otherwise.
+- `pktline`: git's packet lines, read and written.
+
+**Network.**
+- `transport`, `fetch`, `clone`, `push`: fetch in protocol v2 and v0 and push
+  as receive-pack speaks it, over smart HTTP, over ssh through the person's
+  own `ssh` (`GIT_SSH_COMMAND`, `core.sshCommand`, their `~/.ssh/config`), and
+  from `file://` and local paths. Remote-tracking refs,
+  `FETCH_HEAD`, refspecs, reflogs, atomic pushes and fetches, thin packs
+  completed on receipt, `url.<base>.insteadOf` and `pushInsteadOf`.
+- `uploadpack`: relic serves fetches itself, in protocol v2 and v0, with
+  shallow, deepen and every filter git has. `file://` fetches go through it in
+  process.
+- `shallow`: shallow clone and fetch by depth, date and excluded ref; deepen,
+  unshallow and `update_shallow`; a push from a shallow repository sends its
+  boundary. A shallow repository is walked as git walks it.
+- `partial`, `filterspec`, `objectfilter`: partial clone with `blob:none`,
+  `blob:limit`, `tree:<depth>`, `sparse:oid=`, `object:type=` and `combine:`,
+  choosing exactly the objects git's filters choose. A promised object is
+  fetched when it is read, asking every promisor remote in git's order. A
+  server that cannot filter is asked for everything, with git's warning.
+- `submoduletransport`: submodules cloned and fetched through relic itself.
+- `httpclient`: relic's own HTTP/1.1 client. https through a proxy's CONNECT
+  tunnel, `http.sslVerify=false`, kept connections, chunked and gzip bodies,
+  and connect, handshake and activity timeouts.
+- `tls`: relic's own TLS client, the standard library's with client
+  authentication added, importing nothing but std. Every https connection
+  goes through it.
+- Client certificates for git and LFS: `http.sslCert`, `sslKey`,
+  `sslCertType`, `sslKeyType` and `sslCertPasswordProtected`, and the proxy
+  forms; RSA, ECDSA P-256/P-384 and Ed25519 keys in PEM or DER, PKCS#8,
+  PKCS#1 or SEC1, plain or encrypted, in TLS 1.3 and 1.2. A passphrase comes
+  from the credential helpers as git asks for one.
+- `httpsettings`, `httpauth`: git's `http.*` for a URL, `http.<url>.*`
+  sections, the `GIT_SSL_*` variables, `http.sslCAInfo` and `sslCAPath`,
+  proxies as curl reads them, and proxy authentication as curl does it for
+  git (anyauth, Basic, Digest with MD5 and SHA-256).
+- `warning`: what git would print as a warning, returned as a value.
+- `revindex`: `.rev` files written while `pack.writeReverseIndex` is on.
+- `inflate`: relic's own zlib decoder for pack entries, which checks the
+  Adler-32. Received packs are indexed as they arrive, their deltas resolved
+  on several threads through the caller's `std.Io` (`pack.threads`, or git's
+  rule when it is unset).
+
+**Credentials.**
+- `credential`: the helper protocol as git 2.55 speaks it, including bearer
+  tokens, `wwwauth[]`, `state[]`, `password_expiry_utc` against the caller's
+  time, and scheme-less `credential.<host>` sections. Nothing is asked of the
+  person unless the caller passes a `credential.Prompt`.
+- `auth`: why a remote refused, as values: the URL, the transport, each
+  helper asked and what it answered, whether a prompt was available, and what
+  the server or ssh said. ssh's "Permission denied" and host-key failures are
+  their own errors.
+- `userconfig`: the configuration the person's git reads — the system file
+  their git was built with, the XDG file and `~/.gitconfig`,
+  `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS`. A clone takes it for its
+  fetch and for its checkout's filters.
+- `netrc`: `~/.netrc` on the LFS path, as git-lfs reads it.
+
+**History.**
+- `ort`: merge, cherry-pick, revert and rebase follow git's merge-ort. Renames,
+  directory renames, directory/file and file/symlink conflicts, submodule
+  fast-forwards, several merge bases merged into virtual ones, git's conflict
+  messages, and the inner merges' messages at verbosity 5. Where git's
+  merge-ort stops on its own assertion, relic stops with
+  `DirectoryRenameLostStage`.
+- `strategy`, `subtreeshift`: every `-X` word git's merge takes — ours,
+  theirs, patience, histogram, `diff-algorithm=`, the whitespace options,
+  renames and their threshold, renormalize, `subtree` and `subtree=<path>` —
+  kept between the steps of a stopped sequence as git keeps them.
+- `rename`, `similarity`: rename and copy detection in diffs with git's score
+  and matching order (`-M`, `-C`, `--find-copies-harder`).
+- `rerere`: resolutions recorded and replayed in git's `rr-cache` and
+  `MERGE_RR`, with `status`, `remaining`, `diff`, `forget` and `gc`. The index
+  keeps git's resolve-undo record.
+- `sequencer`, `rebase`, `merging`, `threeway`: the commands on top, with
+  their state files in git's format, so git and relic continue each other's
+  stops.
+- `revparse`: git's revision grammar.
+- Merged files are written through ident, smudge filters and LFS, as checkout
+  writes them.
+
+**Hooks, signing, stash.**
+- `hooks`, `commithooks`: git's hooks with git's arguments, environment and
+  standard input — around commit, merge, cherry-pick, revert and rebase, and
+  pre-push, post-checkout and reference-transaction where git runs them.
+- `signing`: commits and tags signed and verified with OpenPGP, SSH or X.509
+  as `gpg.format` says, through the person's `gpg` or `ssh-keygen`.
+- `stash`: push, apply, pop, list, drop and show in git's own shape.
+
+**Filters and LFS.**
+- `filter`, `convert`: clean and smudge filters by name, the long-running
+  process protocol, and `ident`.
+- `lfs`: LFS pointers and the object store, cleaned on add and smudged on
+  checkout without git-lfs.
+- `lfsapi`, `lfstransfer`, `lfsssh`: the batch API with the basic adapter,
+  over https or git-lfs's pure-ssh protocol, finding the server where git-lfs
+  finds it and authenticating as it does. Downloads resume with a Range and
+  are checked by SHA-256; gzip and zstd bodies; chunked uploads; `fetch` with
+  `lfs.fetchrecent*`; objects taken from a `--reference` or `--shared` store
+  first.
+- `lfslocks`, `lfspush`: lock, list, verify and unlock, with git-lfs's cache
+  on disk so either tool shows the other's; lockable files read-only unless
+  held; a push uploads its LFS objects and checks other people's locks
+  first.
+- `lfshooks`: when git-lfs's own hooks are in a repository and git-lfs is not
+  installed, relic does their work.
+
+**Submodules, sparse, reftable.**
+- `submodule`, `gitmodules`: `.gitmodules`, gitlinks, recursive status,
+  init, update, sync and absorbed git directories.
+- `sparseindex`, `sparsecheckout`: cone-mode sparse checkout and the sparse
+  index, read and written.
+- `reftable`, `reftablestack`: the reftable ref backend, read and written.
+- `config`: `includeIf` decided by the repository's own git directory and
+  branch; a variable before any section, and a name's case, read as git reads
+  them; an XDG slot beside the global file, and command-line pairs.
+
+### Changed
+
+- Breaking: `worktree.CheckoutOptions.force` defaults to false, so a checkout
+  keeps local changes and names the paths it would lose. Callers that mean
+  `read-tree --reset` pass `force = true`.
+- Breaking: `merge.Conflict.Kind` names stage shapes and `Conflict.merged` is
+  gone; `favor` gives way to `strategy_options`; `revwalk.mergeBasesWith`
+  takes options; `Walk.Commit.parents` is borrowed from the walk;
+  `worktree.writeEntry` takes a `convert.Session`; `textdiff.similarity` is
+  removed.
+- Breaking: `push.Options` gains `lfs`, and a push from a repository that uses
+  LFS uploads its objects and may refuse a change to a file someone else has
+  locked.
+- Breaking: `Repository.loadFilters` returns `LoadFiltersError`.
+- History walks, merge bases and ancestry checks use git's ordering and
+  commit-graph generation numbers, and look only at the commits between the
+  two sides. They are no longer quadratic.
+- A read-only file is replaced and removed on Windows as it is elsewhere.
+- A merge keeps a given message byte for byte, and `MERGE_MSG` ends with a
+  newline as `git merge -m` writes it.
+
+### Fixed
+
+- `add -A` over a conflicted index left the conflict stages beside the new
+  entry, which git refuses to read.
+- `Index.removeMany` read a path it had already freed.
+
 ## [0.2.0] - 2026-09-20
 
 Pack writing at git's cost for a smaller pack, with an opt-in thread count

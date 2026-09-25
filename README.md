@@ -2,9 +2,11 @@
 
 [![CI](https://github.com/pedronaugusto/relic/actions/workflows/ci.yml/badge.svg)](https://github.com/pedronaugusto/relic/actions/workflows/ci.yml)
 
-relic reads and writes a git repository from Zig: objects, packs, refs, the
-index, the working tree and diffs. What it lays down is what git reads back,
-so a program that needs a repository can have one in process.
+relic is git as a Zig library: objects, packs, refs, the index, the working
+tree and diffs; fetch, clone and push over HTTP(S), ssh and local paths;
+merge, cherry-pick, revert and rebase; hooks, filters, signing, submodules,
+stash; LFS with locks. What it lays down is what git reads back, so a program
+that needs a repository can have one in process.
 
 ## Usage
 
@@ -110,16 +112,20 @@ const relic_dep = b.dependency("relic", .{ .target = target, .optimize = optimiz
 exe.root_module.addImport("relic", relic_dep.module("relic"));
 ```
 
-One module and no dependencies: zlib comes from `std.compress.flate`, SHA-256
-from `std.crypto`, and SHA-1 is in the package, so there is nothing to link
-and no build option to forward. Every function that allocates takes the
-allocator as its first argument and every function that touches the disk takes
-a `std.Io`; the package starts no threads by default, spawns no process, and
-never reads a clock — the caller passes the time and the identity.
-`PackOptions.threads` above one submits delta searches to the caller's
-concurrency executor. One word outlives a call without a caller holding it,
-and it is the answer to which SHA-1
-instructions this processor has, asked once.
+One module and no dependencies: SHA-256 and the TLS primitives come from
+`std.crypto`, SHA-1, inflate and the TLS client are in the package, so there
+is nothing to link and no build option to forward. Every function that
+allocates takes the allocator as its first argument and every function that
+touches the disk or the network takes a `std.Io`. Concurrent work — the delta
+search when `PackOptions.threads` asks, resolving a received pack's deltas —
+goes to the caller's executor, never to threads of the package's own. A
+process starts only through a `program.Programs` the caller hands in; without
+one, a hook is not run and a setting that would run a program is a named
+refusal. The only clock read is the HTTP client's: the certificates' dates,
+and its timeouts. Everything else that needs the time takes it from the
+caller, with the identity. One word outlives a call without a caller holding
+it, and it is the answer to which SHA-1 instructions this processor has,
+asked once.
 
 ## The API
 
@@ -143,10 +149,32 @@ instructions this processor has, asked once.
 | `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
 | `worktrees` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`. |
 | `sparse` | `Patterns` for `info/sparse-checkout`. |
-| `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`, rename and copy detection. |
-| `textdiff` | `diffLines`, `hunks`, `stat`, `similarity`, `Algorithm` (`myers`, `histogram`). |
-| `revwalk` | `Walk`, `mergeBase`, `mergeBases`, `isAncestor`. |
-| `merge` | `blobs` for xdiff-style content merging; `trees` for a stage-only tree merge and `treesWithOptions` to resolve regular text files. |
+| `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`. |
+| `rename`, `similarity` | Rename and copy detection with git's score and diffcore's order: `-M`, `-C`, `--find-copies-harder`. |
+| `textdiff` | `diffLines`, `hunks`, `stat`, `sameLine`, `Algorithm` (`myers`, `histogram`, `patience`), and git's `--minimal`. |
+| `revwalk` | `Walk`, `mergeBase`, `mergeBases`, `mergeBasesWith`, `isAncestor`, `isAncestorWith`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary. |
+| `revparse` | git's revision grammar. |
+| `merge`, `blobmerge` | Content merging as xdiff does it, and the stage-only tree merge. |
+| `ort` | `mergeTrees`, `mergeCommits` — git's merge-ort: renames, directory renames, directory/file and type conflicts, submodules, virtual merge bases, git's messages. |
+| `strategy`, `subtreeshift` | Every `-X` word git's merge takes, and git's match-trees for `subtree`. |
+| `merging`, `sequencer`, `rebase`, `threeway` | Merge, cherry-pick, revert and rebase, with their state files in git's format. |
+| `rerere` | Recorded resolutions in git's `rr-cache`: `run`, `status`, `remaining`, `diff`, `forget`, `gc`. |
+| `stash` | `push`, `apply`, `pop`, `list`, `show`, `drop`, `clear`. |
+| `hooks`, `commithooks` | git's hooks with git's arguments, environment and input. |
+| `signing` | Sign and verify commits and tags: OpenPGP, SSH, X.509. |
+| `program` | `Programs`, `Invocation`, `run` — the one place a process starts. |
+| `filter`, `convert` | Clean and smudge filters, the long-running process protocol, `ident`, line endings. |
+| `submodule`, `gitmodules`, `submoduletransport` | `.gitmodules`, status, init, update, sync, absorbed git directories, and fetching them. |
+| `sparsecheckout`, `sparseindex` | Cone-mode sparse checkout and the sparse index. |
+| `reftable`, `reftablestack` | The reftable ref backend, read and written. |
+| `transport`, `fetch`, `clone`, `push` | The commands. Protocol v2 and v0, refspecs, `FETCH_HEAD`, atomic updates, `insteadOf`. |
+| `smarthttp`, `ssh`, `local`, `httpclient`, `tls` | The transports: HTTP(S) through relic's own HTTP/1.1 and TLS clients, the person's `ssh`, and `file://` and paths. |
+| `uploadpack` | `Server` — serving fetches, with shallow and every filter. |
+| `indexpack`, `inflate`, `revindex` | Receiving a pack: indexed as it arrives, deltas resolved on the caller's executor, `.rev` files. |
+| `shallow`, `partial`, `filterspec`, `objectfilter` | Shallow history; partial clone, its filters and the lazy fetch. |
+| `credential`, `auth`, `userconfig`, `httpsettings`, `httpauth`, `netrc` | The person's own setup: credential helpers, why a remote refused, their configuration, git's `http.*`, proxy authentication. |
+| `lfs`, `lfsapi`, `lfstransfer`, `lfsssh`, `lfslocks`, `lfspush`, `lfshooks` | LFS without git-lfs: pointers and the store, the batch API over https or ssh, locks, pre-push, git-lfs's hooks. |
+| `warning` | What git would print as a warning, as a value. |
 | `commitgraph`, `midx` | The two accelerators, read. A `revwalk.Walk` takes parents and times from a commit-graph when it is given one and reads the object when it is not; a lookup asks a multi-pack index which pack to open before it asks the packs one by one. Neither changes an answer. |
 | `safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
 | `dirscan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
@@ -182,10 +210,9 @@ Two different rules call a file binary and both are here: a NUL in the first
 8000 bytes decides whether a *diff* is printed, and a lone carriage return, a
 NUL, or more than one non-printable byte per 128 printable ones decides
 whether a file is *normalised on check-in*. The second is the one conversion
-asks. Two settings would make this store a blob git would not —
-`working-tree-encoding`, and a `filter` whose `filter.<name>.required` is true
-— and both are a named refusal carrying the value, because running a filter
-means running a program.
+asks. A `filter` runs the program its configuration names, through the
+caller's `Programs`; without them, a required filter is a named refusal
+carrying its name. `working-tree-encoding` is refused the same way.
 
 **Every replacement goes through the file git would lock.**
 `O_CREAT|O_EXCL` on `<file>.lock`, write, make durable, rename. No advisory
@@ -232,6 +259,40 @@ device names with or without an extension; a component ending in a dot or a
 space; a backslash inside a name; an absolute path or a drive letter. A ref
 name ending in `.lock` is refused too, since that is the name of the file that
 blocks every update to the ref without it.
+
+**A remote that works from the person's terminal works from here.** relic
+reads the configuration their git reads — the system file their git was built
+with, the XDG file, `~/.gitconfig`, the `GIT_CONFIG_*` variables — runs their
+`ssh` with their `~/.ssh/config`, and asks their credential helpers, the ones
+`gh`, the keychain or a credential manager installed, byte for byte as git
+asks them. It stores no secret of its own and asks the person nothing unless
+the caller passes a prompt. When a remote refuses, the caller gets values
+rather than a sentence — which helpers were asked and what they said, what
+the server or ssh said — so it can tell the person what to fix.
+
+**TLS is relic's own.** The standard library's HTTP client cannot skip a
+certificate check, cannot present a client certificate, and its proxy tunnel
+carries the request in the clear. So `src/tls` is the standard library's TLS
+client with client authentication added, importing nothing but std, and
+`httpclient` is an HTTP/1.1 client over it. Every https connection goes
+through the two; a test fails if any other file names the standard library's
+HTTP or TLS client, and another checks that what crosses a proxy's tunnel is
+TLS.
+
+**A merge is git's merge-ort.** Renames, directory renames, directory/file and
+type conflicts, submodules and criss-cross histories resolve as git resolves
+them, with git's conflict messages, and a stopped merge, cherry-pick or rebase
+leaves git's state files, so either tool continues the other's. Thousands of
+random histories are merged by both and compared tree, stages and messages;
+where git's own merge-ort stops on an assertion, relic stops with a named
+error at the same place.
+
+**LFS needs no git-lfs.** Pointers are cleaned on add and smudged on checkout
+in process; the server is found where git-lfs looks for it and asked the way
+git-lfs asks it, over https or git-lfs's pure-ssh protocol; the last lock
+listing is kept where git-lfs keeps it, in its JSON, so either tool shows the
+other's locks offline. A repository carrying git-lfs's own hooks works on a
+machine without git-lfs.
 
 **The hash is the floor under a repository whose files have size.** Both
 architectures carry SHA-1 instructions, and this package uses them: aarch64's
@@ -411,24 +472,22 @@ refresh and re-hash the whole working tree.
 
 ## Scope
 
-- **No network.** Fetch, push and clone are a wire protocol and a different discipline.
-- **No pack bitmaps, no `.rev` and no multi-pack index written.** The multi-pack index is read, a bitmap is not read either, and a pack without any of them is a pack git reads.
-- **No hooks are run.** The caller has the path and may run one itself.
-- **No named clean or smudge filters.** A repository whose attributes require one is a named refusal.
-- **No reftable and no sparse index.** Both are detected and refused by name rather than misread.
+- **No pack bitmaps and no multi-pack index written.** The multi-pack index is read, a bitmap is not, and a pack without either is a pack git reads.
+- **No `working-tree-encoding`.** A character-set conversion; refused by name.
+- **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name.
+- **LFS without git-lfs's extras.** tus and custom transfer adapters are refused by name.
+- **No `@{date}`** in a revision; refused by name.
+- **No receive-pack server.** relic serves fetches; a push goes to git's server.
+- **No `git://`, dumb HTTP or remote helpers.** Refused by name.
+- **No `hasconfig:` includes.**
 
 ## Ahead
 
 Planned, in the order they are likely to come; none is promised for a date.
 
-- **An inflate of its own.** Reading is bounded by the standard library's
-  inflate today. An owned one, fuzzed against the standard one, is the way
-  past that ceiling, and it comes when a reader needs it.
-- **Fetch and push.** The wire protocol, over a transport the caller opens.
-- **Clean and smudge filters** by name, so a repository that keeps large
-  files through one is read and written rather than refused.
-- **Locks.** A lock on a path held in the repository, for the workflows
-  where two people must not edit one binary file at once.
+- **Object reads through relic's own inflate.** Received packs already use
+  it; checkout and object reads still inflate through the standard library.
+- **`-s subtree`** as a strategy name, beside the `-X subtree` forms.
 
 ## Platforms
 
@@ -480,7 +539,12 @@ once with offset deltas, once with reference deltas, and once under SHA-256;
 `core.autocrlf` with `* text=auto`; `status` against `status --porcelain`;
 `list` against `ls-files`; name-status, numstat and the unified patch against
 `diff-tree` and `diff`, with the `@@` header checked at four context widths;
-`worktree list` before and after an add, a lock, a prune and a remove; a pack
+`worktree list` before and after an add, a lock, a prune and a remove;
+clone, fetch and push against `git http-backend`, git's own ssh transport
+through a stand-in, and relic's upload-pack, with refs, reflogs,
+`.git/shallow` and `.promisor` files compared; merges, cherry-picks, rebases
+and rerere against the git that made the fixture, state files and reflogs
+included; LFS transfers and locks against git-lfs on a local server; a pack
 this wrote against `git verify-pack -v` and `git index-pack --verify`, with
 and without deltas and with either delta kind; the reachable object set
 against `git rev-list --objects --all`; a repository whose loose objects have
@@ -493,12 +557,14 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Nineteen fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Sixty-five fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
-between them they cover the loose object header, the tree, the commit and the
-tag, a delta, the pack index, the index file, `packed-refs`, the reflog, the
-config file, `.gitignore`, `.gitattributes`, the glob matcher, a path from a
-tree, the commit-graph, the multi-pack index and the EWAH bitmaps. Five check
+between them they cover every format relic reads: the object formats, packs
+and their indexes, the index file, refs, reftable and reflogs, config and
+attributes, the glob matcher, the accelerators, packet lines and the wire
+protocol's answers, credential helper answers, filter specs, LFS batch and
+lock answers, TLS handshake messages and private keys, and the merge state
+files. Five check
 more than that. The diff fuzzer applies the
 edit script it produced and checks that it reproduces the other side, which is
 the property that catches an off-by-one nothing else would. The
