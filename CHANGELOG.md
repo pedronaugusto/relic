@@ -46,6 +46,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the rule for bringing std's fixes across, and `ci/tls-fork.sh` takes the
   diff again.
 
+### Fixed
+
+- The signing tests' git read the machine's system configuration, which on
+  a Homebrew or Xcode git names the keychain as the credential helper. They
+  now run in the same isolated environment as the rest of the suite: no
+  system configuration, a scratch home, no agents, no prompt. The lock
+  helper the concurrency tests start is given that environment too, and the
+  gpg tests stop every daemon gpg started for their home rather than only the
+  agent.
+
 ### Added
 
 - A test that holds the TLS client to the standard library's: it fails when

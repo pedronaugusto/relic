@@ -595,6 +595,16 @@ against `git rev-list --objects --all`; a repository whose loose objects have
 all moved into a pack read back object for object; and `git fsck` silent about
 everything written.
 
+**The suite is a guest on the machine it runs on.** Every process it starts
+— git, git-lfs, gpg, gpgsm, ssh-keygen, OpenSSL, the suite's own helpers —
+runs with the system's git configuration off (`GIT_CONFIG_NOSYSTEM`), a
+scratch `HOME` holding the only global configuration it reads, a scratch
+`GNUPGHOME` where gpg is involved, no ssh or gpg agent of the person's, and no
+prompt. gpg's daemons for a scratch home are stopped with it. The tests that
+exercise the person's credential helpers point git at stand-ins, and check
+each one answers as a stand-in before anything is asked of it, so no test
+reaches a real keychain.
+
 Concurrency is tested rather than hoped for. A second process takes
 `index.lock` exactly as a running git does; the same test shows git refusing
 that lock, and this refusing it by name and leaving it alone. A stale lock is

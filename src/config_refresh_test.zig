@@ -150,8 +150,7 @@ fn gitWithHome(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, home: []const u8, ar
     const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
     defer gpa.free(path);
     try environ.put("PATH", path);
-    try environ.put("HOME", home);
-    try environ.put("GIT_CONFIG_NOSYSTEM", "1");
+    try testgit.isolate(&environ, home);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false" });

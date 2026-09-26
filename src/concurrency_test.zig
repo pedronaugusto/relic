@@ -31,10 +31,14 @@ const Holder = struct {
     released: bool = false,
 
     fn start(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, lock_path: []const u8) !Holder {
-        _ = gpa;
+        // The helper reads nothing of the environment, and is given none of
+        // the person's all the same: every process the suite starts is.
+        var env = try testgit.programEnviron(gpa);
+        defer env.deinit();
         var child = try std.process.spawn(io, .{
             .argv = &.{ lock_helper_path, lock_path },
             .cwd = .{ .dir = dir },
+            .environ_map = &env,
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .ignore,

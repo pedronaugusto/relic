@@ -2900,7 +2900,7 @@ fn signedHistory(format: @import("signing.zig").Format) !void {
     defer gpa.free(dir);
     if (!try makeSigningKey(&pair, io, dir, format)) return error.SkipZigTest;
     defer if (format == .openpgp) {
-        const stopped = std.process.run(gpa, io, .{ .argv = &.{ "gpgconf", "--kill", "gpg-agent" }, .environ_map = &pair.env }) catch null;
+        const stopped = std.process.run(gpa, io, .{ .argv = &.{ "gpgconf", "--kill", "all" }, .environ_map = &pair.env }) catch null;
         if (stopped) |s| {
             gpa.free(s.stdout);
             gpa.free(s.stderr);

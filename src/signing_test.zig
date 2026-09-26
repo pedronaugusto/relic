@@ -57,14 +57,17 @@ const Keyed = struct {
         k.home = try std.fs.path.join(gpa, &.{ top, "keys" });
         errdefer gpa.free(k.home);
 
-        // Nothing from this process's environment but `PATH`: no agent, no
-        // home, no `GNUPGHOME` of the person's.
+        // Nothing from this process's environment but `PATH`, isolated as
+        // the harness isolates git: no agent, no home, no system or global
+        // configuration and no `GNUPGHOME` of the person's. The keys' own
+        // home is added after, since `isolate` takes every `GIT_*` and
+        // `GNUPGHOME` out.
         k.environ = .init(gpa);
         errdefer k.environ.deinit();
         const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
         defer gpa.free(path);
         try k.environ.put("PATH", path);
-        try k.environ.put("HOME", k.home);
+        try testgit.isolate(&k.environ, k.home);
         try k.environ.put("TMPDIR", k.home);
         const gnupg_home = try std.fs.path.join(gpa, &.{ k.home, "g" });
         defer gpa.free(gnupg_home);
@@ -77,8 +80,9 @@ const Keyed = struct {
 
     fn deinit(k: *Keyed, io: Io) void {
         if (k.format != .ssh) {
-            // The agent gpg started for this home goes with it.
-            _ = k.run(io, &.{ "gpgconf", "--kill", "gpg-agent" }) catch {};
+            // The daemons gpg started for this home go with it: the agent,
+            // and keyboxd or dirmngr on a GnuPG that starts them.
+            _ = k.run(io, &.{ "gpgconf", "--kill", "all" }) catch {};
         }
         k.repo.deinit();
         k.environ.deinit();
