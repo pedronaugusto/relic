@@ -11,6 +11,10 @@
 //! written back as it is; `sparseindex` is what expands one into the files
 //! under it and collapses them again.
 
+// The modules relic's API puts under this one, as `relic.index.<name>`.
+pub const sparseindex = @import("sparseindex.zig");
+pub const ewah = @import("ewah.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -20,7 +24,6 @@ const object = @import("object.zig");
 const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
 const varint = @import("varint.zig");
-const ewah = @import("ewah.zig");
 const odb_mod = @import("odb.zig");
 
 const Oid = hash.Oid;

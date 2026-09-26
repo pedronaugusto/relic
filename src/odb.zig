@@ -4,6 +4,17 @@
 //! through a uniquely-named temporary and a rename, so two writers of the same
 //! object never meet and a reader never sees half of one.
 
+// The modules relic's API puts under this one, as `relic.odb.<name>`.
+pub const pack = @import("pack.zig");
+pub const delta = @import("delta.zig");
+pub const inflate = @import("inflate.zig");
+pub const indexpack = @import("indexpack.zig");
+pub const revindex = @import("revindex.zig");
+pub const commitgraph = @import("commitgraph.zig");
+pub const midx = @import("midx.zig");
+pub const abbrev = @import("abbrev.zig");
+pub const varint = @import("varint.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -11,9 +22,6 @@ const flate = std.compress.flate;
 
 const hash = @import("hash.zig");
 const object = @import("object.zig");
-const pack = @import("pack.zig");
-const delta_mod = @import("delta.zig");
-const midx_mod = @import("midx.zig");
 const fs = @import("fs.zig");
 
 const Oid = hash.Oid;
@@ -105,7 +113,7 @@ const Source = struct {
     /// Whether objects may be written here. Only the first source is.
     writable: bool,
     /// `pack/multi-pack-index`, when there is one.
-    midx: ?midx_mod.Index,
+    midx: ?midx.Index,
     /// For each pack the multi-pack index names, its position in `packs`, or
     /// `null` when that pack is not open here. The index names packs by file
     /// name and this database holds them in directory order, so the two have
@@ -375,7 +383,7 @@ pub const Odb = struct {
         source.midx_packs.clearRetainingCapacity();
 
         const pack_dir = source.pack_dir orelse return;
-        var index = (midx_mod.Index.open(odb.gpa, io, pack_dir, odb.kind) catch return) orelse return;
+        var index = (midx.Index.open(odb.gpa, io, pack_dir, odb.kind) catch return) orelse return;
         errdefer index.deinit();
 
         var position: u32 = 0;
@@ -1732,9 +1740,9 @@ const WindowSlot = struct {
     depth: u32,
     /// Built on the first candidate search that survives the cheap size and
     /// depth filters, then reused for the rest of this slot's window life.
-    encoder: ?delta_mod.Encoder,
+    encoder: ?delta.Encoder,
 
-    fn getEncoder(slot: *WindowSlot, gpa: Allocator) Allocator.Error!*delta_mod.Encoder {
+    fn getEncoder(slot: *WindowSlot, gpa: Allocator) Allocator.Error!*delta.Encoder {
         if (slot.encoder == null) slot.encoder = try .init(gpa, slot.bytes);
         return &slot.encoder.?;
     }
@@ -1742,7 +1750,7 @@ const WindowSlot = struct {
 
 const DeltaJob = struct {
     gpa: Allocator,
-    encoder: *const delta_mod.Encoder,
+    encoder: *const delta.Encoder,
     target: []const u8,
     limit: usize,
     slot: usize,

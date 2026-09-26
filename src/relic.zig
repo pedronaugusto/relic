@@ -1,118 +1,53 @@
 //! relic — read and write a git repository from Zig.
+//!
+//! The API is one module per concern, and each of those holds the modules
+//! that belong to it: `relic.refs` is refs and their transactions, and
+//! `relic.refs.reflog` is the log beside them.
+//!
+//! | Module | What it is | Under it |
+//! |---|---|---|
+//! | `repo` | `Repository`: open or create one, and reach the rest from it. | `hooks`, `program`, `warning`, `fs` |
+//! | `hash` | `Oid`, `Kind`, `Hasher`: object names, SHA-1 or SHA-256. | `sha1`, `sha1dc` |
+//! | `object` | `Commit`, `Tree`, `Tag`, `Signature`: objects as bytes. | `fsck` |
+//! | `odb` | `Odb`: loose objects, packs, alternates. | `pack`, `delta`, `inflate`, `indexpack`, `revindex`, `commitgraph`, `midx`, `abbrev`, `varint` |
+//! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs`. | `reflog`, `reftable`, `reftablestack` |
+//! | `config` | `Config`: git's configuration files, lossless. | `userconfig` |
+//! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex`, `ewah` |
+//! | `worktree` | Staging, writing a tree, checking one out, status. | `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `platstat`, `safepath` |
+//! | `diff` | Tree against tree, blob against blob, unified text. | `textdiff`, `rename`, `similarity`, `patchid` |
+//! | `revwalk` | Walking history, merge bases. | `revparse`, `shallow`, `ere` |
+//! | `merge` | Three-way merges of contents and trees. | `blobmerge`, `ort`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
+//! | `commit` | Making a commit as `git commit` does. | `message`, `head`, `reset`, `stash`, `signing`, `commithooks`, `merging`, `sequencer`, `rebase`, `todo` |
+//! | `transport` | `Session`: a remote, open. | `remote`, `url`, `refspec`, `fetch`, `fetchpack`, `clone`, `push`, `sendpack`, `local`, `ssh`, `smarthttp`, `httpclient`, `tls`, `clientcert`, `httpauth`, `httpsettings`, `credential`, `auth`, `protocol`, `connection`, `pktline`, `sideband`, `uploadpack`, `objectwalk`, `objectfilter`, `partial`, `filterspec`, `progress` |
+//! | `submodule` | Submodules: status, init, update, sync, absorb. | `gitmodules`, `gitlink`, `submoduletransport` |
+//! | `lfs` | Git LFS in process: pointers and the store. | `lfsapi`, `lfstransfer`, `lfslocks`, `lfspush`, `lfshooks`, `lfsssh`, `mimesniff`, `timetext`, `netrc` |
 
-pub const sha1 = @import("sha1.zig");
-pub const sha1dc = @import("sha1dc.zig");
+pub const repo = @import("repo.zig");
 pub const hash = @import("hash.zig");
 pub const object = @import("object.zig");
-pub const fs = @import("fs.zig");
-pub const delta = @import("delta.zig");
-pub const pack = @import("pack.zig");
 pub const odb = @import("odb.zig");
-pub const index = @import("index.zig");
-pub const varint = @import("varint.zig");
-pub const ewah = @import("ewah.zig");
-pub const safepath = @import("safepath.zig");
-pub const platstat = @import("platstat.zig");
-pub const dirscan = @import("dirscan.zig");
 pub const refs = @import("refs.zig");
-pub const reflog = @import("reflog.zig");
-pub const reftable = @import("reftable.zig");
-pub const reftablestack = @import("reftablestack.zig");
 pub const config = @import("config.zig");
-pub const wildmatch = @import("wildmatch.zig");
-pub const ignore = @import("ignore.zig");
-pub const attributes = @import("attributes.zig");
+pub const index = @import("index.zig");
 pub const worktree = @import("worktree.zig");
-pub const worktrees = @import("worktrees.zig");
-pub const sparse = @import("sparse.zig");
-pub const sparsecheckout = @import("sparsecheckout.zig");
-pub const sparseindex = @import("sparseindex.zig");
-pub const repo = @import("repo.zig");
+pub const diff = @import("diff.zig");
 pub const revwalk = @import("revwalk.zig");
 pub const merge = @import("merge.zig");
-pub const commitgraph = @import("commitgraph.zig");
-pub const midx = @import("midx.zig");
-pub const textdiff = @import("textdiff.zig");
-pub const diff = @import("diff.zig");
-pub const pktline = @import("pktline.zig");
-pub const program = @import("program.zig");
-pub const gitmodules = @import("gitmodules.zig");
-pub const gitlink = @import("gitlink.zig");
-pub const submodule = @import("submodule.zig");
-pub const submoduletransport = @import("submoduletransport.zig");
-pub const filter = @import("filter.zig");
-pub const lfs = @import("lfs.zig");
-pub const netrc = @import("netrc.zig");
-pub const mimesniff = @import("mimesniff.zig");
-pub const timetext = @import("timetext.zig");
-pub const lfsapi = @import("lfsapi.zig");
-pub const lfstransfer = @import("lfstransfer.zig");
-pub const lfslocks = @import("lfslocks.zig");
-pub const lfspush = @import("lfspush.zig");
-pub const lfshooks = @import("lfshooks.zig");
-pub const lfsssh = @import("lfsssh.zig");
-pub const convert = @import("convert.zig");
-pub const refspec = @import("refspec.zig");
-pub const url = @import("url.zig");
-pub const remote = @import("remote.zig");
-pub const progress = @import("progress.zig");
-pub const fsck = @import("fsck.zig");
-pub const inflate = @import("inflate.zig");
-pub const indexpack = @import("indexpack.zig");
-pub const connection = @import("connection.zig");
-pub const sideband = @import("sideband.zig");
-pub const protocol = @import("protocol.zig");
-pub const objectwalk = @import("objectwalk.zig");
-pub const fetchpack = @import("fetchpack.zig");
-pub const local = @import("local.zig");
-pub const ssh = @import("ssh.zig");
-pub const credential = @import("credential.zig");
-pub const auth = @import("auth.zig");
-pub const warning = @import("warning.zig");
-pub const userconfig = @import("userconfig.zig");
-pub const httpsettings = @import("httpsettings.zig");
-pub const tls = @import("tls/root.zig");
-pub const httpclient = @import("httpclient.zig");
-pub const httpauth = @import("httpauth.zig");
-pub const ere = @import("ere.zig");
-pub const revparse = @import("revparse.zig");
-pub const smarthttp = @import("smarthttp.zig");
-pub const shallow = @import("shallow.zig");
-pub const partial = @import("partial.zig");
-pub const filterspec = @import("filterspec.zig");
-pub const revindex = @import("revindex.zig");
-pub const uploadpack = @import("uploadpack.zig");
-pub const transport = @import("transport.zig");
-pub const fetch = @import("fetch.zig");
-pub const clone = @import("clone.zig");
-pub const sendpack = @import("sendpack.zig");
-pub const push = @import("push.zig");
-pub const hooks = @import("hooks.zig");
 pub const commit = @import("commit.zig");
-pub const stash = @import("stash.zig");
-pub const signing = @import("signing.zig");
-pub const threeway = @import("threeway.zig");
-pub const abbrev = @import("abbrev.zig");
-pub const message = @import("message.zig");
-pub const head = @import("head.zig");
-pub const reset = @import("reset.zig");
-pub const merging = @import("merging.zig");
-pub const todo = @import("todo.zig");
-pub const sequencer = @import("sequencer.zig");
-pub const patchid = @import("patchid.zig");
-pub const similarity = @import("similarity.zig");
-pub const ort = @import("ort.zig");
-pub const rename = @import("rename.zig");
-pub const rerere = @import("rerere.zig");
-pub const commithooks = @import("commithooks.zig");
-pub const strategy = @import("strategy.zig");
-pub const subtreeshift = @import("subtreeshift.zig");
-pub const rebase = @import("rebase.zig");
+pub const transport = @import("transport.zig");
+pub const submodule = @import("submodule.zig");
+pub const lfs = @import("lfs.zig");
 
 const builtin = @import("builtin");
 
 test {
-    @import("std").testing.refAllDecls(@This());
+    const std = @import("std");
+    // Every module the API reaches, one level down as well as at the top,
+    // so that every file under the root is compiled and its tests run.
+    std.testing.refAllDecls(@This());
+    inline for (@typeInfo(@This()).@"struct".decls) |decl| {
+        std.testing.refAllDecls(@field(@This(), decl.name));
+    }
     if (builtin.is_test) {
         _ = @import("testgit.zig");
         _ = @import("fixture_test.zig");

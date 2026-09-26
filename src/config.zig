@@ -8,6 +8,9 @@
 //! `includeIf` is not optional. A caller that misses one reads the wrong
 //! `core.autocrlf` and therefore writes a different blob than git would.
 
+// The modules relic's API puts under this one, as `relic.config.<name>`.
+pub const userconfig = @import("userconfig.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

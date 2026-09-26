@@ -119,7 +119,7 @@ allocates takes the allocator as its first argument and every function that
 touches the disk or the network takes a `std.Io`. Concurrent work — the delta
 search when `PackOptions.threads` asks, resolving a received pack's deltas —
 goes to the caller's executor, never to threads of the package's own. A
-process starts only through a `program.Programs` the caller hands in; without
+process starts only through a `repo.program.Programs` the caller hands in; without
 one, a hook is not run and a setting that would run a program is a named
 refusal. The only clock read is the HTTP client's: the certificates' dates,
 and its timeouts. Everything else that needs the time takes it from the
@@ -129,57 +129,72 @@ asked once.
 
 ## The API
 
-| Module | |
+The root is one module per concern, and each of those holds the modules
+that belong to it: `relic.refs` is refs and their transactions, and
+`relic.refs.reflog` is the log git writes beside them.
+
+| Path | |
 |---|---|
+| `repo` | `Repository.open`, `init`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. The front door. |
+| `repo.hooks` | git's hooks with git's arguments, environment and input. |
+| `repo.program` | `Programs`, `Invocation`, `run` — the one place a process starts. |
+| `repo.warning` | What git would print as a warning, as a value. |
+| `repo.fs` | `Sync`, `OnContention`, `staleReport`, `Resolution` — the lock, durability and timestamp policies every writer and every stat comparison here goes through. |
 | `hash` | `Kind` (`sha1`, `sha256`), `Oid`, `Hasher` with `Options` and `nameObject`. The hash is a parameter from the first line, not a width bolted on later. |
-| `sha1` | SHA-1 over the processor's own instructions, with the eighty rounds as the fallback and the choice made at run time. |
-| `sha1dc` | SHA-1 that checks each block for the signature of a collision attack. Off unless asked for. |
+| `hash.sha1` | SHA-1 over the processor's own instructions, with the eighty rounds as the fallback and the choice made at run time. |
+| `hash.sha1dc` | SHA-1 that checks each block for the signature of a collision attack. Off unless asked for. |
 | `object` | `Type`, `Mode`, `Tree` and `Tree.Builder`, `Commit`, `Tag`, `Signature`, `ExtraHeader`. Parsing and writing, with git's tree sort rule and header order. |
-| `pack` | `Index` (`.idx` v2), `Pack`, `Cache`, `Writer`. Both delta kinds, the 64-bit offset table, a bounded chain, `verify`, and writing a pack and its index. |
-| `delta` | `apply` and `encode`, with the copy and insert opcodes. |
-| `odb` | `Odb.open`, `read`, `readHeader`, `exists`, `findPrefix`, `write`, `writeStream`, `listObjects`, `verify`, `refresh`, `syncBatch`, and the `stats` counters. Loose objects, the packs, `objects/info/alternates` and the multi-pack index. |
-| `odb`, writing packs | `collectReachable`, `collectLoose`, `collectAll`, `writePack`, `packLoose`, `repack`, and `beginPack` / `writeInto` / `finishPack` for a caller filling one as it goes. |
-| `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
+| `object.fsck` | What git's `fsck` finds wrong with one object's bytes. |
+| `odb` | `Odb.open`, `read`, `readHeader`, `exists`, `findPrefix`, `write`, `writeStream`, `listObjects`, `verify`, `refresh`, `syncBatch`, and the `stats` counters. Loose objects, the packs, `objects/info/alternates` and the multi-pack index. Writing packs: `collectReachable`, `collectLoose`, `collectAll`, `writePack`, `packLoose`, `repack`, and `beginPack` / `writeInto` / `finishPack` for a caller filling one as it goes. |
+| `odb.pack`, `odb.delta` | `Index` (`.idx` v2), `Pack`, `Cache`, `Writer`; `apply` and `encode`. Both delta kinds, the 64-bit offset table, a bounded chain, `verify`, and writing a pack and its index. |
+| `odb.indexpack`, `odb.inflate`, `odb.revindex` | Receiving a pack: indexed as it arrives, deltas resolved on the caller's executor, `.rev` files. |
+| `odb.commitgraph`, `odb.midx` | The two accelerators, read. A `revwalk.Walk` takes parents and times from a commit-graph when it is given one and reads the object when it is not; a lookup asks a multi-pack index which pack to open before it asks the packs one by one. Neither changes an answer. |
+| `odb.abbrev`, `odb.varint` | Short object names as git prints them; git's two varints. |
 | `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. |
-| `reflog` | `append`, `read`, `Log.at` for `HEAD@{n}`, `Policy` for `core.logAllRefUpdates`. |
+| `refs.reflog` | `append`, `read`, `Log.at` for `HEAD@{n}`, `Policy` for `core.logAllRefUpdates`. |
+| `refs.reftable`, `refs.reftablestack` | The reftable ref backend, read and written. |
 | `config` | `Config.open`, `get`, `all`, `getBool`, `getInt`, `getPath`, `subsections`, `origin`, `set`, `unset`, `write`. Lossless: setting a value rewrites one line. |
-| `ignore` | `Rules.init` / `loadGlobal` / `addDirectory` / `addText` / `popTo` / `match` / `matchPath`, with the pattern that decided. |
-| `attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
-| `wildmatch` | `match` — git's own glob, which is not `fnmatch`. |
+| `config.userconfig` | Where the person's git reads its configuration from. |
+| `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
+| `index.sparseindex`, `index.ewah` | The sparse index, and the bitmap a split index's masks are stored in. |
 | `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
-| `worktrees` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`. |
-| `sparse` | `Patterns` for `info/sparse-checkout`. |
+| `worktree.worktrees` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`. |
+| `worktree.sparse`, `worktree.sparsecheckout` | `Patterns` for `info/sparse-checkout`, and cone-mode sparse checkout as an operation. |
+| `worktree.ignore` | `Rules.init` / `loadGlobal` / `addDirectory` / `addText` / `popTo` / `match` / `matchPath`, with the pattern that decided. |
+| `worktree.attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
+| `worktree.wildmatch` | `match` — git's own glob, which is not `fnmatch`. |
+| `worktree.filter`, `worktree.convert` | Clean and smudge filters, the long-running process protocol, `ident`, line endings. |
+| `worktree.dirscan`, `worktree.platstat` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
+| `worktree.safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`. |
-| `rename`, `similarity` | Rename and copy detection with git's score and diffcore's order: `-M`, `-C`, `--find-copies-harder`. |
-| `textdiff` | `diffLines`, `hunks`, `stat`, `sameLine`, `Algorithm` (`myers`, `histogram`, `patience`), and git's `--minimal`. |
+| `diff.textdiff` | `diffLines`, `hunks`, `stat`, `sameLine`, `Algorithm` (`myers`, `histogram`, `patience`), and git's `--minimal`. |
+| `diff.rename`, `diff.similarity` | Rename and copy detection with git's score and diffcore's order: `-M`, `-C`, `--find-copies-harder`. |
+| `diff.patchid` | Patch ids: a name for what a commit changes. |
 | `revwalk` | `Walk`, `mergeBase`, `mergeBases`, `mergeBasesWith`, `isAncestor`, `isAncestorWith`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary. |
-| `revparse` | git's revision grammar. |
-| `merge`, `blobmerge` | Content merging as xdiff does it, and the stage-only tree merge. |
-| `ort` | `mergeTrees`, `mergeCommits` — git's merge-ort: renames, directory renames, directory/file and type conflicts, submodules, virtual merge bases, git's messages. |
-| `strategy`, `subtreeshift` | Every `-X` word git's merge takes, and git's match-trees for `subtree`. |
-| `merging`, `sequencer`, `rebase`, `threeway` | Merge, cherry-pick, revert and rebase, with their state files in git's format. |
-| `rerere` | Recorded resolutions in git's `rr-cache`: `run`, `status`, `remaining`, `diff`, `forget`, `gc`. |
-| `stash` | `push`, `apply`, `pop`, `list`, `show`, `drop`, `clear`. |
-| `hooks`, `commithooks` | git's hooks with git's arguments, environment and input. |
-| `signing` | Sign and verify commits and tags: OpenPGP, SSH, X.509. |
-| `program` | `Programs`, `Invocation`, `run` — the one place a process starts. |
-| `filter`, `convert` | Clean and smudge filters, the long-running process protocol, `ident`, line endings. |
-| `submodule`, `gitmodules`, `submoduletransport` | `.gitmodules`, status, init, update, sync, absorbed git directories, and fetching them. |
-| `sparsecheckout`, `sparseindex` | Cone-mode sparse checkout and the sparse index. |
-| `reftable`, `reftablestack` | The reftable ref backend, read and written. |
-| `transport`, `fetch`, `clone`, `push` | The commands. Protocol v2 and v0, refspecs, `FETCH_HEAD`, atomic updates, `insteadOf`. |
-| `smarthttp`, `ssh`, `local`, `httpclient`, `tls` | The transports: HTTP(S) through relic's own HTTP/1.1 and TLS clients, the person's `ssh`, and `file://` and paths. |
-| `uploadpack` | `Server` — serving fetches, with shallow and every filter. |
-| `indexpack`, `inflate`, `revindex` | Receiving a pack: indexed as it arrives, deltas resolved on the caller's executor, `.rev` files. |
-| `shallow`, `partial`, `filterspec`, `objectfilter` | Shallow history; partial clone, its filters and the lazy fetch. |
-| `credential`, `auth`, `userconfig`, `httpsettings`, `httpauth`, `netrc` | The person's own setup: credential helpers, why a remote refused, their configuration, git's `http.*`, proxy authentication. |
-| `lfs`, `lfsapi`, `lfstransfer`, `lfsssh`, `lfslocks`, `lfspush`, `lfshooks` | LFS without git-lfs: pointers and the store, the batch API over https or ssh, locks, pre-push, git-lfs's hooks. |
-| `warning` | What git would print as a warning, as a value. |
-| `commitgraph`, `midx` | The two accelerators, read. A `revwalk.Walk` takes parents and times from a commit-graph when it is given one and reads the object when it is not; a lookup asks a multi-pack index which pack to open before it asks the packs one by one. Neither changes an answer. |
-| `safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
-| `dirscan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
-| `fs` | `Sync`, `OnContention`, `staleReport`, `Resolution` — the lock, durability and timestamp policies every writer and every stat comparison here goes through. |
-| `repo` | `Repository.open`, `init`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. |
+| `revwalk.revparse`, `revwalk.ere` | git's revision grammar, and the extended regular expressions `:/text` is matched with. |
+| `revwalk.shallow` | A shallow repository's boundary: `.git/shallow`. |
+| `merge`, `merge.blobmerge` | Content merging as xdiff does it, and the stage-only tree merge. |
+| `merge.ort` | `mergeTrees`, `mergeCommits` — git's merge-ort: renames, directory renames, directory/file and type conflicts, submodules, virtual merge bases, git's messages. |
+| `merge.strategy`, `merge.subtreeshift` | Every `-X` word git's merge takes, and git's match-trees for `subtree`. |
+| `merge.threeway` | A merge of three trees carried into the index and the working tree. |
+| `merge.rerere` | Recorded resolutions in git's `rr-cache`: `run`, `status`, `remaining`, `diff`, `forget`, `gc`. |
+| `commit` | Making a commit the way `git commit` does, its hooks in git's order. |
+| `commit.merging`, `commit.sequencer`, `commit.rebase`, `commit.todo` | Merge, cherry-pick, revert and rebase, with their state files in git's format. |
+| `commit.message`, `commit.head`, `commit.reset`, `commit.commithooks` | What those commands share: messages as git shapes them, `HEAD` as git moves it, `git reset`, the hooks around the commits they make. |
+| `commit.stash` | `push`, `apply`, `pop`, `list`, `show`, `drop`, `clear`. |
+| `commit.signing` | Sign and verify commits and tags: OpenPGP, SSH, X.509. |
+| `transport` | `Session`: a remote, open — the one thing a fetch, a clone or a push talks to. |
+| `transport.fetch`, `transport.clone`, `transport.push` | The commands. Protocol v2 and v0, refspecs, `FETCH_HEAD`, atomic updates, `insteadOf`. |
+| `transport.remote`, `transport.url`, `transport.refspec` | Remotes as the configuration describes them, what a URL names, and which refs a fetch takes. |
+| `transport.smarthttp`, `transport.ssh`, `transport.local`, `transport.httpclient`, `transport.tls`, `transport.clientcert` | The transports: HTTP(S) through relic's own HTTP/1.1 and TLS clients, the person's `ssh`, and `file://` and paths. |
+| `transport.credential`, `transport.auth`, `transport.httpsettings`, `transport.httpauth` | The person's own setup: credential helpers, why a remote refused, git's `http.*`, proxy authentication. |
+| `transport.protocol`, `transport.connection`, `transport.pktline`, `transport.sideband`, `transport.fetchpack`, `transport.sendpack`, `transport.progress` | The wire underneath the commands. |
+| `transport.uploadpack` | `Server` — serving fetches, with shallow and every filter. |
+| `transport.objectwalk`, `transport.objectfilter`, `transport.partial`, `transport.filterspec` | Which objects one side lacks; partial clone, its filters and the lazy fetch. |
+| `submodule`, `submodule.gitmodules`, `submodule.gitlink`, `submodule.submoduletransport` | `.gitmodules`, status, init, update, sync, absorbed git directories, and fetching them. |
+| `lfs` | LFS without git-lfs: pointers and the store. |
+| `lfs.lfsapi`, `lfs.lfstransfer`, `lfs.lfsssh`, `lfs.lfslocks`, `lfs.lfspush`, `lfs.lfshooks` | The batch API over https or ssh, locks, pre-push, git-lfs's hooks. |
+| `lfs.netrc`, `lfs.mimesniff`, `lfs.timetext` | What the LFS client reads beside: `~/.netrc`, a file's media type, the API's times. |
 
 Every public declaration carries a doc comment stating its contract, and every
 operation has one named error set. A refusal is always a named error carrying
@@ -219,10 +234,10 @@ carrying its name. `working-tree-encoding` is refused the same way.
 lock is taken, because git takes none and a lock that is not git's lock does
 not stop it, and a reader never blocks: it sees either the whole old file or
 the whole new one. A lock another writer holds is `error.LockHeld` and is left
-exactly where it was found. `fs.staleReport` says whether it is held, which
+exactly where it was found. `repo.fs.staleReport` says whether it is held, which
 process id is in `<file>~pid.lock`, and whether that process still exists —
 process ids are reused, so that is a report for a person and not permission to
-remove anything. `fs.OnContention` chooses between failing at once and waiting
+remove anything. `repo.fs.OnContention` chooses between failing at once and waiting
 with git's own backoff.
 
 **A lookup narrows before it searches.** A repository with many packs has one
@@ -238,7 +253,7 @@ and tries again, because a `git gc` may have packed the object away between
 the two.
 
 **Durability is a policy with three values, and the default is git's own.**
-`fs.Sync.none` makes neither a loose object nor the index durable before
+`repo.fs.Sync.none` makes neither a loose object nor the index durable before
 returning, which is what `core.fsync` defaults to. `batch` flushes each file
 and puts one real barrier at the end — a throwaway file in the same directory,
 synced and removed — which is full durability at one sync per batch rather
@@ -367,7 +382,7 @@ still fails if the shortcut or the hardware arm is lost. There is a ceiling on
 the walk as well, but it is a ceiling and not a budget.
 
 **A pack is written in git's order, and nothing is taken away until it is
-there.** `pack.Writer` streams the entries into a temporary and writes the
+there.** `odb.pack.Writer` streams the entries into a temporary and writes the
 index beside it; what is held is one object, the deflate state, and one index
 entry per object. `Odb.writePack` is the policy on top: the objects are
 ordered by type descending, then by git's own hash of the tail of the path

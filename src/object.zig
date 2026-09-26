@@ -4,6 +4,9 @@
 //! given and every `write` appends to a writer the caller owns, so an object
 //! may be built in memory, named, and only then stored.
 
+// The modules relic's API puts under this one, as `relic.object.<name>`.
+pub const fsck = @import("fsck.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

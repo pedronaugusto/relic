@@ -30,6 +30,17 @@
 //! the content, and a pointer that names one is refused by name rather than
 //! smudged without it.
 
+// The modules relic's API puts under this one, as `relic.lfs.<name>`.
+pub const lfsapi = @import("lfsapi.zig");
+pub const lfstransfer = @import("lfstransfer.zig");
+pub const lfslocks = @import("lfslocks.zig");
+pub const lfspush = @import("lfspush.zig");
+pub const lfshooks = @import("lfshooks.zig");
+pub const lfsssh = @import("lfsssh.zig");
+pub const mimesniff = @import("mimesniff.zig");
+pub const timetext = @import("timetext.zig");
+pub const netrc = @import("netrc.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

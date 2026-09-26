@@ -7,6 +7,14 @@
 //! itself. With `content_merge` it is git's merge, `ort.zig`'s: renames
 //! followed, files merged, conflicts recorded as git records them.
 
+// The modules relic's API puts under this one, as `relic.merge.<name>`.
+pub const blobmerge = @import("blobmerge.zig");
+pub const ort = @import("ort.zig");
+pub const strategy = @import("strategy.zig");
+pub const subtreeshift = @import("subtreeshift.zig");
+pub const threeway = @import("threeway.zig");
+pub const rerere = @import("rerere.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -17,8 +25,6 @@ const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const textdiff = @import("textdiff.zig");
 const attributes = @import("attributes.zig");
-const blobmerge = @import("blobmerge.zig");
-const ort = @import("ort.zig");
 
 const Oid = hash.Oid;
 

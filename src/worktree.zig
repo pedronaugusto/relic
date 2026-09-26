@@ -5,6 +5,19 @@
 //! becomes a filesystem path, because a tree entry's name is written by
 //! whoever wrote the tree.
 
+// The modules relic's API puts under this one, as `relic.worktree.<name>`.
+pub const worktrees = @import("worktrees.zig");
+pub const sparse = @import("sparse.zig");
+pub const sparsecheckout = @import("sparsecheckout.zig");
+pub const ignore = @import("ignore.zig");
+pub const attributes = @import("attributes.zig");
+pub const wildmatch = @import("wildmatch.zig");
+pub const convert = @import("convert.zig");
+pub const filter = @import("filter.zig");
+pub const dirscan = @import("dirscan.zig");
+pub const platstat = @import("platstat.zig");
+pub const safepath = @import("safepath.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -14,16 +27,9 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const fs = @import("fs.zig");
-const safepath = @import("safepath.zig");
-const ignore = @import("ignore.zig");
-const attributes = @import("attributes.zig");
-const sparse = @import("sparse.zig");
 const sparseindex = @import("sparseindex.zig");
-const dirscan = @import("dirscan.zig");
 const pack_mod = @import("pack.zig");
 const gitlink = @import("gitlink.zig");
-const convert = @import("convert.zig");
-const filter = @import("filter.zig");
 const lfs = @import("lfs.zig");
 const program = @import("program.zig");
 

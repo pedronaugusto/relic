@@ -11,6 +11,11 @@
 //! `reftablestack` is the other side. There a transaction is one table added
 //! under one lock, so its commit is all or nothing.
 
+// The modules relic's API puts under this one, as `relic.refs.<name>`.
+pub const reflog = @import("reflog.zig");
+pub const reftable = @import("reftable.zig");
+pub const reftablestack = @import("reftablestack.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -19,10 +24,8 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
-const reflog = @import("reflog.zig");
 const hooks = @import("hooks.zig");
 const testgit = @import("testgit.zig");
-const reftablestack = @import("reftablestack.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;

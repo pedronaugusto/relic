@@ -27,6 +27,11 @@
 //! starts a process unless the caller hands in `program.Programs` and the
 //! repository's own configuration names a `!command` update.
 
+// The modules relic's API puts under this one, as `relic.submodule.<name>`.
+pub const gitmodules = @import("gitmodules.zig");
+pub const gitlink = @import("gitlink.zig");
+pub const submoduletransport = @import("submoduletransport.zig");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -41,8 +46,6 @@ const config_mod = @import("config.zig");
 const refs_mod = @import("refs.zig");
 const repo_mod = @import("repo.zig");
 const worktree = @import("worktree.zig");
-const gitmodules = @import("gitmodules.zig");
-const gitlink = @import("gitlink.zig");
 const program = @import("program.zig");
 const wildmatch = @import("wildmatch.zig");
 

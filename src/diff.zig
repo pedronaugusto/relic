@@ -5,6 +5,12 @@
 //! a caller wants — a name-status list, added and removed line counts, and a
 //! patch with git's own headers.
 
+// The modules relic's API puts under this one, as `relic.diff.<name>`.
+pub const textdiff = @import("textdiff.zig");
+pub const rename = @import("rename.zig");
+pub const similarity = @import("similarity.zig");
+pub const patchid = @import("patchid.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -12,9 +18,6 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
-const textdiff = @import("textdiff.zig");
-const rename = @import("rename.zig");
-const similarity = @import("similarity.zig");
 const attributes = @import("attributes.zig");
 const config_mod = @import("config.zig");
 

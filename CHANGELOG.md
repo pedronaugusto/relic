@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** the root is one module per concern, each holding the modules
+  that belong to it, in place of 106 flat modules. The fifteen at the top are
+  `repo`, `hash`, `object`, `odb`, `refs`, `config`, `index`, `worktree`,
+  `diff`, `revwalk`, `merge`, `commit`, `transport`, `submodule` and `lfs`;
+  the rest moved under them:
+
+  | Under | Modules |
+  |---|---|
+  | `repo` | `hooks`, `program`, `warning`, `fs` |
+  | `hash` | `sha1`, `sha1dc` |
+  | `object` | `fsck` |
+  | `odb` | `pack`, `delta`, `inflate`, `indexpack`, `revindex`, `commitgraph`, `midx`, `abbrev`, `varint` |
+  | `refs` | `reflog`, `reftable`, `reftablestack` |
+  | `config` | `userconfig` |
+  | `index` | `sparseindex`, `ewah` |
+  | `worktree` | `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `platstat`, `safepath` |
+  | `diff` | `textdiff`, `rename`, `similarity`, `patchid` |
+  | `revwalk` | `revparse`, `shallow`, `ere` |
+  | `merge` | `blobmerge`, `ort`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
+  | `commit` | `message`, `head`, `reset`, `stash`, `signing`, `commithooks`, `merging`, `sequencer`, `rebase`, `todo` |
+  | `transport` | `remote`, `url`, `refspec`, `fetch`, `fetchpack`, `clone`, `push`, `sendpack`, `local`, `ssh`, `smarthttp`, `httpclient`, `tls`, `clientcert`, `httpauth`, `httpsettings`, `credential`, `auth`, `protocol`, `connection`, `pktline`, `sideband`, `uploadpack`, `objectwalk`, `objectfilter`, `partial`, `filterspec`, `progress` |
+  | `submodule` | `gitmodules`, `gitlink`, `submoduletransport` |
+  | `lfs` | `lfsapi`, `lfstransfer`, `lfslocks`, `lfspush`, `lfshooks`, `lfsssh`, `mimesniff`, `timetext`, `netrc` |
+
+  So `relic.reflog` is `relic.refs.reflog`, `relic.fetch` is
+  `relic.transport.fetch` and `relic.program` is `relic.repo.program`. The
+  declarations inside each module are unchanged. `blobmerge`, `objectfilter`
+  and `clientcert`, which the README listed and the root did not export, are
+  now reachable.
+
 ## [0.3.0] - 2026-09-25
 
 relic grows from a local repository library into all of git a program needs:

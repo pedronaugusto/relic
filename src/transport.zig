@@ -9,6 +9,36 @@
 //! the refs, the negotiation, the pack — is the same for both. A `Session`
 //! hides which of the three it is from the operations above.
 
+// The modules relic's API puts under this one, as `relic.transport.<name>`.
+pub const remote = @import("remote.zig");
+pub const url = @import("url.zig");
+pub const refspec = @import("refspec.zig");
+pub const fetch = @import("fetch.zig");
+pub const fetchpack = @import("fetchpack.zig");
+pub const clone = @import("clone.zig");
+pub const push = @import("push.zig");
+pub const sendpack = @import("sendpack.zig");
+pub const local = @import("local.zig");
+pub const ssh = @import("ssh.zig");
+pub const smarthttp = @import("smarthttp.zig");
+pub const httpclient = @import("httpclient.zig");
+pub const tls = @import("tls/root.zig");
+pub const clientcert = @import("clientcert.zig");
+pub const httpauth = @import("httpauth.zig");
+pub const httpsettings = @import("httpsettings.zig");
+pub const credential = @import("credential.zig");
+pub const auth = @import("auth.zig");
+pub const protocol = @import("protocol.zig");
+pub const connection = @import("connection.zig");
+pub const pktline = @import("pktline.zig");
+pub const sideband = @import("sideband.zig");
+pub const uploadpack = @import("uploadpack.zig");
+pub const objectwalk = @import("objectwalk.zig");
+pub const objectfilter = @import("objectfilter.zig");
+pub const partial = @import("partial.zig");
+pub const filterspec = @import("filterspec.zig");
+pub const progress = @import("progress.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -18,21 +48,9 @@ const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
 const program = @import("program.zig");
 const config_mod = @import("config.zig");
-const url_mod = @import("url.zig");
-const connection = @import("connection.zig");
-const protocol = @import("protocol.zig");
-const fetchpack = @import("fetchpack.zig");
 const indexpack = @import("indexpack.zig");
-const local = @import("local.zig");
-const ssh = @import("ssh.zig");
-const smarthttp = @import("smarthttp.zig");
-const credential = @import("credential.zig");
-const uploadpack = @import("uploadpack.zig");
-const auth = @import("auth.zig");
 const warning = @import("warning.zig");
-const sendpack = @import("sendpack.zig");
 const object = @import("object.zig");
-const progress_mod = @import("progress.zig");
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;
@@ -68,7 +86,7 @@ pub const Options = struct {
     /// `protocol.version` from `config`, as git does: 2 unless it says 0
     /// or 1.
     protocol_v2: ?bool = null,
-    progress: ?progress_mod.Progress = null,
+    progress: ?progress.Progress = null,
     /// What stands in for a terminal when an HTTP server asks for a
     /// credential no helper has. Without one nothing is asked, and
     /// askpass runs only when it says so.
@@ -109,40 +127,40 @@ pub const Session = struct {
         },
     },
 
-    /// Open the remote at `url` for `service`. `kind` is the local
+    /// Open the remote at `remote_url` for `service`. `kind` is the local
     /// repository's hash, or `null` when there is no local repository yet.
     pub fn open(
         gpa: Allocator,
         io: Io,
-        url: []const u8,
+        remote_url: []const u8,
         service: Service,
         kind: ?hash.Kind,
         options: Options,
     ) Error!Session {
-        const parsed = url_mod.Url.parse(url) catch |err| return err;
+        const parsed = url.Url.parse(remote_url) catch |err| return err;
         switch (parsed.scheme) {
             .local, .file => if (service == .upload_pack and !options.local_copy) {
                 // A fetch from this machine goes through upload-pack, as
                 // git's does — relic's own, in this process.
-                const remote = try gpa.create(local.Remote);
+                const here = try gpa.create(local.Remote);
                 // The connection owns the repository once it is made.
                 var owned = true;
-                errdefer if (owned) gpa.destroy(remote);
-                remote.* = try local.Remote.open(gpa, io, url);
-                errdefer if (owned) remote.deinit(io);
-                if (kind) |k| if (k != remote.repo.kind) return error.ObjectFormatMismatch;
+                errdefer if (owned) gpa.destroy(here);
+                here.* = try local.Remote.open(gpa, io, remote_url);
+                errdefer if (owned) here.deinit(io);
+                if (kind) |k| if (k != here.repo.kind) return error.ObjectFormatMismatch;
                 const v2 = options.protocol_v2 orelse wantsV2(options.config);
-                const conn = try uploadpack.connect(gpa, io, remote, if (v2) .v2 else .v0, .{});
+                const conn = try uploadpack.connect(gpa, io, here, if (v2) .v2 else .v0, .{});
                 owned = false;
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind);
             } else {
-                const remote = try gpa.create(local.Remote);
-                errdefer gpa.destroy(remote);
-                remote.* = try local.Remote.open(gpa, io, url);
-                errdefer remote.deinit(io);
-                if (kind) |k| if (k != remote.repo.kind) return error.ObjectFormatMismatch;
-                return .{ .gpa = gpa, .service = service, .impl = .{ .local = remote } };
+                const here = try gpa.create(local.Remote);
+                errdefer gpa.destroy(here);
+                here.* = try local.Remote.open(gpa, io, remote_url);
+                errdefer here.deinit(io);
+                if (kind) |k| if (k != here.repo.kind) return error.ObjectFormatMismatch;
+                return .{ .gpa = gpa, .service = service, .impl = .{ .local = here } };
             },
             .ssh => {
                 const conn = try ssh.connect(gpa, io, parsed, service, .{
@@ -187,9 +205,9 @@ pub const Session = struct {
     /// End the session and release everything.
     pub fn close(s: *Session, io: Io) void {
         switch (s.impl) {
-            .local => |remote| {
-                remote.deinit(io);
-                s.gpa.destroy(remote);
+            .local => |here| {
+                here.deinit(io);
+                s.gpa.destroy(here);
             },
             .smart => |*smart| {
                 // A conversation over a pipe that the server still waits on
@@ -211,7 +229,7 @@ pub const Session = struct {
     /// The hash the remote's object names are written with.
     pub fn objectFormat(s: *const Session) hash.Kind {
         return switch (s.impl) {
-            .local => |remote| remote.repo.kind,
+            .local => |here| here.repo.kind,
             .smart => |smart| smart.advertisement.kind,
         };
     }
@@ -248,7 +266,7 @@ pub const Session = struct {
     /// any are given. The result is the caller's.
     pub fn listRefs(s: *Session, gpa: Allocator, io: Io, prefixes: []const []const u8) Error!protocol.RefList {
         return switch (s.impl) {
-            .local => |remote| remote.listRefs(gpa, io, prefixes),
+            .local => |here| here.listRefs(gpa, io, prefixes),
             .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes }),
         };
     }
@@ -262,7 +280,7 @@ pub const Session = struct {
         push_options: []const []const u8 = &.{},
         /// Who a repository on this machine logs the update as.
         who: object.Signature,
-        progress: ?progress_mod.Progress = null,
+        progress: ?progress.Progress = null,
     };
 
     /// Send a push, reading the objects from `db`, and return the remote's
@@ -270,11 +288,11 @@ pub const Session = struct {
     pub fn push(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: PushRequest) Error!sendpack.Report {
         std.debug.assert(s.service == .receive_pack);
         switch (s.impl) {
-            .local => |remote| {
+            .local => |here| {
                 // A repository on this machine runs no hooks for relic, and
                 // push options are for hooks.
                 if (request.push_options.len != 0) return error.PushOptionsUnsupported;
-                return remote.receivePush(gpa, io, db, request.commands, request.objects, .{
+                return here.receivePush(gpa, io, db, request.commands, request.objects, .{
                     .who = request.who,
                     .atomic = request.atomic,
                 });
@@ -328,8 +346,8 @@ pub const Session = struct {
         std.debug.assert(s.service == .upload_pack);
         if (request.wants.len == 0) return .{ .pack = null, .objects = 0 };
         switch (s.impl) {
-            .local => |remote| {
-                const report = try remote.copyObjects(io, db, pack_dir, request.wants, request.tips, request.include_tag, .{ .reverse_index = options.receive.reverse_index });
+            .local => |here| {
+                const report = try here.copyObjects(io, db, pack_dir, request.wants, request.tips, request.include_tag, .{ .reverse_index = options.receive.reverse_index });
                 const written = report orelse return .{ .pack = null, .objects = 0 };
                 return .{ .pack = written.name, .objects = written.objects };
             },

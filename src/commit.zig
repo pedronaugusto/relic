@@ -18,6 +18,18 @@
 //! `GIT_EDITOR=:`. A merge, a cherry-pick or a revert in progress is a named
 //! refusal rather than a commit that quietly drops the other parent.
 
+// The modules relic's API puts under this one, as `relic.commit.<name>`.
+pub const message = @import("message.zig");
+pub const head = @import("head.zig");
+pub const reset = @import("reset.zig");
+pub const stash = @import("stash.zig");
+pub const signing = @import("signing.zig");
+pub const commithooks = @import("commithooks.zig");
+pub const merging = @import("merging.zig");
+pub const sequencer = @import("sequencer.zig");
+pub const rebase = @import("rebase.zig");
+pub const todo = @import("todo.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -30,9 +42,7 @@ const repo_mod = @import("repo.zig");
 const worktree = @import("worktree.zig");
 const index_mod = @import("index.zig");
 const hooks = @import("hooks.zig");
-const commithooks = @import("commithooks.zig");
 const fs = @import("fs.zig");
-const signing = @import("signing.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -158,8 +168,8 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     // What the new commit sits on, and what an amend carries over.
     var parents: []const Oid = &.{};
     var carried: []const object.ExtraHeader = &.{};
-    if (current) |head| {
-        const found = try repo.odb.read(io, head);
+    if (current) |tip| {
+        const found = try repo.odb.read(io, tip);
         defer gpa.free(found.bytes);
         if (found.type != .commit) return error.UnexpectedObjectType;
         const bytes = try arena.dupe(u8, found.bytes);
@@ -175,7 +185,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
             }
             carried = kept.items;
         } else {
-            parents = try arena.dupe(Oid, &.{head});
+            parents = try arena.dupe(Oid, &.{tip});
             if (!options.allow_empty and parsed.tree.eql(tree)) return error.NothingToCommit;
         }
     } else if (!options.allow_empty and index.entries.items.len == 0) {
@@ -188,15 +198,15 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     }
 
     const edited = try repo.git_dir.readFileAlloc(io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
-    const message = try clean(arena, edited, cleanup, comment);
-    if (!options.allow_empty_message and isEmpty(message, cleanup, comment)) return error.EmptyMessage;
+    const cleaned = try clean(arena, edited, cleanup, comment);
+    if (!options.allow_empty_message and isEmpty(cleaned, cleanup, comment)) return error.EmptyMessage;
 
     const new = try repo.writeCommit(io, .{
         .tree = tree,
         .parents = parents,
         .author = request.author,
         .committer = request.committer,
-        .message = message,
+        .message = cleaned,
         .extra = carried,
         .signing = options.signing,
     });
@@ -207,8 +217,8 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         "commit (amend)"
     else
         "commit";
-    const subject_end = std.mem.indexOfScalar(u8, message, '\n') orelse message.len;
-    const log_message = try std.fmt.allocPrint(arena, "{s}: {s}", .{ action, message[0..subject_end] });
+    const subject_end = std.mem.indexOfScalar(u8, cleaned, '\n') orelse cleaned.len;
+    const log_message = try std.fmt.allocPrint(arena, "{s}: {s}", .{ action, cleaned[0..subject_end] });
     const policy = repo.reflogPolicy();
     {
         var tx = repo.beginRefs();
@@ -260,9 +270,9 @@ fn clean(arena: Allocator, text: []const u8, cleanup: Cleanup, comment: []const 
 }
 
 /// Whether a cleaned message says nothing: every line blank or a comment.
-fn isEmpty(message: []const u8, cleanup: Cleanup, comment: []const u8) bool {
-    if (cleanup == .verbatim and message.len != 0) return false;
-    var lines = std.mem.splitScalar(u8, message, '\n');
+fn isEmpty(text: []const u8, cleanup: Cleanup, comment: []const u8) bool {
+    if (cleanup == .verbatim and text.len != 0) return false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, comment)) continue;
         for (line) |c| {
@@ -396,14 +406,14 @@ const Twin = struct {
         try t.git.exec(io, args.items);
     }
 
-    fn relicCommit(t: *Twin, gpa: Allocator, io: Io, message: []const u8, options: Options) !Outcome {
+    fn relicCommit(t: *Twin, gpa: Allocator, io: Io, text: []const u8, options: Options) !Outcome {
         var repo = try Repository.open(gpa, io, t.relic.dir, .{});
         defer repo.deinit(io);
         var runner = try repo.hookRunner(io, .{ .environ = &t.environ }, .{ .output = .ignore });
         defer runner.deinit();
         var opts = options;
         opts.hooks = &runner;
-        return commit(&repo, io, .{ .author = who, .committer = who, .message = message }, opts);
+        return commit(&repo, io, .{ .author = who, .committer = who, .message = text }, opts);
     }
 
     fn expectSame(t: *Twin, io: Io, args: []const []const u8) !void {
@@ -502,9 +512,9 @@ test "a refusing pre-commit or commit-msg hook writes nothing, and --no-verify s
 
     try twin.hook(io, "pre-commit", "#!/bin/sh\nexit 1\n");
     const made = try commit(&repo, io, request, .{ .hooks = &runner, .verify = false });
-    const head = (try repo.head(io)).?;
-    defer gpa.free(head.name);
-    try testing.expect(head.oid.eql(made.commit));
+    const moved = (try repo.head(io)).?;
+    defer gpa.free(moved.name);
+    try testing.expect(moved.oid.eql(made.commit));
 }
 
 test "an amend replaces the commit, keeps its parents, and tells post-rewrite" {

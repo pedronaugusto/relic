@@ -5,11 +5,12 @@
 //! was made with, so a name from one repository cannot be compared with a name
 //! from another by accident, and nothing in this package assumes twenty bytes.
 
+// The modules relic's API puts under this one, as `relic.hash.<name>`.
+pub const sha1 = @import("sha1.zig");
+pub const sha1dc = @import("sha1dc.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-
-const sha1_impl = @import("sha1.zig");
-const sha1dc = @import("sha1dc.zig");
 
 /// A repository's hash function.
 ///
@@ -224,7 +225,7 @@ pub const Hasher = struct {
     state: State,
 
     const State = union(enum) {
-        sha1: sha1_impl.Sha1,
+        sha1: sha1.Sha1,
         sha1_checked: sha1dc.Sha1Dc,
         sha256: std.crypto.hash.sha2.Sha256,
     };
@@ -257,11 +258,11 @@ pub const Hasher = struct {
     /// on both architectures already; SHA-1 has this package's, which has
     /// one too. A caller printing a benchmark wants the name; nothing else
     /// needs it.
-    pub const Sha1Backend = sha1_impl.Backend;
+    pub const Sha1Backend = sha1.Backend;
 
     /// The SHA-1 instructions this processor turned out to have.
     pub fn sha1Backend() Sha1Backend {
-        return sha1_impl.backend();
+        return sha1.backend();
     }
 
     /// A hasher over `kind`, with nothing fed to it yet. Feed the header

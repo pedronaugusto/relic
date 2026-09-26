@@ -3,6 +3,12 @@
 //! A repository is a local directory. Nothing here talks to a network, runs
 //! another program, or reads a clock.
 
+// The modules relic's API puts under this one, as `relic.repo.<name>`.
+pub const hooks = @import("hooks.zig");
+pub const program = @import("program.zig");
+pub const warning = @import("warning.zig");
+pub const fs = @import("fs.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -21,10 +27,7 @@ const worktree = @import("worktree.zig");
 const worktrees = @import("worktrees.zig");
 const filter = @import("filter.zig");
 const reftablestack = @import("reftablestack.zig");
-const fs = @import("fs.zig");
 const safepath = @import("safepath.zig");
-const program = @import("program.zig");
-const hooks = @import("hooks.zig");
 const signing = @import("signing.zig");
 
 const Oid = hash.Oid;
