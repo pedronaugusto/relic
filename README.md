@@ -285,14 +285,42 @@ the caller passes a prompt. When a remote refuses, the caller gets values
 rather than a sentence — which helpers were asked and what they said, what
 the server or ssh said — so it can tell the person what to fix.
 
-**TLS is relic's own.** The standard library's HTTP client cannot skip a
-certificate check, cannot present a client certificate, and its proxy tunnel
-carries the request in the clear. So `src/tls` is the standard library's TLS
-client with client authentication added, importing nothing but std, and
-`httpclient` is an HTTP/1.1 client over it. Every https connection goes
-through the two; a test fails if any other file names the standard library's
-HTTP or TLS client, and another checks that what crosses a proxy's tunnel is
-TLS.
+**TLS, HTTP and inflate are relic's own, each for something the standard
+library cannot do.** Every https connection goes through relic's TLS and HTTP
+clients; a test fails if any other file names the standard library's HTTP or
+TLS client, and another checks that what crosses a proxy's tunnel is TLS.
+
+- **TLS** is the standard library's client with client authentication added.
+  std's client runs the whole handshake inside `init`, takes no client
+  certificate, and refuses a server's CertificateRequest, so nothing outside
+  it could add one: the answer has to be written into the handshake.
+  `src/tls/Client.zig` is therefore a copy of Zig 0.16.0's file, and
+  `src/tls/Client.zig.diff` is everything the copy adds — the two options,
+  the CertificateRequest arm, the client's Certificate and CertificateVerify
+  for TLS 1.2 and 1.3 — with the code they call in `src/tls/auth_wire.zig`.
+  The copy is held to std on every `zig build test`: the std file the
+  compiler ships is hashed against the one the diff was taken from, and the
+  diff applied to it must give the copy byte for byte. A Zig release that
+  changes std's client fails the build until its fixes are brought across;
+  the header of `src/tls/Client.zig` says how, and `ci/tls-fork.sh` takes the
+  diff again.
+- **HTTP/1.1** is relic's because std's client builds its TLS inside a
+  private connect path: verification cannot be turned off for
+  `http.sslVerify=false`, there is one trust store where git has
+  `http.sslCAInfo`, `http.sslCAPath` and a proxy's own `http.proxySSLCAInfo`,
+  there is no client certificate for `http.sslCert`, and a CONNECT tunnel
+  carries no TLS of its own, so an https remote behind an http proxy would
+  be spoken to in the clear. It answers a proxy only with Basic
+  authentication from the URL, where git's curl answers a 407 with Basic or
+  Digest, and it applies no connect, handshake or activity timeout, which
+  git-lfs's settings need. Heads, chunked bodies and compression are read
+  with std's `http.Reader`.
+- **inflate** is relic's because std's zlib decoder reads the Adler-32 at the
+  end of a stream and does not check it, so a corrupt object would be taken
+  as it came; relic's checks it and refuses what zlib refuses. It decodes a
+  pack entry into one buffer of known size, which puts a large clone's
+  inflating at zlib's speed rather than about twice it, and it is fuzzed
+  against std's decoder and compressor.
 
 **A merge is git's merge-ort.** Renames, directory renames, directory/file and
 type conflicts, submodules and criss-cross histories resolve as git resolves
@@ -532,6 +560,7 @@ zig build examples      # the examples on their own
 zig build check         # compile everything, including the tests, run nothing
 zig build test --fuzz   # the fuzz tests, until stopped
 ci/readme_usage.sh --check   # the Usage block against the example
+ci/tls-fork.sh --check       # the TLS client's recorded diff against std's
 ```
 
 Every test runs under `std.testing.allocator` and `std.testing.io`, against

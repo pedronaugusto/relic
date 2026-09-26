@@ -82,5 +82,6 @@ test {
         _ = @import("clientcert_test.zig");
         _ = @import("inflate_test.zig");
         _ = @import("strategy_test.zig");
+        _ = @import("tls_fork_test.zig");
     }
 }

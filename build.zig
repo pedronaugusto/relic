@@ -90,6 +90,10 @@ pub fn build(b: *std.Build) void {
         "A git-lfs-transfer server program to prove the pure-ssh client against",
     ) orelse "");
     build_options.addOption([]const u8, "upload_pack_helper_path", b.getInstallPath(.bin, upload_pack_helper.out_filename));
+    // The standard library's TLS client, which `src/tls/Client.zig` is a copy
+    // of with client authentication added: `src/tls_fork_test.zig` holds the
+    // copy to it, and fails when the compiler building this ships another.
+    build_options.addOption([]const u8, "std_tls_client", b.graph.zig_lib_directory.join(b.allocator, &.{ "std", "crypto", "tls", "Client.zig" }) catch @panic("OOM"));
 
     // Error return traces are off for the test binary, and the reason is
     // `zig build test --fuzz`. Building the suite with fuzzing instrumented

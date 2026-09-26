@@ -7,6 +7,43 @@
 //! or, without one, with an empty Certificate, as the protocol says, and
 //! the server decides. Everything else, the checking of the server's
 //! certificate included, is the standard library's code as it is.
+//!
+//! **Why a copy.** std's client runs the whole handshake inside `init`, with
+//! the transcript, the keys and the state as locals, takes no client
+//! certificate in its `Options`, and refuses a CertificateRequest as an
+//! unexpected message. There is nothing a wrapper could hold on to, so the
+//! answer has to be written into the handshake itself.
+//!
+//! **What differs.** This file is Zig 0.16.0's
+//! `lib/std/crypto/tls/Client.zig` with the changes in `Client.zig.diff`
+//! beside it, and nothing else. They are:
+//!
+//! - this comment, and the imports: `std` by name, `ClientAuth`,
+//!   `PrivateKey`, and the helpers in `auth_wire.zig`;
+//! - `Options.client_auth` and `Options.certificate_requested`, 64 more
+//!   bytes of `Options.entropy` for a signature's salt or nonce, and the
+//!   four `InitError` members a client key can fail with;
+//! - a `certificate_request` arm in the handshake, for TLS 1.3 and 1.2;
+//! - TLS 1.2: the handshake kept as bytes while there is a key to sign
+//!   them, and the Certificate and CertificateVerify written around the
+//!   ClientKeyExchange;
+//! - TLS 1.3: the Certificate and CertificateVerify sealed under the
+//!   handshake keys before Finished, which then takes the next record
+//!   sequence, and the application secrets taken from the transcript as it
+//!   stood at the server's Finished.
+//!
+//! Everything those changes call is in `auth_wire.zig`.
+//!
+//! **Keeping it level with std.** `src/tls_fork_test.zig` holds this file
+//! to std: it fails when std's `Client.zig` is not the one the diff was
+//! taken against, and when this file is not that file with the diff applied.
+//! When a Zig release changes std's client, bring the fixes across: apply
+//! `Client.zig.diff` to the new std file, settle any hunk that no longer
+//! applies by keeping what it was for, write the result here, and run
+//! `ci/tls-fork.sh`, which takes the diff again and records the new std
+//! file's hash. Then `zig build test`, where `clientcert_test.zig` proves
+//! the handshakes against OpenSSL's servers. A change made here and not in
+//! std goes into the diff the same way, and belongs in the list above.
 
 const builtin = @import("builtin");
 const native_endian = builtin.cpu.arch.endian();
@@ -14,6 +51,13 @@ const native_endian = builtin.cpu.arch.endian();
 const std = @import("std");
 const ClientAuth = @import("ClientAuth.zig");
 const PrivateKey = @import("key.zig").PrivateKey;
+const auth_wire = @import("auth_wire.zig");
+const CertificateRequest = auth_wire.CertificateRequest;
+const keepRaw = auth_wire.keepRaw;
+const signWith = auth_wire.signWith;
+const sequenceNonce = auth_wire.sequenceNonce;
+const Sealer13 = auth_wire.Sealer13;
+const writePlainHandshake = auth_wire.writePlainHandshake;
 const tls = std.crypto.tls;
 const Client = @This();
 const mem = std.mem;
@@ -62,7 +106,6 @@ application_cipher: tls.ApplicationCipher,
 /// this connection.
 ssl_key_log: ?*SslKeyLog,
 
-/// Errors from reading after the handshake; `read_err` holds the one met.
 pub const ReadError = error{
     /// The alert description will be stored in `alert`.
     TlsAlert,
@@ -76,7 +119,6 @@ pub const ReadError = error{
     TlsSequenceOverflow,
 };
 
-/// Where the session's secrets are written, as `SSLKEYLOGFILE` has them.
 pub const SslKeyLog = struct {
     client_key_seq: u64,
     server_key_seq: u64,
@@ -98,7 +140,6 @@ pub const SslKeyLog = struct {
 /// at least this amount.
 pub const min_buffer_len = tls.max_ciphertext_record_len;
 
-/// How a handshake is made.
 pub const Options = struct {
     /// How to perform host verification of server certificates.
     host: union(enum) {
@@ -163,7 +204,6 @@ pub const Options = struct {
     pub const entropy_len = 240 + 64;
 };
 
-/// Errors from the handshake.
 pub const InitError = error{
     InsufficientEntropy,
     /// The server asked for a certificate and none of the signature
@@ -1272,7 +1312,6 @@ fn prepareCiphertextRecord(
     }
 }
 
-/// Whether the server has closed the session with `close_notify`.
 pub fn eof(c: Client) bool {
     return c.received_close_notify;
 }
@@ -1500,215 +1539,6 @@ fn big(x: anytype) @TypeOf(x) {
         .big => x,
         .little => @byteSwap(x),
     };
-}
-
-/// A server's CertificateRequest, as far as the answer needs it.
-const CertificateRequest = struct {
-    /// TLS 1.3's certificate_request_context, echoed in the Certificate.
-    context: []const u8,
-    /// The signature schemes the server takes, two bytes each.
-    schemes: []const u8,
-
-    /// TLS 1.3 (RFC 8446, 4.3.2): the context, then extensions, of which
-    /// signature_algorithms must be one.
-    fn parse13(body: []u8) error{TlsDecodeError}!CertificateRequest {
-        var d: tls.Decoder = .fromTheirSlice(body);
-        try d.ensure(1);
-        const context_len = d.decode(u8);
-        try d.ensure(context_len + 2);
-        const context = d.slice(context_len);
-        const extensions_len = d.decode(u16);
-        var extensions = try d.sub(extensions_len);
-        if (!d.eof()) return error.TlsDecodeError;
-        var schemes: ?[]const u8 = null;
-        while (!extensions.eof()) {
-            try extensions.ensure(4);
-            const et = extensions.decode(tls.ExtensionType);
-            const size = extensions.decode(u16);
-            var ext = try extensions.sub(size);
-            if (et != .signature_algorithms) continue;
-            if (schemes != null) return error.TlsDecodeError;
-            schemes = try schemeList(&ext);
-        }
-        return .{ .context = context, .schemes = schemes orelse return error.TlsDecodeError };
-    }
-
-    /// TLS 1.2 (RFC 5246, 7.4.4): certificate types, signature schemes,
-    /// the authorities the server names.
-    fn parse12(body: []u8) error{TlsDecodeError}!CertificateRequest {
-        var d: tls.Decoder = .fromTheirSlice(body);
-        try d.ensure(1);
-        const types_len = d.decode(u8);
-        try d.ensure(types_len);
-        d.skip(types_len);
-        const schemes = try schemeList(&d);
-        try d.ensure(2);
-        const authorities_len = d.decode(u16);
-        _ = try d.sub(authorities_len);
-        if (!d.eof()) return error.TlsDecodeError;
-        return .{ .context = &.{}, .schemes = schemes };
-    }
-
-    fn schemeList(d: *tls.Decoder) error{TlsDecodeError}![]const u8 {
-        try d.ensure(2);
-        const len = d.decode(u16);
-        if (len == 0 or len % 2 != 0) return error.TlsDecodeError;
-        try d.ensure(len);
-        return d.slice(len);
-    }
-
-    /// The first of `mine` the server takes.
-    fn choose(r: CertificateRequest, mine: []const tls.SignatureScheme) ?tls.SignatureScheme {
-        for (mine) |want| {
-            var i: usize = 0;
-            while (i + 2 <= r.schemes.len) : (i += 2) {
-                if (mem.readInt(u16, r.schemes[i..][0..2], .big) == @intFromEnum(want)) return want;
-            }
-        }
-        return null;
-    }
-};
-
-/// Keep `parts` of the handshake for TLS 1.2's CertificateVerify, when
-/// there is a key to sign them with.
-fn keepRaw(raw: *std.ArrayList(u8), auth: ?*const ClientAuth, parts: []const []const u8) error{OutOfMemory}!void {
-    const a = auth orelse return;
-    for (parts) |part| try raw.appendSlice(a.gpa, part);
-}
-
-fn signWith(
-    key: PrivateKey,
-    scheme: tls.SignatureScheme,
-    msg: []const u8,
-    entropy: *const [64]u8,
-    out: *[PrivateKey.max_signature_len]u8,
-) error{ ClientCertificateSchemeUnsupported, ClientKeyInvalid, ClientSignatureFault }![]const u8 {
-    return key.sign(scheme, msg, entropy, out) catch |err| switch (err) {
-        error.SignatureSchemeMismatch => error.ClientCertificateSchemeUnsupported,
-        error.InvalidRsaKey => error.ClientKeyInvalid,
-        error.RsaSignatureFault, error.SigningFailed => error.ClientSignatureFault,
-    };
-}
-
-/// The nonce for record `seq` under `iv` (RFC 8446, 5.3).
-fn sequenceNonce(comptime P: type, iv: [P.AEAD.nonce_length]u8, seq: u64) [P.AEAD.nonce_length]u8 {
-    const V = @Vector(P.AEAD.nonce_length, u8);
-    const pad = [1]u8{0} ** (P.AEAD.nonce_length - 8);
-    const operand: V = pad ++ @as([8]u8, @bitCast(big(seq)));
-    return @as(V, iv) ^ operand;
-}
-
-/// The most handshake bytes put in one record the client writes.
-const client_fragment_len = 4096;
-
-/// Handshake messages the client sends under TLS 1.3's handshake keys,
-/// gathered into records of `client_fragment_len`.
-fn Sealer13(comptime P: type) type {
-    return struct {
-        output: *Writer,
-        key: [P.AEAD.key_length]u8,
-        iv: [P.AEAD.nonce_length]u8,
-        seq: *u64,
-        buf: [client_fragment_len + 1]u8 = undefined,
-        len: usize = 0,
-
-        fn add(s: *@This(), bytes: []const u8) Writer.Error!void {
-            var rest = bytes;
-            while (rest.len > 0) {
-                const n = @min(rest.len, client_fragment_len - s.len);
-                @memcpy(s.buf[s.len..][0..n], rest[0..n]);
-                s.len += n;
-                rest = rest[n..];
-                if (s.len == client_fragment_len) try s.seal();
-            }
-        }
-
-        fn seal(s: *@This()) Writer.Error!void {
-            if (s.len == 0) return;
-            s.buf[s.len] = @intFromEnum(tls.ContentType.handshake);
-            const inner = s.buf[0 .. s.len + 1];
-            var record: [tls.record_header_len + client_fragment_len + 1 + @as(usize, P.AEAD.tag_length)]u8 = undefined;
-            const total = inner.len + P.AEAD.tag_length;
-            record[0] = @intFromEnum(tls.ContentType.application_data);
-            mem.writeInt(u16, record[1..3], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
-            mem.writeInt(u16, record[3..5], @intCast(total), .big);
-            const header = record[0..tls.record_header_len];
-            P.AEAD.encrypt(
-                record[tls.record_header_len..][0..inner.len],
-                record[tls.record_header_len + inner.len ..][0..P.AEAD.tag_length],
-                inner,
-                header,
-                sequenceNonce(P, s.iv, s.seq.*),
-                s.key,
-            );
-            try s.output.writeAll(record[0 .. tls.record_header_len + total]);
-            s.seq.* += 1;
-            s.len = 0;
-        }
-    };
-}
-
-/// Handshake messages the client sends in the clear, before TLS 1.2's
-/// ChangeCipherSpec, in records of `client_fragment_len`.
-fn writePlainHandshake(output: *Writer, parts: []const []const u8) Writer.Error!void {
-    var total: usize = 0;
-    for (parts) |part| total += part.len;
-    var part_index: usize = 0;
-    var at: usize = 0;
-    while (total > 0) {
-        const n = @min(total, client_fragment_len);
-        var header: [tls.record_header_len]u8 = undefined;
-        header[0] = @intFromEnum(tls.ContentType.handshake);
-        mem.writeInt(u16, header[1..3], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
-        mem.writeInt(u16, header[3..5], @intCast(n), .big);
-        try output.writeAll(&header);
-        var left = n;
-        while (left > 0) {
-            const part = parts[part_index];
-            const take = @min(left, part.len - at);
-            try output.writeAll(part[at..][0..take]);
-            at += take;
-            left -= take;
-            if (at == part.len) {
-                part_index += 1;
-                at = 0;
-            }
-        }
-        total -= n;
-    }
-}
-
-test "a CertificateRequest is read as each version writes it, and anything else is refused" {
-    var tls13 = [_]u8{ 2, 0xaa, 0xbb, 0, 10, 0, 13, 0, 6, 0, 4, 0x08, 0x04, 0x04, 0x03 };
-    const r13 = try CertificateRequest.parse13(&tls13);
-    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, r13.context);
-    try std.testing.expectEqual(tls.SignatureScheme.ecdsa_secp256r1_sha256, r13.choose(&.{ .ed25519, .ecdsa_secp256r1_sha256 }).?);
-    try std.testing.expectEqual(null, r13.choose(&.{.ed25519}));
-    var no_schemes = [_]u8{ 0, 0, 0 };
-    try std.testing.expectError(error.TlsDecodeError, CertificateRequest.parse13(&no_schemes));
-    var tls12 = [_]u8{ 2, 1, 64, 0, 2, 0x04, 0x01, 0, 0 };
-    const r12 = try CertificateRequest.parse12(&tls12);
-    try std.testing.expectEqual(tls.SignatureScheme.rsa_pkcs1_sha256, r12.choose(&.{ .rsa_pss_rsae_sha256, .rsa_pkcs1_sha256 }).?);
-    var odd = [_]u8{ 0, 0, 3, 0x04, 0x01, 0x05, 0, 0 };
-    try std.testing.expectError(error.TlsDecodeError, CertificateRequest.parse12(&odd));
-}
-
-test "fuzz: any CertificateRequest is read or refused as undecodable" {
-    try std.testing.fuzz({}, struct {
-        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [300]u8 = undefined;
-            const body = buf[0..smith.slice(&buf)];
-            if (CertificateRequest.parse13(body)) |r| {
-                _ = r.choose(&.{ .rsa_pss_rsae_sha256, .ed25519 });
-            } else |err| try std.testing.expectEqual(error.TlsDecodeError, err);
-            if (CertificateRequest.parse12(body)) |r| {
-                _ = r.choose(&.{.rsa_pkcs1_sha256});
-            } else |err| try std.testing.expectEqual(error.TlsDecodeError, err);
-        }
-    }.one, .{ .corpus = &.{
-        &.{ 0, 0, 8, 0, 13, 0, 4, 0, 2, 0x08, 0x07 },
-        &.{ 1, 64, 0, 2, 0x04, 0x03, 0, 0 },
-    } });
 }
 
 const KeyShare = struct {
