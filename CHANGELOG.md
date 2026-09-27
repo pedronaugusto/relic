@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Odb.existsOwn` and `Odb.own`: whether an object is in the database's own
+  objects rather than only in an alternate, and taking one an alternate
+  holds into its own. A repository that borrows another's objects owns what
+  it cannot afford to lose to the other's `gc`.
+
 ### Changed
 
 - **Breaking:** the root is one module per concern, each holding the modules

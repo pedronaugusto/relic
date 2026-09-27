@@ -675,7 +675,34 @@ pub const Odb = struct {
             odb.stats.loose_present += 1;
             return oid;
         }
+        try odb.writeLoose(io, t, bytes, oid);
+        return oid;
+    }
 
+    /// Whether `oid` is in this database's own objects, loose or packed,
+    /// and not only in an alternate.
+    pub fn existsOwn(odb: *Odb, io: Io, oid: Oid) Error!bool {
+        const source = odb.writableSource();
+        var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+        const path = odb.loosePath(oid, &path_buf);
+        if (source.dir.access(io, path, .{})) |_| return true else |_| {}
+        return (try source.findPack(oid, &odb.stats)) != null;
+    }
+
+    /// Take `oid` into this database's own objects when only an alternate
+    /// holds it, so that it stays readable here whatever becomes of the
+    /// alternate: a repository that borrows another's objects owns what it
+    /// cannot afford to lose. An object already here is left as it is.
+    pub fn own(odb: *Odb, io: Io, oid: Oid) Error!void {
+        if (try odb.existsOwn(io, oid)) return;
+        const found = try odb.read(io, oid);
+        defer odb.gpa.free(found.bytes);
+        try odb.writeLoose(io, found.type, found.bytes, oid);
+    }
+
+    /// Writes `bytes`, named `oid`, as a loose object in this database's own
+    /// objects, whatever an alternate holds.
+    fn writeLoose(odb: *Odb, io: Io, t: object.Type, bytes: []const u8, oid: Oid) Error!void {
         const source = odb.writableSource();
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
@@ -748,7 +775,6 @@ pub const Odb = struct {
             try fs.syncDir(io, sub);
         }
         odb.stats.loose_written += 1;
-        return oid;
     }
 
     /// `<xx>/tmp_obj_<random>`, written into `buf`.
@@ -2015,6 +2041,43 @@ test "a loose object written is a loose object read" {
         error.ObjectNotFound,
         odb.read(io, try Oid.parse(.sha1, "1" ** 40)),
     );
+}
+
+test "an object an alternate holds is borrowed, and owned once asked for" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "theirs/pack");
+    try tmp.dir.createDirPath(io, "ours/pack");
+    try tmp.dir.createDirPath(io, "ours/info");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ours/info/alternates", .data = "../theirs\n" });
+
+    const oid = blk: {
+        var theirs = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "theirs", .{ .iterate = true }), .sha1, .{});
+        defer theirs.deinit(io);
+        break :blk try theirs.write(io, .blob, "borrowed\n");
+    };
+    {
+        var ours = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "ours", .{ .iterate = true }), .sha1, .{});
+        defer ours.deinit(io);
+        // read through the alternate, written nowhere here
+        try std.testing.expect(try ours.exists(io, oid));
+        try std.testing.expect(!try ours.existsOwn(io, oid));
+        try std.testing.expect((try ours.write(io, .blob, "borrowed\n")).eql(oid));
+        try std.testing.expect(!try ours.existsOwn(io, oid));
+        // owned: here whatever becomes of the alternate
+        try ours.own(io, oid);
+        try std.testing.expect(try ours.existsOwn(io, oid));
+        try ours.own(io, oid);
+    }
+    try tmp.dir.deleteTree(io, "theirs");
+    try tmp.dir.createDirPath(io, "theirs/pack");
+    var ours = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "ours", .{ .iterate = true }), .sha1, .{});
+    defer ours.deinit(io);
+    const found = try ours.read(io, oid);
+    defer gpa.free(found.bytes);
+    try std.testing.expectEqualStrings("borrowed\n", found.bytes);
 }
 
 test "an abbreviated name resolves, and an ambiguous one is named" {
