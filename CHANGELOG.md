@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Performance
+
+- A pack entry is inflated in one pass by relic's own decoder, into the
+  buffer its header sizes, rather than streamed through std's.
+- Packs are looked in before loose objects, as git looks: a packed
+  repository no longer pays a failed `open` for every object read.
+- An entry's header and data come from one buffered read, and a seek
+  backwards to a delta's base reuses what the buffer already holds.
+- `worktree.status` does not read HEAD's side of a directory whose tree the
+  index's cache tree already names; with nothing staged, HEAD is not read.
+- Measured on the 20 000-file bench repository against git 2.55, best of
+  seven, alternating: every blob through the pack 178 ms against 219,
+  status 46 ms against 52, `rev-list --objects` 62.6 ms against 61.3.
+
 ### Added
 
 - `Odb.existsOwn` and `Odb.own`: whether an object is in the database's own
