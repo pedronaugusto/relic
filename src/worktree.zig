@@ -753,9 +753,21 @@ pub fn status(
     for (index.entries.items) |entry| {
         if (entry.isSparseDirectory()) try sparse_dirs.put(arena, entry.path[0 .. entry.path.len - 1], entry.oid);
     }
+    // The cache tree says which directories the index holds exactly as a
+    // tree object it names; where HEAD has that same tree, nothing under it
+    // is staged and HEAD's side is never read. With nothing staged at all
+    // that is the root, and HEAD is not read at all — git's shortcut.
+    var cached: std.StringHashMapUnmanaged(Oid) = .empty;
+    if (index.cache_tree) |*tree| try validTrees(arena, &tree.root, "", &cached);
+    var unchanged: std.StringHashMapUnmanaged(void) = .empty;
     var head_paths: std.StringHashMapUnmanaged(TreeEntry) = .empty;
     if (options.head_tree) |tree_oid| {
-        try flattenTree(arena, io, db, tree_oid, "", &head_paths, 0, &sparse_dirs);
+        if (cached.get("")) |root| {
+            if (root.eql(tree_oid)) try unchanged.put(arena, "", {});
+        }
+        if (!unchanged.contains("")) {
+            try flattenStaged(arena, io, db, tree_oid, "", &head_paths, 0, &sparse_dirs, &cached, &unchanged);
+        }
     }
     var expanded: std.StringHashMapUnmanaged(TreeEntry) = .empty;
     for (index.entries.items) |entry| {
@@ -796,7 +808,10 @@ pub fn status(
                 if (entry.mode == .gitlink or was_gitlink) continue;
             }
         }
-        const staged = compareToHead(&head_paths, entry.path, entry.mode, entry.oid);
+        const staged = if (options.head_tree == null or !underAny(&unchanged, entry.path))
+            compareToHead(&head_paths, entry.path, entry.mode, entry.oid)
+        else
+            .unmodified;
         if (staged == .unmodified) continue;
         const slot = try entries.getOrPut(arena, try arena.dupe(u8, entry.path));
         slot.value_ptr.* = .{
@@ -882,6 +897,69 @@ pub fn status(
 }
 
 /// HEAD's side of one index path: what `status` calls a staged change.
+/// Every directory the cache tree holds valid, by path, with its tree.
+fn validTrees(arena: Allocator, node: *const index_mod.CacheTree.Node, path: []const u8, out: *std.StringHashMapUnmanaged(Oid)) Allocator.Error!void {
+    if (node.isValid()) try out.put(arena, path, node.oid.?);
+    for (node.children.items) |*child| {
+        const sub = if (path.len == 0) child.name else try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, child.name });
+        try validTrees(arena, child, sub, out);
+    }
+}
+
+/// HEAD's tree flattened, as `flattenTree`, but a directory whose tree the
+/// index's cache tree names as its own is not descended into: it is
+/// recorded in `unchanged`, nothing under it being staged.
+fn flattenStaged(
+    arena: Allocator,
+    io: Io,
+    db: *Odb,
+    tree_oid: Oid,
+    prefix: []const u8,
+    out: *std.StringHashMapUnmanaged(TreeEntry),
+    depth: u32,
+    same: *const std.StringHashMapUnmanaged(Oid),
+    cached: *const std.StringHashMapUnmanaged(Oid),
+    unchanged: *std.StringHashMapUnmanaged(void),
+) Error!void {
+    if (depth > 64) return error.UnsupportedEntry;
+    const found = try db.read(io, tree_oid);
+    defer db.gpa.free(found.bytes);
+    if (found.type != .tree) return error.UnsupportedEntry;
+    const tree: object.Tree = .parse(db.kind, found.bytes);
+    var it = tree.iterate();
+    while (try it.next()) |entry| {
+        const path = if (prefix.len == 0)
+            try arena.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
+        if (entry.mode == .tree) {
+            if (same.get(path)) |oid| {
+                if (oid.eql(entry.oid)) continue;
+            }
+            if (cached.get(path)) |oid| {
+                if (oid.eql(entry.oid)) {
+                    try unchanged.put(arena, path, {});
+                    continue;
+                }
+            }
+            try flattenStaged(arena, io, db, entry.oid, path, out, depth + 1, same, cached, unchanged);
+            continue;
+        }
+        try out.put(arena, path, .{ .mode = entry.mode, .oid = entry.oid });
+    }
+}
+
+/// Whether `path` lies under a directory in `dirs` ("" is the root).
+fn underAny(dirs: *const std.StringHashMapUnmanaged(void), path: []const u8) bool {
+    if (dirs.count() == 0) return false;
+    if (dirs.contains("")) return true;
+    var end: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {
+        if (dirs.contains(path[0..slash])) return true;
+    }
+    return false;
+}
+
 fn compareToHead(head_paths: *const std.StringHashMapUnmanaged(TreeEntry), path: []const u8, mode: object.Mode, oid: Oid) Change {
     const in_head = head_paths.get(path) orelse return .added;
     if (!in_head.oid.eql(oid)) return .modified;
