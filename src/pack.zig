@@ -481,6 +481,20 @@ pub const Pack = struct {
         return p;
     }
 
+    /// Move the file reader to `offset`, reusing what its buffer already
+    /// holds there: std's positional reader drops its buffer on any seek
+    /// backwards, and a delta chain seeks backwards to each base, which is
+    /// most often a few kilobytes before the delta that names it.
+    fn seekTo(p: *Pack, offset: u64) Io.File.Reader.SeekError!void {
+        const r = &p.file_reader;
+        const start = r.pos - r.interface.end;
+        if (offset >= start and offset < r.pos) {
+            r.interface.seek = @intCast(offset - start);
+            return;
+        }
+        return r.seekTo(offset);
+    }
+
     /// Close the pack and release everything it holds.
     pub fn deinit(p: *Pack, io: Io) void {
         p.gpa.free(p.window);
@@ -518,7 +532,17 @@ pub const Pack = struct {
             @memcpy(out[0..n], mem[@intCast(offset)..][0..n]);
             return n;
         }
-        return p.file.readPositional(io, &.{out}, offset);
+        // through the reader, so the entry's data behind its header is then
+        // already buffered for the inflate that follows
+        _ = io;
+        p.seekTo(offset) catch return error.TruncatedPack;
+        const have = p.file_reader.interface.peekGreedy(1) catch |err| switch (err) {
+            error.EndOfStream => return 0,
+            error.ReadFailed => return p.file_reader.err orelse error.TruncatedPack,
+        };
+        const n = @min(out.len, have.len);
+        @memcpy(out[0..n], have[0..n]);
+        return n;
     }
 
     /// The header of the entry at `offset`, without inflating anything.
@@ -595,7 +619,7 @@ pub const Pack = struct {
             fixed_reader = .fixed(mem[@intCast(at)..]);
             break :blk &fixed_reader;
         } else blk: {
-            p.file_reader.seekTo(at) catch return error.TruncatedPack;
+            p.seekTo(at) catch return error.TruncatedPack;
             break :blk &p.file_reader.interface;
         };
 
@@ -726,7 +750,7 @@ pub const Pack = struct {
             fixed_reader = .fixed(mem[@intCast(at)..]);
             break :blk &fixed_reader;
         } else blk: {
-            p.file_reader.seekTo(at) catch return error.TruncatedPack;
+            p.seekTo(at) catch return error.TruncatedPack;
             break :blk &p.file_reader.interface;
         };
         var decompress: flate.Decompress = .init(input, .zlib, p.window);

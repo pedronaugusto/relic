@@ -468,8 +468,11 @@ pub const Odb = struct {
         return error.ObjectNotFound;
     }
 
+    /// The packs first, then the loose objects, as git looks: a name is its
+    /// content, so where it is found does not change what is read, and in a
+    /// packed repository a loose lookup first is a failed `open` for every
+    /// object.
     fn tryRead(odb: *Odb, io: Io, oid: Oid) Error!?Read {
-        if (try odb.readLoose(io, oid)) |found| return found;
         var base: u32 = 0;
         for (odb.sources.items) |*source| {
             defer base += @intCast(source.packs.items.len);
@@ -478,7 +481,7 @@ pub const Odb = struct {
             const obj = try p.readAt(io, located.offset, &odb.cache, base + @as(u32, @intCast(located.at)));
             return .{ .type = obj.type, .bytes = obj.bytes };
         }
-        return null;
+        return odb.readLoose(io, oid);
     }
 
     fn readLoose(odb: *Odb, io: Io, oid: Oid) Error!?Read {
