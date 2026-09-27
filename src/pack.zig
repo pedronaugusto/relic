@@ -12,6 +12,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
+const inflate_mod = @import("inflate.zig");
 
 const hash = @import("hash.zig");
 const object = @import("object.zig");
@@ -385,8 +386,11 @@ pub const Pack = struct {
     max_depth: u32,
     max_chain_bytes: u64,
     /// Scratch for one inflate at a time. The package starts no threads, and
-    /// a delta chain is resolved one entry after another, so one window does.
+    /// a delta chain is resolved one entry after another, so one window —
+    /// for a head read part way — and one decoder — for an entry read whole —
+    /// do.
     window: []u8,
+    decoder: *inflate_mod.Decoder,
     input_buffer: []u8,
     file_reader: Io.File.Reader,
 
@@ -449,6 +453,9 @@ pub const Pack = struct {
 
         const window = try gpa.alloc(u8, flate.max_window_len);
         errdefer gpa.free(window);
+        const decoder = try gpa.create(inflate_mod.Decoder);
+        errdefer gpa.destroy(decoder);
+        decoder.* = .{};
         // 64 KiB rather than the usual 8: a pack scan reads entry headers one
         // after another and the larger buffer is several times faster.
         const input_buffer = try gpa.alloc(u8, 64 * 1024);
@@ -466,6 +473,7 @@ pub const Pack = struct {
             .max_depth = options.max_depth,
             .max_chain_bytes = options.max_chain_bytes,
             .window = window,
+            .decoder = decoder,
             .input_buffer = input_buffer,
             .file_reader = undefined,
         };
@@ -476,6 +484,7 @@ pub const Pack = struct {
     /// Close the pack and release everything it holds.
     pub fn deinit(p: *Pack, io: Io) void {
         p.gpa.free(p.window);
+        p.gpa.destroy(p.decoder);
         p.gpa.free(p.input_buffer);
         if (p.mapping) |*m| m.destroy(io);
         p.file.close(io);
@@ -590,8 +599,10 @@ pub const Pack = struct {
             break :blk &p.file_reader.interface;
         };
 
-        var decompress: flate.Decompress = .init(input, .zlib, p.window);
-        decompress.reader.readSliceAll(out) catch return error.CorruptPackEntry;
+        // the whole entry in one pass into a buffer its header sized: no
+        // window, no streaming state (`inflate.zig`)
+        const n = p.decoder.zlib(input, out) catch return error.CorruptPackEntry;
+        if (n != out.len) return error.CorruptPackEntry;
         return out;
     }
 
