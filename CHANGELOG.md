@@ -48,6 +48,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The suite runs from a checkout at any path. gpg-agent puts its sockets in
+  `GNUPGHOME`, and a home inside a test's temporary directory, under the
+  checkout, gave a socket path past the 104 bytes Darwin allows, so every
+  OpenPGP test failed from a long path. The signing tests' gpg home is now a
+  short directory of their own under `/tmp` (`testgit.GnupgHome`), removed
+  once gpg's daemons for it are stopped.
+
 - `Signer.init` and `Lfs.load` leaked memory when a setting was long. Each
   took its arena's state before its last allocations, so the blocks those
   allocations made were not in the state `deinit` freed: a signing key,

@@ -310,6 +310,43 @@ pub fn isolate(map: *Environ.Map, home: []const u8) !void {
     try map.put("GIT_TERMINAL_PROMPT", "0");
 }
 
+/// A home for gpg of a test's own, at a path short enough for its sockets.
+///
+/// gpg-agent, and keyboxd and dirmngr where they run, put their sockets in
+/// `GNUPGHOME`, and a Unix socket's path is held to 104 bytes on Darwin and
+/// 108 on Linux. A home inside a test's temporary directory lives under the
+/// checkout, so from a checkout at a long path gpg could not bind its agent
+/// ("File name too long") and every OpenPGP test failed. This home is
+/// `/tmp/relic-gpg-` and sixteen random characters, whatever the checkout,
+/// made with the mode gpg asks of a home (0700) and removed by `deinit`,
+/// which is called once gpg's daemons for it have been told to stop.
+/// Nothing of the person's is in it: the tests that use it still put it in
+/// an environment `isolate` has emptied of theirs.
+pub const GnupgHome = struct {
+    buffer: [prefix.len + 16]u8,
+
+    const prefix = "/tmp/relic-gpg-";
+
+    pub fn init(io: Io) !GnupgHome {
+        var home: GnupgHome = .{ .buffer = undefined };
+        var random_bytes: [12]u8 = undefined;
+        io.random(&random_bytes);
+        @memcpy(home.buffer[0..prefix.len], prefix);
+        _ = std.base64.url_safe_no_pad.Encoder.encode(home.buffer[prefix.len..], &random_bytes);
+        try Io.Dir.createDirAbsolute(io, home.path(), .fromMode(0o700));
+        return home;
+    }
+
+    pub fn path(home: *const GnupgHome) []const u8 {
+        return &home.buffer;
+    }
+
+    pub fn deinit(home: *GnupgHome, io: Io) void {
+        Io.Dir.cwd().deleteTree(io, home.path()) catch {};
+        home.* = undefined;
+    }
+};
+
 /// The test process's environment, isolated: see `isolate`.
 pub fn isolatedEnviron(gpa: Allocator, home: []const u8) !Environ.Map {
     var map = try std.testing.environ.createMap(gpa);

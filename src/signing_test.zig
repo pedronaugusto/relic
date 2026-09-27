@@ -2,7 +2,7 @@
 //!
 //! The keys are made for each test in its own temporary directory: an SSH
 //! key by `ssh-keygen`, and an OpenPGP key by `gpg` in a `GNUPGHOME` of its
-//! own. The environment every program runs in is built from nothing but
+//! own, under `/tmp` so that its sockets' paths fit (`testgit.GnupgHome`). The environment every program runs in is built from nothing but
 //! `PATH` and that directory, so neither the person's `~/.gnupg` nor
 //! `~/.ssh` nor any agent they run is reached. A machine without the
 //! program skips the test.
@@ -41,6 +41,8 @@ const Keyed = struct {
     environ: std.process.Environ.Map,
     /// The absolute path of the directory the keys are in.
     home: []const u8,
+    /// gpg's home, short enough for its sockets: see `testgit.GnupgHome`.
+    gnupg: testgit.GnupgHome,
     format: signing.Format,
 
     fn init(gpa: Allocator, io: Io, format: signing.Format, init_args: []const []const u8) !*Keyed {
@@ -69,9 +71,9 @@ const Keyed = struct {
         try k.environ.put("PATH", path);
         try testgit.isolate(&k.environ, k.home);
         try k.environ.put("TMPDIR", k.home);
-        const gnupg_home = try std.fs.path.join(gpa, &.{ k.home, "g" });
-        defer gpa.free(gnupg_home);
-        try k.environ.put("GNUPGHOME", gnupg_home);
+        k.gnupg = try .init(io);
+        errdefer k.gnupg.deinit(io);
+        try k.environ.put("GNUPGHOME", k.gnupg.path());
         try k.environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
         try k.environ.put("GIT_COMMITTER_DATE", "@1700000000 +0000");
         k.repo.environ = &k.environ;
@@ -84,6 +86,7 @@ const Keyed = struct {
             // and keyboxd or dirmngr on a GnuPG that starts them.
             _ = k.run(io, &.{ "gpgconf", "--kill", "all" }) catch {};
         }
+        k.gnupg.deinit(io);
         k.repo.deinit();
         k.environ.deinit();
         k.gpa.free(k.home);
@@ -134,8 +137,6 @@ const Keyed = struct {
                 try k.config(io, "gpg.ssh.allowedSignersFile", allowed_path);
             },
             .openpgp => {
-                const home = k.environ.get("GNUPGHOME").?;
-                try Io.Dir.createDirAbsolute(io, home, .fromMode(0o700));
                 k.gpa.free(try k.run(io, &.{
                     "gpg",                  "--batch",                       "--quiet", "--passphrase", "",
                     "--quick-generate-key", "Fixture <fixture@example.com>", "ed25519", "sign",         "never",

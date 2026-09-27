@@ -2782,12 +2782,11 @@ test "a rebase's squash and reword run the hooks of the commits git makes for th
 //=========================================================================
 
 /// A key of `format` made in `dir`, which holds nothing of the person's,
-/// with both copies of `pair` set to sign with it. `false` when the program
-/// that makes it is not installed.
-fn makeSigningKey(pair: *Pair, io: Io, dir: []const u8, format: @import("signing.zig").Format) !bool {
+/// with gpg's home at `gnupg_home` (a `testgit.GnupgHome`) and both copies
+/// of `pair` set to sign with it. `false` when the program that makes it is
+/// not installed.
+fn makeSigningKey(pair: *Pair, io: Io, dir: []const u8, gnupg_home: []const u8, format: @import("signing.zig").Format) !bool {
     const gpa = pair.gpa;
-    const gnupg_home = try std.fs.path.join(gpa, &.{ dir, "g" });
-    defer gpa.free(gnupg_home);
     try pair.env.put("GNUPGHOME", gnupg_home);
     try pair.env.put("HOME", dir);
     switch (format) {
@@ -2813,7 +2812,6 @@ fn makeSigningKey(pair: *Pair, io: Io, dir: []const u8, format: @import("signing
             }
         },
         .openpgp => {
-            try Io.Dir.createDirAbsolute(io, gnupg_home, .fromMode(0o700));
             const made = std.process.run(gpa, io, .{ .argv = &.{
                 "gpg",                  "--batch",                       "--quiet", "--passphrase", "",
                 "--quick-generate-key", "Fixture <fixture@example.com>", "ed25519", "sign",         "never",
@@ -2898,7 +2896,11 @@ fn signedHistory(format: @import("signing.zig").Format) !void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try gpa.dupe(u8, buf[0..try keys.dir.realPath(io, &buf)]);
     defer gpa.free(dir);
-    if (!try makeSigningKey(&pair, io, dir, format)) return error.SkipZigTest;
+    // gpg's home under /tmp, where its sockets' paths fit; see
+    // `testgit.GnupgHome`. Removed after the daemons below are stopped.
+    var gnupg: testgit.GnupgHome = try .init(io);
+    defer gnupg.deinit(io);
+    if (!try makeSigningKey(&pair, io, dir, gnupg.path(), format)) return error.SkipZigTest;
     defer if (format == .openpgp) {
         const stopped = std.process.run(gpa, io, .{ .argv = &.{ "gpgconf", "--kill", "all" }, .environ_map = &pair.env }) catch null;
         if (stopped) |s| {
