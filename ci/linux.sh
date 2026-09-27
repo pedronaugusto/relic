@@ -13,8 +13,14 @@
 # version of that file: a rerun finds it and starts at once, and a change to
 # the pinned git or Zig builds a new one rather than running an old one.
 #
-# The caches go under /tmp inside the container so that the repository's own
-# .zig-cache, which holds objects for the host's architecture, is left alone.
+# The suite runs on a copy of the checkout inside the container, not on the
+# checkout itself. A bind mount from macOS is the host's filesystem seen
+# through virtiofs, and it keeps the host's rules: there root may execute a
+# file with no execute bit, and git finds changes in a work tree nobody
+# touched. The promises under test are Linux's, so the files the tests make
+# live on the container's own filesystem. The caches go under /tmp with them,
+# and the repository's own .zig-cache, which holds objects for the host's
+# architecture, is left alone.
 #
 # Usage: ci/linux.sh [extra zig build args...]
 
@@ -38,18 +44,18 @@ docker run --rm "$image" git --version
 for mode in Debug ReleaseSafe; do
     echo "==> zig build test -Doptimize=$mode (linux, in $image)"
     docker run --rm \
-        -v "$PWD:/src" \
-        -w /src \
+        -v "$PWD:/src:ro" \
         "$image" \
-        zig build test \
-        -Doptimize="$mode" \
-        --cache-dir /tmp/zc \
-        --global-cache-dir /tmp/zg \
-        "$@"
+        sh -ec '
+            mkdir /tmp/relic
+            tar -C /src --exclude=./.zig-cache --exclude=./zig-out -cf - . | tar -C /tmp/relic -xf -
+            cd /tmp/relic
+            exec zig build test --cache-dir /tmp/zc --global-cache-dir /tmp/zg "$@"
+        ' sh -Doptimize="$mode" "$@"
 done
 
 echo "==> zig fmt --check (linux)"
-docker run --rm -v "$PWD:/src" -w /src "$image" \
+docker run --rm -v "$PWD:/src:ro" -w /src "$image" \
     zig fmt --check src examples build.zig
 
 echo "all green on linux."
