@@ -8,13 +8,39 @@
 # divergence. Debian for the libc a released binary is likely to meet; the
 # toolchain is fetched by version so the image is reproducible from this file
 # alone.
+#
+# The git is built from a release tarball, not taken from Debian. The suite's
+# reftable fixtures need 2.45 and `git refs verify` 2.47, and bookworm ships
+# 2.39. The version is the one CI's Linux job builds (GIT_VERSION in
+# .github/workflows/ci.yml), and the tarball is checked against the SHA-256
+# kernel.org publishes for it before a byte of it is built. NO_RUST because
+# the Rust parts are optional in this release and would bring a Rust toolchain
+# into the image for nothing the suite reads. The build is a stage of its own,
+# so the image carries the installed git and not its compiler.
+
+FROM debian:bookworm-slim AS git
+ARG GIT_VERSION=2.55.0
+ARG GIT_SHA256=457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl xz-utils \
+      libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -e; \
+    curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /tmp/git.tar.xz; \
+    echo "${GIT_SHA256}  /tmp/git.tar.xz" | sha256sum -c -; \
+    mkdir -p /tmp/git && tar -xJf /tmp/git.tar.xz -C /tmp/git --strip-components=1; \
+    make -C /tmp/git -j"$(nproc)" NO_TCLTK=1 NO_GETTEXT=1 NO_RUST=1 prefix=/opt/git all; \
+    make -C /tmp/git NO_TCLTK=1 NO_GETTEXT=1 NO_RUST=1 prefix=/opt/git install
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends curl xz-utils ca-certificates git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl xz-utils ca-certificates libcurl4 libexpat1 zlib1g perl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=git /opt/git /opt/git
 ARG ZIG=0.16.0
 RUN set -e; arch=$(uname -m); \
     for name in "zig-${arch}-linux-${ZIG}" "zig-linux-${arch}-${ZIG}"; do \
       if curl -fsSL "https://ziglang.org/download/${ZIG}/${name}.tar.xz" -o /tmp/zig.tar.xz; then break; fi; done; \
     mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 && rm /tmp/zig.tar.xz
-ENV PATH=/opt/zig:$PATH
+ENV PATH=/opt/zig:/opt/git/bin:$PATH
 WORKDIR /src
