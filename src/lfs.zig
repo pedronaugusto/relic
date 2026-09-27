@@ -628,14 +628,19 @@ pub const Lfs = struct {
             }
         }
 
+        const fetch_include: []const []const u8 = if (include) |v| try splitPatterns(a, v) else &.{};
+        const fetch_exclude: []const []const u8 = if (exclude) |v| try splitPatterns(a, v) else &.{};
+
+        // The arena's state is taken after its last allocation: a copy taken
+        // earlier would not hold the blocks allocated after it.
         return .{
             .gpa = gpa,
             .arena = arena_instance.state,
             .extensions = extensions,
             .store = .{ .base = common_dir, .root = root },
             .settings = .{
-                .fetch_include = if (include) |v| try splitPatterns(a, v) else &.{},
-                .fetch_exclude = if (exclude) |v| try splitPatterns(a, v) else &.{},
+                .fetch_include = fetch_include,
+                .fetch_exclude = fetch_exclude,
                 .skip_smudge = options.skip_smudge,
                 .url = url,
                 .case_fold = case_fold,
@@ -673,6 +678,24 @@ fn pointerText(comptime oid: []const u8, comptime size: []const u8) []const u8 {
 }
 
 const hello_oid = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03";
+
+test "settings that outgrow the arena's first block are all freed with it" {
+    // Enough patterns that their lists take blocks of their own, which the
+    // arena's state did not hold when it was taken before them.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const many = "p," ** 3000 ++ "p";
+    var config = try config_mod.Config.parseText(gpa, "[lfs]\n" ++
+        "\tfetchinclude = " ++ many ++ "\n" ++
+        "\tfetchexclude = " ++ many ++ "\n", .local);
+    defer config.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var lfs = try Lfs.load(gpa, io, &config, tmp.dir, null, .{});
+    defer lfs.deinit();
+    try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_include.len);
+    try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_exclude.len);
+}
 
 test "a pointer decodes and encodes to the same bytes" {
     const text = pointerText(hello_oid, "6");

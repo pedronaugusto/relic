@@ -48,6 +48,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `Signer.init` and `Lfs.load` leaked memory when a setting was long. Each
+  took its arena's state before its last allocations, so the blocks those
+  allocations made were not in the state `deinit` freed: a signing key,
+  key command, allowed-signers or revocation file, or `lfs.fetchinclude`
+  and `lfs.fetchexclude` lists, long enough to need a block of their own.
+  A path to the key under a long home directory was enough.
+
 - The signing tests' git read the machine's system configuration, which on
   a Homebrew or Xcode git names the keychain as the credential helper. They
   now run in the same isolated environment as the rest of the suite: no

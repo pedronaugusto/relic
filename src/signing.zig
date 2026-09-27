@@ -274,16 +274,24 @@ pub const Signer = struct {
         else
             .undefined;
 
+        const signing_key: ?[]const u8 = if (config.get("user.signingkey")) |raw| try expandPath(arena, config, try unquote(arena, raw)) else null;
+        const default_key_command: ?[]const u8 = if (config.get("gpg.ssh.defaultkeycommand")) |raw| try unquote(arena, raw) else null;
+        const allowed_signers = try config.getPath(arena, "gpg.ssh.allowedsignersfile");
+        const revocation_file = try config.getPath(arena, "gpg.ssh.revocationfile");
+
+        // The arena's state is taken after its last allocation: a copy taken
+        // earlier would not hold the blocks allocated after it, and they
+        // would leak when the copy is freed.
         return .{
             .gpa = gpa,
             .arena = arena_instance.state,
             .programs = programs,
             .format = format,
             .program = program_name,
-            .signing_key = if (config.get("user.signingkey")) |raw| try expandPath(arena, config, try unquote(arena, raw)) else null,
-            .default_key_command = if (config.get("gpg.ssh.defaultkeycommand")) |raw| try unquote(arena, raw) else null,
-            .allowed_signers = try config.getPath(arena, "gpg.ssh.allowedsignersfile"),
-            .revocation_file = try config.getPath(arena, "gpg.ssh.revocationfile"),
+            .signing_key = signing_key,
+            .default_key_command = default_key_command,
+            .allowed_signers = allowed_signers,
+            .revocation_file = revocation_file,
             .min_trust = min_trust,
         };
     }
@@ -876,6 +884,27 @@ const TempFile = struct {
 //=========================================================================
 
 const testing = std.testing;
+
+test "a signer whose settings outgrow the arena's first block frees every one of them" {
+    // Values long enough that each takes a block of its own. The arena's
+    // state was taken before the last four were allocated, so those blocks
+    // were not in it and leaked; a long path in a test's home was enough.
+    const gpa = std.testing.allocator;
+    const long = "/" ++ "k" ** 5000;
+    var config = try config_mod.Config.parseText(gpa, "[gpg]\n\tformat = ssh\n" ++
+        "[user]\n\tsigningKey = " ++ long ++ "/id\n" ++
+        "[gpg \"ssh\"]\n" ++
+        "\tdefaultKeyCommand = " ++ long ++ "/cmd\n" ++
+        "\tallowedSignersFile = " ++ long ++ "/allowed\n" ++
+        "\trevocationFile = " ++ long ++ "/revoked\n", .local);
+    defer config.deinit();
+    var environ: std.process.Environ.Map = .init(gpa);
+    defer environ.deinit();
+    var signer = try Signer.init(gpa, &config, .{ .environ = &environ });
+    defer signer.deinit();
+    try std.testing.expectEqualStrings(long ++ "/id", signer.signing_key.?);
+    try std.testing.expectEqualStrings(long ++ "/revoked", signer.revocation_file.?);
+}
 
 test "a commit's signature comes out as git takes it out, other hashes' too" {
     const gpa = testing.allocator;
