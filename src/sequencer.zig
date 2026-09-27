@@ -488,7 +488,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
             const their_tree = commit.tree;
             var outcome = try threeway.apply(gpa, io, repo, &index, head_tree, head_tree, their_tree, .{ .blocked = r.options.blocked });
             defer outcome.deinit();
-            try index.write(io, repo.git_dir, "index", .{});
+            try repo.writeIndex(io, &index);
             const log = try std.fmt.allocPrint(arena, "{s}: fast-forward", .{r.action.name()});
             try head_mod.advance(io, repo, head, oid, .{ .who = r.options.who, .message = log });
             try updateAbortSafety(gpa, io, repo);
@@ -540,7 +540,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         .blocked = r.options.blocked,
     });
     defer outcome.deinit();
-    try index.write(io, repo.git_dir, "index", .{});
+    try repo.writeIndex(io, &index);
     try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
 
     if (!outcome.isClean()) {
@@ -847,7 +847,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
-    try index.write(io, repo.git_dir, "index", .{});
+    try repo.writeIndex(io, &index);
 
     const picked = try head_mod.readRef(gpa, io, repo, "CHERRY_PICK_HEAD");
     var author = r.options.who;
@@ -1014,7 +1014,7 @@ pub fn resetMerge(
     var index = try repo.openIndex(io);
     defer index.deinit();
     try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, to), .merge, blocked);
-    try index.write(io, repo.git_dir, "index", .{});
+    try repo.writeIndex(io, &index);
     try head_mod.writeRef(io, repo, "ORIG_HEAD", current);
     var buf: [hash.max_hex_len + 16]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;

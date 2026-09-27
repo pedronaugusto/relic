@@ -656,7 +656,7 @@ pub fn afterCommit(gpa: Allocator, io: Io, repo: *Repository) Error!void {
 pub fn afterStop(gpa: Allocator, io: Io, repo: *Repository, index: *Index, arena: Allocator, autoupdate: ?bool) Error![]const []const u8 {
     var outcome = try run(gpa, io, repo, index, .{ .autoupdate = autoupdate });
     defer outcome.deinit();
-    if (outcome.staged.len != 0) try index.write(io, repo.git_dir, "index", .{});
+    if (outcome.staged.len != 0) try repo.writeIndex(io, index);
     var reused: std.ArrayList([]const u8) = .empty;
     for (outcome.resolved) |p| try reused.append(arena, try arena.dupe(u8, p));
     for (outcome.staged) |p| try reused.append(arena, try arena.dupe(u8, p));

@@ -815,6 +815,19 @@ pub const Repository = struct {
     }
 
     /// Open the repository's own index.
+    /// Write `index` as this repository's index, as git writes one: a
+    /// racily clean entry is smudged only where its file changed, read
+    /// through the repository's own rules and attributes.
+    pub fn writeIndex(repo: *Repository, io: Io, index: *index_mod.Index) (index_mod.WriteError || Error)!void {
+        const wt = repo.work_dir orelse return index.write(io, repo.git_dir, "index", .{});
+        var attrs = try repo.loadAttrs(io);
+        defer attrs.deinit();
+        var rules = repo.worktreeRules();
+        rules.attrs = &attrs;
+        var check: worktree.RacyCheck = .{ .gpa = repo.gpa, .io = io, .wt = wt, .rules = rules };
+        try index.write(io, repo.git_dir, "index", .{ .racy = check.racy() });
+    }
+
     pub fn openIndex(repo: *Repository, io: Io) index_mod.ReadError!index_mod.Index {
         return index_mod.Index.readWithResolution(
             repo.gpa,

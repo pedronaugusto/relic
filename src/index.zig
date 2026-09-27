@@ -514,6 +514,18 @@ pub const WriteOptions = struct {
     /// How the lock behaves: whether to wait for a contended one, and how
     /// hard to push the bytes towards the disk before the rename.
     lock: fs.LockFile.Options = .{},
+    /// Whether a racily clean entry's file holds something other than the
+    /// entry says. Given, a racy entry is smudged only when it does, which
+    /// is git's rule, and an index read and written back keeps its bytes;
+    /// without it every racy entry is smudged, which is safe and costs the
+    /// next status a hash of each. `Repository.writeIndex` gives one.
+    racy: ?Racy = null,
+
+    /// See `racy`.
+    pub const Racy = struct {
+        context: *anyopaque,
+        changed: *const fn (context: *anyopaque, index: *const Index, entry: Entry) bool,
+    };
 
     /// The version to write.
     pub const Version = union(enum) {
@@ -1270,7 +1282,10 @@ pub const Index = struct {
             // that a later stat comparison cannot decide the file is
             // unchanged on the strength of a size that was never checked.
             var stat = entry.stat;
-            if (index.isRacy(entry) and entry.stage == 0) stat.size = 0;
+            if (index.isRacy(entry) and entry.stage == 0) {
+                const changed = if (options.racy) |r| r.changed(r.context, index, entry) else true;
+                if (changed) stat.size = 0;
+            }
 
             std.mem.writeInt(u32, fixed[0..4], stat.ctime_sec, .big);
             std.mem.writeInt(u32, fixed[4..8], stat.ctime_nsec, .big);

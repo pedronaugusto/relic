@@ -177,6 +177,40 @@ test "the racy rule notices a file rewritten inside one second" {
     try std.testing.expect(after.eql(expected));
 }
 
+test "a racily clean entry is smudged on the way out only when its file changed, as git smudges" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+
+    try h.repo.writeFile(io, "same.txt", "AAAA\n");
+    try h.repo.writeFile(io, "other.txt", "CCCC\n");
+    _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
+    // Both entries racy: the index is dated to their own second.
+    const same = h.index.find("same.txt").?.stat;
+    h.index.racy_cutoff_sec = same.mtime_sec;
+    h.index.racy_cutoff_nsec = same.mtime_nsec;
+    try std.testing.expect(h.index.isRacy(h.index.find("same.txt").?.*));
+    // other.txt rewritten with the same size and the same time: a stat
+    // cannot tell, the content can.
+    const other_stat = try statOf(io, h.repo.dir, "other.txt");
+    try h.repo.writeFile(io, "other.txt", "DDDD\n");
+    try h.repo.dir.setTimestamps(io, "other.txt", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, other_stat.mtime_sec) * std.time.ns_per_s + other_stat.mtime_nsec } } });
+
+    var check: worktree.RacyCheck = .{ .gpa = gpa, .io = io, .wt = h.repo.dir, .rules = h.worktreeRules() };
+    try h.index.write(io, h.git_dir, "index", .{ .racy = check.racy() });
+    var back = try index_mod.Index.read(gpa, io, h.git_dir, "index", h.git_dir, .sha1);
+    defer back.deinit();
+    try std.testing.expectEqual(@as(u64, 5), back.find("same.txt").?.stat.size);
+    try std.testing.expectEqual(@as(u64, 0), back.find("other.txt").?.stat.size);
+
+    // Without the check every racy entry is smudged.
+    try h.index.write(io, h.git_dir, "index", .{});
+    var all = try index_mod.Index.read(gpa, io, h.git_dir, "index", h.git_dir, .sha1);
+    defer all.deinit();
+    try std.testing.expectEqual(@as(u64, 0), all.find("same.txt").?.stat.size);
+}
+
 test "sparse checkout keeps a racily clean modified file" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

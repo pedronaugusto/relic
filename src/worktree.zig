@@ -2203,6 +2203,25 @@ fn isIgnoredPath(
     return r.matchPath(path, is_dir).excluded;
 }
 
+/// The check `index.WriteOptions.racy` asks for, over the working tree at
+/// `wt` read by `rules`: a racily clean entry is smudged only when its file
+/// holds something else. A file that cannot be read counts as changed.
+pub const RacyCheck = struct {
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    rules: Rules,
+
+    pub fn racy(c: *RacyCheck) index_mod.WriteOptions.Racy {
+        return .{ .context = c, .changed = changed };
+    }
+
+    fn changed(context: *anyopaque, index: *const Index, entry: index_mod.Entry) bool {
+        const c: *RacyCheck = @ptrCast(@alignCast(context));
+        return differsFromIndex(c.gpa, c.io, c.wt, index, entry, c.rules) catch true;
+    }
+};
+
 /// Whether the file at `entry.path` holds something other than the index
 /// says. A file that is not there has nothing to lose, which is how git
 /// treats one deleted by hand; a submodule's checkout is its own.

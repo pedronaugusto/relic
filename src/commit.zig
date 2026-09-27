@@ -231,7 +231,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     }
 
     // The cache tree now names every directory, and the index keeps it.
-    try index.write(io, repo.git_dir, "index", .{});
+    try repo.writeIndex(io, &index);
 
     var outcome: Outcome = .{ .commit = new, .tree = tree, .previous = current };
     if (options.hooks) |runner| {

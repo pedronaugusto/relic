@@ -2007,7 +2007,7 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
         if (try fs.statAt(io, wt, entry.path)) |after| entry.stat = after.stat;
         replaced += 1;
     }
-    if (replaced != 0) try index.write(io, repo.git_dir, "index", .{});
+    if (replaced != 0) try repo.writeIndex(io, &index);
     return .{ .replaced = replaced, .left = left };
 }
 

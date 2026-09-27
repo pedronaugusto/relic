@@ -547,7 +547,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
         .lfs_fetch = if (lfs_configured) lfs_fetch.fetcher() else null,
         .force = true,
     });
-    try index.write(io, repo.git_dir, "index", .{});
+    try repo.writeIndex(io, &index);
 }
 
 const builtin = @import("builtin");

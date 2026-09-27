@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- A racily clean index entry is smudged on the way out only when its file
+  changed, as git smudges one (`WriteOptions.racy`, `worktree.RacyCheck`,
+  `Repository.writeIndex`), so the next status does not hash it again and
+  an index read and written back keeps its bytes. Every index relic writes
+  for a repository goes through `Repository.writeIndex`.
 - A pack entry is inflated in one pass by relic's own decoder, into the
   buffer its header sizes, rather than streamed through std's.
 - Packs are looked in before loose objects, as git looks: a packed

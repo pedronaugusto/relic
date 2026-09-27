@@ -304,7 +304,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     if (fast_forward != .never and bases.len == 1 and bases[0].eql(ours)) {
         var outcome = try threeway.apply(gpa, io, repo, &index, our_tree, our_tree, their_tree, .{ .blocked = options.blocked });
         defer outcome.deinit();
-        try index.write(io, repo.git_dir, "index", .{});
+        try repo.writeIndex(io, &index);
         const log_message = try std.fmt.allocPrint(arena, "{s}: Fast-forward", .{reflog_action});
         try head_mod.advance(io, repo, head, target.oid, .{ .who = options.who, .message = log_message });
         if (options.hooks) |runner| _ = try runner.postMerge(io, false);
@@ -330,7 +330,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         .inner_messages = options.inner_messages,
     });
     defer outcome.deinit();
-    try index.write(io, repo.git_dir, "index", .{});
+    try repo.writeIndex(io, &index);
     try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
 
     const comment = message.commentString(repo.config.get("core.commentchar"), "");
@@ -457,7 +457,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
         if (entry.stage != 0) return error.UnresolvedConflicts;
     }
     const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
-    try index.write(io, repo.git_dir, "index", .{});
+    try repo.writeIndex(io, &index);
 
     const h = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
     const author = options.author orelse options.who;
@@ -499,7 +499,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     var index = try repo.openIndex(io);
     defer index.deinit();
     try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, current), .merge, blocked);
-    try index.write(io, repo.git_dir, "index", .{});
+    try repo.writeIndex(io, &index);
     try removeMergeState(io, repo);
     // `git reset` records where it moved from and logs the move, even to
     // where it already was.

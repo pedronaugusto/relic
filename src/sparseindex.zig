@@ -617,7 +617,7 @@ test "status, write-tree and add on a sparse index say what they say on the full
     try expand(gpa, io, &widened, &repo.odb, null);
     try expectSameEntries(&full, &widened);
 
-    try index.write(io, repo.git_dir, "index", .{});
+    try repo.writeIndex(io, &index);
     try git.exec(io, &.{ "fsck", "--no-progress" });
     const after = try git.run(io, &.{ "status", "--porcelain", "--untracked-files=all" });
     defer gpa.free(after);
