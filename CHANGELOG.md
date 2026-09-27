@@ -48,6 +48,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A file whose stat no longer matched the index was compared with it by
+  line endings alone, under attributes from outside the working tree only:
+  the `.gitattributes` files in it were never read there. So a checked-out
+  CRLF or expanded `$Id$` whose stat had changed -- a touch, or a checkout
+  on Linux, whose file clock is coarse enough that files written in the same
+  tick as the index are racy -- was a local change, and a merge, a pick or a
+  `reset --merge` refused to overwrite it. The file is now read the whole
+  way in, as `add` reads it: the directories' `.gitattributes`, the filter,
+  line endings and `ident`.
+
 - `ci/linux.sh` is green. Its image builds git 2.55.0, the version CI's
   Linux job builds, from the release tarball checked against a pinned
   SHA-256, where it had Debian's 2.39.5, older than the suite's fixtures

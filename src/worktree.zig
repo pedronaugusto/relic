@@ -2162,8 +2162,29 @@ pub fn differsFromIndex(
     var content: []const u8 = bytes;
     if (rules.attrs) |attrs| {
         if (found.kind != .sym_link) {
+            // The whole way in, as the file would be added: the filter,
+            // line endings and `ident`, under the attributes the working
+            // tree gives it. Anything less takes a checked-out `$Id: ... $`
+            // or CRLF for a change whenever the stat stops matching, which a
+            // touch does, and which a filesystem whose clock is coarser than
+            // the time between writing a file and the index does to them all.
+            var conv: convert.Session = .init(gpa, io, .{
+                .wt = wt,
+                .kind = index.kind,
+                .core = rules.core,
+                .required_filters = rules.required_filters,
+                .drivers = rules.filters,
+                .index = index,
+            });
+            defer conv.deinit();
+            // The `.gitattributes` on the way down to the file, which a
+            // lookup alone does not read. What this enters, it leaves; a
+            // caller already going path by path keeps what it entered.
+            const entered = attrs.entered_any;
+            try attrs.enter(io, wt, entry.path);
+            defer if (!entered) attrs.leave();
             const applied = try attrs.lookup(a, entry.path, false);
-            content = (try attributes.toGit(a, bytes, applied, rules.core)).bytes;
+            content = (try conv.toGit(a, entry.path, bytes, applied, .hash_only)).bytes;
         }
     }
     return !hash.Hasher.object(index.kind, "blob", content).eql(entry.oid);

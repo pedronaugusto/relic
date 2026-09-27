@@ -803,3 +803,51 @@ test "a forced checkout overwrites local changes and untracked files, as read-tr
     defer gpa.free(status);
     try std.testing.expectEqualStrings("M  change\nA  new.txt\n", status);
 }
+
+test "a file whose stat went stale is compared as it would be added, under the attributes above it" {
+    // Touched, or written in the same tick of a coarse clock as the index:
+    // the stat stops matching and the content decides. git reads it the
+    // way it would add it, so a CRLF checkout and an expanded `$Id$` under
+    // a directory's `.gitattributes` are no change; a changed line is.
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    try testgit.requireGit(gpa, io);
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+
+    try h.repo.writeFile(io, "sub/.gitattributes", "*.txt text eol=crlf\nid.txt ident\n");
+    try h.repo.writeFile(io, "sub/crlf.txt", "one\ntwo\n");
+    try h.repo.writeFile(io, "sub/id.txt", "$Id$\nx\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    for ([_][]const u8{ "sub/crlf.txt", "sub/id.txt" }) |path| try h.repo.dir.deleteFile(io, path);
+    try h.repo.exec(io, &.{ "checkout", "--", "." });
+    const crlf = try h.repo.readFile(io, "sub/crlf.txt");
+    defer gpa.free(crlf);
+    try std.testing.expectEqualStrings("one\r\ntwo\r\n", crlf);
+    const id = try h.repo.readFile(io, "sub/id.txt");
+    defer gpa.free(id);
+    try std.testing.expect(std.mem.startsWith(u8, id, "$Id: "));
+
+    const long_ago: Io.Dir.SetTimestampsOptions = .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } } };
+    for ([_][]const u8{ "sub/crlf.txt", "sub/id.txt" }) |path| try h.repo.dir.setTimestamps(io, path, long_ago);
+    try h.reload(gpa, io);
+    for ([_][]const u8{ "sub/crlf.txt", "sub/id.txt" }) |path| {
+        const entry = h.index.find(path).?;
+        try std.testing.expect(!entry.stat.matches(try statOf(io, h.repo.dir, path), .full, .nanosecond));
+        try std.testing.expect(!try worktree.differsFromIndex(gpa, io, h.repo.dir, &h.index, entry.*, h.worktreeRules()));
+    }
+    // What it entered to read them, it gave back.
+    try std.testing.expect(!h.attrs.entered_any);
+    const status = try h.repo.run(io, &.{ "status", "--porcelain" });
+    defer gpa.free(status);
+    try std.testing.expectEqualStrings("", status);
+
+    try h.repo.writeFile(io, "sub/crlf.txt", "one\r\nTWO\r\n");
+    const changed = h.index.find("sub/crlf.txt").?;
+    try std.testing.expect(try worktree.differsFromIndex(gpa, io, h.repo.dir, &h.index, changed.*, h.worktreeRules()));
+}
+
+fn statOf(io: Io, dir: Io.Dir, path: []const u8) !fs.Stat {
+    return (try fs.statAt(io, dir, path)).?.stat;
+}
