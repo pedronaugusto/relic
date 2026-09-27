@@ -48,6 +48,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `ci/linux.sh` is green. Its image builds git 2.55.0, the version CI's
+  Linux job builds, from the release tarball checked against a pinned
+  SHA-256, where it had Debian's 2.39.5, older than the suite's fixtures
+  need; the image is tagged with a digest of its Dockerfile, so it is built
+  once and rebuilt when the file changes. The suite runs on a copy of the
+  checkout on the container's own filesystem rather than on the bind mount
+  from macOS, whose permissions and stat are the host's. Three tests
+  assumed macOS: one changed a directory's mode through a handle Linux opens
+  with `O_PATH`, one knew git's assertion failures by the BSD C library's
+  wording, and one knew `openssl s_server`'s peer signature line only as
+  OpenSSL 3.2 and later print it.
+
 - The suite runs from a checkout at any path. gpg-agent puts its sockets in
   `GNUPGHOME`, and a home inside a test's temporary directory, under the
   checkout, gave a socket path past the 104 bytes Darwin allows, so every

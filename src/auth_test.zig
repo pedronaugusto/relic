@@ -390,11 +390,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
     {
         // git's cache refuses a socket directory others can read.
         try person.tools.dir.createDirPath(io, "cache");
-        {
-            var cache_dir = try person.tools.dir.openDir(io, "cache", .{});
-            defer cache_dir.close(io);
-            if (builtin.os.tag != .windows) try cache_dir.setPermissions(io, .fromMode(0o700));
-        }
+        if (builtin.os.tag != .windows) try person.tools.dir.setFilePermissions(io, "cache", .fromMode(0o700), .{});
         const socket = try std.fs.path.join(gpa, &.{ person.tools_path, "cache", "sock" });
         defer gpa.free(socket);
         const cache = try std.fmt.allocPrint(gpa, "[credential]\n\thelper = cache --socket={s}\n", .{socket});

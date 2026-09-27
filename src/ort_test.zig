@@ -82,6 +82,15 @@ const SubOpener = struct {
 };
 
 /// The merge of `ours` into `theirs` both ways, against git's.
+/// Whether git stopped on an assertion in `function`. Each C library words
+/// the message its own way: macOS and the BSDs "Assertion failed: (...),
+/// function f, file merge-ort.c, line n.", glibc "merge-ort.c:n: f:
+/// Assertion `...' failed.", musl "Assertion failed: ... (merge-ort.c: f: n)".
+fn gitAsserted(stderr: []const u8, function: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "ssertion") != null and
+        std.mem.indexOf(u8, stderr, function) != null;
+}
+
 fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8, theirs: []const u8, options: ort.Options) !void {
     var git = try repo.capture(io, &.{ "merge-tree", "--write-tree", "-z", "--messages", ours, theirs });
     defer git.deinit(gpa);
@@ -99,8 +108,8 @@ fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8
     // prints nothing. There the merge has to stop the same way, on the same
     // checks, and nowhere else.
     if (expected.len == 0 and git.code > 1) {
-        const known = std.mem.indexOf(u8, git.stderr, "function handle_content_merge") != null or
-            std.mem.indexOf(u8, git.stderr, "function process_entry") != null;
+        const known = gitAsserted(git.stderr, "handle_content_merge") or
+            gitAsserted(git.stderr, "process_entry");
         if (merged) |r| {
             var result = r;
             result.deinit();
@@ -230,7 +239,7 @@ test "a rename both ways that a directory rename lands on a directory stops wher
     var git = try repo.capture(io, &.{ "merge-tree", "--write-tree", "topic", "main" });
     defer git.deinit(gpa);
     try std.testing.expectEqualStrings("", git.stdout);
-    try std.testing.expect(std.mem.indexOf(u8, git.stderr, "handle_content_merge") != null);
+    try std.testing.expect(gitAsserted(git.stderr, "handle_content_merge"));
     try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
     // Merged into main the file is on the other side, and both finish.
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
@@ -264,7 +273,7 @@ test "a rename a directory rename lands on a directory, whose source is also mov
     var git = try repo.capture(io, &.{ "merge-tree", "--write-tree", "main", "topic" });
     defer git.deinit(gpa);
     try std.testing.expectEqualStrings("", git.stdout);
-    try std.testing.expect(std.mem.indexOf(u8, git.stderr, "function process_entry") != null);
+    try std.testing.expect(gitAsserted(git.stderr, "process_entry"));
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
     try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
 }

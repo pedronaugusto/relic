@@ -57,6 +57,30 @@ const SServer = struct {
     }
 };
 
+/// How `openssl s_server -www` says the client signed: the scheme's name
+/// from OpenSSL 3.2 on, and a type and a digest before it.
+const SignedWith = struct {
+    scheme: []const u8,
+    type: []const u8,
+    digest: ?[]const u8,
+
+    fn on(s: SignedWith, page: []const u8) bool {
+        if (hasLine(page, "Peer signature type: ", s.scheme)) return true;
+        if (!hasLine(page, "Peer signature type: ", s.type)) return false;
+        const digest = s.digest orelse return true;
+        return hasLine(page, "Peer signing digest: ", digest);
+    }
+
+    fn hasLine(page: []const u8, label: []const u8, value: []const u8) bool {
+        var lines = std.mem.splitScalar(u8, page, '\n');
+        while (lines.next()) |line| {
+            const rest = std.mem.trimEnd(u8, line, "\r");
+            if (std.mem.startsWith(u8, rest, label) and std.mem.eql(u8, rest[label.len..], value)) return true;
+        }
+        return false;
+    }
+};
+
 /// relic's `GET /` to the server on `port`, trusting only `server.pem`:
 /// the page, in `gpa`.
 fn relicGet(gpa: Allocator, io: Io, pki: *Pki, port: u16, auth: ?*const tls.ClientAuth) ![]u8 {
@@ -82,15 +106,16 @@ test "relic's TLS client answers OpenSSL's demand for a certificate in TLS 1.3 a
         defer server.stop(io);
         const protocol = if (std.mem.eql(u8, version, "-tls1_3")) "Protocol  : TLSv1.3" else "Protocol  : TLSv1.2";
         for (Pki.kinds) |kind| {
-            // RSA answers in PSS, as OpenSSL's own client does.
-            const signed_with = if (std.mem.eql(u8, kind, "rsa"))
-                "Peer signature type: rsa_pss_rsae_sha256"
+            // RSA answers in PSS, as OpenSSL's own client does. OpenSSL
+            // names the scheme since 3.2; before it, a type and a digest.
+            const signed_with: SignedWith = if (std.mem.eql(u8, kind, "rsa"))
+                .{ .scheme = "rsa_pss_rsae_sha256", .type = "RSA-PSS", .digest = "SHA256" }
             else if (std.mem.eql(u8, kind, "p256"))
-                "Peer signature type: ecdsa_secp256r1_sha256"
+                .{ .scheme = "ecdsa_secp256r1_sha256", .type = "ECDSA", .digest = "SHA256" }
             else if (std.mem.eql(u8, kind, "p384"))
-                "Peer signature type: ecdsa_secp384r1_sha384"
+                .{ .scheme = "ecdsa_secp384r1_sha384", .type = "ECDSA", .digest = "SHA384" }
             else
-                "Peer signature type: ed25519";
+                .{ .scheme = "ed25519", .type = "ed25519", .digest = null };
             for ([_]bool{ false, true }) |encrypted| {
                 var arena_state: std.heap.ArenaAllocator = .init(gpa);
                 defer arena_state.deinit();
@@ -104,7 +129,7 @@ test "relic's TLS client answers OpenSSL's demand for a certificate in TLS 1.3 a
                 const page = try relicGet(gpa, io, pki, server.port, &auth);
                 defer gpa.free(page);
                 try testing.expect(std.mem.indexOf(u8, page, protocol) != null);
-                try testing.expect(std.mem.indexOf(u8, page, signed_with) != null);
+                try testing.expect(signed_with.on(page));
                 try testing.expect(std.mem.indexOf(u8, page, "Verify return code: 0 (ok)") != null);
             }
         }
