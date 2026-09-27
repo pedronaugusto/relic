@@ -231,6 +231,13 @@ fn expectIndexRoundTrip(
     const original = try repo.readFile(io, ".git/index");
     defer gpa.free(original);
 
+    // What this holds is the bytes, not the racy rule: an entry git stamped
+    // in the same tick as the index would be smudged on the way back out
+    // (`Index.isRacy`), which a coarse clock makes a coin toss. The index is
+    // dated a minute on so no entry is racy against it.
+    const later: i96 = (std.Io.Clock.real.now(io).toSeconds() + 60) * std.time.ns_per_s;
+    try git_dir.setTimestamps(io, "index", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = later } } });
+
     var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, kind);
     defer index.deinit();
 
