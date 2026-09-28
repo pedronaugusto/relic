@@ -603,7 +603,7 @@ fn clearReadOnly(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
     if (builtin.os.tag != .windows) return false;
     const st = dir.statFile(io, sub_path, .{}) catch return false;
     if (!isReadOnly(st.permissions)) return false;
-    dir.setFilePermissions(io, sub_path, withReadOnly(st.permissions, false), .{}) catch return false;
+    setFilePermissions(io, dir, sub_path, withReadOnly(st.permissions, false)) catch return false;
     return true;
 }
 
@@ -622,11 +622,73 @@ pub fn isReadOnly(p: Io.File.Permissions) bool {
 pub fn withReadOnly(p: Io.File.Permissions, read_only: bool) Io.File.Permissions {
     if (builtin.os.tag == .windows) {
         const attributes: u32 = @intFromEnum(p);
-        return @enumFromInt(if (read_only) attributes | 1 else attributes & ~@as(u32, 1));
+        if (read_only) return @enumFromInt(attributes | 1);
+        // No attributes at all is written as `FILE_ATTRIBUTE_NORMAL`: to
+        // `NtSetInformationFile` a zero means "leave them as they are".
+        const cleared = attributes & ~@as(u32, 1);
+        return @enumFromInt(if (cleared == 0) 0x80 else cleared);
     }
     if (!Io.File.Permissions.has_executable_bit) return p;
     const mode = p.toMode();
     return .fromMode(if (read_only) mode & ~@as(std.posix.mode_t, 0o222) else mode | 0o200);
+}
+
+/// `Dir.setFilePermissions`, on Windows as well, where the standard
+/// library's has no implementation in 0.16: there the file's attributes are
+/// written through a handle opened for nothing else, which Windows grants
+/// on a read-only file too.
+pub fn setFilePermissions(io: Io, dir: Io.Dir, sub_path: []const u8, permissions: Io.File.Permissions) Io.Dir.SetFilePermissionsError!void {
+    if (builtin.os.tag != .windows) return dir.setFilePermissions(io, sub_path, permissions, .{});
+    const file = try openAttributesWindows(dir, sub_path);
+    defer file.close(io);
+    try file.setPermissions(io, permissions);
+}
+
+/// `Dir.setTimestamps`, on Windows as well, where the standard library's
+/// has no implementation in 0.16: there the times are written through a
+/// handle opened for nothing else.
+pub fn setTimestamps(io: Io, dir: Io.Dir, sub_path: []const u8, options: Io.File.SetTimestampsOptions) (Io.Dir.SetTimestampsError || error{FileNotFound})!void {
+    if (builtin.os.tag != .windows) return dir.setTimestamps(io, sub_path, .{
+        .access_timestamp = options.access_timestamp,
+        .modify_timestamp = options.modify_timestamp,
+    });
+    const file = try openAttributesWindows(dir, sub_path);
+    defer file.close(io);
+    try file.setTimestamps(io, options);
+}
+
+/// A handle to `sub_path`, a file or a directory, that may read and write
+/// its attributes and times and do nothing else.
+fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameError || Io.Cancelable || error{ FileNotFound, AccessDenied, Unexpected })!Io.File {
+    const windows = std.os.windows;
+    const path_w = try Io.Threaded.sliceToPrefixedFileW(dir.handle, sub_path, .{});
+    const span = path_w.span();
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var handle: windows.HANDLE = undefined;
+    switch (windows.ntdll.NtCreateFile(
+        &handle,
+        .{
+            .STANDARD = .{ .SYNCHRONIZE = true },
+            .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true, .WRITE_ATTRIBUTES = true } },
+        },
+        &.{
+            .RootDirectory = if (Io.Dir.path.isAbsoluteWindowsWtf16(span)) null else dir.handle,
+            .ObjectName = @constCast(&windows.UNICODE_STRING.init(span)),
+        },
+        &iosb,
+        null,
+        .{ .NORMAL = true },
+        .VALID_FLAGS,
+        .OPEN,
+        .{ .IO = .SYNCHRONOUS_NONALERT },
+        null,
+        0,
+    )) {
+        .SUCCESS => return .{ .handle = handle, .flags = .{ .nonblocking = false } },
+        .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
+        .ACCESS_DENIED, .SHARING_VIOLATION => return error.AccessDenied,
+        else => |status| return windows.unexpectedStatus(status),
+    }
 }
 
 /// Remove a file, taking a read-only attribute off first where the
@@ -1101,13 +1163,13 @@ test "a read-only file is replaced and removed, as a lockable one nobody holds m
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "locked.bin", .data = "old" });
     const st = try tmp.dir.statFile(io, "locked.bin", .{});
-    try tmp.dir.setFilePermissions(io, "locked.bin", withReadOnly(st.permissions, true), .{});
+    try setFilePermissions(io, tmp.dir, "locked.bin", withReadOnly(st.permissions, true));
     try tmp.dir.writeFile(io, .{ .sub_path = "new.tmp", .data = "new" });
     try renameWithRetry(io, tmp.dir, "new.tmp", "locked.bin");
     var buf: [8]u8 = undefined;
     try std.testing.expectEqualStrings("new", try tmp.dir.readFile(io, "locked.bin", &buf));
     const again = try tmp.dir.statFile(io, "locked.bin", .{});
-    try tmp.dir.setFilePermissions(io, "locked.bin", withReadOnly(again.permissions, true), .{});
+    try setFilePermissions(io, tmp.dir, "locked.bin", withReadOnly(again.permissions, true));
     try deleteFile(io, tmp.dir, "locked.bin");
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "locked.bin", .{}));
 }

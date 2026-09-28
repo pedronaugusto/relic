@@ -195,7 +195,7 @@ test "a racily clean entry is smudged on the way out only when its file changed,
     // cannot tell, the content can.
     const other_stat = try statOf(io, h.repo.dir, "other.txt");
     try h.repo.writeFile(io, "other.txt", "DDDD\n");
-    try h.repo.dir.setTimestamps(io, "other.txt", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, other_stat.mtime_sec) * std.time.ns_per_s + other_stat.mtime_nsec } } });
+    try fs.setTimestamps(io, h.repo.dir, "other.txt", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, other_stat.mtime_sec) * std.time.ns_per_s + other_stat.mtime_nsec } } });
 
     var check: worktree.RacyCheck = .{ .gpa = gpa, .io = io, .wt = h.repo.dir, .rules = h.worktreeRules() };
     try h.index.write(io, h.git_dir, "index", .{ .racy = check.racy() });
@@ -863,8 +863,8 @@ test "a file whose stat went stale is compared as it would be added, under the a
     defer gpa.free(id);
     try std.testing.expect(std.mem.startsWith(u8, id, "$Id: "));
 
-    const long_ago: Io.Dir.SetTimestampsOptions = .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } } };
-    for ([_][]const u8{ "sub/crlf.txt", "sub/id.txt" }) |path| try h.repo.dir.setTimestamps(io, path, long_ago);
+    const long_ago: Io.File.SetTimestampsOptions = .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } } };
+    for ([_][]const u8{ "sub/crlf.txt", "sub/id.txt" }) |path| try fs.setTimestamps(io, h.repo.dir, path, long_ago);
     try h.reload(gpa, io);
     for ([_][]const u8{ "sub/crlf.txt", "sub/id.txt" }) |path| {
         const entry = h.index.find(path).?;

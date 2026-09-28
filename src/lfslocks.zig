@@ -942,7 +942,7 @@ fn setWritable(io: Io, wt: Io.Dir, path: []const u8, writable: bool) Error!bool 
     if (st.kind != .file) return false;
     const now = st.permissions;
     const wanted = fs.withReadOnly(now, !writable);
-    if (wanted != now) try wt.setFilePermissions(io, path, wanted, .{});
+    if (wanted != now) try fs.setFilePermissions(io, wt, path, wanted);
     return true;
 }
 

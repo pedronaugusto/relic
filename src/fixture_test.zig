@@ -9,6 +9,7 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
 const sha1dc = @import("sha1dc.zig");
+const fs = @import("fs.zig");
 
 const Oid = hash.Oid;
 
@@ -236,7 +237,7 @@ fn expectIndexRoundTrip(
     // (`Index.isRacy`), which a coarse clock makes a coin toss. The index is
     // dated a minute on so no entry is racy against it.
     const later: i96 = (std.Io.Clock.real.now(io).toSeconds() + 60) * std.time.ns_per_s;
-    try git_dir.setTimestamps(io, "index", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = later } } });
+    try fs.setTimestamps(io, git_dir, "index", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = later } } });
 
     var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, kind);
     defer index.deinit();
