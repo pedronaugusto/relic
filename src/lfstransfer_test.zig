@@ -1808,7 +1808,7 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
             .{ .path = "young-dir/old.tmp", .age_s = 7200 },
             .{ .path = "old-dir/old.tmp", .age_s = 7200 },
         };
-        var tmp = try d.createDirPathOpen(io, ".git/lfs/tmp", .{});
+        var tmp = try d.createDirPathOpen(io, ".git/lfs/tmp", .{ .open_options = .{ .iterate = true } });
         defer tmp.close(io);
         for (entries) |e| {
             if (std.fs.path.dirnamePosix(e.path)) |parent| try tmp.createDirPath(io, parent);
