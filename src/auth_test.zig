@@ -221,6 +221,9 @@ fn remoteLines(gpa: Allocator, stderr: []const u8) ![]u8 {
 test "with only the person's environment, relic asks the helpers git asks: gh's reset for its host, the system keychain elsewhere" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // What git says to a credential helper is 2.46's: its capabilities, and
+    // the authtype, credential and state a helper hands back.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
     var person = try Person.init(gpa, io);
     defer person.deinit();
     var root = testing.tmpDir(.{ .iterate = true });
@@ -308,6 +311,9 @@ test "with only the person's environment, relic asks the helpers git asks: gh's 
 test "named helpers run as git runs them: Git Credential Manager, and git's own store and cache" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // What git says to a credential helper is 2.46's: its capabilities, and
+    // the authtype, credential and state a helper hands back.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
     var person = try Person.init(gpa, io);
     defer person.deinit();
     var root = testing.tmpDir(.{ .iterate = true });
@@ -515,6 +521,9 @@ test "a refusal says what git says: the server's words, the helpers asked, the p
 test "a helper's bearer token is sent as git sends it, and handed back with its state" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // What git says to a credential helper is 2.46's: its capabilities, and
+    // the authtype, credential and state a helper hands back.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
     var person = try Person.init(gpa, io);
     defer person.deinit();
     var root = testing.tmpDir(.{ .iterate = true });
@@ -569,6 +578,9 @@ test "a helper's bearer token is sent as git sends it, and handed back with its 
 test "a helper's password past its password_expiry_utc is passed over for the next helper's, and not stored, as git passes it over" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // What git says to a credential helper is 2.46's: its capabilities, and
+    // the authtype, credential and state a helper hands back.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
     var person = try Person.init(gpa, io);
     defer person.deinit();
     var root = testing.tmpDir(.{ .iterate = true });

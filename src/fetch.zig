@@ -1315,6 +1315,8 @@ fn expectSameRefs(gpa: Allocator, io: Io, a: *testgit.Repo, b: *testgit.Repo) !v
 test "a fetch from a local repository leaves what git fetch leaves: refs, logs and FETCH_HEAD" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
+    try testgit.requireGitVersion(gpa, io, 2, 48);
     var twins = try Twins.init(gpa, io, 4);
     defer twins.deinit(gpa);
 
@@ -1348,6 +1350,9 @@ test "a fetch from a local repository leaves what git fetch leaves: refs, logs a
 test "named refspecs, pruning and every tag are what git makes of them" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // Which fetches set refs/remotes/<remote>/HEAD is git 2.50's: 2.48 and
+    // 2.49 set it on a fetch this one does not.
+    try testgit.requireGitVersion(gpa, io, 2, 50);
     var twins = try Twins.init(gpa, io, 3);
     defer twins.deinit(gpa);
 
@@ -1387,6 +1392,8 @@ test "named refspecs, pruning and every tag are what git makes of them" {
 test "a non-fast-forward and a moved tag are refused as git refuses them, and forced as git forces them" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
+    try testgit.requireGitVersion(gpa, io, 2, 48);
     var twins = try Twins.init(gpa, io, 3);
     defer twins.deinit(gpa);
     for ([_]*testgit.Repo{ &twins.by_git, &twins.by_relic }) |twin| {

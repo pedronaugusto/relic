@@ -299,6 +299,8 @@ test "a shallow clone over ssh is git's, and one from a path is a whole local cl
 test "from a shallow remote a fetch leaves the refs that would move the boundary, or takes it with update_shallow, as git fetch does" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
+    try testgit.requireGitVersion(gpa, io, 2, 48);
     var root = testing.tmpDir(.{ .iterate = true });
     defer root.cleanup();
     try servedHistory(gpa, io, root.dir);

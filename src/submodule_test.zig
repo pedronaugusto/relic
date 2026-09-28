@@ -688,6 +688,9 @@ test "a name holding a quote and a backslash is registered, synced and removed a
 test "a relative url resolves against the default remote, or against the superproject itself" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // git resolves a relative url against the default remote's url from 2.51
+    // on; an older one against the superproject's own path.
+    try testgit.requireGitVersion(gpa, io, 2, 51);
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
     try git.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000," ++ "1" ** 40 ++ ",a" });

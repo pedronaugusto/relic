@@ -55,6 +55,8 @@ fn expectSameFetch(gpa: Allocator, io: Io, by_git: *testgit.Repo, by_relic: *tes
 test "a fetch over smart HTTP leaves what git fetch leaves, in v2 and in v0" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
+    try testgit.requireGitVersion(gpa, io, 2, 48);
     var env = try testremote.environ(gpa);
     defer env.deinit();
     for ([_]bool{ true, false }) |v2| {
@@ -191,6 +193,8 @@ test "credentials come from a helper as git asks for them, are stored when they 
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
+    // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
+    try testgit.requireGitVersion(gpa, io, 2, 48);
     var env = try testremote.environ(gpa);
     defer env.deinit();
     var root = testing.tmpDir(.{ .iterate = true });
@@ -413,6 +417,8 @@ test "ssh is handed the same arguments git hands it" {
 test "a fetch over ssh leaves what git fetch leaves, in v2 and in v0" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
+    try testgit.requireGitVersion(gpa, io, 2, 48);
     var tools = testing.tmpDir(.{ .iterate = true });
     defer tools.cleanup();
     const fake = try testremote.fakeSsh(gpa, io, tools.dir);
@@ -860,6 +866,8 @@ test "the negotiation git's fetch-pack makes is made byte for byte, over a pipe 
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
+    // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
+    try testgit.requireGitVersion(gpa, io, 2, 48);
     var root = testing.tmpDir(.{ .iterate = true });
     defer root.cleanup();
     try servedRepo(gpa, io, &root, 3);
