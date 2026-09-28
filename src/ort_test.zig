@@ -4,6 +4,7 @@
 //! with its paths and its kind.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -82,13 +83,17 @@ const SubOpener = struct {
 };
 
 /// The merge of `ours` into `theirs` both ways, against git's.
-/// Whether git stopped on an assertion in `function`. Each C library words
-/// the message its own way: macOS and the BSDs "Assertion failed: (...),
-/// function f, file merge-ort.c, line n.", glibc "merge-ort.c:n: f:
-/// Assertion `...' failed.", musl "Assertion failed: ... (merge-ort.c: f: n)".
-fn gitAsserted(stderr: []const u8, function: []const u8) bool {
-    return std.mem.indexOf(u8, stderr, "ssertion") != null and
-        std.mem.indexOf(u8, stderr, function) != null;
+/// Whether git stopped on the assertion `expression` in `function`. Each C
+/// library words the message its own way: macOS and the BSDs "Assertion
+/// failed: (...), function f, file merge-ort.c, line n.", glibc
+/// "merge-ort.c:n: f: Assertion `...' failed.", musl "Assertion failed: ...
+/// (merge-ort.c: f: n)", and the Windows C runtime git for Windows is built
+/// on "Assertion failed: ..., file merge-ort.c, line n", which names no
+/// function; there the expression alone says which assertion it was.
+fn gitAsserted(stderr: []const u8, function: []const u8, expression: []const u8) bool {
+    if (std.mem.indexOf(u8, stderr, "ssertion") == null) return false;
+    if (std.mem.indexOf(u8, stderr, expression) == null) return false;
+    return builtin.os.tag == .windows or std.mem.indexOf(u8, stderr, function) != null;
 }
 
 fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8, theirs: []const u8, options: ort.Options) !void {
@@ -108,8 +113,8 @@ fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8
     // prints nothing. There the merge has to stop the same way, on the same
     // checks, and nowhere else.
     if (expected.len == 0 and git.code > 1) {
-        const known = gitAsserted(git.stderr, "handle_content_merge") or
-            gitAsserted(git.stderr, "process_entry");
+        const known = gitAsserted(git.stderr, "handle_content_merge", "(S_IFMT & a->mode) == (S_IFMT & b->mode)") or
+            gitAsserted(git.stderr, "process_entry", "ci->merged.is_null == (ci->filemask == ci->match_mask)");
         if (merged) |r| {
             var result = r;
             result.deinit();
@@ -239,7 +244,7 @@ test "a rename both ways that a directory rename lands on a directory stops wher
     var git = try repo.capture(io, &.{ "merge-tree", "--write-tree", "topic", "main" });
     defer git.deinit(gpa);
     try std.testing.expectEqualStrings("", git.stdout);
-    try std.testing.expect(gitAsserted(git.stderr, "handle_content_merge"));
+    try std.testing.expect(gitAsserted(git.stderr, "handle_content_merge", "(S_IFMT & a->mode) == (S_IFMT & b->mode)"));
     try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
     // Merged into main the file is on the other side, and both finish.
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
@@ -273,7 +278,7 @@ test "a rename a directory rename lands on a directory, whose source is also mov
     var git = try repo.capture(io, &.{ "merge-tree", "--write-tree", "main", "topic" });
     defer git.deinit(gpa);
     try std.testing.expectEqualStrings("", git.stdout);
-    try std.testing.expect(gitAsserted(git.stderr, "process_entry"));
+    try std.testing.expect(gitAsserted(git.stderr, "process_entry", "ci->merged.is_null == (ci->filemask == ci->match_mask)"));
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
     try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
 }
