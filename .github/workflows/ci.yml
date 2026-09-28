@@ -27,14 +27,20 @@ jobs:
   # The job refuses to run the suite on anything older than 2.47, because
   # a fixture that needs a newer git skips rather than fails, and a gate
   # that skips is not one. The floor is the old-git job below.
+  #
+  # One job per platform and mode. The suite in one mode is ten to fifteen
+  # minutes of a hosted macOS or Windows runner, most of it git's own
+  # processes, so four modes in a row no longer fit a job's half hour; four
+  # jobs side by side each have theirs.
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, ${{ matrix.optimize }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        optimize: [Debug, ReleaseSafe, ReleaseFast, ReleaseSmall]
     steps:
       - uses: actions/checkout@v4
 
@@ -87,19 +93,11 @@ jobs:
           fi
 
       - name: Formatting
+        if: matrix.optimize == 'Debug'
         run: zig fmt --check src examples build.zig build.zig.zon
 
-      - name: Test — Debug
-        run: zig build test -Doptimize=Debug
-
-      - name: Test — ReleaseSafe
-        run: zig build test -Doptimize=ReleaseSafe
-
-      - name: Test — ReleaseFast
-        run: zig build test -Doptimize=ReleaseFast
-
-      - name: Test — ReleaseSmall
-        run: zig build test -Doptimize=ReleaseSmall
+      - name: Test — ${{ matrix.optimize }}
+        run: zig build test -Doptimize=${{ matrix.optimize }}
 
       # The suite under ThreadSanitizer. The delta search runs its candidates
       # concurrently when asked to, and the suite writes one repository from two
@@ -110,11 +108,12 @@ jobs:
       # first test reports, while the same suite passes under ThreadSanitizer on
       # a Mac, where it is run before a release.
       - name: Test — ThreadSanitizer
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.optimize == 'Debug'
         run: zig build test -Dthread-sanitizer -Doptimize=Debug --test-timeout 120s
 
       # Built AND run, against the module a consumer gets.
       - name: Examples
+        if: matrix.optimize == 'Debug'
         run: zig build examples
 
   # The oldest git this claims to work with. Everything the suite compares
@@ -168,15 +167,19 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+      # Installed under the runner's own home, without sudo: master builds
+      # its Rust parts with the runner's cargo, which a root `make install`
+      # would not find on its path.
       - name: Build git from master
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential gettext libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev
           git clone --depth 1 https://github.com/git/git.git /tmp/git
-          make -C /tmp/git -j"$(nproc)" NO_TCLTK=1 NO_GETTEXT=1 prefix=/usr/local
-          sudo make -C /tmp/git NO_TCLTK=1 NO_GETTEXT=1 prefix=/usr/local install
-          git --version
+          make -C /tmp/git -j"$(nproc)" NO_TCLTK=1 NO_GETTEXT=1 prefix="$HOME/git-master" all
+          make -C /tmp/git NO_TCLTK=1 NO_GETTEXT=1 prefix="$HOME/git-master" install
+          echo "$HOME/git-master/bin" >> "$GITHUB_PATH"
+      - run: git --version
       - run: zig build test -Doptimize=ReleaseSafe
 
   # README.md's Usage block is a region of examples/usage.zig, which the job
