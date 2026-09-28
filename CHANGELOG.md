@@ -27,6 +27,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Odb.listAlternates`, `addAlternate` and `removeAlternate` read and update
+  git's alternates file, including comments and quoted paths, with changes
+  visible to the open database at once.
 - `Odb.existsOwn` and `Odb.own`: whether an object is in the database's own
   objects rather than only in an alternate, and taking one an alternate
   holds into its own. A repository that borrows another's objects owns what

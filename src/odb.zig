@@ -98,11 +98,109 @@ pub const Error = error{
     /// `objects/info/alternates` pointed at itself, or the chain was deeper
     /// than `Options.max_alternate_depth`.
     AlternatesTooDeep,
+    /// A path cannot be represented as one alternates-file line.
+    InvalidAlternatePath,
+    /// Adding a path would pass the supported alternates-file size.
+    AlternatesTooLarge,
 } || pack.Error || pack.WriteError || object.HeaderParseError ||
     object.ParseError || object.TreeParseError || Allocator.Error ||
     Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error ||
     Io.File.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
-    Io.Dir.CreateDirError || Io.Dir.ReadFileAllocError || Io.Dir.Iterator.Error;
+    Io.Dir.CreateDirPathError || Io.Dir.ReadFileAllocError || Io.Dir.Iterator.Error;
+
+/// Paths named directly by one `objects/info/alternates` file. `paths` hold
+/// decoded names, and `text` holds the original file; release both with
+/// `deinit` when finished.
+pub const Alternates = struct {
+    gpa: Allocator,
+    text: []u8,
+    paths: [][]u8,
+
+    pub fn deinit(a: *Alternates) void {
+        for (a.paths) |path| a.gpa.free(path);
+        a.gpa.free(a.paths);
+        a.gpa.free(a.text);
+        a.* = undefined;
+    }
+};
+
+fn alternateLine(raw: []const u8) ?[]const u8 {
+    const line = std.mem.trimEnd(u8, raw, "\r");
+    if (line.len == 0 or line[0] == '#') return null;
+    return line;
+}
+
+/// Git accepts C-style quoted lines for names that cannot be written raw.
+/// Malformed quoted lines name no directory, as an inaccessible path does.
+fn parseAlternate(gpa: Allocator, raw: []const u8) Allocator.Error!?[]u8 {
+    const line = alternateLine(raw) orelse return null;
+    if (line[0] != '"') return try gpa.dupe(u8, line);
+    if (line.len < 2 or line[line.len - 1] != '"') return null;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var i: usize = 1;
+    while (i < line.len - 1) : (i += 1) {
+        var c = line[i];
+        if (c == '\\') {
+            i += 1;
+            if (i >= line.len - 1) return null;
+            c = switch (line[i]) {
+                'a' => 7,
+                'b' => 8,
+                'f' => 12,
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'v' => 11,
+                'e' => 27,
+                '\\' => '\\',
+                '"' => '"',
+                '0'...'3' => blk: {
+                    if (i + 2 >= line.len - 1) return null;
+                    const d1 = line[i + 1];
+                    const d2 = line[i + 2];
+                    if (d1 < '0' or d1 > '7' or d2 < '0' or d2 > '7') return null;
+                    const value = (line[i] - '0') * 64 + (d1 - '0') * 8 + (d2 - '0');
+                    i += 2;
+                    break :blk value;
+                },
+                else => return null,
+            };
+        } else if (c == '"') return null;
+        try out.append(gpa, c);
+    }
+    if (out.items.len == 0 or std.mem.indexOfScalar(u8, out.items, 0) != null) return null;
+    return try out.toOwnedSlice(gpa);
+}
+
+fn appendAlternatePath(gpa: Allocator, out: *std.ArrayList(u8), path: []const u8) Allocator.Error!void {
+    var quoted = path[0] == '#';
+    for (path) |c| if (c < ' ' or c == 127 or c == '\\' or c == '"') {
+        quoted = true;
+        break;
+    };
+    if (!quoted) return out.appendSlice(gpa, path);
+    try out.append(gpa, '"');
+    for (path) |c| {
+        switch (c) {
+            '\\', '"' => {
+                try out.append(gpa, '\\');
+                try out.append(gpa, c);
+            },
+            '\n' => try out.appendSlice(gpa, "\\n"),
+            '\r' => try out.appendSlice(gpa, "\\r"),
+            '\t' => try out.appendSlice(gpa, "\\t"),
+            1...8, 11...12, 14...31, 127 => {
+                try out.append(gpa, '\\');
+                try out.append(gpa, '0' + (c >> 6));
+                try out.append(gpa, '0' + ((c >> 3) & 7));
+                try out.append(gpa, '0' + (c & 7));
+            },
+            else => try out.append(gpa, c),
+        }
+    }
+    try out.append(gpa, '"');
+}
 
 /// One `objects` directory: the repository's own, or an alternate.
 const Source = struct {
@@ -295,6 +393,85 @@ pub const Odb = struct {
         return odb;
     }
 
+    /// Read the paths named directly by this database's alternates file.
+    /// Relative paths are relative to its `objects` directory, as in git.
+    /// Comments and empty lines are omitted, quoted names are decoded, and
+    /// the caller owns the result.
+    pub fn listAlternates(odb: *Odb, gpa: Allocator, io: Io) Error!Alternates {
+        const file = (try fs.readFileAlloc(gpa, io, odb.sources.items[0].dir, "info/alternates", 1 << 20)) orelse try gpa.alloc(u8, 0);
+        errdefer gpa.free(file);
+        var paths: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (paths.items) |path| gpa.free(path);
+            paths.deinit(gpa);
+        }
+        var lines = std.mem.splitScalar(u8, file, '\n');
+        while (lines.next()) |raw| if (try parseAlternate(gpa, raw)) |path| {
+            paths.append(gpa, path) catch {
+                gpa.free(path);
+                return error.OutOfMemory;
+            };
+        };
+        return .{ .gpa = gpa, .text = file, .paths = try paths.toOwnedSlice(gpa) };
+    }
+
+    /// Append one object-directory path if it is not already named. The
+    /// newly named objects are available through this open database at once.
+    pub fn addAlternate(odb: *Odb, io: Io, path: []const u8) Error!void {
+        if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAlternatePath;
+        var listed = try odb.listAlternates(odb.gpa, io);
+        defer listed.deinit();
+        for (listed.paths) |existing| if (std.mem.eql(u8, existing, path)) return;
+        var content: std.ArrayList(u8) = .empty;
+        defer content.deinit(odb.gpa);
+        try content.appendSlice(odb.gpa, listed.text);
+        if (content.items.len != 0 and content.items[content.items.len - 1] != '\n') try content.append(odb.gpa, '\n');
+        try appendAlternatePath(odb.gpa, &content, path);
+        try content.append(odb.gpa, '\n');
+        try odb.writeAlternates(io, content.items);
+    }
+
+    /// Remove every direct line naming `path`, preserving other paths and
+    /// comments. A path absent from the file changes nothing.
+    pub fn removeAlternate(odb: *Odb, io: Io, path: []const u8) Error!void {
+        var listed = try odb.listAlternates(odb.gpa, io);
+        defer listed.deinit();
+        var content: std.ArrayList(u8) = .empty;
+        defer content.deinit(odb.gpa);
+        var changed = false;
+        var cursor: usize = 0;
+        while (cursor < listed.text.len) {
+            const end = std.mem.indexOfScalarPos(u8, listed.text, cursor, '\n') orelse listed.text.len;
+            const raw = listed.text[cursor..end];
+            if (try parseAlternate(odb.gpa, raw)) |existing| {
+                defer odb.gpa.free(existing);
+                if (std.mem.eql(u8, existing, path)) {
+                    changed = true;
+                    cursor = @min(end + 1, listed.text.len);
+                    continue;
+                }
+            }
+            const next = @min(end + 1, listed.text.len);
+            try content.appendSlice(odb.gpa, listed.text[cursor..next]);
+            cursor = next;
+        }
+        if (changed) try odb.writeAlternates(io, content.items);
+    }
+
+    fn writeAlternates(odb: *Odb, io: Io, content: []const u8) Error!void {
+        if (content.len > 1 << 20) return error.AlternatesTooLarge;
+        const dir = odb.sources.items[0].dir;
+        try dir.createDirPath(io, "info");
+        try fs.atomicWrite(io, dir, "info/alternates", content, "alternates-", odb.options.sync);
+        // The own source remains open; rebuild the chain below it so reads
+        // immediately see additions and stop seeing removed alternates.
+        for (odb.sources.items[1..]) |*source| odb.closeSource(io, source);
+        odb.sources.items.len = 1;
+        odb.cache.clear();
+        try odb.readAlternates(io, dir, 0);
+        odb.generation += 1;
+    }
+
     fn addSource(odb: *Odb, io: Io, dir: Io.Dir, writable: bool, depth: u8) Error!void {
         if (depth > odb.options.max_alternate_depth) return error.AlternatesTooDeep;
         const pack_dir = dir.openDir(io, "pack", .{ .iterate = true }) catch |err| switch (err) {
@@ -319,9 +496,8 @@ pub const Odb = struct {
         defer odb.gpa.free(text);
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw_line| {
-            var line = raw_line;
-            if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-            if (line.len == 0 or line[0] == '#') continue;
+            const line = (try parseAlternate(odb.gpa, raw_line)) orelse continue;
+            defer odb.gpa.free(line);
             const alt = dir.openDir(io, line, .{ .iterate = true }) catch continue;
             odb.addSource(io, alt, false, depth + 1) catch |err| switch (err) {
                 error.AlternatesTooDeep => {
@@ -413,16 +589,7 @@ pub const Odb = struct {
 
     /// Close every pack and release everything held.
     pub fn deinit(odb: *Odb, io: Io) void {
-        for (odb.sources.items) |*source| {
-            for (source.packs.items) |*p| p.deinit(io);
-            for (source.pack_names.items) |name| odb.gpa.free(name);
-            source.packs.deinit(odb.gpa);
-            source.pack_names.deinit(odb.gpa);
-            if (source.midx) |*index| index.deinit();
-            source.midx_packs.deinit(odb.gpa);
-            if (source.pack_dir) |d| d.close(io);
-            source.dir.close(io);
-        }
+        for (odb.sources.items) |*source| odb.closeSource(io, source);
         odb.sources.deinit(odb.gpa);
         if (odb.deflate_window.len != 0) odb.gpa.free(odb.deflate_window);
         if (odb.deflate_state) |state| {
@@ -432,6 +599,17 @@ pub const Odb = struct {
         odb.cache.deinit();
         odb.shallow.deinit(odb.gpa);
         odb.* = undefined;
+    }
+
+    fn closeSource(odb: *Odb, io: Io, source: *Source) void {
+        for (source.packs.items) |*p| p.deinit(io);
+        for (source.pack_names.items) |name| odb.gpa.free(name);
+        source.packs.deinit(odb.gpa);
+        source.pack_names.deinit(odb.gpa);
+        if (source.midx) |*index| index.deinit();
+        source.midx_packs.deinit(odb.gpa);
+        if (source.pack_dir) |d| d.close(io);
+        source.dir.close(io);
     }
 
     /// The hash every name in this database is written with.
@@ -2081,6 +2259,109 @@ test "an object an alternate holds is borrowed, and owned once asked for" {
     const found = try ours.read(io, oid);
     defer gpa.free(found.bytes);
     try std.testing.expectEqualStrings("borrowed\n", found.bytes);
+}
+
+test "alternates API reads a relative chain, preserves comments, and updates open lookups" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    for ([_][]const u8{ "a/pack", "b/pack", "c/pack", "a/info" }) |dir| try tmp.dir.createDirPath(io, dir);
+    const oid = blk: {
+        var c = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "c", .{ .iterate = true }), .sha1, .{});
+        defer c.deinit(io);
+        break :blk try c.write(io, .blob, "through two alternates\n");
+    };
+    var b = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "b", .{ .iterate = true }), .sha1, .{});
+    defer b.deinit(io);
+    try b.addAlternate(io, "../c");
+    try tmp.dir.writeFile(io, .{ .sub_path = "b/info/alternates", .data = "\"../c\"\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/info/alternates", .data = "# keep this comment\n" });
+    var a = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "a", .{ .iterate = true }), .sha1, .{});
+    defer a.deinit(io);
+    try std.testing.expect(!try a.exists(io, oid));
+    try a.addAlternate(io, "../b");
+    try a.addAlternate(io, "../b");
+    var listed = try a.listAlternates(gpa, io);
+    defer listed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), listed.paths.len);
+    try std.testing.expectEqualStrings("../b", listed.paths[0]);
+    try std.testing.expect(std.mem.startsWith(u8, listed.text, "# keep this comment\n"));
+    const found = try a.read(io, oid);
+    defer gpa.free(found.bytes);
+    try std.testing.expectEqualStrings("through two alternates\n", found.bytes);
+    try a.removeAlternate(io, "../b");
+    try std.testing.expect(!try a.exists(io, oid));
+    var after = try a.listAlternates(gpa, io);
+    defer after.deinit();
+    try std.testing.expectEqualStrings("# keep this comment\n", after.text);
+    try std.testing.expectError(error.InvalidAlternatePath, a.addAlternate(io, "bad\x00path"));
+}
+
+test "alternate path quoting round trips comment prefixes and control bytes" {
+    const gpa = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(gpa);
+    const path = "#quoted\\name\n\x01";
+    try appendAlternatePath(gpa, &encoded, path);
+    const decoded = (try parseAlternate(gpa, encoded.items)).?;
+    defer gpa.free(decoded);
+    try std.testing.expectEqualStrings(path, decoded);
+}
+
+test "git reads an alternate relic wrote and relic reads one git wrote" {
+    const testgit = @import("testgit.zig");
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var source = try testgit.Repo.init(gpa, io, &.{});
+    defer source.deinit();
+    var borrower = try testgit.Repo.init(gpa, io, &.{});
+    defer borrower.deinit();
+    try source.writeFile(io, "blob", "shared by git and relic\n");
+    const oid_text = try source.run(io, &.{ "hash-object", "-w", "blob" });
+    defer gpa.free(oid_text);
+    const oid = try Oid.parse(.sha1, std.mem.trim(u8, oid_text, "\r\n"));
+    try source.exec(io, &.{ "add", "blob" });
+    try source.exec(io, &.{ "commit", "-qm", "source" });
+    const source_objects = try source.dir.realPathFileAlloc(io, ".git/objects", gpa);
+    defer gpa.free(source_objects);
+    const borrower_git_dir = try borrower.dir.openDir(io, ".git", .{});
+    defer borrower_git_dir.close(io);
+    var db = try Odb.open(gpa, io, borrower_git_dir, .sha1, .{});
+    defer db.deinit(io);
+    try db.addAlternate(io, source_objects);
+    const from_git = try borrower.run(io, &.{ "cat-file", "-p", std.mem.trim(u8, oid_text, "\r\n") });
+    defer gpa.free(from_git);
+    try std.testing.expectEqualStrings("shared by git and relic\n", from_git);
+    try db.removeAlternate(io, source_objects);
+    try std.testing.expect(!try db.exists(io, oid));
+    borrower.report_failures = false;
+    try std.testing.expectError(error.GitFailed, borrower.run(io, &.{ "cat-file", "-e", std.mem.trim(u8, oid_text, "\r\n") }));
+    if (@import("builtin").os.tag != .windows) {
+        const quoted_line = try std.fmt.allocPrint(gpa, "\"{s}\"\n", .{source_objects});
+        defer gpa.free(quoted_line);
+        try borrower.dir.writeFile(io, .{ .sub_path = ".git/objects/info/alternates", .data = quoted_line });
+        const quoted_from_git = try borrower.run(io, &.{ "cat-file", "-p", std.mem.trim(u8, oid_text, "\r\n") });
+        defer gpa.free(quoted_from_git);
+        try std.testing.expectEqualStrings("shared by git and relic\n", quoted_from_git);
+        var quoted_db = try Odb.open(gpa, io, borrower_git_dir, .sha1, .{});
+        defer quoted_db.deinit(io);
+        try std.testing.expect(try quoted_db.exists(io, oid));
+    }
+    const source_root = try source.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(source_root);
+    const clone_root = try borrower.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(clone_root);
+    const clone_path = try std.fs.path.join(gpa, &.{ clone_root, "shared" });
+    defer gpa.free(clone_path);
+    try source.exec(io, &.{ "clone", "-q", "--shared", source_root, clone_path });
+    const clone_git_dir = try borrower.dir.openDir(io, "shared/.git", .{});
+    defer clone_git_dir.close(io);
+    var reopened = try Odb.open(gpa, io, clone_git_dir, .sha1, .{});
+    defer reopened.deinit(io);
+    const from_relic = try reopened.read(io, oid);
+    defer gpa.free(from_relic.bytes);
+    try std.testing.expectEqualStrings("shared by git and relic\n", from_relic.bytes);
 }
 
 test "an abbreviated name resolves, and an ambiguous one is named" {
