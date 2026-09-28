@@ -87,7 +87,10 @@ pub fn sendForm(arena: Allocator, text: []const u8) Error![]const u8 {
 /// `RESERVED_NON_WS`.
 const reserved = "~`!@#$^&*()[]{}\\;'\",<>?";
 
-/// `git_parse_ulong`: `strtoumax` with base 0, then a unit.
+/// `git_parse_ulong`: `strtoumax` with base 0, then a unit, and the whole
+/// held to what an `unsigned long` holds, which is the platform's: 64 bits
+/// on Linux and macOS, 32 on Windows, where git for Windows refuses a
+/// `blob:limit` of 4 GiB.
 fn parseUlong(text: []const u8) Error!u64 {
     if (std.mem.indexOfScalar(u8, text, '-') != null) return error.InvalidFilter;
     var i: usize = 0;
@@ -119,7 +122,9 @@ fn parseUlong(text: []const u8) Error!u64 {
         'g' => 1024 * 1024 * 1024,
         else => return error.InvalidFilter,
     } else return error.InvalidFilter;
-    return std.math.mul(u64, value, factor) catch error.InvalidFilter;
+    const total = std.math.mul(u64, value, factor) catch return error.InvalidFilter;
+    if (total > std.math.maxInt(c_ulong)) return error.InvalidFilter;
+    return total;
 }
 
 fn isCSpace(c: u8) bool {
@@ -166,7 +171,8 @@ test "a filter is read, and refused, where git's own reading reads and refuses i
     for ([_][]const u8{
         "blob:none",                       "blob:none ",                                      "blob:limit=1k",
         "blob:limit=1K",                   "blob:limit=+5",                                   "blob:limit=",
-        "blob:limit=18446744073709551615", "blob:limit=17179869184g",                         "tree:0",
+        "blob:limit=18446744073709551615", "blob:limit=17179869184g",                         "blob:limit=4g",
+        "blob:limit=4294967295",           "tree:4294967296",                                 "tree:0",
         "tree:1k",                         "tree:0x10",                                       "tree:010",
         "tree: 1",                         "tree:\t1",                                        "tree:+1",
         "tree:-1",                         "tree:1 ",                                         "tree:1kb",
