@@ -260,6 +260,15 @@ pub const Result = struct {
     /// When the inexact rename search was skipped for want of a higher
     /// `merge.renameLimit`, the limit that would have run it; otherwise 0.
     rename_limit_needed: u64,
+    /// Whether renormalizing read attributes. git reads a path's attributes
+    /// through a stack that keeps its top level once read, and renormalizing
+    /// fills the stack its checkout of the result then uses: that checkout
+    /// writes the files under the top-level `.gitattributes` the merge read,
+    /// not the merged tree's.
+    renormalize_read_attributes: bool = false,
+    /// The blob of the merge's own top-level `.gitattributes` renormalizing
+    /// read, when it read that one rather than the working tree's.
+    merged_attributes_blob: ?Oid = null,
 
     /// Whether the merge is clean.
     pub fn isClean(r: *const Result) bool {
@@ -449,6 +458,11 @@ const Merge = struct {
     cached_irrelevant: [3]std.StringHashMapUnmanaged(void) = .{ .empty, .empty, .empty },
     redo_after_renames: u2 = 0,
     loaded_attr_dirs: std.StringHashMapUnmanaged(void) = .empty,
+    /// Whether renormalizing read any attributes, and the blob of the
+    /// merge's own top-level `.gitattributes` it read them from, if it did:
+    /// see `Result.renormalize_read_attributes`.
+    renormalize_read_attributes: bool = false,
+    merged_attributes_blob: ?Oid = null,
 
     // For recursion.
     virtuals: std.ArrayList(Virtual) = .empty,
@@ -917,12 +931,14 @@ const Merge = struct {
         if (!isReg(version.mode)) return;
         const text = try attrs.arena.allocator().dupe(u8, try m.readBlob(version.oid));
         try attrs.addText(text, "", ".gitattributes", 1);
+        m.merged_attributes_blob = version.oid;
     }
 
     /// `renormalize_buffer`, when the merge renormalizes; `bytes` as they
     /// are otherwise.
     fn renormalized(m: *Merge, path: []const u8, bytes: []const u8) Error![]const u8 {
         const session = m.options.renormalize orelse return bytes;
+        if (m.options.attributes != null) m.renormalize_read_attributes = true;
         const applied = (try m.attributesOf(path)) orelse attributes.Attributes{ .items = &.{} };
         return session.renormalize(m.arena, path, bytes, applied);
     }
@@ -2136,6 +2152,8 @@ const Merge = struct {
             .conflicted = conflicted.items,
             .messages = messages.items,
             .rename_limit_needed = m.needed_limit,
+            .renormalize_read_attributes = m.renormalize_read_attributes,
+            .merged_attributes_blob = m.merged_attributes_blob,
         };
     }
 };

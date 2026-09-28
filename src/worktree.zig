@@ -1767,8 +1767,11 @@ fn recordWritten(io: Io, wt: Io.Dir, index: *Index, path: []const u8, want: Tree
 
 /// Put the tree's own `.gitattributes` files into `attrs`, each at the depth
 /// its directory is at. The text lives in `arena`; the caller takes the
-/// levels out again before the arena goes.
-fn addTreeAttributes(
+/// levels out again before the arena goes. A later `Attrs.enter` reads the
+/// working tree's file only for a directory the tree has none in, which is
+/// how git reads attributes while it checks a tree out: from the index it
+/// is writing first.
+pub fn addTreeAttributes(
     arena: Allocator,
     io: Io,
     db: *Odb,

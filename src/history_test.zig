@@ -3155,19 +3155,27 @@ fn attributesContestedScript(repo: *testgit.Repo, io: Io) anyerror!void {
 }
 
 test "a renormalizing merge reads the attributes the merge brings when the working tree has none" {
-    for ([_]*const fn (*testgit.Repo, Io) anyerror!void{ attributesArriveScript, attributesContestedScript }) |script| {
-        try renormalizeWithMergedAttributes(script);
+    // With the platform's line endings and with CRLF, which Windows has
+    // natively: a `.gitattributes` the merge writes is itself text, and
+    // under CRLF the attributes it is written under show in its bytes.
+    for ([_]?[]const u8{ null, "crlf" }) |eol| {
+        for ([_]*const fn (*testgit.Repo, Io) anyerror!void{ attributesArriveScript, attributesContestedScript }) |script| {
+            try renormalizeWithMergedAttributes(script, eol);
+        }
     }
 }
 
-fn renormalizeWithMergedAttributes(script: *const fn (*testgit.Repo, Io) anyerror!void) !void {
+fn renormalizeWithMergedAttributes(script: *const fn (*testgit.Repo, Io) anyerror!void, eol: ?[]const u8) !void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, script);
     defer pair.deinit();
-    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "before" });
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        if (eol) |value| try r.exec(io, &.{ "config", "core.eol", value });
+        try r.exec(io, &.{ "tag", "before" });
+    }
     for ([_][]const []const u8{ &.{}, &.{"renormalize"} }) |words| {
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
             gitMayFail(r, io, &.{ "merge", "--abort" }) catch {};

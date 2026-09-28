@@ -321,6 +321,30 @@ fn run(
         outcome_removed += 1;
     }
 
+    // The files are written under the attributes git's checkout of the
+    // merge reads: the merged tree's own `.gitattributes` first, as git
+    // reads them from the index it is writing, and a working tree file
+    // only for a directory the tree has none in. A `.gitattributes` the
+    // merge brings therefore applies to the files written with it, itself
+    // included -- except at the top when renormalizing read attributes:
+    // git's checkout keeps the top level its renormalizing read, the
+    // merge's own file or else the working tree's as it was before
+    // anything is written, which `enter` reads first.
+    var write_attrs = try repo.loadAttrs(io);
+    defer write_attrs.deinit();
+    var merged_entries = try worktree.flatten(arena, io, db, merged.tree);
+    if (merged.renormalize_read_attributes) {
+        _ = merged_entries.remove(".gitattributes");
+        if (merged.merged_attributes_blob) |oid| {
+            const found = try db.read(io, oid);
+            defer db.gpa.free(found.bytes);
+            try write_attrs.addText(try arena.dupe(u8, found.bytes), "", ".gitattributes", 1);
+        }
+    }
+    try worktree.addTreeAttributes(arena, io, db, &write_attrs, &merged_entries);
+    var write_rules = rules;
+    write_rules.attrs = &write_attrs;
+
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
         .kind = db.kind,
@@ -354,7 +378,8 @@ fn run(
                 wt.deleteTree(io, path) catch {};
             }
         }
-        const written = try worktree.writeEntry(gpa, io, wt, db, &conv, path, want.mode, want.oid, rules);
+        try write_attrs.enter(io, wt, path);
+        const written = try worktree.writeEntry(gpa, io, wt, db, &conv, path, want.mode, want.oid, write_rules);
         try stats.put(arena, path, written.stat);
         outcome_written += 1;
     }
