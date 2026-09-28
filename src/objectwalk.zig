@@ -545,7 +545,8 @@ test "what is missing is what git rev-list --objects lists" {
         var buf: [64]u8 = undefined;
         try repo.writeFile(io, "a.txt", try std.fmt.bufPrint(&buf, "version {d}\n", .{i}));
         try repo.writeFile(io, "dir/same.txt", "never changes\n");
-        try repo.writeFile(io, try std.fmt.bufPrint(&buf, "dir/n{d}.txt", .{i % 3}), try std.fmt.bufPrint(&buf, "n {d}\n", .{i}));
+        var name_buf: [64]u8 = undefined;
+        try repo.writeFile(io, try std.fmt.bufPrint(&name_buf, "dir/n{d}.txt", .{i % 3}), try std.fmt.bufPrint(&buf, "n {d}\n", .{i}));
         try repo.exec(io, &.{ "add", "-A" });
         try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&buf, "c{d}", .{i}) });
         if (i == 1) try repo.exec(io, &.{ "branch", "side" });
