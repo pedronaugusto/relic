@@ -1406,6 +1406,9 @@ test "reference-transaction hears from a transaction what git's hears" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    // What the reference-transaction hook hears is git 2.54's: a
+    // "preparing" state, and a symbolic ref's updates among the others.
+    try testgit.requireGitVersion(gpa, io, 2, 54);
     var twin = try HookTwin.init(gpa, io, logging_hook);
     defer twin.deinit();
 
@@ -1460,6 +1463,9 @@ test "an update goes through HEAD to its branch, and both logs record it, as git
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    // What the reference-transaction hook hears is git 2.54's: a
+    // "preparing" state, and a symbolic ref's updates among the others.
+    try testgit.requireGitVersion(gpa, io, 2, 54);
     var twin = try HookTwin.init(gpa, io, logging_hook);
     defer twin.deinit();
     const first_text = try twin.git.line(io, &.{ "rev-parse", "HEAD~1" });
@@ -1573,6 +1579,9 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    // What the reference-transaction hook hears is git 2.54's: a
+    // "preparing" state, and a symbolic ref's updates among the others.
+    try testgit.requireGitVersion(gpa, io, 2, 54);
     for ([_][]const u8{ "preparing", "prepared" }) |state| {
         var body_buf: [160]u8 = undefined;
         const body = try std.fmt.bufPrint(&body_buf, "#!/bin/sh\n{{ echo \"$1\"; cat; }} >> .git/rt.log\n[ \"$1\" = {s} ] && exit 1\nexit 0\n", .{state});
@@ -1615,6 +1624,9 @@ test "a deletion is announced as git announces it, packed or loose" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    // What the reference-transaction hook hears is git 2.54's: a
+    // "preparing" state, and a symbolic ref's updates among the others.
+    try testgit.requireGitVersion(gpa, io, 2, 54);
     var twin = try HookTwin.init(gpa, io, logging_hook);
     defer twin.deinit();
     const head_text = try twin.relic.line(io, &.{ "rev-parse", "HEAD" });
@@ -1671,6 +1683,8 @@ test "a deletion is announced as git announces it, packed or loose" {
 test "deleting a ref takes its log and its empty directories with it, as git does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    // git removes the directories a deleted ref leaves empty from 2.31 on.
+    try testgit.requireGitVersion(gpa, io, 2, 31);
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
     var here = try testgit.Repo.init(gpa, io, &.{});

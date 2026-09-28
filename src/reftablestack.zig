@@ -1566,7 +1566,8 @@ test "what this writes into a reftable repository git reads, logs and all" {
 test "a table written for a transaction is the table git writes for it" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    try requireReftableGit(gpa, io);
+    // `update-ref --stdin`'s symref-create is git 2.46's.
+    try testgit.requireGitVersion(gpa, io, 2, 46);
     var twins: [2]testgit.Repo = undefined;
     var made: usize = 0;
     defer for (twins[0..made]) |*t| t.deinit();
@@ -1926,7 +1927,9 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    try requireReftableGit(gpa, io);
+    // What the reference-transaction hook hears is git 2.54's: a
+    // "preparing" state, and a symbolic ref's updates among the others.
+    try testgit.requireGitVersion(gpa, io, 2, 54);
     const hooks = @import("hooks.zig");
     var environ = try testgit.programEnviron(gpa);
     defer environ.deinit();
