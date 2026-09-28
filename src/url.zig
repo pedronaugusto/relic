@@ -8,6 +8,7 @@
 //! reading to git's own `url_is_local_not_ssh` and `parse_connect_url`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 /// The transport a URL is reached through.
@@ -71,6 +72,11 @@ pub const Url = struct {
                 return error.UnsupportedTransport;
             const rest = text[sep + 3 ..];
             if (scheme == .file) {
+                // On Windows `file://C:/repo` is the path with its drive, as
+                // git for Windows reads it.
+                if (builtin.os.tag == .windows and rest.len >= 2 and std.ascii.isAlphabetic(rest[0]) and rest[1] == ':') {
+                    return .{ .scheme = .file, .path = rest, .raw = text };
+                }
                 // `file://host/path` names a host other than this one only
                 // when it is not empty and not `localhost`; git refuses the
                 // rest the same way.
@@ -256,6 +262,11 @@ test "each shape of URL is read as git reads it" {
         const url = try Url.parse("file:///srv/repo.git");
         try testing.expectEqual(Scheme.file, url.scheme);
         try testing.expectEqualStrings("/srv/repo.git", url.path);
+    }
+    if (builtin.os.tag == .windows) {
+        const url = try Url.parse("file://C:\\srv/repo.git");
+        try testing.expectEqual(Scheme.file, url.scheme);
+        try testing.expectEqualStrings("C:\\srv/repo.git", url.path);
     }
 }
 
