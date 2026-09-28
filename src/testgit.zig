@@ -364,6 +364,15 @@ pub fn keepSystemVariables(gpa: Allocator, map: *Environ.Map) !void {
     }
 }
 
+/// Keep git from finding a repository above `dir`, an absolute path, for a
+/// test that runs git outside any repository of its own. A test's
+/// directories live inside the checkout the suite runs from, and git looking
+/// upwards from one finds that checkout: its configuration, or, where the
+/// checkout is a linked worktree or belongs to another user, a refusal.
+pub fn noRepositoryAbove(map: *Environ.Map, dir: []const u8) !void {
+    try map.put("GIT_CEILING_DIRECTORIES", std.fs.path.dirname(dir) orelse dir);
+}
+
 /// The test process's environment, isolated: see `isolate`.
 pub fn isolatedEnviron(gpa: Allocator, home: []const u8) !Environ.Map {
     var map = try std.testing.environ.createMap(gpa);
