@@ -22,6 +22,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const builtin = @import("builtin");
 
 const hash = @import("hash.zig");
 const object = @import("object.zig");
@@ -186,7 +187,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     } else null;
     const reached = rewritten orelse url;
 
-    // A path is recorded absolute, as git records it.
+    // A path is recorded absolute, as git records it (`absolutePathAsGit`).
     const parsed = url_mod.Url.parse(reached) catch |err| return err;
     // A path is a local clone, copied as it is: git ignores a depth and a
     // filter there, says so, and keeps what they decided besides — one
@@ -202,7 +203,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         send_filter = null;
     }
     const recorded = if (reached.ptr == url.ptr and parsed.scheme == .local)
-        try Io.Dir.cwd().realPathFileAlloc(io, url, arena)
+        try absolutePathAsGit(io, arena, url)
     else
         url;
 
@@ -550,7 +551,18 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     try repo.writeIndex(io, &index);
 }
 
-const builtin = @import("builtin");
+/// A local path as git's clone records it, through `absolute_pathdup`: an
+/// absolute path as it was given, links and separators and all, and any
+/// other after the working directory and a slash. git's working directory
+/// on Windows is written with forward slashes.
+fn absolutePathAsGit(io: Io, arena: Allocator, path: []const u8) ![]const u8 {
+    if (std.fs.path.isAbsolute(path)) return path;
+    const cwd = try Io.Dir.cwd().realPathFileAlloc(io, ".", arena);
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, cwd, '\\', '/');
+    const sep: []const u8 = if (cwd.len != 0 and (cwd[cwd.len - 1] == '/' or cwd[cwd.len - 1] == '\\')) "" else "/";
+    return std.mem.concat(arena, u8, &.{ cwd, sep, path });
+}
+
 const testing = std.testing;
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
