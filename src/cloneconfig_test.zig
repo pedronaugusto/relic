@@ -161,13 +161,17 @@ test "a clone goes where url.<base>.insteadOf sends it and records the URL as gi
     const bare = try std.fmt.allocPrint(gpa, "{s}/repo.git", .{root_path});
     defer gpa.free(bare);
     try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
-    // The person's own file names a short form for the server.
+    // The person's own file names a short form for the server. It is the
+    // home's `.gitconfig`, named by `GIT_CONFIG_GLOBAL` as well for the git
+    // that reads that (2.32 and later) and found through `HOME` by one that
+    // does not.
     const text = try std.fmt.allocPrint(gpa, "[url \"file://{s}/\"]\n\tinsteadOf = here:\n", .{root_path});
     defer gpa.free(text);
-    try root.dir.writeFile(io, .{ .sub_path = "gitconfig", .data = text });
-    const global = try std.fmt.allocPrint(gpa, "{s}/gitconfig", .{root_path});
+    try root.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = text });
+    const global = try std.fmt.allocPrint(gpa, "{s}/.gitconfig", .{root_path});
     defer gpa.free(global);
     try env.put("GIT_CONFIG_GLOBAL", global);
+    try env.put("HOME", root_path);
 
     const by_git = try std.fmt.allocPrint(gpa, "{s}/by-git", .{root_path});
     defer gpa.free(by_git);
@@ -179,7 +183,7 @@ test "a clone goes where url.<base>.insteadOf sends it and records the URL as gi
     var repo = try clone_mod.clone(gpa, io, "here:repo.git", d, .{
         .who = test_who,
         .programs = .{ .environ = &env },
-        .user_config = .{ .global = .{ .dir = root.dir, .sub_path = "gitconfig" } },
+        .user_config = .{ .global = .{ .dir = root.dir, .sub_path = ".gitconfig" } },
     });
     defer repo.deinit(io);
     var git_dir = try root.dir.openDir(io, "by-git", .{});
