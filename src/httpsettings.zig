@@ -14,11 +14,13 @@
 //! `GIT_SSL_NO_VERIFY`, `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`, `GIT_SSL_CERT`,
 //! `GIT_SSL_KEY` and `GIT_HTTP_USER_AGENT`; and a proxy is `http.proxy`,
 //! else what curl reads for git — `https_proxy` or `HTTPS_PROXY` for
-//! `https`, only the lower-case `http_proxy` for `http`, then `all_proxy`
-//! or `ALL_PROXY` — unless `no_proxy` or `NO_PROXY` names the host. An
-//! empty `http.proxy` turns every proxy off.
+//! `https`, only the lower-case `http_proxy` for `http` (where a name has
+//! case; on Windows it has none), then `all_proxy` or `ALL_PROXY` — unless
+//! `no_proxy` or `NO_PROXY` names the host. An empty `http.proxy` turns
+//! every proxy off.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
@@ -314,8 +316,14 @@ test "the environment overrides the files, and no_proxy names hosts as curl read
 
     const plain = try resolve(arena, &config, &env, try url_mod.Url.parse("http://git.example.com/r.git"));
     try testing.expectEqualStrings("/etc/from-env.pem", plain.ca_info.?);
-    // curl ignores an upper-case HTTP_PROXY, and so git does.
-    try testing.expect(plain.proxy == null);
+    // curl ignores an upper-case HTTP_PROXY, and so git does. On Windows a
+    // variable's name has no case: `http_proxy` is the variable set as
+    // `HTTP_PROXY`, and curl, asking for the one, is given the other.
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqualStrings("http://upper:3128", plain.proxy.?);
+    } else {
+        try testing.expect(plain.proxy == null);
+    }
     const secure = try resolve(arena, &config, &env, try url_mod.Url.parse("https://git.example.com/r.git"));
     try testing.expectEqualStrings("http://secure:3128", secure.proxy.?);
     const inside = try resolve(arena, &config, &env, try url_mod.Url.parse("https://git.internal.example.com/r.git"));
