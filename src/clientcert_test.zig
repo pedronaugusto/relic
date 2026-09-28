@@ -115,7 +115,7 @@ test "relic's TLS client answers OpenSSL's demand for a certificate in TLS 1.3 a
             else if (std.mem.eql(u8, kind, "p384"))
                 .{ .scheme = "ecdsa_secp384r1_sha384", .type = "ECDSA", .digest = "SHA384" }
             else
-                .{ .scheme = "ed25519", .type = "ed25519", .digest = null };
+                .{ .scheme = "ed25519", .type = "Ed25519", .digest = null };
             for ([_]bool{ false, true }) |encrypted| {
                 var arena_state: std.heap.ArenaAllocator = .init(gpa);
                 defer arena_state.deinit();
