@@ -448,7 +448,7 @@ pub const TlsFront = struct {
     ca_dir: []u8,
 
     const script =
-        \\import select, socket, ssl, sys, threading
+        \\import os, select, socket, ssl, sys, threading
         \\cert, key, backend = sys.argv[1], sys.argv[2], int(sys.argv[3])
         \\client_ca, version = sys.argv[4], sys.argv[5]
         \\ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -463,6 +463,12 @@ pub const TlsFront = struct {
         \\ls.bind(("127.0.0.1", 0))
         \\ls.listen(16)
         \\print(ls.getsockname()[1], flush=True)
+        \\# The test process owns stdin. Even an assertion panic closes the
+        \\# pipe, so a front orphaned by a failed test cannot keep serving.
+        \\def end_with_parent():
+        \\    sys.stdin.buffer.read()
+        \\    os._exit(0)
+        \\threading.Thread(target=end_with_parent, daemon=True).start()
         \\# One thread per connection, and one TLS state used by it alone.
         \\def serve(c):
         \\    try: s = ctx.wrap_socket(c, server_side=True)
@@ -564,6 +570,10 @@ pub const TlsFront = struct {
 
     /// Stop serving and release everything.
     pub fn stop(f: *TlsFront, io: Io) void {
+        if (f.running.child.stdin) |stdin| {
+            stdin.close(io);
+            f.running.child.stdin = null;
+        }
         f.running.deinit(io);
         f.env.deinit();
         f.gpa.free(f.cert_path);
@@ -572,6 +582,63 @@ pub const TlsFront = struct {
         f.gpa.destroy(f);
     }
 };
+
+test "a TLS helper exits when a parent test fails without cleanup" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const front = try TlsFront.start(gpa, io, 1);
+    defer front.stop(io);
+    const base = try absolutePath(gpa, io, front.dir.dir);
+    defer gpa.free(base);
+    const key = try std.fs.path.join(gpa, &.{ base, "key.pem" });
+    defer gpa.free(key);
+    var env = try environ(gpa);
+    defer env.deinit();
+    const failing_parent =
+        \\import os, subprocess, sys
+        \\child = subprocess.Popen(["python3", "-c", sys.argv[1], sys.argv[2], sys.argv[3], "1", "", ""], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        \\if not child.stdout.readline(): sys.exit(2)
+        \\print(child.pid, flush=True)
+        \\os._exit(1)
+    ;
+    var parent = try program.run(.{ .environ = &env }, gpa, io, .{
+        .argv = &.{ "python3", "-c", failing_parent, TlsFront.script, front.cert_path, key },
+    }, "", .{});
+    defer parent.deinit(gpa);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, parent.term);
+    const pid = std.mem.trim(u8, parent.stdout, "\r\n");
+    const check =
+        \\import os, signal, subprocess, sys, time
+        \\pid = int(sys.argv[1])
+        \\certificate = sys.argv[2]
+        \\def alive():
+        \\    try: os.kill(pid, 0)
+        \\    except ProcessLookupError: return False
+        \\    if sys.platform.startswith("linux"):
+        \\        try:
+        \\            with open(f"/proc/{pid}/stat") as stat:
+        \\                if stat.read().split(") ", 1)[1][0] == "Z": return False
+        \\            with open(f"/proc/{pid}/cmdline", "rb") as command:
+        \\                return os.fsencode(certificate) in command.read()
+        \\        except FileNotFoundError: return False
+        \\    state = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+        \\    if state.returncode != 0 or state.stdout.strip().startswith("Z"): return False
+        \\    command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+        \\    return command.returncode == 0 and certificate in command.stdout
+        \\for _ in range(200):
+        \\    if not alive(): sys.exit(0)
+        \\    time.sleep(.01)
+        \\try: os.kill(pid, signal.SIGKILL)
+        \\except ProcessLookupError: sys.exit(0)
+        \\sys.exit(1)
+    ;
+    var result = try program.run(.{ .environ = &env }, gpa, io, .{
+        .argv = &.{ "python3", "-c", check, pid, front.cert_path },
+    }, "", .{});
+    defer result.deinit(gpa);
+    try std.testing.expect(result.succeeded());
+}
 
 /// Certificates made for one test by `openssl`: an authority for clients,
 /// a stranger no server trusts, a server certificate for 127.0.0.1, and
