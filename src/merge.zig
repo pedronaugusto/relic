@@ -657,8 +657,9 @@ test "binary blob content is refused like git merge-file" {
 test "a random corpus of three-way merges matches git merge-file in every style and every algorithm" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // `--diff-algorithm` reached merge-file in 2.44; zdiff3 is older.
-    try testgit.requireGitVersion(gpa, io, 2, 44);
+    // `--diff-algorithm` reached merge-file in 2.44, and git before 2.54
+    // splits some of these histogram merges otherwise (case 14, for one).
+    try testgit.requireGitVersion(gpa, io, 2, 54);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 
@@ -746,6 +747,8 @@ test "markers take a carriage return where both sides end their lines with one" 
     const ours = "a\r\nB\r\nc\r\n";
     const theirs = "a\r\nX\r\nc\r\n";
     for ([_]ConflictStyle{ .merge, .diff3, .zdiff3 }) |style| {
+        // zdiff3 is git 2.35's.
+        if (style == .zdiff3 and !try testgit.gitAtLeast(gpa, io, 2, 35)) continue;
         const expected = try gitMergeFile(gpa, io, &repo, ancestor, ours, theirs, .{ .conflict_style = style });
         defer gpa.free(expected);
         var got = try blobs(gpa, ancestor, ours, theirs, .{ .conflict_style = style });

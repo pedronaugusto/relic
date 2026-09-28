@@ -239,7 +239,8 @@ fn importCommit(arena: Allocator, stream: *std.ArrayList(u8), branch: []const u8
 test "the whitespace strategy options merge as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    // git before 2.54 merges some of these under -X ignore-space-change otherwise.
+    try testgit.requireGitVersion(gpa, io, 2, 54);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -359,7 +360,8 @@ const Trees = struct {
 test "the subtree strategy options line the trees up as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    // `merge-tree -X` is git 2.43's.
+    try testgit.requireGitVersion(gpa, io, 2, 43);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(gpa);

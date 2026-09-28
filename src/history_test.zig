@@ -74,6 +74,26 @@ pub const Pair = struct {
     }
 };
 
+/// The merges these compare are merge-ort's, git's default from 2.34: an
+/// older git merges, picks and rebases with merge-recursive, which leaves
+/// other stages, files and state behind (and writes no AUTO_MERGE).
+fn requireOrtGit(io: Io) !void {
+    try testgit.requireGitVersion(std.testing.allocator, io, 2, 34);
+}
+
+/// The sequencer these compare is git 2.32's, which reworked the messages
+/// a fixup and a squash write and keeps --no-reschedule-failed-exec in the
+/// state it leaves.
+fn requireSequencer232(io: Io) !void {
+    try testgit.requireGitVersion(std.testing.allocator, io, 2, 32);
+}
+
+/// The rebase these compare is git 2.50's, whose todo lines put "# " before
+/// a commit's subject and which logs a rebuilt merge as "rebase (merge)".
+fn requireRebase250(io: Io) !void {
+    try testgit.requireGitVersion(std.testing.allocator, io, 2, 50);
+}
+
 /// Run `git` and keep going whatever it exits with; what it left is what is
 /// compared.
 pub fn gitMayFail(repo: *testgit.Repo, io: Io, args: []const []const u8) !void {
@@ -224,12 +244,14 @@ const main_logs = [_][]const u8{ "HEAD", "refs/heads/main" };
 test "a conflicted merge stops exactly where git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
 
     for ([_][]const u8{ "merge", "diff3", "zdiff3" }) |style| {
+        // zdiff3 is git 2.35's.
+        if (std.mem.eql(u8, style, "zdiff3") and !try testgit.gitAtLeast(gpa, io, 2, 35)) continue;
         try pair.git.exec(io, &.{ "config", "merge.conflictStyle", style });
         try pair.ours.exec(io, &.{ "config", "merge.conflictStyle", style });
         try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
@@ -259,7 +281,7 @@ test "a conflicted merge stops exactly where git's does" {
 test "a clean merge commits what git commits, and a fast-forward moves as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, cleanScript);
     defer pair.deinit();
@@ -321,7 +343,7 @@ test "a clean merge commits what git commits, and a fast-forward moves as git's 
 test "a merge one side stopped is concluded by the other" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -354,7 +376,7 @@ test "a merge one side stopped is concluded by the other" {
 test "a merge that would overwrite a local change is refused, and one it does not touch survives" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, cleanScript);
     defer pair.deinit();
@@ -416,7 +438,7 @@ fn crissCrossScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a criss-cross merge folds its two bases into one, as git does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, crissCrossScript);
     defer pair.deinit();
@@ -440,7 +462,7 @@ test "a criss-cross merge folds its two bases into one, as git does" {
 test "a signed-off merge with its own message, and one stopped before committing" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, cleanScript);
     defer pair.deinit();
@@ -510,7 +532,7 @@ fn oidOf(gpa: Allocator, io: Io, repo: *testgit.Repo, rev: []const u8) !Oid {
 test "a cherry-pick sequence stops where git's does, and each side continues the other's" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -547,7 +569,7 @@ test "a cherry-pick sequence stops where git's does, and each side continues the
 test "a pick with -x, a sign-off and the other recorded options leaves git's opts and message" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -585,7 +607,8 @@ test "a pick with -x, a sign-off and the other recorded options leaves git's opt
 test "a single pick and a revert sequence stop, abort and skip as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    // A revert of a revert is "Reapply" in git's message from 2.43 on.
+    try testgit.requireGitVersion(gpa, io, 2, 43);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -668,7 +691,7 @@ fn trailersScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "picked messages take -x and sign-off lines by git's trailer rules" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, trailersScript);
     defer pair.deinit();
@@ -696,7 +719,8 @@ test "picked messages take -x and sign-off lines by git's trailer rules" {
 test "a pick that becomes empty stops, and is dropped or kept when asked, as git's is" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    // The empty picks compared here are git 2.45's.
+    try testgit.requireGitVersion(gpa, io, 2, 45);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, trailersScript);
     defer pair.deinit();
@@ -752,7 +776,7 @@ fn mergeCommitScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a merge commit is picked and reverted against the mainline parent it is given" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, mergeCommitScript);
     defer pair.deinit();
@@ -814,7 +838,7 @@ fn expectSameSheet(pair: *Pair, io: Io, name: []const u8) !void {
 test "a rebase that stops on a conflict leaves git's state, and either side finishes the other's" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireRebase250(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -851,7 +875,7 @@ test "a rebase that stops on a conflict leaves git's state, and either side fini
 test "a clean rebase, an up-to-date one, and one onto another base land where git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, cleanScript);
     defer pair.deinit();
@@ -958,6 +982,7 @@ fn sheetFor(gpa: Allocator, io: Io, repo: *testgit.Repo, lines: []const []const 
 test "an interactive rebase driven by a sheet does what git's does, line for line" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    try requireSequencer232(io);
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
@@ -986,6 +1011,8 @@ test "an interactive rebase driven by a sheet does what git's does, line for lin
 test "an edit and a break stop where git's do, and each side continues the other's" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    // The message a stopped rebase keeps in rebase-merge/message ends in a newline from git 2.45 on.
+    try testgit.requireGitVersion(gpa, io, 2, 45);
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
@@ -1066,7 +1093,7 @@ fn upstreamScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "commits already upstream are left out by patch id, text, binary and mode alike" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, upstreamScript);
     defer pair.deinit();
@@ -1086,7 +1113,8 @@ test "commits already upstream are left out by patch id, text, binary and mode a
 test "a rebase stopped on one side is skipped and aborted by the other" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    // The reflog a stopped, skipped and aborted rebase leaves is git 2.39's.
+    try testgit.requireGitVersion(gpa, io, 2, 39);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -1130,6 +1158,7 @@ test "a rebase stopped on one side is skipped and aborted by the other" {
 test "autosquash moves fixup and squash commits where git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    try requireOrtGit(io);
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
@@ -1157,6 +1186,7 @@ test "autosquash moves fixup and squash commits where git's does" {
 test "an exec line runs only through the programs the caller hands in" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    try requireSequencer232(io);
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
@@ -1202,6 +1232,7 @@ test "an exec line runs only through the programs the caller hands in" {
 test "labels, resets and merges rebuild a merge as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    try requireRebase250(io);
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
@@ -1245,7 +1276,8 @@ fn branchesScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "update-refs moves the other branches with the commits they point at, and not one checked out elsewhere" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    // `rebase --update-refs` is git 2.38's.
+    try testgit.requireGitVersion(gpa, io, 2, 38);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, branchesScript);
     defer pair.deinit();
@@ -1269,7 +1301,7 @@ test "update-refs moves the other branches with the commits they point at, and n
 test "a branch named to rebase is switched to first, and a detached HEAD rebases where it stands" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireRebase250(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, cleanScript);
     defer pair.deinit();
@@ -1369,7 +1401,7 @@ fn renameScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a merge carries one side's edit across the other side's rename, as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, renameScript);
     defer pair.deinit();
@@ -1390,7 +1422,8 @@ test "a merge carries one side's edit across the other side's rename, as git's d
 test "with renames off the same merge conflicts as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    // git before 2.50 merges this history to another tree.
+    try testgit.requireGitVersion(gpa, io, 2, 50);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, renameScript);
     defer pair.deinit();
@@ -1423,7 +1456,7 @@ fn goneScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a pick refused for an untracked file goes back on the sheet, and continues once the file is gone" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireRebase250(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, goneScript);
     defer pair.deinit();
@@ -1511,6 +1544,7 @@ fn shapesScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a file meeting a directory, a symlink meeting a file and a double rename stop as git's merge does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    try requireOrtGit(io);
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
@@ -1563,7 +1597,7 @@ fn conflictingBasesScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a criss-cross merge whose bases conflict leaves git's nested markers" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, conflictingBasesScript);
     defer pair.deinit();
@@ -1603,7 +1637,7 @@ fn movedDirectoryScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "cherry-picks and a rebase follow a moved directory as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, movedDirectoryScript);
     defer pair.deinit();
@@ -1666,7 +1700,7 @@ fn submoduleScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a submodule both sides moved forward is fast-forwarded as git's merge does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, submoduleScript);
     defer pair.deinit();
@@ -1717,7 +1751,7 @@ fn divergedSubmoduleScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a submodule the two sides took different ways is a conflict as git's merge leaves it" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedSubmoduleScript);
     defer pair.deinit();
@@ -1784,7 +1818,7 @@ fn expectSameRerere(pair: *Pair, io: Io) !void {
 test "rerere takes down a conflict, records its resolution and replays it, as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -1845,7 +1879,7 @@ test "rerere takes down a conflict, records its resolution and replays it, as gi
 test "rerere records a cherry-pick's and a rebase's resolutions and replays them, as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireRebase250(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -1948,7 +1982,8 @@ fn algorithmScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "diff.algorithm and the strategy options choose the line diff of a merge, a cherry-pick and a rebase as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    // git before 2.50 draws some of these conflicts' hunks otherwise.
+    try testgit.requireGitVersion(gpa, io, 2, 50);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, algorithmScript);
     defer pair.deinit();
@@ -2341,7 +2376,7 @@ fn renormalizeScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a merge renormalizes when asked and writes its files through their attributes, as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, renormalizeScript);
     defer pair.deinit();
@@ -2458,7 +2493,7 @@ test "a merge runs git merge's hooks, and a stopped one git commit's, as git's d
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, cleanScript);
     defer pair.deinit();
@@ -2540,7 +2575,7 @@ test "a cherry-pick and a revert run the sequencer's hooks, and a continued stop
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -2593,7 +2628,7 @@ test "a rebase runs git rebase's hooks, stopped, continued and finished, as git'
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireRebase250(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -2676,7 +2711,7 @@ test "a rebase's fixup runs the hooks of the amend it makes, as git's does" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, fixupScript);
     defer pair.deinit();
@@ -2709,7 +2744,7 @@ test "a rebase's squash and reword run the hooks of the commits git makes for th
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireSequencer232(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, fixupScript);
     defer pair.deinit();
@@ -3040,7 +3075,7 @@ test "merges, picks, reverts and rebases are signed with an OpenPGP key as git s
 test "merge.default decides a path the attributes say nothing about, as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
@@ -3070,7 +3105,7 @@ test "merge.default decides a path the attributes say nothing about, as git's do
 test "a merge with no commit named merges the branch's upstream, as git merge does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, cleanScript);
     defer pair.deinit();
@@ -3155,6 +3190,7 @@ fn attributesContestedScript(repo: *testgit.Repo, io: Io) anyerror!void {
 }
 
 test "a renormalizing merge reads the attributes the merge brings when the working tree has none" {
+    try requireOrtGit(std.testing.io);
     // With the platform's line endings and with CRLF, which Windows has
     // natively: a `.gitattributes` the merge writes is itself text, and
     // under CRLF the attributes it is written under show in its bytes.
@@ -3222,6 +3258,8 @@ fn conflictedMergeScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "a merge line under strategy options merges as the git merge git's rebase runs for it" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    // The message a stopped rebase keeps in rebase-merge/message ends in a newline from git 2.45 on.
+    try testgit.requireGitVersion(gpa, io, 2, 45);
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     for ([_]*const fn (*testgit.Repo, Io) anyerror!void{ mergeCommitScript, conflictedMergeScript }) |script| {
@@ -3312,7 +3350,7 @@ fn subtreeScript(repo: *testgit.Repo, io: Io) anyerror!void {
 test "merge and cherry-pick with subtree and whitespace options end as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGit(gpa, io);
+    try requireOrtGit(io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, subtreeScript);
     defer pair.deinit();
