@@ -14,6 +14,7 @@
 //! | `config` | `Config`: git's configuration files, lossless. | `userconfig` |
 //! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex`, `ewah` |
 //! | `worktree` | Staging, writing a tree, checking one out, status. | `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `platstat`, `safepath` |
+//! | `wildmatch` | Match a glob directly with git's pathname and case-fold flags. | |
 //! | `diff` | Tree against tree, blob against blob, unified text. | `textdiff`, `rename`, `similarity`, `patchid` |
 //! | `revwalk` | Walking history, merge bases. | `revparse`, `shallow`, `ere` |
 //! | `merge` | Three-way merges of contents and trees. | `blobmerge`, `ort`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
@@ -30,6 +31,8 @@ pub const refs = @import("refs.zig");
 pub const config = @import("config.zig");
 pub const index = @import("index.zig");
 pub const worktree = @import("worktree.zig");
+/// Match a glob with git's pathname and case-fold flags.
+pub const wildmatch = @import("wildmatch.zig");
 pub const diff = @import("diff.zig");
 pub const revwalk = @import("revwalk.zig");
 pub const merge = @import("merge.zig");
@@ -39,6 +42,14 @@ pub const submodule = @import("submodule.zig");
 pub const lfs = @import("lfs.zig");
 
 const builtin = @import("builtin");
+
+test "public wildmatch follows git pathname and case-fold cases" {
+    const std = @import("std");
+    try std.testing.expect(try wildmatch.match("a/**/b", "a/x/y/b", .{ .pathname = true }));
+    try std.testing.expect(!try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = true }));
+    try std.testing.expect(try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = false }));
+    try std.testing.expect(try wildmatch.match("*.TXT", "readme.txt", .{ .case_fold = true }));
+}
 
 test {
     const std = @import("std");

@@ -164,6 +164,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `worktree.ignore` | `Rules.init` / `loadGlobal` / `addDirectory` / `addText` / `popTo` / `match` / `matchPath`, with the pattern that decided. |
 | `worktree.attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
 | `worktree.wildmatch` | `match` — git's own glob, which is not `fnmatch`. |
+| `wildmatch.match(pattern, text, flags)` | Match a glob with git's `pathname` and `case_fold` flags. |
 | `worktree.filter`, `worktree.convert` | Clean and smudge filters, the long-running process protocol, `ident`, line endings. |
 | `worktree.dirscan`, `worktree.platstat` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
 | `worktree.safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
