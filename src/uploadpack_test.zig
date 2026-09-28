@@ -116,6 +116,9 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
+    // git before 2.43 cannot walk what a combine: filter with object:type=
+    // left.
+    try testgit.requireGitVersion(gpa, io, 2, 43);
     var root = testing.tmpDir(.{ .iterate = true });
     defer root.cleanup();
     const bare = try served(gpa, io, root.dir);

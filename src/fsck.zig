@@ -374,6 +374,8 @@ test "a tree out of order, with a twin, or naming .git is refused by name" {
 test "git refuses the same objects and names the same problem" {
     const gpa = testing.allocator;
     const io = testing.io;
+    // git before 2.40 dies on some of these objects rather than name the problem.
+    try testgit.requireGitVersion(gpa, io, 2, 40);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     const Case = struct { t: object.Type, bytes: []const u8, problem: Problem };

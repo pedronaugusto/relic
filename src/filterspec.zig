@@ -185,6 +185,9 @@ test "a filter is read, and refused, where git's own reading reads and refuses i
         "combine:%zz",                     "combine:blob:none+sparse:oid=HEAD%3asparse-spec", "combine:blob:none+sparse:oid=HEAD~1",
         "combine:blob:none +tree:1",       "combine:tree:1%0",                                "nothing",
     }) |text| {
+        // How git reads these is 2.54's: an older git refuses a combine:
+        // with an empty last part, which 2.54 reads.
+        if (!try testgit.gitAtLeast(gpa, io, 2, 54)) break;
         const arg = try std.fmt.allocPrint(arena, "--filter={s}", .{text});
         // Quietly: most of these git refuses, as it should.
         const theirs = if (testremote.gitInputEnv(gpa, io, repo.dir, &env, &.{ "rev-list", "--objects", arg, "-n0", "HEAD" }, "", false)) |out| blk: {

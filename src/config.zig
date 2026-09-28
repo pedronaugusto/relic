@@ -1919,6 +1919,8 @@ test "a header reads as git reads it, and a header git refuses is refused" {
 test "a value reads as git reads it, carriage returns and all" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    // A carriage return inside a value is git 2.45's to read as this does.
+    try testgit.requireGitVersion(gpa, io, 2, 45);
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
     const lines = [_][]const u8{
@@ -2022,6 +2024,8 @@ fn expectSetsAgree(git: *testgit.Repo, start: []const u8, sets: []const [2][]con
 test "setting values writes the bytes git config writes, headers and escapes included" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    // git quotes a value holding a carriage return from 2.45 on.
+    try testgit.requireGitVersion(gpa, io, 2, 45);
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
 

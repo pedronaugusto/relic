@@ -625,6 +625,9 @@ test "a quoted name's escapes are undone" {
 }
 
 test "names and urls: this refuses exactly what git fsck refuses" {
+    // git's fsck refuses a url whose port is out of range from 2.44 on;
+    // an older one lets it through.
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 44);
     const names = [_][]const u8{
         "..",   "a/../b", "a\\..\\b", "../a", "a/..", "foo/",  "-foo", "a/./b",
         ".git", "x/.git", "a:b",      "..a",  "a..",  "a/..b", "sub",
