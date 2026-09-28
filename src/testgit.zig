@@ -485,10 +485,17 @@ test "a git the harness runs reads no configuration but the harness's own" {
             return error.TestUnexpectedResult;
         }
     }
-    // The home git sees is the scratch one, and it is empty.
+    // The home git sees is the scratch one, and it is empty. git for
+    // Windows prints the path with forward slashes, whichever it was given.
     const home = try repo.line(io, &.{ "var", "GIT_CONFIG_GLOBAL" });
     defer gpa.free(home);
-    try std.testing.expect(std.mem.startsWith(u8, home, repo.isolated.?.get("HOME").?));
+    const scratch = try gpa.dupe(u8, repo.isolated.?.get("HOME").?);
+    defer gpa.free(scratch);
+    if (builtin.os.tag == .windows) {
+        std.mem.replaceScalar(u8, home, '\\', '/');
+        std.mem.replaceScalar(u8, scratch, '\\', '/');
+    }
+    try std.testing.expect(std.mem.startsWith(u8, home, scratch));
     var it = repo.home.?.dir.iterate();
     try std.testing.expectEqual(@as(?Io.Dir.Entry, null), try it.next(io));
 }
