@@ -32,6 +32,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   visible to the open database at once.
 - Export `wildmatch.match` at the package root, with git's pathname and
   case-fold options for callers matching globs directly.
+- `program.Programs.spawn` accepts a caller's process launcher and optional
+  termination hook for hooks, filters and other programs relic runs.
 - `Odb.existsOwn` and `Odb.own`: whether an object is in the database's own
   objects rather than only in an alternate, and taking one an alternate
   holds into its own. A repository that borrows another's objects owns what

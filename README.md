@@ -137,7 +137,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 |---|---|
 | `repo` | `Repository.open`, `init`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. The front door. |
 | `repo.hooks` | git's hooks with git's arguments, environment and input. |
-| `repo.program` | `Programs`, `Invocation`, `run` — the one place a process starts. |
+| `repo.program` | `Programs`, `SpawnHook`, `Invocation`, `run` — the one place a process starts. `Programs.spawn` can supply process creation and termination. |
 | `repo.warning` | What git would print as a warning, as a value. |
 | `repo.fs` | `Sync`, `OnContention`, `staleReport`, `Resolution` — the lock, durability and timestamp policies every writer and every stat comparison here goes through. |
 | `hash` | `Kind` (`sha1`, `sha256`), `Oid`, `Hasher` with `Options` and `nameObject`. The hash is a parameter from the first line, not a width bolted on later. |

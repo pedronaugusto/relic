@@ -31,6 +31,22 @@ pub const Programs = struct {
     /// Usually the process's own, `std.process.Init.environ_map`. It is
     /// read, never changed.
     environ: *const Environ.Map,
+    /// Override process creation for every program relic runs. The hook
+    /// receives the fully prepared argv, environment, cwd and streams.
+    /// Supply `terminate` as well when a timeout must end descendants.
+    spawn: ?SpawnHook = null,
+};
+
+/// A caller-owned process launcher, used for hooks, filters and helpers.
+pub const SpawnHook = struct {
+    context: *anyopaque,
+    /// `options` borrows the prepared command and environment for this call;
+    /// spawn the child before returning rather than retaining them.
+    start: *const fn (*anyopaque, Io, std.process.SpawnOptions) std.process.SpawnError!Child,
+    /// Called on cleanup after normal completion too, as well as on timeout
+    /// and error paths. It must reap or kill the child; when absent, relic
+    /// calls `Child.kill`.
+    terminate: ?*const fn (*anyopaque, *Child, Io) void = null,
 };
 
 /// One variable set for a program on top of the environment it starts
@@ -184,6 +200,7 @@ fn feed(io: Io, stdin: Io.File, input: []const u8) void {
 /// transport over `ssh`.
 pub const Running = struct {
     child: Child,
+    spawn: ?SpawnHook,
     environ: Environ.Map,
     line: CommandLine,
     gpa: Allocator,
@@ -199,7 +216,9 @@ pub const Running = struct {
 
     /// Stop it if it is still running and release everything.
     pub fn deinit(running: *Running, io: Io) void {
-        running.child.kill(io);
+        if (running.spawn) |hook| {
+            if (hook.terminate) |terminate| terminate(hook.context, &running.child, io) else running.child.kill(io);
+        } else running.child.kill(io);
         running.environ.deinit();
         running.line.deinit(running.gpa);
         running.* = undefined;
@@ -217,7 +236,7 @@ pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation)
     const line: CommandLine = try .init(gpa, invocation);
     errdefer line.deinit(gpa);
 
-    const child = try std.process.spawn(io, .{
+    const options: std.process.SpawnOptions = .{
         .argv = line.argv,
         .cwd = invocation.cwd,
         .environ_map = &environ,
@@ -233,8 +252,9 @@ pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation)
             .inherit => .inherit,
             .ignore => .ignore,
         },
-    });
-    return .{ .child = child, .environ = environ, .line = line, .gpa = gpa };
+    };
+    const child = if (programs.spawn) |hook| try hook.start(hook.context, io, options) else try std.process.spawn(io, options);
+    return .{ .child = child, .spawn = programs.spawn, .environ = environ, .line = line, .gpa = gpa };
 }
 
 /// The argv a process is started with. A command line with nothing a shell
@@ -306,6 +326,42 @@ fn testEnviron() !Environ.Map {
     try map.put("RELIC_KEPT", "kept");
     try map.put("RELIC_GONE", "gone");
     return map;
+}
+
+test "Programs spawn hook receives prepared options and owns termination" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const Hooks = struct {
+        started: bool = false,
+        ended: bool = false,
+
+        fn start(raw: *anyopaque, io: Io, options: std.process.SpawnOptions) std.process.SpawnError!Child {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.started = true;
+            testing.expectEqualStrings("cat", options.argv[0]) catch unreachable;
+            testing.expectEqualStrings("hooked", options.environ_map.?.get("RELIC_HOOKED").?) catch unreachable;
+            return std.process.spawn(io, options);
+        }
+
+        fn terminate(raw: *anyopaque, child: *Child, io: Io) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.ended = true;
+            child.kill(io);
+        }
+    };
+    var env = try testEnviron();
+    defer env.deinit();
+    var hooks: Hooks = .{};
+    var outcome = try run(.{ .environ = &env, .spawn = .{
+        .context = &hooks,
+        .start = Hooks.start,
+        .terminate = Hooks.terminate,
+    } }, testing.allocator, testing.io, .{
+        .argv = &.{"cat"},
+        .set = &.{.{ .name = "RELIC_HOOKED", .value = "hooked" }},
+    }, "hello", .{});
+    defer outcome.deinit(testing.allocator);
+    try testing.expectEqualStrings("hello", outcome.stdout);
+    try testing.expect(hooks.started and hooks.ended);
 }
 
 test "a command line reaches the shell as git hands it one, and its arguments stay arguments" {
