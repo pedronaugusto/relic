@@ -347,6 +347,23 @@ pub const GnupgHome = struct {
     }
 };
 
+/// What Windows itself needs in the environment of a program it starts, and
+/// a person does not set: `SystemRoot`, without which Winsock cannot load,
+/// so that git's curl, started with nothing but `PATH`, cannot open a socket
+/// and reports every server as one it could not connect to.
+const windows_system_variables = [_][]const u8{"SystemRoot"};
+
+/// Carry `windows_system_variables` over from the test's own environment
+/// into `map`, on Windows. Elsewhere there are none.
+pub fn keepSystemVariables(gpa: Allocator, map: *Environ.Map) !void {
+    if (builtin.os.tag != .windows) return;
+    for (windows_system_variables) |name| {
+        const value = std.testing.environ.getAlloc(gpa, name) catch continue;
+        defer gpa.free(value);
+        try map.put(name, value);
+    }
+}
+
 /// The test process's environment, isolated: see `isolate`.
 pub fn isolatedEnviron(gpa: Allocator, home: []const u8) !Environ.Map {
     var map = try std.testing.environ.createMap(gpa);
@@ -356,15 +373,16 @@ pub fn isolatedEnviron(gpa: Allocator, home: []const u8) !Environ.Map {
 }
 
 /// The environment a program the library starts runs in during a test: the
-/// machine's `PATH`, isolated as `isolate` isolates git, and nothing else,
-/// so no setting of the person's reaches it. `error.SkipZigTest` where
-/// there is no `PATH`.
+/// machine's `PATH` and what Windows needs (`keepSystemVariables`),
+/// isolated as `isolate` isolates git, and nothing else, so no setting of
+/// the person's reaches it. `error.SkipZigTest` where there is no `PATH`.
 pub fn programEnviron(gpa: Allocator) !std.process.Environ.Map {
     var map: std.process.Environ.Map = .init(gpa);
     errdefer map.deinit();
     const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
     defer gpa.free(path);
     try map.put("PATH", path);
+    try keepSystemVariables(gpa, &map);
     try isolate(&map, no_home);
     return map;
 }

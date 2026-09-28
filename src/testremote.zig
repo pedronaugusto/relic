@@ -16,14 +16,16 @@ const Environ = std.process.Environ;
 const program = @import("program.zig");
 const testgit = @import("testgit.zig");
 
-/// The environment a program started by a test sees: the test's own `PATH`,
-/// isolated as `testgit.isolate` isolates git, and nothing else.
+/// The environment a program started by a test sees: the test's own `PATH`
+/// and what Windows needs (`testgit.keepSystemVariables`), isolated as
+/// `testgit.isolate` isolates git, and nothing else.
 pub fn environ(gpa: Allocator) !Environ.Map {
     var map: Environ.Map = .init(gpa);
     errdefer map.deinit();
     const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
     defer gpa.free(path);
     try map.put("PATH", path);
+    try testgit.keepSystemVariables(gpa, &map);
     try testgit.isolate(&map, testgit.no_home);
     return map;
 }
