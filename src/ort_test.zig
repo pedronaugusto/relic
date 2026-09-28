@@ -592,11 +592,15 @@ test "submodules merge by fast-forward, or say which merge would join them, as g
     }
     try repo.exec(io, &.{ "checkout", "-q", "main" });
 
-    var opener: SubOpener = .{ .gpa = gpa, .io = io, .repo = &repo };
-    defer opener.deinit();
-    const subs: ort.Submodules = .{ .context = &opener, .openFn = SubOpener.open };
-    try expectSameMerge(gpa, io, &repo, "left", "ahead", .{ .submodules = subs });
-    try expectSameMerge(gpa, io, &repo, "left", "right", .{ .submodules = subs });
+    {
+        // Closed before the submodule's repository is moved below: Windows
+        // refuses to rename a directory with a file in it held open.
+        var opener: SubOpener = .{ .gpa = gpa, .io = io, .repo = &repo };
+        defer opener.deinit();
+        const subs: ort.Submodules = .{ .context = &opener, .openFn = SubOpener.open };
+        try expectSameMerge(gpa, io, &repo, "left", "ahead", .{ .submodules = subs });
+        try expectSameMerge(gpa, io, &repo, "left", "right", .{ .submodules = subs });
+    }
     // Without the submodule's history, git calls it not checked out.
     try repo.dir.rename("sub/.git", repo.dir, "sub/.git-away", io);
     try expectSameMerge(gpa, io, &repo, "ahead", "right", .{});
