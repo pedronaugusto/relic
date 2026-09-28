@@ -152,7 +152,6 @@ fn parseAlternate(gpa: Allocator, raw: []const u8) Allocator.Error!?[]u8 {
                 'r' => '\r',
                 't' => '\t',
                 'v' => 11,
-                'e' => 27,
                 '\\' => '\\',
                 '"' => '"',
                 '0'...'3' => blk: {
