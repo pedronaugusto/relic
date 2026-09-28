@@ -164,6 +164,8 @@ test "a partial clone is the one git makes, filtered by blob:none, blob:limit, t
     defer gpa.free(url);
 
     for ([_][]const u8{ "blob:none", "blob:limit=1k", "tree:0", "combine:blob:none+tree:1", "sparse:oid=main:big.txt", "object:type=tree" }) |spec| {
+        // `object:type=` is git 2.32's filter; an older git refuses it.
+        if (std.mem.startsWith(u8, spec, "object:type=") and !try testgit.gitAtLeast(gpa, io, 2, 32)) continue;
         var twins = try Twins.init(gpa, io);
         defer twins.deinit(gpa, io);
         const filter_arg = try std.fmt.allocPrint(gpa, "--filter={s}", .{spec});

@@ -456,10 +456,16 @@ pub fn requireGit(gpa: Allocator, io: Io) !void {
 /// release it needs and stands aside on anything older, rather than
 /// asserting a shape that git was never asked to produce.
 pub fn requireGitVersion(gpa: Allocator, io: Io, major: u32, minor: u32) !void {
+    if (!try gitAtLeast(gpa, io, major, minor)) return error.SkipZigTest;
+}
+
+/// Whether the `git` on the path is at least `major.minor`, for a test
+/// that compares one thing against every git and another only against the
+/// release that has it. `error.SkipZigTest` when there is no git at all.
+pub fn gitAtLeast(gpa: Allocator, io: Io, major: u32, minor: u32) !bool {
     try requireGit(gpa, io);
-    if (git_major > major) return;
-    if (git_major == major and git_minor >= minor) return;
-    return error.SkipZigTest;
+    if (git_major > major) return true;
+    return git_major == major and git_minor >= minor;
 }
 
 /// The two leading numbers of `git version 2.43.0`, which is the shape every
@@ -494,8 +500,12 @@ test "a git the harness runs reads no configuration but the harness's own" {
             return error.TestUnexpectedResult;
         }
     }
-    // The home git sees is the scratch one, and it is empty. git for
-    // Windows prints the path with forward slashes, whichever it was given.
+    // The home git sees is the scratch one, and it is empty. `git var`
+    // names the global file from 2.42 on; git for Windows prints the path
+    // with forward slashes, whichever it was given.
+    var it = repo.home.?.dir.iterate();
+    try std.testing.expectEqual(@as(?Io.Dir.Entry, null), try it.next(io));
+    if (!try gitAtLeast(gpa, io, 2, 42)) return;
     const home = try repo.line(io, &.{ "var", "GIT_CONFIG_GLOBAL" });
     defer gpa.free(home);
     const scratch = try gpa.dupe(u8, repo.isolated.?.get("HOME").?);
@@ -505,8 +515,6 @@ test "a git the harness runs reads no configuration but the harness's own" {
         std.mem.replaceScalar(u8, scratch, '\\', '/');
     }
     try std.testing.expect(std.mem.startsWith(u8, home, scratch));
-    var it = repo.home.?.dir.iterate();
-    try std.testing.expectEqual(@as(?Io.Dir.Entry, null), try it.next(io));
 }
 
 test "isolation takes out a person's repository variables, agents and prompts, and keeps the rest" {

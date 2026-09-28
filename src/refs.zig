@@ -1769,6 +1769,8 @@ test "one transaction logs each ref in its own words when its edits say so, as g
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     for ([_][]const []const u8{ &.{}, &.{"--ref-format=reftable"} }) |args| {
+        // A reftable repository is git 2.45's to make.
+        if (args.len != 0 and !try testgit.gitAtLeast(gpa, io, 2, 45)) continue;
         var r = try testgit.Repo.init(gpa, io, args);
         defer r.deinit();
         try r.writeFile(io, "f", "f\n");

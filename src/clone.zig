@@ -769,7 +769,10 @@ test "an empty remote clones to an unborn branch, as git's does" {
     defer gpa.free(theirs);
     const ours = try git(gpa, io, &env, by_relic.dir, &.{ "symbolic-ref", "HEAD" });
     defer gpa.free(ours);
-    try testing.expectEqualStrings(theirs, ours);
+    try testing.expect(std.mem.startsWith(u8, ours, "refs/heads/trunk"));
+    // git learns an empty remote's unborn branch from 2.31 on; an older
+    // one names its own default.
+    if (try testgit.gitAtLeast(gpa, io, 2, 31)) try testing.expectEqualStrings(theirs, ours);
 }
 
 test "a destination that is not empty and a filter git does not have are refused by name" {
