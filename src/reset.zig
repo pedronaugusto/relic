@@ -119,6 +119,14 @@ pub fn toTree(
     std.mem.sort([]const u8, rewrite.items, {}, lessThanPath);
     std.mem.sort([]const u8, remove.items, {}, lessThanPath);
 
+    // Git's checkout reads attributes from the index it is installing.
+    // Keep the old rules for the local-change checks above, then use the
+    // target tree's files for every path written below.
+    var write_attrs = try repo.loadAttrs(io);
+    defer write_attrs.deinit();
+    try worktree.addTreeAttributes(arena, io, db, &write_attrs, &wanted);
+    rules.attrs = &write_attrs;
+
     var i = remove.items.len;
     while (i > 0) {
         i -= 1;
@@ -138,6 +146,9 @@ pub fn toTree(
         if (try fs.statAt(io, wt, path)) |found| {
             if (found.kind == .directory) wt.deleteTree(io, path) catch {};
         }
+        // Validate before `enter` consults a directory in the working tree.
+        if (worktree.safepath.check(path, .worktree) != null) return error.UnsafePath;
+        try write_attrs.enter(io, wt, path);
         const written = try worktree.writeEntry(gpa, io, wt, db, &conv, path, want.mode, want.oid, rules);
         try stats.put(arena, path, written.stat);
     }
@@ -178,4 +189,40 @@ fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
 /// missing file loses nothing.
 fn differs(gpa: Allocator, io: Io, wt: Io.Dir, index: *const Index, entry: index_mod.Entry, rules: worktree.Rules) Error!bool {
     return threeway.differsOnDisk(gpa, io, wt, index, entry, rules);
+}
+
+test "reset writes through the target tree's attributes as git reset hard does" {
+    const testgit = @import("testgit.zig");
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var fixture = try testgit.Repo.init(gpa, io, &.{});
+    defer fixture.deinit();
+    try fixture.writeFile(io, ".gitattributes", "file text eol=lf\n");
+    try fixture.writeFile(io, "file", "old\n");
+    try fixture.exec(io, &.{ "add", "-A" });
+    try fixture.exec(io, &.{ "commit", "-qm", "old" });
+    try fixture.exec(io, &.{ "tag", "old" });
+    try fixture.writeFile(io, ".gitattributes", "file text eol=crlf\n");
+    try fixture.writeFile(io, "file", "new\n");
+    try fixture.exec(io, &.{ "add", "-A" });
+    try fixture.exec(io, &.{ "commit", "-qm", "new" });
+    try fixture.exec(io, &.{ "tag", "new" });
+    const tree_text = try fixture.run(io, &.{ "rev-parse", "new^{tree}" });
+    defer gpa.free(tree_text);
+    const tree = try Oid.parse(.sha1, std.mem.trim(u8, tree_text, "\r\n"));
+
+    try fixture.exec(io, &.{ "reset", "-q", "--hard", "old" });
+    try fixture.exec(io, &.{ "reset", "-q", "--hard", "new" });
+    const expected = try fixture.dir.readFileAlloc(io, "file", gpa, .limited(100));
+    defer gpa.free(expected);
+    try std.testing.expectEqualStrings("new\r\n", expected);
+    try fixture.exec(io, &.{ "reset", "-q", "--hard", "old" });
+    var repo = try Repository.open(gpa, io, fixture.dir, .{});
+    defer repo.deinit(io);
+    var idx = try repo.openIndex(io);
+    defer idx.deinit();
+    try toTree(gpa, io, &repo, &idx, tree, .hard, null);
+    const actual = try fixture.dir.readFileAlloc(io, "file", gpa, .limited(100));
+    defer gpa.free(actual);
+    try std.testing.expectEqualSlices(u8, expected, actual);
 }

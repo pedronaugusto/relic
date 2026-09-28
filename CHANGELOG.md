@@ -81,6 +81,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `reset.toTree` writes files through the target tree's `.gitattributes`,
+  matching `git reset --hard` when attributes change between trees.
 - A file whose stat no longer matched the index was compared with it by
   line endings alone, under attributes from outside the working tree only:
   the `.gitattributes` files in it were never read there. So a checked-out
