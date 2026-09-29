@@ -77,7 +77,6 @@ fn mode(io: Io, d: Io.Dir, path: []const u8) !u32 {
 }
 
 test "locks relic takes git lfs locks lists, and the other way round, with the owner the server names" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var pair = try Pair.init(gpa, io);
@@ -135,7 +134,6 @@ test "locks relic takes git lfs locks lists, and the other way round, with the o
 }
 
 test "the lock cache is where git-lfs keeps it and what git-lfs writes, read both ways" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var pair = try Pair.init(gpa, io);
@@ -183,6 +181,7 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
 }
 
 test "lockable files are read-only unless the person holds the lock, with git-lfs's bits" {
+    // Windows has no POSIX write bits for git-lfs's lockable-file mode check.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -231,7 +230,6 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
 }
 
 test "a server with no locking API is named" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{ .locking = false });
@@ -252,6 +250,7 @@ test "a server with no locking API is named" {
 }
 
 test "a repository with git-lfs's hooks works on a machine without git-lfs" {
+    // The final assertions compare POSIX write bits that Windows does not preserve.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;

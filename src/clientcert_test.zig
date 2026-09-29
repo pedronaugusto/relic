@@ -5,7 +5,6 @@
 //! credential helper.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Environ = std.process.Environ;
@@ -18,6 +17,7 @@ const tls = @import("tls/root.zig");
 const repo_mod = @import("repo.zig");
 const fetch_mod = @import("fetch.zig");
 const testgit = @import("testgit.zig");
+const testlfs = @import("testlfs.zig");
 const testremote = @import("testremote.zig");
 
 const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -96,7 +96,6 @@ fn relicGet(gpa: Allocator, io: Io, pki: *Pki, port: u16, auth: ?*const tls.Clie
 }
 
 test "relic's TLS client answers OpenSSL's demand for a certificate in TLS 1.3 and 1.2, with RSA, ECDSA and Ed25519 keys, plain and encrypted" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const pki = try Pki.make(gpa, io);
@@ -178,28 +177,6 @@ fn relicFetch(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map) !voi
     outcome.deinit();
 }
 
-/// A credential helper that notes each operation and its input in
-/// `<dir>/helper.log` and answers `get` with `answer`.
-fn helperScript(gpa: Allocator, io: Io, dir: Io.Dir, answer: []const u8) ![]u8 {
-    const base = try testremote.absolutePath(gpa, io, dir);
-    defer gpa.free(base);
-    const script = try std.fmt.allocPrint(gpa,
-        \\#!/bin/sh
-        \\echo "== $1" >> "{s}/helper.log"
-        \\while IFS= read -r line; do
-        \\  echo "$line" >> "{s}/helper.log"
-        \\done
-        \\if [ "$1" = get ]; then echo password={s}; fi
-        \\
-    , .{ base, base, answer });
-    defer gpa.free(script);
-    try dir.writeFile(io, .{ .sub_path = "helper", .data = script });
-    const file = try dir.openFile(io, "helper", .{});
-    defer file.close(io);
-    try file.setPermissions(io, .fromMode(0o755));
-    return std.fmt.allocPrint(gpa, "{s}/helper", .{base});
-}
-
 /// One side-by-side case: the settings both get, and what relic answers.
 const Case = struct {
     kind: []const u8 = "p256",
@@ -216,7 +193,6 @@ const Case = struct {
 };
 
 test "git and relic fetch from a server that requires a certificate alike: key beside or with the certificate, a passphrase from the helper, and the refusals" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const pki = try Pki.make(gpa, io);
@@ -297,7 +273,7 @@ fn sideBySide(gpa: Allocator, io: Io, pki: *Pki, front: *testremote.TlsFront, ur
         if (key) |k| try r.exec(io, &.{ "config", "http.sslKey", k });
         if (case.protected) |answer| {
             try r.exec(io, &.{ "config", "http.sslCertPasswordProtected", "true" });
-            const helper = try helperScript(gpa, io, tools, answer);
+            const helper = try testlfs.passwordHelper(gpa, io, tools, "helper", answer);
             defer gpa.free(helper);
             try r.exec(io, &.{ "config", "credential.helper", helper });
         }
@@ -347,7 +323,6 @@ fn sideBySideWithout(gpa: Allocator, io: Io, front: *testremote.TlsFront, url: [
 }
 
 test "an https proxy that requires a certificate is answered with http.proxySSLCert and checked against http.proxySSLCAInfo, as git does both" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const pki = try Pki.make(gpa, io);

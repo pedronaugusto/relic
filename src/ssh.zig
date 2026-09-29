@@ -302,7 +302,6 @@ test "ssh without the permission to run it, or a port a simple ssh cannot take, 
     const io = testing.io;
     const url = try url_mod.Url.parse("ssh://example.invalid:2222/srv/repo");
     try testing.expectError(error.ProgramsNotGranted, connect(gpa, io, url, .upload_pack, .{}));
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var env = try testremote.environ(gpa);
     defer env.deinit();
     var config = try @import("config.zig").Config.parseText(gpa, "[ssh]\nvariant = simple\n", .local);

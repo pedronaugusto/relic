@@ -27,6 +27,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `zig build test -Dtest-filter=…` selects tests by name for focused fixture checks.
 - `Odb.listAlternates`, `addAlternate` and `removeAlternate` read and update
   git's alternates file, including comments and quoted paths, with changes
   visible to the open database at once.

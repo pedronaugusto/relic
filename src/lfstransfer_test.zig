@@ -9,7 +9,6 @@
 //! git-lfs as well as git, and stand aside without it.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
@@ -35,7 +34,6 @@ pub const Fixture = struct {
     server: *testlfs.Server,
 
     pub fn init(gpa: Allocator, io: Io, options: testlfs.Server.Options) !*Fixture {
-        if (builtin.os.tag == .windows) return error.SkipZigTest;
         const fx = try gpa.create(Fixture);
         errdefer gpa.destroy(fx);
         var tmp = testing.tmpDir(.{ .iterate = true });
@@ -50,7 +48,7 @@ pub const Fixture = struct {
         try testlfs.requireGitLfs(gpa, io, &env);
         // The stand-ins go first on the path: git-lfs-authenticate for the
         // stand-in ssh to find.
-        const tools_path = try std.fmt.allocPrint(gpa, "{s}/tools:{s}", .{ root, env.get("PATH").? });
+        const tools_path = try std.fmt.allocPrint(gpa, "{s}/tools{c}{s}", .{ root, std.fs.path.delimiter, env.get("PATH").? });
         defer gpa.free(tools_path);
         try env.put("PATH", tools_path);
         var tools = try tmp.dir.openDir(io, "tools", .{});
