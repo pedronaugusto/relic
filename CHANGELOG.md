@@ -81,6 +81,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `diff.numstat` and `diff.unified` free an object's bytes with the object
+  database's allocator, which allocated them, rather than the caller's.
 - `reset.toTree` writes files through the target tree's `.gitattributes`,
   matching `git reset --hard` when attributes change between trees.
 - The test TLS front exits when its parent test process ends, including on a

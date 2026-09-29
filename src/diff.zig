@@ -438,23 +438,21 @@ pub fn numstat(
         // A gitlink has no content in this repository; git counts it as one
         // line changed either way, which is what a commit name is.
         var old_gitlink: [96]u8 = undefined;
+        var old_read: ?[]u8 = null;
+        defer if (old_read) |bytes| db.gpa.free(bytes);
         const old_bytes: []const u8 = if (change.old) |entry| blk: {
             if (entry.mode == .gitlink) break :blk gitlinkText(&old_gitlink, entry.oid);
-            const found = try db.read(io, entry.oid);
-            break :blk found.bytes;
+            old_read = (try db.read(io, entry.oid)).bytes;
+            break :blk old_read.?;
         } else "";
-        defer if (change.old) |entry| {
-            if (entry.mode != .gitlink) gpa.free(@constCast(old_bytes));
-        };
         var new_gitlink: [96]u8 = undefined;
+        var new_read: ?[]u8 = null;
+        defer if (new_read) |bytes| db.gpa.free(bytes);
         const new_bytes: []const u8 = if (change.new) |entry| blk: {
             if (entry.mode == .gitlink) break :blk gitlinkText(&new_gitlink, entry.oid);
-            const found = try db.read(io, entry.oid);
-            break :blk found.bytes;
+            new_read = (try db.read(io, entry.oid)).bytes;
+            break :blk new_read.?;
         } else "";
-        defer if (change.new) |entry| {
-            if (entry.mode != .gitlink) gpa.free(@constCast(new_bytes));
-        };
         out[i] = try blobNumStat(gpa, old_bytes, new_bytes, options);
     }
     return out;
@@ -526,23 +524,23 @@ pub fn unified(
     }
 
     var old_gitlink: [96]u8 = undefined;
+    // an object's bytes are the object database's allocator's, whoever
+    // asked for them
+    var old_read: ?[]u8 = null;
+    defer if (old_read) |bytes| db.gpa.free(bytes);
     const old_bytes: []const u8 = if (change.old) |entry| blk: {
         if (entry.mode == .gitlink) break :blk gitlinkText(&old_gitlink, entry.oid);
-        const found = try db.read(io, entry.oid);
-        break :blk found.bytes;
+        old_read = (try db.read(io, entry.oid)).bytes;
+        break :blk old_read.?;
     } else "";
-    defer if (change.old) |entry| {
-        if (entry.mode != .gitlink) gpa.free(@constCast(old_bytes));
-    };
     var new_gitlink: [96]u8 = undefined;
+    var new_read: ?[]u8 = null;
+    defer if (new_read) |bytes| db.gpa.free(bytes);
     const new_bytes: []const u8 = if (change.new) |entry| blk: {
         if (entry.mode == .gitlink) break :blk gitlinkText(&new_gitlink, entry.oid);
-        const found = try db.read(io, entry.oid);
-        break :blk found.bytes;
+        new_read = (try db.read(io, entry.oid)).bytes;
+        break :blk new_read.?;
     } else "";
-    defer if (change.new) |entry| {
-        if (entry.mode != .gitlink) gpa.free(@constCast(new_bytes));
-    };
 
     if (isBinary(old_bytes) or isBinary(new_bytes)) {
         try w.print("Binary files a/{s} and b/{s} differ\n", .{ old_path, new_path });

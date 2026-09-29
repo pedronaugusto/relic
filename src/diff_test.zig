@@ -121,6 +121,28 @@ test "numstat agrees with git, including the binary marker" {
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
+test "an object's bytes go back to the object database's allocator, whatever the caller's is" {
+    // numstat and unified read each blob through the odb, which allocates
+    // it on its own allocator; they freed it on the caller's, which leaked
+    // it here (an arena frees nothing) and would free it into the wrong
+    // allocator anywhere the two differ.
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(gpa, io, setupMixed);
+    defer pair.deinit(io, gpa);
+    var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
+    defer changes.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const other = arena.allocator();
+    _ = try diff.numstat(other, io, &pair.db, changes.items, .{});
+    for (changes.items) |change| {
+        var out: std.Io.Writer.Allocating = .init(other);
+        try diff.unified(other, io, &out.writer, &pair.db, change, .{});
+    }
+}
+
 test "the unified patch is byte for byte what git prints" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
