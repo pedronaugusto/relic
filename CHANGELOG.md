@@ -81,6 +81,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `connection.Process.sayTo`, `finish` and `diagnose` leave a connection
+  that is not a program's alone, rather than reading and writing its context
+  as a `Process`.
 - `diff.numstat` and `diff.unified` free an object's bytes with the object
   database's allocator, which allocated them, rather than the caller's.
 - `reset.toTree` writes files through the target tree's `.gitattributes`,

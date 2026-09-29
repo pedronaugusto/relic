@@ -274,23 +274,23 @@ pub const Process = struct {
     fn nothing() void {}
 
     fn advertisement(context: *anyopaque, _: *Connection) Error!*Io.Reader {
-        const p: *Process = @ptrCast(@alignCast(context));
+        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
         return &p.reader.interface;
     }
 
     fn request(context: *anyopaque, _: *Connection) Error!*Io.Writer {
-        const p: *Process = @ptrCast(@alignCast(context));
+        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
         return &p.writer.interface;
     }
 
     fn response(context: *anyopaque, c: *Connection) Error!*Io.Reader {
-        const p: *Process = @ptrCast(@alignCast(context));
+        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
         p.writer.interface.flush() catch return failure(context, c);
         return &p.reader.interface;
     }
 
     fn failure(context: *anyopaque, c: *Connection) Error {
-        const p: *Process = @ptrCast(@alignCast(context));
+        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
         if (p.reader.err) |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => {},
@@ -304,7 +304,7 @@ pub const Process = struct {
     }
 
     fn close(context: *anyopaque, io: Io) void {
-        const p: *Process = @ptrCast(@alignCast(context));
+        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
         if (!p.exited) {
             // The end of the conversation: the program's input ends, and so
             // does this side's interest in its output, so a program still
@@ -335,17 +335,25 @@ pub const Process = struct {
         p.gpa.destroy(p);
     }
 
+    /// The program behind `c`, or `null` when `c` is another transport's
+    /// conversation: these three are public, and a connection is a
+    /// `Process` only when it carries its vtable.
+    fn of(c: *Connection) ?*Process {
+        if (c.vtable != &vtable) return null;
+        return @ptrCast(@alignCast(c.context)); // safe: the vtable is this type's, which only start installs, beside a Process
+    }
+
     /// Have what the program writes on its standard error handed to `sink`
     /// as `ssh_said` when the conversation ends well.
     pub fn sayTo(c: *Connection, sink: ?*warning.Warnings) void {
-        const p: *Process = @ptrCast(@alignCast(c.context));
+        const p = of(c) orelse return;
         p.said_to = sink;
     }
 
     /// Close the program's input and wait for it: whether it succeeded.
     /// The connection stays open for `close`.
     pub fn finish(c: *Connection, io: Io) Error!void {
-        const p: *Process = @ptrCast(@alignCast(c.context));
+        const p = of(c) orelse return;
         if (p.exited) return;
         p.writer.interface.flush() catch {};
         p.exited = true;
@@ -365,7 +373,7 @@ pub const Process = struct {
     /// last of what it wrote on its standard error, empty when that was not
     /// captured. The program's input is closed and it is waited for.
     pub fn diagnose(c: *Connection, io: Io) Io.Cancelable!struct { code: ?u8, stderr: []const u8 } {
-        const p: *Process = @ptrCast(@alignCast(c.context));
+        const p = of(c) orelse return .{ .code = null, .stderr = "" };
         // What it said is the failure's now, not a warning.
         p.said_to = null;
         if (!p.exited) {
@@ -404,4 +412,24 @@ test "the last of a program's standard error is what is kept" {
     tail.keep("0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789");
     try std.testing.expectEqual(@as(usize, 4096), tail.len);
     try std.testing.expect(std.mem.endsWith(u8, tail.buffer[0..tail.len], "6789"));
+}
+
+test "a conversation that is not a program's is not read as one" {
+    // Another transport's context, as large as a Process would be.
+    var other: [@sizeOf(Process)]u8 align(@alignOf(Process)) = @splat(0xaa);
+    const vtable: Connection.VTable = .{
+        .advertisement = undefined,
+        .request = undefined,
+        .response = undefined,
+        .failure = undefined,
+        .close = undefined,
+    };
+    var c: Connection = .{ .context = &other, .vtable = &vtable, .stateless = false };
+    Process.sayTo(&c, null);
+    for (other) |byte| try std.testing.expectEqual(0xaa, byte);
+    try Process.finish(&c, std.testing.io);
+    const ended = try Process.diagnose(&c, std.testing.io);
+    try std.testing.expectEqual(null, ended.code);
+    try std.testing.expectEqualStrings("", ended.stderr);
+    for (other) |byte| try std.testing.expectEqual(0xaa, byte);
 }
