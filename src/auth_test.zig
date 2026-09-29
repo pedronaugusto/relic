@@ -99,9 +99,8 @@ const Person = struct {
         return path;
     }
 
-    /// A private `GIT_EXEC_PATH` containing just the named stand-ins. Git's
-    /// real exec path follows it on `PATH`, so its other helpers remain
-    /// available without copying the whole directory into every fixture.
+    /// A private `GIT_EXEC_PATH`: every program of the real one, with
+    /// `git-credential-<name>` for each of `names` replaced by a stand-in.
     /// Each is checked to be the stand-in before any test asks it anything,
     /// so the person's real keychain is never reached.
     fn shadowHelpers(p: *Person, io: Io, names: []const []const u8, answers: []const []const u8) !void {
@@ -112,6 +111,17 @@ const Person = struct {
         try p.tools.dir.createDirPath(io, "exec");
         var shadow = try p.tools.dir.openDir(io, "exec", .{});
         defer shadow.close(io);
+        var real_dir = try Io.Dir.cwd().openDir(io, real, .{ .iterate = true });
+        defer real_dir.close(io);
+        var it = real_dir.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind == .directory) continue;
+            const target = try std.fs.path.join(p.gpa, &.{ real, entry.name });
+            defer p.gpa.free(target);
+            if (builtin.os.tag == .windows) {
+                try real_dir.copyFile(entry.name, shadow, entry.name, io, .{});
+            } else try shadow.symLink(io, target, entry.name, .{});
+        }
         for (names, answers) |name, answer| {
             const path = try p.standIn(io, name, answer);
             defer p.gpa.free(path);
@@ -129,10 +139,6 @@ const Person = struct {
         }
         const exec_path = try std.fs.path.join(p.gpa, &.{ p.tools_path, "exec" });
         defer p.gpa.free(exec_path);
-        const previous_path = p.env.get("PATH") orelse return error.SkipZigTest;
-        const search_path = try std.fmt.allocPrint(p.gpa, "{s}{c}{s}{c}{s}", .{ exec_path, std.fs.path.delimiter, real, std.fs.path.delimiter, previous_path });
-        defer p.gpa.free(search_path);
-        try p.env.put("PATH", search_path);
         try p.env.put("GIT_EXEC_PATH", exec_path);
         for (names) |name| {
             var dashed_buf: [64]u8 = undefined;
@@ -187,21 +193,6 @@ const Person = struct {
         });
     }
 };
-
-test "credential stand-ins keep Git's other executables on PATH without copying them" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    var person = try Person.init(gpa, io);
-    defer person.deinit();
-    try person.shadowHelpers(io, &.{"manager"}, &.{"username=ada\npassword=secret\n"});
-
-    var shadow = try person.tools.dir.openDir(io, "exec", .{ .iterate = true });
-    defer shadow.close(io);
-    var entries = shadow.iterate();
-    var count: usize = 0;
-    while (try entries.next(io)) |_| count += 1;
-    try testing.expectEqual(@as(usize, 2), count);
-}
 
 /// A bare repository at `<root>/<name>` for the server, with one commit.
 fn served(gpa: Allocator, io: Io, root: *testing.TmpDir, name: []const u8) !void {
