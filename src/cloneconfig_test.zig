@@ -17,6 +17,7 @@ const testremote = @import("testremote.zig");
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 test "a clone checks out through the filters the person's ~/.gitconfig names, as git clone does with git-lfs installed" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try lfstest.Fixture.init(gpa, io, .{});
@@ -96,6 +97,7 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
 }
 
 test "a clone given no settings of its own reaches the remote with the person's, as git clone does" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
@@ -143,6 +145,7 @@ test "a clone given no settings of its own reaches the remote with the person's,
 }
 
 test "a clone goes where url.<base>.insteadOf sends it and records the URL as given, as git clone does" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);

@@ -323,6 +323,7 @@ pub fn stripspace(gpa: Allocator, text: []const u8, comment: ?[]const u8) Alloca
 
 const testing = std.testing;
 const testgit = @import("testgit.zig");
+const builtin = @import("builtin");
 
 test "a message is cleaned the way git's stripspace cleans it" {
     const gpa = testing.allocator;
@@ -374,11 +375,16 @@ const Twin = struct {
         t.relic.environ = &t.environ;
     }
 
-    /// Put the same native hook in both repositories.
-    fn fixtureHook(t: *Twin, io: Io, name: []const u8, action: []const u8, data: []const u8) !void {
+    /// Put the same hook in both.
+    fn hook(t: *Twin, io: Io, name: []const u8, body: []const u8) !void {
         var path_buf: [96]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, ".git/hooks/{s}", .{name});
-        inline for (.{ &t.git, &t.relic }) |r| try testgit.fixtureHook(r.gpa, io, r.dir, path, action, data);
+        inline for (.{ &t.git, &t.relic }) |r| {
+            try r.writeFile(io, path, body);
+            const file = try r.dir.openFile(io, path, .{});
+            defer file.close(io);
+            try file.setPermissions(io, .fromMode(0o755));
+        }
     }
 
     fn both(t: *Twin, io: Io, args: []const []const u8) !void {
@@ -419,7 +425,24 @@ const Twin = struct {
     }
 };
 
+/// A hook body that records what it was given, in terms two repositories
+/// in different places print alike.
+const recorder =
+    \\#!/bin/sh
+    \\{
+    \\  printf '%s %s' "$(basename "$0")" "$#"
+    \\  for a in "$@"; do
+    \\    if [ -f "$a" ]; then printf ' [%s]' "$(basename "$a")"; else printf ' %s' "$a"; fi
+    \\  done
+    \\  [ "$(pwd -P)" = "$(git rev-parse --show-toplevel)" ] && printf ' top'
+    \\  [ "$GIT_INDEX_FILE" -ef .git/index ] && printf ' index'
+    \\  printf ' editor=%s author=%s <%s> %s\n' "$GIT_EDITOR" "$GIT_AUTHOR_NAME" "$GIT_AUTHOR_EMAIL" "$GIT_AUTHOR_DATE"
+    \\} >> .git/hook.log
+    \\
+;
+
 test "a commit runs git's hooks in git's order with what git gives them, and writes git's commit" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var twin = try Twin.init(gpa, io);
@@ -427,12 +450,12 @@ test "a commit runs git's hooks in git's order with what git gives them, and wri
     twin.bind();
 
     for ([_][]const u8{ "pre-commit", "prepare-commit-msg", "commit-msg", "post-commit" }) |name| {
-        try twin.fixtureHook(io, name, "commit_record", "");
+        try twin.hook(io, name, recorder);
     }
     // A commit-msg hook that rewrites the message, as a sign-off hook does.
-    try twin.fixtureHook(io, "commit-msg", "commit_record", "signoff");
+    try twin.hook(io, "commit-msg", recorder ++ "echo 'Signed-off-by: Hook <hook@example.com>' >> \"$1\"\n");
     // A pre-commit hook that stages a file, which the commit must include.
-    try twin.fixtureHook(io, "pre-commit", "commit_record", "stage");
+    try twin.hook(io, "pre-commit", recorder ++ "echo generated > gen.txt && git add gen.txt\n");
 
     try twin.write(io, "a.txt", "a\n");
     try twin.both(io, &.{ "add", "a.txt" });
@@ -462,6 +485,7 @@ test "a commit runs git's hooks in git's order with what git gives them, and wri
 }
 
 test "a refusing pre-commit or commit-msg hook writes nothing, and --no-verify skips both" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var twin = try Twin.init(gpa, io);
@@ -470,7 +494,7 @@ test "a refusing pre-commit or commit-msg hook writes nothing, and --no-verify s
     try twin.write(io, "a.txt", "a\n");
     try twin.both(io, &.{ "add", "a.txt" });
 
-    try twin.fixtureHook(io, "pre-commit", "status", "1\n");
+    try twin.hook(io, "pre-commit", "#!/bin/sh\nexit 1\n");
     var repo = try Repository.open(gpa, io, twin.relic.dir, .{});
     defer repo.deinit(io);
     var runner = try repo.hookRunner(io, .{ .environ = &twin.environ }, .{ .output = .ignore });
@@ -480,13 +504,13 @@ test "a refusing pre-commit or commit-msg hook writes nothing, and --no-verify s
     try testing.expectEqualStrings("pre-commit", runner.failure.event());
     try testing.expect((try repo.head(io)) == null);
 
-    try twin.fixtureHook(io, "pre-commit", "status", "0\n");
-    try twin.fixtureHook(io, "commit-msg", "status", "5\n");
+    try twin.hook(io, "pre-commit", "#!/bin/sh\nexit 0\n");
+    try twin.hook(io, "commit-msg", "#!/bin/sh\nexit 5\n");
     try testing.expectError(error.HookRejected, commit(&repo, io, request, .{ .hooks = &runner }));
     try testing.expectEqual(@as(?u8, 5), runner.failure.status());
     try testing.expect((try repo.head(io)) == null);
 
-    try twin.fixtureHook(io, "pre-commit", "status", "1\n");
+    try twin.hook(io, "pre-commit", "#!/bin/sh\nexit 1\n");
     const made = try commit(&repo, io, request, .{ .hooks = &runner, .verify = false });
     const moved = (try repo.head(io)).?;
     defer gpa.free(moved.name);
@@ -494,12 +518,13 @@ test "a refusing pre-commit or commit-msg hook writes nothing, and --no-verify s
 }
 
 test "an amend replaces the commit, keeps its parents, and tells post-rewrite" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var twin = try Twin.init(gpa, io);
     defer twin.deinit();
     twin.bind();
-    try twin.fixtureHook(io, "post-rewrite", "rewrite_log", "");
+    try twin.hook(io, "post-rewrite", "#!/bin/sh\n{ echo \"$*\"; cat; } | sed \"s/$(git rev-parse HEAD)/NEW/\" >> .git/rewrite.log\n");
     try twin.write(io, "a.txt", "a\n");
     try twin.both(io, &.{ "add", "a.txt" });
     try twin.both(io, &.{ "commit", "-q", "-m", "one" });

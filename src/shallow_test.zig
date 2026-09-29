@@ -5,6 +5,7 @@
 //! walks and fetches on what git made.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
@@ -253,6 +254,7 @@ test "a fetch deepens, and unshallows, as git fetch does, and a plain fetch into
 }
 
 test "a shallow clone over ssh is git's, and one from a path is a whole local clone, as git's is" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -359,6 +361,7 @@ test "from a shallow remote a fetch leaves the refs that would move the boundary
 }
 
 test "a push from a shallow repository tells the server its boundary, as git's send-pack does, and is refused where git's is" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -374,7 +377,23 @@ test "a push from a shallow repository tells the server its boundary, as git's s
     // A stand-in ssh that keeps what it is sent.
     var tools = testing.tmpDir(.{ .iterate = true });
     defer tools.cleanup();
-    const ssh = try testremote.capturingSsh(gpa, io, tools.dir);
+    const tools_path = try testremote.absolutePath(gpa, io, tools.dir);
+    defer gpa.free(tools_path);
+    const script = try std.fmt.allocPrint(gpa,
+        \\#!/bin/sh
+        \\while [ $# -gt 0 ]; do case "$1" in -G) exit 0;; -o|-p|-P) shift 2;; -*) shift;; *) break;; esac; done
+        \\shift
+        \\tee -a "{s}/sent" | PATH="$(git --exec-path):$PATH" sh -c "$*"
+        \\
+    , .{tools_path});
+    defer gpa.free(script);
+    try tools.dir.writeFile(io, .{ .sub_path = "ssh", .data = script });
+    {
+        const file = try tools.dir.openFile(io, "ssh", .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    }
+    const ssh = try std.fmt.allocPrint(gpa, "{s}/ssh", .{tools_path});
     defer gpa.free(ssh);
     try env.put("GIT_SSH_COMMAND", ssh);
     // Both sides commit the same commit, whatever second each lands in.

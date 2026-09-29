@@ -424,7 +424,11 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     defer gpa.free(fake_ssh);
     const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
     defer gpa.free(nobody);
-    gpa.free(try testlfs.installProgram(gpa, io, fx.tools, "git-lfs-transfer", server_program));
+    {
+        const text = try std.fmt.allocPrint(gpa, "#!/bin/sh\nexec '{s}' \"$@\"\n", .{server_program});
+        defer gpa.free(text);
+        gpa.free(try testlfs.script(gpa, io, fx.tools, "git-lfs-transfer", text));
+    }
     const remote_path = try fx.path("served/repo.git");
     defer gpa.free(remote_path);
     const url = try std.fmt.allocPrint(gpa, "ssh://git@example.invalid:2222{s}", .{remote_path});
