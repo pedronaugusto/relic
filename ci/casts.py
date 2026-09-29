@@ -71,7 +71,7 @@ def main():
         paths = [pathlib.Path(p) for p in listed.stdout.split()]
     found = []
     for path in paths:
-        if TEST_FILE.search(str(path)) or str(path) in VENDORED or not path.exists():
+        if TEST_FILE.search(path.as_posix()) or path.as_posix() in VENDORED or not path.exists():
             continue
         found += findings(path)
     for f in found:
