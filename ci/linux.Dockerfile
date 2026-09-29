@@ -17,6 +17,10 @@
 # the Rust parts are optional in this release and would bring a Rust toolchain
 # into the image for nothing the suite reads. The build is a stage of its own,
 # so the image carries the installed git and not its compiler.
+#
+# gnupg and openssh-client are the signers the signing tests drive; without
+# them those tests skip, and ci/linux.sh runs the suite with
+# RELIC_REQUIRE_SIGNERS=1 so a missing one fails instead.
 
 FROM debian:bookworm-slim AS git
 ARG GIT_VERSION=2.55.0
@@ -35,6 +39,7 @@ RUN set -e; \
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl xz-utils ca-certificates libcurl4 libexpat1 zlib1g perl \
+      gnupg openssh-client \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=git /opt/git /opt/git
 ARG ZIG=0.16.0

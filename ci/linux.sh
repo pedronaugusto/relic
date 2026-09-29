@@ -40,10 +40,12 @@ if ! docker image inspect "$image" >/dev/null 2>&1; then
     docker build -f ci/linux.Dockerfile -t "$image" ci
 fi
 docker run --rm "$image" git --version
+docker run --rm "$image" sh -ec 'gpg --version | head -1; command -v gpgconf ssh-keygen'
 
 for mode in Debug ReleaseSafe; do
     echo "==> zig build test -Doptimize=$mode (linux, in $image)"
     docker run --rm \
+        -e RELIC_REQUIRE_SIGNERS=1 \
         -v "$PWD:/src:ro" \
         "$image" \
         sh -ec '
