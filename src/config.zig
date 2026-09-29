@@ -606,7 +606,16 @@ pub const Config = struct {
             const git_dir = config.context.git_dir orelse return false;
             var buf: [4096]u8 = undefined;
             const pattern = config.expandCondition(pattern_raw, &buf) orelse return false;
-            return wildmatch.match(pattern, git_dir, .{ .pathname = true, .case_fold = case_fold }) catch false;
+            // Git matches paths with forward slashes on Windows, including
+            // the home directory expanded from `~/`.
+            var normalized: [4096]u8 = undefined;
+            const match_pattern = if (@import("builtin").os.tag == .windows) blk: {
+                if (pattern.len > normalized.len) return false;
+                @memcpy(normalized[0..pattern.len], pattern);
+                std.mem.replaceScalar(u8, normalized[0..pattern.len], '\\', '/');
+                break :blk normalized[0..pattern.len];
+            } else pattern;
+            return wildmatch.match(match_pattern, git_dir, .{ .pathname = true, .case_fold = case_fold }) catch false;
         }
         if (std.mem.startsWith(u8, condition, "onbranch:")) {
             const pattern_raw = condition["onbranch:".len..];

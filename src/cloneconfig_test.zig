@@ -17,7 +17,6 @@ const testremote = @import("testremote.zig");
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 test "a clone checks out through the filters the person's ~/.gitconfig names, as git clone does with git-lfs installed" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try lfstest.Fixture.init(gpa, io, .{});
@@ -97,7 +96,6 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
 }
 
 test "a clone given no settings of its own reaches the remote with the person's, as git clone does" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
@@ -119,7 +117,7 @@ test "a clone given no settings of its own reaches the remote with the person's,
     const text = try std.fmt.allocPrint(gpa, "[core]\n\tsshCommand = {s}\n", .{fake});
     defer gpa.free(text);
     try root.dir.writeFile(io, .{ .sub_path = "gitconfig", .data = text });
-    const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}/repo.git", .{root_path});
+    const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/repo.git", .{ if (builtin.os.tag == .windows) "/" else "", root_path });
     defer gpa.free(url);
 
     try root.dir.createDirPath(io, "by-relic");
@@ -145,7 +143,6 @@ test "a clone given no settings of its own reaches the remote with the person's,
 }
 
 test "a clone goes where url.<base>.insteadOf sends it and records the URL as given, as git clone does" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
@@ -165,7 +162,10 @@ test "a clone goes where url.<base>.insteadOf sends it and records the URL as gi
     // home's `.gitconfig`, named by `GIT_CONFIG_GLOBAL` as well for the git
     // that reads that (2.32 and later) and found through `HOME` by one that
     // does not.
-    const text = try std.fmt.allocPrint(gpa, "[url \"file://{s}/\"]\n\tinsteadOf = here:\n", .{root_path});
+    const url_root = try gpa.dupe(u8, root_path);
+    defer gpa.free(url_root);
+    if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, url_root, '\\', '/');
+    const text = try std.fmt.allocPrint(gpa, "[url \"file://{s}/\"]\n\tinsteadOf = here:\n", .{url_root});
     defer gpa.free(text);
     try root.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = text });
     const global = try std.fmt.allocPrint(gpa, "{s}/.gitconfig", .{root_path});

@@ -51,7 +51,9 @@ pub const Pair = struct {
         errdefer pair.env.deinit();
         // An editor that accepts what it is given, for a `git commit` or a
         // `git rebase --continue` that would open one.
-        try pair.env.put("GIT_EDITOR", "true");
+        const editor = try testgit.fixtureCommand(gpa, @import("build_options").process_fixture_path, "silent");
+        defer gpa.free(editor);
+        try pair.env.put("GIT_EDITOR", editor);
         pair.git = try testgit.Repo.init(gpa, io, &.{});
         errdefer pair.git.deinit();
         pair.git.environ = &pair.env;
@@ -921,13 +923,21 @@ test "a clean rebase, an up-to-date one, and one onto another base land where gi
 fn gitRebaseInteractive(repo: *testgit.Repo, io: Io, sheet: []const u8, args: []const []const u8) !void {
     try repo.writeFile(io, ".git/relic-todo", sheet);
     const env = @constCast(repo.environ.?);
-    try env.put("GIT_SEQUENCE_EDITOR", "cp .git/relic-todo");
+    const editor = try testgit.fixtureCommand(repo.gpa, @import("build_options").process_fixture_path, "copy-file .git/relic-todo");
+    defer repo.gpa.free(editor);
+    try env.put("GIT_SEQUENCE_EDITOR", editor);
     defer _ = env.swapRemove("GIT_SEQUENCE_EDITOR");
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(repo.gpa);
     try argv.appendSlice(repo.gpa, &.{ "rebase", "-i" });
     try argv.appendSlice(repo.gpa, args);
     try gitMayFail(repo, io, argv.items);
+}
+
+fn useFixtureEditor(pair: *Pair, name: []const u8, arguments: []const u8) !void {
+    const command = try testgit.fixtureCommand(pair.gpa, @import("build_options").process_fixture_path, arguments);
+    defer pair.gpa.free(command);
+    try pair.env.put(name, command);
 }
 
 /// Five commits on `side` over `main`, each adding its own file, the last
@@ -983,7 +993,6 @@ test "an interactive rebase driven by a sheet does what git's does, line for lin
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireSequencer232(io);
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, sheetScript);
@@ -1013,7 +1022,6 @@ test "an edit and a break stop where git's do, and each side continues the other
     const io = std.testing.io;
     // The message a stopped rebase keeps in rebase-merge/message ends in a newline from git 2.45 on.
     try testgit.requireGitVersion(gpa, io, 2, 45);
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, sheetScript);
@@ -1159,13 +1167,12 @@ test "autosquash moves fixup and squash commits where git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireOrtGit(io);
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, sheetScript);
     defer pair.deinit();
 
-    try pair.env.put("GIT_SEQUENCE_EDITOR", "true");
+    try useFixtureEditor(&pair, "GIT_SEQUENCE_EDITOR", "silent");
     try pair.git.exec(io, &.{ "rebase", "-i", "--autosquash", "main" });
     _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
     {
@@ -1187,7 +1194,6 @@ test "an exec line runs only through the programs the caller hands in" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireSequencer232(io);
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, sheetScript);
@@ -1233,7 +1239,6 @@ test "labels, resets and merges rebuild a merge as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireRebase250(io);
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, mergeCommitScript);
@@ -1330,7 +1335,6 @@ test "a branch named to rebase is switched to first, and a detached HEAD rebases
 test "the messages a person would edit come from the caller, and land as an editor's would" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, sheetScript);
@@ -1344,9 +1348,9 @@ test "the messages a person would edit come from the caller, and land as an edit
     defer gpa.free(sheet);
     // git's editor writes the same text over whatever it is shown.
     try pair.git.writeFile(io, ".git/relic-message", "Edited by hand\n\n# a comment the cleanup takes away\nwith a body\n");
-    try pair.env.put("GIT_EDITOR", "cp .git/relic-message");
+    try useFixtureEditor(&pair, "GIT_EDITOR", "copy-file .git/relic-message");
     try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
-    try pair.env.put("GIT_EDITOR", "true");
+    try useFixtureEditor(&pair, "GIT_EDITOR", "silent");
 
     const Editor = struct {
         seen: [4]rebase.MessageKind = undefined,
@@ -1545,6 +1549,7 @@ test "a file meeting a directory, a symlink meeting a file and a double rename s
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireOrtGit(io);
+    // Git for Windows may check out the symbolic link as a plain file.
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
@@ -2424,29 +2429,6 @@ test "a merge renormalizes when asked and writes its files through their attribu
 // Hooks
 //=========================================================================
 
-/// A hook that records what it was given: its arguments as they are, where
-/// it runs, git's variables for it, which of a command's state files are
-/// there, its standard input, and a message hook's file.
-const recorder =
-    \\#!/bin/sh
-    \\{
-    \\  printf '%s' "$(basename "$0")"
-    \\  for a in "$@"; do printf ' %s' "$a"; done
-    \\  [ "$(pwd -P)" = "$(cd "$(git rev-parse --show-toplevel)" && pwd -P)" ] && printf ' top'
-    \\  printf ' index=%s editor=%s author=%s <%s> %s' "$GIT_INDEX_FILE" "$GIT_EDITOR" "$GIT_AUTHOR_NAME" "$GIT_AUTHOR_EMAIL" "$GIT_AUTHOR_DATE"
-    \\  for f in MERGE_HEAD MERGE_MSG CHERRY_PICK_HEAD REVERT_HEAD REBASE_HEAD COMMIT_EDITMSG; do [ -f ".git/$f" ] && printf ' %s' "$f"; done
-    \\  printf ' stdin=['; tr '\n' ';'; printf ']'
-    \\  case "$(basename "$0")" in prepare-commit-msg|commit-msg)
-    \\    # Behind an editor the file also holds git's help for the person,
-    \\    # which the commit strips; what is compared then is what it keeps.
-    \\    if [ "$GIT_EDITOR" = ":" ]; then printf ' msg=['; tr '\n' '|' < "$1"; else printf ' edited=['; git stripspace -s < "$1" | tr '\n' '|'; fi
-    \\    printf ']';;
-    \\  esac
-    \\  printf '\n'
-    \\} >> .git/hook.log
-    \\
-;
-
 const recorded_hooks = [_][]const u8{
     "pre-merge-commit", "prepare-commit-msg", "commit-msg",   "pre-commit",
     "post-commit",      "post-merge",         "post-rewrite", "post-checkout",
@@ -2460,10 +2442,7 @@ fn installRecorders(pair: *Pair, io: Io) !void {
         for (recorded_hooks) |name| {
             const path = try std.fmt.allocPrint(pair.gpa, ".git/hooks/{s}", .{name});
             defer pair.gpa.free(path);
-            try r.writeFile(io, path, recorder);
-            const file = try r.dir.openFile(io, path, .{ .mode = .read_write });
-            defer file.close(io);
-            try file.setPermissions(io, .fromMode(0o755));
+            try testgit.fixtureHook(pair.gpa, io, r.dir, path, "history_record", "");
         }
         try r.writeFile(io, ".git/hook.log", "");
     }
@@ -2490,7 +2469,6 @@ fn gitWithHooks(pair: *Pair, io: Io, args: []const []const u8) !void {
 }
 
 test "a merge runs git merge's hooks, and a stopped one git commit's, as git's do" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireOrtGit(io);
@@ -2572,7 +2550,6 @@ test "a merge runs git merge's hooks, and a stopped one git commit's, as git's d
 }
 
 test "a cherry-pick and a revert run the sequencer's hooks, and a continued stop git commit's, as git's do" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireOrtGit(io);
@@ -2625,7 +2602,6 @@ test "a cherry-pick and a revert run the sequencer's hooks, and a continued stop
 }
 
 test "a rebase runs git rebase's hooks, stopped, continued and finished, as git's does" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireRebase250(io);
@@ -2708,7 +2684,6 @@ fn fixupScript(repo: *testgit.Repo, io: Io) anyerror!void {
 }
 
 test "a rebase's fixup runs the hooks of the amend it makes, as git's does" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireOrtGit(io);
@@ -2717,7 +2692,7 @@ test "a rebase's fixup runs the hooks of the amend it makes, as git's does" {
     defer pair.deinit();
     try installRecorders(&pair, io);
 
-    try pair.env.put("GIT_SEQUENCE_EDITOR", "true");
+    try useFixtureEditor(&pair, "GIT_SEQUENCE_EDITOR", "silent");
     try gitWithHooks(&pair, io, &.{ "rebase", "-i", "--autosquash", "main" });
     _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
     {
@@ -2741,7 +2716,6 @@ test "a rebase's fixup runs the hooks of the amend it makes, as git's does" {
 }
 
 test "a rebase's squash and reword run the hooks of the commits git makes for them" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try requireSequencer232(io);
@@ -2755,7 +2729,7 @@ test "a rebase's squash and reword run the hooks of the commits git makes for th
     try installRecorders(&pair, io);
 
     // The squash, through the editor the person has.
-    try pair.env.put("GIT_SEQUENCE_EDITOR", "true");
+    try useFixtureEditor(&pair, "GIT_SEQUENCE_EDITOR", "silent");
     try gitWithHooks(&pair, io, &.{ "rebase", "-i", "--autosquash", "main" });
     _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
     {
@@ -2789,7 +2763,7 @@ test "a rebase's squash and reword run the hooks of the commits git makes for th
     const sheet = try std.fmt.allocPrint(gpa, "pick {s} one\npick {s} squash! one\nreword {s} two\n", .{ one.hex(&hex[0]), squash.hex(&hex[1]), two.hex(&hex[2]) });
     defer gpa.free(sheet);
     try pair.git.writeFile(io, ".git/relic-sheet", sheet);
-    try pair.env.put("GIT_SEQUENCE_EDITOR", "cp .git/relic-sheet");
+    try useFixtureEditor(&pair, "GIT_SEQUENCE_EDITOR", "copy-file .git/relic-sheet");
     try gitWithHooks(&pair, io, &.{ "rebase", "-i", "main" });
     _ = pair.env.swapRemove("GIT_SEQUENCE_EDITOR");
     try pair.git.dir.deleteFile(io, ".git/relic-sheet");
@@ -2919,7 +2893,6 @@ fn expectSignedAlike(pair: *Pair, io: Io, rev: []const u8) !void {
 }
 
 fn signedHistory(format: @import("signing.zig").Format) !void {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try testgit.requireGit(gpa, io);
@@ -2931,9 +2904,9 @@ fn signedHistory(format: @import("signing.zig").Format) !void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try gpa.dupe(u8, buf[0..try keys.dir.realPath(io, &buf)]);
     defer gpa.free(dir);
-    // gpg's home under /tmp, where its sockets' paths fit; see
+    // gpg's own short home, where Unix sockets' paths fit; see
     // `testgit.GnupgHome`. Removed after the daemons below are stopped.
-    var gnupg: testgit.GnupgHome = try .init(io);
+    var gnupg: testgit.GnupgHome = try .init(gpa, io);
     defer gnupg.deinit(io);
     if (!try makeSigningKey(&pair, io, dir, gnupg.path(), format)) return error.SkipZigTest;
     defer if (format == .openpgp) {
@@ -3065,6 +3038,7 @@ test "merges, picks, reverts and rebases are signed with an ssh key as git signs
 }
 
 test "merges, picks, reverts and rebases are signed with an OpenPGP key as git signs them" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // GnuPG agent is unavailable on the Windows runner.
     try signedHistory(.openpgp);
 }
 
@@ -3260,7 +3234,6 @@ test "a merge line under strategy options merges as the git merge git's rebase r
     const io = std.testing.io;
     // The message a stopped rebase keeps in rebase-merge/message ends in a newline from git 2.45 on.
     try testgit.requireGitVersion(gpa, io, 2, 45);
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     for ([_]*const fn (*testgit.Repo, Io) anyerror!void{ mergeCommitScript, conflictedMergeScript }) |script| {
         var pair: Pair = undefined;

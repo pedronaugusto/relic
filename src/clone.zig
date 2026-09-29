@@ -694,7 +694,6 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
 }
 
 test "a clone over ssh and over HTTP is the clone git makes" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
@@ -720,7 +719,10 @@ test "a clone over ssh and over HTTP is the clone git makes" {
     defer gpa.free(fake);
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const ssh_url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}/repo.git", .{root_path});
+    const ssh_path = try gpa.dupe(u8, root_path);
+    defer gpa.free(ssh_path);
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+    const ssh_url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/repo.git", .{ if (builtin.os.tag == .windows) "/" else "", ssh_path });
     defer gpa.free(ssh_url);
 
     var settings_text: std.ArrayList(u8) = .empty;

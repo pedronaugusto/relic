@@ -28,6 +28,7 @@ const transport = @import("transport.zig");
 const userconfig = @import("userconfig.zig");
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
+const testlfs = @import("testlfs.zig");
 
 const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -42,7 +43,6 @@ const Person = struct {
     env: Environ.Map,
 
     fn init(gpa: Allocator, io: Io) !Person {
-        if (builtin.os.tag == .windows) return error.SkipZigTest;
         try testgit.requireGit(gpa, io);
         var home = testing.tmpDir(.{ .iterate = true });
         errdefer home.cleanup();
@@ -86,27 +86,22 @@ const Person = struct {
     /// `<name>.log` and answers `get` with `<name>.answer`. The path is
     /// the caller's.
     fn standIn(p: *Person, io: Io, name: []const u8, answer: []const u8) ![]u8 {
-        const script = try std.fmt.allocPrint(p.gpa,
-            \\#!/bin/sh
-            \\for op; do :; done
-            \\[ "$op" = relic-probe ] && {{ echo stand-in; exit 0; }}
-            \\echo "== $op" >> "{s}/{s}.log"
-            \\while IFS= read -r line; do echo "$line" >> "{s}/{s}.log"; done
-            \\if [ "$op" = get ]; then cat "{s}/{s}.answer"; fi
-            \\
-        , .{ p.tools_path, name, p.tools_path, name, p.tools_path, name });
-        defer p.gpa.free(script);
-        try p.tools.dir.writeFile(io, .{ .sub_path = name, .data = script });
+        const path = try testlfs.installProgram(p.gpa, io, p.tools.dir, name, @import("build_options").lfs_test_tool_path);
+        errdefer p.gpa.free(path);
+        const sidecar = try std.fmt.allocPrint(p.gpa, "{s}.fixture", .{path});
+        defer p.gpa.free(sidecar);
+        const stem = if (builtin.os.tag == .windows) path[0 .. path.len - 4] else path;
+        const description = try std.fmt.allocPrint(p.gpa, "credential-person\n{s}\n", .{stem});
+        defer p.gpa.free(description);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = description });
         var answer_name: [64]u8 = undefined;
         try p.tools.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&answer_name, "{s}.answer", .{name}), .data = answer });
-        const file = try p.tools.dir.openFile(io, name, .{});
-        defer file.close(io);
-        if (builtin.os.tag != .windows) try file.setPermissions(io, .fromMode(0o755));
-        return std.fs.path.join(p.gpa, &.{ p.tools_path, name });
+        return path;
     }
 
-    /// A private `GIT_EXEC_PATH`: every program of the real one, with
-    /// `git-credential-<name>` for each of `names` replaced by a stand-in.
+    /// A private `GIT_EXEC_PATH` containing just the named stand-ins. Git's
+    /// real exec path follows it on `PATH`, so its other helpers remain
+    /// available without copying the whole directory into every fixture.
     /// Each is checked to be the stand-in before any test asks it anything,
     /// so the person's real keychain is never reached.
     fn shadowHelpers(p: *Person, io: Io, names: []const []const u8, answers: []const []const u8) !void {
@@ -117,24 +112,27 @@ const Person = struct {
         try p.tools.dir.createDirPath(io, "exec");
         var shadow = try p.tools.dir.openDir(io, "exec", .{});
         defer shadow.close(io);
-        var real_dir = try Io.Dir.cwd().openDir(io, real, .{ .iterate = true });
-        defer real_dir.close(io);
-        var it = real_dir.iterate();
-        while (try it.next(io)) |entry| {
-            const target = try std.fs.path.join(p.gpa, &.{ real, entry.name });
-            defer p.gpa.free(target);
-            try shadow.symLink(io, target, entry.name, .{});
-        }
         for (names, answers) |name, answer| {
             const path = try p.standIn(io, name, answer);
             defer p.gpa.free(path);
             var dashed_buf: [64]u8 = undefined;
             const dashed = try std.fmt.bufPrint(&dashed_buf, "git-credential-{s}", .{name});
-            shadow.deleteFile(io, dashed) catch {};
-            try shadow.symLink(io, path, dashed, .{});
+            const installed = if (builtin.os.tag == .windows) try std.fmt.allocPrint(p.gpa, "{s}.exe", .{dashed}) else try p.gpa.dupe(u8, dashed);
+            defer p.gpa.free(installed);
+            shadow.deleteFile(io, installed) catch {};
+            if (builtin.os.tag == .windows) try Io.Dir.cwd().copyFile(path, shadow, installed, io, .{}) else try shadow.symLink(io, path, installed, .{});
+            const fixture = try std.fmt.allocPrint(p.gpa, "{s}.fixture", .{installed});
+            defer p.gpa.free(fixture);
+            const source = try std.fmt.allocPrint(p.gpa, "{s}.fixture", .{path});
+            defer p.gpa.free(source);
+            try Io.Dir.cwd().copyFile(source, shadow, fixture, io, .{});
         }
         const exec_path = try std.fs.path.join(p.gpa, &.{ p.tools_path, "exec" });
         defer p.gpa.free(exec_path);
+        const previous_path = p.env.get("PATH") orelse return error.SkipZigTest;
+        const search_path = try std.fmt.allocPrint(p.gpa, "{s}{c}{s}{c}{s}", .{ exec_path, std.fs.path.delimiter, real, std.fs.path.delimiter, previous_path });
+        defer p.gpa.free(search_path);
+        try p.env.put("PATH", search_path);
         try p.env.put("GIT_EXEC_PATH", exec_path);
         for (names) |name| {
             var dashed_buf: [64]u8 = undefined;
@@ -189,6 +187,21 @@ const Person = struct {
         });
     }
 };
+
+test "credential stand-ins keep Git's other executables on PATH without copying them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    try person.shadowHelpers(io, &.{"manager"}, &.{"username=ada\npassword=secret\n"});
+
+    var shadow = try person.tools.dir.openDir(io, "exec", .{ .iterate = true });
+    defer shadow.close(io);
+    var entries = shadow.iterate();
+    var count: usize = 0;
+    while (try entries.next(io)) |_| count += 1;
+    try testing.expectEqual(@as(usize, 2), count);
+}
 
 /// A bare repository at `<root>/<name>` for the server, with one commit.
 fn served(gpa: Allocator, io: Io, root: *testing.TmpDir, name: []const u8) !void {
@@ -360,7 +373,10 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         var files: [2][]u8 = undefined;
         for (0..2) |who| {
             try person.tools.dir.writeFile(io, .{ .sub_path = "credentials", .data = line });
-            const store = try std.fmt.allocPrint(gpa, "[credential]\n\thelper = store --file={s}/credentials\n", .{person.tools_path});
+            const tools_path = try gpa.dupe(u8, person.tools_path);
+            defer gpa.free(tools_path);
+            if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, tools_path, '\\', '/');
+            const store = try std.fmt.allocPrint(gpa, "[credential]\n\thelper = store --file={s}/credentials\n", .{tools_path});
             defer gpa.free(store);
             try person.writeSystem(io, store);
             var r = try testgit.Repo.init(gpa, io, &.{});
@@ -399,6 +415,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         if (builtin.os.tag != .windows) try person.tools.dir.setFilePermissions(io, "cache", .fromMode(0o700), .{});
         const socket = try std.fs.path.join(gpa, &.{ person.tools_path, "cache", "sock" });
         defer gpa.free(socket);
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, socket, '\\', '/');
         const cache = try std.fmt.allocPrint(gpa, "[credential]\n\thelper = cache --socket={s}\n", .{socket});
         defer gpa.free(cache);
         try person.writeSystem(io, cache);
@@ -636,21 +653,11 @@ test "what ssh says on a conversation that succeeds is handed back as a warning,
     var person = try Person.init(gpa, io);
     defer person.deinit();
     // ssh that adds a host key, says so, and goes on.
-    try person.tools.dir.writeFile(io, .{ .sub_path = "ssh", .data =
-        \\#!/bin/sh
-        \\echo "Warning: Permanently added 'work-github' (ED25519) to the list of known hosts." >&2
-        \\while [ $# -gt 0 ]; do case "$1" in -G) exit 0 ;; -o|-p|-P|-i|-J|-F) shift 2 ;; -*) shift ;; *) break ;; esac; done
-        \\shift
-        \\PATH="$(git --exec-path):$PATH" exec sh -c "$*"
-        \\
-    });
-    {
-        const file = try person.tools.dir.openFile(io, "ssh", .{});
-        defer file.close(io);
-        if (builtin.os.tag != .windows) try file.setPermissions(io, .fromMode(0o755));
-    }
-    const ssh = try std.fs.path.join(gpa, &.{ person.tools_path, "ssh" });
+    const ssh = try testlfs.installProgram(gpa, io, person.tools.dir, "ssh", @import("build_options").fake_ssh_helper_path);
     defer gpa.free(ssh);
+    const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{ssh});
+    defer gpa.free(sidecar);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = "warn\nWarning: Permanently added 'work-github' (ED25519) to the list of known hosts.\n" });
     try person.env.put("GIT_SSH_COMMAND", ssh);
     var source = try testremote.historyRepo(gpa, io, 1);
     defer source.deinit();
@@ -693,35 +700,17 @@ test "what ssh says on a conversation that succeeds is handed back as a warning,
 /// agent and home it was started with, then either says `refusal` on its
 /// standard error and exits 255, as ssh does, or runs the command here.
 fn sshStandIn(person: *Person, io: Io, refusal: ?[]const u8) ![]u8 {
-    const body = if (refusal) |text|
-        try std.fmt.allocPrint(person.gpa, "echo '{s}' >&2; exit 255\n", .{text})
+    const path = try testlfs.installProgram(person.gpa, io, person.tools.dir, "ssh", @import("build_options").fake_ssh_helper_path);
+    errdefer person.gpa.free(path);
+    const sidecar = try std.fmt.allocPrint(person.gpa, "{s}.fixture", .{path});
+    defer person.gpa.free(sidecar);
+    const description = if (refusal) |message|
+        try std.fmt.allocPrint(person.gpa, "refuse\n{s}\n", .{message})
     else
-        try person.gpa.dupe(u8,
-            \\while [ $# -gt 0 ]; do
-            \\  case "$1" in
-            \\    -G) exit 0 ;;
-            \\    -o|-p|-P|-i|-J|-F) shift 2 ;;
-            \\    -*) shift ;;
-            \\    *) break ;;
-            \\  esac
-            \\done
-            \\shift
-            \\PATH="$(git --exec-path):$PATH" exec sh -c "$*"
-            \\
-        );
-    defer person.gpa.free(body);
-    const script = try std.fmt.allocPrint(person.gpa,
-        \\#!/bin/sh
-        \\for a in "$@"; do printf '[%s]' "$a" >> "$0.log"; done
-        \\echo " agent=$SSH_AUTH_SOCK home=$HOME" >> "$0.log"
-        \\{s}
-    , .{body});
-    defer person.gpa.free(script);
-    try person.tools.dir.writeFile(io, .{ .sub_path = "ssh", .data = script });
-    const file = try person.tools.dir.openFile(io, "ssh", .{});
-    defer file.close(io);
-    if (builtin.os.tag != .windows) try file.setPermissions(io, .fromMode(0o755));
-    return std.fs.path.join(person.gpa, &.{ person.tools_path, "ssh" });
+        try person.gpa.dupe(u8, "auth\n");
+    defer person.gpa.free(description);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = description });
+    return path;
 }
 
 test "ssh gets the person's host alias, agent and command line untouched, as git hands them over" {
@@ -730,21 +719,33 @@ test "ssh gets the person's host alias, agent and command line untouched, as git
     var person = try Person.init(gpa, io);
     defer person.deinit();
     // The person's agent, which their ssh uses and relic must pass along.
-    try person.env.put("SSH_AUTH_SOCK", "/tmp/agent.person");
+    // Git for Windows runs configured SSH commands through MSYS sh, which
+    // rewrites a Unix /tmp path to its own temporary directory. Use a
+    // Windows absolute path so the exact value can be compared on both.
+    const agent = if (builtin.os.tag == .windows)
+        try std.fmt.allocPrint(gpa, "{s}/agent.person", .{person.tools_path})
+    else
+        try gpa.dupe(u8, "/tmp/agent.person");
+    defer gpa.free(agent);
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, agent, '\\', '/');
+    try person.env.put("SSH_AUTH_SOCK", agent);
     const ssh = try sshStandIn(&person, io, null);
     defer gpa.free(ssh);
     var source = try testremote.historyRepo(gpa, io, 1);
     defer source.deinit();
     const source_path = try testremote.absolutePath(gpa, io, source.dir);
     defer gpa.free(source_path);
+    const ssh_path = try gpa.dupe(u8, source_path);
+    defer gpa.free(ssh_path);
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
 
     // A `Host work-github` alias with its `IdentityFile` and `ProxyJump`
     // lives in ~/.ssh/config, which only ssh reads: the host goes to ssh
     // as written. `GIT_SSH_COMMAND` and `core.sshCommand` are command
     // lines, their options kept.
-    const scp = try std.fmt.allocPrint(gpa, "work-github:{s}", .{source_path});
+    const scp = try std.fmt.allocPrint(gpa, "work-github:{s}", .{ssh_path});
     defer gpa.free(scp);
-    const with_user = try std.fmt.allocPrint(gpa, "ssh://git@work-github{s}", .{source_path});
+    const with_user = try std.fmt.allocPrint(gpa, "ssh://git@work-github{s}{s}", .{ if (builtin.os.tag == .windows) "/" else "", ssh_path });
     defer gpa.free(with_user);
     const Case = struct { url: []const u8, env_command: ?[]const u8 = null, config_command: ?[]const u8 = null };
     const env_line = try std.fmt.allocPrint(gpa, "{s} -i ~/.ssh/work_ed25519 -o ProxyJump=bastion", .{ssh});
@@ -787,7 +788,9 @@ test "ssh gets the person's host alias, agent and command line untouched, as git
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
         try testing.expect(std.mem.indexOf(u8, ours, "work-github]") != null);
-        try testing.expect(std.mem.indexOf(u8, ours, "agent=/tmp/agent.person") != null);
+        const agent_entry = try std.fmt.allocPrint(gpa, "agent={s}", .{agent});
+        defer gpa.free(agent_entry);
+        try testing.expect(std.mem.indexOf(u8, ours, agent_entry) != null);
     }
 }
 

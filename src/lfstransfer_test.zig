@@ -9,7 +9,6 @@
 //! git-lfs as well as git, and stand aside without it.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
@@ -19,6 +18,7 @@ const lfs = @import("lfs.zig");
 const lfsapi = @import("lfsapi.zig");
 const lfstransfer = @import("lfstransfer.zig");
 const objectwalk = @import("objectwalk.zig");
+const fs = @import("fs.zig");
 const progress_mod = @import("progress.zig");
 const testlfs = @import("testlfs.zig");
 const testremote = @import("testremote.zig");
@@ -35,7 +35,6 @@ pub const Fixture = struct {
     server: *testlfs.Server,
 
     pub fn init(gpa: Allocator, io: Io, options: testlfs.Server.Options) !*Fixture {
-        if (builtin.os.tag == .windows) return error.SkipZigTest;
         const fx = try gpa.create(Fixture);
         errdefer gpa.destroy(fx);
         var tmp = testing.tmpDir(.{ .iterate = true });
@@ -50,7 +49,7 @@ pub const Fixture = struct {
         try testlfs.requireGitLfs(gpa, io, &env);
         // The stand-ins go first on the path: git-lfs-authenticate for the
         // stand-in ssh to find.
-        const tools_path = try std.fmt.allocPrint(gpa, "{s}/tools:{s}", .{ root, env.get("PATH").? });
+        const tools_path = try std.fmt.allocPrint(gpa, "{s}/tools{c}{s}", .{ root, std.fs.path.delimiter, env.get("PATH").? });
         defer gpa.free(tools_path);
         try env.put("PATH", tools_path);
         var tools = try tmp.dir.openDir(io, "tools", .{});
@@ -598,10 +597,7 @@ test "the endpoint and its access are the ones git lfs env names" {
         const access = try server.settings.urlGet(arena_state.allocator(), "lfs", e.url, "access");
         const ours = try std.fmt.allocPrint(gpa, "Endpoint={s} (auth={s})", .{ e.url, access orelse "none" });
         defer gpa.free(ours);
-        testing.expectEqualStrings(line, ours) catch |err| {
-            std.debug.print("case {d}\n", .{n});
-            return err;
-        };
+        try testing.expectEqualStrings(line, ours);
         if (e.ssh) |ssh| {
             const ssh_line = try std.fmt.allocPrint(gpa, "\n  SSH={s}:{s}\n", .{ ssh.user_and_host, ssh.path });
             defer gpa.free(ssh_line);
@@ -615,9 +611,9 @@ test "a refused credential is erased, as git-lfs erases it, and the transfer say
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{ .users = &.{.{ .name = "ada", .password = "secret" }} });
     defer fx.deinit();
-    const wrong_git = try testlfs.credentialHelper(gpa, io, fx.tools, "wrong-git", "ada", "wrong");
+    const wrong_git = try testlfs.removableCredentialHelper(gpa, io, fx.tools, "wrong-git", "ada", "wrong");
     defer gpa.free(wrong_git);
-    const wrong_relic = try testlfs.credentialHelper(gpa, io, fx.tools, "wrong-relic", "ada", "wrong");
+    const wrong_relic = try testlfs.removableCredentialHelper(gpa, io, fx.tools, "wrong-relic", "ada", "wrong");
     defer gpa.free(wrong_relic);
     const content = try noise(gpa, 20 * 1024, 8);
     defer gpa.free(content);
@@ -642,6 +638,10 @@ test "a refused credential is erased, as git-lfs erases it, and the transfer say
     var fetched = try lfstransfer.fetch(server, &repo, .{});
     defer fetched.deinit();
     try testing.expectEqual(@as(usize, 1), fetched.failures());
+    try testing.expectEqual(lfstransfer.Result.Status.failed, fetched.results[0].status);
+    try testing.expect(std.mem.startsWith(u8, fetched.results[0].message.?, "no credential for "));
+    _ = try fx.tools.statFile(io, "wrong-git.erased", .{});
+    _ = try fx.tools.statFile(io, "wrong-relic.erased", .{});
 
     const theirs_log = try fx.tools.readFileAlloc(io, "wrong-git.log", gpa, .unlimited);
     defer gpa.free(theirs_log);
@@ -1057,6 +1057,7 @@ test "a clone made with --shared takes its objects from the other repository's s
 
     var listings: [2][]u8 = .{ &.{}, &.{} };
     defer for (listings) |l| gpa.free(l);
+    var linked: [2]bool = undefined;
     for ([_][]const u8{ "by-git", "by-relic" }, 0..) |name, i| {
         const dest = try fx.path(name);
         defer gpa.free(dest);
@@ -1082,9 +1083,12 @@ test "a clone made with --shared takes its objects from the other repository's s
         defer gpa.free(seen);
         try testing.expectEqualStrings("", seen);
         listings[i] = try storeListing(fx, d);
-        // The same file, not a copy of it.
-        try testing.expectEqual(seed_stat.inode, (try d.statFile(io, object_path, .{})).inode);
+        try expectFile(fx, d, object_path, "shared once\n");
+        linked[i] = seed_stat.inode == (try d.statFile(io, object_path, .{})).inode;
     }
+    // A platform that permits Git LFS to hard-link gets a hard link from
+    // relic too; on a platform where Git LFS copies, relic copies too.
+    try testing.expectEqual(linked[0], linked[1]);
     try testing.expectEqualStrings(listings[0], listings[1]);
     try testing.expect(std.mem.indexOf(u8, listings[1], &oid) != null);
     try testing.expect(std.mem.indexOf(u8, listings[1], &testlfs.sha256Hex("shared twice\n")) != null);
@@ -1588,7 +1592,7 @@ test "a refused credential is described as git-lfs's helpers hear it, with the s
     var logs: [2][]u8 = .{ &.{}, &.{} };
     defer for (logs) |l| gpa.free(l);
     for ([_][]const u8{ "git-helper", "relic-helper" }, 0..) |helper_name, i| {
-        const helper = try testlfs.credentialHelperVerbatim(gpa, io, fx.tools, helper_name, "ada", "wrong");
+        const helper = try testlfs.removableCredentialHelperVerbatim(gpa, io, fx.tools, helper_name, "ada", "wrong");
         defer gpa.free(helper);
         var d = try committed(fx, helper_name, helper, &.{.{ "a.bin", content }});
         defer d.close(io);
@@ -1813,10 +1817,10 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
         for (entries) |e| {
             if (std.fs.path.dirnamePosix(e.path)) |parent| try tmp.createDirPath(io, parent);
             try tmp.writeFile(io, .{ .sub_path = e.path, .data = "x" });
-            try tmp.setTimestamps(io, e.path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - e.age_s) * std.time.ns_per_s } } });
+            try fs.setTimestamps(io, tmp, e.path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - e.age_s) * std.time.ns_per_s } } });
         }
-        try tmp.setTimestamps(io, "young-dir", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - 600) * std.time.ns_per_s } } });
-        try tmp.setTimestamps(io, "old-dir", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - 7200) * std.time.ns_per_s } } });
+        try fs.setTimestamps(io, tmp, "young-dir", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - 600) * std.time.ns_per_s } } });
+        try fs.setTimestamps(io, tmp, "old-dir", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now - 7200) * std.time.ns_per_s } } });
         if (i == 0) {
             try fx.gitIn(d, &.{ "lfs", "fetch" });
         } else {
@@ -1838,7 +1842,11 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
             for (found.items) |f| gpa.free(f);
             found.deinit(gpa);
         }
-        while (try walker.next(io)) |e| try found.append(gpa, try gpa.dupe(u8, e.path));
+        while (try walker.next(io)) |e| {
+            const path = try gpa.dupe(u8, e.path);
+            if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+            try found.append(gpa, path);
+        }
         std.mem.sort([]const u8, found.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {
                 return std.mem.lessThan(u8, a, b);

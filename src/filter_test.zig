@@ -7,7 +7,6 @@
 //! compiles and hands in through `build_options`.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const build_options = @import("build_options");
 
@@ -168,30 +167,40 @@ pub const Twin = struct {
     }
 };
 
-pub fn skipWithoutSh() !void {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-}
-
 test "command-line filters store what git stores and check out what git checks out" {
-    try skipWithoutSh();
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try environ(gpa);
     defer env.deinit();
 
+    const fixture = build_options.process_fixture_path;
+    const up = try testgit.fixtureCommand(gpa, fixture, "upper");
+    defer gpa.free(up);
+    const down = try testgit.fixtureCommand(gpa, fixture, "lower");
+    defer gpa.free(down);
+    const tag = try testgit.fixtureCommand(gpa, fixture, "tag %f");
+    defer gpa.free(tag);
+    const drop = try testgit.fixtureCommand(gpa, fixture, "drop-first-line");
+    defer gpa.free(drop);
+    const crlf_command = try testgit.fixtureCommand(gpa, fixture, "crlf");
+    defer gpa.free(crlf_command);
+    const copy = try testgit.fixtureCommand(gpa, fixture, "copy");
+    defer gpa.free(copy);
+    const fail = try testgit.fixtureCommand(gpa, fixture, "fail");
+    defer gpa.free(fail);
+
     var twin = try Twin.init(gpa, io, &.{
-        .{ "filter.up.clean", "tr a-z A-Z" },
-        .{ "filter.up.smudge", "tr A-Z a-z" },
-        // `%s` is the program's own and passes through; `%f` is the path,
-        // quoted, and a space and a quote in it stay one argument.
-        .{ "filter.tag.clean", "{ printf 'path=%s\\n' %f; cat; }" },
-        .{ "filter.tag.smudge", "sed 1d" },
+        .{ "filter.up.clean", up },
+        .{ "filter.up.smudge", down },
+        // `%f` is the path, quoted so a space and a quote stay one argument.
+        .{ "filter.tag.clean", tag },
+        .{ "filter.tag.smudge", drop },
         // Carriage returns out of the clean filter are normalised after it,
         // and put back before the smudge.
-        .{ "filter.crlf.clean", "awk '{ sub(/\\r$/, \"\"); printf \"%s\\r\\n\", $0 }'" },
-        .{ "filter.crlf.smudge", "cat" },
-        .{ "filter.broken.clean", "false" },
-        .{ "filter.broken.smudge", "false" },
+        .{ "filter.crlf.clean", crlf_command },
+        .{ "filter.crlf.smudge", copy },
+        .{ "filter.broken.clean", fail },
+        .{ "filter.broken.smudge", fail },
     }, &.{
         .{ ".gitattributes", "*.up filter=up\n*.tag filter=tag\n*.crlf filter=crlf text eol=crlf\n*.txt ident\n*.broken filter=broken\n*.none filter=undefined\n" },
         .{ "a.up", "hello, world\n" },
@@ -274,7 +283,7 @@ test "the conversion order is the order git runs, not the one its manual gives" 
 
 /// The helper as a `filter.<driver>.process` command line.
 fn helperCommand(gpa: std.mem.Allocator, args: []const u8) ![]u8 {
-    return std.fmt.allocPrint(gpa, "'{s}' {s}", .{ build_options.filter_helper_path, args });
+    return testgit.fixtureCommand(gpa, build_options.filter_helper_path, args);
 }
 
 /// The requests each helper process that ran was sent, one string per
@@ -298,7 +307,6 @@ fn freeLogs(gpa: std.mem.Allocator, logs: *std.ArrayList([]u8)) void {
 }
 
 test "a process filter stores what git stores, one process for the whole add" {
-    try skipWithoutSh();
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try environ(gpa);
@@ -307,15 +315,18 @@ test "a process filter stores what git stores, one process for the whole add" {
     defer log_tmp.cleanup();
     const log_path = try log_tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(log_path);
+    if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, log_path, '\\', '/');
     const log_arg = try std.fmt.allocPrint(gpa, "--log={s}", .{log_path});
     defer gpa.free(log_arg);
     const command = try helperCommand(gpa, log_arg);
     defer gpa.free(command);
+    const fail = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "fail");
+    defer gpa.free(fail);
 
     var twin = try Twin.init(gpa, io, &.{
         .{ "filter.rot.process", command },
         // The process is used where both are configured.
-        .{ "filter.rot.clean", "false" },
+        .{ "filter.rot.clean", fail },
         .{ "filter.rot.required", "true" },
     }, &.{
         .{ ".gitattributes", "*.r filter=rot\n" },
@@ -346,7 +357,6 @@ test "a process filter stores what git stores, one process for the whole add" {
 }
 
 test "a delayed smudge is written after the rest, as git writes it" {
-    try skipWithoutSh();
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try environ(gpa);
@@ -355,6 +365,7 @@ test "a delayed smudge is written after the rest, as git writes it" {
     defer log_tmp.cleanup();
     const log_path = try log_tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(log_path);
+    if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, log_path, '\\', '/');
     const args = try std.fmt.allocPrint(gpa, "--delay --log={s}", .{log_path});
     defer gpa.free(args);
     const command = try helperCommand(gpa, args);
@@ -413,13 +424,16 @@ test "a delayed smudge is written after the rest, as git writes it" {
 }
 
 test "a failing required filter stops the add by name, as it stops git" {
-    try skipWithoutSh();
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try environ(gpa);
     defer env.deinit();
+    const reject = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "reject-filter");
+    defer gpa.free(reject);
+    const copy = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "copy");
+    defer gpa.free(copy);
     var twin = try Twin.init(gpa, io, &.{
-        .{ "filter.must.clean", "echo nope >&2; exit 3" },
+        .{ "filter.must.clean", reject },
         .{ "filter.must.required", "true" },
     }, &.{
         .{ ".gitattributes", "*.m filter=must\n" },
@@ -444,7 +458,7 @@ test "a failing required filter stops the add by name, as it stops git" {
 
     // A required driver with nothing to run for the direction fails too.
     try twin.ours.exec(io, &.{ "config", "--unset", "filter.must.clean" });
-    try twin.ours.exec(io, &.{ "config", "filter.must.smudge", "cat" });
+    try twin.ours.exec(io, &.{ "config", "filter.must.smudge", copy });
     try testing.expectError(error.FilterFailed, relicAdd(gpa, io, twin.ours.dir, .{ .programs = .{ .environ = &env } }));
 }
 
@@ -477,7 +491,6 @@ test "without programs a required filter is refused by name and any other is pas
 }
 
 test "a process filter's error passes one file over and its abort stops the command, as in git" {
-    try skipWithoutSh();
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try environ(gpa);
@@ -512,7 +525,6 @@ test "a process filter's error passes one file over and its abort stops the comm
 }
 
 test "a process filter that does not speak pkt-line is a named error, as it is fatal to git" {
-    try skipWithoutSh();
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try environ(gpa);
@@ -530,7 +542,9 @@ test "a process filter that does not speak pkt-line is a named error, as it is f
 
     // A filter that will not start is passed over, which is what git does
     // when the greeting never comes.
-    try twin.ours.exec(io, &.{ "config", "filter.rot.process", "exit 0" });
+    const silent = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "silent");
+    defer gpa.free(silent);
+    try twin.ours.exec(io, &.{ "config", "filter.rot.process", silent });
     var report: filter.Report = .init(gpa);
     defer report.deinit();
     _ = try relicAdd(gpa, io, twin.ours.dir, .{ .programs = .{ .environ = &env }, .report = &report });
@@ -538,7 +552,6 @@ test "a process filter that does not speak pkt-line is a named error, as it is f
 }
 
 test "status compares a filtered file through what it would be stored as" {
-    try skipWithoutSh();
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try environ(gpa);

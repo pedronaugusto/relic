@@ -31,6 +31,7 @@
 //! library's own connect timeout is not there yet on any system.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const http = std.http;
@@ -1048,7 +1049,18 @@ pub const Connection = struct {
             _ = layer.client.reader.peekByte() catch {};
             if (layer.client.read_err != null) return conn.readFailed();
         };
+        if (conn.missingCertificateReset()) return error.ClientCertificateRejected;
         return error.ConnectionFailed;
+    }
+
+    fn missingCertificateReset(conn: *Connection) bool {
+        if (builtin.os.tag != .windows or conn.client.client_auth != null) return false;
+        // Windows can report the server's TLS certificate refusal as a
+        // socket reset before the TLS alert reaches the reader.
+        for (conn.layers) |slot| if (slot) |layer| {
+            if (layer.certificate_requested) return true;
+        };
+        return false;
     }
 
     fn readFailed(conn: *Connection) Error {
@@ -1070,6 +1082,7 @@ pub const Connection = struct {
             }
             return error.TlsFailed;
         };
+        if (conn.missingCertificateReset()) return error.ClientCertificateRejected;
         return error.ConnectionFailed;
     }
 

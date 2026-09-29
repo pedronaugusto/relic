@@ -289,7 +289,6 @@ test "lfs.storage is honoured, and git-lfs finds the objects there" {
 }
 
 test "git-lfs run by relic as its filter process does what relic's own LFS does" {
-    try ft.skipWithoutSh();
     const gpa = testing.allocator;
     const io = testing.io;
     try requireGitLfs(gpa, io);

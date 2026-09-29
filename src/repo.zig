@@ -743,7 +743,10 @@ pub const Repository = struct {
         defer repo.lfsconfig_mutex.unlock(io);
         const key = try repo.lfsconfigKey(io);
         if (repo.lfsconfig_cache) |cached| {
-            if (std.meta.eql(cached.key, key)) {
+            // Windows file timestamps can stay unchanged when a same-size
+            // worktree file is rewritten immediately. Re-read that small
+            // file rather than handing out stale settings.
+            if (std.meta.eql(cached.key, key) and !(@import("builtin").os.tag == .windows and key.worktree != null)) {
                 return if (cached.text) |t| try repo.gpa.dupe(u8, t) else null;
             }
         }

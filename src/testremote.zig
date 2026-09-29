@@ -117,35 +117,38 @@ pub fn addCommits(gpa: Allocator, io: Io, repo: *testgit.Repo, first: usize, cou
     }
 }
 
-/// Write a stand-in for `ssh` into `dir` and return its absolute path. It
-/// notes each argument it is given in `<itself>.log`, answers OpenSSH's
-/// `-G` probe as OpenSSH does, skips the options, ignores the host, and runs
-/// the command it was asked to run here — with git's own programs on the
-/// path, as a login shell on a server has them. git's test suite does the
-/// same.
+/// Write a native stand-in for `ssh` into `dir` and return its absolute path.
+/// It logs the arguments, answers OpenSSH's `-G` probe, ignores the host,
+/// and runs the remote command here with the same standard streams. Git and
+/// relic use the same copy.
 pub fn fakeSsh(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    try dir.writeFile(io, .{ .sub_path = "fake-ssh", .data =
-        \\#!/bin/sh
-        \\for a in "$@"; do printf '[%s]' "$a" >> "$0.log"; done; echo >> "$0.log"
-        \\while [ $# -gt 0 ]; do
-        \\  case "$1" in
-        \\    -G) exit 0 ;;
-        \\    -o|-p|-P) shift 2 ;;
-        \\    -*) shift ;;
-        \\    *) break ;;
-        \\  esac
-        \\done
-        \\shift
-        \\PATH="$(git --exec-path):$PATH" exec sh -c "$*"
-        \\
-    });
-    const file = try dir.openFile(io, "fake-ssh", .{});
-    defer file.close(io);
-    try file.setPermissions(io, .fromMode(0o755));
+    const name = if (builtin.os.tag == .windows) "fake-ssh.exe" else "fake-ssh";
+    try Io.Dir.cwd().copyFile(@import("build_options").fake_ssh_helper_path, dir, name, io, .{});
+    if (builtin.os.tag != .windows) {
+        const file = try dir.openFile(io, name, .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    }
     const base = try absolutePath(gpa, io, dir);
     defer gpa.free(base);
-    return std.fmt.allocPrint(gpa, "{s}/fake-ssh", .{base});
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base, name });
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    return path;
+}
+
+/// Install the native SSH stand-in and record every byte sent to it in
+/// `sent` beside the executable.
+pub fn capturingSsh(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
+    const path = try fakeSsh(gpa, io, dir);
+    errdefer gpa.free(path);
+    const base = try absolutePath(gpa, io, dir);
+    defer gpa.free(base);
+    const sent = try std.fs.path.join(gpa, &.{ base, "sent" });
+    defer gpa.free(sent);
+    const sidecar = try std.fmt.allocPrint(gpa, "{s}.capture", .{path});
+    defer gpa.free(sidecar);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = sent });
+    return path;
 }
 
 /// An HTTP server on 127.0.0.1 that hands every request to
@@ -519,7 +522,6 @@ pub const TlsFront = struct {
 
     /// `start`, set up as `options` says.
     pub fn startWith(gpa: Allocator, io: Io, backend_port: u16, options: Options) !*TlsFront {
-        if (builtin.os.tag == .windows) return error.SkipZigTest;
         const f = try gpa.create(TlsFront);
         errdefer gpa.destroy(f);
         var env = try environ(gpa);
@@ -550,8 +552,16 @@ pub const TlsFront = struct {
         if (!made.succeeded()) return error.SkipZigTest;
         try dir.dir.createDirPath(io, "ca");
         try dir.dir.copyFile("cert.pem", dir.dir, "ca/cert.pem", io, .{});
-        var rehash = program.run(.{ .environ = &env }, gpa, io, .{ .argv = &.{ "openssl", "rehash", ca_dir } }, "", .{}) catch null;
-        if (rehash) |*r| r.deinit(gpa);
+        // OpenSSL looks up CApath certificates by their subject hash. A
+        // copied file works on Windows too, where rehash's symlink may not.
+        var hashed = try program.run(.{ .environ = &env }, gpa, io, .{
+            .argv = &.{ "openssl", "x509", "-hash", "-noout", "-in", cert_path },
+        }, "", .{});
+        defer hashed.deinit(gpa);
+        if (!hashed.succeeded()) return error.SkipZigTest;
+        const ca_name = try std.fmt.allocPrint(gpa, "ca/{s}.0", .{std.mem.trim(u8, hashed.stdout, "\r\n")});
+        defer gpa.free(ca_name);
+        try dir.dir.copyFile("cert.pem", dir.dir, ca_name, io, .{});
 
         var port_buf: [8]u8 = undefined;
         const backend = try std.fmt.bufPrint(&port_buf, "{d}", .{backend_port});
@@ -584,6 +594,7 @@ pub const TlsFront = struct {
 };
 
 test "a TLS helper exits when a parent test fails without cleanup" {
+    // This test inspects another process with POSIX signals and `ps`.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -658,7 +669,6 @@ pub const Pki = struct {
     /// Make them all in a new temporary directory. `error.SkipZigTest`
     /// without `openssl`.
     pub fn make(gpa: Allocator, io: Io) !*Pki {
-        if (builtin.os.tag == .windows) return error.SkipZigTest;
         const p = try gpa.create(Pki);
         errdefer gpa.destroy(p);
         var env = try environ(gpa);

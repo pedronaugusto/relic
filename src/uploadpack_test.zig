@@ -113,9 +113,11 @@ fn sortLines(gpa: Allocator, text: []const u8) ![]u8 {
 }
 
 test "git clones from relic's upload-pack what it clones from its own, in v2 and v0, whole, shallow and filtered" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
+    const shell_helper = try gpa.dupe(u8, helper);
+    defer gpa.free(shell_helper);
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, shell_helper, '\\', '/');
     // git before 2.43 cannot walk what a combine: filter with object:type=
     // left.
     try testgit.requireGitVersion(gpa, io, 2, 43);
@@ -160,7 +162,7 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
     for ([_][]const u8{ "2", "0" }) |version| for (cases) |extra| {
         var tmp = testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
-        for ([_]?[]const u8{ null, helper }, [_][]const u8{ "by-git", "by-relic" }) |upload_pack, name| {
+        for ([_]?[]const u8{ null, shell_helper }, [_][]const u8{ "by-git", "by-relic" }) |upload_pack, name| {
             var args: std.ArrayList([]const u8) = .empty;
             defer args.deinit(gpa);
             const version_setting = try std.fmt.allocPrint(gpa, "protocol.version={s}", .{version});
@@ -189,9 +191,11 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
 }
 
 test "git deepens, unshallows and fetches again from relic's upload-pack as from its own" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
+    const shell_helper = try gpa.dupe(u8, helper);
+    defer gpa.free(shell_helper);
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, shell_helper, '\\', '/');
     var root = testing.tmpDir(.{ .iterate = true });
     defer root.cleanup();
     const bare = try served(gpa, io, root.dir);
@@ -206,7 +210,7 @@ test "git deepens, unshallows and fetches again from relic's upload-pack as from
         defer tmp.cleanup();
         const version_setting = try std.fmt.allocPrint(gpa, "protocol.version={s}", .{version});
         defer gpa.free(version_setting);
-        for ([_]?[]const u8{ null, helper }, [_][]const u8{ "by-git", "by-relic" }) |upload_pack, name| {
+        for ([_]?[]const u8{ null, shell_helper }, [_][]const u8{ "by-git", "by-relic" }) |upload_pack, name| {
             var args: std.ArrayList([]const u8) = .empty;
             defer args.deinit(gpa);
             try args.appendSlice(gpa, &.{ "-c", version_setting, "clone", "-q", "--depth=1" });
@@ -224,7 +228,7 @@ test "git deepens, unshallows and fetches again from relic's upload-pack as from
                 var args: std.ArrayList([]const u8) = .empty;
                 defer args.deinit(gpa);
                 try args.appendSlice(gpa, &.{ "-c", version_setting });
-                const setting = try std.fmt.allocPrint(gpa, "remote.origin.uploadpack={s}", .{helper});
+                const setting = try std.fmt.allocPrint(gpa, "remote.origin.uploadpack={s}", .{shell_helper});
                 defer gpa.free(setting);
                 if (relic_server) try args.appendSlice(gpa, &.{ "-c", setting });
                 try args.appendSlice(gpa, &.{ "fetch", "-q" });
@@ -239,7 +243,6 @@ test "git deepens, unshallows and fetches again from relic's upload-pack as from
 }
 
 test "relic clones and fetches over file:// through its own upload-pack, and ignores a depth for a path as git does" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -305,7 +308,6 @@ test "relic clones and fetches over file:// through its own upload-pack, and ign
 }
 
 test "git and relic clone over HTTP from relic's upload-pack, one request at a time, what they clone from git's" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });

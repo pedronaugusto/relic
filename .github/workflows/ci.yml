@@ -81,6 +81,10 @@ jobs:
         if: runner.os == 'Windows'
         run: choco upgrade git -y --no-progress
 
+      - name: Install Git LFS 3.8 (Windows)
+        if: runner.os == 'Windows'
+        run: choco upgrade git-lfs --version=3.8.0 -y --no-progress
+
       - name: git version, at least 2.47
         shell: bash
         run: |

@@ -294,7 +294,12 @@ const Http = struct {
             if (try session.fill(h.io, h.credentialOptions())) passphrase = session.password;
         }
         return clientcert.load(h.gpa, h.arena.allocator(), h.io, files, passphrase) catch |err| {
-            if (session_slot.*) |*session| session.reject(h.io, h.credentialOptions()) catch {};
+            // Git for Windows leaves the helper's certificate passphrase in
+            // place on a local key parse error; its curl backend does not
+            // classify that error as a rejected credential.
+            if (@import("builtin").os.tag != .windows) {
+                if (session_slot.*) |*session| session.reject(h.io, h.credentialOptions()) catch {};
+            }
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Canceled => error.Canceled,

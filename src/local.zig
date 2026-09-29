@@ -377,9 +377,15 @@ pub const Remote = struct {
             "pre-receive",  "update",           "post-receive",          "post-update",
             "proc-receive", "push-to-checkout", "reference-transaction",
         }) |name| {
-            const stat = dir.statFile(io, name, .{}) catch continue;
+            if (dir.statFile(io, name, .{})) |stat| {
+                if (stat.kind == .file and (builtin.os.tag == .windows or stat.permissions.toMode() & 0o111 != 0))
+                    return error.RemoteHooksNotRun;
+            } else |_| {}
+            if (builtin.os.tag != .windows) continue;
+            var name_buf: [64]u8 = undefined;
+            const executable = std.fmt.bufPrint(&name_buf, "{s}.exe", .{name}) catch unreachable;
+            const stat = dir.statFile(io, executable, .{}) catch continue;
             if (stat.kind != .file) continue;
-            if (builtin.os.tag != .windows and stat.permissions.toMode() & 0o111 == 0) continue;
             return error.RemoteHooksNotRun;
         }
     }

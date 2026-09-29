@@ -36,6 +36,7 @@ pub fn environ(gpa: Allocator, home: []const u8) !Environ.Map {
     const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
     defer gpa.free(path);
     try map.put("PATH", path);
+    try testgit.keepSystemVariables(gpa, &map);
     try map.put("HOME", home);
     try map.put("XDG_CONFIG_HOME", home);
     // Where git-lfs, and relic after it, make the directory for an ssh
@@ -917,17 +918,35 @@ pub fn sha256Hex(bytes: []const u8) [64]u8 {
     return out;
 }
 
-/// Write an executable script at `name` in `dir`, and return its absolute
-/// path, which is the caller's.
-pub fn script(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, text: []const u8) ![]u8 {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    try dir.writeFile(io, .{ .sub_path = name, .data = text });
-    const file = try dir.openFile(io, name, .{});
-    defer file.close(io);
-    try file.setPermissions(io, .fromMode(0o755));
+/// Install an executable named `name` in a fixture directory, returning its
+/// absolute path. The copy lets a test give a server the name git expects.
+pub fn installProgram(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, source: []const u8) ![]u8 {
+    const executable = if (builtin.os.tag == .windows) try std.fmt.allocPrint(gpa, "{s}.exe", .{name}) else try gpa.dupe(u8, name);
+    defer gpa.free(executable);
+    try Io.Dir.cwd().copyFile(source, dir, executable, io, .{});
+    if (builtin.os.tag != .windows) {
+        const file = try dir.openFile(io, executable, .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    }
     const base = try testremote.absolutePath(gpa, io, dir);
     defer gpa.free(base);
-    return std.fmt.allocPrint(gpa, "{s}/{s}", .{ base, name });
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base, executable });
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    return path;
+}
+
+fn installTool(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, kind: []const u8, values: []const []const u8) ![]u8 {
+    const path = try installProgram(gpa, io, dir, name, @import("build_options").lfs_test_tool_path);
+    errdefer gpa.free(path);
+    const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{path});
+    defer gpa.free(sidecar);
+    var description: std.ArrayList(u8) = .empty;
+    defer description.deinit(gpa);
+    try description.print(gpa, "{s}\n", .{kind});
+    for (values) |value| try description.print(gpa, "{s}\n", .{value});
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = description.items });
+    return path;
 }
 
 /// A stand-in `git-lfs-transfer` in `dir`: relic's own server for the
@@ -935,13 +954,7 @@ pub fn script(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, text: []con
 /// each connection was asked into `log_dir`. `extra` goes to it as well:
 /// `--user=<name>`, `--no-version`.
 pub fn transferScript(gpa: Allocator, io: Io, dir: Io.Dir, root: []const u8, log_dir: []const u8, extra: []const u8) ![]u8 {
-    const text = try std.fmt.allocPrint(gpa,
-        \\#!/bin/sh
-        \\exec '{s}' '--root={s}' '--log={s}' {s} "$@"
-        \\
-    , .{ @import("build_options").lfs_transfer_helper_path, root, log_dir, extra });
-    defer gpa.free(text);
-    return script(gpa, io, dir, "git-lfs-transfer", text);
+    return installTool(gpa, io, dir, "git-lfs-transfer", "transfer", &.{ @import("build_options").lfs_transfer_helper_path, root, log_dir, extra });
 }
 
 /// What every connection to the stand-in `git-lfs-transfer` was asked,
@@ -973,38 +986,31 @@ pub fn transferLog(gpa: Allocator, io: Io, log_dir: Io.Dir) ![]u8 {
 /// and the protocol, host, path, username and password it was given in
 /// `<dir>/<name>.log`, and answers `get` with `user` and `password`.
 pub fn credentialHelper(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, user: []const u8, password: []const u8) ![]u8 {
-    const base = try testremote.absolutePath(gpa, io, dir);
-    defer gpa.free(base);
-    const text = try std.fmt.allocPrint(gpa,
-        \\#!/bin/sh
-        \\log="{s}/{s}.log"
-        \\echo "== $1" >> "$log"
-        \\while IFS= read -r line; do
-        \\  case "$line" in protocol=*|host=*|username=*|password=*|path=*) echo "$line" >> "$log";; esac
-        \\done
-        \\if [ "$1" = get ]; then echo username={s}; echo password={s}; fi
-        \\
-    , .{ base, name, user, password });
-    defer gpa.free(text);
-    return script(gpa, io, dir, name, text);
+    return installTool(gpa, io, dir, name, "credential", &.{ user, password });
+}
+
+/// A credential store that removes its answer after `erase`, so a rejected
+/// password cannot be handed back forever on the next `get`.
+pub fn removableCredentialHelper(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, user: []const u8, password: []const u8) ![]u8 {
+    return installTool(gpa, io, dir, name, "credential-removable", &.{ user, password });
 }
 
 /// A stand-in credential helper like `credentialHelper`, which notes every
 /// line it is given, sorted within each call, since git-lfs writes them in
 /// no fixed order.
 pub fn credentialHelperVerbatim(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, user: []const u8, password: []const u8) ![]u8 {
-    const base = try testremote.absolutePath(gpa, io, dir);
-    defer gpa.free(base);
-    const text = try std.fmt.allocPrint(gpa,
-        \\#!/bin/sh
-        \\log="{s}/{s}.log"
-        \\echo "== $1" >> "$log"
-        \\sed '/^$/q' | grep -v '^$' | LC_ALL=C sort >> "$log"
-        \\if [ "$1" = get ]; then echo username={s}; echo password={s}; fi
-        \\
-    , .{ base, name, user, password });
-    defer gpa.free(text);
-    return script(gpa, io, dir, name, text);
+    return installTool(gpa, io, dir, name, "credential-verbatim", &.{ user, password });
+}
+
+/// The verbatim helper with a real store's `erase` behavior.
+pub fn removableCredentialHelperVerbatim(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, user: []const u8, password: []const u8) ![]u8 {
+    return installTool(gpa, io, dir, name, "credential-removable-verbatim", &.{ user, password });
+}
+
+/// A credential helper that logs all input and answers `get` with just the
+/// password, as an encrypted client-key passphrase helper does.
+pub fn passwordHelper(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, password: []const u8) ![]u8 {
+    return installTool(gpa, io, dir, name, "password", &.{password});
 }
 
 /// A stand-in `git-lfs-authenticate` in `dir`, which answers with `href` and
@@ -1017,16 +1023,7 @@ pub fn authenticateScript(gpa: Allocator, io: Io, dir: Io.Dir, href: []const u8,
 /// `authenticateScript` with `expiry` — `,"expires_in":1` and the like, or
 /// nothing — written after the header.
 pub fn authenticateScriptExpiring(gpa: Allocator, io: Io, dir: Io.Dir, href: []const u8, token: []const u8, expiry: []const u8) ![]u8 {
-    const base = try testremote.absolutePath(gpa, io, dir);
-    defer gpa.free(base);
-    const text = try std.fmt.allocPrint(gpa,
-        \\#!/bin/sh
-        \\echo "$@" >> "{s}/git-lfs-authenticate.log"
-        \\printf '{{"href":"{s}","header":{{"Authorization":"RemoteAuth {s}"}}{s}}}'
-        \\
-    , .{ base, href, token, expiry });
-    defer gpa.free(text);
-    return script(gpa, io, dir, "git-lfs-authenticate", text);
+    return installTool(gpa, io, dir, "git-lfs-authenticate", "authenticate", &.{ href, token, expiry });
 }
 
 test "the test server answers a batch, a transfer and a lock as the API says" {

@@ -935,7 +935,6 @@ fn tagTarget(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) !Oid {
 }
 
 test "the pre-push hook point is shown what git's pre-push hook is shown, and can stop the push" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var twins = try PushTwins.init(gpa, io);
@@ -946,14 +945,9 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
     defer work_git.close(io);
     const hook_log = try std.fmt.allocPrint(gpa, "{s}/pre-push.log", .{twins.root_path});
     defer gpa.free(hook_log);
-    const hook = try std.fmt.allocPrint(gpa, "#!/bin/sh\necho \"$1\" >> {s}\ncat >> {s}\nexit 0\n", .{ hook_log, hook_log });
-    defer gpa.free(hook);
-    try work_git.writeFile(io, .{ .sub_path = ".git/hooks/pre-push", .data = hook });
-    {
-        const file = try work_git.openFile(io, ".git/hooks/pre-push", .{});
-        defer file.close(io);
-        try file.setPermissions(io, .fromMode(0o755));
-    }
+    const hook_data = try std.fmt.allocPrint(gpa, "{s}\n", .{hook_log});
+    defer gpa.free(hook_data);
+    try testgit.fixtureHook(gpa, io, work_git, ".git/hooks/pre-push", "record_stdin", hook_data);
     twins.git_settings = &.{ "-c", "core.hooksPath=.git/hooks" };
 
     const Seen = struct {
@@ -1000,7 +994,6 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
 }
 
 test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     for ([_]bool{ false, true }) |over_http| {
@@ -1011,6 +1004,9 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
         var server: ?*testremote.HttpServer = null;
         defer if (server) |s| s.stop();
         if (over_http) server = try testremote.HttpServer.start(gpa, io, twins.root.dir, .{});
+        const ssh_path = try gpa.dupe(u8, twins.root_path);
+        defer gpa.free(ssh_path);
+        if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
         for ([_][2][]const u8{ .{ "work-git", "remote-git.git" }, .{ "work-relic", "remote-relic.git" } }) |pair| {
             var work = try twins.root.dir.openDir(io, pair[0], .{});
             defer work.close(io);
@@ -1020,7 +1016,7 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
             const url = if (server) |s|
                 try s.url(gpa, pair[1])
             else
-                try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}/{s}", .{ twins.root_path, pair[1] });
+                try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/{s}", .{ if (@import("builtin").os.tag == .windows) "/" else "", ssh_path, pair[1] });
             defer gpa.free(url);
             try twins.git(work, &.{ "remote", "set-url", "origin", url });
             try twins.git(work, &.{ "config", "core.sshCommand", fake });
@@ -1066,15 +1062,7 @@ test "a repository on this machine refuses its checked-out branch as receive-pac
     here.report_failures = false;
     try testing.expectError(error.GitFailed, here.exec(io, &.{ "push", "-q", "origin", "main" }));
 
-    // A hook is a file with its executable bit set, which Windows does not
-    // keep.
-    if (builtin.os.tag == .windows) return;
-    try target.writeFile(io, ".git/hooks/pre-receive", "#!/bin/sh\nexit 0\n");
-    {
-        const file = try target.dir.openFile(io, ".git/hooks/pre-receive", .{});
-        defer file.close(io);
-        try file.setPermissions(io, .fromMode(0o755));
-    }
+    try testgit.fixtureHook(gpa, io, target.dir, ".git/hooks/pre-receive", "status", "0");
     try testing.expectError(error.RemoteHooksNotRun, push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{"main:refs/heads/third"} }));
 }
 

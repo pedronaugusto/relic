@@ -657,6 +657,24 @@ pub fn setTimestamps(io: Io, dir: Io.Dir, sub_path: []const u8, options: Io.File
     try file.setTimestamps(io, options);
 }
 
+/// Link two paths in a directory. Zig 0.16's threaded I/O has no Windows
+/// implementation of `Dir.hardLink`, although the filesystem supports it.
+pub fn hardLink(io: Io, dir: Io.Dir, old_path: []const u8, new_path: []const u8) !void {
+    if (builtin.os.tag != .windows) return dir.hardLink(old_path, dir, new_path, io, .{});
+    var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    var old_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    var new_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const old_absolute = if (std.fs.path.isAbsolute(old_path)) old_path else try std.fmt.bufPrint(&old_buf, "{s}/{s}", .{ root, old_path });
+    const new_absolute = if (std.fs.path.isAbsolute(new_path)) new_path else try std.fmt.bufPrint(&new_buf, "{s}/{s}", .{ root, new_path });
+    const old_w = try Io.Threaded.sliceToPrefixedFileW(null, old_absolute, .{});
+    const new_w = try Io.Threaded.sliceToPrefixedFileW(null, new_absolute, .{});
+    if (!CreateHardLinkW(new_w.span().ptr, old_w.span().ptr, null).toBool()) return error.OperationUnsupported;
+}
+
+extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]const u16, security_attributes: ?*anyopaque) callconv(.winapi) std.os.windows.BOOL;
+
 /// A handle to `sub_path`, a file or a directory, that may read and write
 /// its attributes and times and do nothing else.
 fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameError || Io.Cancelable || error{ FileNotFound, AccessDenied, Unexpected })!Io.File {

@@ -119,7 +119,8 @@ fn sockNamed(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
     while (std.mem.indexOfPos(u8, text, at, "sock-")) |i| {
         try out.appendSlice(gpa, text[at..i]);
         try out.appendSlice(gpa, "sock-X");
-        at = std.mem.indexOfScalarPos(u8, text, i, '/') orelse text.len;
+        at = i;
+        while (at < text.len and text[at] != '/' and text[at] != '\\') : (at += 1) {}
     }
     try out.appendSlice(gpa, text[at..]);
     return out.toOwnedSlice(gpa);
@@ -178,8 +179,13 @@ test "objects go up and come down over git-lfs-transfer, asked for as git-lfs as
     try expectSame(up[0], up[1]);
     try testing.expect(std.mem.indexOf(u8, up[1][0], "> put-object ") != null);
     try testing.expect(std.mem.indexOf(u8, up[1][0], "> verify-object ") != null);
-    try testing.expect(std.mem.indexOf(u8, up[1][1], "[-oControlMaster=yes][-oControlPath=") != null);
-    try testing.expect(std.mem.indexOf(u8, up[1][1], "/home/sock-X/lfs.sock]") != null);
+    if (@import("builtin").os.tag == .windows) {
+        // Git LFS leaves SSH multiplexing off by default on Windows.
+        try testing.expect(std.mem.indexOf(u8, up[1][1], "[-oControlMaster=") == null);
+    } else {
+        try testing.expect(std.mem.indexOf(u8, up[1][1], "[-oControlMaster=yes][-oControlPath=") != null);
+        try testing.expect(std.mem.indexOf(u8, up[1][1], "/home/sock-X/lfs.sock]") != null);
+    }
 
     // Down: each fetches what relic put there.
     var down: [2][2][]u8 = undefined;
@@ -389,6 +395,7 @@ test "each transfer worker has its own git-lfs-transfer, sharing the first's ssh
         defer d.close(io);
         try t.emptyStore(s.fx, d);
         try s.fx.gitIn(d, &.{ "config", "lfs.concurrenttransfers", "3" });
+        try s.fx.gitIn(d, &.{ "config", "lfs.ssh.automultiplex", "true" });
         if (i == 0) {
             try s.fx.gitIn(d, &.{ "lfs", "fetch" });
         } else {
@@ -424,14 +431,10 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     defer gpa.free(fake_ssh);
     const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
     defer gpa.free(nobody);
-    {
-        const text = try std.fmt.allocPrint(gpa, "#!/bin/sh\nexec '{s}' \"$@\"\n", .{server_program});
-        defer gpa.free(text);
-        gpa.free(try testlfs.script(gpa, io, fx.tools, "git-lfs-transfer", text));
-    }
+    gpa.free(try testlfs.installProgram(gpa, io, fx.tools, "git-lfs-transfer", server_program));
     const remote_path = try fx.path("served/repo.git");
     defer gpa.free(remote_path);
-    const url = try std.fmt.allocPrint(gpa, "ssh://git@example.invalid:2222{s}", .{remote_path});
+    const url = try std.fmt.allocPrint(gpa, "ssh://git@example.invalid:2222{s}{s}", .{ if (@import("builtin").os.tag == .windows) "/" else "", remote_path });
     defer gpa.free(url);
     const Point = struct {
         fn at(f: *Fixture, d: Io.Dir, u: []const u8, ssh: []const u8) !void {

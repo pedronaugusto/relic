@@ -517,7 +517,7 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
         const stat = store.base.statFile(io, ref_path, .{}) catch continue;
         if (stat.kind != .file or stat.size != pointer.size) continue;
         try store.base.createDirPath(io, std.fs.path.dirnamePosix(object_path).?);
-        if (store.base.hardLink(ref_path, store.base, object_path, io, .{})) {
+        if (fs.hardLink(io, store.base, ref_path, object_path)) {
             return true;
         } else |_| {}
         const file = store.base.openFile(io, ref_path, .{}) catch continue;

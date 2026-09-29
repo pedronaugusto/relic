@@ -54,7 +54,10 @@ pub const Hooks = struct {
 
     /// `git_path(name)`: a file of the git directory as a hook is handed it.
     pub fn path(h: *const Hooks, arena: Allocator, name: []const u8) Allocator.Error![]const u8 {
-        return std.fs.path.join(arena, &.{ h.git_dir, name });
+        const path_name = try std.fs.path.join(arena, &.{ h.git_dir, name });
+        // Git hands hook scripts slash-separated paths on Windows too.
+        if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, path_name, '\\', '/');
+        return path_name;
     }
 
     /// What the commit hooks are told: `GIT_INDEX_FILE`, and the author git

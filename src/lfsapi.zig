@@ -528,7 +528,12 @@ pub const Endpoint = struct {
     /// The path of a repository on this machine, from its `file://` URL.
     pub fn localPath(e: Endpoint) ?[]const u8 {
         if (!e.isLocal()) return null;
-        return e.url["file://".len..];
+        const path = e.url["file://".len..];
+        // A Windows file URL is file:///C:/path. The slash introduces the
+        // URL path; it is not part of the native drive-absolute path.
+        if (builtin.os.tag == .windows and path.len >= 3 and path[0] == '/' and
+            std.ascii.isAlphabetic(path[1]) and path[2] == ':') return path[1..];
+        return path;
     }
 };
 
@@ -1530,8 +1535,10 @@ pub const Client = struct {
                                 c.describeRefusal(switch (err) {
                                     error.CredentialHelperQuit => .helper_quit,
                                     error.ProgramsNotGranted => .programs_not_granted,
-                                    else => .no_credential,
+                                    else => if (auth_attempts > 0) .refused else .no_credential,
                                 }, 401, url, said, cr);
+                                if (err == error.CredentialsUnavailable)
+                                    return c.fail(error.AuthenticationFailed, "no credential for {s}", .{stripQuery(cred_url)});
                                 return err;
                             };
                             if (!filled) {
@@ -1872,7 +1879,11 @@ pub const Client = struct {
         defer if (session) |*s| s.deinit();
         var passphrase: ?[]const u8 = null;
         if (clientcert.keyIsEncrypted(arena, c.io, files)) {
-            session = .forCertificate(c.gpa, key_path);
+            // Git LFS names the key with slashes on Windows, unlike Git's
+            // own certificate helper request.
+            const helper_path = try arena.dupe(u8, key_path);
+            if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, helper_path, '\\', '/');
+            session = .forCertificate(c.gpa, helper_path);
             const s = &session.?;
             if (try s.fill(c.io, c.credentialOptions())) passphrase = s.password;
         }
