@@ -17,7 +17,7 @@
 // The modules relic's API puts under this one, as `relic.revwalk.<name>`.
 pub const revparse = @import("revparse.zig");
 pub const shallow = @import("shallow.zig");
-pub const ere = @import("ere.zig");
+const ere = @import("ere.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

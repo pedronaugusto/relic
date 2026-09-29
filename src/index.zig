@@ -13,7 +13,7 @@
 
 // The modules relic's API puts under this one, as `relic.index.<name>`.
 pub const sparseindex = @import("sparseindex.zig");
-pub const ewah = @import("ewah.zig");
+const ewah = @import("ewah.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

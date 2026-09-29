@@ -52,18 +52,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | `repo` | `hooks`, `program`, `warning`, `fs` |
   | `hash` | `sha1`, `sha1dc` |
   | `object` | `fsck` |
-  | `odb` | `pack`, `delta`, `inflate`, `indexpack`, `revindex`, `commitgraph`, `midx`, `abbrev`, `varint` |
+  | `odb` | `pack`, `delta`, `inflate`, `indexpack`, `revindex`, `commitgraph`, `midx`, `abbrev` |
   | `refs` | `reflog`, `reftable`, `reftablestack` |
   | `config` | `userconfig` |
-  | `index` | `sparseindex`, `ewah` |
-  | `worktree` | `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `platstat`, `safepath` |
+  | `index` | `sparseindex` |
+  | `worktree` | `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `safepath` |
   | `diff` | `textdiff`, `rename`, `similarity`, `patchid` |
-  | `revwalk` | `revparse`, `shallow`, `ere` |
+  | `revwalk` | `revparse`, `shallow` |
   | `merge` | `blobmerge`, `ort`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
   | `commit` | `message`, `head`, `reset`, `stash`, `signing`, `commithooks`, `merging`, `sequencer`, `rebase`, `todo` |
   | `transport` | `remote`, `url`, `refspec`, `fetch`, `fetchpack`, `clone`, `push`, `sendpack`, `local`, `ssh`, `smarthttp`, `httpclient`, `tls`, `clientcert`, `httpauth`, `httpsettings`, `credential`, `auth`, `protocol`, `connection`, `pktline`, `sideband`, `uploadpack`, `objectwalk`, `objectfilter`, `partial`, `filterspec`, `progress` |
   | `submodule` | `gitmodules`, `gitlink`, `submoduletransport` |
-  | `lfs` | `lfsapi`, `lfstransfer`, `lfslocks`, `lfspush`, `lfshooks`, `lfsssh`, `mimesniff`, `timetext`, `netrc` |
+  | `lfs` | `lfsapi`, `lfstransfer`, `lfslocks`, `lfspush`, `lfshooks`, `lfsssh`, `netrc` |
 
   So `relic.reflog` is `relic.refs.reflog`, `relic.fetch` is
   `relic.transport.fetch` and `relic.program` is `relic.repo.program`. The

@@ -15,7 +15,7 @@ pub const wildmatch = @import("wildmatch.zig");
 pub const convert = @import("convert.zig");
 pub const filter = @import("filter.zig");
 pub const dirscan = @import("dirscan.zig");
-pub const platstat = @import("platstat.zig");
+const platstat = @import("platstat.zig");
 pub const safepath = @import("safepath.zig");
 
 const std = @import("std");
