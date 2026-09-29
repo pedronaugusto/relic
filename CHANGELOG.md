@@ -82,6 +82,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A conversation with a program (ssh, a helper) that is cancelled stops the
+  program on `close` or `diagnose` rather than waiting for it to end, so a
+  fetch or push whose remote never answers returns when its caller cancels.
 - `connection.Process.sayTo`, `finish` and `diagnose` leave a connection
   that is not a program's alone, rather than reading and writing its context
   as a `Process`.

@@ -959,3 +959,50 @@ fn withoutAgent(gpa: Allocator, bytes: []const u8) ![]u8 {
     try out.appendSlice(gpa, rest);
     return out.toOwnedSlice(gpa);
 }
+
+fn fetchForever(gpa: Allocator, io: Io, repo: *repo_mod.Repository, env: *const std.process.Environ.Map) void {
+    var outcome = fetch_mod.fetch(gpa, io, repo, "origin", .{ .who = test_who, .programs = .{ .environ = env } }) catch return;
+    outcome.deinit();
+}
+
+fn nap(io: Io, ms: i64) void {
+    io.sleep(.fromMilliseconds(ms), .awake) catch {};
+}
+
+test "a fetch cancelled while its ssh never answers stops the ssh and returns at once" {
+    // the stand-in is a shell script; Windows has no /bin/sh to run it
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "ssh", .data = "#!/bin/sh\n[ \"$1\" = \"-G\" ] && exit 1\nexec sleep 30\n" });
+    try tmp.dir.setFilePermissions(io, "ssh", .fromMode(0o755), .{});
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(io, &buf)];
+    try tmp.dir.createDirPath(io, "repo");
+    var repo_dir = try tmp.dir.openDir(io, "repo", .{});
+    defer repo_dir.close(io);
+    var made = try repo_mod.Repository.init(gpa, io, repo_dir, .{});
+    made.deinit(io);
+    const config = try std.fmt.allocPrint(gpa, "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tsshCommand = {s}/ssh\n[remote \"origin\"]\n\turl = ssh://example.invalid/r.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n", .{root});
+    defer gpa.free(config);
+    try repo_dir.writeFile(io, .{ .sub_path = ".git/config", .data = config });
+    var repo = try repo_mod.Repository.open(gpa, io, repo_dir, .{ .discover = false });
+    defer repo.deinit(io);
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+
+    const began = Io.Clock.awake.now(io);
+    const Outcome = union(enum) { fetched: void, late: void };
+    var outcomes: [2]Outcome = undefined;
+    var select = Io.Select(Outcome).init(io, &outcomes);
+    try select.concurrent(.fetched, fetchForever, .{ gpa, io, &repo, &env });
+    try select.concurrent(.late, nap, .{ io, 300 });
+    try testing.expectEqual(Outcome.late, try select.await());
+    select.cancelDiscard();
+    const took = began.durationTo(Io.Clock.awake.now(io)).toMilliseconds();
+    // the stand-in would have held the fetch for thirty seconds
+    try testing.expect(took < 5_000);
+}

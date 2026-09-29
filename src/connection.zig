@@ -160,6 +160,9 @@ pub const Process = struct {
     connection: Connection,
     exited: bool = false,
     term: ?std.process.Child.Term = null,
+    /// A wait for the program was cancelled: the conversation is over
+    /// for the caller, whatever the program is doing.
+    wait_canceled: bool = false,
     /// The captured standard error, when it is captured.
     stderr: ?*Tail = null,
     /// Where what the program said goes when the conversation ends without
@@ -289,6 +292,15 @@ pub const Process = struct {
         return &p.reader.interface;
     }
 
+    /// Whether the conversation was cancelled: a read, a write or a wait
+    /// of it answered `Canceled`.
+    fn canceled(p: *const Process) bool {
+        if (p.wait_canceled) return true;
+        if (p.reader.err) |err| if (err == error.Canceled) return true;
+        if (p.writer.err) |err| if (err == error.Canceled) return true;
+        return false;
+    }
+
     fn failure(context: *anyopaque, c: *Connection) Error {
         const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
         if (p.reader.err) |err| switch (err) {
@@ -316,7 +328,12 @@ pub const Process = struct {
                 p.running.child.stdout = null;
             }
             p.exited = true;
-            _ = p.running.wait(io) catch {};
+            if (canceled(p)) {
+                // cancelled: nobody is left for the program's answer, and
+                // one that never ends — an ssh whose remote never answers —
+                // would hold whoever cancelled until it did
+                p.running.child.kill(io);
+            } else _ = p.running.wait(io) catch {};
         }
         if (p.stderr) |tail| {
             // Something the program started may still hold its standard
@@ -358,7 +375,10 @@ pub const Process = struct {
         p.writer.interface.flush() catch {};
         p.exited = true;
         const term = p.running.wait(io) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
+            error.Canceled => {
+                p.wait_canceled = true;
+                return error.Canceled;
+            },
             else => return error.TransportProgramFailed,
         };
         p.term = term;
@@ -378,8 +398,16 @@ pub const Process = struct {
         p.said_to = null;
         if (!p.exited) {
             p.exited = true;
+            if (canceled(p)) {
+                // as `close`: a cancelled conversation's program is stopped
+                p.running.child.kill(io);
+                return error.Canceled;
+            }
             p.term = p.running.wait(io) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
+                error.Canceled => {
+                    p.wait_canceled = true;
+                    return error.Canceled;
+                },
                 else => null,
             };
         }
