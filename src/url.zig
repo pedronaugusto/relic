@@ -306,11 +306,11 @@ fn fuzzParse(_: void, smith: *testing.Smith) anyerror!void {
         error.UnsupportedTransport, error.MalformedUrl => return,
     };
     // Every part is a view of the input.
-    const base = @intFromPtr(input.ptr);
+    const base = @intFromPtr(input.ptr); // safe: compared as a number, never dereferenced
     for ([_]?[]const u8{ url.user, url.password, url.host, url.path }) |part| {
         const p = part orelse continue;
         if (p.len == 0) continue;
-        try testing.expect(@intFromPtr(p.ptr) >= base and @intFromPtr(p.ptr) + p.len <= base + input.len);
+        try testing.expect(@intFromPtr(p.ptr) >= base and @intFromPtr(p.ptr) + p.len <= base + input.len); // safe: compared as numbers, never dereferenced
     }
     const shown = try anonymize(testing.allocator, input);
     defer testing.allocator.free(shown);

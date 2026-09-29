@@ -47,7 +47,7 @@ pub const Fetcher = struct {
     }
 
     fn fetchFn(context: *anyopaque, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
-        const f: *Fetcher = @ptrCast(@alignCast(context));
+        const f: *Fetcher = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Fetcher
         if (f.server == null) {
             f.server = lfsapi.Server.open(f.gpa, f.io, f.repo, f.remote, f.options) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,

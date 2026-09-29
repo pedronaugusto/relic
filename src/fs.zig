@@ -663,6 +663,7 @@ fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameErro
     const windows = std.os.windows;
     const path_w = try Io.Threaded.sliceToPrefixedFileW(dir.handle, sub_path, .{});
     const span = path_w.span();
+    var object_name = windows.UNICODE_STRING.init(span);
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     var handle: windows.HANDLE = undefined;
     switch (windows.ntdll.NtCreateFile(
@@ -673,7 +674,7 @@ fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameErro
         },
         &.{
             .RootDirectory = if (Io.Dir.path.isAbsoluteWindowsWtf16(span)) null else dir.handle,
-            .ObjectName = @constCast(&windows.UNICODE_STRING.init(span)),
+            .ObjectName = &object_name,
         },
         &iosb,
         null,

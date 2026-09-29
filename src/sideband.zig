@@ -62,7 +62,7 @@ pub const Demux = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const d: *Demux = @alignCast(@fieldParentPtr("interface", r));
+        const d: *Demux = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a Demux's interface
         while (true) {
             if (d.pending.len != 0) {
                 const n = limit.minInt(d.pending.len);

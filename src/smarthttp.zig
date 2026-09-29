@@ -207,7 +207,7 @@ const Http = struct {
     };
 
     fn self(context: *anyopaque) *Http {
-        return @ptrCast(@alignCast(context));
+        return @ptrCast(@alignCast(context)); // safe: the context handed out with this vtable is an Http
     }
 
     fn targetOf(url: url_mod.Url) httpclient.Target {
@@ -705,7 +705,7 @@ const Http = struct {
     /// The request writer's buffer is full: the request is too large to
     /// send whole, so it is sent in chunks from here on.
     fn drainPost(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const h: *Http = @alignCast(@fieldParentPtr("post", w));
+        const h: *Http = @alignCast(@fieldParentPtr("post", w)); // safe: this function is installed only on a Http's post
         if (h.streaming == null) {
             h.startStreaming() catch |err| {
                 h.write_error = err;

@@ -760,7 +760,7 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
     errdefer out.deinit();
     const Shorten = struct {
         fn shorten(context: *anyopaque, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
-            const run: *Run = @ptrCast(@alignCast(context));
+            const run: *Run = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Run
             return abbrev.unique(run.io, &run.repo.odb, oid, run.abbrev_len, buf) catch oid.hex(buf);
         }
     };

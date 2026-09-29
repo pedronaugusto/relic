@@ -876,13 +876,13 @@ pub const Connection = struct {
     const metered_writer: Io.Writer.VTable = .{ .drain = meteredDrain, .sendFile = meteredSendFile };
 
     fn ofReader(r: *Io.Reader) *Connection {
-        const sr: *Io.net.Stream.Reader = @alignCast(@fieldParentPtr("interface", r));
-        return @alignCast(@fieldParentPtr("stream_reader", sr));
+        const sr: *Io.net.Stream.Reader = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a Io.net.Stream.Reader's interface
+        return @alignCast(@fieldParentPtr("stream_reader", sr)); // safe: the metered vtables are installed only on a Connection's own streams
     }
 
     fn ofWriter(w: *Io.Writer) *Connection {
-        const sw: *Io.net.Stream.Writer = @alignCast(@fieldParentPtr("interface", w));
-        return @alignCast(@fieldParentPtr("stream_writer", sw));
+        const sw: *Io.net.Stream.Writer = @alignCast(@fieldParentPtr("interface", w)); // safe: this function is installed only on a Io.net.Stream.Writer's interface
+        return @alignCast(@fieldParentPtr("stream_writer", sw)); // safe: the metered vtables are installed only on a Connection's own streams
     }
 
     fn awakeNow(io: Io) u64 {

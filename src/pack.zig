@@ -1455,7 +1455,7 @@ pub const Writer = struct {
         }
 
         fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-            const s: *Sink = @alignCast(@fieldParentPtr("writer", w));
+            const s: *Sink = @alignCast(@fieldParentPtr("writer", w)); // safe: this function is installed only on a Sink's writer
             if (w.end != 0) {
                 try s.emit(w.buffer[0..w.end]);
                 w.end = 0;

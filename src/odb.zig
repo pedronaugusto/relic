@@ -1019,7 +1019,7 @@ pub const Odb = struct {
         }
 
         fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-            const s: *Stream = @alignCast(@fieldParentPtr("input_writer", w));
+            const s: *Stream = @alignCast(@fieldParentPtr("input_writer", w)); // safe: this function is installed only on a Stream's input_writer
             var total: usize = 0;
             for (data[0 .. data.len - 1]) |slice| {
                 total = std.math.add(usize, total, slice.len) catch return error.WriteFailed;

@@ -479,7 +479,7 @@ const Tee = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const t: *Tee = @alignCast(@fieldParentPtr("interface", r));
+        const t: *Tee = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a Tee's interface
         const dest = limit.slice(try w.writableSliceGreedy(1));
         const n = t.pull(dest) catch |err| {
             t.err = err;

@@ -808,7 +808,7 @@ pub const StatusProbe = struct {
     }
 
     fn inspect(context: *anyopaque, io: Io, path: []const u8, recorded: Oid) worktree.Error!worktree.SubmoduleState {
-        const p: *StatusProbe = @ptrCast(@alignCast(context));
+        const p: *StatusProbe = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a StatusProbe
         return p.inspectPath(io, path, recorded) catch |err| return p.fail(path, err);
     }
 

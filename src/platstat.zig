@@ -76,7 +76,7 @@ pub fn full(dir: Io.Dir, sub_path: []const u8) FullResult {
     if (sub_path.len >= path_buf.len) return .unavailable;
     @memcpy(path_buf[0..sub_path.len], sub_path);
     path_buf[sub_path.len] = 0;
-    const path: [*:0]const u8 = @ptrCast(&path_buf);
+    const path: [*:0]const u8 = path_buf[0..sub_path.len :0].ptr;
 
     switch (builtin.os.tag) {
         .linux => {
@@ -178,7 +178,7 @@ pub fn statAt(dir: Io.Dir, sub_path: []const u8) Extra {
     if (sub_path.len >= path_buf.len) return .{};
     @memcpy(path_buf[0..sub_path.len], sub_path);
     path_buf[sub_path.len] = 0;
-    const path: [*:0]const u8 = @ptrCast(&path_buf);
+    const path: [*:0]const u8 = path_buf[0..sub_path.len :0].ptr;
 
     switch (builtin.os.tag) {
         .linux => {

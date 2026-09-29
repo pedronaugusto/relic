@@ -981,7 +981,7 @@ const Sideband = struct {
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const sb: *Sideband = @alignCast(@fieldParentPtr("w", w));
+        const sb: *Sideband = @alignCast(@fieldParentPtr("w", w)); // safe: this function is installed only on a Sideband's w
         try sb.emit(w.buffered());
         w.end = 0;
         var consumed: usize = 0;
@@ -1068,7 +1068,7 @@ const InProcess = struct {
     };
 
     fn self(context: *anyopaque) *InProcess {
-        return @ptrCast(@alignCast(context));
+        return @ptrCast(@alignCast(context)); // safe: the context handed out with this vtable is an InProcess
     }
 
     fn start(c: *InProcess) void {

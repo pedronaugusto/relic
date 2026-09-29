@@ -90,7 +90,7 @@ pub const Transport = struct {
     }
 
     fn cloneFn(context: *anyopaque, gpa: Allocator, io: Io, url: []const u8, git_dir: Io.Dir) submodule.TransportError!void {
-        const t: *Transport = @ptrCast(@alignCast(context));
+        const t: *Transport = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Transport
         const o = t.options;
         var repo = clone_mod.clone(gpa, io, url, git_dir, .{
             .separate_git_dir = true,
@@ -107,7 +107,7 @@ pub const Transport = struct {
     }
 
     fn fetchFn(context: *anyopaque, gpa: Allocator, io: Io, repo: *Repository, remote: []const u8, want: Oid) submodule.TransportError!void {
-        const t: *Transport = @ptrCast(@alignCast(context));
+        const t: *Transport = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Transport
         t.fetchOnce(gpa, io, repo, remote, &.{}) catch |err| return t.failed(err);
         repo.odb.refresh(io) catch |err| return t.failed(err);
         if (repo.odb.exists(io, want) catch |err| return t.failed(err)) return;

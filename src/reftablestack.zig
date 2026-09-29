@@ -557,7 +557,7 @@ fn resolveIn(stacks: *const Stacks, store: *const refs.Store, gpa: Allocator, na
     var depth: u8 = 0;
     while (depth <= refs.max_symbolic_depth) : (depth += 1) {
         var value: ?refs.Ref = null;
-        var owned: ?[]u8 = null;
+        var owned: ?[]const u8 = null;
         defer if (owned) |o| gpa.free(o);
         var overridden = false;
         if (pending) |tx| {
@@ -570,7 +570,7 @@ fn resolveIn(stacks: *const Stacks, store: *const refs.Store, gpa: Allocator, na
         if (!overridden) {
             value = try readIn(stacks, store, gpa, current);
             if (value) |v| switch (v) {
-                .symbolic => |t| owned = @constCast(t),
+                .symbolic => |t| owned = t,
                 .direct => {},
             };
         }

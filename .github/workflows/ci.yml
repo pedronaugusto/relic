@@ -194,6 +194,8 @@ jobs:
       - run: ci/readme_usage.sh --check
       # the git the Linux image builds is the git the Linux job builds
       - run: ci/git-flags.sh
+      # every cast out of the type system says why it is safe
+      - run: python3 ci/casts.py
 
   # Compile-only coverage of the targets the suite cannot execute on. These
   # prove the sources and the build graph are portable; the `test` job above

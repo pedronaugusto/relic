@@ -472,7 +472,7 @@ pub const Fake = struct {
 
     fn self(context: *anyopaque, c: *Connection) *Fake {
         _ = context;
-        return @alignCast(@fieldParentPtr("connection", c));
+        return @alignCast(@fieldParentPtr("connection", c)); // safe: this vtable is installed only on a Fake's own connection
     }
 
     fn advertisement(context: *anyopaque, c: *Connection) connection.Error!*Io.Reader {

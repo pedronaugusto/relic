@@ -1001,7 +1001,7 @@ pub const Repository = struct {
     }
 
     fn peelForRefs(context: *anyopaque, io: Io, oid: Oid) ?Oid {
-        const repo: *Repository = @ptrCast(@alignCast(context));
+        const repo: *Repository = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Repository
         const header = repo.odb.readHeader(io, oid) catch return null;
         if (header.type != .tag) return null;
         return repo.peel(io, oid) catch null;

@@ -2220,7 +2220,7 @@ pub const RacyCheck = struct {
     }
 
     fn changed(context: *anyopaque, index: *const Index, entry: index_mod.Entry) bool {
-        const c: *RacyCheck = @ptrCast(@alignCast(context));
+        const c: *RacyCheck = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a RacyCheck
         return differsFromIndex(c.gpa, c.io, c.wt, index, entry, c.rules) catch true;
     }
 };

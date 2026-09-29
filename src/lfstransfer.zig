@@ -1194,7 +1194,7 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
 }
 
 fn addBytes(context: *anyopaque, n: u64) void {
-    const state: *Run = @ptrCast(@alignCast(context));
+    const state: *Run = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Run
     state.say(.{ .bytes = n });
 }
 
@@ -1214,7 +1214,7 @@ const Counting = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const c: *Counting = @alignCast(@fieldParentPtr("interface", r));
+        const c: *Counting = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a Counting's interface
         const n = c.inner.stream(w, limit) catch |err| {
             c.flush();
             return err;
@@ -1542,7 +1542,7 @@ const SshData = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const d: *SshData = @alignCast(@fieldParentPtr("interface", r));
+        const d: *SshData = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a SshData's interface
         while (d.pending.len == 0) {
             if (d.done) return error.EndOfStream;
             const next = d.conn.nextData() catch |err| {
@@ -1667,7 +1667,7 @@ pub const Fetcher = struct {
         _ = io;
         _ = store;
         _ = settings;
-        const f: *Fetcher = @ptrCast(@alignCast(context));
+        const f: *Fetcher = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Fetcher
         var objects: std.ArrayList(Object) = .empty;
         defer objects.deinit(f.server.gpa);
         for (wanted) |w| objects.append(f.server.gpa, .of(w.pointer, w.path)) catch return error.OutOfMemory;
