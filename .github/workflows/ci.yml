@@ -29,13 +29,13 @@ jobs:
   # that skips is not one. The floor is the old-git job below.
   #
   # One job per platform and mode. The suite in one mode is ten to fifteen
-  # minutes of a hosted macOS or Windows runner, most of it git's own
-  # processes, so four modes in a row no longer fit a job's half hour; four
-  # jobs side by side each have theirs.
+  # minutes of a hosted macOS runner and twenty to thirty of a Windows one,
+  # where every fixture now runs and git's processes start slowly, most of
+  # it git's own; four jobs side by side each have their own budget.
   test:
     name: test (${{ matrix.os }}, ${{ matrix.optimize }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 30 }}
     strategy:
       fail-fast: false
       matrix:
