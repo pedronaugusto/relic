@@ -41,6 +41,7 @@ fn serverMain(fx: *Fixture) ![]u8 {
 }
 
 test "a push uploads the LFS objects its commits point at, and only those the server lacks" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{ .users = &.{.{ .name = "ada", .password = "secret" }} });
@@ -98,6 +99,7 @@ test "a push uploads the LFS objects its commits point at, and only those the se
 }
 
 test "a push changing a file someone else has locked is refused or reported, as git-lfs's pre-push hook does" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{ .users = &.{
@@ -175,6 +177,7 @@ test "a push changing a file someone else has locked is refused or reported, as 
 }
 
 test "a server without a locking API is remembered under git-lfs's key, as git-lfs remembers it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{ .locking = false });

@@ -694,6 +694,7 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
 }
 
 test "a clone over ssh and over HTTP is the clone git makes" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);

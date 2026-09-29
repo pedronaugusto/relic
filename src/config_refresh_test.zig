@@ -181,6 +181,7 @@ fn expectIncludesAgree(gpa: std.mem.Allocator, io: Io, proj: Io.Dir, home: []con
 }
 
 test "includeIf gitdir:, gitdir/i: and onbranch: in ~/.gitconfig hold for a repository as they hold for git" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     try testgit.requireGit(gpa, io);

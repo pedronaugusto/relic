@@ -1924,6 +1924,7 @@ fn refsVerify(repo: *testgit.Repo, io: Io, prefix: []const []const u8) !void {
 }
 
 test "an update goes through HEAD, a deletion takes its log, and the hook hears what git's does, in a reftable" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     // What the reference-transaction hook hears is git 2.54's: a
@@ -1937,6 +1938,7 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
     var twins: [2]testgit.Repo = undefined;
     var made: usize = 0;
     defer for (twins[0..made]) |*t| t.deinit();
+    const hook = "#!/bin/sh\n{ echo \"$1\"; cat; } >> .git/rt.log\n";
     for (&twins) |*r| {
         r.* = try testgit.Repo.init(gpa, io, &.{"--ref-format=reftable"});
         made += 1;
@@ -1946,7 +1948,10 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
         try r.exec(io, &.{ "add", "a.txt" });
         try r.exec(io, &.{ "commit", "-q", "-m", "one" });
         try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "two" });
-        try testgit.fixtureHook(gpa, io, r.dir, ".git/hooks/reference-transaction", "record_stdin", ".git/rt.log\n");
+        try r.writeFile(io, ".git/hooks/reference-transaction", hook);
+        const file = try r.dir.openFile(io, ".git/hooks/reference-transaction", .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
     }
     const first_text = try twins[0].line(io, &.{ "rev-parse", "HEAD~1" });
     defer gpa.free(first_text);

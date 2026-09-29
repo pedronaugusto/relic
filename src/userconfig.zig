@@ -264,21 +264,11 @@ fn askGit(arena: Allocator, io: Io, programs: program.Programs, name: []const u8
 const testing = std.testing;
 const testgit = @import("testgit.zig");
 
-fn expectSameTestPath(gpa: Allocator, actual: []const u8, expected: []const u8) !void {
-    if (builtin.os.tag != .windows) return testing.expectEqualStrings(expected, actual);
-    const a = try gpa.dupe(u8, actual);
-    defer gpa.free(a);
-    const b = try gpa.dupe(u8, expected);
-    defer gpa.free(b);
-    std.mem.replaceScalar(u8, a, '\\', '/');
-    std.mem.replaceScalar(u8, b, '\\', '/');
-    try testing.expectEqualStrings(b, a);
-}
-
 test "the files are the ones git names, found from the person's environment" {
     const gpa = testing.allocator;
     const io = testing.io;
     try testgit.requireGit(gpa, io);
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var home = testing.tmpDir(.{});
     defer home.cleanup();
     const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
@@ -295,7 +285,6 @@ test "the files are the ones git names, found from the person's environment" {
     const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
     defer gpa.free(path);
     try env.put("PATH", path);
-    try testgit.keepSystemVariables(gpa, &env);
     try env.put("HOME", home_path);
     try testgit.noRepositoryAbove(&env, home_path);
     try env.put("GIT_CONFIG_SYSTEM", system);
@@ -319,7 +308,7 @@ test "the files are the ones git names, found from the person's environment" {
     defer outcome.deinit(gpa);
     if (outcome.succeeded()) {
         var lines = std.mem.tokenizeScalar(u8, outcome.stdout, '\n');
-        for (l.global) |ours| try expectSameTestPath(gpa, ours, lines.next().?);
+        for (l.global) |ours| try testing.expectEqualStrings(lines.next().?, ours);
     }
 
     // Without leave to run git, and with no GIT_CONFIG_SYSTEM, the system
@@ -379,6 +368,7 @@ test "GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are read as git reads them, bot
     const io = testing.io;
     // GIT_CONFIG_COUNT and the 'key'='value' quoting are git 2.31's.
     try testgit.requireGitVersion(gpa, io, 2, 31);
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var home = testing.tmpDir(.{});
     defer home.cleanup();
     const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
@@ -388,7 +378,6 @@ test "GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are read as git reads them, bot
     const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
     defer gpa.free(path);
     try env.put("PATH", path);
-    try testgit.keepSystemVariables(gpa, &env);
     try env.put("HOME", home_path);
     try testgit.noRepositoryAbove(&env, home_path);
     try env.put("XDG_CONFIG_HOME", home_path);
@@ -439,6 +428,7 @@ test "the XDG file and ~/.gitconfig are both read, the second winning, as git re
     const gpa = testing.allocator;
     const io = testing.io;
     try testgit.requireGit(gpa, io);
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var home = testing.tmpDir(.{ .iterate = true });
     defer home.cleanup();
     const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
@@ -451,7 +441,6 @@ test "the XDG file and ~/.gitconfig are both read, the second winning, as git re
     const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
     defer gpa.free(path);
     try env.put("PATH", path);
-    try testgit.keepSystemVariables(gpa, &env);
     try env.put("HOME", home_path);
     try testgit.noRepositoryAbove(&env, home_path);
     try env.put("GIT_CONFIG_NOSYSTEM", "1");

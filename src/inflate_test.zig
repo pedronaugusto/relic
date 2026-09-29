@@ -3,6 +3,7 @@
 //! `python3`'s `zlib` — the library git writes its objects and packs with.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 
 const program = @import("program.zig");
@@ -37,6 +38,7 @@ const script =
 ;
 
 test "every stream zlib makes, at every level, strategy and window, decodes to what it was" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);

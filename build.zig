@@ -77,48 +77,6 @@ pub fn build(b: *std.Build) void {
     });
     const install_upload_pack_helper = b.addInstallArtifact(upload_pack_helper, .{});
 
-    // Hook fixtures use a native program on every target. Each copy reads
-    // its own sidecar description, so git and relic run the same behaviour.
-    const hook_fixture = b.addExecutable(.{
-        .name = "relic-hook-fixture",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/hook_fixture.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const install_hook_fixture = b.addInstallArtifact(hook_fixture, .{});
-
-    const fake_ssh = b.addExecutable(.{
-        .name = "relic-fake-ssh",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/fake_ssh_helper.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const install_fake_ssh = b.addInstallArtifact(fake_ssh, .{});
-
-    const lfs_tool = b.addExecutable(.{
-        .name = "relic-lfs-test-tool",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/lfs_test_tool.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const install_lfs_tool = b.addInstallArtifact(lfs_tool, .{});
-
-    const process_fixture = b.addExecutable(.{
-        .name = "relic-process-fixture",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/process_fixture.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const install_process_fixture = b.addInstallArtifact(process_fixture, .{});
-
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
     build_options.addOption([]const u8, "filter_helper_path", b.getInstallPath(.bin, filter_helper.out_filename));
@@ -132,10 +90,6 @@ pub fn build(b: *std.Build) void {
         "A git-lfs-transfer server program to prove the pure-ssh client against",
     ) orelse "");
     build_options.addOption([]const u8, "upload_pack_helper_path", b.getInstallPath(.bin, upload_pack_helper.out_filename));
-    build_options.addOption([]const u8, "hook_fixture_path", b.getInstallPath(.bin, hook_fixture.out_filename));
-    build_options.addOption([]const u8, "fake_ssh_helper_path", b.getInstallPath(.bin, fake_ssh.out_filename));
-    build_options.addOption([]const u8, "lfs_test_tool_path", b.getInstallPath(.bin, lfs_tool.out_filename));
-    build_options.addOption([]const u8, "process_fixture_path", b.getInstallPath(.bin, process_fixture.out_filename));
     // The standard library's TLS client, which `src/tls/Client.zig` is a copy
     // of with client authentication added: `src/tls_fork_test.zig` holds the
     // copy to it, and fails when the compiler building this ships another.
@@ -173,7 +127,6 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{
         .name = "relic-tests",
         .root_module = test_module,
-        .filters = if (b.option([]const u8, "test-filter", "Select tests by name")) |filter| &.{filter} else &.{},
     });
 
     const run_tests = b.addRunArtifact(tests);
@@ -181,10 +134,6 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&install_filter_helper.step);
     run_tests.step.dependOn(&install_lfs_transfer_helper.step);
     run_tests.step.dependOn(&install_upload_pack_helper.step);
-    run_tests.step.dependOn(&install_hook_fixture.step);
-    run_tests.step.dependOn(&install_fake_ssh.step);
-    run_tests.step.dependOn(&install_lfs_tool.step);
-    run_tests.step.dependOn(&install_process_fixture.step);
 
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);
@@ -198,10 +147,6 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&filter_helper.step);
     check_step.dependOn(&lfs_transfer_helper.step);
     check_step.dependOn(&upload_pack_helper.step);
-    check_step.dependOn(&hook_fixture.step);
-    check_step.dependOn(&fake_ssh.step);
-    check_step.dependOn(&lfs_tool.step);
-    check_step.dependOn(&process_fixture.step);
 
     //=====================================================================
     // Examples

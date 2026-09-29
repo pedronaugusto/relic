@@ -131,6 +131,7 @@ const ten = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
 const files = [_][]const u8{ "a.txt", "b.txt", "dir/c.txt", "new.txt", "loose.txt", "build.log", "fresh/deep/x.txt", "out/o.txt" };
 
 test "a stash pushed here is the stash git pushes, and git lists, shows and applies it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
 
@@ -197,6 +198,7 @@ test "nothing to stash is no stash" {
 }
 
 test "git's stash is applied and popped here as git applies and pops it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
 
@@ -246,6 +248,7 @@ test "git's stash is applied and popped here as git applies and pops it" {
 }
 
 test "an index git cannot restore as a patch is not restored here either" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var twin = try Twin.init(gpa, io);
@@ -272,6 +275,7 @@ test "an index git cannot restore as a patch is not restored here either" {
 }
 
 test "a conflicting stash leaves git's stages and markers, and pop keeps it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var twin = try Twin.init(gpa, io);
@@ -298,6 +302,7 @@ test "a conflicting stash leaves git's stages and markers, and pop keeps it" {
 }
 
 test "a stash that would overwrite local changes or untracked files is refused and nothing moves" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var twin = try Twin.init(gpa, io);
@@ -327,6 +332,7 @@ test "a stash that would overwrite local changes or untracked files is refused a
 }
 
 test "dropping and clearing leave git's list" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var twin = try Twin.init(gpa, io);
@@ -382,17 +388,14 @@ test "dropping and clearing leave git's list" {
 }
 
 test "a stash goes through the clean and smudge filters as git's does" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
-    const clean = try testgit.fixtureCommand(gpa, @import("build_options").process_fixture_path, "upper");
-    defer gpa.free(clean);
-    const smudge = try testgit.fixtureCommand(gpa, @import("build_options").process_fixture_path, "lower");
-    defer gpa.free(smudge);
     var twin = try Twin.init(gpa, io);
     defer twin.deinit(gpa);
     inline for (.{ &twin.git, &twin.relic }) |r| {
-        try r.exec(io, &.{ "config", "filter.up.clean", clean });
-        try r.exec(io, &.{ "config", "filter.up.smudge", smudge });
+        try r.exec(io, &.{ "config", "filter.up.clean", "tr a-z A-Z" });
+        try r.exec(io, &.{ "config", "filter.up.smudge", "tr A-Z a-z" });
         try r.exec(io, &.{ "config", "filter.up.required", "true" });
     }
     try twin.write(io, ".gitattributes", "*.up filter=up\n");

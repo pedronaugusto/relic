@@ -956,6 +956,7 @@ test "update checks out the recorded commit, and refuses what it will not do by 
 }
 
 test "a !command update runs only with the permission to run programs" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var f = try Fixture.init(gpa, io);
@@ -969,11 +970,7 @@ test "a !command update runs only with the permission to run programs" {
     defer lib.dir.close(io);
     try lib.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "moved on" });
 
-    const command = try testgit.fixtureCommand(gpa, @import("build_options").process_fixture_path, "touch ran-");
-    defer gpa.free(command);
-    const update = try std.fmt.allocPrint(gpa, "!{s}", .{command});
-    defer gpa.free(update);
-    try c.git.exec(io, &.{ "config", "submodule.vendor/lib.update", update });
+    try c.git.exec(io, &.{ "config", "submodule.vendor/lib.update", "!touch ran-" });
     try reopen(&repo, gpa, io, c.git.dir);
     // Without the permission, a named refusal carrying the setting.
     var refusal: submodule.Refusal = .{};
@@ -981,9 +978,12 @@ test "a !command update runs only with the permission to run programs" {
     try testing.expectEqualStrings("submodule.vendor/lib.update", refusal.setting());
 
     // With it, the command runs in the submodule with the commit as its
-    // argument, as git runs it: the fixture creates `ran-` and `<commit>`.
-    var environ = try testgit.programEnviron(gpa);
+    // argument, as git runs it: `touch ran- <commit>`.
+    var environ: std.process.Environ.Map = .init(gpa);
     defer environ.deinit();
+    const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
+    defer gpa.free(path);
+    try environ.put("PATH", path);
     _ = try submodule.update(gpa, io, &repo, .{ .programs = .{ .environ = &environ } });
     const recorded = try c.git.line(io, &.{ "rev-parse", "HEAD:vendor/lib" });
     defer gpa.free(recorded);

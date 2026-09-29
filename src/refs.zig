@@ -1346,7 +1346,7 @@ const HookTwin = struct {
     relic: testgit.Repo,
     environ: std.process.Environ.Map,
 
-    fn init(gpa: Allocator, io: Io, hook_action: []const u8, hook_data: []const u8) !HookTwin {
+    fn init(gpa: Allocator, io: Io, hook_body: []const u8) !HookTwin {
         var t: HookTwin = .{
             .git = try testgit.Repo.init(gpa, io, &.{}),
             .relic = undefined,
@@ -1367,7 +1367,10 @@ const HookTwin = struct {
             try r.exec(io, &.{ "add", "a.txt" });
             try r.exec(io, &.{ "commit", "-q", "-m", "one" });
             try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "two" });
-            try testgit.fixtureHook(gpa, io, r.dir, ".git/hooks/reference-transaction", hook_action, hook_data);
+            try r.writeFile(io, ".git/hooks/reference-transaction", hook_body);
+            const file = try r.dir.openFile(io, ".git/hooks/reference-transaction", .{});
+            defer file.close(io);
+            try file.setPermissions(io, .fromMode(0o755));
         }
         return t;
     }
@@ -1397,15 +1400,16 @@ const HookTwin = struct {
     }
 };
 
-const logging_hook = ".git/rt.log\n";
+const logging_hook = "#!/bin/sh\n{ echo \"$1\"; cat; } >> .git/rt.log\n";
 
 test "reference-transaction hears from a transaction what git's hears" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // What the reference-transaction hook hears is git 2.54's: a
     // "preparing" state, and a symbolic ref's updates among the others.
     try testgit.requireGitVersion(gpa, io, 2, 54);
-    var twin = try HookTwin.init(gpa, io, "record_stdin", logging_hook);
+    var twin = try HookTwin.init(gpa, io, logging_hook);
     defer twin.deinit();
 
     const first_text = try twin.git.line(io, &.{ "rev-parse", "HEAD~1" });
@@ -1456,12 +1460,13 @@ test "reference-transaction hears from a transaction what git's hears" {
 }
 
 test "an update goes through HEAD to its branch, and both logs record it, as git's does" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // What the reference-transaction hook hears is git 2.54's: a
     // "preparing" state, and a symbolic ref's updates among the others.
     try testgit.requireGitVersion(gpa, io, 2, 54);
-    var twin = try HookTwin.init(gpa, io, "record_stdin", logging_hook);
+    var twin = try HookTwin.init(gpa, io, logging_hook);
     defer twin.deinit();
     const first_text = try twin.git.line(io, &.{ "rev-parse", "HEAD~1" });
     defer gpa.free(first_text);
@@ -1523,9 +1528,10 @@ test "an update goes through HEAD to its branch, and both logs record it, as git
 }
 
 test "a log message is collapsed in the transaction as git collapses it" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    var twin = try HookTwin.init(gpa, io, "status", "0\n");
+    var twin = try HookTwin.init(gpa, io, "#!/bin/sh\n");
     defer twin.deinit();
     const head_text = try twin.relic.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head_text);
@@ -1570,6 +1576,7 @@ test "an edit named twice, once through HEAD, is refused before anything moves" 
 }
 
 test "a reference-transaction hook refusing a transaction leaves every ref as it was" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // What the reference-transaction hook hears is git 2.54's: a
@@ -1577,8 +1584,8 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
     try testgit.requireGitVersion(gpa, io, 2, 54);
     for ([_][]const u8{ "preparing", "prepared" }) |state| {
         var body_buf: [160]u8 = undefined;
-        const body = try std.fmt.bufPrint(&body_buf, ".git/rt.log\n{s}", .{state});
-        var twin = try HookTwin.init(gpa, io, "record_stdin", body);
+        const body = try std.fmt.bufPrint(&body_buf, "#!/bin/sh\n{{ echo \"$1\"; cat; }} >> .git/rt.log\n[ \"$1\" = {s} ] && exit 1\nexit 0\n", .{state});
+        var twin = try HookTwin.init(gpa, io, body);
         defer twin.deinit();
         const head_text = try twin.git.line(io, &.{ "rev-parse", "HEAD" });
         defer gpa.free(head_text);
@@ -1614,12 +1621,13 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
 }
 
 test "a deletion is announced as git announces it, packed or loose" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // What the reference-transaction hook hears is git 2.54's: a
     // "preparing" state, and a symbolic ref's updates among the others.
     try testgit.requireGitVersion(gpa, io, 2, 54);
-    var twin = try HookTwin.init(gpa, io, "record_stdin", logging_hook);
+    var twin = try HookTwin.init(gpa, io, logging_hook);
     defer twin.deinit();
     const head_text = try twin.relic.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head_text);

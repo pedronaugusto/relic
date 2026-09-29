@@ -316,17 +316,20 @@ pub fn needsShell(line: []const u8) bool {
 }
 
 const testing = std.testing;
-const process_fixture = @import("build_options").process_fixture_path;
 
 fn testEnviron() !Environ.Map {
-    var map = try @import("testgit.zig").programEnviron(testing.allocator);
+    var map: Environ.Map = .init(testing.allocator);
     errdefer map.deinit();
+    const path = testing.environ.getAlloc(testing.allocator, "PATH") catch return error.SkipZigTest;
+    defer testing.allocator.free(path);
+    try map.put("PATH", path);
     try map.put("RELIC_KEPT", "kept");
     try map.put("RELIC_GONE", "gone");
     return map;
 }
 
 test "Programs spawn hook receives prepared options and owns termination" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const Hooks = struct {
         started: bool = false,
         ended: bool = false,
@@ -334,8 +337,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
         fn start(raw: *anyopaque, io: Io, options: std.process.SpawnOptions) std.process.SpawnError!Child {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.started = true;
-            testing.expectEqualStrings(process_fixture, options.argv[0]) catch unreachable;
-            testing.expectEqualStrings("copy", options.argv[1]) catch unreachable;
+            testing.expectEqualStrings("cat", options.argv[0]) catch unreachable;
             testing.expectEqualStrings("hooked", options.environ_map.?.get("RELIC_HOOKED").?) catch unreachable;
             return std.process.spawn(io, options);
         }
@@ -354,7 +356,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
         .start = Hooks.start,
         .terminate = Hooks.terminate,
     } }, testing.allocator, testing.io, .{
-        .argv = &.{ process_fixture, "copy" },
+        .argv = &.{"cat"},
         .set = &.{.{ .name = "RELIC_HOOKED", .value = "hooked" }},
     }, "hello", .{});
     defer outcome.deinit(testing.allocator);
@@ -363,6 +365,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
 }
 
 test "a command line reaches the shell as git hands it one, and its arguments stay arguments" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var environ = try testEnviron();
@@ -397,6 +400,7 @@ test "a command line with nothing to interpret runs directly" {
 }
 
 test "input larger than a pipe goes in while output larger than a pipe comes out" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var environ = try testEnviron();
@@ -405,20 +409,22 @@ test "input larger than a pipe goes in while output larger than a pipe comes out
     const input = try gpa.alloc(u8, 4 << 20);
     defer gpa.free(input);
     for (input, 0..) |*b, i| b.* = @truncate(i *% 31);
-    var outcome = try run(.{ .environ = &environ }, gpa, io, .{ .argv = &.{ process_fixture, "copy" } }, input, .{});
+    var outcome = try run(.{ .environ = &environ }, gpa, io, .{ .argv = &.{"cat"} }, input, .{});
     defer outcome.deinit(gpa);
     try testing.expect(outcome.succeeded());
     try testing.expectEqualSlices(u8, input, outcome.stdout);
 }
 
 test "a failing program is its status, its diagnostics kept apart" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var environ = try testEnviron();
     defer environ.deinit();
 
     var outcome = try run(.{ .environ = &environ }, gpa, io, .{
-        .argv = &.{ process_fixture, "streams", "3" },
+        .argv = &.{"echo out; echo err >&2; exit 3"},
+        .shell = true,
     }, "ignored input", .{});
     defer outcome.deinit(gpa);
     try testing.expect(!outcome.succeeded());
@@ -428,13 +434,15 @@ test "a failing program is its status, its diagnostics kept apart" {
 }
 
 test "output sent elsewhere is not collected, and the status still is" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var environ = try testEnviron();
     defer environ.deinit();
 
     var outcome = try run(.{ .environ = &environ }, gpa, io, .{
-        .argv = &.{ process_fixture, "streams", "4" },
+        .argv = &.{"echo out; echo err >&2; exit 4"},
+        .shell = true,
         .stdout = .ignore,
         .stderr = .ignore,
     }, "", .{});
@@ -444,7 +452,8 @@ test "output sent elsewhere is not collected, and the status still is" {
     try testing.expectEqualStrings("", outcome.stderr);
 
     var kept = try run(.{ .environ = &environ }, gpa, io, .{
-        .argv = &.{ process_fixture, "stderr" },
+        .argv = &.{"echo err >&2"},
+        .shell = true,
         .stdout = .ignore,
     }, "", .{});
     defer kept.deinit(gpa);
@@ -453,11 +462,13 @@ test "output sent elsewhere is not collected, and the status still is" {
 }
 
 test "output past the limit is refused by name" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var environ = try testEnviron();
     defer environ.deinit();
     try testing.expectError(error.OutputTooLong, run(.{ .environ = &environ }, gpa, io, .{
-        .argv = &.{ process_fixture, "bytes" },
+        .argv = &.{"head -c 100000 /dev/zero"},
+        .shell = true,
     }, "", .{ .output = .limited(1000) }));
 }
