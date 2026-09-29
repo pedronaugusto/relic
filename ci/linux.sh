@@ -27,6 +27,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+ci/git-flags.sh
 digest=$(git hash-object ci/linux.Dockerfile | cut -c1-12)
 image=${RELIC_LINUX_IMAGE:-relic-linux-$digest}
 

@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /opt/git
-          key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+          key: git-${{ env.GIT_VERSION }}-norust-${{ runner.os }}-${{ runner.arch }}
 
       - name: Build git (Linux)
         if: runner.os == 'Linux' && steps.git-cache.outputs.cache-hit != 'true'
@@ -64,8 +64,8 @@ jobs:
             build-essential libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev
           curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /tmp/git.tar.xz
           mkdir -p /tmp/git-src && tar -xJf /tmp/git.tar.xz -C /tmp/git-src --strip-components=1
-          make -C /tmp/git-src -j"$(nproc)" NO_TCLTK=1 NO_GETTEXT=1 prefix=/opt/git all
-          sudo make -C /tmp/git-src NO_TCLTK=1 NO_GETTEXT=1 prefix=/opt/git install
+          make -C /tmp/git-src -j"$(nproc)" NO_TCLTK=1 NO_GETTEXT=1 NO_RUST=1 prefix=/opt/git all
+          sudo make -C /tmp/git-src NO_TCLTK=1 NO_GETTEXT=1 NO_RUST=1 prefix=/opt/git install
 
       - name: Use the built git (Linux)
         if: runner.os == 'Linux'
@@ -192,6 +192,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ci/readme_usage.sh --check
+      # the git the Linux image builds is the git the Linux job builds
+      - run: ci/git-flags.sh
 
   # Compile-only coverage of the targets the suite cannot execute on. These
   # prove the sources and the build graph are portable; the `test` job above
