@@ -974,7 +974,6 @@ fn openRunner(gpa: Allocator, io: Io, repo: *testgit.Repo, environ: *const std.p
 }
 
 test "a hook runs from the top of the working tree with git's arguments, and nothing that points elsewhere" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
@@ -982,14 +981,7 @@ test "a hook runs from the top of the working tree with git's arguments, and not
     var environ = try testEnviron(gpa);
     defer environ.deinit();
 
-    try writeHook(io, repo.dir, ".git/hooks/post-merge",
-        \\#!/bin/sh
-        \\echo "args=$# $*"
-        \\[ "$(pwd -P)" = "$(git rev-parse --show-toplevel)" ] && echo top
-        \\echo "dir=${GIT_DIR-unset} index=${GIT_INDEX_FILE-unset} prefix=${GIT_PREFIX-unset} kept=$RELIC_KEPT"
-        \\echo to-stderr >&2
-        \\
-    );
+    try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/post-merge", "context", "");
 
     var opened = try openRunner(gpa, io, &repo, &environ, "");
     defer opened.git_dir.close(io);
@@ -1005,6 +997,7 @@ test "a hook runs from the top of the working tree with git's arguments, and not
 }
 
 test "a hook that is not executable is passed over and said to be" {
+    // Windows has no executable bit; git runs named hook programs there.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -1025,14 +1018,13 @@ test "a hook that is not executable is passed over and said to be" {
 }
 
 test "a blocking hook that fails is a named refusal carrying its status" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     var environ = try testEnviron(gpa);
     defer environ.deinit();
-    try writeHook(io, repo.dir, ".git/hooks/pre-rebase", "#!/bin/sh\necho \"no: $*\" >&2\nexit 3\n");
+    try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/pre-rebase", "reject", "3\nno: ");
 
     var opened = try openRunner(gpa, io, &repo, &environ, "");
     defer opened.git_dir.close(io);
@@ -1045,15 +1037,14 @@ test "a blocking hook that fails is a named refusal carrying its status" {
 }
 
 test "core.hooksPath moves the hooks, relative to where they run" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     var environ = try testEnviron(gpa);
     defer environ.deinit();
-    try writeHook(io, repo.dir, ".git/hooks/post-merge", "#!/bin/sh\necho shared\n");
-    try writeHook(io, repo.dir, "tools/hooks/post-merge", "#!/bin/sh\necho moved\n");
+    try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/post-merge", "text", "shared\n");
+    try testgit.fixtureHook(gpa, io, repo.dir, "tools/hooks/post-merge", "text", "moved\n");
 
     var opened = try openRunner(gpa, io, &repo, &environ, "[core]\n\thooksPath = tools/hooks\n");
     defer opened.git_dir.close(io);
@@ -1064,14 +1055,13 @@ test "core.hooksPath moves the hooks, relative to where they run" {
 }
 
 test "configured hooks run first, in the order last named, through the shell" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     var environ = try testEnviron(gpa);
     defer environ.deinit();
-    try writeHook(io, repo.dir, ".git/hooks/post-merge", "#!/bin/sh\necho file $1\n");
+    try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/post-merge", "arg", "file ");
 
     const text =
         \\[hook "second"]
@@ -1114,14 +1104,13 @@ test "configured hooks run first, in the order last named, through the shell" {
 }
 
 test "an event's configured hooks can be turned off while its file still runs" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     var environ = try testEnviron(gpa);
     defer environ.deinit();
-    try writeHook(io, repo.dir, ".git/hooks/post-merge", "#!/bin/sh\necho file\n");
+    try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/post-merge", "text", "file\n");
     var opened = try openRunner(gpa, io, &repo, &environ,
         \\[hook "one"]
         \\    event = post-merge
@@ -1138,7 +1127,6 @@ test "an event's configured hooks can be turned off while its file still runs" {
 }
 
 test "a configured hook named after an event is refused by name" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
@@ -1154,7 +1142,6 @@ test "a configured hook named after an event is refused by name" {
 }
 
 test "a configured hook with no command is refused by name" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
@@ -1170,7 +1157,6 @@ test "a configured hook with no command is refused by name" {
 }
 
 test "pre-push, reference-transaction and post-rewrite read git's lines" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
@@ -1180,7 +1166,7 @@ test "pre-push, reference-transaction and post-rewrite read git's lines" {
     for ([_][]const u8{ "pre-push", "reference-transaction", "post-rewrite" }) |name| {
         var path_buf: [64]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, ".git/hooks/{s}", .{name});
-        try writeHook(io, repo.dir, path, "#!/bin/sh\necho \"$(basename \"$0\") $*\"\ncat\n");
+        try testgit.fixtureHook(gpa, io, repo.dir, path, "args_stdin", "");
     }
     var opened = try openRunner(gpa, io, &repo, &environ, "");
     defer opened.git_dir.close(io);
@@ -1214,15 +1200,14 @@ test "pre-push, reference-transaction and post-rewrite read git's lines" {
 }
 
 test "a hook that fails where it cannot stop anything is reported, not raised" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     var environ = try testEnviron(gpa);
     defer environ.deinit();
-    try writeHook(io, repo.dir, ".git/hooks/reference-transaction", "#!/bin/sh\nexit 1\n");
-    try writeHook(io, repo.dir, ".git/hooks/post-checkout", "#!/bin/sh\nexit 2\n");
+    try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/reference-transaction", "status", "1\n");
+    try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/post-checkout", "status", "2\n");
     var opened = try openRunner(gpa, io, &repo, &environ, "");
     defer opened.git_dir.close(io);
     defer opened.config.deinit();

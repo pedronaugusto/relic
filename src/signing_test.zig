@@ -2,7 +2,7 @@
 //!
 //! The keys are made for each test in its own temporary directory: an SSH
 //! key by `ssh-keygen`, and an OpenPGP key by `gpg` in a `GNUPGHOME` of its
-//! own, under `/tmp` so that its sockets' paths fit (`testgit.GnupgHome`). The environment every program runs in is built from nothing but
+//! own, short enough for Unix sockets (`testgit.GnupgHome`). The environment every program runs in is built from nothing but
 //! `PATH` and that directory, so neither the person's `~/.gnupg` nor
 //! `~/.ssh` nor any agent they run is reached. A machine without the
 //! program skips the test.
@@ -46,7 +46,6 @@ const Keyed = struct {
     format: signing.Format,
 
     fn init(gpa: Allocator, io: Io, format: signing.Format, init_args: []const []const u8) !*Keyed {
-        if (builtin.os.tag == .windows) return error.SkipZigTest;
         const k = try gpa.create(Keyed);
         errdefer gpa.destroy(k);
         k.gpa = gpa;
@@ -69,9 +68,10 @@ const Keyed = struct {
         const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
         defer gpa.free(path);
         try k.environ.put("PATH", path);
+        try testgit.keepSystemVariables(gpa, &k.environ);
         try testgit.isolate(&k.environ, k.home);
         try k.environ.put("TMPDIR", k.home);
-        k.gnupg = try .init(io);
+        k.gnupg = try .init(gpa, io);
         errdefer k.gnupg.deinit(io);
         try k.environ.put("GNUPGHOME", k.gnupg.path());
         try k.environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
@@ -193,7 +193,6 @@ fn verifyHere(k: *Keyed, io: Io, rev: []const u8, tag: bool) !signing.Verdict {
 }
 
 fn bothWays(format: signing.Format, init_args: []const []const u8) !void {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var k = try Keyed.init(gpa, io, format, init_args);
@@ -264,7 +263,6 @@ test "ssh signatures made here verify in git, and git's verify here" {
 }
 
 test "ssh signatures in a SHA-256 repository ride in gpgsig-sha256" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var k = try Keyed.init(gpa, io, .ssh, &.{"--object-format=sha256"});
@@ -287,7 +285,6 @@ test "openpgp signatures made here verify in git, and git's verify here" {
 }
 
 test "a key no allowed signer names is untrusted to both, and not verified" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var k = try Keyed.init(gpa, io, .ssh, &.{});
@@ -349,7 +346,6 @@ test "signing configured with no programs is refused by name, never written unsi
 }
 
 test "the commit porcelain signs as commit.gpgSign says" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var k = try Keyed.init(gpa, io, .ssh, &.{});
@@ -365,18 +361,14 @@ test "the commit porcelain signs as commit.gpgSign says" {
 }
 
 test "a signing program is one path, spaces and all, as git runs it" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var k = try Keyed.init(gpa, io, .ssh, &.{});
     defer k.deinit(io);
     try k.makeKey(io);
-    // A wrapper in a directory whose name a shell would split in two.
-    try k.repo.writeFile(io, "keys/my tools/keygen", "#!/bin/sh\necho used >> \"$(dirname \"$0\")/log\"\nexec ssh-keygen \"$@\"\n");
-    const wrapper_file = try k.repo.dir.openFile(io, "keys/my tools/keygen", .{});
-    try wrapper_file.setPermissions(io, .fromMode(0o755));
-    wrapper_file.close(io);
-    const wrapper = try std.fs.path.join(gpa, &.{ k.home, "my tools", "keygen" });
+    // A native wrapper in a directory whose name a shell would split in two.
+    try testgit.fixtureHook(gpa, io, k.repo.dir, "keys/my tools/keygen", "signing_wrapper", "");
+    const wrapper = try std.fs.path.join(gpa, &.{ k.home, "my tools", if (builtin.os.tag == .windows) "keygen.exe" else "keygen" });
     defer gpa.free(wrapper);
     try k.config(io, "gpg.ssh.program", wrapper);
 

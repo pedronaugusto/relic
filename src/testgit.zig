@@ -316,33 +316,41 @@ pub fn isolate(map: *Environ.Map, home: []const u8) !void {
 /// `GNUPGHOME`, and a Unix socket's path is held to 104 bytes on Darwin and
 /// 108 on Linux. A home inside a test's temporary directory lives under the
 /// checkout, so from a checkout at a long path gpg could not bind its agent
-/// ("File name too long") and every OpenPGP test failed. This home is
-/// `/tmp/relic-gpg-` and sixteen random characters, whatever the checkout,
-/// made with the mode gpg asks of a home (0700) and removed by `deinit`,
+/// ("File name too long") and every OpenPGP test failed. On Unix this home
+/// is under `/tmp`; on Windows it is under the process's temporary directory.
+/// It has a random name, the permissions gpg asks for where available, and is removed by `deinit`,
 /// which is called once gpg's daemons for it have been told to stop.
 /// Nothing of the person's is in it: the tests that use it still put it in
 /// an environment `isolate` has emptied of theirs.
 pub const GnupgHome = struct {
-    buffer: [prefix.len + 16]u8,
+    gpa: Allocator,
+    name: []u8,
 
-    const prefix = "/tmp/relic-gpg-";
-
-    pub fn init(io: Io) !GnupgHome {
-        var home: GnupgHome = .{ .buffer = undefined };
+    /// Make one private scratch home for GnuPG.
+    pub fn init(gpa: Allocator, io: Io) !GnupgHome {
         var random_bytes: [12]u8 = undefined;
         io.random(&random_bytes);
-        @memcpy(home.buffer[0..prefix.len], prefix);
-        _ = std.base64.url_safe_no_pad.Encoder.encode(home.buffer[prefix.len..], &random_bytes);
-        try Io.Dir.createDirAbsolute(io, home.path(), .fromMode(0o700));
-        return home;
+        var suffix: [16]u8 = undefined;
+        _ = std.base64.url_safe_no_pad.Encoder.encode(&suffix, &random_bytes);
+        const root = if (builtin.os.tag == .windows) try std.testing.environ.getAlloc(gpa, "TEMP") else try gpa.dupe(u8, "/tmp");
+        defer gpa.free(root);
+        const name = try std.fmt.allocPrint(gpa, "relic-gpg-{s}", .{suffix});
+        defer gpa.free(name);
+        const home_path = try std.fs.path.join(gpa, &.{ root, name });
+        errdefer gpa.free(home_path);
+        try Io.Dir.createDirAbsolute(io, home_path, if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700));
+        return .{ .gpa = gpa, .name = home_path };
     }
 
+    /// Absolute path to the scratch home.
     pub fn path(home: *const GnupgHome) []const u8 {
-        return &home.buffer;
+        return home.name;
     }
 
+    /// Remove the scratch home after its GnuPG daemons have stopped.
     pub fn deinit(home: *GnupgHome, io: Io) void {
         Io.Dir.cwd().deleteTree(io, home.path()) catch {};
+        home.gpa.free(home.name);
         home.* = undefined;
     }
 };
@@ -394,6 +402,44 @@ pub fn programEnviron(gpa: Allocator) !std.process.Environ.Map {
     try keepSystemVariables(gpa, &map);
     try isolate(&map, no_home);
     return map;
+}
+
+/// Install a native hook fixture with `action` and `data` as its sidecar
+/// description. Git and relic run the same executable under the hook name.
+pub fn fixtureHook(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, action: []const u8, data: []const u8) !void {
+    if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(io, parent);
+    const executable = if (builtin.os.tag == .windows) try std.fmt.allocPrint(gpa, "{s}.exe", .{path}) else try gpa.dupe(u8, path);
+    defer gpa.free(executable);
+    try Io.Dir.cwd().copyFile(@import("build_options").hook_fixture_path, dir, executable, io, .{});
+    if (builtin.os.tag != .windows) {
+        const file = try dir.openFile(io, executable, .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    }
+    const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{executable});
+    defer gpa.free(sidecar);
+    const description = try std.fmt.allocPrint(gpa, "{s}\n{s}", .{ action, data });
+    defer gpa.free(description);
+    try dir.writeFile(io, .{ .sub_path = sidecar, .data = description });
+}
+
+/// A shell command naming one fixture executable and its fixed arguments.
+/// Git runs configured filter and helper commands through `sh` on every OS.
+pub fn fixtureCommand(gpa: Allocator, executable: []const u8, arguments: []const u8) ![]u8 {
+    const path = try gpa.dupe(u8, executable);
+    defer gpa.free(path);
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    var command: std.ArrayList(u8) = .empty;
+    errdefer command.deinit(gpa);
+    try command.append(gpa, '\'');
+    for (path) |byte| {
+        if (byte == '\'') {
+            try command.appendSlice(gpa, "'\\''");
+        } else try command.append(gpa, byte);
+    }
+    try command.appendSlice(gpa, "' ");
+    try command.appendSlice(gpa, arguments);
+    return command.toOwnedSlice(gpa);
 }
 
 /// An isolated environment, as `isolatedEnviron` makes with no home, with

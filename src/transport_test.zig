@@ -8,7 +8,6 @@
 //! import.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
@@ -21,6 +20,7 @@ const fetch_mod = @import("fetch.zig");
 const transport = @import("transport.zig");
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
+const testlfs = @import("testlfs.zig");
 
 const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -170,27 +170,18 @@ test "a missing repository, a dumb setting and a header that is not one are refu
 /// A credential helper that notes each operation and its input in `<dir>/helper.log`
 /// and answers `get` with `ada` and `password`.
 fn helperScript(gpa: Allocator, io: Io, dir: Io.Dir, password: []const u8) ![]u8 {
-    const base = try testremote.absolutePath(gpa, io, dir);
-    defer gpa.free(base);
-    const script = try std.fmt.allocPrint(gpa,
-        \\#!/bin/sh
-        \\echo "== $1" >> "{s}/helper.log"
-        \\while IFS= read -r line; do
-        \\  echo "$line" >> "{s}/helper.log"
-        \\done
-        \\if [ "$1" = get ]; then echo username=ada; echo password={s}; fi
-        \\
-    , .{ base, base, password });
-    defer gpa.free(script);
-    try dir.writeFile(io, .{ .sub_path = "helper", .data = script });
-    const file = try dir.openFile(io, "helper", .{});
-    defer file.close(io);
-    try file.setPermissions(io, .fromMode(0o755));
-    return std.fmt.allocPrint(gpa, "{s}/helper", .{base});
+    const path = try testlfs.installProgram(gpa, io, dir, "helper", @import("build_options").lfs_test_tool_path);
+    errdefer gpa.free(path);
+    const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{path});
+    defer gpa.free(sidecar);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = "credential-person\n" });
+    const answer = try std.fmt.allocPrint(gpa, "username=ada\npassword={s}\n", .{password});
+    defer gpa.free(answer);
+    try dir.writeFile(io, .{ .sub_path = "helper.answer", .data = answer });
+    return path;
 }
 
 test "credentials come from a helper as git asks for them, are stored when they work and erased when not" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
@@ -255,7 +246,6 @@ test "credentials come from a helper as git asks for them, are stored when they 
 }
 
 test "credentials in the URL, from askpass and from the caller's prompt are what git would send" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -280,23 +270,11 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     // askpass: asked with git's own prompts.
     var tools = testing.tmpDir(.{ .iterate = true });
     defer tools.cleanup();
-    const base = try testremote.absolutePath(gpa, io, tools.dir);
-    defer gpa.free(base);
-    const askpass_script = try std.fmt.allocPrint(gpa,
-        \\#!/bin/sh
-        \\echo "$1" >> "{s}/askpass.log"
-        \\case "$1" in Username*) echo ada;; *) echo secret;; esac
-        \\
-    , .{base});
-    defer gpa.free(askpass_script);
-    try tools.dir.writeFile(io, .{ .sub_path = "askpass", .data = askpass_script });
-    {
-        const file = try tools.dir.openFile(io, "askpass", .{});
-        defer file.close(io);
-        try file.setPermissions(io, .fromMode(0o755));
-    }
-    const askpass = try std.fmt.allocPrint(gpa, "{s}/askpass", .{base});
+    const askpass = try testlfs.installProgram(gpa, io, tools.dir, "askpass", @import("build_options").lfs_test_tool_path);
     defer gpa.free(askpass);
+    const askpass_sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{askpass});
+    defer gpa.free(askpass_sidecar);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = askpass_sidecar, .data = "askpass\n" });
     var env = try testremote.environ(gpa);
     defer env.deinit();
     try env.put("GIT_ASKPASS", askpass);
@@ -478,7 +456,6 @@ fn relicFetch(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Envir
 }
 
 test "a server's own authority, in http.sslCAInfo or http.sslCAPath, is trusted as git trusts it, and nothing else is" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -546,7 +523,6 @@ fn firstLines(gpa: Allocator, log: []const u8) ![]u8 {
 }
 
 test "a proxy is gone through as git goes through it: the whole URL for http, CONNECT and TLS inside for https, not where no_proxy says" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -626,7 +602,6 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
 }
 
 test "a proxy that asks is answered as curl answers for git: nothing first with anyauth, then Basic or Digest, MD5 or SHA-256" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -697,7 +672,6 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
 }
 
 test "a proxy's credentials come from its URL, or its user's from the helpers, as git's do, and a refusal is named" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -774,7 +748,6 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
 }
 
 test "an https server is fetched from unchecked when http.sslVerify says so, and the caller is told" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -813,7 +786,6 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
 }
 
 test "requests share one connection and a large upload-pack request is gzipped, as git's are" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -863,7 +835,6 @@ fn relicFetchV(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Envi
 }
 
 test "the negotiation git's fetch-pack makes is made byte for byte, over a pipe and over HTTP, in v0 and v2" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
@@ -875,31 +846,7 @@ test "the negotiation git's fetch-pack makes is made byte for byte, over a pipe 
     defer gpa.free(root_path);
     var tools = testing.tmpDir(.{ .iterate = true });
     defer tools.cleanup();
-    const tools_path = try testremote.absolutePath(gpa, io, tools.dir);
-    defer gpa.free(tools_path);
-    // A stand-in ssh that keeps what it was sent.
-    const script = try std.fmt.allocPrint(gpa,
-        \\#!/bin/sh
-        \\while [ $# -gt 0 ]; do
-        \\  case "$1" in
-        \\    -G) exit 0 ;;
-        \\    -o|-p|-P) shift 2 ;;
-        \\    -*) shift ;;
-        \\    *) break ;;
-        \\  esac
-        \\done
-        \\shift
-        \\tee -a "{s}/sent" | PATH="$(git --exec-path):$PATH" sh -c "$*"
-        \\
-    , .{tools_path});
-    defer gpa.free(script);
-    try tools.dir.writeFile(io, .{ .sub_path = "ssh", .data = script });
-    {
-        const file = try tools.dir.openFile(io, "ssh", .{});
-        defer file.close(io);
-        try file.setPermissions(io, .fromMode(0o755));
-    }
-    const ssh_path = try std.fmt.allocPrint(gpa, "{s}/ssh", .{tools_path});
+    const ssh_path = try testremote.capturingSsh(gpa, io, tools.dir);
     defer gpa.free(ssh_path);
 
     // One history of its own, copied to both sides so the haves are the

@@ -113,7 +113,6 @@ fn sortLines(gpa: Allocator, text: []const u8) ![]u8 {
 }
 
 test "git clones from relic's upload-pack what it clones from its own, in v2 and v0, whole, shallow and filtered" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     // git before 2.43 cannot walk what a combine: filter with object:type=
@@ -189,7 +188,6 @@ test "git clones from relic's upload-pack what it clones from its own, in v2 and
 }
 
 test "git deepens, unshallows and fetches again from relic's upload-pack as from its own" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -239,7 +237,6 @@ test "git deepens, unshallows and fetches again from relic's upload-pack as from
 }
 
 test "relic clones and fetches over file:// through its own upload-pack, and ignores a depth for a path as git does" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -305,7 +302,6 @@ test "relic clones and fetches over file:// through its own upload-pack, and ign
 }
 
 test "git and relic clone over HTTP from relic's upload-pack, one request at a time, what they clone from git's" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });

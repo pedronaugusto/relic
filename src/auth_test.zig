@@ -28,6 +28,7 @@ const transport = @import("transport.zig");
 const userconfig = @import("userconfig.zig");
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
+const testlfs = @import("testlfs.zig");
 
 const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -42,7 +43,6 @@ const Person = struct {
     env: Environ.Map,
 
     fn init(gpa: Allocator, io: Io) !Person {
-        if (builtin.os.tag == .windows) return error.SkipZigTest;
         try testgit.requireGit(gpa, io);
         var home = testing.tmpDir(.{ .iterate = true });
         errdefer home.cleanup();
@@ -86,23 +86,17 @@ const Person = struct {
     /// `<name>.log` and answers `get` with `<name>.answer`. The path is
     /// the caller's.
     fn standIn(p: *Person, io: Io, name: []const u8, answer: []const u8) ![]u8 {
-        const script = try std.fmt.allocPrint(p.gpa,
-            \\#!/bin/sh
-            \\for op; do :; done
-            \\[ "$op" = relic-probe ] && {{ echo stand-in; exit 0; }}
-            \\echo "== $op" >> "{s}/{s}.log"
-            \\while IFS= read -r line; do echo "$line" >> "{s}/{s}.log"; done
-            \\if [ "$op" = get ]; then cat "{s}/{s}.answer"; fi
-            \\
-        , .{ p.tools_path, name, p.tools_path, name, p.tools_path, name });
-        defer p.gpa.free(script);
-        try p.tools.dir.writeFile(io, .{ .sub_path = name, .data = script });
+        const path = try testlfs.installProgram(p.gpa, io, p.tools.dir, name, @import("build_options").lfs_test_tool_path);
+        errdefer p.gpa.free(path);
+        const sidecar = try std.fmt.allocPrint(p.gpa, "{s}.fixture", .{path});
+        defer p.gpa.free(sidecar);
+        const stem = if (builtin.os.tag == .windows) path[0 .. path.len - 4] else path;
+        const description = try std.fmt.allocPrint(p.gpa, "credential-person\n{s}\n", .{stem});
+        defer p.gpa.free(description);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = description });
         var answer_name: [64]u8 = undefined;
         try p.tools.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&answer_name, "{s}.answer", .{name}), .data = answer });
-        const file = try p.tools.dir.openFile(io, name, .{});
-        defer file.close(io);
-        if (builtin.os.tag != .windows) try file.setPermissions(io, .fromMode(0o755));
-        return std.fs.path.join(p.gpa, &.{ p.tools_path, name });
+        return path;
     }
 
     /// A private `GIT_EXEC_PATH`: every program of the real one, with
@@ -121,17 +115,27 @@ const Person = struct {
         defer real_dir.close(io);
         var it = real_dir.iterate();
         while (try it.next(io)) |entry| {
+            if (entry.kind == .directory) continue;
             const target = try std.fs.path.join(p.gpa, &.{ real, entry.name });
             defer p.gpa.free(target);
-            try shadow.symLink(io, target, entry.name, .{});
+            if (builtin.os.tag == .windows) {
+                try real_dir.copyFile(entry.name, shadow, entry.name, io, .{});
+            } else try shadow.symLink(io, target, entry.name, .{});
         }
         for (names, answers) |name, answer| {
             const path = try p.standIn(io, name, answer);
             defer p.gpa.free(path);
             var dashed_buf: [64]u8 = undefined;
             const dashed = try std.fmt.bufPrint(&dashed_buf, "git-credential-{s}", .{name});
-            shadow.deleteFile(io, dashed) catch {};
-            try shadow.symLink(io, path, dashed, .{});
+            const installed = if (builtin.os.tag == .windows) try std.fmt.allocPrint(p.gpa, "{s}.exe", .{dashed}) else try p.gpa.dupe(u8, dashed);
+            defer p.gpa.free(installed);
+            shadow.deleteFile(io, installed) catch {};
+            if (builtin.os.tag == .windows) try Io.Dir.cwd().copyFile(path, shadow, installed, io, .{}) else try shadow.symLink(io, path, installed, .{});
+            const fixture = try std.fmt.allocPrint(p.gpa, "{s}.fixture", .{installed});
+            defer p.gpa.free(fixture);
+            const source = try std.fmt.allocPrint(p.gpa, "{s}.fixture", .{path});
+            defer p.gpa.free(source);
+            try Io.Dir.cwd().copyFile(source, shadow, fixture, io, .{});
         }
         const exec_path = try std.fs.path.join(p.gpa, &.{ p.tools_path, "exec" });
         defer p.gpa.free(exec_path);
@@ -636,21 +640,11 @@ test "what ssh says on a conversation that succeeds is handed back as a warning,
     var person = try Person.init(gpa, io);
     defer person.deinit();
     // ssh that adds a host key, says so, and goes on.
-    try person.tools.dir.writeFile(io, .{ .sub_path = "ssh", .data =
-        \\#!/bin/sh
-        \\echo "Warning: Permanently added 'work-github' (ED25519) to the list of known hosts." >&2
-        \\while [ $# -gt 0 ]; do case "$1" in -G) exit 0 ;; -o|-p|-P|-i|-J|-F) shift 2 ;; -*) shift ;; *) break ;; esac; done
-        \\shift
-        \\PATH="$(git --exec-path):$PATH" exec sh -c "$*"
-        \\
-    });
-    {
-        const file = try person.tools.dir.openFile(io, "ssh", .{});
-        defer file.close(io);
-        if (builtin.os.tag != .windows) try file.setPermissions(io, .fromMode(0o755));
-    }
-    const ssh = try std.fs.path.join(gpa, &.{ person.tools_path, "ssh" });
+    const ssh = try testlfs.installProgram(gpa, io, person.tools.dir, "ssh", @import("build_options").fake_ssh_helper_path);
     defer gpa.free(ssh);
+    const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{ssh});
+    defer gpa.free(sidecar);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = "warn\nWarning: Permanently added 'work-github' (ED25519) to the list of known hosts.\n" });
     try person.env.put("GIT_SSH_COMMAND", ssh);
     var source = try testremote.historyRepo(gpa, io, 1);
     defer source.deinit();
@@ -693,35 +687,17 @@ test "what ssh says on a conversation that succeeds is handed back as a warning,
 /// agent and home it was started with, then either says `refusal` on its
 /// standard error and exits 255, as ssh does, or runs the command here.
 fn sshStandIn(person: *Person, io: Io, refusal: ?[]const u8) ![]u8 {
-    const body = if (refusal) |text|
-        try std.fmt.allocPrint(person.gpa, "echo '{s}' >&2; exit 255\n", .{text})
+    const path = try testlfs.installProgram(person.gpa, io, person.tools.dir, "ssh", @import("build_options").fake_ssh_helper_path);
+    errdefer person.gpa.free(path);
+    const sidecar = try std.fmt.allocPrint(person.gpa, "{s}.fixture", .{path});
+    defer person.gpa.free(sidecar);
+    const description = if (refusal) |message|
+        try std.fmt.allocPrint(person.gpa, "refuse\n{s}\n", .{message})
     else
-        try person.gpa.dupe(u8,
-            \\while [ $# -gt 0 ]; do
-            \\  case "$1" in
-            \\    -G) exit 0 ;;
-            \\    -o|-p|-P|-i|-J|-F) shift 2 ;;
-            \\    -*) shift ;;
-            \\    *) break ;;
-            \\  esac
-            \\done
-            \\shift
-            \\PATH="$(git --exec-path):$PATH" exec sh -c "$*"
-            \\
-        );
-    defer person.gpa.free(body);
-    const script = try std.fmt.allocPrint(person.gpa,
-        \\#!/bin/sh
-        \\for a in "$@"; do printf '[%s]' "$a" >> "$0.log"; done
-        \\echo " agent=$SSH_AUTH_SOCK home=$HOME" >> "$0.log"
-        \\{s}
-    , .{body});
-    defer person.gpa.free(script);
-    try person.tools.dir.writeFile(io, .{ .sub_path = "ssh", .data = script });
-    const file = try person.tools.dir.openFile(io, "ssh", .{});
-    defer file.close(io);
-    if (builtin.os.tag != .windows) try file.setPermissions(io, .fromMode(0o755));
-    return std.fs.path.join(person.gpa, &.{ person.tools_path, "ssh" });
+        try person.gpa.dupe(u8, "auth\n");
+    defer person.gpa.free(description);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = description });
+    return path;
 }
 
 test "ssh gets the person's host alias, agent and command line untouched, as git hands them over" {
