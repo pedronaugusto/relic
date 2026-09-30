@@ -93,6 +93,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the later one and frees the first.
 - `LockFile.Options.sync_directory` now syncs the target's parent directory
   after the commit rename where the platform supports it.
+- `AddOptions.ignore_errors` now skips files that cannot be read or hashed,
+  reports each path and error through `error_report`, and stages the rest.
 - A conversation with a program (ssh, a helper) that is cancelled stops the
   program on `close` or `diagnose` rather than waiting for it to end, so a
   fetch or push whose remote never answers returns when its caller cancels.

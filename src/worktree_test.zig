@@ -124,6 +124,102 @@ test "addAll then writeTree equals git add -A and git write-tree" {
     try h.repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
 
+// POSIX read bits are not Windows ACLs: taking them away on Windows does
+// not make a file unreadable. These fixtures skip there, and under root,
+// whose permission to read survives chmod(000).
+fn makeUnreadable(io: Io, dir: Io.Dir, path: []const u8) !struct { err: Io.File.OpenError } {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try dir.setFilePermissions(io, path, @enumFromInt(@as(std.posix.mode_t, 0)), .{});
+    if (dir.openFile(io, path, .{})) |file| {
+        file.close(io);
+        return error.SkipZigTest;
+    } else |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return .{ .err = err },
+        else => return err,
+    }
+}
+
+test "ignore-errors reports unreadable files, keeps their entries and stages the rest as git does" {
+    // Windows needs ACL changes, not chmod, to deny reading a file.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for ([_]worktree.NewBlobs{ .loose, .pack }) |new_blobs| {
+        var h = try Harness.init(gpa, io, &.{});
+        defer h.deinit(io);
+        try h.repo.writeFile(io, "a-unreadable", "old\n");
+        _ = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{});
+        const old = h.index.find("a-unreadable").?.*;
+        try h.index.write(io, h.git_dir, "index", .{});
+
+        try h.repo.writeFile(io, "a-unreadable", "changed and unreadable\n");
+        try h.repo.writeFile(io, "b/new-unreadable", "also unreadable\n");
+        try h.repo.writeFile(io, "0-good", "before\n");
+        try h.repo.writeFile(io, "z-good", "after\n");
+        const first_error = (try makeUnreadable(io, h.repo.dir, "a-unreadable")).err;
+        defer h.repo.dir.setFilePermissions(io, "a-unreadable", .default_file, .{}) catch {};
+        const second_error = (try makeUnreadable(io, h.repo.dir, "b/new-unreadable")).err;
+        defer h.repo.dir.setFilePermissions(io, "b/new-unreadable", .default_file, .{}) catch {};
+
+        var report: worktree.AddErrorReport = .init(gpa);
+        defer report.deinit();
+        const outcome = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{
+            .rules = h.worktreeRules(),
+            .new_blobs = new_blobs,
+            .ignore_errors = true,
+            .error_report = &report,
+        });
+        try std.testing.expectEqual(@as(u32, 2), outcome.skipped_errors);
+        try std.testing.expectEqual(@as(u32, 2), outcome.added);
+        try std.testing.expectEqual(@as(u32, 0), outcome.removed);
+        try std.testing.expectEqual(@as(u32, 2), outcome.hashed);
+        try std.testing.expectEqual(@as(usize, 2), report.failures.items.len);
+        try std.testing.expectEqualStrings("a-unreadable", report.failures.items[0].path);
+        try std.testing.expectEqual(first_error, report.failures.items[0].err);
+        try std.testing.expectEqualStrings("b/new-unreadable", report.failures.items[1].path);
+        try std.testing.expectEqual(second_error, report.failures.items[1].err);
+        try std.testing.expect(old.oid.eql(h.index.find("a-unreadable").?.oid));
+        try std.testing.expectEqualDeep(old.stat, h.index.find("a-unreadable").?.stat);
+        try std.testing.expect(h.index.find("b/new-unreadable") == null);
+        try std.testing.expect(h.index.find("0-good") != null);
+        try std.testing.expect(h.index.find("z-good") != null);
+        // The bytes really reached the database, including when the rest
+        // were put into one pack around the failed files.
+        const blob = try h.db.read(io, h.index.find("z-good").?.oid);
+        defer gpa.free(blob.bytes);
+        try std.testing.expectEqualStrings("after\n", blob.bytes);
+
+        h.repo.report_failures = false;
+        try std.testing.expectError(error.GitFailed, h.repo.exec(io, &.{ "add", "-A", "--ignore-errors" }));
+        const theirs = try h.repo.line(io, &.{"write-tree"});
+        defer gpa.free(theirs);
+        const ours = try worktree.writeTree(gpa, io, &h.index, &h.db);
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try std.testing.expectEqualStrings(theirs, ours.hex(&hex));
+    }
+}
+
+test "without ignore-errors the first unreadable file stops add" {
+    // Windows needs ACL changes, not chmod, to deny reading a file.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    try h.repo.writeFile(io, "a-unreadable", "cannot read\n");
+    try h.repo.writeFile(io, "z-good", "would have been staged\n");
+    const read_error = (try makeUnreadable(io, h.repo.dir, "a-unreadable")).err;
+    defer h.repo.dir.setFilePermissions(io, "a-unreadable", .default_file, .{}) catch {};
+    var report: worktree.AddErrorReport = .init(gpa);
+    defer report.deinit();
+    try std.testing.expectError(read_error, worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{
+        .error_report = &report,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), report.failures.items.len);
+    try std.testing.expect(h.index.find("a-unreadable") == null);
+    try std.testing.expect(h.index.find("z-good") == null);
+}
+
 test "the stat shortcut means a warm addAll hashes nothing" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

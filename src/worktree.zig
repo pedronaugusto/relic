@@ -147,6 +147,9 @@ pub const AddOutcome = struct {
     /// Files staged after `core.safecrlf=warn` found a line-ending conversion
     /// that would not round-trip.
     safecrlf_warnings: u32 = 0,
+    /// Files skipped under `AddOptions.ignore_errors`. `error_report` names
+    /// each path and the error that prevented staging it.
+    skipped_errors: u32 = 0,
 };
 
 /// Where the blobs a staging pass writes are put.
@@ -177,8 +180,13 @@ pub const AddOptions = struct {
     /// Whether to stage deletions for index entries whose file is gone.
     /// `git add -A` does; `git add .` without `-A` does not.
     stage_deletions: bool = true,
-    /// Reserved; the staging walk does not consult this setting.
+    /// Skip files that cannot be read or hashed and keep staging the rest,
+    /// as `git add --ignore-errors` does. `error_report` records each path
+    /// and error; `AddOutcome.skipped_errors` counts them. Without this,
+    /// the first such error stops the walk.
     ignore_errors: bool = false,
+    /// Where files skipped under `ignore_errors` are reported.
+    error_report: ?*AddErrorReport = null,
     /// A path prefix to limit the walk to, `/`-separated. Empty walks the
     /// whole tree.
     prefix: []const u8 = "",
@@ -189,6 +197,38 @@ pub const AddOptions = struct {
     /// Where the path is written when a repository inside the working tree
     /// stops the walk with `error.NoCommitCheckedOut`.
     refusal: ?*Refusal = null,
+};
+
+/// Files a staging pass skipped under `AddOptions.ignore_errors`.
+/// The caller owns this report and hands it in through `error_report`.
+pub const AddErrorReport = struct {
+    gpa: Allocator,
+    /// Paths and errors in the order the walk met them. Paths are owned by
+    /// this report and remain valid after `addAll` returns.
+    failures: std.ArrayList(Failure) = .empty,
+
+    pub const Failure = struct {
+        path: []u8,
+        err: Error,
+    };
+
+    /// An empty report allocated from `gpa`.
+    pub fn init(gpa: Allocator) AddErrorReport {
+        return .{ .gpa = gpa };
+    }
+
+    /// Release the paths and the list.
+    pub fn deinit(r: *AddErrorReport) void {
+        for (r.failures.items) |failure| r.gpa.free(failure.path);
+        r.failures.deinit(r.gpa);
+        r.* = undefined;
+    }
+
+    fn record(r: *AddErrorReport, path: []const u8, err: Error) Allocator.Error!void {
+        const owned = try r.gpa.dupe(u8, path);
+        errdefer r.gpa.free(owned);
+        try r.failures.append(r.gpa, .{ .path = owned, .err = err });
+    }
 };
 
 /// `git add -A`: walk the working tree, stage what changed, stage deletions,
@@ -489,7 +529,19 @@ const Walker = struct {
             if (racy) w.outcome.racy_checked += 1;
         }
 
-        const blob = try w.hashAndStore(path, found);
+        const bytes = w.readForAdd(path, found) catch |err| {
+            try w.skipFile(path, err);
+            return;
+        };
+        const blob = w.store(bytes) catch |err| switch (err) {
+            error.CollisionAttack => {
+                try w.skipFile(path, err);
+                return;
+            },
+            // A failed object write, especially halfway through a pack,
+            // cannot be recovered by passing over a working-tree file.
+            else => return err,
+        };
         w.outcome.hashed += 1;
 
         if (tracked) |entry| {
@@ -522,14 +574,22 @@ const Walker = struct {
         }
     }
 
-    fn hashAndStore(w: *Walker, path: []const u8, found: fs.Entry) Error!Oid {
+    fn skipFile(w: *Walker, path: []const u8, err: Error) Error!void {
+        // Cancellation and allocation failure stop the operation even when
+        // individual files may be passed over.
+        if (!w.options.ignore_errors or err == error.Canceled or err == error.OutOfMemory) return err;
+        if (w.options.error_report) |report| try report.record(path, err);
+        w.outcome.skipped_errors += 1;
+    }
+
+    fn readForAdd(w: *Walker, path: []const u8, found: fs.Entry) Error![]const u8 {
         _ = w.scratch.reset(.retain_capacity);
         const a = w.scratch.allocator();
 
         if (found.kind == .sym_link) {
             var buf: [4096]u8 = undefined;
             const len = try w.wt.readLink(w.io, path, &buf);
-            return w.store(buf[0..len]);
+            return a.dupe(u8, buf[0..len]);
         }
 
         if (w.options.rules.attrs) |attrs| {
@@ -540,10 +600,9 @@ const Walker = struct {
                 .true => return error.IrreversibleConversion,
                 .warn => w.outcome.safecrlf_warnings += 1,
             };
-            return w.store(converted.bytes);
+            return converted.bytes;
         }
-        const bytes = try fs.readFileSized(a, w.io, w.wt, path, found.stat.size, 1 << 31);
-        return w.store(bytes);
+        return fs.readFileSized(a, w.io, w.wt, path, found.stat.size, 1 << 31);
     }
 
     /// Put a blob where this pass puts them.
