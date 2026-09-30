@@ -576,3 +576,38 @@ test "a refusal preserves the diagnostic allocator's resource failure" {
     try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, fields, null));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
 }
+
+test "a refresh changing the ref backend requires reopening and keeps the old state" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]@import("refs.zig").Format{ .files, .reftable }) |format| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = format });
+        defer repo.deinit(io);
+        var diagnostic = repo_mod.Diagnostic.init(gpa);
+        defer diagnostic.deinit();
+        const cache = repo.refs.reftable_cache;
+        const replacement = if (format == .files)
+            "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[user]\nname = changed\n"
+        else
+            "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = files\n[user]\nname = changed\n";
+        try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = replacement });
+        try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, &diagnostic));
+        try std.testing.expectEqualStrings("extensions.refStorage", diagnostic.unsupported_setting);
+        try std.testing.expectEqual(format, repo.refs.format);
+        try std.testing.expectEqual(cache, repo.refs.reftable_cache);
+        try std.testing.expect(repo.config.get("user.name") == null);
+        // A refused refresh did not acknowledge the new file.
+        try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, null));
+        const restored = if (format == .files)
+            "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = files\n[user]\nname = accepted\n"
+        else
+            "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[user]\nname = accepted\n";
+        try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = restored });
+        try std.testing.expect(try repo.refreshConfig(io, &diagnostic));
+        try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+        try std.testing.expectEqualStrings("accepted", repo.config.get("user.name").?);
+        try std.testing.expectEqual(cache, repo.refs.reftable_cache);
+    }
+}

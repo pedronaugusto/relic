@@ -63,6 +63,10 @@ pub const Error = error{
     /// than the one the repository was opened with. Every object name it
     /// holds would change, so it is opened again rather than refreshed.
     ObjectFormatChanged,
+    /// The configuration read again by `refreshConfig` names another ref
+    /// backend. The store and its cache were opened for the old one, so
+    /// the repository must be reopened.
+    RefStorageChanged,
 } || object.ParseError || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
@@ -441,7 +445,8 @@ pub const Repository = struct {
     /// differs. Edits made
     /// to `config` in memory and never written are replaced by what the
     /// files hold. A configuration that no longer passes `open`'s checks is
-    /// that check's error, and the one held before is kept.
+    /// that check's error, and the one held before is kept. A changed hash or
+    /// ref backend requires reopening (`ObjectFormatChanged`, `RefStorageChanged`).
     /// `diagnostic`, when given, names the refusal and is cleared on every call.
     pub fn refreshConfig(repo: *Repository, io: Io, diagnostic: ?*Diagnostic) Error!bool {
         if (diagnostic) |output| output.clear();
@@ -463,6 +468,10 @@ pub const Repository = struct {
         if (fresh.format.kind != repo.kind) {
             try refuseSetting(diagnostic, "extensions.objectFormat");
             return error.ObjectFormatChanged;
+        }
+        if (fresh.format.ref_storage != repo.refs.format) {
+            try refuseSetting(diagnostic, "extensions.refStorage");
+            return error.RefStorageChanged;
         }
         repo.config.deinit();
         repo.config = fresh.config;

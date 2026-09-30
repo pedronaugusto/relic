@@ -206,6 +206,8 @@ its `unsupported_setting` survives a failed open, and `deinit` releases its copy
 Pass the same output to `refreshConfig`, `writeCommit`, `writeTag` or
 `writeTagWith`, or pass `null` when the setting is not needed. Each call clears
 it; the repository never retains it. `OpenDiagnostic` is an alias for `Diagnostic`.
+A refresh that changes the hash or ref backend requires reopening and returns
+`ObjectFormatChanged` or `RefStorageChanged`, keeping the old configuration and store.
 
 A ref transaction acquires and validates every loose-ref lock before it writes
 any ref. Its commit is the same sequence of per-ref renames and reflog appends
