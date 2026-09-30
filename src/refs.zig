@@ -445,11 +445,10 @@ pub const Store = struct {
     pub fn readPacked(store: *const Store, gpa: Allocator, io: Io) ReadError!PackedListing {
         const bytes = (try fs.readFileAlloc(gpa, io, store.common_dir, "packed-refs", 1 << 28)) orelse
             return .{ .gpa = gpa, .bytes = try gpa.alloc(u8, 0), .entries = try gpa.alloc(PackedEntry, 0), .fully_peeled = false };
-        errdefer gpa.free(bytes);
         return parsePacked(gpa, store.kind, bytes);
     }
 
-    /// Parse `packed-refs` bytes this takes ownership of.
+    /// Parse `packed-refs` bytes this takes ownership of, including on error.
     pub fn parsePacked(gpa: Allocator, kind: Kind, bytes: []u8) ReadError!PackedListing {
         errdefer gpa.free(bytes);
         var entries: std.ArrayList(PackedEntry) = .empty;
@@ -1809,4 +1808,24 @@ test "one transaction logs each ref in its own words when its edits say so, as g
             try std.testing.expectEqualStrings(case[1], said);
         }
     }
+}
+
+test "reading packed refs has one owner when parsing stops" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store: Store = .init(gpa, .sha1, tmp.dir, tmp.dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = packed_header ++ "1" ** 40 ++ " refs/heads/main\n" });
+    try std.testing.checkAllAllocationFailures(gpa, readPackedForAllocation, .{ io, tmp.dir });
+    try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = "not a ref\n" });
+    try std.testing.expectError(error.MalformedPackedRefs, store.readPacked(gpa, io));
+}
+
+fn readPackedForAllocation(gpa: Allocator, io: Io, dir: Io.Dir) !void {
+    const store: Store = .init(gpa, .sha1, dir, dir);
+    var listed = try store.readPacked(gpa, io);
+    defer listed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), listed.entries.len);
+    try std.testing.expectEqualStrings("refs/heads/main", listed.entries[0].name);
 }

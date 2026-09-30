@@ -100,6 +100,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Reading `packed-refs` gives its bytes to the parser once, avoiding a double free when parsing or allocation stops.
+
 - A signing policy that is not a boolean is refused by name, and allocation failures while reading it remain resource failures; neither writes an unsigned object.
 
 - Reading a reftable `HEAD` during open or refresh preserves stack failures instead of treating them as a detached branch.
