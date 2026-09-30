@@ -315,14 +315,13 @@ pub const Repository = struct {
         if (try fs.readFileAlloc(gpa, io, git_dir, "commondir", 4096)) |text| {
             defer gpa.free(text);
             const target = std.mem.trim(u8, text, " \t\r\n");
-            if (git_dir.openDir(io, target, .{ .iterate = true })) |common| {
-                return .{
-                    .git_dir = git_dir,
-                    .common_dir = common,
-                    .work_dir = work_dir,
-                    .common_is_separate = true,
-                };
-            } else |_| {}
+            const common = try git_dir.openDir(io, target, .{ .iterate = true });
+            return .{
+                .git_dir = git_dir,
+                .common_dir = common,
+                .work_dir = work_dir,
+                .common_is_separate = true,
+            };
         }
         return .{
             .git_dir = git_dir,

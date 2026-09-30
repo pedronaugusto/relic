@@ -790,3 +790,37 @@ test "discovery closes its git directory when the worktree handle cannot be open
     try std.testing.expectError(error.ProcessFdQuotaExceeded, repo_mod.Repository.open(std.testing.allocator, tracked, tmp.dir, .{ .discover = false }));
     try std.testing.expectEqual(@as(usize, 1), recorder.closed);
 }
+
+test "a commondir that cannot be opened is not replaced by the worktree directory" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+        repo.deinit(io);
+    }
+    var git_dir = try tmp.dir.openDir(io, ".git", .{});
+    defer git_dir.close(io);
+    try git_dir.writeFile(io, .{ .sub_path = "not-a-directory", .data = "file\n" });
+    try tmp.dir.createDir(io, "linked", .default_dir);
+    var linked = try tmp.dir.openDir(io, "linked", .{});
+    defer linked.close(io);
+    try linked.writeFile(io, .{ .sub_path = ".git", .data = "gitdir: ../.git\n" });
+    const cases = .{
+        .{ "missing-common-dir\n", error.FileNotFound },
+        .{ "not-a-directory\n", error.NotDir },
+    };
+    inline for (cases) |case| {
+        try git_dir.writeFile(io, .{ .sub_path = "commondir", .data = case[0] });
+        for ([_]Io.Dir{ tmp.dir, git_dir, linked }) |dir| {
+            if (repo_mod.Repository.open(gpa, io, dir, .{ .discover = false })) |opened| {
+                var unexpected = opened;
+                unexpected.deinit(io);
+                return error.TestExpectedError;
+            } else |err| {
+                try std.testing.expectEqual(case[1], err);
+            }
+        }
+    }
+}
