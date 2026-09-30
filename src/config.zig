@@ -387,7 +387,11 @@ pub const Config = struct {
         const fields = [_][]const u8{ "system", "xdg", "global", "local", "worktree" };
         inline for (fields) |field| {
             if (@field(sources, field)) |path| {
-                @field(config.sources, field) = .{ .dir = path.dir, .sub_path = try gpa.dupe(u8, path.sub_path) };
+                // Copy before publishing even the optional's presence. A
+                // fallible struct initializer can write directly into its
+                // result location, leaving a partial path for deinit.
+                const sub_path = try gpa.dupe(u8, path.sub_path);
+                @field(config.sources, field) = .{ .dir = path.dir, .sub_path = sub_path };
             }
         }
         // The temporary owns a copy until it is complete; after the block
@@ -2315,4 +2319,29 @@ test "configuration sources have one owner when allocation stops" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "configuration source paths enter their owner only after copying succeeds" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "[test]\nvalue = kept\n" });
+    const Check = struct {
+        fn run(gpa: Allocator, dir: Io.Dir) !void {
+            const path: Sources.Path = .{ .dir = dir, .sub_path = "config" };
+            var config = try Config.open(gpa, std.testing.io, .{
+                .system = path,
+                .xdg = path,
+                .global = path,
+                .local = path,
+                .worktree = path,
+            }, .{});
+            defer config.deinit();
+            try std.testing.expectEqualStrings("kept", config.get("test.value").?);
+            inline for (.{ "system", "xdg", "global", "local", "worktree" }) |field| {
+                try std.testing.expectEqualStrings("config", @field(config.sources, field).?.sub_path);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{tmp.dir});
 }
