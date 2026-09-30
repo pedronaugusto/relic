@@ -305,17 +305,19 @@ pub fn permissionsFor(executable: bool) Io.File.Permissions {
 
 /// Whether directory entries are made durable after a rename.
 ///
-/// git does not do this: its lock file code calls `fsync` nowhere, and every
-/// `fsync` in its tree is on a file descriptor. The choice is stated here
-/// rather than assumed: off by default, because the guarantee it adds is one
-/// git itself does not make, and on by request for a caller who wants it. It
-/// is a no-op on Windows, which has no equivalent.
+/// Off by default, and on by request for a caller who wants the renamed
+/// entry flushed as well as the file's bytes. This uses plain `fsync`, with
+/// the same macOS writeout policy as file syncs; the batch barrier remains
+/// the place for the drive-cache flush. Windows cannot flush directory
+/// handles with `FlushFileBuffers`, so this is a no-op there.
 pub const sync_directories_default = false;
 
 /// `fsync` on a directory, so a name that was created or renamed is durable.
 ///
-/// Windows has no equivalent and this is a no-op there; the guarantee is the
-/// operating system's.
+/// Windows's `FlushFileBuffers` does not support directory handles, so this
+/// is a no-op there; the guarantee is the operating system's.
+/// On Linux `dir` must have been opened with `iterate = true`: otherwise
+/// Zig uses `O_PATH`, whose handle cannot be synced.
 pub fn syncDir(io: Io, dir: Io.Dir) Io.File.SyncError!void {
     if (builtin.os.tag == .windows) return;
     const as_file: Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
@@ -369,7 +371,7 @@ pub const LockError = error{
 } || Io.File.OpenError || Io.Cancelable;
 
 /// Errors from finishing a lock.
-pub const CommitError = Io.Writer.Error || Io.File.SyncError || Io.Dir.RenameError;
+pub const CommitError = Io.Writer.Error || Io.File.SyncError || Io.Dir.RenameError || Io.Dir.OpenError;
 
 /// git's lock file: `<path>.lock`, created with `O_CREAT|O_EXCL`, written,
 /// made durable as the policy asks, and renamed over `<path>`.
@@ -390,6 +392,7 @@ pub const LockFile = struct {
     file: Io.File,
     file_writer: Io.File.Writer,
     sync: Sync,
+    sync_directory: bool,
     finished: bool = false,
 
     /// How a lock is taken.
@@ -407,7 +410,9 @@ pub const LockFile = struct {
         /// is git's choice: it is forbidden in a ref name and legal in a
         /// Windows file name, so it cannot collide with anything.
         write_pid: bool = true,
-        /// Reserved; `LockFile.commit` does not sync the directory entry.
+        /// Sync the target's parent directory after the commit rename, so
+        /// the new name is flushed too. Independent of the file sync policy.
+        /// A no-op on Windows: `FlushFileBuffers` cannot flush directories.
         sync_directory: bool = sync_directories_default,
     };
 
@@ -454,6 +459,7 @@ pub const LockFile = struct {
             .file = file,
             .file_writer = file.writer(io, buffer),
             .sync = options.sync,
+            .sync_directory = options.sync_directory,
         };
     }
 
@@ -484,6 +490,16 @@ pub const LockFile = struct {
             return err;
         };
         lock.removePid(io);
+        if (lock.sync_directory and builtin.os.tag != .windows) {
+            // `target` may be refs/heads/main relative to the repository:
+            // it is heads, not the repository directory, that was changed.
+            // Linux's non-iterable directory handles use O_PATH, which
+            // fsync cannot use. Open for reading even when this is `dir`.
+            const parent = std.fs.path.dirname(lock.target) orelse ".";
+            const dir = try lock.dir.openDir(io, parent, .{ .iterate = true });
+            defer dir.close(io);
+            try syncDir(io, dir);
+        }
     }
 
     /// Give the lock up, leaving the target as it was. Safe to call after
@@ -1083,6 +1099,73 @@ test "a lock is refused, not broken, and says who holds it" {
     try std.testing.expect(!lockHeld(io, dir, "thing"));
     // The pid file goes with the lock.
     try std.testing.expectError(error.FileNotFound, dir.access(io, "thing~pid.lock", .{}));
+}
+
+test "a lock syncs the target's directory after rename only when asked" {
+    const Counting = struct {
+        threadlocal var directories: usize = 0;
+        threadlocal var files: usize = 0;
+        threadlocal var expected_inode: @FieldType(Io.File.Stat, "inode") = undefined;
+        threadlocal var correct_parent: bool = true;
+        threadlocal var renamed: bool = true;
+
+        fn sync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
+            const base = std.testing.io;
+            const stat = file.stat(base) catch return error.Unexpected;
+            if (stat.kind == .directory) {
+                directories += 1;
+                correct_parent = correct_parent and stat.inode == expected_inode;
+                const dir: Io.Dir = .{ .handle = file.handle };
+                var buf: [16]u8 = undefined;
+                const contents = dir.readFile(base, "thing", &buf) catch return error.Unexpected;
+                renamed = renamed and std.mem.eql(u8, contents, "new\n");
+                if (dir.access(base, "thing.lock", .{})) {
+                    renamed = false;
+                } else |err| {
+                    renamed = renamed and err == error.FileNotFound;
+                }
+            } else {
+                files += 1;
+            }
+            return base.vtable.fileSync(userdata, file);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.fileSync = Counting.sync;
+    const io: Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "nested", .default_dir);
+    const nested = try tmp.dir.openDir(io, "nested", .{});
+    defer nested.close(io);
+
+    try std.testing.expect(!(LockFile.Options{}).sync_directory);
+    for ([_][]const u8{ "thing", "nested/thing" }) |target| {
+        const parent = if (std.mem.startsWith(u8, target, "nested/")) nested else tmp.dir;
+        const as_file: Io.File = .{ .handle = parent.handle, .flags = .{ .nonblocking = false } };
+        Counting.expected_inode = (try as_file.stat(io)).inode;
+        for ([_]Sync{ .none, .batch, .per_file }) |sync| {
+            for ([_]bool{ false, true }) |sync_directory| {
+                Counting.directories = 0;
+                Counting.files = 0;
+                Counting.correct_parent = true;
+                Counting.renamed = true;
+                var buf: [64]u8 = undefined;
+                var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, target, &buf, .{
+                    .sync = sync,
+                    .sync_directory = sync_directory,
+                });
+                defer lock.deinit(io);
+                try lock.writer().writeAll("new\n");
+                try lock.commit(io);
+                const expected_dirs: usize = if (sync_directory and builtin.os.tag != .windows) 1 else 0;
+                try std.testing.expectEqual(expected_dirs, Counting.directories);
+                try std.testing.expectEqual(@as(usize, if (sync == .none) 0 else 1), Counting.files);
+                try std.testing.expect(Counting.correct_parent);
+                try std.testing.expect(Counting.renamed);
+            }
+        }
+    }
 }
 
 test "a rolled-back lock changes nothing" {

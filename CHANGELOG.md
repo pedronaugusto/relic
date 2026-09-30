@@ -91,9 +91,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A corrupt cache tree that fails below a directory frees that directory's
   name once, not twice; an index that carries `TREE` or `REUC` twice keeps
   the later one and frees the first.
-- The doc comments on `LockFile.Options.sync_directory` and
-  `AddOptions.ignore_errors` now say that those settings are not consulted.
-  Their behaviour is unchanged.
+- `LockFile.Options.sync_directory` now syncs the target's parent directory
+  after the commit rename where the platform supports it.
 - A conversation with a program (ssh, a helper) that is cancelled stops the
   program on `close` or `diagnose` rather than waiting for it to end, so a
   fetch or push whose remote never answers returns when its caller cancels.
