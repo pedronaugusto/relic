@@ -67,9 +67,7 @@ const Keyed = struct {
         errdefer k.environ.deinit();
         const path = testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
         defer gpa.free(path);
-        const tools_path = try gitToolsFirst(gpa, io, path);
-        defer if (tools_path.ptr != path.ptr) gpa.free(tools_path);
-        try k.environ.put("PATH", tools_path);
+        try k.environ.put("PATH", path);
         try testgit.keepSystemVariables(gpa, &k.environ);
         try testgit.isolate(&k.environ, k.home);
         try k.environ.put("TMPDIR", k.home);
@@ -259,22 +257,6 @@ fn bothWays(format: signing.Format, init_args: []const []const u8) !void {
     try testing.expectEqual(try k.letter(io, tampered), bad.letter());
     try testing.expectEqual(@as(u8, 'B'), bad.letter());
     try testing.expect(!bad.verified(.undefined));
-}
-
-/// `path` as git's own helpers see it. Git for Windows runs them with its
-/// `usr/bin` first, so the `ssh-keygen` git signs and verifies with is its
-/// own OpenSSH, not the one Windows ships; the keys are made, and relic
-/// signs, with the same one. Elsewhere `path` itself; otherwise a new
-/// value on `gpa`.
-fn gitToolsFirst(gpa: Allocator, io: Io, path: []const u8) ![]const u8 {
-    if (builtin.os.tag != .windows) return path;
-    const found = std.process.run(gpa, io, .{ .argv = &.{ "git", "--exec-path" } }) catch return path;
-    defer gpa.free(found.stdout);
-    defer gpa.free(found.stderr);
-    // <git>/mingw64/libexec/git-core
-    var root: []const u8 = std.mem.trim(u8, found.stdout, " \t\r\n");
-    for (0..3) |_| root = std.fs.path.dirname(root) orelse return path;
-    return std.fmt.allocPrint(gpa, "{s}\\usr\\bin;{s}", .{ root, path });
 }
 
 /// Whether a missing gpg, gpgconf or ssh-keygen fails the run rather than
