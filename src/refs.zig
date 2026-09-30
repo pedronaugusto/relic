@@ -371,7 +371,10 @@ pub const Store = struct {
             if (dir.handle == store.common_dir.handle and store.git_dir.handle == store.common_dir.handle) {
                 seen_same = true;
             }
-            var refs_dir = dir.openDir(io, "refs", .{ .iterate = true }) catch continue;
+            var refs_dir = dir.openDir(io, "refs", .{ .iterate = true }) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => continue,
+                else => |e| return e,
+            };
             defer refs_dir.close(io);
             try store.walkLooseDir(arena, io, refs_dir, "refs", out, prefix, 0);
         }
@@ -396,7 +399,10 @@ pub const Store = struct {
             if (std.mem.endsWith(u8, entry.name, ".lock")) continue;
             const child_path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, entry.name });
             if (entry.kind == .directory) {
-                var sub = dir.openDir(io, entry.name, .{ .iterate = true }) catch continue;
+                var sub = dir.openDir(io, entry.name, .{ .iterate = true }) catch |err| switch (err) {
+                    error.FileNotFound, error.NotDir => continue,
+                    else => |e| return e,
+                };
                 defer sub.close(io);
                 try store.walkLooseDir(arena, io, sub, child_path, out, prefix, depth + 1);
                 continue;
@@ -404,7 +410,10 @@ pub const Store = struct {
             if (!std.mem.startsWith(u8, child_path, prefix) and !std.mem.startsWith(u8, prefix, child_path)) continue;
             if (!std.mem.startsWith(u8, child_path, prefix)) continue;
             if (!safepath.isValidRefName(child_path)) continue;
-            const target = (store.readLoose(arena, io, child_path) catch continue) orelse continue;
+            const target = (store.readLoose(arena, io, child_path) catch |err| switch (err) {
+                error.MalformedRef => continue,
+                else => |e| return e,
+            }) orelse continue;
             try out.append(arena, .{ .name = child_path, .target = target, .loose = true });
         }
     }
@@ -1828,4 +1837,42 @@ fn readPackedForAllocation(gpa: Allocator, io: Io, dir: Io.Dir) !void {
     defer listed.deinit();
     try std.testing.expectEqual(@as(usize, 1), listed.entries.len);
     try std.testing.expectEqualStrings("refs/heads/main", listed.entries[0].name);
+}
+
+test "listing loose refs preserves allocation resource failures" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "refs/heads");
+    // A packed ref stays present when an unreadable loose shadow is skipped.
+    try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = packed_header ++ "1" ** 40 ++ " refs/heads/main\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = "ref: refs/heads/" ++ "a" ** 2000 ++ "\n" });
+    try std.testing.checkAllAllocationFailures(gpa, listLooseRefsForAllocation, .{ io, tmp.dir });
+    var counting = std.testing.FailingAllocator.init(gpa, .{});
+    try listLooseRefsForAllocation(counting.allocator(), io, tmp.dir);
+    for (0..counting.alloc_index) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        var vtable = failing.allocator().vtable.*;
+        vtable.alloc = struct {
+            fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+                const f: *std.testing.FailingAllocator = @ptrCast(@alignCast(context));
+                const result = f.allocator().rawAlloc(len, alignment, ra);
+                // Fail once, so a swallowed error cannot hide behind a later one.
+                if (result == null and f.has_induced_failure) f.fail_index = std.math.maxInt(usize);
+                return result;
+            }
+        }.alloc;
+        const recovering: Allocator = .{ .ptr = &failing, .vtable = &vtable };
+        try std.testing.expectError(error.OutOfMemory, listLooseRefsForAllocation(recovering, io, tmp.dir));
+    }
+}
+
+fn listLooseRefsForAllocation(gpa: Allocator, io: Io, dir: Io.Dir) !void {
+    const store: Store = .init(gpa, .sha1, dir, dir);
+    var listed = try store.list(gpa, io, "refs/heads/");
+    defer listed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), listed.entries.len);
+    try std.testing.expect(listed.entries[0].loose);
+    try std.testing.expectEqualStrings("refs/heads/" ++ "a" ** 2000, listed.entries[0].target.symbolic);
 }

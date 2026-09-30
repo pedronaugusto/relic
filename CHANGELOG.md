@@ -100,6 +100,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Listing loose refs preserves allocation and filesystem failures instead of returning an incomplete list or an older packed value.
+
 - Repository discovery keeps each directory handle until it can transfer ownership, closing them when opening or reading the next part fails.
 
 - Reading `packed-refs` gives its bytes to the parser once, avoiding a double free when parsing or allocation stops.
