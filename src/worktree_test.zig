@@ -230,14 +230,19 @@ test "the stat shortcut means a warm addAll hashes nothing" {
         var buf: [64]u8 = undefined;
         const path = try std.fmt.bufPrint(&buf, "d{d}/f{d}.txt", .{ i % 6, i });
         try h.repo.writeFile(io, path, "contents\n");
+        // This fixture is deliberately non-racy. The clock can give the
+        // file and index writes the same tick, even with subsecond times.
+        try fs.setTimestamps(io, h.repo.dir, path, .{
+            .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } },
+        });
     }
 
     const cold = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = h.worktreeRules() });
     try std.testing.expectEqual(@as(u32, 60), cold.added);
     try std.testing.expectEqual(@as(u32, 60), cold.hashed);
 
-    // Write and read back, so the index has a real modification time and
-    // the racy window has closed for files written before it.
+    // Write and read back, so the index has a real modification time,
+    // strictly later than the fixture files on any clock resolution.
     try h.index.write(io, h.git_dir, "index", .{});
     try h.reload(gpa, io);
 

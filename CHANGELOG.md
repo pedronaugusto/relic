@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The warm staging fixture gives its files an earlier modification time than the index instead of assuming two writes cannot share a clock tick.
+
 - Configuration source paths enter their owner only after copying succeeds, so allocation failure cannot leave a partial path for cleanup.
 
 - Snapshot reads and reopening use only private objects, borrowing the source database for capture alone, so damaged source packs and alternate metadata cannot affect recorded snapshots.
