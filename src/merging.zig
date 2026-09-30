@@ -371,7 +371,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
             .committer = options.who,
             .message = cleaned,
             .signing = options.signing,
-        });
+        }, null);
         const log_message = try std.fmt.allocPrint(arena, "{s}: Merge made by the 'ort' strategy.", .{reflog_action});
         try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
         // `post-merge` runs before the merge's files go, as in git.
@@ -472,7 +472,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
         .committer = options.who,
         .message = cleaned,
         .signing = options.signing,
-    });
+    }, null);
     const log_message = try std.fmt.allocPrint(arena, "commit (merge): {s}", .{message.subjectLine(cleaned)});
     try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
     try finishCommit(gpa, io, repo);

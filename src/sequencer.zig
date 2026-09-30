@@ -623,7 +623,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         .committer = r.options.who,
         .message = cleaned,
         .signing = r.options.signing,
-    });
+    }, null);
     const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try commit_hooks.postCommit(arena, io, null);
@@ -869,7 +869,7 @@ fn commitStaged(r: *Replay) Error!Oid {
         .committer = r.options.who,
         .message = cleaned,
         .signing = r.options.signing,
-    });
+    }, null);
     const log = if (picked != null)
         try std.fmt.allocPrint(arena, "commit (cherry-pick): {s}", .{firstLine(cleaned)})
     else

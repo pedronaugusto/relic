@@ -39,11 +39,11 @@ pub const Error = error{
     MalformedShallowFile,
     /// `core.repositoryFormatVersion` is a number this release does not
     /// know. `OpenOptions.diagnostic` names the setting on a failed open;
-    /// `unsupportedSetting` does so on a failed refresh.
+    /// the caller-owned diagnostic does so on a failed refresh.
     UnsupportedRepositoryVersion,
     /// An `extensions.*` this release does not implement, at format version
     /// 1 where git requires every extension to be understood.
-    /// The open diagnostic or `unsupportedSetting` names it.
+    /// The caller-owned diagnostic names it.
     UnsupportedExtension,
     /// `extensions.refStorage` names a format other than `files` and
     /// `reftable`. The refs are somewhere this release does not read, and
@@ -75,35 +75,39 @@ pub const WriteError = Error || signing.Error;
 /// How deep `open` walks upwards looking for a `.git`.
 pub const max_discovery_depth: u8 = 64;
 
-/// A refused setting from `Repository.open`, owned by the caller.
-/// Initialize with `init` and release with `deinit`. Each open clears it;
-/// its text stays valid until the next open or `deinit`, even after failure.
-pub const OpenDiagnostic = struct {
+/// A refused setting from an open, refresh or signing write, owned by the caller.
+/// Initialize with `init` and release with `deinit`. Each operation clears it;
+/// its text stays valid until the next operation using it or `deinit`, even
+/// after failure or after the repository is closed.
+pub const Diagnostic = struct {
     gpa: Allocator,
     /// The full setting that was refused, or an empty string.
     unsupported_setting: []const u8 = "",
 
     /// Use this allocator for the diagnostic's own copy of the setting.
-    pub fn init(gpa: Allocator) OpenDiagnostic {
+    pub fn init(gpa: Allocator) Diagnostic {
         return .{ .gpa = gpa };
     }
 
     /// Release the setting's copy.
-    pub fn deinit(diagnostic: *OpenDiagnostic) void {
+    pub fn deinit(diagnostic: *Diagnostic) void {
         diagnostic.clear();
     }
 
-    fn clear(diagnostic: *OpenDiagnostic) void {
+    fn clear(diagnostic: *Diagnostic) void {
         if (diagnostic.unsupported_setting.len != 0) diagnostic.gpa.free(diagnostic.unsupported_setting);
         diagnostic.unsupported_setting = "";
     }
 
-    fn set(diagnostic: *OpenDiagnostic, text: []const u8) Allocator.Error!void {
+    fn set(diagnostic: *Diagnostic, text: []const u8) Allocator.Error!void {
         const owned = try diagnostic.gpa.dupe(u8, text);
         diagnostic.clear();
         diagnostic.unsupported_setting = owned;
     }
 };
+
+/// The caller-owned diagnostic used by earlier open callers.
+pub const OpenDiagnostic = Diagnostic;
 
 /// How a repository is created.
 pub const InitOptions = struct {
@@ -186,11 +190,6 @@ pub const Repository = struct {
     config: config_mod.Config,
     odb: odb_mod.Odb,
     refs: refs_mod.Store,
-    /// The setting that caused `error.UnsupportedExtension`,
-    /// `error.UnsupportedRepositoryVersion` or
-    /// `error.SigningRequiresPrograms`, for a message. Empty otherwise.
-    unsupported: [64]u8 = @splat(0),
-    unsupported_len: usize = 0,
     /// What `lfsconfigText` last found, and what it was found from.
     lfsconfig_cache: ?LfsconfigCache = null,
     lfsconfig_mutex: Io.Mutex = .init,
@@ -211,7 +210,7 @@ pub const Repository = struct {
     pub const OpenOptions = struct {
         /// Caller-owned output for a refused repository format or extension.
         /// Cleared on every open, and never retained by the repository.
-        diagnostic: ?*OpenDiagnostic = null,
+        diagnostic: ?*Diagnostic = null,
         /// Whether to walk upwards looking for a `.git`.
         discover: bool = true,
         /// What the object database is told.
@@ -391,10 +390,10 @@ pub const Repository = struct {
     /// they name; then, when `extensions.worktreeConfig` is on, read them
     /// again with `config.worktree` after the local file, which exists only
     /// when the extension says so and has no say in the format.
-    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, diagnostic: ?*OpenDiagnostic) Error!struct { config: config_mod.Config, format: RepositoryFormat } {
+    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, diagnostic: ?*Diagnostic) Error!struct { config: config_mod.Config, format: RepositoryFormat } {
         var config = try config_mod.Config.open(repo.gpa, io, sources, context);
         errdefer config.deinit();
-        const format = try repo.checkFormat(&config, diagnostic);
+        const format = try checkFormat(&config, diagnostic);
         if (!(config.getBool("extensions.worktreeconfig", false) catch false)) return .{ .config = config, .format = format };
         var with_worktree = sources;
         with_worktree.worktree = .{ .dir = repo.git_dir, .sub_path = "config.worktree" };
@@ -410,16 +409,16 @@ pub const Repository = struct {
 
     /// Decide the repository's format once, from the configuration shared
     /// by its worktrees. A worktree's settings have no say in this decision.
-    fn checkFormat(repo: *Repository, config: *const config_mod.Config, diagnostic: ?*OpenDiagnostic) Error!RepositoryFormat {
+    fn checkFormat(config: *const config_mod.Config, diagnostic: ?*Diagnostic) Error!RepositoryFormat {
         const version = try config.getInt("core.repositoryformatversion", 0);
         if (version < 0 or version > 1) {
-            try repo.refuseSetting(diagnostic, "core.repositoryFormatVersion");
+            try refuseSetting(diagnostic, "core.repositoryFormatVersion");
             return error.UnsupportedRepositoryVersion;
         }
-        if (version == 1) try repo.checkExtensions(config, diagnostic);
+        if (version == 1) try checkExtensions(config, diagnostic);
         const kind = if (config.get("extensions.objectformat")) |text|
             hash.Kind.parse(text) catch {
-                try repo.refuseSetting(diagnostic, "extensions.objectFormat");
+                try refuseSetting(diagnostic, "extensions.objectFormat");
                 return error.UnknownObjectFormat;
             }
         else
@@ -443,8 +442,9 @@ pub const Repository = struct {
     /// to `config` in memory and never written are replaced by what the
     /// files hold. A configuration that no longer passes `open`'s checks is
     /// that check's error, and the one held before is kept.
-    pub fn refreshConfig(repo: *Repository, io: Io) Error!bool {
-        repo.unsupported_len = 0;
+    /// `diagnostic`, when given, names the refusal and is cleared on every call.
+    pub fn refreshConfig(repo: *Repository, io: Io, diagnostic: ?*Diagnostic) Error!bool {
+        if (diagnostic) |output| output.clear();
         // `onbranch:` makes the branch `HEAD` is on part of what was read.
         const branch = try currentBranch(repo.gpa, io, repo.git_dir);
         defer if (branch) |b| repo.gpa.free(b);
@@ -458,10 +458,10 @@ pub const Repository = struct {
         sources.worktree = null;
         var context = repo.config.context;
         context.branch = short;
-        var fresh = try repo.readConfig(io, sources, context, null);
+        var fresh = try repo.readConfig(io, sources, context, diagnostic);
         errdefer fresh.config.deinit();
         if (fresh.format.kind != repo.kind) {
-            repo.setUnsupported("extensions.objectFormat");
+            try refuseSetting(diagnostic, "extensions.objectFormat");
             return error.ObjectFormatChanged;
         }
         repo.config.deinit();
@@ -535,20 +535,8 @@ pub const Repository = struct {
         return options;
     }
 
-    fn refuseSetting(repo: *Repository, diagnostic: ?*OpenDiagnostic, text: []const u8) Allocator.Error!void {
-        repo.setUnsupported(text);
+    fn refuseSetting(diagnostic: ?*Diagnostic, text: []const u8) Allocator.Error!void {
         if (diagnostic) |output| try output.set(text);
-    }
-
-    fn setUnsupported(repo: *Repository, text: []const u8) void {
-        repo.unsupported_len = @min(text.len, repo.unsupported.len);
-        @memcpy(repo.unsupported[0..repo.unsupported_len], text[0..repo.unsupported_len]);
-    }
-
-    /// The setting the last format check or signing request refused, or an
-    /// empty string when that check succeeded.
-    pub fn unsupportedSetting(repo: *const Repository) []const u8 {
-        return repo.unsupported[0..repo.unsupported_len];
     }
 
     /// The extensions this release understands at format version 1.
@@ -570,7 +558,7 @@ pub const Repository = struct {
         "partialclone",
     };
 
-    fn checkExtensions(repo: *Repository, config: *const config_mod.Config, diagnostic: ?*OpenDiagnostic) Error!void {
+    fn checkExtensions(config: *const config_mod.Config, diagnostic: ?*Diagnostic) Error!void {
         for (config.entries.items) |entry| {
             if (!std.ascii.eqlIgnoreCase(entry.section, "extensions")) continue;
             var known = false;
@@ -578,13 +566,13 @@ pub const Repository = struct {
                 if (std.ascii.eqlIgnoreCase(entry.name, name)) known = true;
             }
             if (!known) {
-                try repo.refuseSetting(diagnostic, entry.name);
+                try refuseSetting(diagnostic, entry.name);
                 return error.UnsupportedExtension;
             }
             if (std.ascii.eqlIgnoreCase(entry.name, "refstorage")) {
                 const value = entry.value orelse "";
                 if (!std.ascii.eqlIgnoreCase(value, "files") and !std.ascii.eqlIgnoreCase(value, "reftable")) {
-                    try repo.refuseSetting(diagnostic, "extensions.refStorage");
+                    try refuseSetting(diagnostic, "extensions.refStorage");
                     return error.UnsupportedRefStorage;
                 }
             }
@@ -974,7 +962,9 @@ pub const Repository = struct {
     ///
     /// A commit that is to be signed and comes with no `Programs` to sign it
     /// is `error.SigningRequiresPrograms`, never an unsigned commit.
-    pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest) WriteError!Oid {
+    /// `diagnostic`, when given, names the refused setting and is cleared on every call.
+    pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest, diagnostic: ?*Diagnostic) WriteError!Oid {
+        if (diagnostic) |output| output.clear();
         const fields: object.Commit.Fields = .{
             .tree = request.tree,
             .parents = request.parents,
@@ -984,7 +974,7 @@ pub const Repository = struct {
             .extra = request.extra,
             .message = request.message,
         };
-        var signer = try repo.signerFor(request.signing, "commit.gpgsign", "commit.gpgSign");
+        var signer = try repo.signerFor(request.signing, "commit.gpgsign", "commit.gpgSign", diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|
             signing.signCommit(s, io, repo.kind, fields, request.signing.key)
@@ -1000,14 +990,17 @@ pub const Repository = struct {
     /// Write an annotated tag object. `tag.gpgSign` or
     /// `tag.forceSignAnnotated` makes it signed, which needs `writeTagWith`
     /// and the caller's `Programs`; here it is refused.
-    pub fn writeTag(repo: *Repository, io: Io, fields: object.Tag.Fields) WriteError!Oid {
-        return repo.writeTagWith(io, fields, .{});
+    /// `diagnostic` has the same lifetime as it does for `writeCommit`.
+    pub fn writeTag(repo: *Repository, io: Io, fields: object.Tag.Fields, diagnostic: ?*Diagnostic) WriteError!Oid {
+        return repo.writeTagWith(io, fields, .{}, diagnostic);
     }
 
     /// Write an annotated tag object, signed as `request` and the
     /// configuration say, with the signature after the message.
-    pub fn writeTagWith(repo: *Repository, io: Io, fields: object.Tag.Fields, request: signing.Request) WriteError!Oid {
-        var signer = try repo.signerFor(request, "tag.gpgsign", "tag.gpgSign");
+    /// `diagnostic` has the same lifetime as it does for `writeCommit`.
+    pub fn writeTagWith(repo: *Repository, io: Io, fields: object.Tag.Fields, request: signing.Request, diagnostic: ?*Diagnostic) WriteError!Oid {
+        if (diagnostic) |output| output.clear();
+        var signer = try repo.signerFor(request, "tag.gpgsign", "tag.gpgSign", diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|
             signing.signTag(s, io, repo.kind, fields, request.key)
@@ -1021,7 +1014,7 @@ pub const Repository = struct {
     }
 
     /// The signer a write needs, or `null` when it is not to be signed.
-    fn signerFor(repo: *Repository, request: signing.Request, key: []const u8, spelling: []const u8) WriteError!?signing.Signer {
+    fn signerFor(repo: *Repository, request: signing.Request, key: []const u8, spelling: []const u8, diagnostic: ?*Diagnostic) WriteError!?signing.Signer {
         const wanted = switch (request.sign) {
             .always => true,
             .never => false,
@@ -1030,7 +1023,7 @@ pub const Repository = struct {
         };
         if (!wanted) return null;
         const programs = request.programs orelse {
-            repo.setUnsupported(if (request.sign == .config) spelling else "");
+            if (request.sign == .config) try refuseSetting(diagnostic, spelling);
             return error.SigningRequiresPrograms;
         };
         return try signing.Signer.init(repo.gpa, &repo.config, programs);

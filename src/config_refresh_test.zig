@@ -36,7 +36,7 @@ test "another process's git config is seen after refreshConfig, and not before" 
     var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
     defer repo.deinit(io);
     try expectValue(&repo, "core.autocrlf", "input");
-    try testing.expect(!try repo.refreshConfig(io));
+    try testing.expect(!try repo.refreshConfig(io, null));
 
     // `input` and `false` are the same length, and the write lands inside
     // the second the file was read in: a stat on a file system that records
@@ -46,13 +46,13 @@ test "another process's git config is seen after refreshConfig, and not before" 
     try expectValue(&repo, "core.autocrlf", "input");
     try testing.expect(try repo.config.isStale(io));
 
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "core.autocrlf", "false");
     try expectValue(&repo, "user.name", "Ada");
-    try testing.expect(!try repo.refreshConfig(io));
+    try testing.expect(!try repo.refreshConfig(io, null));
 
     try git.exec(io, &.{ "config", "--unset", "user.name" });
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "user.name", null);
 }
 
@@ -68,7 +68,7 @@ test "an include that appears later and a worktree file the extension turns on a
     try expectValue(&repo, "fixture.value", null);
 
     try git.writeFile(io, ".git/extra.config", "[fixture]\n\tvalue = included\n");
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "fixture.value", "included");
     const read = try git.line(io, &.{ "config", "fixture.value" });
     defer gpa.free(read);
@@ -76,13 +76,13 @@ test "an include that appears later and a worktree file the extension turns on a
 
     try git.exec(io, &.{ "config", "extensions.worktreeConfig", "true" });
     try git.exec(io, &.{ "config", "--worktree", "fixture.scoped", "here" });
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "fixture.scoped", "here");
     try testing.expectEqual(.worktree, repo.config.origin("fixture.scoped").?.level);
 
     // A file the extension brought in is watched like the others.
     try git.exec(io, &.{ "config", "--worktree", "fixture.scoped", "there" });
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "fixture.scoped", "there");
 }
 
@@ -102,11 +102,11 @@ test "a global file the caller named is read again, whether or not it was there 
     try expectValue(&repo, "user.email", null);
 
     try home.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = "[user]\n\temail = ada@example.com\n" });
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "user.email", "ada@example.com");
 
     try home.dir.deleteFile(io, ".gitconfig");
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "user.email", null);
 }
 
@@ -119,23 +119,25 @@ test "a configuration the repository can no longer be opened with is refused, an
 
     var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
     defer repo.deinit(io);
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
 
     // git itself will not run in a repository with an extension it does
     // not know, so the file is edited by name.
     try git.exec(io, &.{ "config", "-f", ".git/config", "core.repositoryformatversion", "1" });
     try git.exec(io, &.{ "config", "-f", ".git/config", "extensions.somethingNew", "true" });
     try git.exec(io, &.{ "config", "-f", ".git/config", "user.name", "Grace" });
-    try testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io));
-    try testing.expectEqualStrings("somethingnew", repo.unsupportedSetting());
+    try testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, &diagnostic));
+    try testing.expectEqualStrings("somethingnew", diagnostic.unsupported_setting);
     try expectValue(&repo, "user.name", "Ada");
 
     try git.exec(io, &.{ "config", "-f", ".git/config", "--unset", "extensions.somethingNew" });
     try git.exec(io, &.{ "config", "-f", ".git/config", "extensions.objectFormat", "sha256" });
-    try testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io));
+    try testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io, &diagnostic));
     try expectValue(&repo, "user.name", "Ada");
 
     try git.exec(io, &.{ "config", "-f", ".git/config", "--unset", "extensions.objectFormat" });
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, &diagnostic));
     try expectValue(&repo, "user.name", "Grace");
 }
 
@@ -225,16 +227,16 @@ test "includeIf gitdir:, gitdir/i: and onbranch: in ~/.gitconfig hold for a repo
     gpa.free(committed.?);
     const switched = try gitWithHome(gpa, io, proj, home, &.{ "checkout", "-q", "-b", "feature/x" });
     gpa.free(switched.?);
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "test.main", null);
     try expectValue(&repo, "test.feature", "yes");
     try expectIncludesAgree(gpa, io, proj, home, &repo);
-    try testing.expect(!try repo.refreshConfig(io));
+    try testing.expect(!try repo.refreshConfig(io, null));
 
     // A detached `HEAD` is on no branch.
     const detached = try gitWithHome(gpa, io, proj, home, &.{ "checkout", "-q", "--detach" });
     gpa.free(detached.?);
-    try testing.expect(try repo.refreshConfig(io));
+    try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "test.feature", null);
     try expectIncludesAgree(gpa, io, proj, home, &repo);
 }

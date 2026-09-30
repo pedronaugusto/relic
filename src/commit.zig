@@ -208,7 +208,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         .message = cleaned,
         .extra = carried,
         .signing = options.signing,
-    });
+    }, null);
 
     const action = if (current == null)
         "commit (initial)"

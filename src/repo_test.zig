@@ -37,7 +37,7 @@ test "peeling refuses an annotated tag chain beyond the limit" {
             .target_type = target_type,
             .name = name,
             .message = "nested\n",
-        });
+        }, null);
         target_type = .tag;
     }
 
@@ -103,7 +103,7 @@ test "a whole commit cycle, and git agrees with every part of it" {
         .author = fixture_who,
         .committer = fixture_who,
         .message = "first commit\n",
-    });
+    }, null);
 
     var tx = repo.beginRefs();
     defer tx.deinit(io);
@@ -182,7 +182,7 @@ test "a sha256 repository this creates is one git uses" {
         .author = fixture_who,
         .committer = fixture_who,
         .message = "sha256\n",
-    });
+    }, null);
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.update("refs/heads/main", .{ .direct = commit }, .any);
@@ -447,17 +447,19 @@ test "a config refresh keeps only its own refused setting" {
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
     try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nsomethingNew = true\n" });
-    try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io));
-    try std.testing.expectEqualStrings("somethingnew", repo.unsupportedSetting());
+    try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectEqualStrings("somethingnew", diagnostic.unsupported_setting);
     try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 0\n" });
-    try std.testing.expect(try repo.refreshConfig(io));
-    try std.testing.expectEqualStrings("", repo.unsupportedSetting());
-    try std.testing.expect(!try repo.refreshConfig(io));
-    try std.testing.expectEqualStrings("", repo.unsupportedSetting());
+    try std.testing.expect(try repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+    try std.testing.expect(!try repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
     try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectformat = sha256\n" });
-    try std.testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io));
-    try std.testing.expectEqualStrings("extensions.objectFormat", repo.unsupportedSetting());
+    try std.testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectEqualStrings("extensions.objectFormat", diagnostic.unsupported_setting);
 }
 
 test "opening uses the format validated before worktree settings are read" {
@@ -499,4 +501,78 @@ test "opening refuses a repository version that is not an integer" {
     } else |err| {
         try std.testing.expectEqual(error.NotAnInteger, err);
     }
+}
+
+test "a refresh preserves a refused extension beyond sixty-four bytes" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
+    const name = "anextensionwhosenameislongerthantherepositorysoldsixtyfourbytebufferandkeepsgoing";
+    {
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+        defer repo.deinit(io);
+        try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\n" ++ name ++ " = true\n" });
+        try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, &diagnostic));
+    }
+    try std.testing.expectEqualStrings(name, diagnostic.unsupported_setting);
+}
+
+test "a signing write keeps only its own refused setting" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
+    try repo.config.set("tag.gpgSign", "true");
+    const fields: @import("object.zig").Tag.Fields = .{
+        .target = @import("hash.zig").Hasher.object(.sha1, "tree", ""),
+        .target_type = .tree,
+        .name = "t",
+        .message = "m",
+    };
+    try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, fields, &diagnostic));
+    try std.testing.expectEqualStrings("tag.gpgSign", diagnostic.unsupported_setting);
+    _ = try repo.writeTagWith(io, fields, .{ .sign = .never }, &diagnostic);
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+    try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, fields, &diagnostic));
+    try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTagWith(io, fields, .{ .sign = .always }, &diagnostic));
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+    try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, fields, &diagnostic));
+    var invalid = fields;
+    invalid.target = @import("hash.zig").Hasher.object(.sha256, "tree", "");
+    try std.testing.expectError(error.UnexpectedObjectType, repo.writeTagWith(io, invalid, .{ .sign = .never }, &diagnostic));
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+}
+
+test "a refusal preserves the diagnostic allocator's resource failure" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    var diagnostic = repo_mod.Diagnostic.init(failing.allocator());
+    defer diagnostic.deinit();
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 9\n" });
+    try std.testing.expectError(error.OutOfMemory, repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+    try std.testing.expectEqual(@as(i64, 0), try repo.config.getInt("core.repositoryformatversion", -1));
+    try std.testing.expectError(error.UnsupportedRepositoryVersion, repo.refreshConfig(io, null));
+    try repo.config.set("tag.gpgSign", "true");
+    const fields: @import("object.zig").Tag.Fields = .{
+        .target = @import("hash.zig").Hasher.object(.sha1, "tree", ""),
+        .target_type = .tree,
+        .name = "t",
+        .message = "m",
+    };
+    try std.testing.expectError(error.OutOfMemory, repo.writeTag(io, fields, &diagnostic));
+    try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, fields, null));
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
 }

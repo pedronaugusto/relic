@@ -175,7 +175,7 @@ fn relicCommit(k: *Keyed, io: Io, tree_from: []const u8) !Oid {
         .committer = who,
         .message = "signed here\n",
         .signing = .{ .programs = k.programs() },
-    });
+    }, null);
 }
 
 fn verifyHere(k: *Keyed, io: Io, rev: []const u8, tag: bool) !signing.Verdict {
@@ -233,7 +233,7 @@ fn bothWays(format: signing.Format, init_args: []const []const u8) !void {
             .name = "v-relic",
             .tagger = who,
             .message = "tagged here\n",
-        }, .{ .programs = k.programs() });
+        }, .{ .programs = k.programs() }, null);
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         try tx.create("refs/tags/v-relic", .{ .direct = tag });
@@ -335,21 +335,23 @@ test "signing configured with no programs is refused by name, never written unsi
     try fixture.exec(io, &.{ "config", "tag.forceSignAnnotated", "true" });
     var repo = try Repository.open(gpa, io, fixture.dir, .{});
     defer repo.deinit(io);
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
     const empty = hash.Hasher.object(.sha1, "tree", "");
     try testing.expectError(error.SigningRequiresPrograms, repo.writeCommit(io, .{
         .tree = empty,
         .author = who,
         .committer = who,
         .message = "m\n",
-    }));
-    try testing.expectEqualStrings("commit.gpgSign", repo.unsupportedSetting());
+    }, &diagnostic));
+    try testing.expectEqualStrings("commit.gpgSign", diagnostic.unsupported_setting);
     try testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, .{
         .target = empty,
         .target_type = .tree,
         .name = "t",
         .tagger = who,
         .message = "m\n",
-    }));
+    }, &diagnostic));
     // Asked not to sign, it writes what it was asked to.
     _ = try repo.writeCommit(io, .{
         .tree = empty,
@@ -357,7 +359,7 @@ test "signing configured with no programs is refused by name, never written unsi
         .committer = who,
         .message = "m\n",
         .signing = .{ .sign = .never },
-    });
+    }, &diagnostic);
 }
 
 test "the commit porcelain signs as commit.gpgSign says" {

@@ -1474,7 +1474,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
             .author = fixtureWho(1_700_000_000 + @as(i64, @intCast(i))),
             .committer = fixtureWho(1_700_000_000 + @as(i64, @intCast(i))),
             .message = "a commit\n",
-        });
+        }, null);
         parent = c.*;
     }
     const tag = try repo.writeTag(io, .{
@@ -1483,7 +1483,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
         .name = "v1",
         .tagger = fixtureWho(1_700_000_100),
         .message = "a tag\n",
-    });
+    }, null);
 
     // One transaction per commit, each moving main and HEAD's log with it,
     // and the geometric rule compacting as they pile up.

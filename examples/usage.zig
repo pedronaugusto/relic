@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
         .author = who,
         .committer = who,
         .message = "first commit\n",
-    });
+    }, null);
 
     // Move the branch under its lock, then append the reflog.
     var tx = repo.beginRefs();
