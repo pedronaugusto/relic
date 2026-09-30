@@ -100,7 +100,8 @@ test "a pack holds both ofs-delta and ref-delta entries and both resolve" {
 
     var saw_ref_delta = false;
     for (db.sources.items) |*source| {
-        for (source.packs.items) |*p| {
+        for (source.packs.items) |*named| {
+            const p = &named.pack;
             var it = p.index.iterate();
             while (try it.next()) |found| {
                 const header = try p.entryHeaderAt(io, found.located.offset);
@@ -119,7 +120,8 @@ test "a pack holds both ofs-delta and ref-delta entries and both resolve" {
     defer db2.deinit(io);
     var saw_ofs_delta = false;
     for (db2.sources.items) |*source| {
-        for (source.packs.items) |*p| {
+        for (source.packs.items) |*named| {
+            const p = &named.pack;
             var it = p.index.iterate();
             while (try it.next()) |found| {
                 const header = try p.entryHeaderAt(io, found.located.offset);

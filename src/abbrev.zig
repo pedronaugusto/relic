@@ -45,7 +45,7 @@ pub fn defaultLength(config: *const config_mod.Config, db: *const odb_mod.Odb) u
 pub fn automaticLength(db: *const odb_mod.Odb) usize {
     var count: u64 = 0;
     for (db.sources.items) |*source| {
-        for (source.packs.items) |*p| count += p.index.count;
+        for (source.packs.items) |*p| count += p.pack.index.count;
     }
     // The most significant bit's place, plus one; zero objects is one bit,
     // as in git.
