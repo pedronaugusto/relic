@@ -279,6 +279,41 @@ test "an unknown ref storage and an unknown extension are refused by name" {
     }
 }
 
+test "failed opens leave the full refused setting in caller-owned diagnostics" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    {
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+        repo.deinit(io);
+    }
+    var diagnostic = repo_mod.OpenDiagnostic.init(gpa);
+    defer diagnostic.deinit();
+    const long_name = "anextensionwhosenameislongerthantherepositorysoldsixtyfourbytebuffer";
+    const cases = .{
+        .{ "[core]\nrepositoryformatversion = 9\n", error.UnsupportedRepositoryVersion, "core.repositoryFormatVersion" },
+        .{ "[core]\nrepositoryformatversion = 1\n[extensions]\nsomethingNew = true\n", error.UnsupportedExtension, "somethingnew" },
+        .{ "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = lmdb\n", error.UnsupportedRefStorage, "extensions.refStorage" },
+        .{ "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectFormat = sha512\n", error.UnknownObjectFormat, "extensions.objectFormat" },
+        .{ "[core]\nrepositoryformatversion = 1\n[extensions]\n" ++ long_name ++ " = true\n", error.UnsupportedExtension, long_name },
+    };
+    inline for (cases) |case| {
+        try tmp.dir.writeFile(io, .{ .sub_path = ".git/config", .data = case[0] });
+        try std.testing.expectError(case[1], repo_mod.Repository.open(gpa, io, tmp.dir, .{ .diagnostic = &diagnostic }));
+        try std.testing.expectEqualStrings(case[2], diagnostic.unsupported_setting);
+    }
+    try tmp.dir.createDir(io, "empty", .default_dir);
+    var empty = try tmp.dir.openDir(io, "empty", .{});
+    defer empty.close(io);
+    try std.testing.expectError(error.NotARepository, repo_mod.Repository.open(gpa, io, empty, .{ .discover = false, .diagnostic = &diagnostic }));
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+    try tmp.dir.writeFile(io, .{ .sub_path = ".git/config", .data = "[core]\nrepositoryformatversion = 0\n" });
+    var repo = try repo_mod.Repository.open(gpa, io, tmp.dir, .{ .diagnostic = &diagnostic });
+    defer repo.deinit(io);
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+}
+
 test "a linked worktree is created, listed, opened, removed and pruned" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

@@ -31,6 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Repository.OpenOptions.diagnostic` keeps the full refused setting in caller-owned output after a failed open.
+
 - A test that holds the TLS client to the standard library's: it fails when
   the compiler ships a different `std/crypto/tls/Client.zig` than the diff
   was taken against, and when the copy is not std's file with the diff

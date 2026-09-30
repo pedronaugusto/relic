@@ -199,8 +199,10 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `lfs.netrc` | What the LFS client reads beside: `~/.netrc`. |
 
 Every public declaration carries a doc comment stating its contract, and every
-operation has one named error set. A refusal is always a named error carrying
-the setting that caused it.
+operation has one named error set. A refusal is a named error. For a refused repository format or extension,
+pass a caller-owned `repo.OpenDiagnostic` in `Repository.OpenOptions.diagnostic`:
+its `unsupported_setting` survives a failed open, and `deinit` releases its copy.
+An open repository names a refused setting through `unsupportedSetting()`.
 
 A ref transaction acquires and validates every loose-ref lock before it writes
 any ref. Its commit is the same sequence of per-ref renames and reflog appends

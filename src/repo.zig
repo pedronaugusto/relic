@@ -38,11 +38,12 @@ pub const Error = error{
     /// `.git/shallow` holds a line that is not an object name.
     MalformedShallowFile,
     /// `core.repositoryFormatVersion` is a number this release does not
-    /// know. `unsupported` on the repository says which.
+    /// know. `OpenOptions.diagnostic` names the setting on a failed open;
+    /// `unsupportedSetting` does so on a failed refresh.
     UnsupportedRepositoryVersion,
     /// An `extensions.*` this release does not implement, at format version
     /// 1 where git requires every extension to be understood.
-    /// `unsupported` names it.
+    /// The open diagnostic or `unsupportedSetting` names it.
     UnsupportedExtension,
     /// `extensions.refStorage` names a format other than `files` and
     /// `reftable`. The refs are somewhere this release does not read, and
@@ -73,6 +74,36 @@ pub const WriteError = Error || signing.Error;
 
 /// How deep `open` walks upwards looking for a `.git`.
 pub const max_discovery_depth: u8 = 64;
+
+/// A refused setting from `Repository.open`, owned by the caller.
+/// Initialize with `init` and release with `deinit`. Each open clears it;
+/// its text stays valid until the next open or `deinit`, even after failure.
+pub const OpenDiagnostic = struct {
+    gpa: Allocator,
+    /// The full setting that was refused, or an empty string.
+    unsupported_setting: []const u8 = "",
+
+    /// Use this allocator for the diagnostic's own copy of the setting.
+    pub fn init(gpa: Allocator) OpenDiagnostic {
+        return .{ .gpa = gpa };
+    }
+
+    /// Release the setting's copy.
+    pub fn deinit(diagnostic: *OpenDiagnostic) void {
+        diagnostic.clear();
+    }
+
+    fn clear(diagnostic: *OpenDiagnostic) void {
+        if (diagnostic.unsupported_setting.len != 0) diagnostic.gpa.free(diagnostic.unsupported_setting);
+        diagnostic.unsupported_setting = "";
+    }
+
+    fn set(diagnostic: *OpenDiagnostic, text: []const u8) Allocator.Error!void {
+        const owned = try diagnostic.gpa.dupe(u8, text);
+        diagnostic.clear();
+        diagnostic.unsupported_setting = owned;
+    }
+};
 
 /// How a repository is created.
 pub const InitOptions = struct {
@@ -170,6 +201,7 @@ pub const Repository = struct {
     /// worktree. A `.git` *file* is followed, which is how a linked worktree
     /// is opened.
     pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, options: OpenOptions) Error!Repository {
+        if (options.diagnostic) |diagnostic| diagnostic.clear();
         var discovered = try discover(gpa, io, dir, options);
         errdefer discovered.close(io);
         return finish(gpa, io, discovered, options);
@@ -177,6 +209,9 @@ pub const Repository = struct {
 
     /// How a repository is opened.
     pub const OpenOptions = struct {
+        /// Caller-owned output for a refused repository format or extension.
+        /// Cleared on every open, and never retained by the repository.
+        diagnostic: ?*OpenDiagnostic = null,
         /// Whether to walk upwards looking for a `.git`.
         discover: bool = true,
         /// What the object database is told.
@@ -333,7 +368,7 @@ pub const Repository = struct {
             .local = .{ .dir = repo.common_dir, .sub_path = "config" },
             .command = options.config_overrides,
             .pairs = options.config_pairs,
-        }, .{ .git_dir = git_dir_path, .branch = if (branch) |b| b["refs/heads/".len..] else null, .home = options.home });
+        }, .{ .git_dir = git_dir_path, .branch = if (branch) |b| b["refs/heads/".len..] else null, .home = options.home }, options.diagnostic);
         repo.config = read.config;
         errdefer repo.config.deinit();
         repo.kind = read.kind;
@@ -361,10 +396,10 @@ pub const Repository = struct {
     /// they name; then, when `extensions.worktreeConfig` is on, read them
     /// again with `config.worktree` after the local file, which exists only
     /// when the extension says so and has no say in the format.
-    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context) Error!struct { config: config_mod.Config, kind: hash.Kind } {
+    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, diagnostic: ?*OpenDiagnostic) Error!struct { config: config_mod.Config, kind: hash.Kind } {
         var config = try config_mod.Config.open(repo.gpa, io, sources, context);
         errdefer config.deinit();
-        const kind = try repo.checkFormat(&config);
+        const kind = try repo.checkFormat(&config, diagnostic);
         if (!(config.getBool("extensions.worktreeconfig", false) catch false)) return .{ .config = config, .kind = kind };
         var with_worktree = sources;
         with_worktree.worktree = .{ .dir = repo.git_dir, .sub_path = "config.worktree" };
@@ -375,15 +410,18 @@ pub const Repository = struct {
 
     /// The format version and the extensions `config` names, checked, and
     /// the hash it says object names are written with.
-    fn checkFormat(repo: *Repository, config: *const config_mod.Config) Error!hash.Kind {
+    fn checkFormat(repo: *Repository, config: *const config_mod.Config, diagnostic: ?*OpenDiagnostic) Error!hash.Kind {
         const version = config.getInt("core.repositoryformatversion", 0) catch 0;
         if (version < 0 or version > 1) {
-            repo.setUnsupported("core.repositoryFormatVersion");
+            try repo.refuseSetting(diagnostic, "core.repositoryFormatVersion");
             return error.UnsupportedRepositoryVersion;
         }
-        if (version == 1) try repo.checkExtensions(config);
+        if (version == 1) try repo.checkExtensions(config, diagnostic);
         const text = config.get("extensions.objectformat") orelse return .sha1;
-        return hash.Kind.parse(text) catch error.UnknownObjectFormat;
+        return hash.Kind.parse(text) catch {
+            try repo.refuseSetting(diagnostic, "extensions.objectFormat");
+            return error.UnknownObjectFormat;
+        };
     }
 
     /// Read the configuration again if a file it came from has changed since
@@ -412,7 +450,7 @@ pub const Repository = struct {
         sources.worktree = null;
         var context = repo.config.context;
         context.branch = short;
-        var fresh = try repo.readConfig(io, sources, context);
+        var fresh = try repo.readConfig(io, sources, context, null);
         errdefer fresh.config.deinit();
         if (fresh.kind != repo.kind) return error.ObjectFormatChanged;
         repo.config.deinit();
@@ -486,6 +524,11 @@ pub const Repository = struct {
         return options;
     }
 
+    fn refuseSetting(repo: *Repository, diagnostic: ?*OpenDiagnostic, text: []const u8) Allocator.Error!void {
+        repo.setUnsupported(text);
+        if (diagnostic) |output| try output.set(text);
+    }
+
     fn setUnsupported(repo: *Repository, text: []const u8) void {
         repo.unsupported_len = @min(text.len, repo.unsupported.len);
         @memcpy(repo.unsupported[0..repo.unsupported_len], text[0..repo.unsupported_len]);
@@ -515,7 +558,7 @@ pub const Repository = struct {
         "partialclone",
     };
 
-    fn checkExtensions(repo: *Repository, config: *const config_mod.Config) Error!void {
+    fn checkExtensions(repo: *Repository, config: *const config_mod.Config, diagnostic: ?*OpenDiagnostic) Error!void {
         for (config.entries.items) |entry| {
             if (!std.ascii.eqlIgnoreCase(entry.section, "extensions")) continue;
             var known = false;
@@ -523,13 +566,13 @@ pub const Repository = struct {
                 if (std.ascii.eqlIgnoreCase(entry.name, name)) known = true;
             }
             if (!known) {
-                repo.setUnsupported(entry.name);
+                try repo.refuseSetting(diagnostic, entry.name);
                 return error.UnsupportedExtension;
             }
             if (std.ascii.eqlIgnoreCase(entry.name, "refstorage")) {
                 const value = entry.value orelse "";
                 if (!std.ascii.eqlIgnoreCase(value, "files") and !std.ascii.eqlIgnoreCase(value, "reftable")) {
-                    repo.setUnsupported("extensions.refStorage");
+                    try repo.refuseSetting(diagnostic, "extensions.refStorage");
                     return error.UnsupportedRefStorage;
                 }
             }
