@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Breaking: delta results over the size limit return `DeltaSizeLimitExceeded`; `DeltaSizeOverflow` means a size encoding wider than 64 bits.
+
 - Breaking: a refresh that changes the ref backend returns `RefStorageChanged`, requires reopening and keeps the old configuration and ref store.
 
 - Breaking: `refreshConfig`, `writeCommit`, `writeTag` and `writeTagWith` take caller-owned `repo.Diagnostic` output; the repository's `unsupported`, `unsupported_len` and `unsupportedSetting` are removed.
