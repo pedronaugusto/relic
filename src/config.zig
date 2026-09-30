@@ -390,33 +390,39 @@ pub const Config = struct {
                 @field(config.sources, field) = .{ .dir = path.dir, .sub_path = try gpa.dupe(u8, path.sub_path) };
             }
         }
-        const command = try gpa.alloc([]const u8, sources.command.len);
-        var kept: usize = 0;
-        errdefer {
-            for (command[0..kept]) |value| gpa.free(value);
-            gpa.free(command);
-        }
-        for (sources.command) |value| {
-            command[kept] = try gpa.dupe(u8, value);
-            kept += 1;
-        }
-        config.sources.command = command;
-        const pairs = try gpa.alloc(Sources.Pair, sources.pairs.len);
-        var kept_pairs: usize = 0;
-        errdefer {
-            for (pairs[0..kept_pairs]) |pair| {
-                gpa.free(pair.name);
-                if (pair.value) |v| gpa.free(v);
+        // The temporary owns a copy until it is complete; after the block
+        // returns, only Config.deinit owns it, even if the next copy fails.
+        config.sources.command = command: {
+            const copy = try gpa.alloc([]const u8, sources.command.len);
+            var kept: usize = 0;
+            errdefer {
+                for (copy[0..kept]) |value| gpa.free(value);
+                gpa.free(copy);
             }
-            gpa.free(pairs);
-        }
-        for (sources.pairs) |pair| {
-            const name = try gpa.dupe(u8, pair.name);
-            errdefer gpa.free(name);
-            pairs[kept_pairs] = .{ .name = name, .value = if (pair.value) |v| try gpa.dupe(u8, v) else null };
-            kept_pairs += 1;
-        }
-        config.sources.pairs = pairs;
+            for (sources.command) |value| {
+                copy[kept] = try gpa.dupe(u8, value);
+                kept += 1;
+            }
+            break :command copy;
+        };
+        config.sources.pairs = pairs: {
+            const copy = try gpa.alloc(Sources.Pair, sources.pairs.len);
+            var kept: usize = 0;
+            errdefer {
+                for (copy[0..kept]) |pair| {
+                    gpa.free(pair.name);
+                    if (pair.value) |v| gpa.free(v);
+                }
+                gpa.free(copy);
+            }
+            for (sources.pairs) |pair| {
+                const name = try gpa.dupe(u8, pair.name);
+                errdefer gpa.free(name);
+                copy[kept] = .{ .name = name, .value = if (pair.value) |v| try gpa.dupe(u8, v) else null };
+                kept += 1;
+            }
+            break :pairs copy;
+        };
     }
 
     /// Whether a file this configuration was read from now holds other
@@ -2294,4 +2300,19 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
     defer gpa.free(removed);
     var third = try Config.parseText(gpa, removed, .local);
     third.deinit();
+}
+
+test "configuration sources have one owner when allocation stops" {
+    const Check = struct {
+        fn run(gpa: Allocator) !void {
+            var config = try Config.open(gpa, std.testing.io, .{
+                .command = &.{"test.one=1"},
+                .pairs = &.{.{ .name = "test.two", .value = "2" }},
+            }, .{});
+            defer config.deinit();
+            try std.testing.expectEqualStrings("1", config.get("test.one").?);
+            try std.testing.expectEqualStrings("2", config.get("test.two").?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }
