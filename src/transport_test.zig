@@ -351,7 +351,19 @@ test "ssh is handed the same arguments git hands it" {
     defer gpa.free(url_scp);
     const url_plain = try std.fmt.allocPrint(gpa, "ssh://example.invalid:22{s}{s}", .{ drive_slash, source_path });
     defer gpa.free(url_plain);
+    const url_ipv6 = try std.fmt.allocPrint(gpa, "[::1]:{s}", .{source_path});
+    defer gpa.free(url_ipv6);
+    const url_user_ipv6 = try std.fmt.allocPrint(gpa, "ada@[::1]:{s}", .{source_path});
+    defer gpa.free(url_user_ipv6);
+    const url_inside = try std.fmt.allocPrint(gpa, "ssh://[ada@::1]:2222{s}{s}", .{ drive_slash, source_path });
+    defer gpa.free(url_inside);
+    const url_scp_port = try std.fmt.allocPrint(gpa, "[example.invalid:2222]:{s}", .{source_path});
+    defer gpa.free(url_scp_port);
     const cases = [_]Case{
+        .{ .url = url_ipv6 },
+        .{ .url = url_user_ipv6 },
+        .{ .url = url_inside },
+        .{ .url = url_scp_port },
         .{ .url = url_port },
         .{ .url = url_scp },
         .{ .url = url_plain, .variant = "plink" },

@@ -294,6 +294,14 @@ the caller passes a prompt. When a remote refuses, the caller gets values
 rather than a sentence — which helpers were asked and what they said, what
 the server or ssh said — so it can tell the person what to fix.
 
+`transport.url.Url.parse` gives the scheme, user, host, port and path as
+slices of the supplied text. Bracketed IPv6 and ports work in scp syntax as
+well as `ssh://`; an at-sign in a repository path stays in the path.
+`file://` and local paths name local repositories. `<helper>::<address>`
+is recognized and refused as `UnsupportedTransport`, since relic does not
+run remote helpers. Callers decide which schemes and default ports name the
+same remote; they do not need to split the URL themselves.
+
 **TLS, HTTP and inflate are relic's own, each for something the standard
 library cannot do.** Every https connection goes through relic's TLS and HTTP
 clients; a test fails if any other file names the standard library's HTTP or
