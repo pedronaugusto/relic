@@ -367,7 +367,7 @@ const Walker = struct {
     filling: ?Odb.OpenPack = null,
 
     fn walk(w: *Walker, dir_path: []const u8, depth: u32) Error!void {
-        if (depth > 64) return;
+        if (depth > 64) return error.TreeTooDeep;
         const dir = if (dir_path.len == 0)
             w.wt
         else
@@ -1077,7 +1077,7 @@ const StatusScan = struct {
     }
 
     fn walk(s: *StatusScan, dir_path: []const u8, depth: u32) Error!void {
-        if (depth > 64) return;
+        if (depth > 64) return error.TreeTooDeep;
         const dir = if (dir_path.len == 0)
             s.wt
         else
@@ -1203,7 +1203,7 @@ const StatusScan = struct {
     /// nothing but ignored paths, by its name. A repository inside counts
     /// as untracked content, whatever it holds, and is not looked into.
     fn classify(s: *StatusScan, path: []const u8, depth: u32, ignored: *std.ArrayList([]const u8)) Error!bool {
-        if (depth > 64) return false;
+        if (depth > 64) return error.TreeTooDeep;
         if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, path, depth);
         defer if (s.options.rules.ignore) |rules| rules.popTo(depth + 2);
 
@@ -1249,7 +1249,7 @@ const StatusScan = struct {
     /// Whether `path` holds a file, or a repository, anywhere below it: an
     /// ignored directory that holds nothing is not listed.
     fn holdsAnything(s: *StatusScan, path: []const u8, depth: u32) Error!bool {
-        if (depth > 64) return false;
+        if (depth > 64) return error.TreeTooDeep;
         var names = try s.readNames(path);
         defer names.deinit(s.gpa);
         for (names.items) |item| {
@@ -2665,7 +2665,7 @@ const ListScan = struct {
     out: *std.ArrayList([]const u8),
 
     fn walk(s: *ListScan, dir_path: []const u8, depth: u32) Error!void {
-        if (depth > 64) return;
+        if (depth > 64) return error.TreeTooDeep;
         const dir = if (dir_path.len == 0)
             s.wt
         else

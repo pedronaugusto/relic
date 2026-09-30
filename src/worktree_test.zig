@@ -1029,3 +1029,23 @@ test "a directory that staging cannot open is not reported as deleted" {
     try std.testing.expectError(error.AccessDenied, worktree.addAll(gpa, refused, folder.dir, &staged, &db, .{}));
     try std.testing.expect(staged.find("blocked/file") != null);
 }
+
+test "a filesystem walk that reaches its depth limit refuses a partial result" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var folder = std.testing.tmpDir(.{ .iterate = true });
+    defer folder.cleanup();
+    const path = "d/" ** 66 ++ "file";
+    try folder.dir.createDirPath(io, std.fs.path.dirnamePosix(path).?);
+    try folder.dir.writeFile(io, .{ .sub_path = path, .data = "deep\n" });
+    var private = std.testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    try private.dir.createDirPath(io, "objects");
+    var db = try odb_mod.Odb.open(gpa, io, private.dir, .sha1, .{});
+    defer db.deinit(io);
+    var staged = index_mod.Index.initEmpty(gpa, .sha1);
+    defer staged.deinit();
+    try std.testing.expectError(error.TreeTooDeep, worktree.addAll(gpa, io, folder.dir, &staged, &db, .{}));
+    try std.testing.expectError(error.TreeTooDeep, worktree.status(gpa, io, folder.dir, &staged, &db, .{}));
+    try std.testing.expectError(error.TreeTooDeep, worktree.list(gpa, io, folder.dir, &staged, .{}));
+}
