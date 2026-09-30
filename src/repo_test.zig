@@ -611,3 +611,22 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         try std.testing.expectEqual(cache, repo.refs.reftable_cache);
     }
 }
+
+test "a signing refusal names the tag setting that required it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
+    try repo.config.set("tag.forceSignAnnotated", "true");
+    try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, .{
+        .target = @import("hash.zig").Hasher.object(.sha1, "tree", ""),
+        .target_type = .tree,
+        .name = "t",
+        .message = "m",
+    }, &diagnostic));
+    try std.testing.expectEqualStrings("tag.forceSignAnnotated", diagnostic.unsupported_setting);
+}

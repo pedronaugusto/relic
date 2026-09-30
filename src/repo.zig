@@ -983,7 +983,7 @@ pub const Repository = struct {
             .extra = request.extra,
             .message = request.message,
         };
-        var signer = try repo.signerFor(request.signing, "commit.gpgsign", "commit.gpgSign", diagnostic);
+        var signer = try repo.signerFor(request.signing, .commit, diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|
             signing.signCommit(s, io, repo.kind, fields, request.signing.key)
@@ -1009,7 +1009,7 @@ pub const Repository = struct {
     /// `diagnostic` has the same lifetime as it does for `writeCommit`.
     pub fn writeTagWith(repo: *Repository, io: Io, fields: object.Tag.Fields, request: signing.Request, diagnostic: ?*Diagnostic) WriteError!Oid {
         if (diagnostic) |output| output.clear();
-        var signer = try repo.signerFor(request, "tag.gpgsign", "tag.gpgSign", diagnostic);
+        var signer = try repo.signerFor(request, .tag, diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|
             signing.signTag(s, io, repo.kind, fields, request.key)
@@ -1023,16 +1023,24 @@ pub const Repository = struct {
     }
 
     /// The signer a write needs, or `null` when it is not to be signed.
-    fn signerFor(repo: *Repository, request: signing.Request, key: []const u8, spelling: []const u8, diagnostic: ?*Diagnostic) WriteError!?signing.Signer {
-        const wanted = switch (request.sign) {
-            .always => true,
-            .never => false,
-            .config => (repo.config.getBool(key, false) catch false) or
-                (std.mem.startsWith(u8, key, "tag.") and (repo.config.getBool("tag.forcesignannotated", false) catch false)),
+    /// The same decision names the setting that requires programs.
+    fn signerFor(repo: *Repository, request: signing.Request, target: enum { commit, tag }, diagnostic: ?*Diagnostic) WriteError!?signing.Signer {
+        const primary = switch (target) {
+            .commit => "commit.gpgSign",
+            .tag => "tag.gpgSign",
         };
-        if (!wanted) return null;
+        const setting = switch (request.sign) {
+            .always => "",
+            .never => return null,
+            .config => configured: {
+                if (repo.config.getBool(primary, false) catch false) break :configured primary;
+                if (target == .tag and (repo.config.getBool("tag.forceSignAnnotated", false) catch false))
+                    break :configured "tag.forceSignAnnotated";
+                return null;
+            },
+        };
         const programs = request.programs orelse {
-            if (request.sign == .config) try refuseSetting(diagnostic, spelling);
+            if (setting.len != 0) try refuseSetting(diagnostic, setting);
             return error.SigningRequiresPrograms;
         };
         return try signing.Signer.init(repo.gpa, &repo.config, programs);
