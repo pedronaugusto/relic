@@ -510,7 +510,7 @@ pub const Repository = struct {
             for ([_]hash.Kind{ .sha1, .sha256 }) |kind| {
                 const head_value = reftablestack.headIn(gpa, arena.allocator(), io, git_dir, kind) catch |err| switch (err) {
                     error.HashMismatch => continue,
-                    else => return null,
+                    else => |e| return e,
                 };
                 const value = head_value orelse return null;
                 switch (value) {

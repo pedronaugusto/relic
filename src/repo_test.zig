@@ -659,3 +659,36 @@ test "a refresh updates reftable write settings together with the configuration"
     try std.testing.expectEqualDeep(@import("reftablestack.zig").Options{ .lock = .{ .wait_ms = 200 } }, repo.refs.reftable_options);
     try std.testing.expectEqual(cache, repo.refs.reftable_cache);
 }
+
+test "a reftable HEAD read failure does not become a detached branch" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]@import("hash.zig").Kind{ .sha1, .sha256 }) |kind| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .object_format = kind, .ref_format = .reftable });
+        defer repo.deinit(io);
+        try std.testing.expectEqualStrings("main", repo.config.context.branch.?);
+        const before = try repo.git_dir.readFileAlloc(io, "reftable/tables.list", gpa, .limited(4096));
+        defer gpa.free(before);
+        const cases = .{
+            .{ "not a table\n", error.MalformedTablesList },
+            .{ "missing.ref\n", error.ReftableMissing },
+        };
+        inline for (cases) |case| {
+            try repo.git_dir.writeFile(io, .{ .sub_path = "reftable/tables.list", .data = case[0] });
+            try std.testing.expectError(case[1], repo.refreshConfig(io, null));
+            try std.testing.expectEqualStrings("main", repo.config.context.branch.?);
+            if (repo_mod.Repository.open(gpa, io, tmp.dir, .{})) |opened| {
+                var unexpected = opened;
+                unexpected.deinit(io);
+                return error.TestExpectedError;
+            } else |err| {
+                try std.testing.expectEqual(case[1], err);
+            }
+        }
+        try repo.git_dir.writeFile(io, .{ .sub_path = "reftable/tables.list", .data = before });
+        try std.testing.expect(!try repo.refreshConfig(io, null));
+        try std.testing.expectEqualStrings("main", repo.config.context.branch.?);
+    }
+}

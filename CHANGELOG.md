@@ -100,6 +100,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Reading a reftable `HEAD` during open or refresh preserves stack failures instead of treating them as a detached branch.
+
 - A config refresh updates the ref store's `reftable.*` settings together with the configuration, keeping both when the settings are invalid.
 
 - A tag signing refusal names `tag.forceSignAnnotated` when that is what requires signing.
