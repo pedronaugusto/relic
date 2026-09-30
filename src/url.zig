@@ -77,12 +77,12 @@ pub const Url = struct {
                 if (builtin.os.tag == .windows and rest.len >= 2 and std.ascii.isAlphabetic(rest[0]) and rest[1] == ':') {
                     return .{ .scheme = .file, .path = rest, .raw = text };
                 }
-                // git keeps a non-local authority as a UNC-style path.
-                // localhost and an empty authority name the path alone.
+                // git for Windows keeps an authority as a UNC path.
+                // On Unix only the path after the authority is used.
                 const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
                 const host = rest[0..slash];
                 if (slash == rest.len) return error.MalformedUrl;
-                if (host.len != 0 and !std.ascii.eqlIgnoreCase(host, "localhost")) {
+                if (builtin.os.tag == .windows and host.len != 0) {
                     return .{ .scheme = .file, .host = host, .path = text[sep + 1 ..], .raw = text };
                 }
                 return .{ .scheme = .file, .path = rest[slash..], .raw = text };
@@ -187,13 +187,14 @@ fn splitPort(url: *Url, suffix: []const u8) ParseError!void {
 }
 
 /// git's `url_is_local_not_ssh`: no colon, or a slash before the first
-/// colon, or a DOS drive letter.
+/// colon, or a DOS drive letter on Windows.
 pub fn isLocal(text: []const u8) bool {
     const colon = std.mem.indexOfScalar(u8, text, ':') orelse return true;
     if (std.mem.indexOfScalar(u8, text, '/')) |slash| {
         if (slash < colon) return true;
     }
-    return text.len >= 2 and std.ascii.isAlphabetic(text[0]) and text[1] == ':' and colon == 1;
+    return builtin.os.tag == .windows and text.len >= 2 and
+        std.ascii.isAlphabetic(text[0]) and text[1] == ':' and colon == 1;
 }
 
 /// The URL with any `user[:password]@` taken out, which is how git writes a
@@ -204,7 +205,7 @@ pub fn isLocal(text: []const u8) bool {
 /// the user part of its authority; the scp-like form loses everything up to
 /// the `@` before its colon.
 pub fn anonymize(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
-    if (std.mem.indexOf(u8, text, "://")) |sep| {
+    if (schemeEnd(text)) |sep| {
         const start = sep + 3;
         const path_at = std.mem.indexOfScalarPos(u8, text, start, '/') orelse text.len;
         if (std.mem.lastIndexOfScalar(u8, text[start..path_at], '@')) |at| {
@@ -262,7 +263,7 @@ test "each shape of URL is read as git reads it" {
     }
     try testing.expectEqual(Scheme.local, (try Url.parse("../other/repo")).scheme);
     try testing.expectEqual(Scheme.local, (try Url.parse("/srv/a:b")).scheme);
-    try testing.expectEqual(Scheme.local, (try Url.parse("C:\\repos\\x")).scheme);
+    try testing.expectEqual(if (builtin.os.tag == .windows) Scheme.local else Scheme.ssh, (try Url.parse("C:\\repos\\x")).scheme);
     {
         const url = try Url.parse("file:///srv/repo.git");
         try testing.expectEqual(Scheme.file, url.scheme);
@@ -361,13 +362,51 @@ test "bracketed remote identities follow git t5601 clone URLs" {
 test "file and local URL identities follow git path and scheme boundaries" {
     const remote_file = try Url.parse("file://server/share/repo.git");
     try testing.expectEqual(Scheme.file, remote_file.scheme);
-    try testing.expectEqualStrings("server", remote_file.host);
-    try testing.expectEqualStrings("//server/share/repo.git", remote_file.path);
+    try testing.expectEqualStrings(if (builtin.os.tag == .windows) "server" else "", remote_file.host);
+    try testing.expectEqualStrings(if (builtin.os.tag == .windows) "//server/share/repo.git" else "/share/repo.git", remote_file.path);
     const local_file = try Url.parse("file://localhost/srv/repo.git");
-    try testing.expectEqualStrings("/srv/repo.git", local_file.path);
+    try testing.expectEqualStrings(if (builtin.os.tag == .windows) "//localhost/srv/repo.git" else "/srv/repo.git", local_file.path);
     const embedded = try Url.parse("./folder/ssh://host/repo");
     try testing.expectEqual(Scheme.local, embedded.scheme);
     try testing.expectEqualStrings("./folder/ssh://host/repo", embedded.path);
     const helper_path = try Url.parse("./ext::repo");
     try testing.expectEqual(Scheme.local, helper_path.scheme);
+}
+
+test "local URL classification follows the platform and survives display" {
+    // t5601: c:temp is SSH on Unix and a drive-relative path on Windows.
+    const drive = try Url.parse("c:temp");
+    try testing.expectEqual(if (builtin.os.tag == .windows) Scheme.local else Scheme.ssh, drive.scheme);
+    if (builtin.os.tag != .windows) {
+        try testing.expectEqualStrings("c", drive.host);
+        try testing.expectEqualStrings("temp", drive.path);
+    }
+    const path = "./folder/ssh://user@host/repo";
+    const parsed = try Url.parse(path);
+    try testing.expectEqual(Scheme.local, parsed.scheme);
+    const shown = try anonymize(testing.allocator, path);
+    defer testing.allocator.free(shown);
+    try testing.expectEqualStrings(path, shown);
+}
+
+test "file URL authorities follow git on this platform" {
+    if (builtin.os.tag == .windows) {
+        const parsed = try Url.parse("file://server/share/repo.git");
+        try testing.expectEqualStrings("//server/share/repo.git", parsed.path);
+        return;
+    }
+    const testgit = @import("testgit.zig");
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var fixture = try testgit.Repo.init(gpa, io, &.{});
+    defer fixture.deinit();
+    const path = try fixture.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(path);
+    // connect.c uses only the slash onwards on Unix; this authority is
+    // neither resolved nor opened. Windows retains it as a UNC path.
+    const text = try std.fmt.allocPrint(gpa, "file://elsewhere{s}", .{path});
+    defer gpa.free(text);
+    const parsed = try Url.parse(text);
+    try testing.expectEqualStrings(path, parsed.path);
+    try fixture.exec(io, &.{ "ls-remote", text });
 }
