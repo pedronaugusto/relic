@@ -31,7 +31,7 @@ const signing = @import("signing.zig");
 
 const Oid = hash.Oid;
 
-/// Errors from opening or creating a repository.
+/// Errors from opening, creating or refreshing a repository and reading its objects.
 pub const Error = error{
     /// No `.git` directory or file at the path or above it.
     NotARepository,

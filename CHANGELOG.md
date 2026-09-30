@@ -100,6 +100,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The smart HTTP doc comments describe relic's TLS client and its configured client certificates.
+
 - Commit and tag writes name refused `gpg.format` and `gpg.minTrustLevel` settings in caller-owned diagnostics.
 
 - A `commondir` that cannot be opened returns the filesystem error instead of reading shared state from the worktree directory.

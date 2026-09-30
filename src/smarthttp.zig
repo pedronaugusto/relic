@@ -17,7 +17,7 @@
 //! upload-pack request over a kilobyte, as git sends it; a larger one is
 //! sent in chunks as it is written. Connections are kept between requests.
 //!
-//! `https://` is TLS from `std.crypto.tls`, against the system's root
+//! `https://` is TLS from relic's client, against the system's root
 //! certificates, or against `http.sslCAInfo` in their place and
 //! `http.sslCAPath` besides — a company's own authority, a self-hosted
 //! server's — or against nothing at all when `http.sslVerify` is false,
@@ -28,9 +28,9 @@
 //! find in the environment: an `https` URL goes through it in a `CONNECT`
 //! tunnel with TLS inside, an `http` one as a whole URL. A proxy's
 //! credentials are the ones its URL carries, a username there with the
-//! password from the person's helpers, as git fills them. A client
-//! certificate is refused by name: the standard library's TLS client cannot
-//! present one.
+//! password from the person's helpers, as git fills them. Client certificates
+//! come from `http.sslCert` and `http.sslKey`, or `http.proxySSLCert` and
+//! `http.proxySSLKey` for an https proxy, and relic's TLS client presents them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
