@@ -1,7 +1,7 @@
 //! The front door: open or create a repository and reach everything in it.
 //!
-//! A repository is a local directory. Nothing here talks to a network, runs
-//! another program, or reads a clock.
+//! A repository is a local directory. Nothing here talks to a network or
+//! reads a clock. Signing a write needs the caller's `program.Programs`.
 
 // The modules relic's API puts under this one, as `relic.repo.<name>`.
 pub const hooks = @import("hooks.zig");
@@ -1038,8 +1038,8 @@ pub const Repository = struct {
             .always => "",
             .never => return null,
             .config => configured: {
-                if (repo.config.getBool(primary, false) catch false) break :configured primary;
-                if (target == .tag and (repo.config.getBool("tag.forceSignAnnotated", false) catch false))
+                if (try repo.signingBool(primary, diagnostic)) break :configured primary;
+                if (target == .tag and try repo.signingBool("tag.forceSignAnnotated", diagnostic))
                     break :configured "tag.forceSignAnnotated";
                 return null;
             },
@@ -1049,6 +1049,13 @@ pub const Repository = struct {
             return error.SigningRequiresPrograms;
         };
         return try signing.Signer.init(repo.gpa, &repo.config, programs);
+    }
+
+    fn signingBool(repo: *const Repository, setting: []const u8, diagnostic: ?*Diagnostic) WriteError!bool {
+        return repo.config.getBool(setting, false) catch |err| {
+            if (err == error.NotABoolean) try refuseSetting(diagnostic, setting);
+            return err;
+        };
     }
 
     /// The reflog policy `core.logAllRefUpdates` asks for.

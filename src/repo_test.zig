@@ -692,3 +692,63 @@ test "a reftable HEAD read failure does not become a detached branch" {
         try std.testing.expectEqualStrings("main", repo.config.context.branch.?);
     }
 }
+
+test "a malformed signing policy is refused before an unsigned object is written" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    inline for (.{ "commit.gpgSign", "tag.gpgSign", "tag.forceSignAnnotated" }) |setting| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+        defer repo.deinit(io);
+        var diagnostic = repo_mod.Diagnostic.init(gpa);
+        defer diagnostic.deinit();
+        try repo.config.set(setting, "maybe");
+        const tree = hash.Hasher.object(.sha1, "tree", "");
+        if (comptime std.mem.startsWith(u8, setting, "commit.")) {
+            try std.testing.expectError(error.NotABoolean, repo.writeCommit(io, .{
+                .tree = tree,
+                .author = fixture_who,
+                .committer = fixture_who,
+                .message = "m",
+            }, &diagnostic));
+        } else {
+            try std.testing.expectError(error.NotABoolean, repo.writeTag(io, .{
+                .target = tree,
+                .target_type = .tree,
+                .name = "t",
+                .message = "m",
+            }, &diagnostic));
+        }
+        try std.testing.expectEqualStrings(setting, diagnostic.unsupported_setting);
+        var objects = try repo.git_dir.openDir(io, "objects", .{ .iterate = true });
+        defer objects.close(io);
+        var entries = objects.iterate();
+        while (try entries.next(io)) |entry| {
+            // init creates these two empty directories, and no object fanout.
+            try std.testing.expect(std.mem.eql(u8, entry.name, "info") or std.mem.eql(u8, entry.name, "pack"));
+        }
+    }
+}
+
+test "reading a signing policy preserves allocation resource failures" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    try repo.config.set("tag.gpgSign", "true");
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    repo.config.gpa = failing.allocator();
+    defer repo.config.gpa = gpa;
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
+    try std.testing.expectError(error.OutOfMemory, repo.writeTag(io, .{
+        .target = hash.Hasher.object(.sha1, "tree", ""),
+        .target_type = .tree,
+        .name = "t",
+        .message = "m",
+    }, &diagnostic));
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+}

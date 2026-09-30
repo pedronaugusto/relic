@@ -100,6 +100,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A signing policy that is not a boolean is refused by name, and allocation failures while reading it remain resource failures; neither writes an unsigned object.
+
 - Reading a reftable `HEAD` during open or refresh preserves stack failures instead of treating them as a detached branch.
 
 - A config refresh updates the ref store's `reftable.*` settings together with the configuration, keeping both when the settings are invalid.
