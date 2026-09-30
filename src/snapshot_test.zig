@@ -199,6 +199,7 @@ test "snapshot allocation failures leave no published result or lost owner" {
     try source.writeFile(io, "nested/file", "borrowed\n");
     try source.exec(io, &.{ "add", "." });
     try source.exec(io, &.{ "commit", "-qm", "base" });
+    try source.exec(io, &.{ "repack", "-ad" });
     const alternate = try sourceObjects(source.dir);
     defer gpa.free(alternate);
     try testing.checkAllAllocationFailures(gpa, allocationCase, .{ source.dir, alternate });

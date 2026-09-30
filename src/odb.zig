@@ -371,6 +371,9 @@ pub const Odb = struct {
 
         odb.deflate_window = try gpa.alloc(u8, flate.max_window_len);
         const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
+        // addSource transfers the handle when it registers the source. A
+        // failure before that point leaves this scope as its sole owner.
+        errdefer if (odb.sources.items.len == 0) objects.close(io);
         try odb.addSource(io, objects, true, 0);
         if (options.probe_timestamp_resolution) {
             odb.timestamp_resolution = fs.probeTimestampResolution(io, objects);
@@ -488,6 +491,8 @@ pub const Odb = struct {
             error.FileNotFound, error.NotDir => null,
             else => |e| return e,
         };
+        var registered = false;
+        errdefer if (!registered) if (pack_dir) |d| d.close(io);
         try odb.sources.append(odb.gpa, .{
             .dir = dir,
             .pack_dir = pack_dir,
@@ -496,6 +501,7 @@ pub const Odb = struct {
             .midx = null,
             .midx_packs = .empty,
         });
+        registered = true;
         try odb.scanPacks(io, odb.sources.items.len - 1);
         try odb.readAlternates(io, dir, depth);
     }
@@ -508,15 +514,21 @@ pub const Odb = struct {
             const line = (try parseAlternate(odb.gpa, raw_line)) orelse continue;
             defer odb.gpa.free(line);
             const alt = dir.openDir(io, line, .{ .iterate = true }) catch continue;
-            odb.addSource(io, alt, false, depth + 1) catch |err| switch (err) {
-                error.AlternatesTooDeep => {
+            const before = odb.sources.items.len;
+            odb.addSource(io, alt, false, depth + 1) catch |err| {
+                if (odb.sources.items.len == before) {
+                    // The source was never registered: this scope owns alt.
                     alt.close(io);
-                    return err;
-                },
-                else => {
-                    alt.close(io);
-                    continue;
-                },
+                } else {
+                    // Registration transferred the handles to the database,
+                    // including any deeper sources. Undo that whole suffix.
+                    for (odb.sources.items[before..]) |*source| odb.closeSource(io, source);
+                    odb.sources.items.len = before;
+                }
+                switch (err) {
+                    error.AlternatesTooDeep, error.OutOfMemory, error.Canceled => return err,
+                    else => continue,
+                }
             };
         }
     }
