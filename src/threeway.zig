@@ -16,8 +16,6 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const worktree = @import("worktree.zig");

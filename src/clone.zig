@@ -38,7 +38,6 @@ const worktree = @import("worktree.zig");
 const filter = @import("filter.zig");
 const url_mod = @import("url.zig");
 const program = @import("program.zig");
-const protocol = @import("protocol.zig");
 const transport = @import("transport.zig");
 const objectwalk = @import("objectwalk.zig");
 const credential = @import("credential.zig");

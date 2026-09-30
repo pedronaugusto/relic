@@ -19,7 +19,6 @@ const Io = std.Io;
 
 const hash = @import("hash.zig");
 const object = @import("object.zig");
-const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
 const signing_mod = @import("signing.zig");

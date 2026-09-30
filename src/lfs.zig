@@ -37,8 +37,6 @@ pub const lfslocks = @import("lfslocks.zig");
 pub const lfspush = @import("lfspush.zig");
 pub const lfshooks = @import("lfshooks.zig");
 pub const lfsssh = @import("lfsssh.zig");
-const mimesniff = @import("mimesniff.zig");
-const timetext = @import("timetext.zig");
 pub const netrc = @import("netrc.zig");
 
 const std = @import("std");

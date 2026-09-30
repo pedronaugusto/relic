@@ -797,8 +797,6 @@ const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
 const repo_mod = @import("repo.zig");
 const objectwalk = @import("objectwalk.zig");
-const pack_mod = @import("pack.zig");
-
 /// A conversation with `git upload-pack` run on this machine, in `dir`.
 fn uploadPack(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, dir: Io.Dir, v2: bool) !*Connection {
     return connection.Process.start(gpa, io, .{ .environ = env }, .{

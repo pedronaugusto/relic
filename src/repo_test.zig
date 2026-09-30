@@ -10,10 +10,6 @@ const object = @import("object.zig");
 const repo_mod = @import("repo.zig");
 const worktree = @import("worktree.zig");
 const worktrees = @import("worktrees.zig");
-const refs_mod = @import("refs.zig");
-const reflog = @import("reflog.zig");
-const index_mod = @import("index.zig");
-
 const Oid = hash.Oid;
 
 const fixture_who: object.Signature = .{

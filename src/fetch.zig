@@ -28,7 +28,6 @@ const fs = @import("fs.zig");
 const refs_mod = @import("refs.zig");
 const reflog = @import("reflog.zig");
 const repo_mod = @import("repo.zig");
-const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
 const revwalk = @import("revwalk.zig");
 const fetchpack = @import("fetchpack.zig");

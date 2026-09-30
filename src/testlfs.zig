@@ -995,13 +995,6 @@ pub fn removableCredentialHelper(gpa: Allocator, io: Io, dir: Io.Dir, name: []co
     return installTool(gpa, io, dir, name, "credential-removable", &.{ user, password });
 }
 
-/// A stand-in credential helper like `credentialHelper`, which notes every
-/// line it is given, sorted within each call, since git-lfs writes them in
-/// no fixed order.
-pub fn credentialHelperVerbatim(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, user: []const u8, password: []const u8) ![]u8 {
-    return installTool(gpa, io, dir, name, "credential-verbatim", &.{ user, password });
-}
-
 /// The verbatim helper with a real store's `erase` behavior.
 pub fn removableCredentialHelperVerbatim(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, user: []const u8, password: []const u8) ![]u8 {
     return installTool(gpa, io, dir, name, "credential-removable-verbatim", &.{ user, password });

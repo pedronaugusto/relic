@@ -8,7 +8,6 @@
 //! reads what git reads.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 
 const testgit = @import("testgit.zig");

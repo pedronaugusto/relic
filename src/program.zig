@@ -20,7 +20,6 @@
 //! which is every Unix's and which git for Windows installs.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;

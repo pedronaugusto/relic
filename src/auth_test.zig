@@ -24,7 +24,6 @@ const credential = @import("credential.zig");
 const fetch_mod = @import("fetch.zig");
 const program = @import("program.zig");
 const repo_mod = @import("repo.zig");
-const transport = @import("transport.zig");
 const userconfig = @import("userconfig.zig");
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");

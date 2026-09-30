@@ -26,7 +26,6 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const repo_mod = @import("repo.zig");
-const refs_mod = @import("refs.zig");
 const revwalk = @import("revwalk.zig");
 const remote_mod = @import("remote.zig");
 const ere = @import("ere.zig");

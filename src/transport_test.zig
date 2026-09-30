@@ -13,7 +13,6 @@ const Io = std.Io;
 const testing = std.testing;
 
 const config_mod = @import("config.zig");
-const url_mod = @import("url.zig");
 const credential = @import("credential.zig");
 const repo_mod = @import("repo.zig");
 const fetch_mod = @import("fetch.zig");

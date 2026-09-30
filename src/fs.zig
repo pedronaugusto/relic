@@ -13,7 +13,6 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
-const safepath = @import("safepath.zig");
 const platstat = @import("platstat.zig");
 
 /// How hard a write is pushed towards the disk.
@@ -408,7 +407,7 @@ pub const LockFile = struct {
         /// is git's choice: it is forbidden in a ref name and legal in a
         /// Windows file name, so it cannot collide with anything.
         write_pid: bool = true,
-        /// Whether to make the directory entry durable after the rename.
+        /// Reserved; `LockFile.commit` does not sync the directory entry.
         sync_directory: bool = sync_directories_default,
     };
 

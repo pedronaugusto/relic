@@ -15,7 +15,6 @@ pub const wildmatch = @import("wildmatch.zig");
 pub const convert = @import("convert.zig");
 pub const filter = @import("filter.zig");
 pub const dirscan = @import("dirscan.zig");
-const platstat = @import("platstat.zig");
 pub const safepath = @import("safepath.zig");
 
 const std = @import("std");
@@ -178,8 +177,7 @@ pub const AddOptions = struct {
     /// Whether to stage deletions for index entries whose file is gone.
     /// `git add -A` does; `git add .` without `-A` does not.
     stage_deletions: bool = true,
-    /// Whether to stop at the first unreadable file or to skip it, which is
-    /// what `--ignore-errors` asks for.
+    /// Reserved; the staging walk does not consult this setting.
     ignore_errors: bool = false,
     /// A path prefix to limit the walk to, `/`-separated. Empty walks the
     /// whole tree.

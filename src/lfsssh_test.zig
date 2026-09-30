@@ -11,7 +11,6 @@ const Io = std.Io;
 const testing = std.testing;
 
 const repo_mod = @import("repo.zig");
-const lfsapi = @import("lfsapi.zig");
 const lfstransfer = @import("lfstransfer.zig");
 const lfslocks = @import("lfslocks.zig");
 const lfspush = @import("lfspush.zig");

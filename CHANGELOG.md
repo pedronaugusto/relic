@@ -27,6 +27,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A test that holds the TLS client to the standard library's: it fails when
+  the compiler ships a different `std/crypto/tls/Client.zig` than the diff
+  was taken against, and when the copy is not std's file with the diff
+  applied.
 - `zig build test -Dtest-filter=…` selects tests by name for focused fixture checks.
 - `Odb.listAlternates`, `addAlternate` and `removeAlternate` read and update
   git's alternates file, including comments and quoted paths, with changes
@@ -43,9 +47,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Breaking:** the root is one module per concern, each holding the modules
-  that belong to it, in place of 106 flat modules. The fifteen at the top are
+  that belong to it, in place of 106 flat modules. The sixteen at the top are
   `repo`, `hash`, `object`, `odb`, `refs`, `config`, `index`, `worktree`,
-  `diff`, `revwalk`, `merge`, `commit`, `transport`, `submodule` and `lfs`;
+  `wildmatch`, `diff`, `revwalk`, `merge`, `commit`, `transport`, `submodule` and `lfs`;
   the rest moved under them:
 
   | Under | Modules |
@@ -82,6 +86,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The doc comments on `LockFile.Options.sync_directory` and
+  `AddOptions.ignore_errors` now say that those settings are not consulted.
+  Their behaviour is unchanged.
 - A conversation with a program (ssh, a helper) that is cancelled stops the
   program on `close` or `diagnose` rather than waiting for it to end, so a
   fetch or push whose remote never answers returns when its caller cancels.
@@ -137,13 +144,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   helper the concurrency tests start is given that environment too, and the
   gpg tests stop every daemon gpg started for their home rather than only the
   agent.
-
-### Added
-
-- A test that holds the TLS client to the standard library's: it fails when
-  the compiler ships a different `std/crypto/tls/Client.zig` than the diff
-  was taken against, and when the copy is not std's file with the diff
-  applied.
 
 ## [0.3.0] - 2026-09-25
 

@@ -17,10 +17,7 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const repo_mod = @import("repo.zig");
 const worktree = @import("worktree.zig");
-const index_mod = @import("index.zig");
 const submodule = @import("submodule.zig");
-const program = @import("program.zig");
-
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 const testing = std.testing;

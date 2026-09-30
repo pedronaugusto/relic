@@ -32,8 +32,6 @@ const ignore = @import("ignore.zig");
 const revwalk = @import("revwalk.zig");
 const local = @import("local.zig");
 const connection = @import("connection.zig");
-const config_mod = @import("config.zig");
-
 const Oid = hash.Oid;
 const Connection = connection.Connection;
 

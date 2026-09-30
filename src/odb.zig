@@ -13,8 +13,6 @@ pub const revindex = @import("revindex.zig");
 pub const commitgraph = @import("commitgraph.zig");
 pub const midx = @import("midx.zig");
 pub const abbrev = @import("abbrev.zig");
-const varint = @import("varint.zig");
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

@@ -690,7 +690,6 @@ fn updateTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remo
     try tx.commit(io, .{ .who = who, .message = "update by push", .policy = repo.reflogPolicy() });
 }
 
-const builtin = @import("builtin");
 const testing = std.testing;
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");

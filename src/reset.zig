@@ -17,11 +17,9 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const worktree = @import("worktree.zig");
 const convert = @import("convert.zig");
-const attributes = @import("attributes.zig");
 const fs = @import("fs.zig");
 const repo_mod = @import("repo.zig");
 const threeway = @import("threeway.zig");

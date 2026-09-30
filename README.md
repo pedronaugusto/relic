@@ -530,8 +530,8 @@ refresh and re-hash the whole working tree.
 
 Planned, in the order they are likely to come; none is promised for a date.
 
-- **Object reads through relic's own inflate.** Received packs already use
-  it; checkout and object reads still inflate through the standard library.
+- **Loose object reads through relic's own inflate.** Packed object reads
+  and received packs already use it; loose reads still use the standard library.
 - **`-s subtree`** as a strategy name, beside the `-X subtree` forms.
 
 ## Platforms

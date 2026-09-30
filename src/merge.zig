@@ -23,7 +23,6 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
-const textdiff = @import("textdiff.zig");
 const attributes = @import("attributes.zig");
 
 const Oid = hash.Oid;

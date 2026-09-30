@@ -37,7 +37,6 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const refs_mod = @import("refs.zig");
-const reflog = @import("reflog.zig");
 const repo_mod = @import("repo.zig");
 const worktree = @import("worktree.zig");
 const index_mod = @import("index.zig");

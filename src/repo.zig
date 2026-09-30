@@ -27,7 +27,6 @@ const worktree = @import("worktree.zig");
 const worktrees = @import("worktrees.zig");
 const filter = @import("filter.zig");
 const reftablestack = @import("reftablestack.zig");
-const safepath = @import("safepath.zig");
 const signing = @import("signing.zig");
 
 const Oid = hash.Oid;

@@ -20,13 +20,10 @@ const builtin = @import("builtin");
 
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
-const sha1dc = @import("sha1dc.zig");
 const odb_mod = @import("odb.zig");
-const index_mod = @import("index.zig");
 const worktree = @import("worktree.zig");
 const repo_mod = @import("repo.zig");
 const ignore = @import("ignore.zig");
-const attributes = @import("attributes.zig");
 const dirscan = @import("dirscan.zig");
 
 /// How many files the generated tree holds.

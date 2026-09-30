@@ -5,15 +5,11 @@
 
 const std = @import("std");
 const Io = std.Io;
-const builtin = @import("builtin");
-
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
 const fs = @import("fs.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
-const worktree = @import("worktree.zig");
-const repo_mod = @import("repo.zig");
 const reflog = @import("reflog.zig");
 
 const Oid = hash.Oid;

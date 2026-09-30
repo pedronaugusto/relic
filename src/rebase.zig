@@ -30,7 +30,6 @@ const Io = std.Io;
 
 const hash = @import("hash.zig");
 const object = @import("object.zig");
-const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
 const signing_mod = @import("signing.zig");
@@ -50,10 +49,7 @@ const patchid = @import("patchid.zig");
 const revwalk = @import("revwalk.zig");
 const diff = @import("diff.zig");
 const program = @import("program.zig");
-const config_mod = @import("config.zig");
 const repo_mod = @import("repo.zig");
-const refs_mod = @import("refs.zig");
-const reflog = @import("reflog.zig");
 const worktrees = @import("worktrees.zig");
 const rerere = @import("rerere.zig");
 

@@ -120,16 +120,6 @@ const Run = struct {
     /// Per conflict name, which variants have a preimage and a postimage.
     dirs: std.StringHashMapUnmanaged(std.ArrayList(u8)) = .empty,
 
-    fn cache(r: *Run) Error!Io.Dir {
-        return r.repo.common_dir.openDir(r.io, "rr-cache", .{}) catch |err| switch (err) {
-            error.FileNotFound => {
-                r.repo.common_dir.createDirPath(r.io, "rr-cache") catch {};
-                return r.repo.common_dir.openDir(r.io, "rr-cache", .{ .iterate = true }) catch |e| return e;
-            },
-            else => |e| return e,
-        };
-    }
-
     fn pathOf(r: *Run, id: Id, file: []const u8) Allocator.Error![]const u8 {
         if (id.variant <= 0) return std.fmt.allocPrint(r.arena, "rr-cache/{s}/{s}", .{ id.hex, file });
         return std.fmt.allocPrint(r.arena, "rr-cache/{s}/{s}.{d}", .{ id.hex, file, id.variant });
