@@ -752,3 +752,41 @@ test "reading a signing policy preserves allocation resource failures" {
     }, &diagnostic));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
 }
+
+test "discovery closes its git directory when the worktree handle cannot be opened" {
+    const Recorder = struct {
+        opened: ?Io.Dir = null,
+        closed: usize = 0,
+
+        fn openDir(context: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+            const r: *@This() = @ptrCast(@alignCast(context.?));
+            if (r.opened != null) return error.ProcessFdQuotaExceeded;
+            const opened = try dir.openDir(std.testing.io, path, options);
+            r.opened = opened;
+            return opened;
+        }
+
+        fn close(context: ?*anyopaque, dirs: []const Io.Dir) void {
+            const r: *@This() = @ptrCast(@alignCast(context.?));
+            for (dirs) |dir| {
+                std.debug.assert(dir.handle == r.opened.?.handle);
+                dir.close(std.testing.io);
+                r.opened = null;
+                r.closed += 1;
+            }
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, ".git", .default_dir);
+    var recorder: Recorder = .{};
+    // Clean up even while this test is proving an unfixed leak.
+    defer if (recorder.opened) |dir| dir.close(io);
+    var vtable = Io.failing.vtable.*;
+    vtable.dirOpenDir = Recorder.openDir;
+    vtable.dirClose = Recorder.close;
+    const tracked: Io = .{ .userdata = &recorder, .vtable = &vtable };
+    try std.testing.expectError(error.ProcessFdQuotaExceeded, repo_mod.Repository.open(std.testing.allocator, tracked, tmp.dir, .{ .discover = false }));
+    try std.testing.expectEqual(@as(usize, 1), recorder.closed);
+}

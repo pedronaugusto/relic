@@ -257,14 +257,16 @@ pub const Repository = struct {
     fn discover(gpa: Allocator, io: Io, start: Io.Dir, options: OpenOptions) Error!Discovered {
         var current = start;
         var current_owned = false;
+        defer if (current_owned) current.close(io);
         var depth: u8 = 0;
         while (true) : (depth += 1) {
             if (depth > max_discovery_depth) break;
 
             // A `.git` directory here?
             if (current.openDir(io, ".git", .{ .iterate = true })) |git_dir| {
+                errdefer git_dir.close(io);
                 const work = try current.openDir(io, ".", .{ .iterate = true });
-                if (current_owned) current.close(io);
+                errdefer work.close(io);
                 return try withCommon(gpa, io, git_dir, work);
             } else |_| {}
 
@@ -278,8 +280,9 @@ pub const Repository = struct {
                 else
                     current.openDir(io, target, .{ .iterate = true })) catch
                     return error.BrokenGitFile;
+                errdefer git_dir.close(io);
                 const work = try current.openDir(io, ".", .{ .iterate = true });
-                if (current_owned) current.close(io);
+                errdefer work.close(io);
                 return try withCommon(gpa, io, git_dir, work);
             }
 
@@ -287,7 +290,7 @@ pub const Repository = struct {
             // repository, or `.git` handed in directly.
             if (looksLikeGitDir(io, current)) {
                 const git_dir = try current.openDir(io, ".", .{ .iterate = true });
-                if (current_owned) current.close(io);
+                errdefer git_dir.close(io);
                 return try withCommon(gpa, io, git_dir, null);
             }
 
@@ -303,7 +306,6 @@ pub const Repository = struct {
             current = parent;
             current_owned = true;
         }
-        if (current_owned) current.close(io);
         return error.NotARepository;
     }
 

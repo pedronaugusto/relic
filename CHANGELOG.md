@@ -100,6 +100,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Repository discovery keeps each directory handle until it can transfer ownership, closing them when opening or reading the next part fails.
+
 - Reading `packed-refs` gives its bytes to the parser once, avoiding a double free when parsing or allocation stops.
 
 - A signing policy that is not a boolean is refused by name, and allocation failures while reading it remain resource failures; neither writes an unsigned object.
