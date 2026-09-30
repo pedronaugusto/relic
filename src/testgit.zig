@@ -314,18 +314,11 @@ pub fn isolate(map: *Environ.Map, home: []const u8) !void {
     try map.put("GIT_TERMINAL_PROMPT", "0");
 }
 
-/// A home for gpg of a test's own, at a path short enough for its sockets.
-///
-/// gpg-agent, and keyboxd and dirmngr where they run, put their sockets in
-/// `GNUPGHOME`, and a Unix socket's path is held to 104 bytes on Darwin and
-/// 108 on Linux. A home inside a test's temporary directory lives under the
-/// checkout, so from a checkout at a long path gpg could not bind its agent
-/// ("File name too long") and every OpenPGP test failed. On Unix this home
-/// is under `/tmp`; on Windows it is under the process's temporary directory.
-/// It has a random name, the permissions gpg asks for where available, and is removed by `deinit`,
-/// which is called once gpg's daemons for it have been told to stop.
-/// Nothing of the person's is in it: the tests that use it still put it in
-/// an environment `isolate` has emptied of theirs.
+/// A home for gpg of a test's own, under `.zig-cache/gpg` in the checkout.
+/// It has a random name, private permissions where available, and is removed
+/// by `deinit` after its daemons have stopped. Unix sockets need a short
+/// checkout path: their limit is 104 bytes on Darwin and 108 on Linux.
+/// The environment `isolate` supplies carries nothing of the person's.
 pub const GnupgHome = struct {
     gpa: Allocator,
     name: []u8,
@@ -336,11 +329,10 @@ pub const GnupgHome = struct {
         io.random(&random_bytes);
         var suffix: [16]u8 = undefined;
         _ = std.base64.url_safe_no_pad.Encoder.encode(&suffix, &random_bytes);
-        const root = if (builtin.os.tag == .windows) try std.testing.environ.getAlloc(gpa, "TEMP") else try gpa.dupe(u8, "/tmp");
+        try Io.Dir.cwd().createDirPath(io, ".zig-cache/gpg");
+        const root = try Io.Dir.cwd().realPathFileAlloc(io, ".zig-cache/gpg", gpa);
         defer gpa.free(root);
-        const name = try std.fmt.allocPrint(gpa, "relic-gpg-{s}", .{suffix});
-        defer gpa.free(name);
-        const home_path = try std.fs.path.join(gpa, &.{ root, name });
+        const home_path = try std.fs.path.join(gpa, &.{ root, &suffix });
         errdefer gpa.free(home_path);
         try Io.Dir.createDirAbsolute(io, home_path, if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700));
         return .{ .gpa = gpa, .name = home_path };
@@ -622,4 +614,25 @@ test "a repository variable in the environment cannot send the harness's git to 
     const git_dir = try repo.line(io, &.{ "rev-parse", "--absolute-git-dir" });
     defer gpa.free(git_dir);
     try std.testing.expect(!std.mem.eql(u8, git_dir, other_git));
+}
+
+test "GnuPG test homes stay under the checkout" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cache = try Io.Dir.cwd().realPathFileAlloc(io, ".zig-cache", gpa);
+    defer gpa.free(cache);
+    const Guard = struct {
+        threadlocal var requested: [Io.Dir.max_path_bytes]u8 = undefined;
+        threadlocal var len: usize = 0;
+        fn create(_: ?*anyopaque, _: Io.Dir, path: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
+            len = @min(path.len, requested.len);
+            @memcpy(requested[0..len], path[0..len]);
+            return error.AccessDenied;
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.dirCreateDir = Guard.create;
+    const guarded: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    try std.testing.expectError(error.AccessDenied, GnupgHome.init(gpa, guarded));
+    try std.testing.expect(std.mem.startsWith(u8, Guard.requested[0..Guard.len], cache));
 }

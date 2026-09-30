@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- GnuPG fixtures keep their private homes under the checkout's `.zig-cache` instead of writing into an external temporary directory.
 - An object source transfers its directory handles once on registration, rolls back failed alternate sources, and preserves allocation failure and cancellation.
 - A registered pack and its name have one owner, and allocation failure or cancellation while opening packs and their multi-pack index remains a resource failure.
 - Staging refuses a directory it cannot open instead of recording its tracked files as deleted.
