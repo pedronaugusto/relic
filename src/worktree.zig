@@ -371,7 +371,10 @@ const Walker = struct {
         const dir = if (dir_path.len == 0)
             w.wt
         else
-            w.wt.openDir(w.io, dir_path, .{ .iterate = true }) catch return;
+            w.wt.openDir(w.io, dir_path, .{ .iterate = true }) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => return,
+                else => return err,
+            };
         defer if (dir_path.len != 0) dir.close(w.io);
 
         if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt, dir_path, depth);
