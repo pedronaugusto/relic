@@ -981,3 +981,23 @@ test "a file whose stat went stale is compared as it would be added, under the a
 fn statOf(io: Io, dir: Io.Dir, path: []const u8) !fs.Stat {
     return (try fs.statAt(io, dir, path)).?.stat;
 }
+
+test "a staging scan owns each name when allocation stops" {
+    const io = std.testing.io;
+    var folder = std.testing.tmpDir(.{ .iterate = true });
+    defer folder.cleanup();
+    try folder.dir.writeFile(io, .{ .sub_path = "file", .data = "contents\n" });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingAllocationCase, .{folder.dir});
+}
+
+fn stagingAllocationCase(gpa: std.mem.Allocator, wt: Io.Dir) !void {
+    const io = std.testing.io;
+    var private = std.testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    try private.dir.createDirPath(io, "objects");
+    var db = try odb_mod.Odb.open(gpa, io, private.dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    var staged = index_mod.Index.initEmpty(gpa, .sha1);
+    defer staged.deinit();
+    _ = try worktree.addAll(gpa, io, wt, &staged, &db, .{});
+}

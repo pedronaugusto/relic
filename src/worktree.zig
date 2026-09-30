@@ -391,10 +391,9 @@ const Walker = struct {
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;
-            try entries.append(w.gpa, .{
-                .name = try w.gpa.dupe(u8, item.name),
-                .entry = item.entry,
-            });
+            const name = try w.gpa.dupe(u8, item.name);
+            errdefer w.gpa.free(name);
+            try entries.append(w.gpa, .{ .name = name, .entry = item.entry });
         }
         std.mem.sort(Found, entries.items, {}, lessThanFound);
 
