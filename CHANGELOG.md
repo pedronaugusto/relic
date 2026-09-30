@@ -100,6 +100,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Opening or refreshing refuses an invalid `extensions.worktreeConfig` boolean by name and preserves resource failures instead of ignoring the worktree file.
+
 - The smart HTTP doc comments describe relic's TLS client and its configured client certificates.
 
 - Commit and tag writes name refused `gpg.format` and `gpg.minTrustLevel` settings in caller-owned diagnostics.

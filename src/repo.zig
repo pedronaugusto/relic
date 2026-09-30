@@ -399,7 +399,7 @@ pub const Repository = struct {
         var config = try config_mod.Config.open(repo.gpa, io, sources, context);
         errdefer config.deinit();
         const format = try checkFormat(&config, diagnostic);
-        if (!(config.getBool("extensions.worktreeconfig", false) catch false)) return .{ .config = config, .format = format };
+        if (!try settingBool(&config, "extensions.worktreeConfig", diagnostic)) return .{ .config = config, .format = format };
         var with_worktree = sources;
         with_worktree.worktree = .{ .dir = repo.git_dir, .sub_path = "config.worktree" };
         const both = try config_mod.Config.open(repo.gpa, io, with_worktree, context);
@@ -1039,8 +1039,8 @@ pub const Repository = struct {
             .always => "",
             .never => return null,
             .config => configured: {
-                if (try repo.signingBool(primary, diagnostic)) break :configured primary;
-                if (target == .tag and try repo.signingBool("tag.forceSignAnnotated", diagnostic))
+                if (try settingBool(&repo.config, primary, diagnostic)) break :configured primary;
+                if (target == .tag and try settingBool(&repo.config, "tag.forceSignAnnotated", diagnostic))
                     break :configured "tag.forceSignAnnotated";
                 return null;
             },
@@ -1059,8 +1059,8 @@ pub const Repository = struct {
         };
     }
 
-    fn signingBool(repo: *const Repository, setting: []const u8, diagnostic: ?*Diagnostic) WriteError!bool {
-        return repo.config.getBool(setting, false) catch |err| {
+    fn settingBool(config: *const config_mod.Config, setting: []const u8, diagnostic: ?*Diagnostic) config_mod.ValueError!bool {
+        return config.getBool(setting, false) catch |err| {
             if (err == error.NotABoolean) try refuseSetting(diagnostic, setting);
             return err;
         };

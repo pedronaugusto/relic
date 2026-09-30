@@ -852,3 +852,32 @@ test "a signer configuration refusal names its setting in caller-owned output" {
         try repo.config.set(case[0], case[3]);
     }
 }
+
+test "a malformed worktree configuration policy is refused instead of disabling the file" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config.worktree", .data = "[user]\nname = worktree\n" });
+    const shared = "[core]\nrepositoryformatversion = 1\n[extensions]\nworktreeConfig = ";
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = shared ++ "maybe\n" });
+    try std.testing.expectError(error.NotABoolean, repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectEqualStrings("extensions.worktreeConfig", diagnostic.unsupported_setting);
+    try std.testing.expect(repo.config.get("user.name") == null);
+    if (repo_mod.Repository.open(gpa, io, tmp.dir, .{ .diagnostic = &diagnostic })) |opened| {
+        var unexpected = opened;
+        unexpected.deinit(io);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(error.NotABoolean, err);
+        try std.testing.expectEqualStrings("extensions.worktreeConfig", diagnostic.unsupported_setting);
+    }
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = shared ++ "true\n" });
+    try std.testing.expect(try repo.refreshConfig(io, &diagnostic));
+    try std.testing.expectEqualStrings("worktree", repo.config.get("user.name").?);
+    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+}
