@@ -100,6 +100,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Commit and tag writes name refused `gpg.format` and `gpg.minTrustLevel` settings in caller-owned diagnostics.
+
 - A `commondir` that cannot be opened returns the filesystem error instead of reading shared state from the worktree directory.
 
 - Listing loose refs preserves allocation and filesystem failures instead of returning an incomplete list or an older packed value.

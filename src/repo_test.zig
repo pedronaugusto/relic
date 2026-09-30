@@ -824,3 +824,31 @@ test "a commondir that cannot be opened is not replaced by the worktree director
         }
     }
 }
+
+test "a signer configuration refusal names its setting in caller-owned output" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    var environ: std.process.Environ.Map = .init(gpa);
+    defer environ.deinit();
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
+    const request: @import("signing.zig").Request = .{ .sign = .always, .programs = .{ .environ = &environ } };
+    inline for (.{
+        .{ "gpg.format", "new-format", error.UnknownSignatureFormat, "openpgp" },
+        .{ "gpg.minTrustLevel", "new-level", error.UnknownTrustLevel, "undefined" },
+    }) |case| {
+        try repo.config.set(case[0], case[1]);
+        try std.testing.expectError(case[2], repo.writeTagWith(io, .{
+            .target = hash.Hasher.object(.sha1, "tree", ""),
+            .target_type = .tree,
+            .name = "t",
+            .message = "m",
+        }, request, &diagnostic));
+        try std.testing.expectEqualStrings(case[0], diagnostic.unsupported_setting);
+        try repo.config.set(case[0], case[3]);
+    }
+}

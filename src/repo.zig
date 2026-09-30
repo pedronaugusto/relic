@@ -1049,7 +1049,14 @@ pub const Repository = struct {
             if (setting.len != 0) try refuseSetting(diagnostic, setting);
             return error.SigningRequiresPrograms;
         };
-        return try signing.Signer.init(repo.gpa, &repo.config, programs);
+        return signing.Signer.init(repo.gpa, &repo.config, programs) catch |err| {
+            switch (err) {
+                error.UnknownSignatureFormat => try refuseSetting(diagnostic, "gpg.format"),
+                error.UnknownTrustLevel => try refuseSetting(diagnostic, "gpg.minTrustLevel"),
+                else => {},
+            }
+            return err;
+        };
     }
 
     fn signingBool(repo: *const Repository, setting: []const u8, diagnostic: ?*Diagnostic) WriteError!bool {
