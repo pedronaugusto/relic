@@ -287,3 +287,35 @@ test "snapshot plain folders keep executable modes symlinks and SHA256 names" {
         try testing.expectEqualStrings("run", buf[0..len]);
     }
 }
+
+test "snapshot retains sparse tracked files absent from disk and captures present edits" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 34);
+    var source = try testgit.Repo.init(gpa, io, &.{});
+    defer source.deinit();
+    try source.writeFile(io, "included/file", "before\n");
+    try source.writeFile(io, "excluded/deep/file", "sparse history\n");
+    try source.exec(io, &.{ "add", "." });
+    try source.exec(io, &.{ "commit", "-qm", "base" });
+    try source.exec(io, &.{ "sparse-checkout", "init", "--cone", "--sparse-index" });
+    try source.exec(io, &.{ "sparse-checkout", "set", "included" });
+    try testing.expectError(error.FileNotFound, source.dir.access(io, "excluded/deep/file", .{}));
+    try source.writeFile(io, "included/file", "after\n");
+    var r = try repo.Repository.open(gpa, io, source.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
+    defer r.deinit(io);
+    const alternate = try sourceObjects(source.dir);
+    defer gpa.free(alternate);
+    var private = testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    var store = try snapshot.Store.open(gpa, io, private.dir, .{ .alternate = alternate });
+    defer store.deinit(io);
+    const captured = try store.capture(io, .{ .repository = &r }, .{});
+    try expectClosure(&store.db, captured.snapshot.tree);
+    try store.db.removeAlternate(io, alternate);
+    var dest = testing.tmpDir(.{ .iterate = true });
+    defer dest.cleanup();
+    _ = try store.restore(io, captured.snapshot, dest.dir, .{});
+    try expectFile(dest.dir, "included/file", "after\n");
+    try expectFile(dest.dir, "excluded/deep/file", "sparse history\n");
+}

@@ -19,6 +19,7 @@ const worktree = @import("worktree.zig");
 const diff_mod = @import("diff.zig");
 const filter = @import("filter.zig");
 const program = @import("program.zig");
+const fs = @import("fs.zig");
 
 pub const Error = worktree.Error || repo.Error || repo.Repository.LoadFiltersError ||
     diff_mod.Error || error{ BareRepository, ObjectFormatMismatch, TreeDepthExceeded };
@@ -142,7 +143,9 @@ pub const Store = struct {
         for (staged.entries.items) |*entry| {
             entry.stat = .none;
             entry.assume_valid = false;
-            entry.skip_worktree = false;
+            // A sparse path absent by policy still has its indexed content.
+            // A present one must be read, even when Git marked it skipped.
+            if (entry.skip_worktree and try fs.statAt(io, wt, entry.path) != null) entry.skip_worktree = false;
         }
         const outcome = try worktree.addAll(store.gpa, io, wt, &staged, &store.db, .{
             .rules = rules,

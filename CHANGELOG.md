@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Snapshots keep the indexed contents of sparse tracked paths absent by policy and read edits to skipped paths present on disk.
 - URL parsing and display share scheme boundaries, and drive prefixes and file authorities follow Git's platform rules.
 - GnuPG fixtures keep their private homes under the checkout's `.zig-cache` instead of writing into an external temporary directory.
 - An object source transfers its directory handles once on registration, rolls back failed alternate sources, and preserves allocation failure and cancellation.

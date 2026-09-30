@@ -127,7 +127,8 @@ _ = try store.restore(io, first, destination_dir, .{});
 The source index supplies tracked paths, including ignored ones. Capture
 reads their working files and untracked-not-ignored files under the source's
 ignore, attribute, line-ending and filter rules, without writing its index,
-refs or objects. Files are read afresh each time. Configured filter programs
+refs or objects. Present files are read afresh each time; sparse tracked
+paths absent by policy keep their indexed contents. Configured filter programs
 need `CaptureOptions.programs`; native LFS writes into the private store even
 when the source has its own `lfs.storage`. For a folder without a repository,
 pass `.{ .folder = folder_dir }`: its `.gitignore` and `.gitattributes` apply,
