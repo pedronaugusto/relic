@@ -92,6 +92,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Repository format decisions come from the shared configuration once, and an invalid version is refused rather than read as zero.
+
 - A configuration keeps one owner for copied command values when a later source allocation fails.
 
 - A config refresh clears an earlier refused setting and names a changed object format itself.

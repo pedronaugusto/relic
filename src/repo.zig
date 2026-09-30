@@ -371,23 +371,18 @@ pub const Repository = struct {
         }, .{ .git_dir = git_dir_path, .branch = if (branch) |b| b["refs/heads/".len..] else null, .home = options.home }, options.diagnostic);
         repo.config = read.config;
         errdefer repo.config.deinit();
-        repo.kind = read.kind;
+        repo.kind = read.format.kind;
 
         repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, repo.kind, options.odb);
         errdefer repo.odb.deinit(io);
         repo.odb.shallow = try shallow.read(gpa, io, repo.common_dir, repo.kind);
         repo.refs = .init(gpa, repo.kind, repo.git_dir, repo.common_dir);
-        const version = repo.config.getInt("core.repositoryformatversion", 0) catch 0;
-        if (version == 1) {
-            if (repo.config.get("extensions.refstorage")) |text| {
-                if (std.ascii.eqlIgnoreCase(text, "reftable")) {
-                    repo.refs.format = .reftable;
-                    repo.refs.reftable_options = try repo.reftableOptions();
-                    const cache = try gpa.create(reftablestack.Cache);
-                    cache.* = .init(gpa);
-                    repo.refs.reftable_cache = cache;
-                }
-            }
+        repo.refs.format = read.format.ref_storage;
+        if (repo.refs.format == .reftable) {
+            repo.refs.reftable_options = try repo.reftableOptions();
+            const cache = try gpa.create(reftablestack.Cache);
+            cache.* = .init(gpa);
+            repo.refs.reftable_cache = cache;
         }
         return repo;
     }
@@ -396,31 +391,43 @@ pub const Repository = struct {
     /// they name; then, when `extensions.worktreeConfig` is on, read them
     /// again with `config.worktree` after the local file, which exists only
     /// when the extension says so and has no say in the format.
-    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, diagnostic: ?*OpenDiagnostic) Error!struct { config: config_mod.Config, kind: hash.Kind } {
+    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, diagnostic: ?*OpenDiagnostic) Error!struct { config: config_mod.Config, format: RepositoryFormat } {
         var config = try config_mod.Config.open(repo.gpa, io, sources, context);
         errdefer config.deinit();
-        const kind = try repo.checkFormat(&config, diagnostic);
-        if (!(config.getBool("extensions.worktreeconfig", false) catch false)) return .{ .config = config, .kind = kind };
+        const format = try repo.checkFormat(&config, diagnostic);
+        if (!(config.getBool("extensions.worktreeconfig", false) catch false)) return .{ .config = config, .format = format };
         var with_worktree = sources;
         with_worktree.worktree = .{ .dir = repo.git_dir, .sub_path = "config.worktree" };
         const both = try config_mod.Config.open(repo.gpa, io, with_worktree, context);
         config.deinit();
-        return .{ .config = both, .kind = kind };
+        return .{ .config = both, .format = format };
     }
 
-    /// The format version and the extensions `config` names, checked, and
-    /// the hash it says object names are written with.
-    fn checkFormat(repo: *Repository, config: *const config_mod.Config, diagnostic: ?*OpenDiagnostic) Error!hash.Kind {
-        const version = config.getInt("core.repositoryformatversion", 0) catch 0;
+    const RepositoryFormat = struct {
+        kind: hash.Kind,
+        ref_storage: refs_mod.Format,
+    };
+
+    /// Decide the repository's format once, from the configuration shared
+    /// by its worktrees. A worktree's settings have no say in this decision.
+    fn checkFormat(repo: *Repository, config: *const config_mod.Config, diagnostic: ?*OpenDiagnostic) Error!RepositoryFormat {
+        const version = try config.getInt("core.repositoryformatversion", 0);
         if (version < 0 or version > 1) {
             try repo.refuseSetting(diagnostic, "core.repositoryFormatVersion");
             return error.UnsupportedRepositoryVersion;
         }
         if (version == 1) try repo.checkExtensions(config, diagnostic);
-        const text = config.get("extensions.objectformat") orelse return .sha1;
-        return hash.Kind.parse(text) catch {
-            try repo.refuseSetting(diagnostic, "extensions.objectFormat");
-            return error.UnknownObjectFormat;
+        const kind = if (config.get("extensions.objectformat")) |text|
+            hash.Kind.parse(text) catch {
+                try repo.refuseSetting(diagnostic, "extensions.objectFormat");
+                return error.UnknownObjectFormat;
+            }
+        else
+            hash.Kind.sha1;
+        const storage = config.get("extensions.refstorage") orelse "files";
+        return .{
+            .kind = kind,
+            .ref_storage = if (version == 1 and std.ascii.eqlIgnoreCase(storage, "reftable")) .reftable else .files,
         };
     }
 
@@ -453,7 +460,7 @@ pub const Repository = struct {
         context.branch = short;
         var fresh = try repo.readConfig(io, sources, context, null);
         errdefer fresh.config.deinit();
-        if (fresh.kind != repo.kind) {
+        if (fresh.format.kind != repo.kind) {
             repo.setUnsupported("extensions.objectFormat");
             return error.ObjectFormatChanged;
         }

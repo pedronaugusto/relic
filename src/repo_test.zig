@@ -459,3 +459,44 @@ test "a config refresh keeps only its own refused setting" {
     try std.testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io));
     try std.testing.expectEqualStrings("extensions.objectFormat", repo.unsupportedSetting());
 }
+
+test "opening uses the format validated before worktree settings are read" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    {
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+        repo.deinit(io);
+    }
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".git/config",
+        .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\nworktreeConfig = true\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".git/config.worktree",
+        .data = "[core]\nrepositoryformatversion = 0\n[extensions]\nrefStorage = files\n",
+    });
+    var opened = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
+    defer opened.deinit(io);
+    try std.testing.expectEqual(@import("refs.zig").Format.reftable, opened.refs.format);
+}
+
+test "opening refuses a repository version that is not an integer" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    {
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+        repo.deinit(io);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = ".git/config", .data = "[core]\nrepositoryformatversion = invalid\n" });
+    if (repo_mod.Repository.open(gpa, io, tmp.dir, .{})) |repository| {
+        var opened = repository;
+        opened.deinit(io);
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try std.testing.expectEqual(error.NotAnInteger, err);
+    }
+}
