@@ -86,6 +86,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A cache-tree rebuild that stops on a staged conflict frees the directory
+  node it took out of the tree, which it leaked.
+- A corrupt cache tree that fails below a directory frees that directory's
+  name once, not twice; an index that carries `TREE` or `REUC` twice keeps
+  the later one and frees the first.
 - The doc comments on `LockFile.Options.sync_directory` and
   `AddOptions.ignore_errors` now say that those settings are not consulted.
   Their behaviour is unchanged.

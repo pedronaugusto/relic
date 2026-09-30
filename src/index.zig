@@ -240,8 +240,7 @@ pub const CacheTree = struct {
 
     fn parseNode(gpa: Allocator, kind: Kind, data: []const u8, offset: *usize) ReadError!Node {
         const nul = std.mem.indexOfScalarPos(u8, data, offset.*, 0) orelse return error.CorruptCacheTree;
-        const name = try gpa.dupe(u8, data[offset.*..nul]);
-        errdefer gpa.free(name);
+        const raw_name = data[offset.*..nul];
         offset.* = nul + 1;
 
         const space = std.mem.indexOfScalarPos(u8, data, offset.*, ' ') orelse return error.CorruptCacheTree;
@@ -260,8 +259,9 @@ pub const CacheTree = struct {
             offset.* += raw_len;
         }
 
+        // the node owns its name from here, and its errdefer frees both
         var node: Node = .{
-            .name = name,
+            .name = try gpa.dupe(u8, raw_name),
             .entry_count = entry_count,
             .oid = oid,
             .children = .empty,
@@ -383,6 +383,10 @@ pub const CacheTree = struct {
                     .oid = null,
                     .children = .empty,
                 };
+                // taken out of the tree, the node is this walk's until it
+                // is kept or dropped, and an error on the way frees it
+                var held = true;
+                errdefer if (held) child_node.deinit(t.gpa);
                 const child_prefix = entry.path[0 .. prefix.len + slash + 1];
                 const child_start = consumed.*;
                 const child_oid = try t.rebuildNode(io, &child_node, child_prefix, entries, consumed, db);
@@ -390,10 +394,12 @@ pub const CacheTree = struct {
                 child_node.oid = child_oid;
                 // An empty directory produces no tree entry and no node.
                 if (child_node.entry_count == 0) {
+                    held = false;
                     child_node.deinit(t.gpa);
                 } else {
                     try builder.add(.tree, dir_name, child_oid);
                     try kept.append(t.gpa, child_node);
+                    held = false;
                 }
             } else {
                 // A staged conflict has no single tree to write.
@@ -723,10 +729,15 @@ pub const Index = struct {
             const data = body[offset..][0..size];
             offset += size;
 
+            // an extension given twice: the later one stands, as in git
             if (std.mem.eql(u8, &signature, "TREE")) {
-                index.cache_tree = try CacheTree.parse(gpa, kind, data);
+                const tree = try CacheTree.parse(gpa, kind, data);
+                if (index.cache_tree) |*t| t.deinit();
+                index.cache_tree = tree;
             } else if (std.mem.eql(u8, &signature, "REUC")) {
-                index.resolve_undo = try ResolveUndo.parse(gpa, kind, data);
+                const undo = try ResolveUndo.parse(gpa, kind, data);
+                if (index.resolve_undo) |*r| r.deinit();
+                index.resolve_undo = undo;
             } else if (std.mem.eql(u8, &signature, "link")) {
                 try index.parseLink(gpa, data);
             } else if (std.mem.eql(u8, &signature, "EOIE")) {
@@ -1528,6 +1539,53 @@ test "a valid cache-tree root must cover every index entry" {
         error.CorruptCacheTree,
         tree.rebuild(std.testing.io, &entries, &unused_db),
     );
+}
+
+test "a rebuild that meets a conflict frees the directory it took out of the tree" {
+    const gpa = std.testing.allocator;
+    var tree = try CacheTree.empty(gpa);
+    defer tree.deinit();
+    // the tree as a read left it, a directory holding a directory, with
+    // the outer one invalidated by a change staged in it
+    var sub: CacheTree.Node = .{ .name = try gpa.dupe(u8, "sub"), .entry_count = 1, .oid = Oid.zero(.sha1), .children = .empty };
+    errdefer sub.deinit(gpa);
+    var dir: CacheTree.Node = .{ .name = try gpa.dupe(u8, "dir"), .entry_count = -1, .oid = null, .children = .empty };
+    errdefer dir.deinit(gpa);
+    try dir.children.append(gpa, sub);
+    try tree.root.children.append(gpa, dir);
+
+    const entries = [_]Entry{.{ .path = "dir/a.txt", .oid = Oid.zero(.sha1), .mode = .file, .stage = 2 }};
+    var db: odb_mod.Odb = undefined;
+    db.kind = .sha1;
+    try std.testing.expectError(error.CorruptCacheTree, tree.rebuild(std.testing.io, &entries, &db));
+}
+
+test "a cache tree cut short after a directory's name frees it once" {
+    const gpa = std.testing.allocator;
+    // the root names one subtree, which is missing
+    try std.testing.expectError(error.CorruptCacheTree, CacheTree.parse(gpa, .sha1, "\x00-1 1\n"));
+    // the subtree is read whole but names a child of its own that is missing
+    try std.testing.expectError(error.CorruptCacheTree, CacheTree.parse(gpa, .sha1, "\x00-1 1\ndir\x00-1 1\n"));
+}
+
+test "an index that gives its cache tree twice keeps the later one and leaks neither" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    try index.add(.{ .path = "dir/a.txt", .oid = Oid.zero(.sha1), .mode = .file });
+    const tree = try index.cacheTree();
+    try tree.root.children.append(gpa, .{ .name = try gpa.dupe(u8, "dir"), .entry_count = -1, .oid = null, .children = .empty });
+    const bytes = try index.toBytes(.{ .skip_hash = true });
+    defer gpa.free(bytes);
+    // the TREE extension, repeated just before the trailer
+    const at = std.mem.find(u8, bytes, "TREE").?;
+    const len = 8 + std.mem.readInt(u32, bytes[at + 4 ..][0..4], .big);
+    const trailer = bytes.len - Kind.sha1.rawLen();
+    const twice = try std.mem.concat(gpa, u8, &.{ bytes[0..trailer], bytes[at..][0..len], bytes[trailer..] });
+    defer gpa.free(twice);
+    var back = try Index.parse(gpa, .sha1, twice);
+    defer back.deinit();
+    try std.testing.expect(back.cache_tree != null);
 }
 
 test "the trailer index.skipHash asks for is zeros, and reads back as skipped" {
