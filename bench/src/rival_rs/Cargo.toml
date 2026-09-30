@@ -1,0 +1,32 @@
+[package]
+name = "rival_rs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "gix_bench"
+path = "src/bin/gix_bench.rs"
+
+[[bin]]
+name = "git2_bench"
+path = "src/bin/git2_bench.rs"
+
+[dependencies]
+# Default features: what a normal caller gets — max-performance-safe,
+# basic (blob-diff, revision, index), extras (status, dirwalk, ...), sha1.
+gix = "=0.87.1"
+git2 = "=0.21.0"
+
+# Pack writing is not in the `gix` hub crate: `gix_pack::data::output` is
+# gated behind a feature `gix` does not enable, so the pack-write workload
+# goes through gix-pack directly.
+gix-pack = { version = "=0.74.2", default-features = false, features = ["generate", "parallel", "sha1"] }
+gix-features = { version = "=0.49.1", features = ["progress", "parallel"] }
+gix-odb = "=0.84.0"
+gix-zlib = "=0.1.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

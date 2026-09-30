@@ -1,0 +1,10 @@
+.{
+    .name = .relic_transport_bench,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x57c62039300f06f9,
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+    .dependencies = .{
+        .relic = .{ .path = "../.." },
+    },
+}
