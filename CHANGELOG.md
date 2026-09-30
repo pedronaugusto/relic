@@ -92,6 +92,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A config refresh clears an earlier refused setting and names a changed object format itself.
+
 - Allocation, cancellation, I/O and size-limit failures stay distinct from corrupt objects, malformed settings and bad revisions.
 
 - A cache-tree rebuild that stops on a staged conflict frees the directory

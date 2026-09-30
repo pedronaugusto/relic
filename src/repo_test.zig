@@ -439,3 +439,23 @@ test "worktree remove takes the tree and the admin directory with it" {
     defer gpa.free(listed);
     try std.testing.expect(std.mem.indexOf(u8, listed, "trees/two") == null);
 }
+
+test "a config refresh keeps only its own refused setting" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nsomethingNew = true\n" });
+    try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io));
+    try std.testing.expectEqualStrings("somethingnew", repo.unsupportedSetting());
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 0\n" });
+    try std.testing.expect(try repo.refreshConfig(io));
+    try std.testing.expectEqualStrings("", repo.unsupportedSetting());
+    try std.testing.expect(!try repo.refreshConfig(io));
+    try std.testing.expectEqualStrings("", repo.unsupportedSetting());
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectformat = sha256\n" });
+    try std.testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io));
+    try std.testing.expectEqualStrings("extensions.objectFormat", repo.unsupportedSetting());
+}

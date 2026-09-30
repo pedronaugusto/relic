@@ -437,6 +437,7 @@ pub const Repository = struct {
     /// files hold. A configuration that no longer passes `open`'s checks is
     /// that check's error, and the one held before is kept.
     pub fn refreshConfig(repo: *Repository, io: Io) Error!bool {
+        repo.unsupported_len = 0;
         // `onbranch:` makes the branch `HEAD` is on part of what was read.
         const branch = try currentBranch(repo.gpa, io, repo.git_dir);
         defer if (branch) |b| repo.gpa.free(b);
@@ -452,7 +453,10 @@ pub const Repository = struct {
         context.branch = short;
         var fresh = try repo.readConfig(io, sources, context, null);
         errdefer fresh.config.deinit();
-        if (fresh.kind != repo.kind) return error.ObjectFormatChanged;
+        if (fresh.kind != repo.kind) {
+            repo.setUnsupported("extensions.objectFormat");
+            return error.ObjectFormatChanged;
+        }
         repo.config.deinit();
         repo.config = fresh.config;
         return true;
@@ -534,7 +538,8 @@ pub const Repository = struct {
         @memcpy(repo.unsupported[0..repo.unsupported_len], text[0..repo.unsupported_len]);
     }
 
-    /// The setting that was refused, or an empty string.
+    /// The setting the last format check or signing request refused, or an
+    /// empty string when that check succeeded.
     pub fn unsupportedSetting(repo: *const Repository) []const u8 {
         return repo.unsupported[0..repo.unsupported_len];
     }
