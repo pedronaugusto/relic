@@ -630,3 +630,32 @@ test "a signing refusal names the tag setting that required it" {
     }, &diagnostic));
     try std.testing.expectEqualStrings("tag.forceSignAnnotated", diagnostic.unsupported_setting);
 }
+
+test "a refresh updates reftable write settings together with the configuration" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = .reftable });
+    defer repo.deinit(io);
+    const cache = repo.refs.reftable_cache;
+    const prefix = "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[reftable]\n";
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = prefix ++
+        "blockSize = 8192\nrestartInterval = 32\nindexObjects = false\ngeometricFactor = 4\nlockTimeout = 0\n" });
+    try std.testing.expect(try repo.refreshConfig(io, null));
+    const options = repo.refs.reftable_options;
+    try std.testing.expectEqual(@as(u32, 8192), options.write.block_size);
+    try std.testing.expectEqual(@as(u16, 32), options.write.restart_interval);
+    try std.testing.expect(!options.write.index_objects);
+    try std.testing.expectEqual(@as(u8, 4), options.geometric_factor);
+    try std.testing.expectEqual(@import("fs.zig").OnContention.fail, options.lock);
+    try std.testing.expectEqual(cache, repo.refs.reftable_cache);
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = prefix ++ "blockSize = invalid\n" });
+    try std.testing.expectError(error.NotAnInteger, repo.refreshConfig(io, null));
+    try std.testing.expectEqualDeep(options, repo.refs.reftable_options);
+    try std.testing.expectEqualStrings("8192", repo.config.get("reftable.blocksize").?);
+    try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = prefix ++ "lockTimeout = 200\n" });
+    try std.testing.expect(try repo.refreshConfig(io, null));
+    try std.testing.expectEqualDeep(@import("reftablestack.zig").Options{ .lock = .{ .wait_ms = 200 } }, repo.refs.reftable_options);
+    try std.testing.expectEqual(cache, repo.refs.reftable_cache);
+}

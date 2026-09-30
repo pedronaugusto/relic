@@ -382,7 +382,7 @@ pub const Repository = struct {
         repo.refs = .init(gpa, repo.kind, repo.git_dir, repo.common_dir);
         repo.refs.format = read.format.ref_storage;
         if (repo.refs.format == .reftable) {
-            repo.refs.reftable_options = try repo.reftableOptions();
+            repo.refs.reftable_options = try reftableOptions(&repo.config);
             const cache = try gpa.create(reftablestack.Cache);
             cache.* = .init(gpa);
             repo.refs.reftable_cache = cache;
@@ -473,8 +473,13 @@ pub const Repository = struct {
             try refuseSetting(diagnostic, "extensions.refStorage");
             return error.RefStorageChanged;
         }
+        const ref_options = if (repo.refs.format == .reftable)
+            try reftableOptions(&fresh.config)
+        else
+            repo.refs.reftable_options;
         repo.config.deinit();
         repo.config = fresh.config;
+        repo.refs.reftable_options = ref_options;
         return true;
     }
 
@@ -523,18 +528,18 @@ pub const Repository = struct {
     }
 
     /// The `reftable.*` settings, for the stack's writes and compactions.
-    fn reftableOptions(repo: *const Repository) Error!reftablestack.Options {
+    fn reftableOptions(config: *const config_mod.Config) Error!reftablestack.Options {
         var options: reftablestack.Options = .{};
-        const block_size = try repo.config.getInt("reftable.blocksize", options.write.block_size);
+        const block_size = try config.getInt("reftable.blocksize", options.write.block_size);
         if (block_size > 0 and block_size < (1 << 24)) options.write.block_size = @intCast(block_size);
-        const restart = try repo.config.getInt("reftable.restartinterval", options.write.restart_interval);
+        const restart = try config.getInt("reftable.restartinterval", options.write.restart_interval);
         if (restart > 0 and restart <= std.math.maxInt(u16)) options.write.restart_interval = @intCast(restart);
-        options.write.index_objects = try repo.config.getBool("reftable.indexobjects", true);
-        const factor = try repo.config.getInt("reftable.geometricfactor", options.geometric_factor);
+        options.write.index_objects = try config.getBool("reftable.indexobjects", true);
+        const factor = try config.getInt("reftable.geometricfactor", options.geometric_factor);
         if (factor > 0 and factor <= std.math.maxInt(u8)) options.geometric_factor = @intCast(factor);
         // git's reading: zero means try once, a negative number means wait
         // for ever, which here is as long as a wait can be written down.
-        const timeout = try repo.config.getInt("reftable.locktimeout", 100);
+        const timeout = try config.getInt("reftable.locktimeout", 100);
         options.lock = if (timeout == 0)
             .fail
         else if (timeout < 0)

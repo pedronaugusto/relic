@@ -100,6 +100,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A config refresh updates the ref store's `reftable.*` settings together with the configuration, keeping both when the settings are invalid.
+
 - A tag signing refusal names `tag.forceSignAnnotated` when that is what requires signing.
 
 - Repository format decisions come from the shared configuration once, and an invalid version is refused rather than read as zero.
