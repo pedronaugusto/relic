@@ -39,16 +39,6 @@ pub const Sync = enum {
     pub const default: Sync = .none;
 };
 
-/// On macOS `fsync(2)` pushes bytes to the device and returns; only
-/// `fcntl(F_FULLFSYNC)` flushes the drive's own write cache, and it costs
-/// about thirty times as much per call. `std.Io.File.sync` is plain `fsync`,
-/// which is exactly what git's own macOS default (`fsyncMethod =
-/// writeout-only`) asks for — so this package is right by inheritance rather
-/// than by choice. Do not "fix" it into `F_FULLFSYNC` per file: that makes
-/// every write thirty times slower for a guarantee the batch barrier already
-/// gives once per batch.
-pub const macos_fsync_is_writeout_only = builtin.os.tag == .macos;
-
 /// How fine a modification time a filesystem records.
 ///
 /// The old assumption here was that a nanosecond reported is a nanosecond

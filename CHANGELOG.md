@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- `repo.fs.macos_fsync_is_writeout_only`, a constant nothing read.
+
 ### Performance
 
 - A racily clean index entry is smudged on the way out only when its file
