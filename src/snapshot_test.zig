@@ -43,8 +43,6 @@ test "snapshot owns unchanged nested history before a rewrite and prune" {
     try source.exec(io, &.{ "repack", "-ad" });
     const old_blob = try source.line(io, &.{ "rev-parse", "HEAD:unchanged/deep/file" });
     defer gpa.free(old_blob);
-    const alternate = try sourceObjects(source.dir);
-    defer gpa.free(alternate);
     var private = testing.tmpDir(.{ .iterate = true });
     defer private.cleanup();
     var r = try repo.Repository.open(gpa, io, source.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
@@ -52,7 +50,7 @@ test "snapshot owns unchanged nested history before a rewrite and prune" {
     var first: snapshot.Snapshot = undefined;
     var second: snapshot.Snapshot = undefined;
     {
-        var store = try snapshot.Store.open(gpa, io, private.dir, .{ .alternate = alternate });
+        var store = try snapshot.Store.open(gpa, io, private.dir, .{});
         defer store.deinit(io);
         first = (try store.capture(io, .{ .repository = &r }, .{})).snapshot;
         try source.writeFile(io, "changed", "after\n");
@@ -73,11 +71,11 @@ test "snapshot owns unchanged nested history before a rewrite and prune" {
     try testing.expectError(error.GitFailed, source.exec(io, &.{ "cat-file", "-e", old_blob }));
     source.report_failures = true;
 
-    // Reopening discards every in-memory shortcut; removing the alternate
-    // proves restore and diff use the private store alone.
+    // Reopening discards every in-memory shortcut; only the private
+    // source is registered, so restore and diff have no alternate reader.
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
-    try store.db.removeAlternate(io, alternate);
+    try testing.expectEqual(@as(usize, 1), store.db.sources.items.len);
     try expectClosure(&store.db, first.tree);
     try expectClosure(&store.db, second.tree);
     var dest = testing.tmpDir(.{ .iterate = true });
@@ -119,11 +117,9 @@ test "snapshot follows repository membership and current ignore and attribute ru
     defer gpa.free(counts_before);
     var r = try repo.Repository.open(gpa, io, source.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
     defer r.deinit(io);
-    const alternate = try sourceObjects(source.dir);
-    defer gpa.free(alternate);
     var private = testing.tmpDir(.{ .iterate = true });
     defer private.cleanup();
-    var store = try snapshot.Store.open(gpa, io, private.dir, .{ .alternate = alternate });
+    var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
     const captured = try store.capture(io, .{ .repository = &r }, .{});
     try expectClosure(&store.db, captured.snapshot.tree);
@@ -200,12 +196,10 @@ test "snapshot allocation failures leave no published result or lost owner" {
     try source.exec(io, &.{ "add", "." });
     try source.exec(io, &.{ "commit", "-qm", "base" });
     try source.exec(io, &.{ "repack", "-ad" });
-    const alternate = try sourceObjects(source.dir);
-    defer gpa.free(alternate);
-    try testing.checkAllAllocationFailures(gpa, allocationCase, .{ source.dir, alternate });
+    try testing.checkAllAllocationFailures(gpa, allocationCase, .{source.dir});
 }
 
-fn allocationCase(gpa: std.mem.Allocator, source: Io.Dir, alternate: []const u8) !void {
+fn allocationCase(gpa: std.mem.Allocator, source: Io.Dir) !void {
     const io = testing.io;
     var private = testing.tmpDir(.{ .iterate = true });
     defer private.cleanup();
@@ -213,7 +207,7 @@ fn allocationCase(gpa: std.mem.Allocator, source: Io.Dir, alternate: []const u8)
     defer dest.cleanup();
     var r = try repo.Repository.open(gpa, io, source, .{ .odb = .{ .probe_timestamp_resolution = false } });
     defer r.deinit(io);
-    var store = try snapshot.Store.open(gpa, io, private.dir, .{ .alternate = alternate });
+    var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
     const captured = try store.capture(io, .{ .repository = &r }, .{});
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
@@ -304,18 +298,110 @@ test "snapshot retains sparse tracked files absent from disk and captures presen
     try source.writeFile(io, "included/file", "after\n");
     var r = try repo.Repository.open(gpa, io, source.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
     defer r.deinit(io);
-    const alternate = try sourceObjects(source.dir);
-    defer gpa.free(alternate);
     var private = testing.tmpDir(.{ .iterate = true });
     defer private.cleanup();
-    var store = try snapshot.Store.open(gpa, io, private.dir, .{ .alternate = alternate });
+    var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
     const captured = try store.capture(io, .{ .repository = &r }, .{});
     try expectClosure(&store.db, captured.snapshot.tree);
-    try store.db.removeAlternate(io, alternate);
+    try testing.expectEqual(@as(usize, 1), store.db.sources.items.len);
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
     try expectFile(dest.dir, "included/file", "after\n");
     try expectFile(dest.dir, "excluded/deep/file", "sparse history\n");
+}
+
+test "snapshot reopening does not depend on the source alternate metadata" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var source = try testgit.Repo.init(gpa, io, &.{});
+    defer source.deinit();
+    try source.writeFile(io, "file", "owned\n");
+    try source.exec(io, &.{ "add", "." });
+    try source.exec(io, &.{ "commit", "-qm", "base" });
+    var r = try repo.Repository.open(gpa, io, source.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
+    defer r.deinit(io);
+    var private = testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    try private.dir.createDirPath(io, "objects/info");
+    // A legacy private store may still name the source as an alternate.
+    // Opening a snapshot store must leave this unused metadata alone.
+    const alternate = try sourceObjects(source.dir);
+    defer gpa.free(alternate);
+    try private.dir.writeFile(io, .{ .sub_path = "objects/info/alternates", .data = alternate });
+    const saved = blk: {
+        var store = try snapshot.Store.open(gpa, io, private.dir, .{});
+        defer store.deinit(io);
+        break :blk (try store.capture(io, .{ .repository = &r }, .{})).snapshot;
+    };
+    // The source's alternates now contain a cycle. Its metadata must not
+    // gate opening the private objects of a completed snapshot.
+    try source.writeFile(io, ".git/objects/info/alternates", ".\n");
+    var store = try snapshot.Store.open(gpa, io, private.dir, .{});
+    defer store.deinit(io);
+    try expectClosure(&store.db, saved.tree);
+    var dest = testing.tmpDir(.{ .iterate = true });
+    defer dest.cleanup();
+    _ = try store.restore(io, saved, dest.dir, .{});
+    try expectFile(dest.dir, "file", "owned\n");
+}
+
+test "a live snapshot store reads its own objects after source packs are damaged" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var source = try testgit.Repo.init(gpa, io, &.{});
+    defer source.deinit();
+    try source.writeFile(io, "file", "owned\n");
+    // Larger than the pack reader's buffer: a restore cannot happen to
+    // succeed because capture left the source's entire pack in memory.
+    const uncached = try gpa.alloc(u8, 128 * 1024);
+    defer gpa.free(uncached);
+    var random = std.Random.DefaultPrng.init(0);
+    random.random().bytes(uncached);
+    try source.writeFile(io, "uncached", uncached);
+    try source.exec(io, &.{ "add", "." });
+    try source.exec(io, &.{ "commit", "-qm", "base" });
+    try source.exec(io, &.{ "repack", "-ad" });
+    // Git makes its packs read-only. Replace the fixture pack with an
+    // identical writable file before opening it, on every platform.
+    {
+        const packs = try source.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+        defer packs.close(io);
+        var names = packs.iterate();
+        var replaced = false;
+        while (try names.next(io)) |entry| {
+            if (!std.mem.endsWith(u8, entry.name, ".pack")) continue;
+            const bytes = try packs.readFileAlloc(io, entry.name, gpa, .limited(1 << 20));
+            defer gpa.free(bytes);
+            try packs.deleteFile(io, entry.name);
+            try packs.writeFile(io, .{ .sub_path = entry.name, .data = bytes });
+            replaced = true;
+            break;
+        }
+        try testing.expect(replaced);
+    }
+    var r = try repo.Repository.open(gpa, io, source.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
+    defer r.deinit(io);
+    var private = testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    try private.dir.createDirPath(io, "objects/info");
+    const alternate = try sourceObjects(source.dir);
+    defer gpa.free(alternate);
+    try private.dir.writeFile(io, .{ .sub_path = "objects/info/alternates", .data = alternate });
+    var store = try snapshot.Store.open(gpa, io, private.dir, .{});
+    defer store.deinit(io);
+    const saved = (try store.capture(io, .{ .repository = &r }, .{})).snapshot;
+    const pack_name = r.odb.sources.items[0].packs.items[0].name;
+    const path = try std.fmt.allocPrint(gpa, ".git/objects/pack/{s}.pack", .{pack_name});
+    defer gpa.free(path);
+    try source.writeFile(io, path, "damaged\n");
+    var dest = testing.tmpDir(.{ .iterate = true });
+    defer dest.cleanup();
+    _ = try store.restore(io, saved, dest.dir, .{});
+    try expectFile(dest.dir, "file", "owned\n");
+    try expectFile(dest.dir, "uncached", uncached);
+    var changes = try store.diff(io, null, saved, .{});
+    defer changes.deinit();
+    try testing.expectEqual(@as(usize, 2), changes.items.len);
 }

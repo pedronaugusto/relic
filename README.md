@@ -106,7 +106,9 @@ std.debug.assert(restored.written == 1);
 `worktree.snapshot.Store` records a working tree in a private object store.
 A snapshot is a tree ID. Before returning it, capture takes every tree and
 blob it reaches into the store, including unchanged objects held only by
-an alternate. A rewrite and prune in the source cannot make it unreadable.
+the source. Reads and reopening use only the private objects, never the
+source's packs or alternate metadata. A rewrite and prune in the source
+cannot make a snapshot unreadable.
 Objects already owned are not copied again; a bounded cache skips subtrees
 whose closure has been completed. Reopening rebuilds that cache as needed.
 
@@ -114,7 +116,6 @@ whose closure has been completed. Reopening rebuilds that cache as needed.
 const snapshots = relic.worktree.snapshot;
 var store = try snapshots.Store.open(gpa, io, private_dir, .{
     .kind = repo.kind,
-    .alternate = source_objects_path,
 });
 defer store.deinit(io);
 const first = (try store.capture(io, .{ .repository = &repo }, .{})).snapshot;

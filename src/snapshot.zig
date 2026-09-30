@@ -20,6 +20,7 @@ const diff_mod = @import("diff.zig");
 const filter = @import("filter.zig");
 const program = @import("program.zig");
 const fs = @import("fs.zig");
+const opening = @import("odbinit.zig");
 
 pub const Error = worktree.Error || repo.Error || repo.Repository.LoadFiltersError ||
     diff_mod.Error || error{ BareRepository, ObjectFormatMismatch, TreeDepthExceeded };
@@ -38,9 +39,6 @@ pub const Source = union(enum) {
 pub const OpenOptions = struct {
     kind: hash.Kind = .sha1,
     odb: odb.Options = .{},
-    /// An objects directory to borrow while capturing, persisted as an
-    /// alternate. It is never needed to read a completed snapshot.
-    alternate: ?[]const u8 = null,
 };
 
 pub const CaptureOptions = struct {
@@ -83,9 +81,8 @@ pub const Store = struct {
         errdefer owned.close(io);
         try owned.createDirPath(io, "objects/pack");
         try owned.createDirPath(io, "objects/info");
-        var db = try odb.Odb.open(gpa, io, owned, options.kind, options.odb);
+        var db = try opening.openOwn(gpa, io, owned, options.kind, options.odb);
         errdefer db.deinit(io);
-        if (options.alternate) |path| _ = try db.addAlternate(io, path);
         return .{ .gpa = gpa, .dir = owned, .db = db };
     }
 
@@ -107,7 +104,9 @@ pub const Store = struct {
             .repository => |r| r,
             .folder => null,
         };
-        if (source_repo) |r| if (r.kind != store.db.kind) return error.ObjectFormatMismatch;
+        if (source_repo) |r| {
+            if (r.kind != store.db.kind) return error.ObjectFormatMismatch;
+        }
         const wt = switch (source) {
             .repository => |r| r.work_dir orelse return error.BareRepository,
             .folder => |dir| dir,
@@ -138,8 +137,9 @@ pub const Store = struct {
             index.Index.initEmpty(store.gpa, store.db.kind);
         defer staged.deinit();
         // The source index is a membership list, not a cache for this store.
-        // Present sparse directories must be expanded from the alternate.
-        try index.sparseindex.expand(store.gpa, io, &staged, &store.db, null);
+        // Sparse directories keep their indexed contents from the source.
+        const source_db: ?*odb.Odb = if (source_repo) |r| &r.odb else null;
+        try index.sparseindex.expand(store.gpa, io, &staged, source_db orelse &store.db, null);
         for (staged.entries.items) |*entry| {
             entry.stat = .none;
             entry.assume_valid = false;
@@ -154,7 +154,7 @@ pub const Store = struct {
             .refusal = options.refusal,
         });
         const tree = try worktree.writeTree(store.gpa, io, &staged, &store.db);
-        try store.ownTree(io, tree, 0);
+        try store.ownTree(io, tree, source_db, 0);
         try store.db.syncBatch(io);
         return .{ .snapshot = .{ .tree = tree }, .staged = outcome };
     }
@@ -162,23 +162,34 @@ pub const Store = struct {
     // A tree being present is not a certificate for its descendants: writeTree
     // can have just written it while its unchanged children remain borrowed.
     // Only a completed walk may put a tree in the shortcut cache.
-    fn ownTree(store: *Store, io: Io, oid: hash.Oid, depth: u32) Error!void {
+    fn ownTree(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb, depth: u32) Error!void {
         if (store.complete.contains(oid)) return;
         if (depth > 128) return error.TreeDepthExceeded;
-        try store.db.own(io, oid);
+        try store.ownObject(io, oid, source_db);
         const found = try store.db.read(io, oid);
         defer store.gpa.free(found.bytes);
         if (found.type != .tree) return error.UnexpectedObjectType;
         var tree = object.Tree.parse(store.db.kind, found.bytes);
         var entries = tree.iterate();
         while (try entries.next()) |entry| switch (entry.mode) {
-            .tree => try store.ownTree(io, entry.oid, depth + 1),
+            .tree => try store.ownTree(io, entry.oid, source_db, depth + 1),
             .gitlink => {},
-            .file, .exec, .symlink => try store.db.own(io, entry.oid),
+            .file, .exec, .symlink => try store.ownObject(io, entry.oid, source_db),
         };
         // A cache must not turn the caller's retained history into an
         // unbounded amount of live memory. Missing entries only cost a walk.
         if (store.complete.count() < 4096) try store.complete.put(store.gpa, oid, {});
+    }
+
+    // The source is a reader for this capture alone. Attaching it to db
+    // would let a live restore prefer a source pack over our own loose copy.
+    fn ownObject(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb) Error!void {
+        if (try store.db.existsOwn(io, oid)) return;
+        const source = source_db orelse return error.ObjectNotFound;
+        const found = try source.read(io, oid);
+        defer source.gpa.free(found.bytes);
+        const written = try store.db.write(io, found.type, found.bytes);
+        if (!written.eql(oid)) return error.ObjectNameMismatch;
     }
 
     /// Materialize a snapshot using checkout's path checks and overwrite

@@ -21,6 +21,7 @@ const flate = std.compress.flate;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const fs = @import("fs.zig");
+const opening = @import("odbinit.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -360,16 +361,9 @@ pub const Odb = struct {
         kind: Kind,
         options: Options,
     ) Error!Odb {
-        var odb: Odb = .{
-            .gpa = gpa,
-            .kind = kind,
-            .options = options,
-            .sources = .empty,
-            .cache = try .init(gpa, options.delta_cache_bytes),
-        };
+        var odb = try opening.empty(gpa, io, kind, options);
         errdefer odb.deinit(io);
 
-        odb.deflate_window = try gpa.alloc(u8, flate.max_window_len);
         const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
         // addSource transfers the handle when it registers the source. A
         // failure before that point leaves this scope as its sole owner.
@@ -390,15 +384,8 @@ pub const Odb = struct {
         kind: Kind,
         options: Options,
     ) Error!Odb {
-        var odb: Odb = .{
-            .gpa = gpa,
-            .kind = kind,
-            .options = options,
-            .sources = .empty,
-            .cache = try .init(gpa, options.delta_cache_bytes),
-        };
+        var odb = try opening.empty(gpa, io, kind, options);
         errdefer odb.deinit(io);
-        odb.deflate_window = try gpa.alloc(u8, flate.max_window_len);
         try odb.addSource(io, objects_dir, true, 0);
         if (options.probe_timestamp_resolution) {
             odb.timestamp_resolution = fs.probeTimestampResolution(io, objects_dir);
@@ -487,21 +474,7 @@ pub const Odb = struct {
 
     fn addSource(odb: *Odb, io: Io, dir: Io.Dir, writable: bool, depth: u8) Error!void {
         if (depth > odb.options.max_alternate_depth) return error.AlternatesTooDeep;
-        const pack_dir = dir.openDir(io, "pack", .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir => null,
-            else => |e| return e,
-        };
-        var registered = false;
-        errdefer if (!registered) if (pack_dir) |d| d.close(io);
-        try odb.sources.append(odb.gpa, .{
-            .dir = dir,
-            .pack_dir = pack_dir,
-            .packs = .empty,
-            .writable = writable,
-            .midx = null,
-            .midx_packs = .empty,
-        });
-        registered = true;
+        try opening.register(odb, io, dir, writable);
         try odb.scanPacks(io, odb.sources.items.len - 1);
         try odb.readAlternates(io, dir, depth);
     }
