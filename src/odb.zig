@@ -52,7 +52,8 @@ pub const Options = struct {
     max_delta_depth: u32 = pack.default_max_depth,
     /// How many levels of `objects/info/alternates` to follow.
     max_alternate_depth: u8 = 5,
-    /// The largest loose object this will read into memory.
+    /// The largest inflated loose object, including its header, this will
+    /// read into memory. Exceeding it is `error.StreamTooLong`.
     max_object_bytes: usize = 1 << 31,
     /// Whether to measure, at open, how fine a modification time the
     /// filesystem under `objects` records.
@@ -103,7 +104,7 @@ pub const Error = error{
 } || pack.Error || pack.WriteError || object.HeaderParseError ||
     object.ParseError || object.TreeParseError || Allocator.Error ||
     Io.Dir.OpenError || Io.File.OpenError || Io.Writer.Error ||
-    Io.File.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
+    Io.File.Reader.Error || Io.Reader.Error || Io.File.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirPathError || Io.Dir.ReadFileAllocError || Io.Dir.Iterator.Error;
 
 /// Paths named directly by one `objects/info/alternates` file. `paths` hold
@@ -688,8 +689,19 @@ pub const Odb = struct {
         var file_reader = file.reader(io, input_buffer);
         var window: [flate.max_window_len]u8 = undefined;
         var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &window);
-        return decompress.reader.allocRemaining(odb.gpa, .limited(odb.options.max_object_bytes)) catch
-            return error.CorruptLooseObject;
+        return decompress.reader.allocRemaining(odb.gpa, .limited(odb.options.max_object_bytes)) catch |err| switch (err) {
+            error.OutOfMemory, error.StreamTooLong => |e| return e,
+            error.ReadFailed => return looseInflateError(&decompress, &file_reader),
+        };
+    }
+
+    // The inflater's ReadFailed can mean bad zlib or a failed file read.
+    // Only the latter has a cause on the file reader.
+    fn looseInflateError(decompress: *const flate.Decompress, reader: *const Io.File.Reader) Error {
+        if (decompress.err) |cause| {
+            if (cause == error.ReadFailed) return reader.err orelse error.ReadFailed;
+        }
+        return error.CorruptLooseObject;
     }
 
     /// The type and length of `oid`, with no body inflated where the object
@@ -738,7 +750,7 @@ pub const Odb = struct {
             var head: [64]u8 = @splat(0);
             var got: usize = 0;
             while (got < head.len) {
-                const n = decompress.reader.readSliceShort(head[got..]) catch return error.CorruptLooseObject;
+                const n = decompress.reader.readSliceShort(head[got..]) catch return looseInflateError(&decompress, &file_reader);
                 if (n == 0) break;
                 got += n;
                 if (std.mem.indexOfScalar(u8, head[0..got], 0) != null) break;
@@ -756,13 +768,12 @@ pub const Odb = struct {
             @memcpy(body[0..initial.len], initial);
             var body_got = initial.len;
             while (body_got < body.len) {
-                const n = decompress.reader.readSliceShort(body[body_got..]) catch
-                    return error.CorruptLooseObject;
+                const n = decompress.reader.readSliceShort(body[body_got..]) catch return looseInflateError(&decompress, &file_reader);
                 if (n == 0) return error.CorruptLooseObject;
                 body_got += n;
             }
             var extra: [1]u8 = undefined;
-            if ((decompress.reader.readSliceShort(&extra) catch return error.CorruptLooseObject) != 0) {
+            if ((decompress.reader.readSliceShort(&extra) catch return looseInflateError(&decompress, &file_reader)) != 0) {
                 return error.CorruptLooseObject;
             }
             return .{ .header = parsed.header, .bytes = body };
@@ -2435,5 +2446,75 @@ test "a stream whose installation fails remains abortable" {
     var it = odb.sources.items[0].dir.iterate();
     while (try it.next(io)) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "tmp_obj_"));
+    }
+}
+
+test "loose inflate preserves allocation resource failures" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
+    defer odb.deinit(io);
+    const oid = try odb.write(io, .blob, "hello\n");
+    var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+    const file = try objects.openFile(io, odb.loosePath(oid, &path_buf), .{});
+    defer file.close(io);
+    const Check = struct {
+        fn run(allocator: Allocator, original: *const Odb, input: Io.File) !void {
+            var copy = original.*;
+            copy.gpa = allocator;
+            const bytes = try copy.inflateWhole(std.testing.io, input);
+            defer allocator.free(bytes);
+            try std.testing.expectEqualStrings("blob 6\x00hello\n", bytes);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(gpa, Check.run, .{ &odb, file });
+}
+
+test "loose inflate distinguishes policy resource failures from corruption" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
+    defer odb.deinit(io);
+    const oid = try odb.write(io, .blob, "hello\n");
+    odb.options.max_object_bytes = 1;
+    try std.testing.expectError(error.StreamTooLong, odb.read(io, oid));
+    odb.options.max_object_bytes = 100;
+    var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+    try objects.writeFile(io, .{ .sub_path = odb.loosePath(oid, &path_buf), .data = "bad zlib" });
+    try std.testing.expectError(error.CorruptLooseObject, odb.read(io, oid));
+}
+
+test "loose reads preserve I/O and cancellation resource failures" {
+    const Fault = struct {
+        threadlocal var failure: Io.File.ReadPositionalError = error.InputOutput;
+        fn read(_: ?*anyopaque, _: Io.File, _: []const []u8, _: u64) Io.File.ReadPositionalError!usize {
+            return failure;
+        }
+    };
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
+    defer odb.deinit(io);
+    const oid = try odb.write(io, .blob, "hello\n");
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Fault.read;
+    const failing_io: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    for ([_]Io.File.ReadPositionalError{ error.InputOutput, error.Canceled }) |failure| {
+        Fault.failure = failure;
+        try std.testing.expectError(failure, odb.read(failing_io, oid));
+        try std.testing.expectError(failure, odb.readHeader(failing_io, oid));
+        try std.testing.expectError(failure, odb.readHeaderForPack(failing_io, oid, 100));
     }
 }

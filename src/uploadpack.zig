@@ -47,7 +47,7 @@ pub const Error = error{
     FilterRefused,
     /// Writing to the client failed.
     WriteFailed,
-} || odb_mod.Error || objectwalk.Error || local.Error || Allocator.Error || Io.Cancelable;
+} || Io.Reader.Error || odb_mod.Error || objectwalk.Error || local.Error || Allocator.Error || Io.Cancelable;
 
 /// What the server allows, as git's `uploadpack.*` settings say; `null`
 /// takes the served repository's own setting.
@@ -201,6 +201,7 @@ pub const Server = struct {
         while (true) {
             const packet = pktline.read(in) catch |err| switch (err) {
                 error.EndOfStream => return false,
+                error.ReadFailed => return error.ReadFailed,
                 else => return error.ProtocolError,
             };
             switch (packet) {
@@ -215,7 +216,10 @@ pub const Server = struct {
         }
         var args: std.ArrayList([]const u8) = .empty;
         while (true) {
-            const packet = pktline.read(in) catch return error.ProtocolError;
+            const packet = pktline.read(in) catch |err| switch (err) {
+                error.ReadFailed => return error.ReadFailed,
+                else => return error.ProtocolError,
+            };
             switch (packet) {
                 .flush => break,
                 .data => |raw| try args.append(arena, try arena.dupe(u8, std.mem.trimEnd(u8, raw, "\n"))),
@@ -354,6 +358,7 @@ pub const Server = struct {
             const packet = pktline.read(in) catch |err| switch (err) {
                 // Asked nothing: `ls-remote`, or a client that has all of it.
                 error.EndOfStream => if (!any) return else return error.ProtocolError,
+                error.ReadFailed => return error.ReadFailed,
                 else => return error.ProtocolError,
             };
             any = true;
@@ -615,6 +620,7 @@ const Negotiation = struct {
         while (true) {
             const packet = pktline.read(in) catch |err| switch (err) {
                 error.EndOfStream => return false,
+                error.ReadFailed => return error.ReadFailed,
                 else => return error.ProtocolError,
             };
             const raw = switch (packet) {
@@ -1160,5 +1166,24 @@ fn fuzzServe(remote: *local.Remote, smith: *std.testing.Smith) anyerror!void {
         var out: Io.Writer.Allocating = .init(std.testing.allocator);
         defer out.deinit();
         server.serveRequest(&limited.interface, &out.writer) catch {};
+    }
+}
+
+test "upload-pack reads preserve transport resource failures" {
+    const Broken = struct {
+        fn stream(_: *Io.Reader, _: *Io.Writer, _: Io.Limit) Io.Reader.StreamError!usize {
+            return error.ReadFailed;
+        }
+    };
+    var server: Server = undefined;
+    server.gpa = std.testing.allocator;
+    var writer: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    // Fail in the command, and then in the arguments after its delimiter.
+    for ([_][]const u8{ "", "0014command=ls-refs\n0001" }) |buffered| {
+        var buf: [pktline.max_line]u8 = undefined;
+        @memcpy(buf[0..buffered.len], buffered);
+        var reader: Io.Reader = .{ .vtable = &.{ .stream = Broken.stream }, .buffer = &buf, .seek = 0, .end = buffered.len };
+        try std.testing.expectError(error.ReadFailed, server.commandV2(&reader, &writer.writer));
     }
 }

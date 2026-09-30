@@ -1936,7 +1936,10 @@ pub const Client = struct {
             true
         else
             return c.fail(error.InvalidProxy, "{s} is not an HTTP proxy", .{text});
-        const host = uri.getHostAlloc(arena) catch return c.fail(error.InvalidProxy, "{s}", .{text});
+        const host = uri.getHostAlloc(arena) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return c.fail(error.InvalidProxy, "{s}", .{text}),
+        };
         // Go sends Basic from the first request, with the proxy URL's user
         // and password percent-decoded, and nothing else.
         var proxy_credential: ?httpclient.Proxy.Credential = null;
@@ -2815,4 +2818,13 @@ test "Retry-After is a number of seconds, or a date counted from the time the ca
     try testing.expect(expiresWithin(1000, 0, 1004, 5));
     try testing.expect(!expiresWithin(1000, 0, 1005, 5));
     try testing.expect(!expiresWithin(1000, 0, null, 5));
+}
+
+test "LFS proxy parsing preserves allocation resource failures" {
+    var client: Client = undefined;
+    client.io = testing.io;
+    client.message_mutex = .init;
+    var transport: httpclient.Client = undefined;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, client.useProxy(&transport, failing.allocator(), "http://pro%78y:3128"));
 }

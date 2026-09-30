@@ -92,7 +92,10 @@ pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*c
             if (gop.found_existing and score.lessThan(gop.value_ptr.*)) continue;
             gop.value_ptr.* = score;
             const raw = entry.value orelse "";
-            const value = config_mod.unquote(arena, raw) catch return error.InvalidHttpSetting;
+            const value = config_mod.unquote(arena, raw) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidHttpSetting,
+            };
             const origin = if (entry.subsection.len == 0)
                 try std.fmt.allocPrint(arena, "http.{s}", .{name})
             else
@@ -330,4 +333,22 @@ test "the environment overrides the files, and no_proxy names hosts as curl read
     try testing.expect(inside.proxy == null);
     try testing.expect(noProxy("*", "anything"));
     try testing.expect(!noProxy("example.com", "badexample.com"));
+}
+
+test "HTTP settings preserve allocation resource failures" {
+    var config = try config_mod.Config.parseText(testing.allocator, "[http]\nproxy = http://proxy:3128\n", .local);
+    defer config.deinit();
+    var failure_index: usize = 0;
+    while (true) : (failure_index += 1) {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        var failing = testing.FailingAllocator.init(arena.allocator(), .{ .fail_index = failure_index });
+        const settings = resolve(failing.allocator(), &config, null, try url_mod.Url.parse("https://example.com/repo")) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        try testing.expectEqualStrings("http://proxy:3128", settings.proxy.?);
+        try testing.expect(!failing.has_induced_failure);
+        return;
+    }
 }

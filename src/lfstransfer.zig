@@ -916,9 +916,15 @@ fn rewriteHref(state: *Run, scratch: Allocator, href: []const u8) Error![]const 
     if (!state.server.settings.getBool("lfs.transfer.enablehrefrewrite", false)) return href;
     const config = state.server.settings.config;
     const rewrite = @import("remote.zig").rewrite;
-    const pushed = if (state.operation == .upload) rewrite(scratch, config, href, .push) catch return error.MalformedValue else null;
+    const pushed = if (state.operation == .upload) rewrite(scratch, config, href, .push) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedValue,
+    } else null;
     if (pushed) |p| return p;
-    return (rewrite(scratch, config, href, .fetch) catch return error.MalformedValue) orelse href;
+    return (rewrite(scratch, config, href, .fetch) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedValue,
+    }) orelse href;
 }
 
 /// The URL whose access mode a transfer uses, as git-lfs finds it: the
@@ -2172,4 +2178,18 @@ test "an ssh batch answer's lines become the objects and actions git-lfs reads f
     try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{"short line"}));
     try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{b ++ " x download"}));
     try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{b ++ " 1 download expires-at=soon"}));
+}
+
+test "LFS URL rewriting preserves allocation resource failures" {
+    var config = try @import("config.zig").Config.parseText(testing.allocator, "[lfs.transfer]\nenablehrefrewrite = true\n[url \"https://new/\"]\ninsteadOf = https://old/\npushInsteadOf = https://old/\n", .local);
+    defer config.deinit();
+    var server: lfsapi.Server = undefined;
+    server.settings = .{ .gpa = testing.allocator, .config = &config };
+    var state: Run = undefined;
+    state.server = &server;
+    inline for (.{ lfsapi.Operation.download, lfsapi.Operation.upload }) |op| {
+        state.operation = op;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        try testing.expectError(error.OutOfMemory, rewriteHref(&state, failing.allocator(), "https://old/object"));
+    }
 }

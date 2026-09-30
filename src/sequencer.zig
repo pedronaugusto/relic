@@ -339,7 +339,10 @@ const OptsError = error{ MalformedState, EditorRequested, UnsupportedStrategy, O
 /// Read the settings in an `opts` file's text into `options`. The strategy
 /// options are added to the ones `options` has, copied into `arena`.
 fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Options) OptsError!void {
-    var parsed = config_mod.Config.parseText(gpa, text, .local) catch return error.MalformedState;
+    var parsed = config_mod.Config.parseText(gpa, text, .local) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedState,
+    };
     defer parsed.deinit();
     var words: std.ArrayList([]const u8) = .empty;
     try words.appendSlice(arena, options.strategy_options);
@@ -1067,4 +1070,17 @@ pub fn signs(repo: *Repository, request: signing_mod.Request) bool {
         .never => false,
         .config => repo.config.getBool("commit.gpgsign", false) catch false,
     };
+}
+
+test "sequencer settings preserve allocation resource failures" {
+    const Check = struct {
+        fn run(gpa: Allocator) !void {
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            var options: Options = .{ .who = undefined };
+            try parseOpts(gpa, arena.allocator(), "[options]\nsignoff = true\nmainline = 2\n", &options);
+            try std.testing.expect(options.signoff);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }

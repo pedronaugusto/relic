@@ -92,6 +92,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Allocation, cancellation, I/O and size-limit failures stay distinct from corrupt objects, malformed settings and bad revisions.
+
 - A cache-tree rebuild that stops on a staged conflict frees the directory
   node it took out of the tree, which it leaked.
 - A corrupt cache tree that fails below a directory frees that directory's
