@@ -6,6 +6,7 @@
 //! whoever wrote the tree.
 
 // The modules relic's API puts under this one, as `relic.worktree.<name>`.
+pub const snapshot = @import("snapshot.zig");
 pub const worktrees = @import("worktrees.zig");
 pub const sparse = @import("sparse.zig");
 pub const sparsecheckout = @import("sparsecheckout.zig");

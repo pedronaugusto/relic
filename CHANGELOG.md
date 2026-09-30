@@ -44,6 +44,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `worktree.snapshot.Store` captures repository working trees and plain folders with an owned tree-and-blob closure, restores and diffs snapshots, and copies only objects the private store does not already hold.
 - `Repository.OpenOptions.diagnostic` keeps the full refused setting in caller-owned output after a failed open.
 
 - A test that holds the TLS client to the standard library's: it fails when

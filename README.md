@@ -101,6 +101,59 @@ std.debug.assert(restored.written == 1);
 ```
 <!-- END GENERATED -->
 
+## Snapshots
+
+`worktree.snapshot.Store` records a working tree in a private object store.
+A snapshot is a tree ID. Before returning it, capture takes every tree and
+blob it reaches into the store, including unchanged objects held only by
+an alternate. A rewrite and prune in the source cannot make it unreadable.
+Objects already owned are not copied again; a bounded cache skips subtrees
+whose closure has been completed. Reopening rebuilds that cache as needed.
+
+```zig
+const snapshots = relic.worktree.snapshot;
+var store = try snapshots.Store.open(gpa, io, private_dir, .{
+    .kind = repo.kind,
+    .alternate = source_objects_path,
+});
+defer store.deinit(io);
+const first = (try store.capture(io, .{ .repository = &repo }, .{})).snapshot;
+const second = (try store.capture(io, .{ .repository = &repo }, .{})).snapshot;
+var changes = try store.diff(io, first, second, .{});
+defer changes.deinit();
+_ = try store.restore(io, first, destination_dir, .{});
+```
+
+The source index supplies tracked paths, including ignored ones. Capture
+reads their working files and untracked-not-ignored files under the source's
+ignore, attribute, line-ending and filter rules, without writing its index,
+refs or objects. Files are read afresh each time. Configured filter programs
+need `CaptureOptions.programs`; native LFS writes into the private store even
+when the source has its own `lfs.storage`. For a folder without a repository,
+pass `.{ .folder = folder_dir }`: its `.gitignore` and `.gitattributes` apply,
+and no configuration is read from outside it.
+
+Like jj's working-copy snapshots, capture includes new files automatically
+and returns the same tree for unchanged contents. Like `git stash create`,
+it leaves the working tree alone and returns an object name. The result
+needs only its tree closure, with no history parents, stash stack or index
+snapshot. Gitlinks record submodule commits rather than their files. LFS
+pointers are Git blobs; referenced LFS payloads are outside the Git object
+closure, and restoring emits pointers unless filter drivers are supplied.
+
+Restore writes an empty destination by default and refuses files in the
+way. `RestoreOptions.from` names its previous snapshot so removed paths can
+be deleted; `checkout.force` allows discarding local changes. Tree attributes
+apply on restore, and `checkout.rules` supplies additional core settings and
+filter drivers. Paths outside the previous and new snapshots are left alone.
+
+The caller serializes operations, retains tree IDs, and decides sequence
+numbers, frames and retention. The store writes no refs. Objects needed by
+retained IDs must be kept; close the store before collecting its objects
+and reopen it afterwards. A failed capture returns no snapshot, and any
+objects already written remain reusable. Set the object database's sync
+options when retained IDs need durable objects before they are published.
+
 ## Install
 
 ```sh
@@ -158,6 +211,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `config.userconfig` | Where the person's git reads its configuration from. |
 | `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
 | `index.sparseindex` | The sparse index. |
+| `worktree.snapshot` | `Store`, `capture`, `restore`, `diff`: working trees whose complete Git object closure belongs to a private store. |
 | `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
 | `worktree.worktrees` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`. |
 | `worktree.sparse`, `worktree.sparsecheckout` | `Patterns` for `info/sparse-checkout`, and cone-mode sparse checkout as an operation. |
