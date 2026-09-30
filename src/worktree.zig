@@ -344,6 +344,16 @@ pub fn addAll(
     return outcome;
 }
 
+// Every filesystem walk uses the same distinction: a vanished directory
+// can be absent, but a directory that could not be read cannot be empty.
+fn openWalkDirectory(io: Io, wt: Io.Dir, path: []const u8) Error!?Io.Dir {
+    if (path.len == 0) return wt;
+    return wt.openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => null,
+        else => return err,
+    };
+}
+
 const Walker = struct {
     gpa: Allocator,
     /// The conversions, and the filter processes, for the whole walk.
@@ -368,13 +378,7 @@ const Walker = struct {
 
     fn walk(w: *Walker, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
-        const dir = if (dir_path.len == 0)
-            w.wt
-        else
-            w.wt.openDir(w.io, dir_path, .{ .iterate = true }) catch |err| switch (err) {
-                error.FileNotFound, error.NotDir => return,
-                else => return err,
-            };
+        const dir = (try openWalkDirectory(w.io, w.wt, dir_path)) orelse return;
         defer if (dir_path.len != 0) dir.close(w.io);
 
         if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt, dir_path, depth);
@@ -1078,10 +1082,7 @@ const StatusScan = struct {
 
     fn walk(s: *StatusScan, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
-        const dir = if (dir_path.len == 0)
-            s.wt
-        else
-            s.wt.openDir(s.io, dir_path, .{ .iterate = true }) catch return;
+        const dir = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
         defer if (dir_path.len != 0) dir.close(s.io);
 
         if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
@@ -1270,8 +1271,8 @@ const StatusScan = struct {
     fn readNames(s: *StatusScan, path: []const u8) Error!std.ArrayList(Name) {
         var out: std.ArrayList(Name) = .empty;
         errdefer out.deinit(s.gpa);
-        var dir = s.wt.openDir(s.io, path, .{ .iterate = true }) catch return out;
-        defer dir.close(s.io);
+        const dir = (try openWalkDirectory(s.io, s.wt, path)) orelse return out;
+        defer if (path.len != 0) dir.close(s.io);
         var scan = try dirscan.Scan.init(s.gpa, s.io, dir);
         defer scan.deinit();
         while (try scan.next()) |item| {
@@ -2666,10 +2667,7 @@ const ListScan = struct {
 
     fn walk(s: *ListScan, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
-        const dir = if (dir_path.len == 0)
-            s.wt
-        else
-            s.wt.openDir(s.io, dir_path, .{ .iterate = true }) catch return;
+        const dir = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
         defer if (dir_path.len != 0) dir.close(s.io);
 
         if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);

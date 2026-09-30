@@ -1049,3 +1049,30 @@ test "a filesystem walk that reaches its depth limit refuses a partial result" {
     try std.testing.expectError(error.TreeTooDeep, worktree.status(gpa, io, folder.dir, &staged, &db, .{}));
     try std.testing.expectError(error.TreeTooDeep, worktree.list(gpa, io, folder.dir, &staged, .{}));
 }
+
+test "status and listing refuse a directory they could not read" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var folder = std.testing.tmpDir(.{ .iterate = true });
+    defer folder.cleanup();
+    try folder.dir.createDirPath(io, "blocked");
+    try folder.dir.writeFile(io, .{ .sub_path = "blocked/file", .data = "untracked\n" });
+    var private = std.testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    try private.dir.createDirPath(io, "objects");
+    var db = try odb_mod.Odb.open(gpa, io, private.dir, .sha1, .{});
+    defer db.deinit(io);
+    var staged = index_mod.Index.initEmpty(gpa, .sha1);
+    defer staged.deinit();
+    const Refused = struct {
+        fn openDir(context: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+            if (std.mem.eql(u8, path, "blocked")) return error.AccessDenied;
+            return std.testing.io.vtable.dirOpenDir(context, dir, path, options);
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.dirOpenDir = Refused.openDir;
+    const refused: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    try std.testing.expectError(error.AccessDenied, worktree.status(gpa, refused, folder.dir, &staged, &db, .{}));
+    try std.testing.expectError(error.AccessDenied, worktree.list(gpa, refused, folder.dir, &staged, .{}));
+}
