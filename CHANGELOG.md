@@ -81,6 +81,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `worktree.snapshot.Store.adoptTree` migrates retained borrowed trees into owned storage without recapturing files, with the same closure and durability policy as capture.
+
 - Checkout and snapshot stores offer opt-in durable completion, and `Odb.makeDurable` owns and syncs selected object closures before an intent is recorded; file barriers precede directory barriers, with drive-cache flushes on macOS and failures preserved.
 
 - `worktree.snapshot.Store` captures repository working trees and plain folders with an owned tree-and-blob closure, restores and diffs snapshots, and copies only objects the private store does not already hold.

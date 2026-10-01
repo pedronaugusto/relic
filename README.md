@@ -168,7 +168,11 @@ filter drivers. Paths outside the previous and new snapshots are left alone.
 The caller serializes operations, retains tree IDs, and decides sequence
 numbers, frames and retention. The store writes no refs. Objects needed by
 retained IDs must be kept; close the store before collecting its objects
-and reopen it afterwards. A failed capture returns no snapshot, and any
+and reopen it afterwards. To migrate existing borrowed tree IDs, call
+`store.adoptTree(io, &source_db, tree)` while their old objects still exist.
+It copies the same tree and blob closure without recapturing files, including
+objects split between the source and store, and applies the store’s durability
+policy before returning the unchanged ID. A failed capture returns no snapshot, and any
 objects already written remain reusable. Set the object database's sync
 options when retained IDs need durable objects before they are published.
 
@@ -229,7 +233,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `config.userconfig` | Where the person's git reads its configuration from. |
 | `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
 | `index.sparseindex` | The sparse index. |
-| `worktree.snapshot` | `Store`, `capture`, `restore`, `diff`: working trees whose complete Git object closure belongs to a private store. |
+| `worktree.snapshot` | `Store`, `capture`, `adoptTree`, `restore`, `diff`: working trees whose complete Git object closure belongs to a private store. |
 | `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
 | `worktree.worktrees` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`. |
 | `worktree.sparse`, `worktree.sparsecheckout` | `Patterns` for `info/sparse-checkout`, and cone-mode sparse checkout as an operation. |

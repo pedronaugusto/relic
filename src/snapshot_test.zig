@@ -459,6 +459,13 @@ test "durable snapshots sync their closure and restored files before directories
     _ = try store.capture(io, .{ .folder = folder.dir }, .{});
     try testing.expectEqual(@as(usize, 4), SyncOrder.files);
     try testing.expect(SyncOrder.ordered);
+    SyncOrder.reset();
+    _ = try store.adoptTree(io, &store.db, captured.snapshot.tree);
+    try testing.expectEqual(@as(usize, 4), SyncOrder.files);
+    try testing.expect(SyncOrder.ordered);
+    SyncOrder.reset();
+    SyncOrder.fail = true;
+    try testing.expectError(error.InputOutput, store.adoptTree(io, &store.db, captured.snapshot.tree));
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
     SyncOrder.reset();
@@ -536,4 +543,91 @@ test "durable checkout covers unchanged files and surviving parents of deletions
     try testing.expectEqual(@as(usize, 1), SyncOrder.directories);
     try testing.expect(SyncOrder.ordered);
     try testing.expectError(error.FileNotFound, dest.dir.access(base, "old", .{}));
+}
+
+test "snapshot adoption keeps a mixed tree after the source has moved on" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var source = try testgit.Repo.init(gpa, io, &.{});
+    defer source.deinit();
+    try source.writeFile(io, "nested/old", "retained history\n");
+    try source.exec(io, &.{ "add", "." });
+    try source.exec(io, &.{ "commit", "-qm", "old" });
+    const text = try source.line(io, &.{ "rev-parse", "HEAD:nested" });
+    defer gpa.free(text);
+    const old_tree = try hash.Oid.parse(.sha1, text);
+    // Advance both history and disk before migration; no capture can recover old.
+    try source.writeFile(io, "nested/old", "current history\n");
+    try source.exec(io, &.{ "add", "." });
+    try source.exec(io, &.{ "commit", "-qm", "new" });
+    try source.exec(io, &.{ "repack", "-ad" });
+    var private = testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    var frame: snapshot.Snapshot = undefined;
+    {
+        var r = try repo.Repository.open(gpa, io, source.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
+        defer r.deinit(io);
+        var store = try snapshot.Store.open(gpa, io, private.dir, .{});
+        defer store.deinit(io);
+        const local = try store.db.write(io, .blob, "private edit\n");
+        var root = object.Tree.Builder.init(gpa, .sha1);
+        defer root.deinit();
+        try root.add(.file, "private", local);
+        try root.add(.tree, "nested", old_tree);
+        const bytes = try root.build();
+        defer gpa.free(bytes);
+        const tree = try store.db.write(io, .tree, bytes);
+        frame = try store.adoptTree(io, &r.odb, tree);
+        try testing.expect(frame.tree.eql(tree));
+        try expectClosure(&store.db, tree);
+        const writes = store.db.stats.loose_written;
+        _ = try store.adoptTree(io, &r.odb, tree);
+        try testing.expectEqual(writes, store.db.stats.loose_written);
+    }
+    // Every old object may now disappear, and reopening must still restore it.
+    try source.dir.deleteTree(io, ".git/objects");
+    var store = try snapshot.Store.open(gpa, io, private.dir, .{});
+    defer store.deinit(io);
+    var dest = testing.tmpDir(.{ .iterate = true });
+    defer dest.cleanup();
+    _ = try store.restore(io, frame, dest.dir, .{});
+    try expectFile(dest.dir, "nested/old", "retained history\n");
+    try expectFile(dest.dir, "private", "private edit\n");
+}
+
+test "snapshot adoption preserves refusals and allocation ownership" {
+    const Check = struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            const io = testing.io;
+            var source = testing.tmpDir(.{ .iterate = true });
+            defer source.cleanup();
+            var from = try snapshot.Store.open(testing.allocator, io, source.dir, .{});
+            defer from.deinit(io);
+            const blob = try from.db.write(io, .blob, "content");
+            var root = object.Tree.Builder.init(testing.allocator, .sha1);
+            defer root.deinit();
+            try root.add(.file, "a", blob);
+            const bytes = try root.build();
+            defer testing.allocator.free(bytes);
+            const tree = try from.db.write(io, .tree, bytes);
+            var private = testing.tmpDir(.{ .iterate = true });
+            defer private.cleanup();
+            var store = try snapshot.Store.open(gpa, io, private.dir, .{});
+            defer store.deinit(io);
+            try testing.expectError(error.ObjectFormatMismatch, store.adoptTree(io, &from.db, hash.Hasher.object(.sha256, "tree", "")));
+            if (store.adoptTree(io, &from.db, blob)) |_| return error.TestUnexpectedResult else |err| {
+                if (err == error.OutOfMemory) return err;
+                try testing.expectEqual(error.UnexpectedObjectType, err);
+            }
+            const missing = hash.Hasher.object(.sha1, "tree", "missing");
+            if (store.adoptTree(io, &from.db, missing)) |_| return error.TestUnexpectedResult else |err| {
+                if (err == error.OutOfMemory) return err;
+                try testing.expectEqual(error.ObjectNotFound, err);
+            }
+            const saved = try store.adoptTree(io, &from.db, tree);
+            try testing.expect(saved.tree.eql(tree));
+            try expectClosure(&store.db, tree);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
 }

@@ -1,7 +1,7 @@
 //! Working trees recorded in a private object store.
 //!
 //! A snapshot is a tree, without parents or refs. Every tree and blob it
-//! reaches belongs to this store before capture returns. The source's
+//! reaches belongs to this store before capture or adoption returns. The source's
 //! index supplies tracked paths, including ignored ones; its files supply
 //! the contents. No source index, ref or object is written. Gitlinks name
 //! another repository's commit, and LFS pointers name separate LFS data;
@@ -159,13 +159,28 @@ pub const Store = struct {
             .refusal = options.refusal,
         });
         const tree = try worktree.writeTree(store.gpa, io, &staged, &store.db);
-        try store.ownTree(io, tree, source_db, 0);
+        const recorded = try store.recordTree(io, tree, source_db);
+        return .{ .snapshot = recorded, .staged = outcome };
+    }
+
+    /// Take an existing tree and every reachable tree and blob into this
+    /// store without reading a working tree. Objects may already be split
+    /// between the store and source; the source is borrowed for this call.
+    /// Migrate retained IDs while their old objects still exist. Gitlinks
+    /// and LFS payloads keep their separate owners, as with capture.
+    pub fn adoptTree(store: *Store, io: Io, source: *odb.Odb, tree: hash.Oid) Error!Snapshot {
+        if (source.kind != store.db.kind or tree.kind != store.db.kind) return error.ObjectFormatMismatch;
+        return store.recordTree(io, tree, source);
+    }
+
+    fn recordTree(store: *Store, io: Io, tree: hash.Oid, source: ?*odb.Odb) Error!Snapshot {
+        try store.ownTree(io, tree, source, 0);
         try store.db.syncBatch(io);
         if (store.durability == .durable) {
             try store.db.makeDurable(io, &.{tree});
             try @import("durability.zig").syncDirectory(io, store.dir, ".");
         }
-        return .{ .snapshot = .{ .tree = tree }, .staged = outcome };
+        return .{ .tree = tree };
     }
 
     // A tree being present is not a certificate for its descendants: writeTree
