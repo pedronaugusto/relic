@@ -872,10 +872,18 @@ pub const Config = struct {
                 });
             };
             const parsed = parseVariableLine(replacement) catch unreachable;
+            const name = blk: {
+                errdefer config.gpa.free(replacement);
+                var names = file.names.promote(config.gpa);
+                defer file.names = names.state;
+                break :blk try lowered(names.allocator(), parsed.name);
+            };
             if (line.owned) config.gpa.free(line.text);
             line.text = replacement;
             line.owned = true;
-            // The name is the one already read, and already lower-cased.
+            // A lowercase name may borrow the text of its line. Transfer
+            // it with the replacement, before the old text is released.
+            line.name = name;
             line.value_start = parsed.value_start;
             line.value_end = parsed.value_end;
             line.has_value = parsed.has_value;
@@ -2344,4 +2352,18 @@ test "configuration source paths enter their owner only after copying succeeds" 
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{tmp.dir});
+}
+
+test "replacing an inserted setting keeps its name under the new line owner" {
+    const gpa = std.testing.allocator;
+    var config = try Config.parseText(gpa, "[core]\n", .local);
+    defer config.deinit();
+    config.files.items[0].writable = true;
+    try config.set("core.ignorecase", "maybe");
+    try config.set("core.ignorecase", "true");
+    try std.testing.expectEqualStrings("true", config.get("core.ignorecase") orelse "missing");
+    try std.testing.expect(try config.getBool("core.ignorecase", false));
+    try config.set("core.ignorecase", "false");
+    try std.testing.expectEqualStrings("false", config.get("core.ignorecase") orelse "missing");
+    try std.testing.expect(!try config.getBool("core.ignorecase", true));
 }
