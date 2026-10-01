@@ -1460,13 +1460,16 @@ test "concurrent timeout fallbacks count each unwatched connection" {
     const Controlled = struct {
         waiting: std.atomic.Value(usize) = .init(0),
         ready: Io.Event = .unset,
-        threadlocal var state: *@This() = undefined;
+        waiting_on: *const anyopaque = undefined,
+        threadlocal var state: ?*@This() = null;
         threadlocal var counted: bool = false;
 
         fn wait(_: ?*anyopaque, ptr: *const u32, expected: u32) void {
-            if (!counted) {
-                counted = true;
-                if (state.waiting.fetchAdd(1, .acq_rel) == 1) state.ready.set(std.testing.io);
+            if (state) |control| {
+                if (@as(*const anyopaque, ptr) == control.waiting_on and !counted) {
+                    counted = true;
+                    if (control.waiting.fetchAdd(1, .acq_rel) == 1) control.ready.set(std.testing.io);
+                }
             }
             std.testing.io.vtable.futexWaitUncancelable(std.testing.io.userdata, ptr, expected);
         }
@@ -1478,6 +1481,13 @@ test "concurrent timeout fallbacks count each unwatched connection" {
         fn run(c: *Client, control: *@This(), result: *Error!Io.net.Stream) void {
             state = control;
             counted = false;
+            defer state = null;
+            var unrelated: u32 = 0;
+            c.io.futexWaitUncancelable(u32, &unrelated, 1);
+            if (counted) {
+                result.* = error.HttpProtocolError;
+                return;
+            }
             result.* = Connection.dial(c, "127.0.0.1", 1);
         }
     };
@@ -1491,7 +1501,13 @@ test "concurrent timeout fallbacks count each unwatched connection" {
     const guarded: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     var client: Client = .init(std.testing.allocator, guarded);
     defer client.deinit();
+    state.waiting_on = &client.lock.state;
     client.timeouts.connect = .fromSeconds(10);
+    // The hostname connector may wait on its own queues from threads
+    // that have not entered this fixture's worker.
+    var unrelated: u32 = 0;
+    guarded.futexWaitUncancelable(u32, &unrelated, 1);
+    try std.testing.expectEqual(@as(usize, 0), state.waiting.load(.acquire));
     var results: [2]Error!Io.net.Stream = undefined;
     var group: Io.Group = .init;
     defer group.cancel(io);

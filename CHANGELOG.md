@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The HTTP timeout-counter fixture observes only its client mutex and clears worker state, so hostname helper threads can wait on their own queues safely.
+
 - Digest session authentication releases its intermediate credential hash if allocating the session hash fails.
 
 - An HTTP proxy challenge that cannot be answered releases its response and connection before returning the refusal.
