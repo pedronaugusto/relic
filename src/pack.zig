@@ -105,7 +105,7 @@ pub const Index = struct {
         max_bytes: usize,
     ) IndexError!Index {
         const bytes = try dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes));
-        errdefer gpa.free(bytes);
+        // parse takes ownership on success and failure.
         return parse(gpa, kind, bytes);
     }
 
@@ -2310,4 +2310,13 @@ test "pack seeks preserve I/O and cancellation resource failures" {
         try std.testing.expectError(failure, p.inflateAt(0, 1));
         try std.testing.expectError(failure, p.inflateHead(0, 1));
     }
+}
+
+test "a refused on-disk pack index releases its bytes once" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad.idx", .data = "x" });
+    try std.testing.expectError(error.TruncatedIndex, Index.open(gpa, io, tmp.dir, "bad.idx", .sha1, 1024));
 }
