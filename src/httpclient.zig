@@ -930,13 +930,16 @@ pub const Connection = struct {
         const tick: Io.Duration = .{ .nanoseconds = @max(@divTrunc(shortest, 10), std.time.ns_per_ms) };
         while (true) {
             io.sleep(tick, .awake) catch return;
+            // Read the operation's times before sampling the clock. A
+            // task can start I/O between these reads; sampling first could
+            // subtract a newer start from an older time and expire it.
+            const since = conn.busy_since.load(.acquire);
+            const until = conn.handshake_until.load(.acquire);
             const now = awakeNow(io);
             var expired = false;
             if (t.activity) |limit| {
-                const since = conn.busy_since.load(.acquire);
                 if (since != 0 and now - since >= limit.nanoseconds) expired = true;
             }
-            const until = conn.handshake_until.load(.acquire);
             if (until != 0 and now >= until) expired = true;
             if (expired) {
                 conn.timed_out.store(true, .release);
@@ -1372,29 +1375,95 @@ test "tasks sending at once through one client share the connections it keeps" {
     const target: Target = .{ .tls = false, .host = "127.0.0.1", .port = server.port };
 
     const Task = struct {
-        fn run(c: *Client, t: Target) Error!void {
-            for (0..5) |_| {
-                var response = try c.send(.GET, t, "/", &.{}, null);
+        fn run(c: *Client, t: Target, worker: usize) Error!void {
+            for (0..5) |request| {
+                var response = c.send(.GET, t, "/", &.{}, null) catch |err| {
+                    std.debug.print("worker {d}, request {d}: send failed: {s}\n", .{ worker, request, @errorName(err) });
+                    return err;
+                };
                 defer response.deinit();
                 var body: [8]u8 = undefined;
-                const n = response.reader().readSliceShort(&body) catch return response.failure();
-                if (!std.mem.eql(u8, body[0..n], "ok")) return error.HttpProtocolError;
+                const n = response.reader().readSliceShort(&body) catch |err| {
+                    const failure = response.failure();
+                    std.debug.print("worker {d}, request {d}: body failed: {s} ({s})\n", .{ worker, request, @errorName(failure), @errorName(err) });
+                    return failure;
+                };
+                if (!std.mem.eql(u8, body[0..n], "ok")) {
+                    std.debug.print("worker {d}, request {d}: expected ok, got {any} (status {d})\n", .{ worker, request, body[0..n], @intFromEnum(response.head.status) });
+                    return error.HttpProtocolError;
+                }
             }
         }
     };
     var group: Io.Group = .init;
     var results: [4]Error!void = undefined;
     const Wrap = struct {
-        fn run(c: *Client, t: Target, out: *Error!void) void {
-            out.* = Task.run(c, t);
+        fn run(c: *Client, t: Target, worker: usize, out: *Error!void) void {
+            out.* = Task.run(c, t, worker);
         }
     };
-    for (&results) |*out| group.concurrent(io, Wrap.run, .{ &client, target, out }) catch return error.SkipZigTest;
+    defer group.cancel(io);
+    for (&results, 0..) |*out, worker| group.concurrent(io, Wrap.run, .{ &client, target, worker, out }) catch return error.SkipZigTest;
     try group.await(io);
     for (results) |result| try result;
     // Twenty requests, no more connections than tasks.
+    if (client.connections > 4) std.debug.print("twenty requests opened {d} connections for four workers\n", .{client.connections});
     try std.testing.expect(client.connections <= 4);
     try std.testing.expect(client.idle.items.len <= 4);
+}
+
+test "the watchdog cannot expire activity begun after its clock sample" {
+    const Controlled = struct {
+        conn: *Connection,
+        sleeps: usize = 0,
+        shutdowns: usize = 0,
+        fresh_expired: bool = false,
+
+        fn sleep(context: ?*anyopaque, _: Io.Timeout) Io.Cancelable!void {
+            const state: *@This() = @ptrCast(@alignCast(context.?));
+            state.sleeps += 1;
+            if (state.sleeps == 2) state.fresh_expired = state.conn.timed_out.load(.acquire);
+            if (state.sleeps > 2) return error.Canceled;
+        }
+
+        fn now(context: ?*anyopaque, _: Io.Clock) Io.Timestamp {
+            const state: *@This() = @ptrCast(@alignCast(context.?));
+            if (state.sleeps == 1) {
+                // A task starts a read between the watchdog sampling the
+                // clock and loading busy_since. Both clocks are monotonic.
+                state.conn.busy_since.store(2001, .release);
+                return .{ .nanoseconds = 1000 };
+            }
+            return .{ .nanoseconds = 2000 + 10 * std.time.ns_per_s };
+        }
+
+        fn shutdown(context: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.ShutdownHow) Io.net.ShutdownError!void {
+            const state: *@This() = @ptrCast(@alignCast(context.?));
+            state.shutdowns += 1;
+        }
+    };
+    var conn: Connection = undefined;
+    conn.busy_since = .init(0);
+    conn.handshake_until = .init(0);
+    conn.timed_out = .init(false);
+    var state: Controlled = .{ .conn = &conn };
+    var vtable = std.testing.io.vtable.*;
+    vtable.sleep = Controlled.sleep;
+    vtable.now = Controlled.now;
+    vtable.netShutdown = Controlled.shutdown;
+    const io: Io = .{ .userdata = &state, .vtable = &vtable };
+    var client: Client = .init(std.testing.allocator, io);
+    defer client.deinit();
+    client.timeouts.activity = .fromSeconds(10);
+    conn.client = &client;
+    conn.stream = .{ .socket = .{ .handle = undefined, .address = undefined } };
+
+    Connection.watch(&conn);
+    try std.testing.expectEqual(@as(usize, 2), state.sleeps);
+    try std.testing.expect(!state.fresh_expired);
+    // The same operation really does expire at its unchanged deadline.
+    try std.testing.expect(conn.timed_out.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), state.shutdowns);
 }
 
 test "a connection that is not taken within the connect timeout is given up on as TimedOut" {

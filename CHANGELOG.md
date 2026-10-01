@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- HTTP watchdogs read operation timestamps before the clock, so concurrent activity cannot underflow elapsed time and close a fresh connection as timed out.
+
 - Program timeouts cover feeding stdin, collecting output, waiting and cleanup under one deadline, ending the child on expiry; unavailable concurrency is refused instead of feeding a pipe synchronously.
 
 - Shared LFS, promisor and clone configuration writes select their local source, preserving separate worktree configuration and shared repository settings.
