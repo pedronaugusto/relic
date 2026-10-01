@@ -18,7 +18,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Concurrent HTTP timeout fallbacks increment their diagnostic count under the client lock, preserving every connection made without a watchdog.
 
-- HTTP watchdogs read operation timestamps before the clock, so concurrent activity cannot underflow elapsed time and close a fresh connection as timed out.
+- HTTP watchdogs observe refreshed activity after sampling the clock, so a previous operation's start cannot expire the new one.
+
+- HTTP watchdogs reject starts later than their clock sample when computing elapsed time, so concurrent activity cannot underflow and close a fresh connection as timed out.
 
 - Program timeouts cover feeding stdin, collecting output, waiting and cleanup under one deadline, ending the child on expiry; unavailable concurrency is refused instead of feeding a pipe synchronously.
 

@@ -938,15 +938,15 @@ pub const Connection = struct {
         const tick: Io.Duration = .{ .nanoseconds = @max(@divTrunc(shortest, 10), std.time.ns_per_ms) };
         while (true) {
             io.sleep(tick, .awake) catch return;
-            // Read the operation's times before sampling the clock. A
-            // task can start I/O between these reads; sampling first could
-            // subtract a newer start from an older time and expire it.
+            // Observe the current operation after sampling the clock.
+            // An operation begun after that sample is not expired yet;
+            // its newer start must not underflow elapsed time.
+            const now = awakeNow(io);
             const since = conn.busy_since.load(.acquire);
             const until = conn.handshake_until.load(.acquire);
-            const now = awakeNow(io);
             var expired = false;
             if (t.activity) |limit| {
-                if (since != 0 and now - since >= limit.nanoseconds) expired = true;
+                if (since != 0 and now >= since and now - since >= limit.nanoseconds) expired = true;
             }
             if (until != 0 and now >= until) expired = true;
             if (expired) {
@@ -1508,41 +1508,43 @@ test "concurrent timeout fallbacks count each unwatched connection" {
     try std.testing.expectEqual(@as(u32, 2), client.unwatched);
 }
 
-test "the watchdog cannot expire activity begun after its clock sample" {
+fn checkWatchdogActivity(initial_start: u64, sampled: u64, fresh: u64) !void {
     const Controlled = struct {
         conn: *Connection,
         sleeps: usize = 0,
         shutdowns: usize = 0,
         fresh_expired: bool = false,
+        sampled: u64,
+        fresh: u64,
 
         fn sleep(context: ?*anyopaque, _: Io.Timeout) Io.Cancelable!void {
-            const state: *@This() = @ptrCast(@alignCast(context.?));
+            const state: *@This() = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Controlled state as userdata
             state.sleeps += 1;
             if (state.sleeps == 2) state.fresh_expired = state.conn.timed_out.load(.acquire);
             if (state.sleeps > 2) return error.Canceled;
         }
 
         fn now(context: ?*anyopaque, _: Io.Clock) Io.Timestamp {
-            const state: *@This() = @ptrCast(@alignCast(context.?));
+            const state: *@This() = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Controlled state as userdata
             if (state.sleeps == 1) {
-                // A task starts a read between the watchdog sampling the
-                // clock and loading busy_since. Both clocks are monotonic.
-                state.conn.busy_since.store(2001, .release);
-                return .{ .nanoseconds = 1000 };
+                // Refresh activity while the clock is sampled. The cases
+                // cover starts before and after the sample's timestamp.
+                state.conn.busy_since.store(state.fresh, .release);
+                return .{ .nanoseconds = state.sampled };
             }
-            return .{ .nanoseconds = 2000 + 10 * std.time.ns_per_s };
+            return .{ .nanoseconds = state.fresh + 10 * std.time.ns_per_s - 1 };
         }
 
         fn shutdown(context: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.ShutdownHow) Io.net.ShutdownError!void {
-            const state: *@This() = @ptrCast(@alignCast(context.?));
+            const state: *@This() = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Controlled state as userdata
             state.shutdowns += 1;
         }
     };
     var conn: Connection = undefined;
-    conn.busy_since = .init(0);
+    conn.busy_since = .init(initial_start);
     conn.handshake_until = .init(0);
     conn.timed_out = .init(false);
-    var state: Controlled = .{ .conn = &conn };
+    var state: Controlled = .{ .conn = &conn, .sampled = sampled, .fresh = fresh };
     var vtable = std.testing.io.vtable.*;
     vtable.sleep = Controlled.sleep;
     vtable.now = Controlled.now;
@@ -1560,6 +1562,14 @@ test "the watchdog cannot expire activity begun after its clock sample" {
     // The same operation really does expire at its unchanged deadline.
     try std.testing.expect(conn.timed_out.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), state.shutdowns);
+}
+
+test "the watchdog cannot expire activity begun after its clock sample" {
+    try checkWatchdogActivity(0, 1000, 2001);
+}
+
+test "the watchdog cannot expire activity refreshed before its clock sample" {
+    try checkWatchdogActivity(1, 10 * std.time.ns_per_s, 10 * std.time.ns_per_s + 1);
 }
 
 test "a connection that is not taken within the connect timeout is given up on as TimedOut" {
