@@ -95,6 +95,8 @@ pub const Error = error{
     CollisionAttack,
     /// An object read back as a type the caller did not ask for.
     UnexpectedObjectType,
+    /// An object name uses a different hash format from this database.
+    ObjectFormatMismatch,
     /// `objects/info/alternates` pointed at itself, or the chain was deeper
     /// than `Options.max_alternate_depth`.
     AlternatesTooDeep,
@@ -1247,7 +1249,7 @@ pub const Odb = struct {
         defer pending.deinit(odb.gpa);
         try pending.appendSlice(odb.gpa, roots);
         while (pending.pop()) |oid| {
-            if (oid.kind != odb.kind) return error.UnexpectedObjectType;
+            if (oid.kind != odb.kind) return error.ObjectFormatMismatch;
             const slot = try seen.getOrPut(odb.gpa, oid);
             if (slot.found_existing) continue;
             try odb.own(io, oid);
@@ -2667,4 +2669,13 @@ test "openAt borrows its directory on success and every allocation failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "selected object durability names a foreign object format" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var db = try Odb.openAt(std.testing.allocator, io, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    try std.testing.expectError(error.ObjectFormatMismatch, db.makeDurable(io, &.{hash.Hasher.object(.sha256, "blob", "a")}));
 }
