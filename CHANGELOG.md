@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The linked reftable fetch fixture requires Git 2.45, which can create its backend, while every assertion runs on the primary platform gates.
+
 - Required-filter discovery keeps full filter names and allocation failures instead of silently omitting a required driver.
 
 - Fetch checks the main worktree’s checked-out branch through the repository’s ref backend, including linked reftable worktrees.

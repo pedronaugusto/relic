@@ -1463,6 +1463,7 @@ test "unshallowing a whole repository and a filtered fetch are refused by name" 
 test "a linked reftable fetch sees the main worktree branch through its backend" {
     const gpa = testing.allocator;
     const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 45);
     var main = try testgit.Repo.init(gpa, io, &.{"--ref-format=reftable"});
     defer main.deinit();
     try main.exec(io, &.{ "commit", "--allow-empty", "-qm", "base" });
