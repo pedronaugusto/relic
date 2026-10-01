@@ -427,6 +427,12 @@ const Run = struct {
         if (r.fatal == null) r.fatal = err;
     }
 
+    fn failure(r: *Run) ?Error {
+        r.fatal_mutex.lockUncancelable(r.io());
+        defer r.fatal_mutex.unlock(r.io());
+        return r.fatal;
+    }
+
     fn dupe(r: *Run, bytes: []const u8) Allocator.Error![]const u8 {
         r.arena_mutex.lockUncancelable(r.io());
         defer r.arena_mutex.unlock(r.io());
@@ -730,7 +736,7 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
     for (jobs.items) |j| state.total_bytes += j.result.size;
 
     try runJobs(&state);
-    if (state.fatal) |err| return err;
+    if (state.failure()) |err| return err;
     return outcome;
 }
 
@@ -778,6 +784,44 @@ fn runJobs(state: *Run) Error!void {
     try group.await(io);
 }
 
+test "a transfer worker observes a fatal error under its publication lock" {
+    const Controlled = struct {
+        run: *Run,
+        waited: bool = false,
+
+        fn wait(raw: ?*anyopaque, _: *const u32, _: u32) void {
+            const state: *@This() = @ptrCast(@alignCast(raw.?));
+            state.waited = true;
+            // Another worker already holds the lock, and publishes its
+            // failure before handing it to this worker.
+            state.run.fatal = error.OutOfMemory;
+            state.run.fatal_mutex.state.store(.unlocked, .release);
+        }
+
+        fn wake(_: ?*anyopaque, _: *const u32, _: u32) void {}
+    };
+    var server: lfsapi.Server = undefined;
+    var state: Run = .{
+        .server = &server,
+        .operation = .download,
+        .options = .{},
+        .limits = undefined,
+        .arena = std.testing.allocator,
+        .jobs = &.{},
+    };
+    var control: Controlled = .{ .run = &state };
+    var vtable = std.testing.io.vtable.*;
+    vtable.futexWaitUncancelable = Controlled.wait;
+    vtable.futexWake = Controlled.wake;
+    server.io = .{ .userdata = &control, .vtable = &vtable };
+    state.fatal_mutex.state.store(.locked_once, .release);
+    work(&state, 0);
+    try std.testing.expect(control.waited);
+    try std.testing.expectEqual(@as(usize, 0), state.next.load(.acquire));
+    state.setFatal(error.Canceled);
+    try std.testing.expectEqual(error.OutOfMemory, state.fatal.?);
+}
+
 fn workerTask(state: *Run, worker: usize) void {
     work(state, worker);
     state.say(.worker_done);
@@ -785,7 +829,7 @@ fn workerTask(state: *Run, worker: usize) void {
 
 fn work(state: *Run, worker: usize) void {
     while (true) {
-        if (state.fatal != null) return;
+        if (state.failure() != null) return;
         const i = state.next.fetchAdd(1, .monotonic);
         if (i >= state.jobs.len) return;
         runJob(state, &state.jobs[i], worker) catch |err| state.setFatal(err);

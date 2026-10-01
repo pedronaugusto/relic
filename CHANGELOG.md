@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- LFS transfer workers read and publish fatal errors under one lock, preserving the first failure without racing another worker.
+
 - Concurrent HTTP timeout fallbacks increment their diagnostic count under the client lock, preserving every connection made without a watchdog.
 
 - HTTP watchdogs read operation timestamps before the clock, so concurrent activity cannot underflow elapsed time and close a fresh connection as timed out.
