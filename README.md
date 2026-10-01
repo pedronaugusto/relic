@@ -200,18 +200,22 @@ const relic_dep = b.dependency("relic", .{ .target = target, .optimize = optimiz
 exe.root_module.addImport("relic", relic_dep.module("relic"));
 ```
 
-One module and no dependencies: SHA-256 and the TLS primitives come from
-`std.crypto`, SHA-1, inflate and the TLS client are in the package, so there
-is nothing to link and no build option to forward. Every function that
-allocates takes the allocator as its first argument and every function that
+One module, with [conduit](https://github.com/pedronaugusto/conduit) for
+running programs. Conduit carries its libc linkage on POSIX; Windows needs
+no C runtime. SHA-256 and the TLS primitives come from `std.crypto`; SHA-1,
+inflate and the TLS client are in the package. There is no build option to
+forward. Every function that allocates takes the allocator as its first argument and every function that
 touches the disk or the network takes a `std.Io`. Concurrent work — the delta
 search when `PackOptions.threads` asks, resolving a received pack's deltas —
 goes to the caller's executor, never to threads of the package's own. A
 process starts only through a `repo.program.Programs` the caller hands in; without
 one, a hook is not run and a setting that would run a program is a named
-refusal. The only clock read is the HTTP client's: the certificates' dates,
-and its timeouts. Everything else that needs the time takes it from the
-caller, with the identity. One word outlives a call without a caller holding
+refusal. Relic prepares git commands, scrubs the supplied environment and
+keeps the caller's launcher and execution policy; conduit spawns, feeds,
+collects, waits and kills. `program.run` applies one deadline to input, output,
+waiting and cleanup, and refuses unavailable concurrency. Clocks are read
+for program deadlines and the HTTP client's certificates and timeouts.
+Everything else that needs the time takes it from the caller, with the identity. One word outlives a call without a caller holding
 it, and it is the answer to which SHA-1 instructions this processor has,
 asked once.
 
@@ -225,7 +229,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 |---|---|
 | `repo` | `Repository.open`, `init`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. The front door. |
 | `repo.hooks` | git's hooks with git's arguments, environment and input. |
-| `repo.program` | `Programs`, `SpawnHook`, `Invocation`, `run` — the one place a process starts. `Programs.spawn` can supply process creation and termination. |
+| `repo.program` | `Programs`, `SpawnHook`, `Invocation`, `run` — the one place a process starts. `Programs.spawn` supplies creation and termination using conduit children. |
 | `repo.warning` | What git would print as a warning, as a value. |
 | `repo.fs` | `Sync`, `OnContention`, `staleReport`, `Resolution` — the lock, durability and timestamp policies every writer and every stat comparison here goes through. |
 | `hash` | `Kind` (`sha1`, `sha256`), `Oid`, `Hasher` with `Options` and `nameObject`. The hash is a parameter from the first line, not a width bolted on later. |
