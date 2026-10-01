@@ -154,7 +154,12 @@ pub fn run(
     return task.result;
 }
 
-fn exchange(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation, input: []const u8, limits: Limits) Error!Outcome {
+fn exchange(programs: Programs, allocator: Allocator, io: Io, invocation: Invocation, input: []const u8, limits: Limits) Error!Outcome {
+    // Conduit's writer and output collectors allocate on their tasks. Relic
+    // also accepts arenas, so serialize this exchange's use of the caller's
+    // allocator. All those tasks are joined before this adapter goes away.
+    var serial: SerialAllocator = .{ .parent = allocator, .io = io };
+    const gpa = serial.allocator();
     var started = try start(programs, gpa, io, invocation);
     defer started.deinit(io);
     var feeding = try started.child.inputWriter(io, gpa, .{ .max_backlog = input.len });
@@ -182,6 +187,48 @@ fn exchange(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation, 
     };
     return .{ .term = gitTerm(output.term()), .stdout = output.takeStdout(), .stderr = output.takeStderr() };
 }
+
+const SerialAllocator = struct {
+    parent: Allocator,
+    io: Io,
+    mutex: Io.Mutex = .init,
+
+    fn allocator(serial: *SerialAllocator) Allocator {
+        return .{ .ptr = serial, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn of(raw: *anyopaque) *SerialAllocator {
+        return @ptrCast(@alignCast(raw)); // safe: allocator installs its live SerialAllocator as ptr.
+    }
+
+    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const serial = of(raw);
+        serial.mutex.lockUncancelable(serial.io);
+        defer serial.mutex.unlock(serial.io);
+        return serial.parent.rawAlloc(len, alignment, ret);
+    }
+
+    fn resize(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
+        const serial = of(raw);
+        serial.mutex.lockUncancelable(serial.io);
+        defer serial.mutex.unlock(serial.io);
+        return serial.parent.rawResize(memory, alignment, len, ret);
+    }
+
+    fn remap(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
+        const serial = of(raw);
+        serial.mutex.lockUncancelable(serial.io);
+        defer serial.mutex.unlock(serial.io);
+        return serial.parent.rawRemap(memory, alignment, len, ret);
+    }
+
+    fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const serial = of(raw);
+        serial.mutex.lockUncancelable(serial.io);
+        defer serial.mutex.unlock(serial.io);
+        serial.parent.rawFree(memory, alignment, ret);
+    }
+};
 
 // relic's status is git's byte-sized exit status, as std's Child exposed it.
 fn gitTerm(term: Child.Term) Term {
@@ -538,11 +585,13 @@ test "opposite full pipes refuse unavailable concurrency instead of deadlocking"
         try testing.expectError(error.ConcurrencyUnavailable, if (result) |_| @as(Error!void, {}) else |err| @as(Error!void, err));
     }
 
-    var outcome = try run(.{ .environ = &env }, testing.allocator, testing.io, .{
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var outcome = try run(.{ .environ = &env }, arena.allocator(), testing.io, .{
         .argv = &.{ process_fixture, "opposite-pipes" },
         .cwd = .{ .dir = tmp.dir },
     }, input, .{});
-    defer outcome.deinit(testing.allocator);
+    defer outcome.deinit(arena.allocator());
     try testing.expect(outcome.succeeded());
     try testing.expectEqual(input.len, outcome.stdout.len);
     for (outcome.stdout) |byte| try testing.expectEqual(@as(u8, 'x'), byte);
