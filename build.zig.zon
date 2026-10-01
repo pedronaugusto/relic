@@ -1,6 +1,12 @@
 .{
     .name = .relic,
     .version = "0.3.0",
+    .dependencies = .{
+        .conduit = .{
+            .url = "git+https://github.com/pedronaugusto/conduit#04f88cfeb68e687aba60e0ec9f5230ff9a2c6c0f",
+            .hash = "conduit-0.5.1-4rIA7yuKDwD7IeK1oW98CWuvu7rM0LCc5WsPwqqFQElb",
+        },
+    },
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x688191cb6037a69f,
     .paths = .{
