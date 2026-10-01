@@ -224,6 +224,7 @@ test "two writers of the same loose object both succeed" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
 
     // A loose object is named by its own content, so two writers racing on
     // one are writing the same bytes; each goes through its own uniquely
@@ -231,6 +232,7 @@ test "two writers of the same loose object both succeed" {
     var a = try odb_mod.Odb.openAt(gpa, io, objects, .sha1, .{});
     defer a.deinit(io);
     const objects_b = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects_b.close(io);
     var b = try odb_mod.Odb.openAt(gpa, io, objects_b, .sha1, .{});
     defer b.deinit(io);
 

@@ -1688,6 +1688,7 @@ fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var db = try odb_mod.Odb.openAt(gpa, io, objects, .sha1, .{ .probe_timestamp_resolution = false });
     defer db.deinit(io);
     var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });

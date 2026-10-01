@@ -376,7 +376,8 @@ pub const Odb = struct {
     }
 
     /// Open an object database at an `objects` directory directly, for a
-    /// caller that has one without a repository around it.
+    /// caller that has one without a repository around it. The supplied
+    /// handle is borrowed on success and failure; close it in the caller.
     pub fn openAt(
         gpa: Allocator,
         io: Io,
@@ -386,9 +387,11 @@ pub const Odb = struct {
     ) Error!Odb {
         var odb = try opening.empty(gpa, io, kind, options);
         errdefer odb.deinit(io);
-        try odb.addSource(io, objects_dir, true, 0);
+        const owned = try objects_dir.openDir(io, ".", .{ .iterate = true });
+        errdefer if (odb.sources.items.len == 0) owned.close(io);
+        try odb.addSource(io, owned, true, 0);
         if (options.probe_timestamp_resolution) {
-            odb.timestamp_resolution = fs.probeTimestampResolution(io, objects_dir);
+            odb.timestamp_resolution = fs.probeTimestampResolution(io, owned);
         }
         return odb;
     }
@@ -2268,6 +2271,7 @@ test "a loose object written is a loose object read" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
 
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
@@ -2317,12 +2321,16 @@ test "an object an alternate holds is borrowed, and owned once asked for" {
     try tmp.dir.writeFile(io, .{ .sub_path = "ours/info/alternates", .data = "../theirs\n" });
 
     const oid = blk: {
-        var theirs = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "theirs", .{ .iterate = true }), .sha1, .{});
+        const theirs_dir = try tmp.dir.openDir(io, "theirs", .{ .iterate = true });
+        defer theirs_dir.close(io);
+        var theirs = try Odb.openAt(gpa, io, theirs_dir, .sha1, .{});
         defer theirs.deinit(io);
         break :blk try theirs.write(io, .blob, "borrowed\n");
     };
     {
-        var ours = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "ours", .{ .iterate = true }), .sha1, .{});
+        const ours_dir = try tmp.dir.openDir(io, "ours", .{ .iterate = true });
+        defer ours_dir.close(io);
+        var ours = try Odb.openAt(gpa, io, ours_dir, .sha1, .{});
         defer ours.deinit(io);
         // read through the alternate, written nowhere here
         try std.testing.expect(try ours.exists(io, oid));
@@ -2336,7 +2344,9 @@ test "an object an alternate holds is borrowed, and owned once asked for" {
     }
     try tmp.dir.deleteTree(io, "theirs");
     try tmp.dir.createDirPath(io, "theirs/pack");
-    var ours = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "ours", .{ .iterate = true }), .sha1, .{});
+    const ours_dir = try tmp.dir.openDir(io, "ours", .{ .iterate = true });
+    defer ours_dir.close(io);
+    var ours = try Odb.openAt(gpa, io, ours_dir, .sha1, .{});
     defer ours.deinit(io);
     const found = try ours.read(io, oid);
     defer gpa.free(found.bytes);
@@ -2350,16 +2360,22 @@ test "alternates API reads a relative chain, preserves comments, and updates ope
     defer tmp.cleanup();
     for ([_][]const u8{ "a/pack", "b/pack", "c/pack", "a/info" }) |dir| try tmp.dir.createDirPath(io, dir);
     const oid = blk: {
-        var c = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "c", .{ .iterate = true }), .sha1, .{});
+        const c_dir = try tmp.dir.openDir(io, "c", .{ .iterate = true });
+        defer c_dir.close(io);
+        var c = try Odb.openAt(gpa, io, c_dir, .sha1, .{});
         defer c.deinit(io);
         break :blk try c.write(io, .blob, "through two alternates\n");
     };
-    var b = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "b", .{ .iterate = true }), .sha1, .{});
+    const b_dir = try tmp.dir.openDir(io, "b", .{ .iterate = true });
+    defer b_dir.close(io);
+    var b = try Odb.openAt(gpa, io, b_dir, .sha1, .{});
     defer b.deinit(io);
     try b.addAlternate(io, "../c");
     try tmp.dir.writeFile(io, .{ .sub_path = "b/info/alternates", .data = "\"../c\"\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "a/info/alternates", .data = "# keep this comment\n" });
-    var a = try Odb.openAt(gpa, io, try tmp.dir.openDir(io, "a", .{ .iterate = true }), .sha1, .{});
+    const a_dir = try tmp.dir.openDir(io, "a", .{ .iterate = true });
+    defer a_dir.close(io);
+    var a = try Odb.openAt(gpa, io, a_dir, .sha1, .{});
     defer a.deinit(io);
     try std.testing.expect(!try a.exists(io, oid));
     try a.addAlternate(io, "../b");
@@ -2453,6 +2469,7 @@ test "an abbreviated name resolves, and an ambiguous one is named" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
 
@@ -2471,6 +2488,7 @@ test "a streamed object is the same object" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
 
@@ -2495,6 +2513,7 @@ test "a stream whose installation fails remains abortable" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
 
@@ -2530,6 +2549,7 @@ test "loose inflate preserves allocation resource failures" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
     const oid = try odb.write(io, .blob, "hello\n");
@@ -2555,6 +2575,7 @@ test "loose inflate distinguishes policy resource failures from corruption" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
     const oid = try odb.write(io, .blob, "hello\n");
@@ -2579,6 +2600,7 @@ test "loose reads preserve I/O and cancellation resource failures" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
     const oid = try odb.write(io, .blob, "hello\n");
@@ -2613,4 +2635,36 @@ test "packed source registration owns its files and names when allocation stops"
         }
     };
     try std.testing.checkAllAllocationFailures(gpa, Case.run, .{dir});
+}
+
+test "openAt borrows its directory on success and every allocation failure" {
+    const Check = struct {
+        var original: Io.Dir = undefined;
+        var closed_original: bool = false;
+        fn close(context: ?*anyopaque, dirs: []const Io.Dir) void {
+            _ = context;
+            for (dirs) |dir| {
+                if (dir.handle == original.handle) closed_original = true else dir.close(std.testing.io);
+            }
+        }
+        fn run(gpa: Allocator) !void {
+            const base = std.testing.io;
+            var tmp = std.testing.tmpDir(.{ .iterate = true });
+            defer tmp.cleanup();
+            try tmp.dir.createDirPath(base, "pack");
+            original = tmp.dir;
+            closed_original = false;
+            var vtable = base.vtable.*;
+            vtable.dirClose = close;
+            const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+            var db = Odb.openAt(gpa, io, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false }) catch |err| {
+                try std.testing.expect(!closed_original);
+                return err;
+            };
+            db.deinit(io);
+            try std.testing.expect(!closed_original);
+            try tmp.dir.access(base, "pack", .{});
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }

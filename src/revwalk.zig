@@ -678,6 +678,7 @@ test "ancestry reports a missing commit instead of a negative answer" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var db = try odb_mod.Odb.openAt(gpa, io, objects, .sha1, .{});
     defer db.deinit(io);
 
