@@ -734,7 +734,7 @@ pub const Repository = struct {
     /// The result is the caller's, and a walk pushes and pops deeper levels
     /// into it as it goes.
     pub fn loadIgnore(repo: *Repository, io: Io) Error!ignore.Rules {
-        const case_fold = repo.config.getBool("core.ignorecase", false) catch false;
+        const case_fold = try repo.config.getBool("core.ignorecase", false);
         var rules = try ignore.Rules.init(repo.gpa, case_fold);
         errdefer rules.deinit();
         const excludes = try repo.config.getPath(repo.gpa, "core.excludesfile");
@@ -745,7 +745,7 @@ pub const Repository = struct {
 
     /// Load the attributes for the working tree's root.
     pub fn loadAttrs(repo: *Repository, io: Io) Error!attributes.Attrs {
-        const case_fold = repo.config.getBool("core.ignorecase", false) catch false;
+        const case_fold = try repo.config.getBool("core.ignorecase", false);
         var attrs = try attributes.Attrs.init(repo.gpa, case_fold);
         errdefer attrs.deinit();
         const file = try repo.config.getPath(repo.gpa, "core.attributesfile");

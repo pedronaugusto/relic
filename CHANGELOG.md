@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Ignore and attribute loaders preserve malformed case-folding policy and allocation failures instead of loading a different policy.
+
 - Replacing a setting added in memory transfers its name to the new line before freeing the old text, so subsequent reads and edits retain the setting.
 
 - Unit tests count work and compare results instead of asserting speed ratios or performance ceilings; all measurements and their timing example live in the bench branch harness.
