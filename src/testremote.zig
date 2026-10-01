@@ -571,7 +571,7 @@ pub const TlsFront = struct {
         }) catch return error.SkipZigTest;
         errdefer running.deinit(io);
         var line_buf: [32]u8 = undefined;
-        var reader = running.child.stdout.?.readerStreaming(io, &line_buf);
+        var reader = running.child.stdoutFile().?.readerStreaming(io, &line_buf);
         const line = reader.interface.takeDelimiterExclusive('\n') catch return error.SkipZigTest;
         const port = std.fmt.parseUnsigned(u16, std.mem.trim(u8, line, " \r"), 10) catch return error.SkipZigTest;
         f.* = .{ .gpa = gpa, .running = running, .env = env, .dir = dir, .port = port, .cert_path = cert_path, .ca_dir = ca_dir };
@@ -580,10 +580,7 @@ pub const TlsFront = struct {
 
     /// Stop serving and release everything.
     pub fn stop(f: *TlsFront, io: Io) void {
-        if (f.running.child.stdin) |stdin| {
-            stdin.close(io);
-            f.running.child.stdin = null;
-        }
+        f.running.child.closeStdin(io);
         f.running.deinit(io);
         f.env.deinit();
         f.gpa.free(f.cert_path);

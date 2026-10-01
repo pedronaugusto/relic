@@ -240,8 +240,7 @@ pub const Process = struct {
         var running = try program.start(programs, gpa, io, effective);
         errdefer running.deinit(io);
         if (tail) |t| {
-            const file = running.child.stderr.?;
-            running.child.stderr = null;
+            const file = running.child.takeStderr().?;
             t.file = file;
             t.task = io.concurrent(Tail.drain, .{ t, io, file }) catch null;
             if (t.task == null) {
@@ -257,8 +256,8 @@ pub const Process = struct {
             .running = running,
             .read_buffer = read_buffer,
             .write_buffer = write_buffer,
-            .reader = running.child.stdout.?.readerStreaming(io, read_buffer),
-            .writer = running.child.stdin.?.writerStreaming(io, write_buffer),
+            .reader = running.child.stdoutFile().?.readerStreaming(io, read_buffer),
+            .writer = running.child.stdinFile().?.writerStreaming(io, write_buffer),
             .connection = .{ .context = undefined, .vtable = &vtable, .stateless = false },
             .stderr = tail,
         };
@@ -323,16 +322,13 @@ pub const Process = struct {
             // writing — after a refusal half way through a pack — stops at
             // a closed pipe rather than waiting on one nobody reads.
             p.writer.interface.flush() catch {};
-            if (p.running.child.stdout) |stdout| {
-                stdout.close(io);
-                p.running.child.stdout = null;
-            }
+            if (p.running.child.takeStdout()) |stdout| stdout.close(io);
             p.exited = true;
             if (canceled(p)) {
                 // cancelled: nobody is left for the program's answer, and
                 // one that never ends — an ssh whose remote never answers —
                 // would hold whoever cancelled until it did
-                p.running.child.kill(io);
+                p.running.kill(io);
             } else _ = p.running.wait(io) catch {};
         }
         if (p.stderr) |tail| {
@@ -400,7 +396,7 @@ pub const Process = struct {
             p.exited = true;
             if (canceled(p)) {
                 // as `close`: a cancelled conversation's program is stopped
-                p.running.child.kill(io);
+                p.running.kill(io);
                 return error.Canceled;
             }
             p.term = p.running.wait(io) catch |err| switch (err) {

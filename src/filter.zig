@@ -697,8 +697,8 @@ pub const Process = struct {
             else => return error.FilterNotStarted,
         };
         errdefer p.running.deinit(io);
-        p.reader = p.running.child.stdout.?.readerStreaming(io, p.in_buffer);
-        p.writer = p.running.child.stdin.?.writerStreaming(io, p.out_buffer);
+        p.reader = p.running.child.stdoutFile().?.readerStreaming(io, p.in_buffer);
+        p.writer = p.running.child.stdinFile().?.writerStreaming(io, p.out_buffer);
         p.protocol = .{ .in = &p.reader.interface, .out = &p.writer.interface };
         p.protocol.handshake() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,

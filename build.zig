@@ -5,17 +5,19 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     //=====================================================================
-    // The module. Pure Zig, no dependencies, nothing to link: zlib comes
-    // from `std.compress.flate` and the two hashes from `std.crypto`, so a
-    // consumer's build graph has nothing to configure and nothing to
-    // disagree with.
+    // The module. Conduit runs programs and carries its platform linkage;
+    // command preparation and the permission to run remain here.
     //=====================================================================
+
+    const conduit = b.dependency("conduit", .{ .target = target, .optimize = optimize }).module("conduit");
 
     const module = b.addModule("relic", .{
         .root_source_file = b.path("src/relic.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    module.addImport("conduit", conduit);
 
     //=====================================================================
     // Tests. The suite lives beside the code it tests, so the root module's
@@ -168,6 +170,9 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = if (thread_sanitizer) true else null,
         .error_tracing = false,
     });
+    test_module.addImport("conduit", conduit);
+    upload_pack_helper.root_module.addImport("conduit", conduit);
+    hook_fixture.root_module.addImport("conduit", conduit);
     test_module.addOptions("build_options", build_options);
 
     const tests = b.addTest(.{

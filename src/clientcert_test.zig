@@ -41,7 +41,7 @@ const SServer = struct {
         }) catch return error.SkipZigTest;
         errdefer running.deinit(io);
         var line_buf: [256]u8 = undefined;
-        var reader = running.child.stdout.?.readerStreaming(io, &line_buf);
+        var reader = running.child.stdoutFile().?.readerStreaming(io, &line_buf);
         while (true) {
             const line = reader.interface.takeDelimiterExclusive('\n') catch return error.SkipZigTest;
             reader.interface.toss(1);
