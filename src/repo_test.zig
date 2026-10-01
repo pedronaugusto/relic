@@ -990,3 +990,30 @@ test "rule loaders preserve malformed case policy and allocation failures" {
     failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, Load.attributesRules(&r, io));
 }
+
+test "required filter discovery keeps full names and resource failures" {
+    const Read = struct {
+        fn count(r: *repo_mod.Repository) !usize {
+            const names = try r.requiredFilters(r.gpa);
+            defer r.gpa.free(names);
+            return names.len;
+        }
+    };
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer r.deinit(io);
+    const long_name = "x" ** 300;
+    try r.config.set("filter." ++ long_name ++ ".required", "true");
+    const names = try r.requiredFilters(gpa);
+    defer gpa.free(names);
+    try std.testing.expectEqual(@as(usize, 1), names.len);
+    try std.testing.expectEqualStrings(long_name, names[0]);
+    // The query's allocation and the value decoder's allocation have owners.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    r.config.gpa = failing.allocator();
+    defer r.config.gpa = gpa;
+    try std.testing.expectError(error.OutOfMemory, Read.count(&r));
+}

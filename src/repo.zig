@@ -765,9 +765,13 @@ pub const Repository = struct {
         const names = try repo.config.subsections(gpa, "filter");
         defer gpa.free(names);
         for (names) |name| {
-            var key_buf: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buf, "filter.{s}.required", .{name}) catch continue;
-            if (repo.config.getBool(key, false) catch false) try out.append(gpa, name);
+            const key = try std.fmt.allocPrint(gpa, "filter.{s}.required", .{name});
+            defer gpa.free(key);
+            const required = repo.config.getBool(key, false) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NotABoolean, error.NotAnInteger => false,
+            };
+            if (required) try out.append(gpa, name);
         }
         return out.toOwnedSlice(gpa);
     }

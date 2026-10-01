@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Required-filter discovery keeps full filter names and allocation failures instead of silently omitting a required driver.
+
 - Fetch checks the main worktree’s checked-out branch through the repository’s ref backend, including linked reftable worktrees.
 
 - Ignore and attribute loaders preserve malformed case-folding policy and allocation failures instead of loading a different policy.
