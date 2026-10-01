@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Digest session authentication releases its intermediate credential hash if allocating the session hash fails.
+
 - An HTTP proxy challenge that cannot be answered releases its response and connection before returning the refusal.
 
 - HTTP CONNECT retries belong to the connection attempt that accepted the proxy challenge, so concurrent requests cannot consume each other’s retry decisions.
