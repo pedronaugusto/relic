@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Proxy authentication allocates replacement offered schemes before releasing the previous diagnostic, so allocation failure leaves a valid value to release.
+
 - The HTTP timeout-counter fixture observes only its client mutex and clears worker state, so hostname helper threads can wait on their own queues safely.
 
 - Digest session authentication releases its intermediate credential hash if allocating the session hash fails.

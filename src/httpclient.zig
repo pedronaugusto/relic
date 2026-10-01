@@ -373,8 +373,9 @@ pub const Client = struct {
             .digest => |ch| c.proxy_answer = .{ .digest = try .init(c.gpa, ch, try c.cnonce(arena)) },
             .basic => c.proxy_answer = .{ .basic = try httpauth.basic(c.gpa, credential.user, credential.password) },
             .unsupported => |names| {
+                const offered = try c.gpa.dupe(u8, names);
                 if (c.proxy_offered) |o| c.gpa.free(o);
-                c.proxy_offered = try c.gpa.dupe(u8, names);
+                c.proxy_offered = offered;
                 return error.ProxyAuthMethodUnsupported;
             },
         }
@@ -1405,6 +1406,31 @@ test "a proxy challenge that cannot be answered releases its response" {
     try std.testing.expectError(error.ProxyAuthMethodUnsupported, client.send(.GET, .{ .tls = false, .host = "git.example.com", .port = 80 }, "/", &.{}, null));
     try std.testing.expectEqualStrings("Negotiate", client.proxy_offered.?);
     // std.testing.allocator must have no retained response or connection.
+}
+
+test "proxy challenges retain offered schemes when replacement allocation fails" {
+    const Check = struct {
+        fn run(gpa: Allocator) !void {
+            var client: Client = .init(gpa, std.testing.io);
+            defer client.deinit();
+            client.proxy = .{ .host = "proxy.example.com", .port = 80, .credential = .{ .user = "a", .password = "b" } };
+            client.proxy_offered = try gpa.dupe(u8, "previous");
+            const head = try Head.parse("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n");
+            _ = client.proxyChallenged(&head) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    try std.testing.expectEqualStrings("previous", client.proxy_offered.?);
+                    return err;
+                },
+                error.ProxyAuthMethodUnsupported => {
+                    try std.testing.expectEqualStrings("Negotiate", client.proxy_offered.?);
+                    return;
+                },
+                else => return err,
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }
 
 test "tasks sending at once through one client share the connections it keeps" {
