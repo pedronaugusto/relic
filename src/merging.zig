@@ -264,6 +264,7 @@ pub fn inProgress(io: Io, repo: *Repository) bool {
 
 /// Merge `target` into the current branch.
 pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -440,6 +441,7 @@ pub const ConcludeOptions = struct {
 /// what `git commit` and `git merge --continue` do once the conflicts are
 /// resolved.
 pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOptions) Error!Oid {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();

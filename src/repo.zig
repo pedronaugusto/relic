@@ -28,6 +28,7 @@ const worktrees = @import("worktrees.zig");
 const filter = @import("filter.zig");
 const reftablestack = @import("reftablestack.zig");
 const signing = @import("signing.zig");
+const diagnostic_mod = @import("repodiagnostic.zig");
 
 const Oid = hash.Oid;
 
@@ -79,40 +80,8 @@ pub const WriteError = Error || signing.Error || object.Commit.WriteError;
 /// How deep `open` walks upwards looking for a `.git`.
 pub const max_discovery_depth: u8 = 64;
 
-/// A refused setting or signing stderr, owned by the caller.
-/// Initialize with `init` and release with `deinit`. Each operation clears it;
-/// its text stays valid until the next operation using it or `deinit`, even
-/// after failure or after the repository is closed.
-pub const Diagnostic = struct {
-    gpa: Allocator,
-    /// The full setting that was refused, or an empty string.
-    unsupported_setting: []const u8 = "",
-    /// Standard error from a failed signing program, or an empty string.
-    signing_stderr: []const u8 = "",
-
-    /// Use this allocator for the diagnostic's own copy of the setting.
-    pub fn init(gpa: Allocator) Diagnostic {
-        return .{ .gpa = gpa };
-    }
-
-    /// Release the diagnostic's copies.
-    pub fn deinit(diagnostic: *Diagnostic) void {
-        diagnostic.clear();
-    }
-
-    fn clear(diagnostic: *Diagnostic) void {
-        if (diagnostic.unsupported_setting.len != 0) diagnostic.gpa.free(diagnostic.unsupported_setting);
-        diagnostic.unsupported_setting = "";
-        if (diagnostic.signing_stderr.len != 0) diagnostic.gpa.free(diagnostic.signing_stderr);
-        diagnostic.signing_stderr = "";
-    }
-
-    fn set(diagnostic: *Diagnostic, text: []const u8) Allocator.Error!void {
-        const owned = try diagnostic.gpa.dupe(u8, text);
-        diagnostic.clear();
-        diagnostic.unsupported_setting = owned;
-    }
-};
+/// Caller-owned output for repository and history operations.
+pub const Diagnostic = diagnostic_mod.Diagnostic;
 
 /// The caller-owned diagnostic used by earlier open callers.
 pub const OpenDiagnostic = Diagnostic;
@@ -209,7 +178,7 @@ pub const Repository = struct {
     /// worktree. A `.git` *file* is followed, which is how a linked worktree
     /// is opened.
     pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, options: OpenOptions) Error!Repository {
-        if (options.diagnostic) |diagnostic| diagnostic.clear();
+        diagnostic_mod.reset(options.diagnostic);
         var discovered = try discover(gpa, io, dir, options);
         errdefer discovered.close(io);
         return finish(gpa, io, discovered, options);
@@ -451,7 +420,7 @@ pub const Repository = struct {
     /// ref backend requires reopening (`ObjectFormatChanged`, `RefStorageChanged`).
     /// `diagnostic`, when given, names the refusal and is cleared on every call.
     pub fn refreshConfig(repo: *Repository, io: Io, diagnostic: ?*Diagnostic) Error!bool {
-        if (diagnostic) |output| output.clear();
+        diagnostic_mod.reset(diagnostic);
         // `onbranch:` makes the branch `HEAD` is on part of what was read.
         const branch = try currentBranch(repo.gpa, io, repo.git_dir);
         defer if (branch) |b| repo.gpa.free(b);
@@ -552,7 +521,7 @@ pub const Repository = struct {
     }
 
     fn refuseSetting(diagnostic: ?*Diagnostic, text: []const u8) Allocator.Error!void {
-        if (diagnostic) |output| try output.set(text);
+        try diagnostic_mod.refuse(diagnostic, text);
     }
 
     /// The extensions this release understands at format version 1.
@@ -994,7 +963,7 @@ pub const Repository = struct {
     /// `diagnostic`, when given, keeps the refused setting or signing stderr
     /// and is cleared on every call.
     pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest, diagnostic: ?*Diagnostic) WriteError!Oid {
-        if (diagnostic) |output| output.clear();
+        diagnostic_mod.reset(diagnostic);
         const fields: object.Commit.Fields = .{
             .tree = request.tree,
             .parents = request.parents,
@@ -1010,9 +979,7 @@ pub const Repository = struct {
             signing.signCommit(s, io, repo.objectFormat(), fields, request.signing.key)
         else
             object.Commit.build(repo.gpa, repo.objectFormat(), fields)) catch |err| {
-            if (err == error.SigningFailed) if (diagnostic) |output| {
-                output.signing_stderr = try output.gpa.dupe(u8, signer.?.diagnostics.items);
-            };
+            if (err == error.SigningFailed) try diagnostic_mod.signingFailure(diagnostic, signer.?.diagnostics.items);
             return err;
         };
         defer repo.gpa.free(bytes);
@@ -1031,16 +998,14 @@ pub const Repository = struct {
     /// configuration say, with the signature after the message.
     /// `diagnostic` has the same lifetime as it does for `writeCommit`.
     pub fn writeTagWith(repo: *Repository, io: Io, fields: object.Tag.Fields, request: signing.Request, diagnostic: ?*Diagnostic) WriteError!Oid {
-        if (diagnostic) |output| output.clear();
+        diagnostic_mod.reset(diagnostic);
         var signer = try repo.signerFor(request, .tag, diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|
             signing.signTag(s, io, repo.objectFormat(), fields, request.key)
         else
             object.Tag.build(repo.gpa, repo.objectFormat(), fields)) catch |err| {
-            if (err == error.SigningFailed) if (diagnostic) |output| {
-                output.signing_stderr = try output.gpa.dupe(u8, signer.?.diagnostics.items);
-            };
+            if (err == error.SigningFailed) try diagnostic_mod.signingFailure(diagnostic, signer.?.diagnostics.items);
             return err;
         };
         defer repo.gpa.free(bytes);

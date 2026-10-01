@@ -515,3 +515,39 @@ test "a failed signing program leaves its stderr after the repository closes" {
         try tmp.dir.deleteTree(io, ".git");
     }
 }
+
+test "a history refusal before writing clears an earlier diagnostic" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    inline for (.{ "commit", "merge", "sequencer", "rebase" }) |operation| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var repo = try Repository.init(gpa, io, tmp.dir, .{});
+        defer repo.deinit(io);
+        try repo.config.set("commit.gpgSign", "true");
+        var diagnostic = repo_mod.Diagnostic.init(gpa);
+        defer diagnostic.deinit();
+        try testing.expectError(error.SigningRequiresPrograms, repo.writeCommit(io, .{
+            .tree = hash.Hasher.object(.sha1, "tree", ""),
+            .author = who,
+            .committer = who,
+            .message = "m",
+        }, &diagnostic));
+        diagnostic.signing_stderr = try gpa.dupe(u8, "earlier signer failure");
+        if (comptime std.mem.eql(u8, operation, "commit")) {
+            try testing.expectError(error.NothingToCommit, commit_mod.commit(&repo, io, .{
+                .author = who,
+                .committer = who,
+                .message = "m",
+            }, .{ .diagnostic = &diagnostic }));
+        } else if (comptime std.mem.eql(u8, operation, "merge")) {
+            try testing.expectError(error.NoMergeInProgress, @import("merging.zig").conclude(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
+        } else if (comptime std.mem.eql(u8, operation, "sequencer")) {
+            try testing.expectError(error.NoSequencerInProgress, @import("sequencer.zig").proceed(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
+        } else {
+            try testing.expectError(error.NoRebaseInProgress, @import("rebase.zig").proceed(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
+        }
+        try testing.expectEqualStrings("", diagnostic.unsupported_setting);
+        try testing.expectEqualStrings("", diagnostic.signing_stderr);
+    }
+}

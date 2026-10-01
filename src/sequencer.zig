@@ -213,11 +213,13 @@ pub const Outcome = struct {
 
 /// Cherry-pick `commits` in order onto `HEAD`.
 pub fn pick(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     return start(gpa, io, repo, .pick, commits, options);
 }
 
 /// Revert `commits` in order.
 pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     return start(gpa, io, repo, .revert, commits, options);
 }
 
@@ -890,6 +892,7 @@ fn commitStaged(r: *Replay) Error!Oid {
 /// commit what is staged for the one that stopped, then carry on with the
 /// rest of the sequence.
 pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -942,6 +945,7 @@ fn requireIndexIsHead(r: *Replay) Error!void {
 
 /// Leave out the pick that stopped and carry on with the rest.
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
     if (!head_mod.stateExists(io, repo.git_dir, action.headRef())) {
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;

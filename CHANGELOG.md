@@ -12,9 +12,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Fetch checks the main worktree’s checked-out branch through the repository’s ref backend, including linked reftable worktrees.
 
-- Ignore and attribute loaders preserve malformed case-folding policy and allocation failures instead of loading a different policy.
+- History entry points clear earlier diagnostic output even when they refuse the operation before a repository write, through the diagnostic owner.
 
 - Replacing a setting added in memory transfers its name to the new line before freeing the old text, so subsequent reads and edits retain the setting.
+
+- Ignore and attribute loaders preserve malformed case-folding policy and allocation failures instead of loading a different policy.
 
 - Unit tests count work and compare results instead of asserting speed ratios or performance ceilings; all measurements and their timing example live in the bench branch harness.
 

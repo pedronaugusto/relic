@@ -734,6 +734,7 @@ fn requireClean(r: *Run) Error!void {
 /// subjects after them, and git's help below. Edit it and hand it back as
 /// `Options.todo`. The result is the caller's.
 pub fn plan(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: Options) Error![]u8 {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     var r = try newRun(gpa, &arena_state, io, repo, options);
@@ -778,6 +779,7 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
 /// Rebase the current branch, or `options.branch`, onto `upstream` (or
 /// `options.onto`).
 pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     const arena_state = try gpa.create(std.heap.ArenaAllocator);
     arena_state.* = .init(gpa);
     errdefer {
@@ -2364,6 +2366,7 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
 /// Continue the rebase that stopped, whoever stopped it: commit what is
 /// staged, as git does, and carry on down the sheet.
 pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     var r = try loadRun(gpa, io, repo, options);
     errdefer freeRun(&r);
     try commitStagedChanges(&r);
@@ -2485,6 +2488,7 @@ const hooksEnv = ?hooks_mod.Runner.CommitEnv;
 /// Leave out the instruction that stopped, with whatever it changed, and
 /// carry on: `--skip`.
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     {
         var r = try loadRun(gpa, io, repo, options);
         defer freeRun(&r);
