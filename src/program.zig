@@ -83,7 +83,7 @@ pub const Error = error{
     /// The program's output passed `Limits`.
     OutputTooLong,
 } || std.process.SpawnError || Child.SpawnError || Child.OutputError || conduit.InputWriter.StartError ||
-    conduit.InputWriter.QueueError || Io.Timeout.Error || Io.Dir.RealPathError;
+    conduit.InputWriter.QueueError || Io.Timeout.Error || Io.Dir.RealPathError || Io.File.Reader.Error;
 
 pub const Outcome = struct {
     term: Term,
@@ -487,17 +487,27 @@ test "timeout bounds a helper that closes its output and keeps running" {
     defer env.deinit();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const result = run(.{ .environ = &env }, testing.allocator, testing.io, .{
-        .argv = &.{ process_fixture, "closed-output" },
-        .stdout = .ignore,
-        .stderr = .ignore,
-        .cwd = .{ .dir = tmp.dir },
-    }, "", .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } });
-    defer if (result) |value| {
-        var outcome = value;
-        outcome.deinit(testing.allocator);
-    } else |_| {};
-    try testing.expectError(error.Timeout, if (result) |_| @as(Error!void, {}) else |err| @as(Error!void, err));
+    const input = try testing.allocator.alloc(u8, 4 << 20);
+    defer testing.allocator.free(input);
+    @memset(input, 'i');
+    // Exercise both EOF followed by a wait, and a writer blocked on a child
+    // that never reads. Ignored output also proves no reader is needed for
+    // the deadline to apply.
+    for ([_][]const u8{ "", input }) |bytes| {
+        for ([_]bool{ false, true }) |capture| {
+            const result = run(.{ .environ = &env }, testing.allocator, testing.io, .{
+                .argv = &.{ process_fixture, "closed-output" },
+                .stdout = if (capture) .capture else .ignore,
+                .stderr = if (capture) .capture else .ignore,
+                .cwd = .{ .dir = tmp.dir },
+            }, bytes, .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } });
+            defer if (result) |value| {
+                var outcome = value;
+                outcome.deinit(testing.allocator);
+            } else |_| {};
+            try testing.expectError(error.Timeout, if (result) |_| @as(Error!void, {}) else |err| @as(Error!void, err));
+        }
+    }
 }
 
 test "opposite full pipes refuse unavailable concurrency instead of deadlocking" {
@@ -513,15 +523,20 @@ test "opposite full pipes refuse unavailable concurrency instead of deadlocking"
     const input = try testing.allocator.alloc(u8, 4 << 20);
     defer testing.allocator.free(input);
     @memset(input, 'i');
-    const result = run(.{ .environ = &env }, testing.allocator, threaded.io(), .{
-        .argv = &.{ process_fixture, "opposite-pipes" },
-        .cwd = .{ .dir = tmp.dir },
-    }, input, .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } });
-    defer if (result) |value| {
-        var outcome = value;
-        outcome.deinit(testing.allocator);
-    } else |_| {};
-    try testing.expectError(error.ConcurrencyUnavailable, if (result) |_| @as(Error!void, {}) else |err| @as(Error!void, err));
+    for ([_]Limits{
+        .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } },
+        .{},
+    }) |limits| {
+        const result = run(.{ .environ = &env }, testing.allocator, threaded.io(), .{
+            .argv = &.{ process_fixture, "opposite-pipes" },
+            .cwd = .{ .dir = tmp.dir },
+        }, input, limits);
+        defer if (result) |value| {
+            var outcome = value;
+            outcome.deinit(testing.allocator);
+        } else |_| {};
+        try testing.expectError(error.ConcurrencyUnavailable, if (result) |_| @as(Error!void, {}) else |err| @as(Error!void, err));
+    }
 
     var outcome = try run(.{ .environ = &env }, testing.allocator, testing.io, .{
         .argv = &.{ process_fixture, "opposite-pipes" },
