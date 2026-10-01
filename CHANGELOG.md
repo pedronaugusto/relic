@@ -39,6 +39,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Breaking: `CheckoutOptions`, snapshot `OpenOptions` and snapshot `Store` carry durability policy; callers depending on their layouts or constructing stores directly must migrate.
+
 - Breaking: repository hash/ref fields and ref-store allocator/directory/backend/cache fields are opaque owner state accessed through `objectFormat`, `refStore`, `refFormat` and `reftableOptions`; ref-store construction is fallible and requires `deinit`, including `GitDir.refStore`, with backend selection at construction and write-policy changes through `configureReftable`.
 
 - Breaking: caller-owned `repo.Diagnostic` includes `signing_stderr`, preserved after a failed commit or tag signing program; layout-dependent callers must review the new field.
