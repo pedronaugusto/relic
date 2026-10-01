@@ -198,7 +198,11 @@ pub const Lazy = struct {
         var arena_state: std.heap.ArenaAllocator = .init(l.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const names = try promisorRemotes(arena, &repo.config);
+        const borrowed = try promisorRemotes(arena, repo.configuration());
+        const names = try arena.alloc([]const u8, borrowed.len);
+        // fetchFrom may publish configuration while registering a filter.
+        // Keep every remote name under the request's owner across that edit.
+        for (borrowed, names) |name, *owned| owned.* = try arena.dupe(u8, name);
         if (names.len == 0) return error.NotAPartialClone;
         var remaining = try arena.dupe(Oid, oids);
         var last_error: anyerror = error.NotAPartialClone;
@@ -235,17 +239,17 @@ pub const Lazy = struct {
         {
             var buf: [256]u8 = undefined;
             const key = try std.fmt.bufPrint(&buf, "remote.{s}.partialclonefilter", .{name});
-            if (repo.config.get(key) == null) {
-                try repo.config.set(key, "blob:none");
-                try repo.config.write(io, repo.common_dir, "config");
+            if (repo.configuration().get(key) == null) {
+                try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = key, .value = "blob:none" } }}, null);
+                try @import("configstate.zig").get(repo._config).write(io, repo.common_dir, "config");
             }
         }
-        var remote = try @import("remote.zig").Remote.get(l.gpa, &repo.config, name);
+        var remote = try @import("remote.zig").Remote.get(l.gpa, repo.configuration(), name);
         defer remote.deinit();
         if (remote.urls.len == 0) return error.NotAPartialClone;
         var session = try transport.Session.open(l.gpa, io, remote.urls[0], .upload_pack, repo.objectFormat(), .{
             .programs = l.options.programs,
-            .config = &repo.config,
+            .config = repo.configuration(),
             .service_program = remote.upload_pack,
             .prompt = l.options.prompt,
             .auth_failure = &l.auth_failure,
@@ -258,7 +262,7 @@ pub const Lazy = struct {
             .tips = &.{},
             .include_tag = false,
             .filter = "blob:none",
-        }, .{ .receive = .{ .check_objects = l.options.check_objects, .reverse_index = revindex.wanted(&repo.config) } });
+        }, .{ .receive = .{ .check_objects = l.options.check_objects, .reverse_index = revindex.wanted(repo.configuration()) } });
         if (fetched.pack) |pack_name| try writePromisor(io, pack_dir, pack_name, &.{});
     }
 
@@ -283,8 +287,8 @@ pub const Lazy = struct {
                 try db.refresh(io);
             }
             const found = try db.read(io, oid);
-            defer db.gpa.free(found.bytes);
-            var entries = object.Tree.parse(db.kind, found.bytes).iterate();
+            defer db.allocator().free(found.bytes);
+            var entries = object.Tree.parse(db.objectFormat(), found.bytes).iterate();
             while (try entries.next()) |entry| switch (entry.mode) {
                 .tree => try stack.append(l.gpa, entry.oid),
                 .gitlink => {},

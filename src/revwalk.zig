@@ -178,7 +178,7 @@ pub const Walk = struct {
         const found = try walk.db.read(io, n.oid);
         defer walk.gpa.free(found.bytes);
         if (found.type != .commit) return error.NotACommit;
-        var commit = try object.Commit.parse(walk.gpa, walk.db.kind, found.bytes);
+        var commit = try object.Commit.parse(walk.gpa, walk.db.objectFormat(), found.bytes);
         defer commit.deinit();
         n.parents = try walk.gpa.dupe(Oid, parentsOf(walk.db, n.oid, commit.parents));
         n.time = commit.committer.when_secs;
@@ -542,7 +542,7 @@ const Painter = struct {
         const found = try p.db.read(p.io, oid);
         defer p.gpa.free(found.bytes);
         if (found.type != .commit) return error.NotACommit;
-        var commit = try object.Commit.parse(p.gpa, p.db.kind, found.bytes);
+        var commit = try object.Commit.parse(p.gpa, p.db.objectFormat(), found.bytes);
         defer commit.deinit();
         const loaded: Loaded = .{ .parents = try p.gpa.dupe(Oid, parentsOf(p.db, oid, commit.parents)), .time = commit.committer.when_secs };
         errdefer p.gpa.free(loaded.parents);

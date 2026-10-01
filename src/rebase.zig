@@ -350,8 +350,8 @@ fn newRun(gpa: Allocator, arena_state: *std.heap.ArenaAllocator, io: Io, repo: *
         .io = io,
         .repo = repo,
         .options = options,
-        .comment = message.commentString(repo.config.get("core.commentchar"), ""),
-        .abbrev_len = abbrev.defaultLength(&repo.config, &repo.odb),
+        .comment = message.commentString(repo.configuration().get("core.commentchar"), ""),
+        .abbrev_len = abbrev.defaultLength(repo.configuration(), &repo.odb),
         .allow_ff = !options.force and !options.signoff,
         .empty = options.empty orelse if (interactive) .stop else .drop,
     };
@@ -393,7 +393,7 @@ const Walker = struct {
     fn load(w: *Walker, oid: Oid) Error!Node {
         if (w.nodes.get(oid.bytes)) |n| return n;
         const found = try w.repo.odb.read(w.io, oid);
-        defer w.repo.odb.gpa.free(found.bytes);
+        defer w.repo.odb.allocator().free(found.bytes);
         if (found.type != .commit) return error.NotACommit;
         var commit = try object.Commit.parse(w.gpa, w.repo.objectFormat(), found.bytes);
         defer commit.deinit();
@@ -549,7 +549,7 @@ fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
         if (!empty and same.contains(oid.bytes)) continue;
         if (empty and !r.options.keep_empty) continue;
         const found = try r.repo.odb.read(r.io, oid);
-        defer r.repo.odb.gpa.free(found.bytes);
+        defer r.repo.odb.allocator().free(found.bytes);
         var commit = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
         defer commit.deinit();
         const subject = try message.onelineSubject(r.arena, commit.message);
@@ -585,7 +585,7 @@ fn rearrangeSquash(r: *Run, items: []todo.Item) Error![]todo.Item {
         if (item.command == .drop) continue;
         if (item.command.isFixup()) return items;
         const found = try r.repo.odb.read(r.io, commit_oid);
-        defer r.repo.odb.gpa.free(found.bytes);
+        defer r.repo.odb.allocator().free(found.bytes);
         var commit = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
         defer commit.deinit();
         const subject = try message.onelineSubject(r.arena, message.fromSubject(commit.message));
@@ -765,7 +765,7 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
     };
     todo.format(&out.writer, items, .{
         .short = if (short) .{ .context = r, .shortenFn = Shorten.shorten } else null,
-        .abbreviate_commands = r.repo.config.getBool("rebase.abbreviatecommands", false) catch false,
+        .abbreviate_commands = r.repo.configuration().getBool("rebase.abbreviatecommands", false) catch false,
     }) catch return error.OutOfMemory;
     var count: usize = 0;
     for (items) |item| {
@@ -1296,7 +1296,7 @@ fn errorWithPatch(r: *Run, commit: Oid, to_amend: bool) Error!void {
     try writePatch(r, commit);
     if (!r.hasState("message")) {
         const found = try r.repo.odb.read(r.io, commit);
-        defer r.repo.odb.gpa.free(found.bytes);
+        defer r.repo.odb.allocator().free(found.bytes);
         var parsed = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
         defer parsed.deinit();
         try r.state("message", try std.fmt.allocPrint(r.arena, "{s}\n", .{message.fromSubject(parsed.message)}));
@@ -1312,7 +1312,7 @@ fn intendToAmend(r: *Run) Error!void {
 /// prints it, in `patch`.
 fn writePatch(r: *Run, commit_oid: Oid) Error!void {
     const found = try r.repo.odb.read(r.io, commit_oid);
-    defer r.repo.odb.gpa.free(found.bytes);
+    defer r.repo.odb.allocator().free(found.bytes);
     var commit = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
     defer commit.deinit();
     // `log_tree_commit` shows a merge commit no diff at all, so its patch
@@ -1364,7 +1364,7 @@ const Source = struct {
 
 fn readSource(r: *Run, oid: Oid) Error!Source {
     const found = try r.repo.odb.read(r.io, oid);
-    defer r.repo.odb.gpa.free(found.bytes);
+    defer r.repo.odb.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     const bytes = try r.arena.dupe(u8, found.bytes);
     return .{ .oid = oid, .bytes = bytes, .commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), bytes) };
@@ -1603,7 +1603,7 @@ fn firstLine(text: []const u8) []const u8 {
 }
 
 fn configuredCleanup(repo: *Repository) message.Cleanup {
-    const text = repo.config.get("commit.cleanup") orelse return .verbatim;
+    const text = repo.configuration().get("commit.cleanup") orelse return .verbatim;
     return message.Cleanup.parse(text) orelse .verbatim;
 }
 
@@ -2077,7 +2077,7 @@ fn checkedOutBranches(r: *Run) Error!std.StringHashMapUnmanaged([]const u8) {
     const io = r.io;
 
     // The main worktree, unless the repository is bare.
-    const bare = repo.config.getBool("core.bare", false) catch false;
+    const bare = repo.configuration().getBool("core.bare", false) catch false;
     if (!bare) main: {
         var buf: [4096]u8 = undefined;
         const len = repo.common_dir.realPath(io, &buf) catch break :main;

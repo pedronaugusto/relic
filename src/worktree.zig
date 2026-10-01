@@ -280,7 +280,7 @@ pub fn addAll(
 
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -430,7 +430,7 @@ const Walker = struct {
         if (w.index.find(path)) |entry| {
             if (entry.mode == .gitlink) {
                 try w.markSeen(path);
-                const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.kind)) orelse {
+                const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.objectFormat())) orelse {
                     w.outcome.unchanged += 1;
                     return;
                 };
@@ -468,7 +468,7 @@ const Walker = struct {
             w.outcome.unsafe_paths += 1;
             return;
         }
-        const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.kind)) orelse {
+        const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.objectFormat())) orelse {
             if (w.options.refusal) |r| r.set(null, path);
             return error.NoCommitCheckedOut;
         };
@@ -903,7 +903,7 @@ pub fn status(
     // compared through what it would be stored as, clean filter and all.
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -987,9 +987,9 @@ fn flattenStaged(
 ) Error!void {
     if (depth > 64) return error.UnsupportedEntry;
     const found = try db.read(io, tree_oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.UnsupportedEntry;
-    const tree: object.Tree = .parse(db.kind, found.bytes);
+    const tree: object.Tree = .parse(db.objectFormat(), found.bytes);
     var it = tree.iterate();
     while (try it.next()) |entry| {
         const path = if (prefix.len == 0)
@@ -1038,9 +1038,9 @@ fn treeAt(io: Io, db: *Odb, root: Oid, dir: []const u8) Error!?Oid {
     var parts = std.mem.splitScalar(u8, dir, '/');
     while (parts.next()) |name| {
         const found = try db.read(io, current);
-        defer db.gpa.free(found.bytes);
+        defer db.allocator().free(found.bytes);
         if (found.type != .tree) return null;
-        const tree: object.Tree = .parse(db.kind, found.bytes);
+        const tree: object.Tree = .parse(db.objectFormat(), found.bytes);
         const entry = (try tree.find(name)) orelse return null;
         if (entry.mode != .tree) return null;
         current = entry.oid;
@@ -1311,7 +1311,7 @@ const StatusScan = struct {
             const applied = try attrs.lookup(a, path, false);
             break :blk (try s.conv.toGitFile(a, path, found.stat.size, applied, .hash_only)).bytes;
         } else try s.wt.readFileAlloc(s.io, path, a, .limited(1 << 31));
-        const oid = hash.Hasher.object(s.db.kind, "blob", content);
+        const oid = hash.Hasher.object(s.db.objectFormat(), "blob", content);
         if (oid.eql(entry.oid)) return .unmodified;
         return .modified;
     }
@@ -1323,7 +1323,7 @@ const StatusScan = struct {
         const state: SubmoduleState = if (s.options.submodules) |probe|
             try probe.inspect(s.io, path, entry.oid)
         else blk: {
-            const checked_out = try gitlink.head(s.gpa, s.io, s.wt, path, s.db.kind);
+            const checked_out = try gitlink.head(s.gpa, s.io, s.wt, path, s.db.objectFormat());
             break :blk .{ .new_commits = checked_out != null and !checked_out.?.eql(entry.oid) };
         };
         if (state.isClean()) return;
@@ -1356,9 +1356,9 @@ fn flattenTree(
 ) Error!void {
     if (depth > 64) return error.UnsupportedEntry;
     const found = try db.read(io, tree_oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.UnsupportedEntry;
-    const tree: object.Tree = .parse(db.kind, found.bytes);
+    const tree: object.Tree = .parse(db.objectFormat(), found.bytes);
     var it = tree.iterate();
     while (try it.next()) |entry| {
         const path = if (prefix.len == 0)
@@ -1594,7 +1594,7 @@ pub fn checkout(
 
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -1905,7 +1905,7 @@ pub fn addTreeAttributes(
             continue;
         if (!item.value_ptr.mode.isBlob() or item.value_ptr.mode == .symlink) continue;
         const found = try db.read(io, item.value_ptr.oid);
-        defer db.gpa.free(found.bytes);
+        defer db.allocator().free(found.bytes);
         const depth: u32 = if (base.len == 0) 0 else @intCast(std.mem.count(u8, base, "/") + 1);
         try attrs.addText(try arena.dupe(u8, found.bytes), base, path, depth + 1);
     }
@@ -1965,7 +1965,7 @@ pub fn writePaths(
 
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -2135,7 +2135,7 @@ pub fn writeEntry(
             defer scratch.deinit();
             const a = scratch.allocator();
             const found = try db.read(io, oid);
-            defer db.gpa.free(found.bytes);
+            defer db.allocator().free(found.bytes);
             const applied: attributes.Attributes = if (rules.attrs) |attrs| try attrs.lookup(a, path, false) else .{ .items = &.{} };
             const smudged = try conv.toWorktree(a, path, found.bytes, applied, .{ .blob = oid });
             try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
@@ -2540,7 +2540,7 @@ pub fn applySparse(
     defer scratch.deinit();
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -2580,7 +2580,7 @@ pub fn applySparse(
                             content = (try conv.toGit(a, entry.path, raw, applied, .hash_only)).bytes;
                         }
                     }
-                    if (!hash.Hasher.object(db.kind, "blob", content).eql(entry.oid)) {
+                    if (!hash.Hasher.object(db.objectFormat(), "blob", content).eql(entry.oid)) {
                         outcome.kept_dirty += 1;
                         continue;
                     }

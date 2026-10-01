@@ -301,7 +301,7 @@ pub fn mergeTrees(
     m.branch1 = options.labels.ours;
     m.branch2 = options.labels.theirs;
     m.ancestor = options.labels.base;
-    const outcome = try m.nonrecursive(base orelse emptyTree(db.kind), ours, theirs);
+    const outcome = try m.nonrecursive(base orelse emptyTree(db.objectFormat()), ours, theirs);
     return m.finish(gpa, &arena_instance, outcome);
 }
 
@@ -497,7 +497,7 @@ const Merge = struct {
     }
 
     fn zero(m: *const Merge) Oid {
-        return Oid.zero(m.db.kind);
+        return Oid.zero(m.db.objectFormat());
     }
 
     //---------------------------------------------------------------------
@@ -562,12 +562,12 @@ const Merge = struct {
 
     fn readTree(m: *Merge, oid: ?Oid) Error![]TreeItem {
         const tree_oid = oid orelse return &.{};
-        if (tree_oid.eql(emptyTree(m.db.kind))) return &.{};
+        if (tree_oid.eql(emptyTree(m.db.objectFormat()))) return &.{};
         const found = try m.db.read(m.io, tree_oid);
-        defer m.db.gpa.free(found.bytes);
+        defer m.db.allocator().free(found.bytes);
         if (found.type != .tree) return error.NotATree;
         var out: std.ArrayList(TreeItem) = .empty;
-        var it = object.Tree.parse(m.db.kind, found.bytes).iterate();
+        var it = object.Tree.parse(m.db.objectFormat(), found.bytes).iterate();
         while (try it.next()) |entry| {
             try out.append(m.arena, .{ .name = try m.arena.dupe(u8, entry.name), .mode = entry.mode.raw(), .oid = entry.oid });
         }
@@ -880,7 +880,7 @@ const Merge = struct {
     fn readBlob(m: *Merge, oid: Oid) Error![]const u8 {
         if (oid.isZero()) return "";
         const found = try m.db.read(m.io, oid);
-        defer m.db.gpa.free(found.bytes);
+        defer m.db.allocator().free(found.bytes);
         if (found.type != .blob) return error.NotABlob;
         return m.arena.dupe(u8, found.bytes);
     }
@@ -1139,13 +1139,13 @@ const Merge = struct {
                 },
                 else => |e| return e,
             };
-            defer sdb.gpa.free(found.bytes);
+            defer sdb.allocator().free(found.bytes);
             if (found.type != .commit) {
                 try m.pathMsg(.submodule_history_not_available, path, null, null, &.{}, "Failed to merge submodule {s} (commits not present)", .{path});
                 return false;
             }
         }
-        const gpa = m.db.gpa;
+        const gpa = m.db.allocator();
         if (!try revwalk.isAncestor(gpa, m.io, sdb, o, a) or !try revwalk.isAncestor(gpa, m.io, sdb, o, b)) {
             try m.pathMsg(.submodule_may_have_rewinds, path, null, null, &.{}, "Failed to merge submodule {s} (commits don't follow merge-base)", .{path});
             return false;
@@ -1173,8 +1173,8 @@ const Merge = struct {
             var buf: [hash.max_hex_len]u8 = undefined;
             const short = try abbrev.unique(m.io, sdb, commit, abbrev.automaticLength(sdb), &buf);
             const found = try sdb.read(m.io, commit);
-            defer sdb.gpa.free(found.bytes);
-            var parsed = try object.Commit.parse(m.arena, sdb.kind, found.bytes);
+            defer sdb.allocator().free(found.bytes);
+            var parsed = try object.Commit.parse(m.arena, sdb.objectFormat(), found.bytes);
             defer parsed.deinit();
             const subject = try @import("message.zig").onelineSubject(m.arena, parsed.message);
             try listing.print(m.arena, "    {s} {s}\n", .{ short, subject });
@@ -1190,7 +1190,7 @@ const Merge = struct {
     /// `find_first_merges`: the merges on the way from `a` to any tip that
     /// contain `b`, less those that contain another of them.
     fn findFirstMerges(m: *Merge, sdb: *odb_mod.Odb, tips: []const Oid, a: Oid, b: Oid) Error![]const Oid {
-        const gpa = m.db.gpa;
+        const gpa = m.db.allocator();
         var walk = revwalk.Walk.init(gpa, sdb);
         defer walk.deinit();
         for (tips) |tip| try walk.push(tip);
@@ -1972,7 +1972,7 @@ const Merge = struct {
 
     /// `process_entries`.
     fn processEntries(m: *Merge) Error!Oid {
-        if (m.paths.count() == 0) return emptyTree(m.db.kind);
+        if (m.paths.count() == 0) return emptyTree(m.db.objectFormat());
         var plist: std.ArrayList([]const u8) = .empty;
         var it = m.paths.keyIterator();
         while (it.next()) |key| try plist.append(m.arena, key.*);
@@ -2004,8 +2004,8 @@ const Merge = struct {
         // `-X subtree`: the other side and the base lined up with ours
         // first, as `merge_ort_nonrecursive_internal` does.
         if (m.options.subtree_shift) |prefix| {
-            side2 = try subtreeshift.shift(m.db.gpa, m.io, m.db, side1, side2, prefix);
-            base = try subtreeshift.shift(m.db.gpa, m.io, m.db, side1, base, prefix);
+            side2 = try subtreeshift.shift(m.db.allocator(), m.io, m.db, side1, side2, prefix);
+            base = try subtreeshift.shift(m.db.allocator(), m.io, m.db, side1, base, prefix);
         }
         m.reset();
         var passes: u32 = 0;
@@ -2022,7 +2022,7 @@ const Merge = struct {
     fn fakeOid(m: *Merge, n: usize) Oid {
         var bytes: [hash.max_raw_len]u8 = @splat(0xff);
         std.mem.writeInt(u64, bytes[0..8], n, .big);
-        return Oid.fromRaw(m.db.kind, bytes[0..m.db.kind.rawLen()]) catch unreachable;
+        return Oid.fromRaw(m.db.objectFormat(), bytes[0..m.db.objectFormat().rawLen()]) catch unreachable;
     }
 
     fn treeOf(m: *Merge, ref: CommitRef) Error!Oid {
@@ -2030,9 +2030,9 @@ const Merge = struct {
             .virtual => |i| return m.virtuals.items[i].tree,
             .real => |oid| {
                 const found = try m.db.read(m.io, oid);
-                defer m.db.gpa.free(found.bytes);
+                defer m.db.allocator().free(found.bytes);
                 if (found.type != .commit) return error.NotACommit;
-                var commit = try object.Commit.parse(m.arena, m.db.kind, found.bytes);
+                var commit = try object.Commit.parse(m.arena, m.db.objectFormat(), found.bytes);
                 defer commit.deinit();
                 return commit.tree;
             },
@@ -2060,7 +2060,7 @@ const Merge = struct {
             for (v.parents, parents) |ref, *out| out.* = m.oidOf(ref);
             try virtuals.append(m.arena, .{ .oid = v.fake, .parents = parents });
         }
-        const gpa = m.db.gpa;
+        const gpa = m.db.allocator();
         const found = try revwalk.mergeBasesWith(gpa, m.io, m.db, m.oidOf(a), m.oidOf(b), .{ .virtuals = virtuals.items });
         defer gpa.free(found);
         return m.arena.dupe(Oid, found);
@@ -2082,7 +2082,7 @@ const Merge = struct {
         var ancestor_name: []const u8 = undefined;
         var merged_merge_bases: CommitRef = undefined;
         if (bases.items.len == 0) {
-            try m.virtuals.append(m.arena, .{ .tree = emptyTree(m.db.kind), .parents = &.{}, .fake = m.fakeOid(m.virtuals.items.len) });
+            try m.virtuals.append(m.arena, .{ .tree = emptyTree(m.db.objectFormat()), .parents = &.{}, .fake = m.fakeOid(m.virtuals.items.len) });
             merged_merge_bases = .{ .virtual = m.virtuals.items.len - 1 };
             ancestor_name = "empty tree";
         } else {

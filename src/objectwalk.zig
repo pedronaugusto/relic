@@ -242,8 +242,8 @@ const Walk = struct {
             if (header.type != .tag) return .{ .oid = current, .type = header.type };
             if (tags) |list| try list.append(w.gpa, current);
             const found = try w.db.read(w.io, current);
-            defer w.db.gpa.free(found.bytes);
-            var tag = try object.Tag.parse(w.gpa, w.db.kind, found.bytes);
+            defer w.db.allocator().free(found.bytes);
+            var tag = try object.Tag.parse(w.gpa, w.db.objectFormat(), found.bytes);
             defer tag.deinit();
             current = tag.target;
         }
@@ -252,13 +252,13 @@ const Walk = struct {
 
     fn load(w: *Walk, oid: Oid) Error!*Node {
         const gop = try w.nodes.getOrPut(w.gpa, oid);
-        if (!gop.found_existing) gop.value_ptr.* = .{ .tree = .zero(w.db.kind) };
+        if (!gop.found_existing) gop.value_ptr.* = .{ .tree = .zero(w.db.objectFormat()) };
         const node = gop.value_ptr;
         if (node.loaded) return node;
         const found = try w.db.read(w.io, oid);
-        defer w.db.gpa.free(found.bytes);
+        defer w.db.allocator().free(found.bytes);
         if (found.type != .commit) return error.UnexpectedObjectType;
-        var commit = try object.Commit.parse(w.gpa, w.db.kind, found.bytes);
+        var commit = try object.Commit.parse(w.gpa, w.db.objectFormat(), found.bytes);
         defer commit.deinit();
         // `load` may have grown the map; the pointer is taken again.
         const again = w.nodes.getPtr(oid).?;
@@ -353,9 +353,9 @@ const Walk = struct {
                 error.ObjectNotFound => continue,
                 else => |e| return e,
             };
-            defer w.db.gpa.free(found.bytes);
+            defer w.db.allocator().free(found.bytes);
             if (found.type != .tree) continue;
-            var entries = object.Tree.parse(w.db.kind, found.bytes).iterate();
+            var entries = object.Tree.parse(w.db.objectFormat(), found.bytes).iterate();
             while (try entries.next()) |entry| {
                 switch (entry.mode) {
                     .tree => try stack.append(w.gpa, entry.oid),
@@ -383,9 +383,9 @@ const Walk = struct {
             try w.added.put(w.gpa, item.oid, {});
             try out.append(w.gpa, .{ .oid = item.oid, .hint = item.path });
             const found = try w.db.read(w.io, item.oid);
-            defer w.db.gpa.free(found.bytes);
+            defer w.db.allocator().free(found.bytes);
             if (found.type != .tree) return error.UnexpectedObjectType;
-            var entries = object.Tree.parse(w.db.kind, found.bytes).iterate();
+            var entries = object.Tree.parse(w.db.objectFormat(), found.bytes).iterate();
             while (try entries.next()) |entry| {
                 const path = if (item.path.len == 0)
                     try arena.dupe(u8, entry.name)
@@ -506,22 +506,22 @@ pub fn checkConnectedWith(
             },
             else => |e| return e,
         };
-        defer db.gpa.free(found.bytes);
+        defer db.allocator().free(found.bytes);
         switch (found.type) {
             .blob => {},
             .commit => {
-                var commit = try object.Commit.parse(gpa, db.kind, found.bytes);
+                var commit = try object.Commit.parse(gpa, db.objectFormat(), found.bytes);
                 defer commit.deinit();
                 try stack.append(gpa, .{ .oid = commit.tree });
                 for (revwalk.parentsOf(db, oid, commit.parents)) |parent| try stack.append(gpa, .{ .oid = parent });
             },
             .tag => {
-                var tag = try object.Tag.parse(gpa, db.kind, found.bytes);
+                var tag = try object.Tag.parse(gpa, db.objectFormat(), found.bytes);
                 defer tag.deinit();
                 try stack.append(gpa, .{ .oid = tag.target });
             },
             .tree => {
-                var entries = object.Tree.parse(db.kind, found.bytes).iterate();
+                var entries = object.Tree.parse(db.objectFormat(), found.bytes).iterate();
                 while (try entries.next()) |entry| switch (entry.mode) {
                     .gitlink => {},
                     .tree => try stack.append(gpa, .{ .oid = entry.oid }),

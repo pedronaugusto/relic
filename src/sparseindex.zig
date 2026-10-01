@@ -168,9 +168,9 @@ fn expandTree(
 ) Error!void {
     if (depth > max_depth) return error.TreeTooDeep;
     const found = try db.read(io, oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.NotATree;
-    const tree: object.Tree = .parse(db.kind, found.bytes);
+    const tree: object.Tree = .parse(db.objectFormat(), found.bytes);
     var it = tree.iterate();
     const base_len = base.items.len;
     while (try it.next()) |item| {

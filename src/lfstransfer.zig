@@ -1589,7 +1589,7 @@ fn copyLocal(
     defer dir.close(io);
     var remote = Repository.open(gpa, io, dir, .{ .discover = false }) catch return error.LfsLocalRemoteUnreadable;
     defer remote.deinit(io);
-    var remote_lfs = lfs.Lfs.load(gpa, io, &remote.config, remote.common_dir, null, .{}) catch return error.LfsLocalRemoteUnreadable;
+    var remote_lfs = lfs.Lfs.load(gpa, io, remote.configuration(), remote.common_dir, null, .{}) catch return error.LfsLocalRemoteUnreadable;
     defer remote_lfs.deinit();
     const here = server.store();
     const there = &remote_lfs.store;
@@ -1794,7 +1794,7 @@ fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, t
             if (containsOid(unique.items, resolved.oid)) continue;
             try unique.append(arena, resolved.oid);
             const found = try repo.odb.read(io, resolved.oid);
-            defer repo.odb.gpa.free(found.bytes);
+            defer repo.odb.allocator().free(found.bytes);
             var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
             defer commit.deinit();
             try scanTree(arena, io, repo, commit.tree, "", &out, &seen);
@@ -1839,7 +1839,7 @@ fn containsOid(list: []const Oid, oid: Oid) bool {
 /// The committer time of `oid` when it is a commit.
 fn commitTime(arena: Allocator, io: Io, repo: *Repository, oid: Oid) ?i64 {
     const found = repo.odb.read(io, oid) catch return null;
-    defer repo.odb.gpa.free(found.bytes);
+    defer repo.odb.allocator().free(found.bytes);
     if (found.type != .commit) return null;
     var commit = object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes) catch return null;
     defer commit.deinit();
@@ -1848,7 +1848,7 @@ fn commitTime(arena: Allocator, io: Io, repo: *Repository, oid: Oid) ?i64 {
 
 fn treeOfCommit(arena: Allocator, io: Io, repo: *Repository, oid: Oid) FetchError!Oid {
     const found = try repo.odb.read(io, oid);
-    defer repo.odb.gpa.free(found.bytes);
+    defer repo.odb.allocator().free(found.bytes);
     var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
     defer commit.deinit();
     return commit.tree;
@@ -1878,7 +1878,7 @@ fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips
     }
     for (tips.items) |tip| {
         const found = try repo.odb.read(io, tip);
-        defer repo.odb.gpa.free(found.bytes);
+        defer repo.odb.allocator().free(found.bytes);
         const tree = switch (found.type) {
             .commit => blk: {
                 var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
@@ -1895,7 +1895,7 @@ fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips
 
 fn scanTree(arena: Allocator, io: Io, repo: *Repository, tree: Oid, prefix: []const u8, out: *std.ArrayList(Object), seen: *std.StringHashMapUnmanaged(void)) FetchError!void {
     const found = try repo.odb.read(io, tree);
-    defer repo.odb.gpa.free(found.bytes);
+    defer repo.odb.allocator().free(found.bytes);
     var entries = object_mod.Tree.parse(repo.objectFormat(), found.bytes).iterate();
     while (try entries.next()) |entry| {
         const path = if (prefix.len == 0) try arena.dupe(u8, entry.name) else try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
@@ -1915,7 +1915,7 @@ fn addPointer(arena: Allocator, io: Io, repo: *Repository, oid: Oid, size: u64, 
     // a pointer.
     if (size >= lfs.pointer_size_cutoff or size == 0) return;
     const found = try repo.odb.read(io, oid);
-    defer repo.odb.gpa.free(found.bytes);
+    defer repo.odb.allocator().free(found.bytes);
     const pointer = lfs.Pointer.decode(found.bytes) catch return;
     if (pointer.size == 0 or pointer.extension_count != 0) return;
     const key = try arena.dupe(u8, &pointer.oid);
@@ -1988,7 +1988,7 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
         const header = repo.odb.readHeader(io, entry.oid) catch continue;
         if (header.size >= lfs.pointer_size_cutoff or header.size == 0) continue;
         const found = try repo.odb.read(io, entry.oid);
-        defer repo.odb.gpa.free(found.bytes);
+        defer repo.odb.allocator().free(found.bytes);
         const pointer = lfs.Pointer.decode(found.bytes) catch continue;
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         // Only a file that is still exactly its pointer is replaced.
@@ -2061,7 +2061,7 @@ pub fn pushObjects(server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb
         const header = try db.readHeader(io, e.oid);
         if (header.type != .blob or header.size >= lfs.pointer_size_cutoff or header.size == 0) continue;
         const found = try db.read(io, e.oid);
-        defer db.gpa.free(found.bytes);
+        defer db.allocator().free(found.bytes);
         const pointer = lfs.Pointer.decode(found.bytes) catch continue;
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         try objects.append(arena, .of(pointer, e.hint));

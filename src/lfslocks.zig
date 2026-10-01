@@ -899,13 +899,13 @@ pub const Fixed = struct {
 pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const []const u8, options: Options) Error!Fixed {
     var fixed: Fixed = .{};
     const wt = repo.work_dir orelse return fixed;
-    var settings = try lfsapi.Settings.load(gpa, io, &repo.config, repo.work_dir);
+    var settings = try lfsapi.Settings.load(gpa, io, repo.configuration(), repo.work_dir);
     defer settings.deinit();
     if (!readOnlyWanted(&settings)) return fixed;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var store_settings = try lfs.Lfs.load(gpa, io, &repo.config, repo.common_dir, repo.work_dir, .{});
+    var store_settings = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.common_dir, repo.work_dir, .{});
     defer store_settings.deinit();
     const ref = try refFor(arena, io, repo, options);
     const cache = try Cache.read(arena, io, &store_settings.store, ref);

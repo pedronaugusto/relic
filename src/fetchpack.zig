@@ -693,10 +693,10 @@ const Negotiator = struct {
             }
             if (!try n.db.exists(n.io, oid)) return null;
             const found = try n.db.read(n.io, oid);
-            defer n.db.gpa.free(found.bytes);
+            defer n.db.allocator().free(found.bytes);
             switch (found.type) {
                 .tag => {
-                    var tag = try object.Tag.parse(n.gpa, n.db.kind, found.bytes);
+                    var tag = try object.Tag.parse(n.gpa, n.db.objectFormat(), found.bytes);
                     defer tag.deinit();
                     oid = tag.target;
                     continue;
@@ -704,7 +704,7 @@ const Negotiator = struct {
                 .commit => {},
                 else => return null,
             }
-            var commit = try object.Commit.parse(n.gpa, n.db.kind, found.bytes);
+            var commit = try object.Commit.parse(n.gpa, n.db.objectFormat(), found.bytes);
             defer commit.deinit();
             const parents = try n.arena.allocator().dupe(Oid, revwalk.parentsOf(n.db, oid, commit.parents));
             const gop = try n.nodes.getOrPut(n.gpa, oid);

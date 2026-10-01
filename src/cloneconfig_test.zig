@@ -72,7 +72,7 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
         const ours = try d.readFileAlloc(io, "a.bin", gpa, .limited(1 << 20));
         defer gpa.free(ours);
         try testing.expectEqualStrings(content, ours);
-        try testing.expect(repo.config.get("filter.lfs.process") != null);
+        try testing.expect(repo.configuration().get("filter.lfs.process") != null);
         const status = try fx.gitOut(d, &.{ "status", "--porcelain" });
         defer gpa.free(status);
         try testing.expectEqualStrings("", status);
@@ -136,7 +136,7 @@ test "a clone given no settings of its own reaches the remote with the person's,
     var hex: [64]u8 = undefined;
     try testing.expectEqualStrings(theirs, head.oid.hex(&hex));
     // The setting was read, not written into the new repository.
-    try testing.expectEqualStrings(fake, repo.config.get("core.sshCommand").?);
+    try testing.expectEqualStrings(fake, repo.configuration().get("core.sshCommand").?);
     const local = try d.readFileAlloc(io, ".git/config", gpa, .limited(1 << 20));
     defer gpa.free(local);
     try testing.expect(std.mem.indexOf(u8, local, "sshCommand") == null);

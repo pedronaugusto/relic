@@ -402,7 +402,7 @@ test "a promised object is fetched from the next promisor remote when one fails,
     const names = blk: {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        const list = try partial.promisorRemotes(arena.allocator(), &repo.config);
+        const list = try partial.promisorRemotes(arena.allocator(), repo.configuration());
         var joined: std.ArrayList(u8) = .empty;
         for (list) |n| try joined.print(gpa, "{s} ", .{n});
         break :blk try joined.toOwnedSlice(gpa);
@@ -423,7 +423,7 @@ test "a promised object is fetched from the next promisor remote when one fails,
     // With no promisor remote that has them, the read fails by name.
     const set = try git(gpa, io, twins.by_relic, &.{ "config", "remote.mirror.url", "file:///nowhere/mirror.git" });
     gpa.free(set);
-    try repo.config.set("remote.mirror.url", "file:///nowhere/mirror.git");
+    try repo.editConfig(&.{.{ .set = .{ .name = "remote.mirror.url", .value = "file:///nowhere/mirror.git" } }}, null);
     const missing = try Oid.parse(repo.objectFormat(), "1111111111111111111111111111111111111111");
     try testing.expectError(error.PromisorFetchFailed, repo.odb.read(io, missing));
 }

@@ -722,7 +722,7 @@ fn writeCommit(repo: *Repository, io: Io, tree: Oid, parents: []const Oid, who: 
 fn abbreviate(repo: *Repository, io: Io, oid: Oid, buf: *[hash.max_hex_len]u8) Error![]const u8 {
     const hex = oid.hex(buf);
     var len: usize = 7;
-    if (repo.config.getInt("core.abbrev", 7)) |configured| {
+    if (repo.configuration().getInt("core.abbrev", 7)) |configured| {
         if (configured >= 4) len = @intCast(@min(configured, @as(i64, @intCast(hex.len))));
     } else |_| {}
     while (len < hex.len) : (len += 1) {
@@ -792,7 +792,7 @@ pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions
     const current_tree = try worktree.writeTree(gpa, io, &ctx.index, db);
 
     // `--index`: the stash's staged changes, merged onto the index as it is.
-    const use_index = options.index orelse (repo.config.getBool("stash.index", false) catch false);
+    const use_index = options.index orelse (repo.configuration().getBool("stash.index", false) catch false);
     var restored_index: ?Oid = null;
     if (use_index and !stash.base_tree.eql(stash.index_tree) and !current_tree.eql(stash.index_tree)) {
         if (!try patchApplies(gpa, io, db, stash.base_tree, current_tree, stash.index_tree)) return error.IndexConflict;

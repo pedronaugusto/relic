@@ -246,7 +246,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
 }
 
 fn configuredCleanup(repo: *Repository) error{InvalidCleanupMode}!Cleanup {
-    const text = repo.config.get("commit.cleanup") orelse return .whitespace;
+    const text = repo.configuration().get("commit.cleanup") orelse return .whitespace;
     // With no editor, `default` and `scissors` are both `whitespace`.
     if (std.mem.eql(u8, text, "default") or std.mem.eql(u8, text, "whitespace") or
         std.mem.eql(u8, text, "scissors")) return .whitespace;
@@ -256,7 +256,7 @@ fn configuredCleanup(repo: *Repository) error{InvalidCleanupMode}!Cleanup {
 }
 
 fn commentPrefix(repo: *Repository) []const u8 {
-    const text = repo.config.get("core.commentstring") orelse repo.config.get("core.commentchar") orelse return "#";
+    const text = repo.configuration().get("core.commentstring") orelse repo.configuration().get("core.commentchar") orelse return "#";
     // `auto` picks a character the message does not use, which only matters
     // to an editor's template; with no template it is `#`.
     if (text.len == 0 or std.mem.eql(u8, text, "auto")) return "#";

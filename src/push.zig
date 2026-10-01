@@ -226,7 +226,7 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     errdefer outcome.arena.deinit();
     const arena = outcome.arena.allocator();
 
-    var remote = try remote_mod.Remote.get(gpa, &repo.config, remote_name);
+    var remote = try remote_mod.Remote.get(gpa, repo.configuration(), remote_name);
     defer remote.deinit();
 
     var specs: std.ArrayList(Refspec) = .empty;
@@ -261,7 +261,7 @@ fn pushTo(
 ) Error!void {
     var session = try transport.Session.open(gpa, io, url, .receive_pack, repo.objectFormat(), .{
         .programs = options.programs,
-        .config = &repo.config,
+        .config = repo.configuration(),
         .service_program = remote.receive_pack,
         .progress = options.progress,
         .prompt = options.prompt,
@@ -411,7 +411,7 @@ fn defaultRefspecs(
     remote_name: []const u8,
     specs: *std.ArrayList(Refspec),
 ) Error!void {
-    const mode_text = repo.config.get("push.default") orelse "simple";
+    const mode_text = repo.configuration().get("push.default") orelse "simple";
     if (std.ascii.eqlIgnoreCase(mode_text, "nothing")) return error.NoPushDestination;
     if (std.ascii.eqlIgnoreCase(mode_text, "matching")) {
         try specs.append(arena, try Refspec.parse(":", .push));
@@ -424,7 +424,7 @@ fn defaultRefspecs(
         try specs.append(arena, try Refspec.parse(try std.fmt.allocPrint(arena, "{s}:{s}", .{ branch_ref, branch_ref }), .push));
         return;
     }
-    var branch = try remote_mod.Branch.get(gpa, &repo.config, current);
+    var branch = try remote_mod.Branch.get(gpa, repo.configuration(), current);
     defer branch.deinit();
     const same_remote = if (branch.remote) |r| std.mem.eql(u8, r, remote.name orelse remote_name) else false;
     const upstream_mode = std.ascii.eqlIgnoreCase(mode_text, "upstream") or std.ascii.eqlIgnoreCase(mode_text, "tracking");

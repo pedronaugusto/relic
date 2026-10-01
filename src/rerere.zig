@@ -97,8 +97,8 @@ pub const Outcome = struct {
 /// Whether rerere runs here: `rerere.enabled`, or, unset, whether
 /// `.git/rr-cache` is there.
 pub fn enabled(io: Io, repo: *Repository) bool {
-    const setting = repo.config.getBool("rerere.enabled", false) catch null;
-    if (repo.config.get("rerere.enabled") == null) return head_mod.stateExists(io, repo.common_dir, "rr-cache");
+    const setting = repo.configuration().getBool("rerere.enabled", false) catch null;
+    if (repo.configuration().get("rerere.enabled") == null) return head_mod.stateExists(io, repo.common_dir, "rr-cache");
     return setting orelse false;
 }
 
@@ -311,7 +311,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = wt, .rules = rules };
-    const autoupdate = options.autoupdate orelse (repo.config.getBool("rerere.autoupdate", false) catch false);
+    const autoupdate = options.autoupdate orelse (repo.configuration().getBool("rerere.autoupdate", false) catch false);
 
     var rr = try readMergeRr(&r);
 
@@ -536,7 +536,7 @@ fn tryMerge(r: *Run, vid: Id, path: []const u8, cur: []const u8, size: usize) Er
 fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs: []const u8, size: usize, labels: blobmerge.Labels) Error!struct { bytes: []const u8, clean: bool } {
     // `find_ll_merge_driver`: set is text, unset binary, a name the driver
     // of that name, and nothing said `merge.default`.
-    var name: ?[]const u8 = r.repo.config.get("merge.default");
+    var name: ?[]const u8 = r.repo.configuration().get("merge.default");
     if (r.rules.attrs) |attrs| {
         const applied = try attrs.lookup(r.arena, path, false);
         if (applied.get("merge")) |state| switch (state) {
@@ -548,13 +548,13 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
     }
     var favor: blobmerge.Favor = .none;
     if (name) |driver| {
-        if (r.repo.config.get(try std.fmt.allocPrint(r.arena, "merge.{s}.driver", .{driver})) != null) {
+        if (r.repo.configuration().get(try std.fmt.allocPrint(r.arena, "merge.{s}.driver", .{driver})) != null) {
             return error.UnsupportedMergeDriver;
         } else if (std.mem.eql(u8, driver, "binary")) {
             return .{ .bytes = ours, .clean = false };
         } else if (std.mem.eql(u8, driver, "union")) favor = .union_;
     }
-    const style_text = r.repo.config.get("merge.conflictstyle");
+    const style_text = r.repo.configuration().get("merge.conflictstyle");
     const style = if (style_text) |text| blobmerge.ConflictStyle.parse(text) orelse .merge else .merge;
     var merged = blobmerge.blobs(r.arena, base, ours, theirs, .{
         .labels = labels,
@@ -905,7 +905,7 @@ fn handleCache(r: *Run, path: []const u8, stages: Stages, size: usize) Error!Nor
     for (stages, &texts) |stage, *text| {
         const s = stage orelse continue;
         const found = try r.repo.odb.read(r.io, s.oid);
-        defer r.repo.odb.gpa.free(found.bytes);
+        defer r.repo.odb.allocator().free(found.bytes);
         text.* = try r.arena.dupe(u8, found.bytes);
     }
     const merged = try llMerge(r, path, texts[0], texts[1], texts[2], size, .{ .ours = "ours", .base = "", .theirs = "theirs" });
@@ -1005,7 +1005,7 @@ fn mtimeOf(r: *Run, sub: []const u8) Error!i64 {
 /// `repo_config_get_expiry_in_days`: a number of days before `now`, or
 /// `never` and `false` for none, `now` and `all` for everything.
 fn expiryInDays(repo: *Repository, key: []const u8, cutoff: *i64, now: i64) Error!void {
-    const text = repo.config.get(key) orelse return;
+    const text = repo.configuration().get(key) orelse return;
     if (config_mod.parseInt(text)) |days| {
         if (days >= std.math.minInt(i32) and days <= std.math.maxInt(i32)) {
             cutoff.* = now - days * 86400;

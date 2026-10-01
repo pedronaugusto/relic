@@ -129,21 +129,21 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Erro
 /// named by its full name, as git names it in the message. The name lives
 /// in `arena`.
 pub fn upstream(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error!Target {
-    if (!(repo.config.getBool("merge.defaulttoupstream", true) catch true)) return error.NoMergeTarget;
+    if (!(repo.configuration().getBool("merge.defaulttoupstream", true) catch true)) return error.NoMergeTarget;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const branch = head.shortName() orelse return error.NoDefaultUpstream;
-    const remote = repo.config.get(try std.fmt.allocPrint(arena, "branch.{s}.remote", .{branch})) orelse
+    const remote = repo.configuration().get(try std.fmt.allocPrint(arena, "branch.{s}.remote", .{branch})) orelse
         return error.NoDefaultUpstream;
-    const merges = try repo.config.all(try std.fmt.allocPrint(arena, "branch.{s}.merge", .{branch}));
-    defer repo.config.gpa.free(merges);
+    const merges = try repo.configuration().all(try std.fmt.allocPrint(arena, "branch.{s}.merge", .{branch}));
+    defer repo.configuration().gpa.free(merges);
     if (merges.len == 0) return error.NoDefaultUpstream;
     // More than one is an octopus, which this merge does not make.
     if (merges.len > 1) return error.MultipleUpstreams;
     var name: []const u8 = try arena.dupe(u8, merges[0]);
     if (!std.mem.eql(u8, remote, ".")) {
-        const specs = try repo.config.all(try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{remote}));
-        defer repo.config.gpa.free(specs);
+        const specs = try repo.configuration().all(try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{remote}));
+        defer repo.configuration().gpa.free(specs);
         const tracking: ?[]const u8 = for (specs) |text| {
             const spec = refspec.Refspec.parse(text, .fetch) catch continue;
             if (try spec.mapSource(arena, name)) |mapped| break mapped;
@@ -272,8 +272,8 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     if (inProgress(io, repo)) return error.MergeInProgress;
     if (head_mod.stateExists(io, repo.git_dir, "CHERRY_PICK_HEAD") or
         head_mod.stateExists(io, repo.git_dir, "REVERT_HEAD")) return error.SequencerInProgress;
-    if (repo.config.getBool("merge.log", false) catch true) return error.UnsupportedMergeMessage;
-    if (repo.config.getBool("merge.branchdesc", false) catch true) return error.UnsupportedMergeMessage;
+    if (repo.configuration().getBool("merge.log", false) catch true) return error.UnsupportedMergeMessage;
+    if (repo.configuration().getBool("merge.branchdesc", false) catch true) return error.UnsupportedMergeMessage;
 
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
@@ -335,7 +335,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     try repo.writeIndex(io, &index);
     try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
 
-    const comment = message.commentString(repo.config.get("core.commentchar"), "");
+    const comment = message.commentString(repo.configuration().get("core.commentchar"), "");
     var msg: std.ArrayList(u8) = .empty;
     // The message as given, byte for byte; git's own title has no newline
     // at its end.
@@ -468,7 +468,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     const author = options.author orelse options.who;
     const given = options.message orelse ((try head_mod.readState(arena, io, repo.git_dir, "MERGE_MSG")) orelse "");
     const raw = try h.beforeCommit(arena, io, repo, given, .merge, author);
-    const comment = message.commentString(repo.config.get("core.commentchar"), raw);
+    const comment = message.commentString(repo.configuration().get("core.commentchar"), raw);
     const cleaned = try message.cleanup(arena, raw, options.cleanup, comment);
     if (cleaned.len == 0) return error.EmptyMessage;
     const commit = try repo.writeCommit(io, .{
@@ -522,7 +522,7 @@ pub fn removeMergeState(io: Io, repo: *Repository) head_mod.Error!void {
 }
 
 fn configuredFastForward(repo: *Repository) FastForward {
-    const text = repo.config.get("merge.ff") orelse return .allow;
+    const text = repo.configuration().get("merge.ff") orelse return .allow;
     if (std.ascii.eqlIgnoreCase(text, "only")) return .only;
     const on = @import("config.zig").parseBool(text) catch return .allow;
     return if (on) .allow else .never;
@@ -530,14 +530,14 @@ fn configuredFastForward(repo: *Repository) FastForward {
 
 /// `merge.conflictStyle`, or the plain style.
 pub fn configuredStyle(repo: *Repository) merge.ConflictStyle {
-    const text = repo.config.get("merge.conflictstyle") orelse return .merge;
+    const text = repo.configuration().get("merge.conflictstyle") orelse return .merge;
     return merge.ConflictStyle.parse(text) orelse .merge;
 }
 
 /// The cleanup `git merge` uses: `commit.cleanup`, or whitespace alone when
 /// no editor is involved.
 fn cleanupMode(repo: *Repository, editor: bool) message.Cleanup {
-    const text = repo.config.get("commit.cleanup") orelse return if (editor) .strip else .whitespace;
+    const text = repo.configuration().get("commit.cleanup") orelse return if (editor) .strip else .whitespace;
     if (std.mem.eql(u8, text, "default")) return if (editor) .strip else .whitespace;
     return message.Cleanup.parse(text) orelse .whitespace;
 }
@@ -555,8 +555,8 @@ fn title(arena: Allocator, io: Io, repo: *Repository, target: Target, head: head
     };
     const current = head.shortName() orelse "HEAD";
     var suppressed = false;
-    const patterns = try repo.config.all("merge.suppressdest");
-    defer repo.config.gpa.free(patterns);
+    const patterns = try repo.configuration().all("merge.suppressdest");
+    defer repo.configuration().gpa.free(patterns);
     var effective: std.ArrayList([]const u8) = .empty;
     if (patterns.len == 0) {
         try effective.appendSlice(arena, &.{ "main", "master" });

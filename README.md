@@ -119,6 +119,18 @@ on Windows through writable directory handles; a filesystem that refuses them
 returns an error. The caller owns durability of the supplied root directory's
 entry in its parent. Gitlinks and LFS payloads belong to separate stores.
 
+`Odb.openAt` borrows its directory handle on success and failure; close
+that original handle in the caller. Odb owns its format, sources and storage
+policy together. Use `objectFormat()`, `settings()` and `allocator()` to
+read them; changing format or storage policy requires a new database.
+Repository configuration is borrowed through `configuration()`. Apply
+in-memory changes with `editConfig(edits, diagnostic)`; a whole batch is
+validated before it replaces the old view and ref policy. Hash and backend
+changes require reopening. Changing worktree configuration sources requires
+a standalone configuration write followed by refresh; a memory-only edit
+returns `WorktreeConfigChanged`. Write edited configuration with
+`repo.configuration().write(io, repo.common_dir, "config")`.
+
 `worktree.snapshot.Store` records a working tree in a private object store.
 A snapshot is a tree ID. Before returning it, capture takes every tree and
 blob it reaches into the store, including unchanged objects held only by

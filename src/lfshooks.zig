@@ -83,7 +83,7 @@ pub const Native = struct {
             const head = (try n.repo.head(io)) orelse return;
             defer n.gpa.free(head.name);
             const found = try n.repo.odb.read(io, head.oid);
-            defer n.repo.odb.gpa.free(found.bytes);
+            defer n.repo.odb.allocator().free(found.bytes);
             var commit = try object.Commit.parse(arena, n.repo.objectFormat(), found.bytes);
             defer commit.deinit();
             // git's diff-tree of a root commit lists nothing.
@@ -108,7 +108,7 @@ pub const Native = struct {
 fn treeOf(arena: Allocator, io: Io, repo: *Repository, commit_oid: Oid) !Oid {
     const peeled = try repo.peel(io, commit_oid);
     const found = try repo.odb.read(io, peeled);
-    defer repo.odb.gpa.free(found.bytes);
+    defer repo.odb.allocator().free(found.bytes);
     if (found.type == .tree) return peeled;
     var commit = try object.Commit.parse(arena, repo.objectFormat(), found.bytes);
     defer commit.deinit();

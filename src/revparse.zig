@@ -256,13 +256,13 @@ const Resolver = struct {
     /// `branch.<b>.merge` through `branch.<b>.remote`'s fetch refspecs: the
     /// ref that tracks it here.
     fn upstreamOf(r: *Resolver, branch: []const u8) Error![]const u8 {
-        var b = remote_mod.Branch.get(r.gpa, &r.repo.config, branch) catch |err| return revisionError(err);
+        var b = remote_mod.Branch.get(r.gpa, r.repo.configuration(), branch) catch |err| return revisionError(err);
         defer b.deinit();
         const remote_name = b.remote orelse return error.BadRevision;
         if (b.merge.len == 0) return error.BadRevision;
         const merge = try r.a.dupe(u8, b.merge[0]);
         if (std.mem.eql(u8, remote_name, ".")) return merge;
-        var remote = remote_mod.Remote.get(r.gpa, &r.repo.config, remote_name) catch |err| return revisionError(err);
+        var remote = remote_mod.Remote.get(r.gpa, r.repo.configuration(), remote_name) catch |err| return revisionError(err);
         defer remote.deinit();
         for (remote.fetch) |spec| {
             if (try spec.mapSource(r.a, merge)) |tracking| return tracking;
@@ -273,23 +273,23 @@ const Resolver = struct {
     /// Where `git push` would send `branch`, as the ref that tracks it:
     /// `push.default` read as git reads it.
     fn pushOf(r: *Resolver, branch: []const u8) Error![]const u8 {
-        var b = remote_mod.Branch.get(r.gpa, &r.repo.config, branch) catch |err| return revisionError(err);
+        var b = remote_mod.Branch.get(r.gpa, r.repo.configuration(), branch) catch |err| return revisionError(err);
         defer b.deinit();
-        const remote_name = b.push_remote orelse r.repo.config.get("remote.pushdefault") orelse b.remote orelse return error.BadRevision;
-        const mode = r.repo.config.get("push.default") orelse "simple";
+        const remote_name = b.push_remote orelse r.repo.configuration().get("remote.pushdefault") orelse b.remote orelse return error.BadRevision;
+        const mode = r.repo.configuration().get("push.default") orelse "simple";
         if (std.mem.eql(u8, mode, "nothing")) return error.BadRevision;
         if (std.mem.eql(u8, mode, "upstream") or std.mem.eql(u8, mode, "tracking")) return r.upstreamOf(branch);
         if (std.mem.eql(u8, mode, "simple") and b.remote != null and std.mem.eql(u8, b.remote.?, remote_name)) {
             // To the upstream, which must have the branch's own name.
             const up = try r.upstreamOf(branch);
-            var bb = remote_mod.Branch.get(r.gpa, &r.repo.config, branch) catch |err| return revisionError(err);
+            var bb = remote_mod.Branch.get(r.gpa, r.repo.configuration(), branch) catch |err| return revisionError(err);
             defer bb.deinit();
             const merge = if (bb.merge.len != 0) bb.merge[0] else return error.BadRevision;
             if (!std.mem.eql(u8, merge["refs/heads/".len..], branch)) return error.BadRevision;
             return up;
         }
         // current, matching, and simple to another remote: the same name.
-        var remote = remote_mod.Remote.get(r.gpa, &r.repo.config, remote_name) catch |err| return revisionError(err);
+        var remote = remote_mod.Remote.get(r.gpa, r.repo.configuration(), remote_name) catch |err| return revisionError(err);
         defer remote.deinit();
         const dest = try std.fmt.allocPrint(r.a, "refs/heads/{s}", .{branch});
         for (remote.fetch) |spec| {
@@ -352,7 +352,7 @@ const Resolver = struct {
 
     fn tagTarget(r: *Resolver, oid: Oid) Error!Oid {
         const found = r.repo.odb.read(r.io, oid) catch |err| return revisionError(err);
-        defer r.repo.odb.gpa.free(found.bytes);
+        defer r.repo.odb.allocator().free(found.bytes);
         var tag = object.Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
         defer tag.deinit();
         return tag.target;
@@ -360,7 +360,7 @@ const Resolver = struct {
 
     fn treeOf(r: *Resolver, commit: Oid) Error!Oid {
         const found = r.repo.odb.read(r.io, commit) catch |err| return revisionError(err);
-        defer r.repo.odb.gpa.free(found.bytes);
+        defer r.repo.odb.allocator().free(found.bytes);
         var c = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
         defer c.deinit();
         return c.tree;
@@ -368,7 +368,7 @@ const Resolver = struct {
 
     fn parents(r: *Resolver, commit: Oid) Error![]const Oid {
         const found = r.repo.odb.read(r.io, commit) catch |err| return revisionError(err);
-        defer r.repo.odb.gpa.free(found.bytes);
+        defer r.repo.odb.allocator().free(found.bytes);
         var c = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
         defer c.deinit();
         return r.a.dupe(Oid, c.parents);
@@ -448,7 +448,7 @@ const Resolver = struct {
         }
         while (walk.next(r.io) catch |err| return revisionError(err)) |c| {
             const found = r.repo.odb.read(r.io, c.oid) catch |err| return revisionError(err);
-            defer r.repo.odb.gpa.free(found.bytes);
+            defer r.repo.odb.allocator().free(found.bytes);
             var commit = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
             defer commit.deinit();
             const hit = try pattern.search(r.gpa, commit.message);
@@ -463,7 +463,7 @@ const Resolver = struct {
         var parts = std.mem.tokenizeScalar(u8, path, '/');
         while (parts.next()) |part| {
             const found = r.repo.odb.read(r.io, current) catch |err| return revisionError(err);
-            defer r.repo.odb.gpa.free(found.bytes);
+            defer r.repo.odb.allocator().free(found.bytes);
             if (found.type != .tree) return error.BadRevision;
             const entry = (object.Tree.parse(r.repo.objectFormat(), found.bytes).find(part) catch return error.BadRevision) orelse return error.BadRevision;
             current = entry.oid;

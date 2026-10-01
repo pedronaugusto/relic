@@ -250,7 +250,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     errdefer outcome.arena.deinit();
     const arena = outcome.arena.allocator();
 
-    var remote = try remote_mod.Remote.get(gpa, &repo.config, remote_name);
+    var remote = try remote_mod.Remote.get(gpa, repo.configuration(), remote_name);
     defer remote.deinit();
 
     const rla = options.reflog_action orelse blk: {
@@ -284,22 +284,22 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     var branch_config: ?remote_mod.Branch = null;
     defer if (branch_config) |*b| b.deinit();
     if (current) |name| {
-        branch_config = try remote_mod.Branch.get(gpa, &repo.config, name);
+        branch_config = try remote_mod.Branch.get(gpa, repo.configuration(), name);
         const b = &branch_config.?;
         if (b.merge.len != 0 and b.remote != null and remote.name != null and std.mem.eql(u8, b.remote.?, remote.name.?)) {
             branch_merge = b.merge;
         }
     }
 
-    const follow_head = cli_specs.items.len == 0 and remote.name != null and followRemoteHead(&repo.config, remote.name.?);
+    const follow_head = cli_specs.items.len == 0 and remote.name != null and followRemoteHead(repo.configuration(), remote.name.?);
 
     // A promisor remote's packs are filtered as the clone was, and what
     // they leave out is promised rather than missing.
-    const promisor = remote.name != null and partial.isPromisor(&repo.config, remote.name.?);
+    const promisor = remote.name != null and partial.isPromisor(repo.configuration(), remote.name.?);
     const filter_spec: ?[]const u8 = blk: {
         const spec = options.filter orelse if (promisor) configured: {
             const key = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{remote.name.?});
-            const raw = repo.config.get(key) orelse break :configured null;
+            const raw = repo.configuration().get(key) orelse break :configured null;
             break :configured try config_mod.unquote(arena, raw);
         } else null;
         const text = spec orelse break :blk null;
@@ -310,7 +310,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     const url = remote.urls[0];
     var session = try transport.Session.open(gpa, io, url, .upload_pack, repo.objectFormat(), .{
         .programs = options.programs,
-        .config = &repo.config,
+        .config = repo.configuration(),
         .service_program = remote.upload_pack,
         .progress = options.progress,
         .prompt = options.prompt,
@@ -485,7 +485,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     }, .{
         .warnings = options.warnings,
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config), .links = &links, .threads = indexpack.configuredThreads(&repo.config) },
+        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(repo.configuration()), .links = &links, .threads = indexpack.configuredThreads(repo.configuration()) },
         .shallow_info = &shallow_info,
     });
     outcome.pack = fetched.pack;
@@ -529,7 +529,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
                 .tips = tips.items,
                 .common_tips = common_tips.items,
                 .include_tag = false,
-            }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config), .threads = indexpack.configuredThreads(&repo.config) } });
+            }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(repo.configuration()), .threads = indexpack.configuredThreads(repo.configuration()) } });
         }
     }
 
@@ -930,7 +930,7 @@ fn rootsReached(arena: Allocator, io: Io, repo: *Repository, tip: Oid, roots: *c
         }
         if (boundary.contains(oid) or (try index.find(oid)) == null) continue;
         const found = repo.odb.read(io, oid) catch continue;
-        defer repo.odb.gpa.free(found.bytes);
+        defer repo.odb.allocator().free(found.bytes);
         if (found.type != .commit) continue;
         var commit = try object.Commit.parse(arena, repo.objectFormat(), found.bytes);
         defer commit.deinit();
@@ -997,7 +997,7 @@ fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repositor
     if (!repo.isBare() or repo.common_is_separate) {
         var main_store = try refs_mod.Store.initWithOptions(gpa, repo.objectFormat(), repo.common_dir, repo.common_dir, .{ .format = repo.refStore().refFormat() });
         defer main_store.deinit();
-        const bare = repo.config.getBool("core.bare", false) catch false;
+        const bare = repo.configuration().getBool("core.bare", false) catch false;
         if (!bare) {
             if (try main_store.read(gpa, io, "HEAD")) |head| switch (head) {
                 .symbolic => |target| {

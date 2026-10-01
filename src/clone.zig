@@ -256,14 +256,14 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     // A git directory with its working tree elsewhere is not bare, and
     // logs its refs as `git init` sets a repository with a working tree to.
     if (options.separate_git_dir) {
-        try repo.config.set("core.bare", "false");
-        try repo.config.set("core.logallrefupdates", "true");
+        try repo.editConfig(&.{.{ .set = .{ .name = "core.bare", .value = "false" } }}, null);
+        try repo.editConfig(&.{.{ .set = .{ .name = "core.logallrefupdates", .value = "true" } }}, null);
     }
 
     // The remote, in the new configuration.
     const origin = options.origin;
-    try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.url", .{origin}), recorded);
-    if (!options.tags) try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.tagopt", .{origin}), "--no-tags");
+    try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.url", .{origin}), .value = recorded } }}, null);
+    if (!options.tags) try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.tagopt", .{origin}), .value = "--no-tags" } }}, null);
 
     // One branch, or one tag, when that is all that is fetched.
     const single_tag: ?[]const u8 = if (single_branch and head_branch == null and detached != null and options.branch != null)
@@ -277,12 +277,12 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             try std.fmt.allocPrint(arena, "+{s}:{s}", .{ tag, tag })
         else
             try std.fmt.allocPrint(arena, "+refs/heads/*:refs/remotes/{s}/*", .{origin});
-        try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{origin}), spec);
+        try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{origin}), .value = spec } }}, null);
     }
     if (filter_spec) |spec| {
-        try repo.config.set("core.repositoryformatversion", "1");
-        try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.promisor", .{origin}), "true");
-        try repo.config.set(try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{origin}), spec);
+        try repo.editConfig(&.{.{ .set = .{ .name = "core.repositoryformatversion", .value = "1" } }}, null);
+        try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.promisor", .{origin}), .value = "true" } }}, null);
+        try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{origin}), .value = spec } }}, null);
     }
 
     // Every branch, and every tag unless asked not to; or, for a single
@@ -407,8 +407,8 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             try tx.commit(io, log);
             if (!options.bare) {
                 const short = branch["refs/heads/".len..];
-                try repo.config.set(try std.fmt.allocPrint(arena, "branch.{s}.remote", .{short}), origin);
-                try repo.config.set(try std.fmt.allocPrint(arena, "branch.{s}.merge", .{short}), branch);
+                try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "branch.{s}.remote", .{short}), .value = origin } }}, null);
+                try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "branch.{s}.merge", .{short}), .value = branch } }}, null);
             }
         }
     } else if (detached) |oid| {
@@ -435,7 +435,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             }
         }
     }
-    try repo.config.write(io, repo.common_dir, "config");
+    try @import("configstate.zig").get(repo._config).write(io, repo.common_dir, "config");
 
     // The caller's configuration joins the repository's, as git reads
     // every level: the checkout's filters come from there.
@@ -538,7 +538,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     rules.required_filters = required;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    const lfs_configured = repo.config.get("filter.lfs.process") != null or repo.config.get("filter.lfs.smudge") != null;
+    const lfs_configured = repo.configuration().get("filter.lfs.process") != null or repo.configuration().get("filter.lfs.smudge") != null;
     // A new clone's working tree has nothing in it to lose, as git's
     // clone takes it.
     _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, tree, .{

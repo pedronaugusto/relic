@@ -17,7 +17,7 @@ const Repository = repo_mod.Repository;
 const testing = std.testing;
 
 fn expectValue(repo: *const Repository, name: []const u8, want: ?[]const u8) !void {
-    const got = repo.config.get(name);
+    const got = repo.configuration().get(name);
     if (want) |w| {
         try testing.expect(got != null);
         try testing.expectEqualStrings(w, got.?);
@@ -44,7 +44,7 @@ test "another process's git config is seen after refreshConfig, and not before" 
     try git.exec(io, &.{ "config", "core.autocrlf", "false" });
     try git.exec(io, &.{ "config", "user.name", "Ada" });
     try expectValue(&repo, "core.autocrlf", "input");
-    try testing.expect(try repo.config.isStale(io));
+    try testing.expect(try repo.configuration().isStale(io));
 
     try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "core.autocrlf", "false");
@@ -72,13 +72,13 @@ test "an include that appears later and a worktree file the extension turns on a
     try expectValue(&repo, "fixture.value", "included");
     const read = try git.line(io, &.{ "config", "fixture.value" });
     defer gpa.free(read);
-    try testing.expectEqualStrings(read, repo.config.get("fixture.value").?);
+    try testing.expectEqualStrings(read, repo.configuration().get("fixture.value").?);
 
     try git.exec(io, &.{ "config", "extensions.worktreeConfig", "true" });
     try git.exec(io, &.{ "config", "--worktree", "fixture.scoped", "here" });
     try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "fixture.scoped", "here");
-    try testing.expectEqual(.worktree, repo.config.origin("fixture.scoped").?.level);
+    try testing.expectEqual(.worktree, repo.configuration().origin("fixture.scoped").?.level);
 
     // A file the extension brought in is watched like the others.
     try git.exec(io, &.{ "config", "--worktree", "fixture.scoped", "there" });
@@ -173,7 +173,7 @@ fn expectIncludesAgree(gpa: std.mem.Allocator, io: Io, proj: Io.Dir, home: []con
     for (names) |name| {
         const theirs = try gitWithHome(gpa, io, proj, home, &.{ "config", "--get", name });
         defer if (theirs) |t| gpa.free(t);
-        const ours = repo.config.get(name);
+        const ours = repo.configuration().get(name);
         if ((theirs == null) != (ours == null) or (theirs != null and !std.mem.eql(u8, theirs.?, ours.?))) {
             std.debug.print("{s}: git reads {?s}, this reads {?s}\n", .{ name, theirs, ours });
             return error.TestExpectedEqual;

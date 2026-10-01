@@ -278,7 +278,7 @@ pub const Session = struct {
         const entry = index.find(path) orelse index.findStage(path, 2) orelse return false;
         if (!entry.mode.isBlob()) return false;
         const found = try db.read(s.io, entry.oid);
-        defer db.gpa.free(found.bytes);
+        defer db.allocator().free(found.bytes);
         if (found.type != .blob) return false;
         return attributes.hasCrlfText(found.bytes);
     }

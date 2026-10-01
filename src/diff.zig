@@ -211,9 +211,9 @@ fn flatten(
 ) Error!void {
     if (depth > 64) return error.TreeTooDeep;
     const found = try db.read(io, tree_oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.NotATree;
-    const parsed: object.Tree = .parse(db.kind, found.bytes);
+    const parsed: object.Tree = .parse(db.objectFormat(), found.bytes);
     var it = parsed.iterate();
     while (try it.next()) |entry| {
         const path = if (prefix.len == 0)
@@ -259,8 +259,8 @@ fn detectRenames(
     for (all.items) |c| {
         const one = try arena.create(rename.Spec);
         const two = try arena.create(rename.Spec);
-        one.* = specOf(c.old, if (c.new) |n| n.path else c.old.?.path, db.kind);
-        two.* = specOf(c.new, if (c.old) |o| o.path else c.new.?.path, db.kind);
+        one.* = specOf(c.old, if (c.new) |n| n.path else c.old.?.path, db.objectFormat());
+        two.* = specOf(c.new, if (c.old) |o| o.path else c.new.?.path, db.objectFormat());
         const pair = try arena.create(rename.Pair);
         pair.* = .{ .one = one, .two = two };
         try queue.append(arena, pair);
@@ -439,7 +439,7 @@ pub fn numstat(
         // line changed either way, which is what a commit name is.
         var old_gitlink: [96]u8 = undefined;
         var old_read: ?[]u8 = null;
-        defer if (old_read) |bytes| db.gpa.free(bytes);
+        defer if (old_read) |bytes| db.allocator().free(bytes);
         const old_bytes: []const u8 = if (change.old) |entry| blk: {
             if (entry.mode == .gitlink) break :blk gitlinkText(&old_gitlink, entry.oid);
             old_read = (try db.read(io, entry.oid)).bytes;
@@ -447,7 +447,7 @@ pub fn numstat(
         } else "";
         var new_gitlink: [96]u8 = undefined;
         var new_read: ?[]u8 = null;
-        defer if (new_read) |bytes| db.gpa.free(bytes);
+        defer if (new_read) |bytes| db.allocator().free(bytes);
         const new_bytes: []const u8 = if (change.new) |entry| blk: {
             if (entry.mode == .gitlink) break :blk gitlinkText(&new_gitlink, entry.oid);
             new_read = (try db.read(io, entry.oid)).bytes;
@@ -501,8 +501,8 @@ pub fn unified(
         },
     }
 
-    const old_oid = if (change.old) |e| e.oid else Oid.zero(db.kind);
-    const new_oid = if (change.new) |e| e.oid else Oid.zero(db.kind);
+    const old_oid = if (change.old) |e| e.oid else Oid.zero(db.objectFormat());
+    const new_oid = if (change.new) |e| e.oid else Oid.zero(db.objectFormat());
     if (old_oid.eql(new_oid)) {
         // Only the mode moved: git prints no index line and no hunks.
         return;
@@ -527,7 +527,7 @@ pub fn unified(
     // an object's bytes are the object database's allocator's, whoever
     // asked for them
     var old_read: ?[]u8 = null;
-    defer if (old_read) |bytes| db.gpa.free(bytes);
+    defer if (old_read) |bytes| db.allocator().free(bytes);
     const old_bytes: []const u8 = if (change.old) |entry| blk: {
         if (entry.mode == .gitlink) break :blk gitlinkText(&old_gitlink, entry.oid);
         old_read = (try db.read(io, entry.oid)).bytes;
@@ -535,7 +535,7 @@ pub fn unified(
     } else "";
     var new_gitlink: [96]u8 = undefined;
     var new_read: ?[]u8 = null;
-    defer if (new_read) |bytes| db.gpa.free(bytes);
+    defer if (new_read) |bytes| db.allocator().free(bytes);
     const new_bytes: []const u8 = if (change.new) |entry| blk: {
         if (entry.mode == .gitlink) break :blk gitlinkText(&new_gitlink, entry.oid);
         new_read = (try db.read(io, entry.oid)).bytes;

@@ -77,7 +77,7 @@ pub const Server = struct {
     /// Serve `remote` in `version`; `stateless` for HTTP, where every
     /// request stands alone.
     pub fn init(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, stateless: bool, options: Options) Server {
-        const config = &remote.repo.config;
+        const config = remote.repo.configuration();
         const any = options.allow_any orelse (config.getBool("uploadpack.allowanysha1inwant", false) catch false);
         return .{
             .gpa = gpa,
@@ -542,9 +542,9 @@ const Negotiation = struct {
     fn commit(n: *Negotiation, oid: Oid) Error!?object.Commit {
         if (!try n.db().exists(n.io(), oid)) return null;
         const found = try n.db().read(n.io(), oid);
-        defer n.db().gpa.free(found.bytes);
+        defer n.db().allocator().free(found.bytes);
         if (found.type != .commit) return null;
-        return try object.Commit.parse(n.arena, n.db().kind, found.bytes);
+        return try object.Commit.parse(n.arena, n.db().objectFormat(), found.bytes);
     }
 
     fn peelToCommit(n: *Negotiation, start: Oid) Error!?Oid {
@@ -553,11 +553,11 @@ const Negotiation = struct {
         while (depth < 16) : (depth += 1) {
             if (!try n.db().exists(n.io(), oid)) return null;
             const found = try n.db().read(n.io(), oid);
-            defer n.db().gpa.free(found.bytes);
+            defer n.db().allocator().free(found.bytes);
             switch (found.type) {
                 .commit => return oid,
                 .tag => {
-                    var tag = try object.Tag.parse(n.arena, n.db().kind, found.bytes);
+                    var tag = try object.Tag.parse(n.arena, n.db().objectFormat(), found.bytes);
                     oid = tag.target;
                     tag.deinit();
                 },
@@ -881,7 +881,7 @@ const Negotiation = struct {
             error.ObjectNotFound => return null,
             else => |e| return e,
         };
-        defer repo.odb.gpa.free(found.bytes);
+        defer repo.odb.allocator().free(found.bytes);
         if (found.type != .blob) return null;
         const rules = try n.arena.create(ignore.Rules);
         rules.* = try .init(n.arena, false);
@@ -952,8 +952,8 @@ const Negotiation = struct {
                 if (header.type != .tag) break;
                 try chain.append(n.arena, current);
                 const found = try n.db().read(n.io(), current);
-                defer n.db().gpa.free(found.bytes);
-                var tag = try object.Tag.parse(n.arena, n.db().kind, found.bytes);
+                defer n.db().allocator().free(found.bytes);
+                var tag = try object.Tag.parse(n.arena, n.db().objectFormat(), found.bytes);
                 current = tag.target;
                 tag.deinit();
             }

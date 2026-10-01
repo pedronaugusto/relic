@@ -30,17 +30,17 @@ pub const Error = diff.Error || object.ParseError || error{NotACommit};
 /// root commit. `null` for a merge, which has none.
 pub fn ofCommit(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid) Error!?Oid {
     const found = try db.read(io, commit_oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
-    var commit = try object.Commit.parse(gpa, db.kind, found.bytes);
+    var commit = try object.Commit.parse(gpa, db.objectFormat(), found.bytes);
     defer commit.deinit();
     if (commit.parents.len > 1) return null;
     var parent_tree: ?Oid = null;
     if (commit.parents.len == 1) {
         const parent = try db.read(io, commit.parents[0]);
-        defer db.gpa.free(parent.bytes);
+        defer db.allocator().free(parent.bytes);
         if (parent.type != .commit) return error.NotACommit;
-        var parsed = try object.Commit.parse(gpa, db.kind, parent.bytes);
+        var parsed = try object.Commit.parse(gpa, db.objectFormat(), parent.bytes);
         defer parsed.deinit();
         parent_tree = parsed.tree;
     }
@@ -53,9 +53,9 @@ pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, old: ?Oid, new: ?Oid) E
     var changes = try diff.tree(gpa, io, db, old, new, .{});
     defer changes.deinit();
     var result: [hash.max_raw_len]u8 = @splat(0);
-    const raw_len = db.kind.rawLen();
+    const raw_len = db.objectFormat().rawLen();
     for (changes.items) |change| {
-        var h: hash.Hasher = .init(db.kind);
+        var h: hash.Hasher = .init(db.objectFormat());
         try hashChange(gpa, io, db, &h, change);
         const part = h.final();
         // Summed byte by byte with a carry, from the first byte up.
@@ -66,7 +66,7 @@ pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, old: ?Oid, new: ?Oid) E
             carry >>= 8;
         }
     }
-    return Oid.fromRaw(db.kind, result[0..raw_len]) catch unreachable;
+    return Oid.fromRaw(db.objectFormat(), result[0..raw_len]) catch unreachable;
 }
 
 /// git's `isspace`: no vertical tab and no form feed.
@@ -106,7 +106,7 @@ fn sideBytes(gpa: Allocator, io: Io, db: *odb_mod.Odb, entry: ?diff.Entry) Error
         return std.fmt.allocPrint(gpa, "Subproject commit {s}\n", .{e.oid.hex(&hex)});
     }
     const found = try db.read(io, e.oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     return gpa.dupe(u8, found.bytes);
 }
 
@@ -138,7 +138,7 @@ fn hashChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, h: *hash.Hasher, change:
     defer gpa.free(new_bytes);
     if (textdiff.isBinary(old_bytes) or textdiff.isBinary(new_bytes)) {
         var hex: [hash.max_hex_len]u8 = undefined;
-        const zero = Oid.zero(db.kind);
+        const zero = Oid.zero(db.objectFormat());
         h.update((if (old) |e| e.oid else zero).hex(&hex));
         h.update((if (new) |e| e.oid else zero).hex(&hex));
         return;

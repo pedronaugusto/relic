@@ -215,7 +215,7 @@ pub const Settings = struct {
     /// The settings of `repo`, with `.lfsconfig` found where git-lfs finds
     /// it: `Repository.lfsconfigText`. `repo`'s configuration is borrowed.
     pub fn loadRepo(gpa: Allocator, io: Io, repo: *repo_mod.Repository) (LoadError || LfsconfigError)!Settings {
-        var s: Settings = .{ .gpa = gpa, .config = &repo.config };
+        var s: Settings = .{ .gpa = gpa, .config = repo.configuration() };
         const text = (try repo.lfsconfigText(io)) orelse return s;
         defer repo.gpa.free(text);
         s.file = try Config.parseText(gpa, text, .local);
@@ -1182,13 +1182,13 @@ pub const Client = struct {
     pub fn remember(c: *Client, io: Io, repo: *repo_mod.Repository) config_mod.Config.SetError!void {
         var changed = false;
         for (c.learned.items) |l| {
-            if (repo.config.get(l.key)) |existing| {
+            if (repo.configuration().get(l.key)) |existing| {
                 if (std.mem.eql(u8, existing, l.value)) continue;
             }
-            try repo.config.setIn(.local, l.key, l.value);
+            try @import("configstate.zig").rememberLfs(repo._config, l.key, l.value);
             changed = true;
         }
-        if (changed) try repo.config.write(io, repo.common_dir, "config");
+        if (changed) try @import("configstate.zig").get(repo._config).write(io, repo.common_dir, "config");
     }
 
     /// Describe a request that failed for want of a credential, or that the
@@ -2254,7 +2254,7 @@ pub const Server = struct {
         errdefer gpa.free(s.base_path);
         const lfsconfig = try repo.lfsconfigText(io);
         defer if (lfsconfig) |t| repo.gpa.free(t);
-        s.settings = .{ .gpa = gpa, .config = &repo.config };
+        s.settings = .{ .gpa = gpa, .config = repo.configuration() };
         if (lfsconfig) |t| s.settings.file = try Config.parseText(gpa, t, .local);
         errdefer s.settings.deinit();
         {
@@ -2275,7 +2275,7 @@ pub const Server = struct {
         errdefer if (s.fetch_head) |f| gpa.free(f);
         s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
         errdefer gpa.free(s.download_ref);
-        s.lfs = try lfs.Lfs.load(gpa, io, &repo.config, repo.common_dir, null, .{ .lfsconfig = lfsconfig });
+        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.common_dir, null, .{ .lfsconfig = lfsconfig });
         errdefer s.lfs.deinit();
         s.client = try Client.init(gpa, io, &s.settings, s.remote, .{ .base = s.base_path, .fetch_head = s.fetch_head }, options);
         return s;

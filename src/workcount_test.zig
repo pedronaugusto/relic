@@ -161,7 +161,7 @@ test "cold and warm delta-chain reads scan the same objects and bytes" {
 
     const cold_reads = ReadWork.calls;
     const cold_bytes = ReadWork.bytes;
-    const bases = db.cache.entries.count();
+    const bases = @import("odbstate.zig").get(db._state).cache.entries.count();
     try std.testing.expect(bases > 0);
     ReadWork.reset();
     // A second pass over the same objects, with the delta base cache warm.
@@ -179,7 +179,7 @@ test "cold and warm delta-chain reads scan the same objects and bytes" {
     try std.testing.expect(read_count > rounds);
     try std.testing.expect(ReadWork.calls <= cold_reads);
     try std.testing.expect(ReadWork.bytes <= cold_bytes);
-    try std.testing.expectEqual(bases, db.cache.entries.count());
+    try std.testing.expectEqual(bases, @import("odbstate.zig").get(db._state).cache.entries.count());
 }
 
 test "hardware and checked hashes process the same bytes as software" {

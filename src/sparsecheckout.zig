@@ -291,12 +291,12 @@ const Files = struct {
     /// every file, this worktree's file beats the shared one, and the
     /// shared one beats the user's and the system's.
     fn get(f: *const Files, repo: *const Repository, name: []const u8) ?[]const u8 {
-        if (levelValue(&repo.config, name, &.{.command})) |v| return v;
+        if (levelValue(repo.configuration(), name, &.{.command})) |v| return v;
         if (f.worktree) |*w| {
             if (w.find(name)) |entry| return entry.value orelse "true";
         }
         if (f.local.find(name)) |entry| return entry.value orelse "true";
-        return levelValue(&repo.config, name, &.{ .global, .system });
+        return levelValue(repo.configuration(), name, &.{ .global, .system });
     }
 
     fn getBool(f: *const Files, repo: *const Repository, name: []const u8) Error!bool {

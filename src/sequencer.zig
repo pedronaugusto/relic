@@ -437,7 +437,7 @@ const Picked = enum { committed, conflicted, empty, dropped, staged };
 
 fn readCommit(r: *Replay, oid: Oid) Error!struct { bytes: []const u8, commit: object.Commit } {
     const found = try r.repo.odb.read(r.io, oid);
-    defer r.repo.odb.gpa.free(found.bytes);
+    defer r.repo.odb.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     const bytes = try r.arena.dupe(u8, found.bytes);
     const commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), bytes);
@@ -511,7 +511,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     var author: ?object.Signature = null;
     switch (r.action) {
         .revert => {
-            if (repo.config.getBool("revert.reference", false) catch false) return error.RevertReferenceNeedsEditor;
+            if (repo.configuration().getBool("revert.reference", false) catch false) return error.RevertReferenceNeedsEditor;
             base_tree = commit.tree;
             base_label = label;
             next_tree = if (parent) |p| try repo.commitTree(io, p) else null;
@@ -646,7 +646,7 @@ fn firstLine(text: []const u8) []const u8 {
 
 /// `commit.cleanup`, or the message as it is.
 fn configuredCleanup(repo: *Repository) message.Cleanup {
-    const text = repo.config.get("commit.cleanup") orelse return .verbatim;
+    const text = repo.configuration().get("commit.cleanup") orelse return .verbatim;
     return message.Cleanup.parse(text) orelse .verbatim;
 }
 
@@ -690,8 +690,8 @@ fn newReplay(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, action
         .repo = repo,
         .action = action,
         .options = options,
-        .comment = message.commentString(repo.config.get("core.commentchar"), ""),
-        .abbrev_len = abbrev.defaultLength(&repo.config, &repo.odb),
+        .comment = message.commentString(repo.configuration().get("core.commentchar"), ""),
+        .abbrev_len = abbrev.defaultLength(repo.configuration(), &repo.odb),
     };
 }
 
@@ -813,7 +813,7 @@ pub const ResolverContext = struct {
         const found = oid orelse return null;
         const peeled = c.repo.peel(c.io, found) catch return null;
         const read = c.repo.odb.read(c.io, peeled) catch return null;
-        defer c.repo.odb.gpa.free(read.bytes);
+        defer c.repo.odb.allocator().free(read.bytes);
         if (read.type != .commit) return null;
         var commit = object.Commit.parse(gpa, c.repo.objectFormat(), read.bytes) catch return null;
         defer commit.deinit();
@@ -1074,7 +1074,7 @@ pub fn signs(repo: *Repository, request: signing_mod.Request) config_mod.ValueEr
     return switch (request.sign) {
         .always => true,
         .never => false,
-        .config => try repo.config.getBool("commit.gpgsign", false),
+        .config => try repo.configuration().getBool("commit.gpgsign", false),
     };
 }
 
@@ -1103,13 +1103,13 @@ test "sequencer signing policy refuses malformed values and allocation failures"
     defer tmp.cleanup();
     var r = try Repository.init(gpa, io, tmp.dir, .{});
     defer r.deinit(io);
-    try r.config.set("commit.gpgsign", "maybe");
+    try r.editConfig(&.{.{ .set = .{ .name = "commit.gpgsign", .value = "maybe" } }}, null);
     try std.testing.expectError(error.NotABoolean, Read.run(&r, .{}));
     try std.testing.expect(try Read.run(&r, .{ .sign = .always }));
     try std.testing.expect(!try Read.run(&r, .{ .sign = .never }));
-    try r.config.set("commit.gpgsign", "true");
+    try r.editConfig(&.{.{ .set = .{ .name = "commit.gpgsign", .value = "true" } }}, null);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    r.config.gpa = failing.allocator();
-    defer r.config.gpa = gpa;
+    @import("configstate.zig").get(r._config).gpa = failing.allocator();
+    defer @import("configstate.zig").get(r._config).gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Read.run(&r, .{}));
 }

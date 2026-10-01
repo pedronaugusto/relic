@@ -872,7 +872,7 @@ test "requests share one connection and a large upload-pack request is gzipped, 
 fn relicFetchV(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Environ.Map, v2: bool, remote: []const u8) !void {
     var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
-    try repo.config.set("protocol.version", if (v2) "2" else "0");
+    try repo.editConfig(&.{.{ .set = .{ .name = "protocol.version", .value = if (v2) "2" else "0" } }}, null);
     var outcome = try fetch_mod.fetch(gpa, io, &repo, remote, .{ .who = test_who, .programs = .{ .environ = env } });
     outcome.deinit();
 }

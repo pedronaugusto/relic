@@ -203,77 +203,14 @@ fn appendAlternatePath(gpa: Allocator, out: *std.ArrayList(u8), path: []const u8
     try out.append(gpa, '"');
 }
 
-/// The pack and the name it was opened under have one owner. Registration
-/// transfers both together, never a pack without its name or the reverse.
-const NamedPack = struct {
-    pack: pack.Pack,
-    name: []u8,
-
-    fn deinit(named: *NamedPack, gpa: Allocator, io: Io) void {
-        named.pack.deinit(io);
-        gpa.free(named.name);
-    }
-};
-
-/// One `objects` directory: the repository's own, or an alternate.
-const Source = struct {
-    dir: Io.Dir,
-    pack_dir: ?Io.Dir,
-    packs: std.ArrayList(NamedPack),
-    /// Whether objects may be written here. Only the first source is.
-    writable: bool,
-    /// `pack/multi-pack-index`, when there is one.
-    midx: ?midx.Index,
-    /// For each pack the multi-pack index names, its position in `packs`, or
-    /// `null` when that pack is not open here. The index names packs by file
-    /// name and this database holds them in directory order, so the two have
-    /// to be matched up once rather than on every lookup.
-    midx_packs: std.ArrayList(?u32),
-
-    /// Which pack holds `oid`, asking the multi-pack index first.
-    ///
-    /// The index narrows the search to one pack; that pack's own index is
-    /// still what gives the offset. Doing it the other way round would make
-    /// a stale or wrong index a read at a wrong offset rather than a miss,
-    /// and the answer is the same either way, which is the property the whole
-    /// accelerator is allowed to have.
-    fn findPack(source: *Source, oid: Oid, stats: *Stats) Error!?struct { at: usize, offset: u64 } {
-        if (source.midx) |*index| {
-            // A multi-pack index that misanswers is a miss and not an error:
-            // it is an accelerator, and the scan below is the same answer.
-            if (index.find(oid) catch null) |located| {
-                if (located.pack < source.midx_packs.items.len) {
-                    if (source.midx_packs.items[located.pack]) |position| {
-                        const p = &source.packs.items[position].pack;
-                        if (try p.index.find(oid)) |found| {
-                            stats.midx_hits += 1;
-                            return .{ .at = position, .offset = found.offset };
-                        }
-                    }
-                }
-            }
-        }
-        stats.pack_scans += 1;
-        for (source.packs.items, 0..) |*named, position| {
-            const p = &named.pack;
-            if (try p.index.find(oid)) |found| return .{ .at = position, .offset = found.offset };
-        }
-        return null;
-    }
-};
+const storage = @import("odbstate.zig");
+const Source = storage.Source;
+const DeflateState = storage.DeflateState;
 
 /// How many bytes of an object's compressed form are gathered before the
 /// first write. Sixty-four kilobytes is one write for anything a working tree
 /// holds by the thousand, and a bound rather than a promise for the rest.
 const deflate_output_buffer_len = 64 * 1024;
-
-/// The deflate state a writing database keeps. `flate.Compress` is two
-/// hundred and twenty-four kilobytes, which is why it is here and not on the
-/// stack of every `write`.
-const DeflateState = struct {
-    compress: *flate.Compress,
-    buffer: []u8,
-};
 
 /// Counters saying how lookups resolved and what writing cost. Nothing
 /// depends on them; they are how a caller, or a test, sees that an
@@ -299,22 +236,8 @@ pub const Stats = struct {
 
 /// The object database.
 pub const Odb = struct {
-    gpa: Allocator,
-    kind: Kind,
-    options: Options,
-    sources: std.ArrayList(Source),
-    cache: pack.Cache,
-    /// Bumped whenever the pack directories are re-scanned, so a caller can
-    /// tell that a miss was already retried.
-    generation: u32 = 0,
-    /// One deflate window, allocated once. A window is sixty-four kilobytes
-    /// and an `add -A` writes one object per changed file; allocating it per
-    /// object is a measurable share of the cost of a cold pass.
-    deflate_window: []u8 = &.{},
-    /// The deflate state and the buffer an object's compressed bytes are
-    /// gathered in, allocated on the first object written and reused by every
-    /// one after it. `null` in a database nothing has written to.
-    deflate_state: ?DeflateState = null,
+    /// Owned format and storage state; never reassigned piecemeal.
+    _state: *storage.State,
     /// How lookups resolved. Read it; nothing in the package does.
     stats: Stats = .{},
     /// How fine a modification time this repository's filesystem records,
@@ -332,6 +255,25 @@ pub const Odb = struct {
     /// and the case in every repository that is not a partial clone — and a
     /// miss is `error.ObjectNotFound`.
     lazy: ?Lazy = null,
+
+    fn backendData(db: *const Odb) *storage.Data {
+        return storage.get(db._state);
+    }
+
+    /// The hash format selected at construction.
+    pub fn objectFormat(db: *const Odb) Kind {
+        return db.backendData().kind;
+    }
+
+    /// A copy of the storage policy selected at construction.
+    pub fn settings(db: *const Odb) Options {
+        return db.backendData().options;
+    }
+
+    /// The allocator that owns returned object bytes.
+    pub fn allocator(db: *const Odb) Allocator {
+        return db.backendData().gpa;
+    }
 
     /// A fetch of missing objects, installed by the caller: `partial.zig`
     /// makes one.
@@ -369,7 +311,7 @@ pub const Odb = struct {
         const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
         // addSource transfers the handle when it registers the source. A
         // failure before that point leaves this scope as its sole owner.
-        errdefer if (odb.sources.items.len == 0) objects.close(io);
+        errdefer if (odb.backendData().sources.items.len == 0) objects.close(io);
         try odb.addSource(io, objects, true, 0);
         if (options.probe_timestamp_resolution) {
             odb.timestamp_resolution = fs.probeTimestampResolution(io, objects);
@@ -390,7 +332,7 @@ pub const Odb = struct {
         var odb = try opening.empty(gpa, io, kind, options);
         errdefer odb.deinit(io);
         const owned = try objects_dir.openDir(io, ".", .{ .iterate = true });
-        errdefer if (odb.sources.items.len == 0) owned.close(io);
+        errdefer if (odb.backendData().sources.items.len == 0) owned.close(io);
         try odb.addSource(io, owned, true, 0);
         if (options.probe_timestamp_resolution) {
             odb.timestamp_resolution = fs.probeTimestampResolution(io, owned);
@@ -403,7 +345,7 @@ pub const Odb = struct {
     /// Comments and empty lines are omitted, quoted names are decoded, and
     /// the caller owns the result.
     pub fn listAlternates(odb: *Odb, gpa: Allocator, io: Io) Error!Alternates {
-        const file = (try fs.readFileAlloc(gpa, io, odb.sources.items[0].dir, "info/alternates", 1 << 20)) orelse try gpa.alloc(u8, 0);
+        const file = (try fs.readFileAlloc(gpa, io, odb.backendData().sources.items[0].dir, "info/alternates", 1 << 20)) orelse try gpa.alloc(u8, 0);
         errdefer gpa.free(file);
         var paths: std.ArrayList([]u8) = .empty;
         errdefer {
@@ -424,32 +366,32 @@ pub const Odb = struct {
     /// newly named objects are available through this open database at once.
     pub fn addAlternate(odb: *Odb, io: Io, path: []const u8) Error!void {
         if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAlternatePath;
-        var listed = try odb.listAlternates(odb.gpa, io);
+        var listed = try odb.listAlternates(odb.backendData().gpa, io);
         defer listed.deinit();
         for (listed.paths) |existing| if (std.mem.eql(u8, existing, path)) return;
         var content: std.ArrayList(u8) = .empty;
-        defer content.deinit(odb.gpa);
-        try content.appendSlice(odb.gpa, listed.text);
-        if (content.items.len != 0 and content.items[content.items.len - 1] != '\n') try content.append(odb.gpa, '\n');
-        try appendAlternatePath(odb.gpa, &content, path);
-        try content.append(odb.gpa, '\n');
+        defer content.deinit(odb.backendData().gpa);
+        try content.appendSlice(odb.backendData().gpa, listed.text);
+        if (content.items.len != 0 and content.items[content.items.len - 1] != '\n') try content.append(odb.backendData().gpa, '\n');
+        try appendAlternatePath(odb.backendData().gpa, &content, path);
+        try content.append(odb.backendData().gpa, '\n');
         try odb.writeAlternates(io, content.items);
     }
 
     /// Remove every direct line naming `path`, preserving other paths and
     /// comments. A path absent from the file changes nothing.
     pub fn removeAlternate(odb: *Odb, io: Io, path: []const u8) Error!void {
-        var listed = try odb.listAlternates(odb.gpa, io);
+        var listed = try odb.listAlternates(odb.backendData().gpa, io);
         defer listed.deinit();
         var content: std.ArrayList(u8) = .empty;
-        defer content.deinit(odb.gpa);
+        defer content.deinit(odb.backendData().gpa);
         var changed = false;
         var cursor: usize = 0;
         while (cursor < listed.text.len) {
             const end = std.mem.indexOfScalarPos(u8, listed.text, cursor, '\n') orelse listed.text.len;
             const raw = listed.text[cursor..end];
-            if (try parseAlternate(odb.gpa, raw)) |existing| {
-                defer odb.gpa.free(existing);
+            if (try parseAlternate(odb.backendData().gpa, raw)) |existing| {
+                defer odb.backendData().gpa.free(existing);
                 if (std.mem.eql(u8, existing, path)) {
                     changed = true;
                     cursor = @min(end + 1, listed.text.len);
@@ -457,7 +399,7 @@ pub const Odb = struct {
                 }
             }
             const next = @min(end + 1, listed.text.len);
-            try content.appendSlice(odb.gpa, listed.text[cursor..next]);
+            try content.appendSlice(odb.backendData().gpa, listed.text[cursor..next]);
             cursor = next;
         }
         if (changed) try odb.writeAlternates(io, content.items);
@@ -465,43 +407,43 @@ pub const Odb = struct {
 
     fn writeAlternates(odb: *Odb, io: Io, content: []const u8) Error!void {
         if (content.len > 1 << 20) return error.AlternatesTooLarge;
-        const dir = odb.sources.items[0].dir;
+        const dir = odb.backendData().sources.items[0].dir;
         try dir.createDirPath(io, "info");
-        try fs.atomicWrite(io, dir, "info/alternates", content, "alternates-", odb.options.sync);
+        try fs.atomicWrite(io, dir, "info/alternates", content, "alternates-", odb.backendData().options.sync);
         // The own source remains open; rebuild the chain below it so reads
         // immediately see additions and stop seeing removed alternates.
-        for (odb.sources.items[1..]) |*source| odb.closeSource(io, source);
-        odb.sources.items.len = 1;
-        odb.cache.clear();
+        for (odb.backendData().sources.items[1..]) |*source| odb.closeSource(io, source);
+        odb.backendData().sources.items.len = 1;
+        odb.backendData().cache.clear();
         try odb.readAlternates(io, dir, 0);
-        odb.generation += 1;
+        odb.backendData().generation += 1;
     }
 
     fn addSource(odb: *Odb, io: Io, dir: Io.Dir, writable: bool, depth: u8) Error!void {
-        if (depth > odb.options.max_alternate_depth) return error.AlternatesTooDeep;
+        if (depth > odb.backendData().options.max_alternate_depth) return error.AlternatesTooDeep;
         try opening.register(odb, io, dir, writable);
-        try odb.scanPacks(io, odb.sources.items.len - 1);
+        try odb.scanPacks(io, odb.backendData().sources.items.len - 1);
         try odb.readAlternates(io, dir, depth);
     }
 
     fn readAlternates(odb: *Odb, io: Io, dir: Io.Dir, depth: u8) Error!void {
-        const text = (try fs.readFileAlloc(odb.gpa, io, dir, "info/alternates", 1 << 20)) orelse return;
-        defer odb.gpa.free(text);
+        const text = (try fs.readFileAlloc(odb.backendData().gpa, io, dir, "info/alternates", 1 << 20)) orelse return;
+        defer odb.backendData().gpa.free(text);
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw_line| {
-            const line = (try parseAlternate(odb.gpa, raw_line)) orelse continue;
-            defer odb.gpa.free(line);
+            const line = (try parseAlternate(odb.backendData().gpa, raw_line)) orelse continue;
+            defer odb.backendData().gpa.free(line);
             const alt = dir.openDir(io, line, .{ .iterate = true }) catch continue;
-            const before = odb.sources.items.len;
+            const before = odb.backendData().sources.items.len;
             odb.addSource(io, alt, false, depth + 1) catch |err| {
-                if (odb.sources.items.len == before) {
+                if (odb.backendData().sources.items.len == before) {
                     // The source was never registered: this scope owns alt.
                     alt.close(io);
                 } else {
                     // Registration transferred the handles to the database,
                     // including any deeper sources. Undo that whole suffix.
-                    for (odb.sources.items[before..]) |*source| odb.closeSource(io, source);
-                    odb.sources.items.len = before;
+                    for (odb.backendData().sources.items[before..]) |*source| odb.closeSource(io, source);
+                    odb.backendData().sources.items.len = before;
                 }
                 switch (err) {
                     error.AlternatesTooDeep, error.OutOfMemory, error.Canceled => return err,
@@ -512,7 +454,7 @@ pub const Odb = struct {
     }
 
     fn scanPacks(odb: *Odb, io: Io, source_index: usize) Error!void {
-        const source = &odb.sources.items[source_index];
+        const source = &odb.backendData().sources.items[source_index];
         const pack_dir = source.pack_dir orelse return;
         var it = pack_dir.iterate();
         while (try it.next(io)) |entry| {
@@ -527,17 +469,17 @@ pub const Odb = struct {
                 }
             }
             if (already) continue;
-            var opened = pack.Pack.open(odb.gpa, io, pack_dir, base, odb.kind, .{
-                .access = if (odb.options.map_packs) .map else .read,
-                .max_depth = odb.options.max_delta_depth,
+            var opened = pack.Pack.open(odb.backendData().gpa, io, pack_dir, base, odb.backendData().kind, .{
+                .access = if (odb.backendData().options.map_packs) .map else .read,
+                .max_depth = odb.backendData().options.max_delta_depth,
             }) catch |err| switch (err) {
                 error.OutOfMemory, error.Canceled => |failure| return failure,
                 else => continue,
             };
             errdefer opened.deinit(io);
-            const name = try odb.gpa.dupe(u8, base);
-            errdefer odb.gpa.free(name);
-            try source.packs.append(odb.gpa, .{ .pack = opened, .name = name });
+            const name = try odb.backendData().gpa.dupe(u8, base);
+            errdefer odb.backendData().gpa.free(name);
+            try source.packs.append(odb.backendData().gpa, .{ .pack = opened, .name = name });
         }
         try odb.loadMidx(io, source_index);
     }
@@ -549,13 +491,13 @@ pub const Odb = struct {
     /// it names. An index that does not parse is left out: it is an
     /// accelerator, and a repository reads the same without one.
     fn loadMidx(odb: *Odb, io: Io, source_index: usize) Error!void {
-        const source = &odb.sources.items[source_index];
+        const source = &odb.backendData().sources.items[source_index];
         if (source.midx) |*old| old.deinit();
         source.midx = null;
         source.midx_packs.clearRetainingCapacity();
 
         const pack_dir = source.pack_dir orelse return;
-        var index = (midx.Index.open(odb.gpa, io, pack_dir, odb.kind) catch |err| switch (err) {
+        var index = (midx.Index.open(odb.backendData().gpa, io, pack_dir, odb.backendData().kind) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled => |failure| return failure,
             else => return,
         }) orelse return;
@@ -573,7 +515,7 @@ pub const Odb = struct {
                     }
                 }
             }
-            source.midx_packs.append(odb.gpa, at) catch return error.OutOfMemory;
+            source.midx_packs.append(odb.backendData().gpa, at) catch return error.OutOfMemory;
         }
         source.midx = index;
     }
@@ -582,36 +524,38 @@ pub const Odb = struct {
     /// scan. `read` does this once on a miss; a caller watching a repository
     /// a `gc` runs in may call it.
     pub fn refresh(odb: *Odb, io: Io) Error!void {
-        for (0..odb.sources.items.len) |i| try odb.scanPacks(io, i);
-        odb.generation += 1;
+        for (0..odb.backendData().sources.items.len) |i| try odb.scanPacks(io, i);
+        odb.backendData().generation += 1;
     }
 
     /// Close every pack and release everything held.
     pub fn deinit(odb: *Odb, io: Io) void {
-        for (odb.sources.items) |*source| odb.closeSource(io, source);
-        odb.sources.deinit(odb.gpa);
-        if (odb.deflate_window.len != 0) odb.gpa.free(odb.deflate_window);
-        if (odb.deflate_state) |state| {
-            odb.gpa.destroy(state.compress);
-            odb.gpa.free(state.buffer);
+        for (odb.backendData().sources.items) |*source| odb.closeSource(io, source);
+        odb.backendData().sources.deinit(odb.backendData().gpa);
+        if (odb.backendData().deflate_window.len != 0) odb.backendData().gpa.free(odb.backendData().deflate_window);
+        if (odb.backendData().deflate_state) |state| {
+            odb.backendData().gpa.destroy(state.compress);
+            odb.backendData().gpa.free(state.buffer);
         }
-        odb.cache.deinit();
-        odb.shallow.deinit(odb.gpa);
+        odb.backendData().cache.deinit();
+        odb.shallow.deinit(odb.backendData().gpa);
+        const owned = odb.backendData();
+        owned.gpa.destroy(owned);
         odb.* = undefined;
     }
 
     fn closeSource(odb: *Odb, io: Io, source: *Source) void {
-        for (source.packs.items) |*named| named.deinit(odb.gpa, io);
-        source.packs.deinit(odb.gpa);
+        for (source.packs.items) |*named| named.deinit(odb.backendData().gpa, io);
+        source.packs.deinit(odb.backendData().gpa);
         if (source.midx) |*index| index.deinit();
-        source.midx_packs.deinit(odb.gpa);
+        source.midx_packs.deinit(odb.backendData().gpa);
         if (source.pack_dir) |d| d.close(io);
         source.dir.close(io);
     }
 
     /// The hash every name in this database is written with.
     pub fn hashKind(odb: *const Odb) Kind {
-        return odb.kind;
+        return odb.backendData().kind;
     }
 
     fn loosePath(odb: *const Odb, oid: Oid, buf: []u8) []const u8 {
@@ -649,11 +593,11 @@ pub const Odb = struct {
     /// object.
     fn tryRead(odb: *Odb, io: Io, oid: Oid) Error!?Read {
         var base: u32 = 0;
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             defer base += @intCast(source.packs.items.len);
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             const p = &source.packs.items[located.at].pack;
-            const obj = try p.readAt(io, located.offset, &odb.cache, base + @as(u32, @intCast(located.at)));
+            const obj = try p.readAt(io, located.offset, &odb.backendData().cache, base + @as(u32, @intCast(located.at)));
             return .{ .type = obj.type, .bytes = obj.bytes };
         }
         return odb.readLoose(io, oid);
@@ -662,33 +606,33 @@ pub const Odb = struct {
     fn readLoose(odb: *Odb, io: Io, oid: Oid) Error!?Read {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             const file = source.dir.openFile(io, path, .{}) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
             };
             defer file.close(io);
             const bytes = try odb.inflateWhole(io, file);
-            errdefer odb.gpa.free(bytes);
+            errdefer odb.backendData().gpa.free(bytes);
             const parsed = object.parseHeader(bytes) catch return error.CorruptLooseObject;
             const body = bytes[parsed.len..];
             if (body.len != parsed.header.size) return error.CorruptLooseObject;
             // The body moves to the front of the allocation it was inflated
             // into, rather than into a second one.
             std.mem.copyForwards(u8, bytes[0..body.len], body);
-            const out = try odb.gpa.realloc(bytes, body.len);
+            const out = try odb.backendData().gpa.realloc(bytes, body.len);
             return .{ .type = parsed.header.type, .bytes = out };
         }
         return null;
     }
 
     fn inflateWhole(odb: *Odb, io: Io, file: Io.File) Error![]u8 {
-        const input_buffer = try odb.gpa.alloc(u8, odb.options.read_buffer_size);
-        defer odb.gpa.free(input_buffer);
+        const input_buffer = try odb.backendData().gpa.alloc(u8, odb.backendData().options.read_buffer_size);
+        defer odb.backendData().gpa.free(input_buffer);
         var file_reader = file.reader(io, input_buffer);
         var window: [flate.max_window_len]u8 = undefined;
         var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &window);
-        return decompress.reader.allocRemaining(odb.gpa, .limited(odb.options.max_object_bytes)) catch |err| switch (err) {
+        return decompress.reader.allocRemaining(odb.backendData().gpa, .limited(odb.backendData().options.max_object_bytes)) catch |err| switch (err) {
             error.OutOfMemory, error.StreamTooLong => |e| return e,
             error.ReadFailed => return looseInflateError(&decompress, &file_reader),
         };
@@ -733,7 +677,7 @@ pub const Odb = struct {
     fn tryReadHeaderForPack(odb: *Odb, io: Io, oid: Oid, cache_available: usize) Error!?PackHeader {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             const file = source.dir.openFile(io, path, .{}) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
@@ -762,8 +706,8 @@ pub const Odb = struct {
             const body_len: usize = @intCast(parsed.header.size);
             const initial = head[parsed.len..got];
             if (initial.len > body_len) return error.CorruptLooseObject;
-            const body = try odb.gpa.alloc(u8, body_len);
-            errdefer odb.gpa.free(body);
+            const body = try odb.backendData().gpa.alloc(u8, body_len);
+            errdefer odb.backendData().gpa.free(body);
             @memcpy(body[0..initial.len], initial);
             var body_got = initial.len;
             while (body_got < body.len) {
@@ -777,7 +721,7 @@ pub const Odb = struct {
             }
             return .{ .header = parsed.header, .bytes = body };
         }
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
             return .{ .header = try source.packs.items[located.at].pack.headerAt(io, located.offset) };
         }
@@ -791,11 +735,11 @@ pub const Odb = struct {
     pub fn exists(odb: *Odb, io: Io, oid: Oid) Error!bool {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             source.dir.access(io, path, .{}) catch continue;
             return true;
         }
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             if ((try source.findPack(oid, &odb.stats)) != null) return true;
         }
         return false;
@@ -815,9 +759,9 @@ pub const Odb = struct {
     /// name a person typed into a name; nothing else in the package accepts
     /// an abbreviation.
     pub fn findPrefix(odb: *Odb, io: Io, prefix: []const u8) PrefixError!Oid {
-        if (prefix.len < 2 or prefix.len > odb.kind.hexLen()) return error.ObjectNotFound;
+        if (prefix.len < 2 or prefix.len > odb.backendData().kind.hexLen()) return error.ObjectNotFound;
         var found: ?Oid = null;
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             var dir_name: [3]u8 = .{ prefix[0], prefix[1], 0 };
             const sub = source.dir.openDir(io, dir_name[0..2], .{ .iterate = true }) catch null;
             if (sub) |d| {
@@ -825,11 +769,11 @@ pub const Odb = struct {
                 var it = d.iterate();
                 while (it.next(io) catch null) |entry| {
                     if (entry.kind == .directory) continue;
-                    if (entry.name.len != odb.kind.hexLen() - 2) continue;
+                    if (entry.name.len != odb.backendData().kind.hexLen() - 2) continue;
                     var full: [hash.max_hex_len]u8 = undefined;
                     @memcpy(full[0..2], prefix[0..2]);
                     @memcpy(full[2..][0..entry.name.len], entry.name);
-                    const oid = Oid.parse(odb.kind, full[0 .. 2 + entry.name.len]) catch continue;
+                    const oid = Oid.parse(odb.backendData().kind, full[0 .. 2 + entry.name.len]) catch continue;
                     if (!oid.startsWithHex(prefix)) continue;
                     if (found) |f| {
                         if (!f.eql(oid)) return error.AmbiguousPrefix;
@@ -857,7 +801,7 @@ pub const Odb = struct {
     /// An object already in the database is not written again, which is what
     /// git does and what keeps `addAll` from rewriting a tree every frame.
     pub fn write(odb: *Odb, io: Io, t: object.Type, bytes: []const u8) Error!Oid {
-        const named = hash.Hasher.nameObject(odb.kind, odb.hashOptions(), t.name(), bytes);
+        const named = hash.Hasher.nameObject(odb.backendData().kind, odb.hashOptions(), t.name(), bytes);
         if (named.collision_attack) return error.CollisionAttack;
         const oid = named.oid;
         if (try odb.exists(io, oid)) {
@@ -885,7 +829,7 @@ pub const Odb = struct {
     pub fn own(odb: *Odb, io: Io, oid: Oid) Error!void {
         if (try odb.existsOwn(io, oid)) return;
         const found = try odb.read(io, oid);
-        defer odb.gpa.free(found.bytes);
+        defer odb.backendData().gpa.free(found.bytes);
         try odb.writeLoose(io, found.type, found.bytes, oid);
     }
 
@@ -935,7 +879,7 @@ pub const Odb = struct {
         // to. The library default is level 6: three times the processor time
         // for twenty per cent smaller objects, paid on every blob written.
         const compress = state.compress;
-        compress.* = try flate.Compress.init(&file_writer.interface, odb.deflate_window, .zlib, .level_1);
+        compress.* = try flate.Compress.init(&file_writer.interface, odb.backendData().deflate_window, .zlib, .level_1);
         var header_buf: [64]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
         try compress.writer.writeAll(header);
@@ -943,7 +887,7 @@ pub const Odb = struct {
         try compress.writer.flush();
         try compress.finish();
         try file_writer.interface.flush();
-        switch (odb.options.sync) {
+        switch (odb.backendData().options.sync) {
             .none => {},
             // Batch and per-file both flush the object's own descriptor; the
             // difference is the single barrier `syncBatch` puts at the end.
@@ -958,7 +902,7 @@ pub const Odb = struct {
             source.dir.deleteFile(io, temp) catch {};
             return err;
         };
-        if (odb.options.sync_directories) {
+        if (odb.backendData().options.sync_directories) {
             const sub = try source.dir.openDir(io, text[0..2], .{});
             defer sub.close(io);
             try fs.syncDir(io, sub);
@@ -981,24 +925,24 @@ pub const Odb = struct {
     /// A database that is only read never pays for it; one that writes pays
     /// once rather than once per object.
     fn deflateState(odb: *Odb) Allocator.Error!DeflateState {
-        if (odb.deflate_state) |state| return state;
-        const compress = try odb.gpa.create(flate.Compress);
-        errdefer odb.gpa.destroy(compress);
-        const buffer = try odb.gpa.alloc(u8, deflate_output_buffer_len);
-        odb.deflate_state = .{ .compress = compress, .buffer = buffer };
-        return odb.deflate_state.?;
+        if (odb.backendData().deflate_state) |state| return state;
+        const compress = try odb.backendData().gpa.create(flate.Compress);
+        errdefer odb.backendData().gpa.destroy(compress);
+        const buffer = try odb.backendData().gpa.alloc(u8, deflate_output_buffer_len);
+        odb.backendData().deflate_state = .{ .compress = compress, .buffer = buffer };
+        return odb.backendData().deflate_state.?;
     }
 
     /// The naming options every name this database takes is given.
     fn hashOptions(odb: *const Odb) hash.Hasher.Options {
-        return .{ .detect_collisions = odb.options.detect_sha1_collisions };
+        return .{ .detect_collisions = odb.backendData().options.detect_sha1_collisions };
     }
 
     fn writableSource(odb: *Odb) *Source {
-        for (odb.sources.items) |*s| {
+        for (odb.backendData().sources.items) |*s| {
             if (s.writable) return s;
         }
-        return &odb.sources.items[0];
+        return &odb.backendData().sources.items[0];
     }
 
     /// A writer for an object too large to hold in memory.
@@ -1057,7 +1001,7 @@ pub const Odb = struct {
             try s.compress.writer.flush();
             try s.compress.finish();
             try s.file_writer.interface.flush();
-            switch (s.odb.options.sync) {
+            switch (s.odb.backendData().options.sync) {
                 .none => {},
                 .batch, .per_file => try s.file.sync(io),
             }
@@ -1079,7 +1023,7 @@ pub const Odb = struct {
                 return err;
             };
             s.finished = true;
-            if (s.odb.options.sync_directories) try fs.syncDir(io, s.dir);
+            if (s.odb.backendData().options.sync_directories) try fs.syncDir(io, s.dir);
             return oid;
         }
 
@@ -1090,8 +1034,8 @@ pub const Odb = struct {
                 s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
                 s.finished = true;
             }
-            s.odb.gpa.free(s.window);
-            s.odb.gpa.free(s.out_buffer);
+            s.odb.backendData().gpa.free(s.window);
+            s.odb.backendData().gpa.free(s.out_buffer);
         }
 
         /// Release the stream's buffers after a successful `finish`.
@@ -1100,8 +1044,8 @@ pub const Odb = struct {
                 s.abort(io);
                 return;
             }
-            s.odb.gpa.free(s.window);
-            s.odb.gpa.free(s.out_buffer);
+            s.odb.backendData().gpa.free(s.window);
+            s.odb.backendData().gpa.free(s.out_buffer);
             s.* = undefined;
         }
     };
@@ -1117,10 +1061,10 @@ pub const Odb = struct {
             file.close(io);
             source.dir.deleteFile(io, temp) catch {};
         }
-        const window = try odb.gpa.alloc(u8, flate.max_window_len);
-        errdefer odb.gpa.free(window);
-        const out_buffer = try odb.gpa.alloc(u8, 16 * 1024);
-        errdefer odb.gpa.free(out_buffer);
+        const window = try odb.backendData().gpa.alloc(u8, flate.max_window_len);
+        errdefer odb.backendData().gpa.free(window);
+        const out_buffer = try odb.backendData().gpa.alloc(u8, 16 * 1024);
+        errdefer odb.backendData().gpa.free(out_buffer);
 
         out.* = .{
             .odb = odb,
@@ -1131,7 +1075,7 @@ pub const Odb = struct {
             .file_writer = undefined,
             .compress = undefined,
             .input_writer = .{ .vtable = &.{ .drain = Stream.drain }, .buffer = &.{} },
-            .hasher = .initOptions(odb.kind, odb.hashOptions()),
+            .hasher = .initOptions(odb.backendData().kind, odb.hashOptions()),
             .window = window,
             .out_buffer = out_buffer,
             .remaining = size,
@@ -1160,7 +1104,7 @@ pub const Odb = struct {
     /// and every object against the name the index gives it.
     pub fn verify(odb: *Odb, io: Io) Error!Report {
         var report: Report = .{};
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             var top = source.dir.iterate();
             while (try top.next(io)) |entry| {
                 if (entry.kind != .directory) continue;
@@ -1171,14 +1115,14 @@ pub const Odb = struct {
                 var it = sub.iterate();
                 while (try it.next(io)) |file_entry| {
                     if (file_entry.kind == .directory) continue;
-                    if (file_entry.name.len != odb.kind.hexLen() - 2) continue;
+                    if (file_entry.name.len != odb.backendData().kind.hexLen() - 2) continue;
                     var full: [hash.max_hex_len]u8 = undefined;
                     @memcpy(full[0..2], entry.name);
                     @memcpy(full[2..][0..file_entry.name.len], file_entry.name);
-                    const oid = Oid.parse(odb.kind, full[0 .. 2 + file_entry.name.len]) catch continue;
+                    const oid = Oid.parse(odb.backendData().kind, full[0 .. 2 + file_entry.name.len]) catch continue;
                     const found = (try odb.readLoose(io, oid)) orelse continue;
-                    defer odb.gpa.free(found.bytes);
-                    const named = hash.Hasher.nameObject(odb.kind, odb.hashOptions(), found.type.name(), found.bytes);
+                    defer odb.backendData().gpa.free(found.bytes);
+                    const named = hash.Hasher.nameObject(odb.backendData().kind, odb.hashOptions(), found.type.name(), found.bytes);
                     if (named.collision_attack) return error.CollisionAttack;
                     if (!named.oid.eql(oid)) return error.ObjectNameMismatch;
                     report.loose += 1;
@@ -1187,11 +1131,11 @@ pub const Odb = struct {
             }
         }
         var pack_id: u32 = 0;
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             for (source.packs.items) |*named| {
                 const p = &named.pack;
                 defer pack_id += 1;
-                const pack_report = try p.verify(io, &odb.cache, pack_id);
+                const pack_report = try p.verify(io, &odb.backendData().cache, pack_id);
                 report.packs += 1;
                 report.packed_objects += pack_report.objects;
                 report.bytes += pack_report.bytes;
@@ -1207,8 +1151,8 @@ pub const Odb = struct {
     /// it, so a repository with a million objects pays for it only on demand.
     pub fn listObjects(odb: *Odb, io: Io) Error!Oid.Set {
         var set: Oid.Set = .empty;
-        errdefer set.deinit(odb.gpa);
-        for (odb.sources.items) |*source| {
+        errdefer set.deinit(odb.backendData().gpa);
+        for (odb.backendData().sources.items) |*source| {
             var top = source.dir.iterate();
             while (try top.next(io)) |entry| {
                 if (entry.kind != .directory or entry.name.len != 2) continue;
@@ -1217,18 +1161,18 @@ pub const Odb = struct {
                 defer sub.close(io);
                 var it = sub.iterate();
                 while (try it.next(io)) |file_entry| {
-                    if (file_entry.name.len != odb.kind.hexLen() - 2) continue;
+                    if (file_entry.name.len != odb.backendData().kind.hexLen() - 2) continue;
                     var full: [hash.max_hex_len]u8 = undefined;
                     @memcpy(full[0..2], entry.name);
                     @memcpy(full[2..][0..file_entry.name.len], file_entry.name);
-                    const oid = Oid.parse(odb.kind, full[0 .. 2 + file_entry.name.len]) catch continue;
-                    try set.put(odb.gpa, oid, {});
+                    const oid = Oid.parse(odb.backendData().kind, full[0 .. 2 + file_entry.name.len]) catch continue;
+                    try set.put(odb.backendData().gpa, oid, {});
                 }
             }
             for (source.packs.items) |*named| {
                 const p = &named.pack;
                 var it = p.index.iterate();
-                while (try it.next()) |found| try set.put(odb.gpa, found.oid, {});
+                while (try it.next()) |found| try set.put(odb.backendData().gpa, found.oid, {});
             }
         }
         return set;
@@ -1244,47 +1188,47 @@ pub const Odb = struct {
     pub fn makeDurable(odb: *Odb, io: Io, roots: []const Oid) Error!void {
         const barrier = @import("durability.zig");
         var seen: Oid.Set = .empty;
-        defer seen.deinit(odb.gpa);
+        defer seen.deinit(odb.backendData().gpa);
         var pending: std.ArrayList(Oid) = .empty;
-        defer pending.deinit(odb.gpa);
-        try pending.appendSlice(odb.gpa, roots);
+        defer pending.deinit(odb.backendData().gpa);
+        try pending.appendSlice(odb.backendData().gpa, roots);
         while (pending.pop()) |oid| {
-            if (oid.kind != odb.kind) return error.ObjectFormatMismatch;
-            const slot = try seen.getOrPut(odb.gpa, oid);
+            if (oid.kind != odb.backendData().kind) return error.ObjectFormatMismatch;
+            const slot = try seen.getOrPut(odb.backendData().gpa, oid);
             if (slot.found_existing) continue;
             try odb.own(io, oid);
             const found = try odb.read(io, oid);
-            defer odb.gpa.free(found.bytes);
+            defer odb.backendData().gpa.free(found.bytes);
             switch (found.type) {
                 .blob => {},
                 .tree => {
-                    var tree = object.Tree.parse(odb.kind, found.bytes);
+                    var tree = object.Tree.parse(odb.backendData().kind, found.bytes);
                     var entries = tree.iterate();
                     while (try entries.next()) |entry| {
-                        if (entry.mode != .gitlink) try pending.append(odb.gpa, entry.oid);
+                        if (entry.mode != .gitlink) try pending.append(odb.backendData().gpa, entry.oid);
                     }
                 },
                 .commit => {
-                    var commit = try object.Commit.parse(odb.gpa, odb.kind, found.bytes);
+                    var commit = try object.Commit.parse(odb.backendData().gpa, odb.backendData().kind, found.bytes);
                     defer commit.deinit();
-                    try pending.append(odb.gpa, commit.tree);
-                    try pending.appendSlice(odb.gpa, commit.parents);
+                    try pending.append(odb.backendData().gpa, commit.tree);
+                    try pending.appendSlice(odb.backendData().gpa, commit.parents);
                 },
                 .tag => {
-                    var tag = try object.Tag.parse(odb.gpa, odb.kind, found.bytes);
+                    var tag = try object.Tag.parse(odb.backendData().gpa, odb.backendData().kind, found.bytes);
                     defer tag.deinit();
-                    try pending.append(odb.gpa, tag.target);
+                    try pending.append(odb.backendData().gpa, tag.target);
                 },
             }
         }
         const source = odb.writableSource();
         var fanouts: [256]bool = @splat(false);
         var packs: std.AutoHashMapUnmanaged(usize, void) = .empty;
-        defer packs.deinit(odb.gpa);
+        defer packs.deinit(odb.backendData().gpa);
         var it = seen.keyIterator();
         while (it.next()) |oid| {
             if (try source.findPack(oid.*, &odb.stats)) |hit| {
-                const slot = try packs.getOrPut(odb.gpa, hit.at);
+                const slot = try packs.getOrPut(odb.backendData().gpa, hit.at);
                 if (slot.found_existing) continue;
                 const named = &source.packs.items[hit.at];
                 var path_buf: [128]u8 = undefined;
@@ -1315,7 +1259,7 @@ pub const Odb = struct {
     /// one per object. Under the other two policies it is a no-op that costs
     /// a file creation, so a caller may always call it.
     pub fn syncBatch(odb: *Odb, io: Io) Error!void {
-        if (odb.options.sync != .batch) return;
+        if (odb.backendData().options.sync != .batch) return;
         const source = odb.writableSource();
         try fs.syncBarrier(io, source.dir);
     }
@@ -1372,7 +1316,7 @@ pub const Odb = struct {
         entries: []const PackEntry,
         options: PackOptions,
     ) Error!pack.WriteReport {
-        const gpa = odb.gpa;
+        const gpa = odb.backendData().gpa;
 
         // Every object's type and length, which is what the order is by. A
         // header is all this needs, and for a packed object that is no
@@ -1405,8 +1349,8 @@ pub const Odb = struct {
             .reverse_index = options.reverse_index,
         };
         var writer = switch (target) {
-            .dir => |pack_dir| try pack.Writer.init(gpa, io, pack_dir, odb.kind, @intCast(entries.len), write_options),
-            .stream => |out| try pack.Writer.initStream(gpa, odb.kind, out, @intCast(entries.len), write_options),
+            .dir => |pack_dir| try pack.Writer.init(gpa, io, pack_dir, odb.backendData().kind, @intCast(entries.len), write_options),
+            .stream => |out| try pack.Writer.initStream(gpa, odb.backendData().kind, out, @intCast(entries.len), write_options),
         };
         defer writer.deinit(io);
 
@@ -1439,7 +1383,7 @@ pub const Odb = struct {
                 // most half the object it stands in for, and each one after
                 // the first must beat the one before it.
                 var limit: usize = bytes.len / 2;
-                if (limit > odb.kind.rawLen()) limit -= odb.kind.rawLen() else limit = 0;
+                if (limit > odb.backendData().kind.rawLen()) limit -= odb.backendData().kind.rawLen() else limit = 0;
                 chosen = try findDelta(gpa, io, window.items, found.type, bytes, options, limit);
             }
 
@@ -1518,32 +1462,32 @@ pub const Odb = struct {
         tips: []const Oid,
         options: CollectOptions,
     ) Error!Collected {
-        var collected: Collected = .{ .arena = .init(odb.gpa), .entries = &.{} };
+        var collected: Collected = .{ .arena = .init(odb.backendData().gpa), .entries = &.{} };
         errdefer collected.arena.deinit();
         const arena = collected.arena.allocator();
 
         var skip: Oid.Set = .empty;
-        defer skip.deinit(odb.gpa);
-        for (options.exclude) |oid| try skip.put(odb.gpa, oid, {});
+        defer skip.deinit(odb.backendData().gpa);
+        for (options.exclude) |oid| try skip.put(odb.backendData().gpa, oid, {});
         for (options.exclude_packs) |base| {
             const p = odb.findPackByName(base) orelse continue;
             var it = p.index.iterate();
-            while (try it.next()) |found| try skip.put(odb.gpa, found.oid, {});
+            while (try it.next()) |found| try skip.put(odb.backendData().gpa, found.oid, {});
         }
 
         var seen: Oid.Set = .empty;
-        defer seen.deinit(odb.gpa);
+        defer seen.deinit(odb.backendData().gpa);
         var entries: std.ArrayList(PackEntry) = .empty;
-        defer entries.deinit(odb.gpa);
+        defer entries.deinit(odb.backendData().gpa);
 
         // Commits and tags first, so that every tree is reached through the
         // commit that names it and a path is known by the time a blob is.
         var commits: std.ArrayList(Oid) = .empty;
-        defer commits.deinit(odb.gpa);
+        defer commits.deinit(odb.backendData().gpa);
         var trees: std.ArrayList(struct { oid: Oid, path: []const u8 }) = .empty;
-        defer trees.deinit(odb.gpa);
+        defer trees.deinit(odb.backendData().gpa);
 
-        for (tips) |tip| try commits.append(odb.gpa, tip);
+        for (tips) |tip| try commits.append(odb.backendData().gpa, tip);
         var at: usize = 0;
         while (at < commits.items.len) : (at += 1) {
             const oid = commits.items[at];
@@ -1552,24 +1496,24 @@ pub const Odb = struct {
                 error.ObjectNotFound => continue,
                 else => |e| return e,
             };
-            defer odb.gpa.free(found.bytes);
-            try seen.put(odb.gpa, oid, {});
+            defer odb.backendData().gpa.free(found.bytes);
+            try seen.put(odb.backendData().gpa, oid, {});
             switch (found.type) {
                 .commit => {
-                    var commit = try object.Commit.parse(odb.gpa, odb.kind, found.bytes);
+                    var commit = try object.Commit.parse(odb.backendData().gpa, odb.backendData().kind, found.bytes);
                     defer commit.deinit();
-                    try trees.append(odb.gpa, .{ .oid = commit.tree, .path = "" });
-                    for (commit.parents) |parent| try commits.append(odb.gpa, parent);
-                    if (!skip.contains(oid)) try entries.append(odb.gpa, .{ .oid = oid });
+                    try trees.append(odb.backendData().gpa, .{ .oid = commit.tree, .path = "" });
+                    for (commit.parents) |parent| try commits.append(odb.backendData().gpa, parent);
+                    if (!skip.contains(oid)) try entries.append(odb.backendData().gpa, .{ .oid = oid });
                 },
                 .tag => {
-                    var tag = try object.Tag.parse(odb.gpa, odb.kind, found.bytes);
+                    var tag = try object.Tag.parse(odb.backendData().gpa, odb.backendData().kind, found.bytes);
                     defer tag.deinit();
-                    try commits.append(odb.gpa, tag.target);
-                    if (!skip.contains(oid)) try entries.append(odb.gpa, .{ .oid = oid });
+                    try commits.append(odb.backendData().gpa, tag.target);
+                    if (!skip.contains(oid)) try entries.append(odb.backendData().gpa, .{ .oid = oid });
                 },
-                .tree => try trees.append(odb.gpa, .{ .oid = oid, .path = "" }),
-                .blob => if (!skip.contains(oid)) try entries.append(odb.gpa, .{ .oid = oid }),
+                .tree => try trees.append(odb.backendData().gpa, .{ .oid = oid, .path = "" }),
+                .blob => if (!skip.contains(oid)) try entries.append(odb.backendData().gpa, .{ .oid = oid }),
             }
         }
 
@@ -1581,29 +1525,29 @@ pub const Odb = struct {
                 error.ObjectNotFound => continue,
                 else => |e| return e,
             };
-            defer odb.gpa.free(found.bytes);
+            defer odb.backendData().gpa.free(found.bytes);
             if (found.type != .tree) continue;
-            try seen.put(odb.gpa, node.oid, {});
+            try seen.put(odb.backendData().gpa, node.oid, {});
             if (!skip.contains(node.oid)) {
-                try entries.append(odb.gpa, .{ .oid = node.oid, .hint = node.path });
+                try entries.append(odb.backendData().gpa, .{ .oid = node.oid, .hint = node.path });
             }
 
-            var it = object.Tree.parse(odb.kind, found.bytes).iterate();
+            var it = object.Tree.parse(odb.backendData().kind, found.bytes).iterate();
             while (try it.next()) |entry| {
                 const path = if (node.path.len == 0)
                     try arena.dupe(u8, entry.name)
                 else
                     try std.fmt.allocPrint(arena, "{s}/{s}", .{ node.path, entry.name });
                 switch (entry.mode) {
-                    .tree => try trees.append(odb.gpa, .{ .oid = entry.oid, .path = path }),
+                    .tree => try trees.append(odb.backendData().gpa, .{ .oid = entry.oid, .path = path }),
                     // A gitlink names a commit in another repository, which
                     // this one does not hold and must not be asked for.
                     .gitlink => {},
                     else => {
                         if (seen.contains(entry.oid)) continue;
-                        try seen.put(odb.gpa, entry.oid, {});
+                        try seen.put(odb.backendData().gpa, entry.oid, {});
                         if (!skip.contains(entry.oid)) {
-                            try entries.append(odb.gpa, .{ .oid = entry.oid, .hint = path });
+                            try entries.append(odb.backendData().gpa, .{ .oid = entry.oid, .hint = path });
                         }
                     },
                 }
@@ -1632,21 +1576,21 @@ pub const Odb = struct {
     }
 
     fn collectWritable(odb: *Odb, io: Io, options: CollectOptions, packed_too: bool) Error!Collected {
-        var collected: Collected = .{ .arena = .init(odb.gpa), .entries = &.{} };
+        var collected: Collected = .{ .arena = .init(odb.backendData().gpa), .entries = &.{} };
         errdefer collected.arena.deinit();
         const arena = collected.arena.allocator();
 
         var skip: Oid.Set = .empty;
-        defer skip.deinit(odb.gpa);
-        for (options.exclude) |oid| try skip.put(odb.gpa, oid, {});
+        defer skip.deinit(odb.backendData().gpa);
+        for (options.exclude) |oid| try skip.put(odb.backendData().gpa, oid, {});
         for (options.exclude_packs) |base| {
             const p = odb.findPackByName(base) orelse continue;
             var it = p.index.iterate();
-            while (try it.next()) |found| try skip.put(odb.gpa, found.oid, {});
+            while (try it.next()) |found| try skip.put(odb.backendData().gpa, found.oid, {});
         }
 
         var entries: std.ArrayList(PackEntry) = .empty;
-        defer entries.deinit(odb.gpa);
+        defer entries.deinit(odb.backendData().gpa);
         const source = odb.writableSource();
         var top = source.dir.iterate();
         while (try top.next(io)) |entry| {
@@ -1656,26 +1600,26 @@ pub const Odb = struct {
             defer sub.close(io);
             var it = sub.iterate();
             while (try it.next(io)) |file| {
-                if (file.name.len != odb.kind.hexLen() - 2) continue;
+                if (file.name.len != odb.backendData().kind.hexLen() - 2) continue;
                 var full: [hash.max_hex_len]u8 = undefined;
                 @memcpy(full[0..2], entry.name);
                 @memcpy(full[2..][0..file.name.len], file.name);
-                const oid = Oid.parse(odb.kind, full[0 .. 2 + file.name.len]) catch continue;
+                const oid = Oid.parse(odb.backendData().kind, full[0 .. 2 + file.name.len]) catch continue;
                 if (skip.contains(oid)) continue;
-                try entries.append(odb.gpa, .{ .oid = oid });
+                try entries.append(odb.backendData().gpa, .{ .oid = oid });
             }
         }
         if (packed_too) {
             var seen: Oid.Set = .empty;
-            defer seen.deinit(odb.gpa);
-            for (entries.items) |e| try seen.put(odb.gpa, e.oid, {});
+            defer seen.deinit(odb.backendData().gpa);
+            for (entries.items) |e| try seen.put(odb.backendData().gpa, e.oid, {});
             for (source.packs.items) |*named| {
                 const p = &named.pack;
                 var it = p.index.iterate();
                 while (try it.next()) |found| {
                     if (skip.contains(found.oid) or seen.contains(found.oid)) continue;
-                    try seen.put(odb.gpa, found.oid, {});
-                    try entries.append(odb.gpa, .{ .oid = found.oid });
+                    try seen.put(odb.backendData().gpa, found.oid, {});
+                    try entries.append(odb.backendData().gpa, .{ .oid = found.oid });
                 }
             }
         }
@@ -1693,16 +1637,16 @@ pub const Odb = struct {
     /// buys the whole ordering.
     fn assignHints(odb: *Odb, io: Io, arena: Allocator, entries: []PackEntry) Error!void {
         var hints: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty;
-        defer hints.deinit(odb.gpa);
+        defer hints.deinit(odb.backendData().gpa);
         for (entries) |entry| {
             const head = odb.readHeader(io, entry.oid) catch continue;
             if (head.type != .tree) continue;
             const found = odb.read(io, entry.oid) catch continue;
-            defer odb.gpa.free(found.bytes);
-            var it = object.Tree.parse(odb.kind, found.bytes).iterate();
+            defer odb.backendData().gpa.free(found.bytes);
+            var it = object.Tree.parse(odb.backendData().kind, found.bytes).iterate();
             while (it.next() catch null) |child| {
                 if (hints.contains(child.oid)) continue;
-                try hints.put(odb.gpa, child.oid, try arena.dupe(u8, child.name));
+                try hints.put(odb.backendData().gpa, child.oid, try arena.dupe(u8, child.name));
             }
         }
         for (entries) |*entry| {
@@ -1711,7 +1655,7 @@ pub const Odb = struct {
     }
 
     fn findPackByName(odb: *Odb, base: []const u8) ?*pack.Pack {
-        for (odb.sources.items) |*source| {
+        for (odb.backendData().sources.items) |*source| {
             for (source.packs.items) |*named| {
                 if (std.mem.eql(u8, named.name, base)) return &named.pack;
             }
@@ -1796,14 +1740,14 @@ pub const Odb = struct {
         // be named afterwards.
         var old_packs: std.ArrayList([]u8) = .empty;
         defer {
-            for (old_packs.items) |name| odb.gpa.free(name);
-            old_packs.deinit(odb.gpa);
+            for (old_packs.items) |name| odb.backendData().gpa.free(name);
+            old_packs.deinit(odb.backendData().gpa);
         }
         if (remove_packs) {
             for (source.packs.items) |named| {
-                const name = try odb.gpa.dupe(u8, named.name);
-                errdefer odb.gpa.free(name);
-                try old_packs.append(odb.gpa, name);
+                const name = try odb.backendData().gpa.dupe(u8, named.name);
+                errdefer odb.backendData().gpa.free(name);
+                try old_packs.append(odb.backendData().gpa, name);
             }
         }
 
@@ -1862,8 +1806,8 @@ pub const Odb = struct {
     /// Close and re-open every pack of one source, so that a pack removed
     /// from the disk is gone from here too.
     fn reopenPacks(odb: *Odb, io: Io, source_index: usize) Error!void {
-        const source = &odb.sources.items[source_index];
-        for (source.packs.items) |*named| named.deinit(odb.gpa, io);
+        const source = &odb.backendData().sources.items[source_index];
+        for (source.packs.items) |*named| named.deinit(odb.backendData().gpa, io);
         source.packs.clearRetainingCapacity();
         if (source.midx) |*m| {
             m.deinit();
@@ -1872,8 +1816,8 @@ pub const Odb = struct {
         source.midx_packs.clearRetainingCapacity();
         // The delta base cache is keyed on which pack an offset was in, and
         // the packs have just been renumbered.
-        odb.cache.clear();
-        odb.generation +%= 1;
+        odb.backendData().cache.clear();
+        odb.backendData().generation +%= 1;
         try odb.scanPacks(io, source_index);
     }
 
@@ -1897,7 +1841,7 @@ pub const Odb = struct {
         };
         const dir = try source.dir.openDir(io, "pack", .{ .iterate = true });
         errdefer dir.close(io);
-        const writer = try pack.Writer.initCounting(odb.gpa, io, dir, odb.kind, .{
+        const writer = try pack.Writer.initCounting(odb.backendData().gpa, io, dir, odb.backendData().kind, .{
             .sync = options.sync,
             .compression = options.compression,
         });
@@ -1910,7 +1854,7 @@ pub const Odb = struct {
     /// holds, is not written again -- which is the same rule `write`
     /// follows, and what keeps a tree staged twice from being two entries.
     pub fn writeInto(odb: *Odb, io: Io, filling: OpenPack, t: object.Type, bytes: []const u8) Error!Oid {
-        const named = hash.Hasher.nameObject(odb.kind, odb.hashOptions(), t.name(), bytes);
+        const named = hash.Hasher.nameObject(odb.backendData().kind, odb.hashOptions(), t.name(), bytes);
         if (named.collision_attack) return error.CollisionAttack;
         const oid = named.oid;
         if (filling.writer.holds(oid) or try odb.exists(io, oid)) {
@@ -1953,7 +1897,7 @@ pub const Odb = struct {
     /// How many packs are open. A caller measuring a repository asks here.
     pub fn packCount(odb: *const Odb) usize {
         var n: usize = 0;
-        for (odb.sources.items) |*s| n += s.packs.items.len;
+        for (odb.backendData().sources.items) |*s| n += s.packs.items.len;
         return n;
     }
 
@@ -1961,7 +1905,7 @@ pub const Odb = struct {
     /// index that parsed.
     pub fn multiPackIndexCount(odb: *const Odb) usize {
         var n: usize = 0;
-        for (odb.sources.items) |*s| n += @intFromBool(s.midx != null);
+        for (odb.backendData().sources.items) |*s| n += @intFromBool(s.midx != null);
         return n;
     }
 };
@@ -2538,7 +2482,7 @@ test "a stream whose installation fails remains abortable" {
         else => return err,
     }
 
-    var it = odb.sources.items[0].dir.iterate();
+    var it = odb.backendData().sources.items[0].dir.iterate();
     while (try it.next(io)) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "tmp_obj_"));
     }
@@ -2560,8 +2504,10 @@ test "loose inflate preserves allocation resource failures" {
     defer file.close(io);
     const Check = struct {
         fn run(allocator: Allocator, original: *const Odb, input: Io.File) !void {
+            var data_copy = original.backendData().*;
+            data_copy.gpa = allocator;
             var copy = original.*;
-            copy.gpa = allocator;
+            copy._state = @ptrCast(&data_copy);
             const bytes = try copy.inflateWhole(std.testing.io, input);
             defer allocator.free(bytes);
             try std.testing.expectEqualStrings("blob 6\x00hello\n", bytes);
@@ -2581,9 +2527,9 @@ test "loose inflate distinguishes policy resource failures from corruption" {
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
     const oid = try odb.write(io, .blob, "hello\n");
-    odb.options.max_object_bytes = 1;
+    odb.backendData().options.max_object_bytes = 1;
     try std.testing.expectError(error.StreamTooLong, odb.read(io, oid));
-    odb.options.max_object_bytes = 100;
+    odb.backendData().options.max_object_bytes = 100;
     var path_buf: [hash.max_hex_len + 2]u8 = undefined;
     try objects.writeFile(io, .{ .sub_path = odb.loosePath(oid, &path_buf), .data = "bad zlib" });
     try std.testing.expectError(error.CorruptLooseObject, odb.read(io, oid));

@@ -633,7 +633,7 @@ test "init writes .git/config byte for byte as git submodule init writes it" {
     try theirs.git.exec(io, &.{ "submodule", "init" });
     try expectSameFile(gpa, io, ours.git.dir, theirs.git.dir, ".git/config");
     // What was written is what the repository now reads.
-    try testing.expect(repo.config.get("submodule.vendor/lib.url") != null);
+    try testing.expect(repo.configuration().get("submodule.vendor/lib.url") != null);
     try expectSubmoduleStatusAgrees(gpa, io, &ours.git, &repo);
 
     // A second run changes nothing.
@@ -661,7 +661,7 @@ test "a name holding a quote and a backslash is registered, synced and removed a
     try testing.expectEqual(@as(u32, 1), outcome.registered);
     try theirs.git.exec(io, &.{ "submodule", "init" });
     try expectSameFile(gpa, io, ours.git.dir, theirs.git.dir, ".git/config");
-    try testing.expect(repo.config.get("submodule.we\"ird\\name.url") != null);
+    try testing.expect(repo.configuration().get("submodule.we\"ird\\name.url") != null);
 
     for ([_]*testgit.Repo{ &ours.git, &theirs.git }) |g| {
         try g.exec(io, &.{ "config", "-f", ".gitmodules", "submodule.we\"ird\\name.url", "../elsewhere/lib" });
@@ -679,7 +679,7 @@ test "a name holding a quote and a backslash is registered, synced and removed a
     // taken here.
     try theirs.git.exec(io, &.{ "config", "--remove-section", "submodule.we\"ird\\name" });
     try expectSameFile(gpa, io, ours.git.dir, theirs.git.dir, ".git/config");
-    try testing.expect(repo.config.get("submodule.we\"ird\\name.url") == null);
+    try testing.expect(repo.configuration().get("submodule.we\"ird\\name.url") == null);
 }
 
 test "a relative url resolves against the default remote, or against the superproject itself" {

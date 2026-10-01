@@ -349,7 +349,7 @@ pub const CacheTree = struct {
             }
         }
 
-        var builder: object.Tree.Builder = .init(t.gpa, db.kind);
+        var builder: object.Tree.Builder = .init(t.gpa, db.objectFormat());
         defer builder.deinit();
         const start = consumed.*;
 
@@ -1555,8 +1555,10 @@ test "a rebuild that meets a conflict frees the directory it took out of the tre
     try tree.root.children.append(gpa, dir);
 
     const entries = [_]Entry{.{ .path = "dir/a.txt", .oid = Oid.zero(.sha1), .mode = .file, .stage = 2 }};
-    var db: odb_mod.Odb = undefined;
-    db.kind = .sha1;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var db = try odb_mod.Odb.openAt(gpa, std.testing.io, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(std.testing.io);
     try std.testing.expectError(error.CorruptCacheTree, tree.rebuild(std.testing.io, &entries, &db));
 }
 

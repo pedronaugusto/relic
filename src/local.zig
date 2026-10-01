@@ -245,11 +245,11 @@ pub const Remote = struct {
         if (needs_pack and objects.len != 0) {
             var pack_dir = try r.repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
             defer pack_dir.close(io);
-            _ = try from.writePack(io, pack_dir, objects, .{ .reverse_index = @import("revindex.zig").wanted(&r.repo.config) });
+            _ = try from.writePack(io, pack_dir, objects, .{ .reverse_index = @import("revindex.zig").wanted(r.repo.configuration()) });
             try r.repo.odb.refresh(io);
         }
 
-        const config = &r.repo.config;
+        const config = r.repo.configuration();
         const bare = r.repo.isBare();
         const current = try r.repo.refStore().currentBranch(gpa, io);
         defer if (current) |c| gpa.free(c);
@@ -352,9 +352,9 @@ pub const Remote = struct {
                 continue;
             }
             const found = from.read(io, oid) catch continue;
-            defer from.gpa.free(found.bytes);
+            defer from.allocator().free(found.bytes);
             if (found.type != .commit) continue;
-            var commit = try @import("object.zig").Commit.parse(arena, from.kind, found.bytes);
+            var commit = try @import("object.zig").Commit.parse(arena, from.objectFormat(), found.bytes);
             defer commit.deinit();
             for (commit.parents) |p| try stack.append(arena, p);
         }
@@ -372,7 +372,7 @@ pub const Remote = struct {
 
     /// Refuse a repository whose push would run hooks.
     fn refuseHooks(r: *Remote, io: Io) Error!void {
-        const hooks_path = r.repo.config.get("core.hookspath");
+        const hooks_path = r.repo.configuration().get("core.hookspath");
         var dir = (if (hooks_path) |path|
             Io.Dir.cwd().openDir(io, path, .{})
         else

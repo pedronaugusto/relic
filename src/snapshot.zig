@@ -110,7 +110,7 @@ pub const Store = struct {
             .folder => null,
         };
         if (source_repo) |r| {
-            if (r.objectFormat() != store.db.kind) return error.ObjectFormatMismatch;
+            if (r.objectFormat() != store.db.objectFormat()) return error.ObjectFormatMismatch;
         }
         const wt = switch (source) {
             .repository => |r| r.work_dir orelse return error.BareRepository,
@@ -126,7 +126,7 @@ pub const Store = struct {
             const lfsconfig = try r.lfsconfigText(io);
             defer if (lfsconfig) |text| r.gpa.free(text);
             // Native LFS writes to the private store, never to the source.
-            drivers = try filter.Drivers.load(store.gpa, io, &r.config, store.dir, wt, .{ .lfsconfig = lfsconfig });
+            drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), store.dir, wt, .{ .lfsconfig = lfsconfig });
             // lfs.storage belongs to the source's storage policy. Its rules
             // still apply, but even an absolute storage path cannot redirect
             // a snapshot write out of the private store.
@@ -139,7 +139,7 @@ pub const Store = struct {
         var staged = if (source_repo) |r|
             try index.Index.readWithResolution(store.gpa, io, r.git_dir, "index", r.common_dir, r.objectFormat(), r.odb.timestamp_resolution)
         else
-            index.Index.initEmpty(store.gpa, store.db.kind);
+            index.Index.initEmpty(store.gpa, store.db.objectFormat());
         defer staged.deinit();
         // The source index is a membership list, not a cache for this store.
         // Sparse directories keep their indexed contents from the source.
@@ -169,7 +169,7 @@ pub const Store = struct {
     /// Migrate retained IDs while their old objects still exist. Gitlinks
     /// and LFS payloads keep their separate owners, as with capture.
     pub fn adoptTree(store: *Store, io: Io, source: *odb.Odb, tree: hash.Oid) Error!Snapshot {
-        if (source.kind != store.db.kind or tree.kind != store.db.kind) return error.ObjectFormatMismatch;
+        if (source.objectFormat() != store.db.objectFormat() or tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
         return store.recordTree(io, tree, source);
     }
 
@@ -193,7 +193,7 @@ pub const Store = struct {
         const found = try store.db.read(io, oid);
         defer store.gpa.free(found.bytes);
         if (found.type != .tree) return error.UnexpectedObjectType;
-        var tree = object.Tree.parse(store.db.kind, found.bytes);
+        var tree = object.Tree.parse(store.db.objectFormat(), found.bytes);
         var entries = tree.iterate();
         while (try entries.next()) |entry| switch (entry.mode) {
             .tree => try store.ownTree(io, entry.oid, source_db, depth + 1),
@@ -211,7 +211,7 @@ pub const Store = struct {
         if (try store.db.existsOwn(io, oid)) return;
         const source = source_db orelse return error.ObjectNotFound;
         const found = try source.read(io, oid);
-        defer source.gpa.free(found.bytes);
+        defer source.allocator().free(found.bytes);
         const written = try store.db.write(io, found.type, found.bytes);
         if (!written.eql(oid)) return error.ObjectNameMismatch;
     }
@@ -220,9 +220,9 @@ pub const Store = struct {
     /// policy. Tree attributes apply even in an empty destination; callers
     /// may supply core settings and filter drivers through `checkout.rules`.
     pub fn restore(store: *Store, io: Io, snapshot: Snapshot, wt: Io.Dir, options: RestoreOptions) Error!worktree.CheckoutOutcome {
-        if (snapshot.tree.kind != store.db.kind) return error.ObjectFormatMismatch;
-        if (options.from) |before| if (before.tree.kind != store.db.kind) return error.ObjectFormatMismatch;
-        var staged: index.Index = .initEmpty(store.gpa, store.db.kind);
+        if (snapshot.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
+        if (options.from) |before| if (before.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
+        var staged: index.Index = .initEmpty(store.gpa, store.db.objectFormat());
         defer staged.deinit();
         if (options.from) |before| _ = try worktree.resetIndex(store.gpa, io, &staged, &store.db, before.tree);
         var attrs = try worktree.attributes.Attrs.init(store.gpa, options.checkout.rules.ignore_case);
@@ -236,8 +236,8 @@ pub const Store = struct {
     /// Compare snapshot trees; null names an empty tree. The returned
     /// changes belong to the caller and use the ordinary diff API.
     pub fn diff(store: *Store, io: Io, before: ?Snapshot, after: ?Snapshot, options: diff_mod.TreeOptions) Error!diff_mod.Changes {
-        if (before) |s| if (s.tree.kind != store.db.kind) return error.ObjectFormatMismatch;
-        if (after) |s| if (s.tree.kind != store.db.kind) return error.ObjectFormatMismatch;
+        if (before) |s| if (s.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
+        if (after) |s| if (s.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
         return diff_mod.tree(store.gpa, io, &store.db, if (before) |s| s.tree else null, if (after) |s| s.tree else null, options);
     }
 };

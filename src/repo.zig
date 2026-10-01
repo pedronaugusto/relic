@@ -68,6 +68,9 @@ pub const Error = error{
     /// backend. The store and its cache were opened for the old one, so
     /// the repository must be reopened.
     RefStorageChanged,
+    /// An in-memory edit changes which configuration files apply. Write
+    /// that change with a standalone Config and refresh the repository.
+    WorktreeConfigChanged,
 } || object.ParseError || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
@@ -143,6 +146,7 @@ const IndexStamp = struct {
 };
 
 const RefState = opaque {};
+const config_owner = @import("configstate.zig");
 
 pub const Repository = struct {
     gpa: Allocator,
@@ -158,7 +162,7 @@ pub const Repository = struct {
     common_is_separate: bool,
     /// Owned ref state. Its format and cache are opaque to callers.
     _refs: *RefState,
-    /// What the configuration files held at `open`, or when `refreshConfig`
+    /// Opaque ownership of what the configuration files held at `open`, or when `refreshConfig`
     /// last found one changed. Nothing reads them again behind the caller's
     /// back, so another process's `git config` is seen after a
     /// `refreshConfig` and not before. The operations that read a file
@@ -166,7 +170,7 @@ pub const Repository = struct {
     /// settings are edited in `.git/config` as read at that moment. An
     /// `includeIf` is decided against this repository's `.git` directory
     /// and the branch `HEAD` was on when the files were read.
-    config: config_mod.Config,
+    _config: *config_owner.State,
     odb: odb_mod.Odb,
     /// What `lfsconfigText` last found, and what it was found from.
     lfsconfig_cache: ?LfsconfigCache = null,
@@ -325,7 +329,7 @@ pub const Repository = struct {
             .common_dir = discovered.common_dir,
             .work_dir = discovered.work_dir,
             .common_is_separate = discovered.common_is_separate,
-            .config = .initEmpty(gpa),
+            ._config = undefined,
             .odb = undefined,
             ._refs = undefined,
         };
@@ -346,8 +350,8 @@ pub const Repository = struct {
             .command = options.config_overrides,
             .pairs = options.config_pairs,
         }, .{ .git_dir = git_dir_path, .branch = if (branch) |b| b["refs/heads/".len..] else null, .home = options.home }, options.diagnostic);
-        repo.config = read.config;
-        errdefer repo.config.deinit();
+        repo._config = try config_owner.create(read.config);
+        errdefer config_owner.destroy(repo._config);
         repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, read.format.kind, options.odb);
         errdefer repo.odb.deinit(io);
         repo.odb.shallow = try shallow.read(gpa, io, repo.common_dir, read.format.kind);
@@ -355,7 +359,7 @@ pub const Repository = struct {
         errdefer gpa.destroy(store);
         store.* = try refs_mod.Store.initWithOptions(gpa, read.format.kind, repo.git_dir, repo.common_dir, .{
             .format = read.format.ref_storage,
-            .reftable = if (read.format.ref_storage == .reftable) try reftableOptions(&repo.config) else .{},
+            .reftable = if (read.format.ref_storage == .reftable) try reftableOptions(repo.configuration()) else .{},
         });
         repo._refs = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
         return repo;
@@ -414,7 +418,7 @@ pub const Repository = struct {
     /// and it costs a read of each file the configuration came from,
     /// includes among them, and of `HEAD`, and a parse only when one
     /// differs. Edits made
-    /// to `config` in memory and never written are replaced by what the
+    /// through `editConfig` in memory and never written are replaced by what the
     /// files hold. A configuration that no longer passes `open`'s checks is
     /// that check's error, and the one held before is kept. A changed hash or
     /// ref backend requires reopening (`ObjectFormatChanged`, `RefStorageChanged`).
@@ -425,32 +429,18 @@ pub const Repository = struct {
         const branch = try currentBranch(repo.gpa, io, repo.git_dir);
         defer if (branch) |b| repo.gpa.free(b);
         const short = if (branch) |b| b["refs/heads/".len..] else null;
-        const same_branch = if (repo.config.context.branch) |was|
+        const same_branch = if (repo.configuration().context.branch) |was|
             short != null and std.mem.eql(u8, was, short.?)
         else
             short == null;
-        if (same_branch and !try repo.config.isStale(io)) return false;
-        var sources = repo.config.sources;
+        if (same_branch and !try repo.configuration().isStale(io)) return false;
+        var sources = repo.configuration().sources;
         sources.worktree = null;
-        var context = repo.config.context;
+        var context = repo.configuration().context;
         context.branch = short;
         var fresh = try repo.readConfig(io, sources, context, diagnostic);
         errdefer fresh.config.deinit();
-        if (fresh.format.kind != repo.objectFormat()) {
-            try refuseSetting(diagnostic, "extensions.objectFormat");
-            return error.ObjectFormatChanged;
-        }
-        if (fresh.format.ref_storage != repo.refStore().refFormat()) {
-            try refuseSetting(diagnostic, "extensions.refStorage");
-            return error.RefStorageChanged;
-        }
-        const ref_options = if (repo.refStore().refFormat() == .reftable)
-            try reftableOptions(&fresh.config)
-        else
-            repo.refStore().reftableOptions();
-        repo.config.deinit();
-        repo.config = fresh.config;
-        repo.refStore().configureReftable(ref_options);
+        try repo.publishConfig(fresh.config, fresh.format, diagnostic);
         return true;
     }
 
@@ -639,7 +629,7 @@ pub const Repository = struct {
         repo.refStore().deinit();
         repo.gpa.destroy(repo.refStore());
         repo.odb.deinit(io);
-        repo.config.deinit();
+        config_owner.destroy(repo._config);
         if (repo.common_is_separate) repo.common_dir.close(io);
         repo.git_dir.close(io);
         if (repo.work_dir) |w| w.close(io);
@@ -655,6 +645,78 @@ pub const Repository = struct {
     /// Its backend and cache cannot be assigned separately.
     pub fn refStore(repo: *const Repository) *refs_mod.Store {
         return @ptrCast(@alignCast(repo._refs)); // safe: finish allocates _refs as an aligned Store.
+    }
+
+    /// The last published configuration, borrowed until an edit, refresh
+    /// or repository close. Edit through the repository to keep its stores
+    /// and configuration policy in agreement.
+    pub fn configuration(repo: *const Repository) *const config_mod.Config {
+        return config_owner.get(repo._config);
+    }
+
+    pub const ConfigEdit = union(enum) {
+        set: struct { name: []const u8, value: []const u8, level: ?config_mod.Level = null },
+        unset: struct { name: []const u8, level: ?config_mod.Level = null },
+        remove_section: struct { section: []const u8, subsection: ?[]const u8 = null, level: config_mod.Level },
+    };
+
+    /// Apply a batch in memory, publishing only after every edit and the
+    /// resulting repository policy pass. No file is written. Format or
+    /// backend changes require reopening and retain the previous policy.
+    /// Changes to worktree configuration sources require a standalone
+    /// configuration write followed by refresh (`WorktreeConfigChanged`).
+    pub fn editConfig(repo: *Repository, edits: []const ConfigEdit, diagnostic: ?*Diagnostic) (Error || config_mod.Config.SetError)!void {
+        diagnostic_mod.reset(diagnostic);
+        var next = try config_owner.copy(repo.gpa, repo.configuration());
+        errdefer next.deinit();
+        for (edits) |edit| switch (edit) {
+            .set => |e| if (e.level) |level| try next.setIn(level, e.name, e.value) else try next.set(e.name, e.value),
+            .unset => |e| if (e.level) |level| try next.unsetIn(level, e.name) else try next.unset(e.name),
+            .remove_section => |e| _ = try next.removeSectionIn(e.level, e.section, e.subsection),
+        };
+        const policy = try sharedConfigPolicy(&next, diagnostic);
+        // A memory-only edit cannot read or drop the worktree sources.
+        // Refresh owns that filesystem transition after a standalone write.
+        if (policy.worktree_config != (repo.configuration().sources.worktree != null)) {
+            try refuseSetting(diagnostic, "extensions.worktreeConfig");
+            return error.WorktreeConfigChanged;
+        }
+        try repo.publishConfig(next, policy.format, diagnostic);
+    }
+
+    fn sharedConfigPolicy(config: *const config_mod.Config, diagnostic: ?*Diagnostic) Error!struct { format: RepositoryFormat, worktree_config: bool } {
+        var entries: std.ArrayList(config_mod.Entry) = .empty;
+        defer entries.deinit(config.gpa);
+        for (config.entries.items) |entry| {
+            if (entry.level != .worktree) try entries.append(config.gpa, entry);
+        }
+        // Only the entry array belongs to this view; all file bytes remain
+        // borrowed for the check. Worktree settings have no say in format
+        // or in whether their own source is read, just as during open.
+        var shared = config.*;
+        shared.entries = entries;
+        return .{
+            .format = try checkFormat(&shared, diagnostic),
+            .worktree_config = try settingBool(&shared, "extensions.worktreeConfig", diagnostic),
+        };
+    }
+
+    fn publishConfig(repo: *Repository, next: config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) Error!void {
+        if (format.kind != repo.objectFormat()) {
+            try refuseSetting(diagnostic, "extensions.objectFormat");
+            return error.ObjectFormatChanged;
+        }
+        if (format.ref_storage != repo.refStore().refFormat()) {
+            try refuseSetting(diagnostic, "extensions.refStorage");
+            return error.RefStorageChanged;
+        }
+        const ref_options = if (format.ref_storage == .reftable)
+            try reftableOptions(&next)
+        else
+            repo.refStore().reftableOptions();
+        config_owner.get(repo._config).deinit();
+        config_owner.get(repo._config).* = next;
+        repo.refStore().configureReftable(ref_options);
     }
 
     /// Whether the repository has a working tree.
@@ -673,14 +735,14 @@ pub const Repository = struct {
     }
 
     fn coreChoice(repo: *const Repository, comptime T: type, setting: []const u8, fallback: T, comptime boolean: bool) Error!T {
-        const raw = repo.config.get(setting) orelse return fallback;
-        const text = try config_mod.unquote(repo.config.gpa, raw);
-        defer repo.config.gpa.free(text);
+        const raw = repo.configuration().get(setting) orelse return fallback;
+        const text = try config_mod.unquote(repo.configuration().gpa, raw);
+        defer repo.configuration().gpa.free(text);
         if (T == fs.Stat.Check and std.ascii.eqlIgnoreCase(text, "default")) return .full;
         inline for (@typeInfo(T).@"enum".fields) |field| {
             if ((!boolean or (!std.mem.eql(u8, field.name, "true") and !std.mem.eql(u8, field.name, "false"))) and std.ascii.eqlIgnoreCase(text, field.name)) return @enumFromInt(field.value);
         }
-        if (boolean) return if (try repo.config.getBool(setting, false)) .true else .false;
+        if (boolean) return if (try repo.configuration().getBool(setting, false)) .true else .false;
         return error.MalformedValue;
     }
 
@@ -690,11 +752,11 @@ pub const Repository = struct {
     pub fn worktreeRules(repo: *const Repository) Error!worktree.Rules {
         return .{
             .core = try repo.coreSettings(),
-            .ignore_case = try repo.config.getBool("core.ignorecase", false),
+            .ignore_case = try repo.configuration().getBool("core.ignorecase", false),
             .check_stat = try repo.coreChoice(@TypeOf(@as(worktree.Rules, .{}).check_stat), "core.checkstat", .full, false),
             .timestamp_resolution = repo.odb.timestamp_resolution,
-            .file_mode = try repo.config.getBool("core.filemode", Io.File.Permissions.has_executable_bit),
-            .symlinks = try repo.config.getBool("core.symlinks", @import("builtin").os.tag != .windows),
+            .file_mode = try repo.configuration().getBool("core.filemode", Io.File.Permissions.has_executable_bit),
+            .symlinks = try repo.configuration().getBool("core.symlinks", @import("builtin").os.tag != .windows),
         };
     }
 
@@ -703,10 +765,10 @@ pub const Repository = struct {
     /// The result is the caller's, and a walk pushes and pops deeper levels
     /// into it as it goes.
     pub fn loadIgnore(repo: *Repository, io: Io) Error!ignore.Rules {
-        const case_fold = try repo.config.getBool("core.ignorecase", false);
+        const case_fold = try repo.configuration().getBool("core.ignorecase", false);
         var rules = try ignore.Rules.init(repo.gpa, case_fold);
         errdefer rules.deinit();
-        const excludes = try repo.config.getPath(repo.gpa, "core.excludesfile");
+        const excludes = try repo.configuration().getPath(repo.gpa, "core.excludesfile");
         defer if (excludes) |p| repo.gpa.free(p);
         try rules.loadGlobal(io, repo.common_dir, excludes, Io.Dir.cwd());
         return rules;
@@ -714,10 +776,10 @@ pub const Repository = struct {
 
     /// Load the attributes for the working tree's root.
     pub fn loadAttrs(repo: *Repository, io: Io) Error!attributes.Attrs {
-        const case_fold = try repo.config.getBool("core.ignorecase", false);
+        const case_fold = try repo.configuration().getBool("core.ignorecase", false);
         var attrs = try attributes.Attrs.init(repo.gpa, case_fold);
         errdefer attrs.deinit();
-        const file = try repo.config.getPath(repo.gpa, "core.attributesfile");
+        const file = try repo.configuration().getPath(repo.gpa, "core.attributesfile");
         defer if (file) |p| repo.gpa.free(p);
         try attrs.loadGlobal(io, repo.common_dir, file, Io.Dir.cwd());
         return attrs;
@@ -731,12 +793,12 @@ pub const Repository = struct {
     pub fn requiredFilters(repo: *const Repository, gpa: Allocator) config_mod.ValueError![][]const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         errdefer out.deinit(gpa);
-        const names = try repo.config.subsections(gpa, "filter");
+        const names = try repo.configuration().subsections(gpa, "filter");
         defer gpa.free(names);
         for (names) |name| {
             const key = try std.fmt.allocPrint(gpa, "filter.{s}.required", .{name});
             defer gpa.free(key);
-            const required = try repo.config.getBool(key, false);
+            const required = try repo.configuration().getBool(key, false);
             if (required) try out.append(gpa, name);
         }
         return out.toOwnedSlice(gpa);
@@ -753,7 +815,7 @@ pub const Repository = struct {
             text = try repo.lfsconfigText(io);
             with.lfsconfig = text;
         }
-        return filter.Drivers.load(repo.gpa, io, &repo.config, repo.common_dir, repo.work_dir, with);
+        return filter.Drivers.load(repo.gpa, io, repo.configuration(), repo.common_dir, repo.work_dir, with);
     }
 
     /// Errors from `loadFilters`: the drivers', and those of finding
@@ -847,7 +909,7 @@ pub const Repository = struct {
         }
         const tree = (try repo.headTree(io)) orelse return null;
         const found = try repo.odb.read(io, tree);
-        defer repo.odb.gpa.free(found.bytes);
+        defer repo.odb.allocator().free(found.bytes);
         const entry = (object.Tree.parse(repo.objectFormat(), found.bytes).find(".lfsconfig") catch return null) orelse return null;
         if (entry.mode != .file and entry.mode != .exec) return null;
         const blob = try repo.odb.read(io, entry.oid);
@@ -1020,8 +1082,8 @@ pub const Repository = struct {
             .always => "",
             .never => return null,
             .config => configured: {
-                if (try settingBool(&repo.config, primary, diagnostic)) break :configured primary;
-                if (target == .tag and try settingBool(&repo.config, "tag.forceSignAnnotated", diagnostic))
+                if (try settingBool(repo.configuration(), primary, diagnostic)) break :configured primary;
+                if (target == .tag and try settingBool(repo.configuration(), "tag.forceSignAnnotated", diagnostic))
                     break :configured "tag.forceSignAnnotated";
                 return null;
             },
@@ -1030,7 +1092,7 @@ pub const Repository = struct {
             if (setting.len != 0) try refuseSetting(diagnostic, setting);
             return error.SigningRequiresPrograms;
         };
-        return signing.Signer.init(repo.gpa, &repo.config, programs) catch |err| {
+        return signing.Signer.init(repo.gpa, repo.configuration(), programs) catch |err| {
             switch (err) {
                 error.UnknownSignatureFormat => try refuseSetting(diagnostic, "gpg.format"),
                 error.UnknownTrustLevel => try refuseSetting(diagnostic, "gpg.minTrustLevel"),
@@ -1053,7 +1115,7 @@ pub const Repository = struct {
     /// branches; a bare one defaults to writing them only where one already
     /// exists, which is git's rule.
     pub fn reflogPolicy(repo: *const Repository) reflog.Policy {
-        if (repo.config.get("core.logallrefupdates")) |text| return reflog.Policy.parse(text);
+        if (repo.configuration().get("core.logallrefupdates")) |text| return reflog.Policy.parse(text);
         return if (repo.isBare()) .existing_only else .standard;
     }
 
@@ -1090,7 +1152,7 @@ pub const Repository = struct {
         options: hooks.Options,
     ) hooks.InitError!hooks.Runner {
         return hooks.Runner.init(repo.gpa, io, .{
-            .config = &repo.config,
+            .config = repo.configuration(),
             .git_dir = repo.git_dir,
             .common_dir = repo.common_dir,
             .work_dir = repo.work_dir,
