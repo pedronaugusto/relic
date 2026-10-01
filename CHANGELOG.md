@@ -50,7 +50,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Filesystem staging, status and listing return `TreeTooDeep` at their walk limit instead of returning a partial result.
 - Snapshots keep the indexed contents of sparse tracked paths absent by policy and read edits to skipped paths present on disk.
 - URL parsing and display share scheme boundaries, and drive prefixes and file authorities follow Git's platform rules.
-- GnuPG fixtures keep their private homes under the checkout's `.zig-cache` instead of writing into an external temporary directory.
+- GnuPG fixtures use private homes under `.zig-cache/gpg` by default; `-Dgnupg-fixture-root=/short/path` gives long checkouts a short root for agent sockets, and each home is removed after its daemons stop.
 - An object source transfers its directory handles once on registration, rolls back failed alternate sources, and preserves allocation failure and cancellation.
 - A registered pack and its name have one owner, and allocation failure or cancellation while opening packs and their multi-pack index remains a resource failure.
 - Staging refuses a directory it cannot open instead of recording its tracked files as deleted.
@@ -255,13 +255,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with `O_PATH`, one knew git's assertion failures by the BSD C library's
   wording, and one knew `openssl s_server`'s peer signature line only as
   OpenSSL 3.2 and later print it.
-
-- The suite runs from a checkout at any path. gpg-agent puts its sockets in
-  `GNUPGHOME`, and a home inside a test's temporary directory, under the
-  checkout, gave a socket path past the 104 bytes Darwin allows, so every
-  OpenPGP test failed from a long path. The signing tests' gpg home is now a
-  short directory of their own under `/tmp` (`testgit.GnupgHome`), removed
-  once gpg's daemons for it are stopped.
 
 - `Signer.init` and `Lfs.load` leaked memory when a setting was long. Each
   took its arena's state before its last allocations, so the blocks those

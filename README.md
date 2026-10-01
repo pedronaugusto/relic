@@ -665,7 +665,11 @@ everything written.
 runs with the system's git configuration off (`GIT_CONFIG_NOSYSTEM`), a
 scratch `HOME` holding the only global configuration it reads, a scratch
 `GNUPGHOME` where gpg is involved, no ssh or gpg agent of the person's, and no
-prompt. gpg's daemons for a scratch home are stopped with it. The tests that
+prompt. gpg's daemons for a scratch home are stopped with it. GnuPG homes
+are under `.zig-cache/gpg` by default. From a long checkout, pass
+`-Dgnupg-fixture-root=/short/path` to give the agent's Unix sockets a short
+root; only the random private homes beneath that root are removed.
+The tests that
 exercise the person's credential helpers point git at stand-ins, and check
 each one answers as a stand-in before anything is asked of it, so no test
 reaches a real keychain.

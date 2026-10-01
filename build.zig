@@ -122,6 +122,11 @@ pub fn build(b: *std.Build) void {
     const install_process_fixture = b.addInstallArtifact(process_fixture, .{});
 
     const build_options = b.addOptions();
+    build_options.addOption([]const u8, "gnupg_fixture_root", b.pathFromRoot(b.option(
+        []const u8,
+        "gnupg-fixture-root",
+        "A short directory for private GnuPG test homes (defaults to .zig-cache/gpg)",
+    ) orelse ".zig-cache/gpg"));
     build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
     build_options.addOption([]const u8, "filter_helper_path", b.getInstallPath(.bin, filter_helper.out_filename));
     build_options.addOption([]const u8, "lfs_transfer_helper_path", b.getInstallPath(.bin, lfs_transfer_helper.out_filename));

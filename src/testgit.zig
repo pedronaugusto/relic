@@ -314,11 +314,12 @@ pub fn isolate(map: *Environ.Map, home: []const u8) !void {
     try map.put("GIT_TERMINAL_PROMPT", "0");
 }
 
-/// A home for gpg of a test's own, under `.zig-cache/gpg` in the checkout.
-/// It has a random name, private permissions where available, and is removed
-/// by `deinit` after its daemons have stopped. Unix sockets need a short
-/// checkout path: their limit is 104 bytes on Darwin and 108 on Linux.
-/// The environment `isolate` supplies carries nothing of the person's.
+/// A home for gpg of a test's own, under the build's `gnupg-fixture-root`.
+/// The default is `.zig-cache/gpg`; a long checkout selects a short root
+/// with `zig build test -Dgnupg-fixture-root=/short/path`. Each home has a
+/// random name and private permissions where available, and `deinit`
+/// removes it after its daemons have stopped. The environment `isolate`
+/// supplies carries nothing of the person's.
 pub const GnupgHome = struct {
     gpa: Allocator,
     name: []u8,
@@ -329,8 +330,9 @@ pub const GnupgHome = struct {
         io.random(&random_bytes);
         var suffix: [16]u8 = undefined;
         _ = std.base64.url_safe_no_pad.Encoder.encode(&suffix, &random_bytes);
-        try Io.Dir.cwd().createDirPath(io, ".zig-cache/gpg");
-        const root = try Io.Dir.cwd().realPathFileAlloc(io, ".zig-cache/gpg", gpa);
+        const fixture_root = @import("build_options").gnupg_fixture_root;
+        try Io.Dir.cwd().createDirPath(io, fixture_root);
+        const root = try Io.Dir.cwd().realPathFileAlloc(io, fixture_root, gpa);
         defer gpa.free(root);
         const home_path = try std.fs.path.join(gpa, &.{ root, &suffix });
         errdefer gpa.free(home_path);
@@ -616,23 +618,23 @@ test "a repository variable in the environment cannot send the harness's git to 
     try std.testing.expect(!std.mem.eql(u8, git_dir, other_git));
 }
 
-test "GnuPG test homes stay under the checkout" {
+test "GnuPG test homes use the selected root and clean up independently" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const cache = try Io.Dir.cwd().realPathFileAlloc(io, ".zig-cache", gpa);
-    defer gpa.free(cache);
-    const Guard = struct {
-        threadlocal var requested: [Io.Dir.max_path_bytes]u8 = undefined;
-        threadlocal var len: usize = 0;
-        fn create(_: ?*anyopaque, _: Io.Dir, path: []const u8, _: Io.Dir.Permissions) Io.Dir.CreateDirError!void {
-            len = @min(path.len, requested.len);
-            @memcpy(requested[0..len], path[0..len]);
-            return error.AccessDenied;
-        }
+    const root = @import("build_options").gnupg_fixture_root;
+    var first = try GnupgHome.init(gpa, io);
+    defer first.deinit(io);
+    const removed = removed: {
+        var second = try GnupgHome.init(gpa, io);
+        defer second.deinit(io);
+        break :removed try gpa.dupe(u8, second.path());
     };
-    var vtable = io.vtable.*;
-    vtable.dirCreateDir = Guard.create;
-    const guarded: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    try std.testing.expectError(error.AccessDenied, GnupgHome.init(gpa, guarded));
-    try std.testing.expect(std.mem.startsWith(u8, Guard.requested[0..Guard.len], cache));
+    defer gpa.free(removed);
+    const resolved = try Io.Dir.cwd().realPathFileAlloc(io, root, gpa);
+    defer gpa.free(resolved);
+    try std.testing.expectEqualStrings(resolved, std.fs.path.dirname(first.path()).?);
+    try std.testing.expectEqualStrings(resolved, std.fs.path.dirname(removed).?);
+    try std.testing.expect(!std.mem.eql(u8, first.path(), removed));
+    try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, removed, .{}));
+    try Io.Dir.cwd().access(io, first.path(), .{});
 }
