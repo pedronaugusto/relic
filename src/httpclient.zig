@@ -434,6 +434,7 @@ pub const Client = struct {
     /// caller's to read and `deinit`.
     pub fn send(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8) Error!Response {
         var response = try c.sendKept(method, target, path, headers, body);
+        errdefer response.deinit();
         // A proxy that asks, for a request it is handed whole: answered,
         // and the request made again, as curl makes it again.
         if (response.head.status == .proxy_auth_required and c.proxy != null and !target.tls) {
@@ -1391,6 +1392,19 @@ test "a refused tunnel cannot consume another connection's pending proxy retry" 
     client.proxy_retry = true;
     try std.testing.expectError(error.ProxyAuthenticationRequired, client.connect(.{ .tls = true, .host = "git.example.com", .port = 443 }));
     try std.testing.expectEqual(@as(u32, 1), client.connections);
+}
+
+test "a proxy challenge that cannot be answered releases its response" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const server = try TestServer.startAnswer(gpa, io, false, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n");
+    defer server.stop(gpa);
+    var client: Client = .init(gpa, io);
+    defer client.deinit();
+    client.proxy = .{ .host = "127.0.0.1", .port = server.port, .credential = .{ .user = "a", .password = "b" } };
+    try std.testing.expectError(error.ProxyAuthMethodUnsupported, client.send(.GET, .{ .tls = false, .host = "git.example.com", .port = 80 }, "/", &.{}, null));
+    try std.testing.expectEqualStrings("Negotiate", client.proxy_offered.?);
+    // std.testing.allocator must have no retained response or connection.
 }
 
 test "tasks sending at once through one client share the connections it keeps" {
