@@ -118,7 +118,7 @@ fn relicStatus(gpa: Allocator, io: Io, git: *testgit.Repo, untracked: worktree.S
     defer index.deinit();
     var ignore_rules = try repo.loadIgnore(io);
     defer ignore_rules.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     var result = try worktree.status(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
         .rules = rules,
@@ -193,7 +193,7 @@ test "list names a repository inside the working tree once, as git ls-files --ot
     defer index.deinit();
     var ignore_rules = try repo.loadIgnore(io);
     defer ignore_rules.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     var listing = try worktree.list(gpa, io, repo.work_dir.?, &index, rules);
     defer listing.deinit();
@@ -231,7 +231,7 @@ test "addAll stages a repository inside the working tree as the gitlink git add 
     defer index.deinit();
     var ignore_rules = try repo.loadIgnore(io);
     defer ignore_rules.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = rules });
     try testing.expectEqual(@as(u32, 1), outcome.nested_repositories);
@@ -267,7 +267,7 @@ test "a repository inside the working tree with no commit stops addAll, as it st
     defer index.deinit();
     var refusal: worktree.Refusal = .{};
     try testing.expectError(error.NoCommitCheckedOut, worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
-        .rules = repo.worktreeRules(),
+        .rules = try repo.worktreeRules(),
         .refusal = &refusal,
     }));
     try testing.expectEqualStrings("empty", refusal.path());

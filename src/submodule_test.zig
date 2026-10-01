@@ -205,7 +205,7 @@ fn relicPorcelainV2(gpa: Allocator, io: Io, repo: *Repository, options: submodul
     defer ignore_rules.deinit();
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     var probe = try submodule.StatusProbe.init(gpa, io, repo, &index, options);
@@ -393,7 +393,7 @@ test "a moved submodule is staged as git add -A stages it, and the tree is git's
 
     var index = try repo.openIndex(io);
     defer index.deinit();
-    const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = repo.worktreeRules() });
+    const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = try repo.worktreeRules() });
     try testing.expectEqual(@as(u32, 1), outcome.gitlinks_moved);
     try testing.expect(index.find("vendor/lib/untracked.txt") == null);
     const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
@@ -420,13 +420,13 @@ test "an unpopulated submodule stays recorded, and a removed one is staged as re
     {
         var index = try repo.openIndex(io);
         defer index.deinit();
-        _ = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = repo.worktreeRules() });
+        _ = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = try repo.worktreeRules() });
         try testing.expect(index.find("vendor/lib").?.mode == .gitlink);
         try testing.expect(index.find("vendor/lib/junk") == null);
         const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
         try testing.expect(tree.eql((try repo.headTree(io)).?));
 
-        var listing = try worktree.list(gpa, io, repo.work_dir.?, &index, repo.worktreeRules());
+        var listing = try worktree.list(gpa, io, repo.work_dir.?, &index, try repo.worktreeRules());
         defer listing.deinit();
         const others = try c.git.run(io, &.{ "ls-files", "-o" });
         defer gpa.free(others);
@@ -441,7 +441,7 @@ test "an unpopulated submodule stays recorded, and a removed one is staged as re
     {
         var index = try repo.openIndex(io);
         defer index.deinit();
-        _ = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = repo.worktreeRules() });
+        _ = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = try repo.worktreeRules() });
         try testing.expect(index.find("vendor/lib") == null);
         const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
         try c.git.exec(io, &.{ "add", "-A" });
@@ -469,9 +469,9 @@ test "checkout makes an empty directory for a gitlink and takes an empty one awa
 
     var index = try repo.openIndex(io);
     defer index.deinit();
-    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, before, .{ .rules = repo.worktreeRules() });
+    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, before, .{ .rules = try repo.worktreeRules() });
     try testing.expect((try @import("fs.zig").statAt(io, repo.work_dir.?, "vendor/lib")) == null);
-    const outcome = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, with_lib, .{ .rules = repo.worktreeRules() });
+    const outcome = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, with_lib, .{ .rules = try repo.worktreeRules() });
     try testing.expectEqual(@as(u32, 1), outcome.gitlinks);
     const found = (try @import("fs.zig").statAt(io, repo.work_dir.?, "vendor/lib")).?;
     try testing.expectEqual(Io.File.Kind.directory, found.kind);

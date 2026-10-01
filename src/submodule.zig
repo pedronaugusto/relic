@@ -892,7 +892,7 @@ fn inspectRepository(
     defer attrs.deinit();
     const required = try sub.requiredFilters(gpa);
     defer gpa.free(required);
-    var rules = sub.worktreeRules();
+    var rules = try sub.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     rules.required_filters = required;
@@ -1616,7 +1616,7 @@ fn checkoutCommit(
     defer attrs.deinit();
     const required = try sub.requiredFilters(gpa);
     defer gpa.free(required);
-    var rules = sub.worktreeRules();
+    var rules = try sub.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     rules.required_filters = required;

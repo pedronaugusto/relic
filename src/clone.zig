@@ -530,7 +530,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
         .options = .{ .programs = programs, .prompt = options.prompt, .auth_failure = options.auth_failure },
     };
     defer lfs_fetch.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
     const required = try repo.requiredFilters(gpa);

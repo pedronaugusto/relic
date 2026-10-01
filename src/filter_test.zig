@@ -47,7 +47,7 @@ pub fn relicAdd(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !Oid {
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, run.drivers);
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     rules.filters = &drivers;
@@ -72,7 +72,7 @@ pub fn relicCheckout(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, tree: Oid, run
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, run.drivers);
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
     var index = index_mod.Index.initEmpty(gpa, repo.kind);
@@ -97,7 +97,7 @@ pub fn relicStatus(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !workt
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, run.drivers);
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     rules.filters = &drivers;
@@ -580,7 +580,7 @@ test "status compares a filtered file through what it would be stored as" {
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, .{});
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
     var index = try repo.openIndex(io);

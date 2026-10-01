@@ -127,7 +127,7 @@ pub const Store = struct {
             // a snapshot write out of the private store.
             if (drivers.?.lfs) |*lfs| lfs.store = .{ .base = store.dir, .root = "lfs" };
         }
-        var rules = if (source_repo) |r| r.worktreeRules() else worktree.Rules{};
+        var rules = if (source_repo) |r| try r.worktreeRules() else worktree.Rules{};
         rules.ignore = &ignored;
         rules.attrs = &attrs;
         rules.filters = if (drivers) |*d| d else null;

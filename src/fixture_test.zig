@@ -1718,7 +1718,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
         defer repo.deinit(io);
         var rules = try repo.loadIgnore(io);
         defer rules.deinit();
-        var wt_rules = repo.worktreeRules();
+        var wt_rules = try repo.worktreeRules();
         wt_rules.ignore = &rules;
 
         var index = try repo.openIndex(io);

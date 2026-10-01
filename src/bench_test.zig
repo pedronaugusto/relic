@@ -84,7 +84,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     defer rules.deinit();
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var wt_rules = repo.worktreeRules();
+    var wt_rules = try repo.worktreeRules();
     wt_rules.ignore = &rules;
     wt_rules.attrs = &attrs;
 
@@ -399,7 +399,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
         defer repo.deinit(io);
         var rules = try repo.loadIgnore(io);
         defer rules.deinit();
-        var wt_rules = repo.worktreeRules();
+        var wt_rules = try repo.worktreeRules();
         wt_rules.ignore = &rules;
         var index = try repo.openIndex(io);
         defer index.deinit();

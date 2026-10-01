@@ -681,41 +681,38 @@ pub const Repository = struct {
     }
 
     /// The `core` settings that take part in line-ending conversion.
-    pub fn coreSettings(repo: *const Repository) attributes.CoreSettings {
-        const autocrlf: attributes.CoreSettings.AutoCrlf = blk: {
-            const text = repo.config.get("core.autocrlf") orelse break :blk .false;
-            if (std.ascii.eqlIgnoreCase(text, "input")) break :blk .input;
-            const as_bool = config_mod.parseBool(text) catch break :blk .false;
-            break :blk if (as_bool) .true else .false;
+    /// Invalid settings and allocation failures are returned to the caller.
+    pub fn coreSettings(repo: *const Repository) Error!attributes.CoreSettings {
+        return .{
+            .autocrlf = try repo.coreChoice(attributes.CoreSettings.AutoCrlf, "core.autocrlf", .false, true),
+            .eol = try repo.coreChoice(attributes.CoreSettings.Eol, "core.eol", .native, false),
+            .safecrlf = try repo.coreChoice(attributes.CoreSettings.SafeCrlf, "core.safecrlf", .false, true),
         };
-        const eol: attributes.CoreSettings.Eol = blk: {
-            const text = repo.config.get("core.eol") orelse break :blk .native;
-            if (std.ascii.eqlIgnoreCase(text, "lf")) break :blk .lf;
-            if (std.ascii.eqlIgnoreCase(text, "crlf")) break :blk .crlf;
-            break :blk .native;
-        };
-        const safecrlf: attributes.CoreSettings.SafeCrlf = blk: {
-            const text = repo.config.get("core.safecrlf") orelse break :blk .false;
-            if (std.ascii.eqlIgnoreCase(text, "warn")) break :blk .warn;
-            const as_bool = config_mod.parseBool(text) catch break :blk .false;
-            break :blk if (as_bool) .true else .false;
-        };
-        return .{ .autocrlf = autocrlf, .eol = eol, .safecrlf = safecrlf };
+    }
+
+    fn coreChoice(repo: *const Repository, comptime T: type, setting: []const u8, fallback: T, comptime boolean: bool) Error!T {
+        const raw = repo.config.get(setting) orelse return fallback;
+        const text = try config_mod.unquote(repo.config.gpa, raw);
+        defer repo.config.gpa.free(text);
+        if (T == fs.Stat.Check and std.ascii.eqlIgnoreCase(text, "default")) return .full;
+        inline for (@typeInfo(T).@"enum".fields) |field| {
+            if ((!boolean or (!std.mem.eql(u8, field.name, "true") and !std.mem.eql(u8, field.name, "false"))) and std.ascii.eqlIgnoreCase(text, field.name)) return @enumFromInt(field.value);
+        }
+        if (boolean) return if (try repo.config.getBool(setting, false)) .true else .false;
+        return error.MalformedValue;
     }
 
     /// The rules a working-tree operation needs, with `ignore` and `attrs`
-    /// left for the caller to fill in.
-    pub fn worktreeRules(repo: *const Repository) worktree.Rules {
+    /// left for the caller to fill in. Invalid settings and resource failures
+    /// are returned instead of replacing the configured policy with defaults.
+    pub fn worktreeRules(repo: *const Repository) Error!worktree.Rules {
         return .{
-            .core = repo.coreSettings(),
-            .ignore_case = repo.config.getBool("core.ignorecase", false) catch false,
-            .check_stat = if (repo.config.get("core.checkstat")) |text|
-                (if (std.ascii.eqlIgnoreCase(text, "minimal")) .minimal else .full)
-            else
-                .full,
+            .core = try repo.coreSettings(),
+            .ignore_case = try repo.config.getBool("core.ignorecase", false),
+            .check_stat = try repo.coreChoice(@TypeOf(@as(worktree.Rules, .{}).check_stat), "core.checkstat", .full, false),
             .timestamp_resolution = repo.odb.timestamp_resolution,
-            .file_mode = repo.config.getBool("core.filemode", Io.File.Permissions.has_executable_bit) catch true,
-            .symlinks = repo.config.getBool("core.symlinks", @import("builtin").os.tag != .windows) catch true,
+            .file_mode = try repo.config.getBool("core.filemode", Io.File.Permissions.has_executable_bit),
+            .symlinks = try repo.config.getBool("core.symlinks", @import("builtin").os.tag != .windows),
         };
     }
 
@@ -882,7 +879,7 @@ pub const Repository = struct {
         const wt = repo.work_dir orelse return index.write(io, repo.git_dir, "index", .{});
         var attrs = try repo.loadAttrs(io);
         defer attrs.deinit();
-        var rules = repo.worktreeRules();
+        var rules = try repo.worktreeRules();
         rules.attrs = &attrs;
         var check: worktree.RacyCheck = .{ .gpa = repo.gpa, .io = io, .wt = wt, .rules = rules };
         try index.write(io, repo.git_dir, "index", .{ .racy = check.racy() });

@@ -2342,7 +2342,7 @@ test "adding a resolved file replaces its conflict and remembers the stages, as 
             defer ignore.deinit();
             var attrs = try repo.loadAttrs(io);
             defer attrs.deinit();
-            var rules = repo.worktreeRules();
+            var rules = try repo.worktreeRules();
             rules.ignore = &ignore;
             rules.attrs = &attrs;
             _ = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = rules });

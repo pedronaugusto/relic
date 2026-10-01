@@ -57,7 +57,7 @@ pub fn toTree(
     const wt = repo.work_dir orelse return error.BareRepository;
     const db = &repo.odb;
 
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.required_filters = try repo.requiredFilters(arena);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();

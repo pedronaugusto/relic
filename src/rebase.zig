@@ -710,7 +710,7 @@ fn requireClean(r: *Run) Error!void {
     var index = try r.repo.openIndex(r.io);
     defer index.deinit();
     const wt = r.repo.work_dir orelse return error.BareRepository;
-    var rules = r.repo.worktreeRules();
+    var rules = try r.repo.worktreeRules();
     var attrs = try r.repo.loadAttrs(r.io);
     defer attrs.deinit();
     rules.attrs = &attrs;
@@ -2394,7 +2394,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     }
     // Unstaged changes are refused; staged ones are what gets committed.
     const wt = repo.work_dir orelse return error.BareRepository;
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
     rules.attrs = &attrs;

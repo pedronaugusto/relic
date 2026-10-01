@@ -90,7 +90,7 @@ test "a whole commit cycle, and git agrees with every part of it" {
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
 
-    var wt_rules = repo.worktreeRules();
+    var wt_rules = try repo.worktreeRules();
     wt_rules.ignore = &rules;
     wt_rules.attrs = &attrs;
 
@@ -171,7 +171,7 @@ test "a sha256 repository this creates is one git uses" {
     defer index.deinit();
     var rules = try repo.loadIgnore(io);
     defer rules.deinit();
-    var wt_rules = repo.worktreeRules();
+    var wt_rules = try repo.worktreeRules();
     wt_rules.ignore = &rules;
     _ = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = wt_rules });
     const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
@@ -917,4 +917,38 @@ test "repository writes preserve signature and hash refusals" {
         .name = "t",
         .message = "m",
     }, null));
+}
+
+test "worktree configuration adapters refuse malformed settings and allocation failures" {
+    const Adapter = struct {
+        fn core(r: *const repo_mod.Repository) !worktree.attributes.CoreSettings {
+            return try r.coreSettings();
+        }
+        fn rules(r: *const repo_mod.Repository) !worktree.Rules {
+            return try r.worktreeRules();
+        }
+    };
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    inline for (.{ "core.autocrlf", "core.safecrlf", "core.ignorecase", "core.filemode", "core.symlinks" }) |setting| {
+        try repo.config.set(setting, "maybe");
+        try std.testing.expectError(error.NotABoolean, Adapter.rules(&repo));
+        try repo.config.set(setting, "false");
+    }
+    inline for (.{ "core.eol", "core.checkstat" }) |setting| {
+        try repo.config.set(setting, "unknown");
+        try std.testing.expectError(error.MalformedValue, Adapter.rules(&repo));
+        try repo.config.set(setting, if (comptime std.mem.eql(u8, setting, "core.eol")) "native" else "default");
+    }
+    repo.config.deinit();
+    repo.config = try @import("config.zig").Config.parseText(gpa, "[core]\n autocrlf = \"input\"\n", .local);
+    try std.testing.expectEqual(worktree.attributes.CoreSettings.AutoCrlf.input, (try Adapter.core(&repo)).autocrlf);
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    repo.config.gpa = failing.allocator();
+    defer repo.config.gpa = gpa;
+    try std.testing.expectError(error.OutOfMemory, Adapter.core(&repo));
 }

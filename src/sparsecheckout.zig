@@ -488,7 +488,7 @@ const Op = struct {
         var index = try repo.openIndex(io);
         defer index.deinit();
 
-        var rules = repo.worktreeRules();
+        var rules = try repo.worktreeRules();
         var attrs = try repo.loadAttrs(io);
         defer attrs.deinit();
         rules.attrs = &attrs;

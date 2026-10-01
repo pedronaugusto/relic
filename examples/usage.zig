@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     defer ignore_rules.deinit();
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
 

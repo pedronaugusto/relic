@@ -308,7 +308,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
 
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = wt, .rules = rules };
     const autoupdate = options.autoupdate orelse (repo.config.getBool("rerere.autoupdate", false) catch false);
@@ -673,7 +673,7 @@ pub const Paths = struct {
 
 fn startRun(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, attrs: ?*attributes.Attrs) Error!Run {
     const wt = repo.work_dir orelse return error.BareRepository;
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = attrs;
     return .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = wt, .rules = rules };
 }

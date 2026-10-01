@@ -766,7 +766,7 @@ test "checkout and writePaths apply every .gitattributes on the way down, as git
     defer repo.deinit(io);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     var index = try repo.openIndex(io);
     defer index.deinit();

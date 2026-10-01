@@ -204,7 +204,7 @@ fn run(
         }
     }
 
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.required_filters = try repo.requiredFilters(arena);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
