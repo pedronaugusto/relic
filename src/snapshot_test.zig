@@ -631,3 +631,28 @@ test "snapshot adoption preserves refusals and allocation ownership" {
     };
     try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
 }
+
+test "snapshot adoption refuses file entries that name trees" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var source_dir = testing.tmpDir(.{ .iterate = true });
+    defer source_dir.cleanup();
+    var source = try snapshot.Store.open(gpa, io, source_dir.dir, .{});
+    defer source.deinit(io);
+    const child = try source.db.write(io, .tree, "");
+    var root = object.Tree.Builder.init(gpa, .sha1);
+    defer root.deinit();
+    try root.add(.file, "wrong", child);
+    const bytes = try root.build();
+    defer gpa.free(bytes);
+    const tree = try source.db.write(io, .tree, bytes);
+    var private = testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    var store = try snapshot.Store.open(gpa, io, private.dir, .{});
+    defer store.deinit(io);
+    try testing.expectError(error.UnexpectedObjectType, store.adoptTree(io, &source.db, tree));
+    // Preexisting private children must be checked too, without a source read.
+    _ = try store.db.write(io, .tree, "");
+    try testing.expectError(error.UnexpectedObjectType, store.adoptTree(io, &source.db, tree));
+    try testing.expect(!store.complete.contains(tree));
+}

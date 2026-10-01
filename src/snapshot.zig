@@ -189,7 +189,7 @@ pub const Store = struct {
     fn ownTree(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb, depth: u32) Error!void {
         if (store.complete.contains(oid)) return;
         if (depth > 128) return error.TreeDepthExceeded;
-        try store.ownObject(io, oid, source_db);
+        try store.ownObject(io, oid, source_db, .tree);
         const found = try store.db.read(io, oid);
         defer store.gpa.free(found.bytes);
         if (found.type != .tree) return error.UnexpectedObjectType;
@@ -198,7 +198,7 @@ pub const Store = struct {
         while (try entries.next()) |entry| switch (entry.mode) {
             .tree => try store.ownTree(io, entry.oid, source_db, depth + 1),
             .gitlink => {},
-            .file, .exec, .symlink => try store.ownObject(io, entry.oid, source_db),
+            .file, .exec, .symlink => try store.ownObject(io, entry.oid, source_db, .blob),
         };
         // A cache must not turn the caller's retained history into an
         // unbounded amount of live memory. Missing entries only cost a walk.
@@ -207,11 +207,15 @@ pub const Store = struct {
 
     // The source is a reader for this capture alone. Attaching it to db
     // would let a live restore prefer a source pack over our own loose copy.
-    fn ownObject(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb) Error!void {
-        if (try store.db.existsOwn(io, oid)) return;
+    fn ownObject(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb, expected: object.Type) Error!void {
+        if (try store.db.existsOwn(io, oid)) {
+            if ((try store.db.readHeader(io, oid)).type != expected) return error.UnexpectedObjectType;
+            return;
+        }
         const source = source_db orelse return error.ObjectNotFound;
         const found = try source.read(io, oid);
         defer source.allocator().free(found.bytes);
+        if (found.type != expected) return error.UnexpectedObjectType;
         const written = try store.db.write(io, found.type, found.bytes);
         if (!written.eql(oid)) return error.ObjectNameMismatch;
     }
