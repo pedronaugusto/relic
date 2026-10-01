@@ -37,6 +37,10 @@ pub const Source = union(enum) {
 };
 
 pub const OpenOptions = struct {
+    /// Durable capture syncs the owned closure before returning its ID;
+    /// restore syncs file bytes and directories before success. Off by
+    /// default because each barrier waits on storage.
+    durability: fs.Durability = .none,
     kind: hash.Kind = .sha1,
     odb: odb.Options = .{},
 };
@@ -70,6 +74,7 @@ pub const Store = struct {
     gpa: Allocator,
     dir: Io.Dir,
     db: odb.Odb,
+    durability: fs.Durability,
     /// Only inserted after the entire subtree has been taken into db.
     /// It is a shortcut, not persistent state: reopening walks once again.
     complete: std.AutoHashMapUnmanaged(hash.Oid, void) = .empty,
@@ -83,7 +88,7 @@ pub const Store = struct {
         try owned.createDirPath(io, "objects/info");
         var db = try opening.openOwn(gpa, io, owned, options.kind, options.odb);
         errdefer db.deinit(io);
-        return .{ .gpa = gpa, .dir = owned, .db = db };
+        return .{ .gpa = gpa, .dir = owned, .db = db, .durability = options.durability };
     }
 
     pub fn deinit(store: *Store, io: Io) void {
@@ -156,6 +161,10 @@ pub const Store = struct {
         const tree = try worktree.writeTree(store.gpa, io, &staged, &store.db);
         try store.ownTree(io, tree, source_db, 0);
         try store.db.syncBatch(io);
+        if (store.durability == .durable) {
+            try store.db.makeDurable(io, &.{tree});
+            try @import("durability.zig").syncDirectory(io, store.dir, ".");
+        }
         return .{ .snapshot = .{ .tree = tree }, .staged = outcome };
     }
 
@@ -204,6 +213,7 @@ pub const Store = struct {
         var attrs = try worktree.attributes.Attrs.init(store.gpa, options.checkout.rules.ignore_case);
         defer attrs.deinit();
         var checkout = options.checkout;
+        if (store.durability == .durable) checkout.durability = .durable;
         if (checkout.rules.attrs == null) checkout.rules.attrs = &attrs;
         return worktree.checkout(store.gpa, io, wt, &staged, &store.db, snapshot.tree, checkout);
     }

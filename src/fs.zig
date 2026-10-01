@@ -15,6 +15,9 @@ const builtin = @import("builtin");
 
 const platstat = @import("platstat.zig");
 
+/// The end-of-operation policy for selected objects and checkout.
+pub const Durability = @import("durability.zig").Policy;
+
 /// How hard a write is pushed towards the disk.
 ///
 /// git's own default is looser than it looks: `core.fsync` defaults to

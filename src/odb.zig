@@ -1229,6 +1229,80 @@ pub const Odb = struct {
         return set;
     }
 
+    /// Own and make every object reachable from `roots` durable before the
+    /// caller records an intent using their IDs. Commits include parents and
+    /// tags include targets; gitlinks and LFS payloads are separate stores.
+    /// Existing objects are synced too, independent of `Options.sync`.
+    /// This reads the closure and opens/syncs each loose object or used pack
+    /// and index, then their directories. The supplied store directory's own
+    /// parent entry remains the caller's responsibility.
+    pub fn makeDurable(odb: *Odb, io: Io, roots: []const Oid) Error!void {
+        const barrier = @import("durability.zig");
+        var seen: Oid.Set = .empty;
+        defer seen.deinit(odb.gpa);
+        var pending: std.ArrayList(Oid) = .empty;
+        defer pending.deinit(odb.gpa);
+        try pending.appendSlice(odb.gpa, roots);
+        while (pending.pop()) |oid| {
+            if (oid.kind != odb.kind) return error.UnexpectedObjectType;
+            const slot = try seen.getOrPut(odb.gpa, oid);
+            if (slot.found_existing) continue;
+            try odb.own(io, oid);
+            const found = try odb.read(io, oid);
+            defer odb.gpa.free(found.bytes);
+            switch (found.type) {
+                .blob => {},
+                .tree => {
+                    var tree = object.Tree.parse(odb.kind, found.bytes);
+                    var entries = tree.iterate();
+                    while (try entries.next()) |entry| {
+                        if (entry.mode != .gitlink) try pending.append(odb.gpa, entry.oid);
+                    }
+                },
+                .commit => {
+                    var commit = try object.Commit.parse(odb.gpa, odb.kind, found.bytes);
+                    defer commit.deinit();
+                    try pending.append(odb.gpa, commit.tree);
+                    try pending.appendSlice(odb.gpa, commit.parents);
+                },
+                .tag => {
+                    var tag = try object.Tag.parse(odb.gpa, odb.kind, found.bytes);
+                    defer tag.deinit();
+                    try pending.append(odb.gpa, tag.target);
+                },
+            }
+        }
+        const source = odb.writableSource();
+        var fanouts: [256]bool = @splat(false);
+        var packs: std.AutoHashMapUnmanaged(usize, void) = .empty;
+        defer packs.deinit(odb.gpa);
+        var it = seen.keyIterator();
+        while (it.next()) |oid| {
+            if (try source.findPack(oid.*, &odb.stats)) |hit| {
+                const slot = try packs.getOrPut(odb.gpa, hit.at);
+                if (slot.found_existing) continue;
+                const named = &source.packs.items[hit.at];
+                var path_buf: [128]u8 = undefined;
+                const pack_path = std.fmt.bufPrint(&path_buf, "{s}.pack", .{named.name}) catch unreachable;
+                try barrier.syncPath(io, source.pack_dir.?, pack_path);
+                const idx_path = std.fmt.bufPrint(&path_buf, "{s}.idx", .{named.name}) catch unreachable;
+                try barrier.syncPath(io, source.pack_dir.?, idx_path);
+            } else {
+                var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+                const path = odb.loosePath(oid.*, &path_buf);
+                try barrier.syncPath(io, source.dir, path);
+                fanouts[oid.raw()[0]] = true;
+            }
+        }
+        for (fanouts, 0..) |used, byte| if (used) {
+            var path: [2]u8 = undefined;
+            _ = std.fmt.bufPrint(&path, "{x:0>2}", .{byte}) catch unreachable;
+            try barrier.syncDirectory(io, source.dir, &path);
+        };
+        if (packs.count() != 0) try barrier.syncDirectory(io, source.dir, "pack");
+        try barrier.syncDirectory(io, source.dir, ".");
+    }
+
     /// Put one durability barrier at the end of a batch of object writes.
     ///
     /// Under `Options.sync = .batch` this is what makes every object written

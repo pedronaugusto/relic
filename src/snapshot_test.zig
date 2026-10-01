@@ -405,3 +405,135 @@ test "a live snapshot store reads its own objects after source packs are damaged
     defer changes.deinit();
     try testing.expectEqual(@as(usize, 2), changes.items.len);
 }
+
+const SyncOrder = struct {
+    threadlocal var files: usize = 0;
+    threadlocal var directories: usize = 0;
+    threadlocal var ordered: bool = true;
+    threadlocal var fail: bool = false;
+    threadlocal var fail_directory: bool = false;
+
+    fn reset() void {
+        files = 0;
+        directories = 0;
+        ordered = true;
+        fail = false;
+        fail_directory = false;
+    }
+    fn sync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
+        const stat = file.stat(testing.io) catch return error.Unexpected;
+        if (stat.kind == .directory) {
+            directories += 1;
+            if (fail_directory) return error.InputOutput;
+        } else {
+            ordered = ordered and directories == 0;
+            files += 1;
+        }
+        if (fail) return error.InputOutput;
+        return testing.io.vtable.fileSync(userdata, file);
+    }
+};
+
+test "durable snapshots sync their closure and restored files before directories and success" {
+    const gpa = testing.allocator;
+    var vtable = testing.io.vtable.*;
+    vtable.fileSync = SyncOrder.sync;
+    const io: Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    var folder = testing.tmpDir(.{ .iterate = true });
+    defer folder.cleanup();
+    try folder.dir.createDirPath(io, "nested/deep");
+    try folder.dir.writeFile(io, .{ .sub_path = "nested/deep/file", .data = "kept" });
+    var private = testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    var options: snapshot.OpenOptions = .{ .odb = .{ .probe_timestamp_resolution = false } };
+    options.durability = .durable;
+    var store = try snapshot.Store.open(gpa, io, private.dir, options);
+    defer store.deinit(io);
+    SyncOrder.reset();
+    const captured = try store.capture(io, .{ .folder = folder.dir }, .{});
+    // Three trees and the blob; already present objects must be covered too.
+    try testing.expectEqual(@as(usize, 4), SyncOrder.files);
+    try testing.expect(SyncOrder.directories >= 2);
+    try testing.expect(SyncOrder.ordered);
+    SyncOrder.reset();
+    _ = try store.capture(io, .{ .folder = folder.dir }, .{});
+    try testing.expectEqual(@as(usize, 4), SyncOrder.files);
+    try testing.expect(SyncOrder.ordered);
+    var dest = testing.tmpDir(.{ .iterate = true });
+    defer dest.cleanup();
+    SyncOrder.reset();
+    _ = try store.restore(io, captured.snapshot, dest.dir, .{});
+    try testing.expectEqual(@as(usize, 1), SyncOrder.files);
+    try testing.expectEqual(@as(usize, 3), SyncOrder.directories);
+    try testing.expect(SyncOrder.ordered);
+    try expectFile(dest.dir, "nested/deep/file", "kept");
+    // The same barrier covers a stat-shortcut checkout's existing bytes.
+    SyncOrder.reset();
+    _ = try store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot });
+    try testing.expectEqual(@as(usize, 1), SyncOrder.files);
+    try testing.expect(SyncOrder.ordered);
+    SyncOrder.reset();
+    SyncOrder.fail = true;
+    try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
+    SyncOrder.reset();
+    SyncOrder.fail_directory = true;
+    try testing.expectError(error.InputOutput, store.restore(io, captured.snapshot, dest.dir, .{ .from = captured.snapshot }));
+    SyncOrder.reset();
+    SyncOrder.fail = true;
+    try testing.expectError(error.InputOutput, store.capture(io, .{ .folder = folder.dir }, .{}));
+    SyncOrder.reset();
+}
+
+test "selected object durability syncs a used pack and index once" {
+    const gpa = testing.allocator;
+    const base = testing.io;
+    var folder = testing.tmpDir(.{ .iterate = true });
+    defer folder.cleanup();
+    try folder.dir.writeFile(base, .{ .sub_path = "a", .data = "a" });
+    var private = testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    var store = try snapshot.Store.open(gpa, base, private.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
+    defer store.deinit(base);
+    const saved = try store.capture(base, .{ .folder = folder.dir }, .{});
+    // This unrelated object is packed too; durable roots need no refs.
+    _ = try store.db.write(base, .blob, "unrelated");
+    _ = try store.db.repack(base, .{});
+    var vtable = base.vtable.*;
+    vtable.fileSync = SyncOrder.sync;
+    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+    SyncOrder.reset();
+    try store.db.makeDurable(io, &.{ saved.snapshot.tree, saved.snapshot.tree });
+    try testing.expectEqual(@as(usize, 2), SyncOrder.files);
+    try testing.expectEqual(@as(usize, 2), SyncOrder.directories);
+    try testing.expect(SyncOrder.ordered);
+}
+
+test "durable checkout covers unchanged files and surviving parents of deletions" {
+    const gpa = testing.allocator;
+    const base = testing.io;
+    var folder = testing.tmpDir(.{ .iterate = true });
+    defer folder.cleanup();
+    try folder.dir.createDirPath(base, "old/deep");
+    try folder.dir.writeFile(base, .{ .sub_path = "old/deep/remove", .data = "removed" });
+    try folder.dir.writeFile(base, .{ .sub_path = "kept", .data = "kept" });
+    var private = testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    var store = try snapshot.Store.open(gpa, base, private.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
+    defer store.deinit(base);
+    const before = try store.capture(base, .{ .folder = folder.dir }, .{});
+    try folder.dir.deleteTree(base, "old");
+    const after = try store.capture(base, .{ .folder = folder.dir }, .{});
+    var dest = testing.tmpDir(.{ .iterate = true });
+    defer dest.cleanup();
+    _ = try store.restore(base, before.snapshot, dest.dir, .{});
+    var vtable = base.vtable.*;
+    vtable.fileSync = SyncOrder.sync;
+    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+    SyncOrder.reset();
+    const result = try store.restore(io, after.snapshot, dest.dir, .{ .from = before.snapshot, .checkout = .{ .durability = .durable } });
+    try testing.expectEqual(@as(u32, 1), result.removed);
+    try testing.expectEqual(@as(usize, 1), SyncOrder.files);
+    try testing.expectEqual(@as(usize, 1), SyncOrder.directories);
+    try testing.expect(SyncOrder.ordered);
+    try testing.expectError(error.FileNotFound, dest.dir.access(base, "old", .{}));
+}

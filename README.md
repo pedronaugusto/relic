@@ -38,7 +38,7 @@ var ignore_rules = try repo.loadIgnore(io);
 defer ignore_rules.deinit();
 var attrs = try repo.loadAttrs(io);
 defer attrs.deinit();
-var rules = repo.worktreeRules();
+var rules = try repo.worktreeRules();
 rules.ignore = &ignore_rules;
 rules.attrs = &attrs;
 
@@ -102,6 +102,22 @@ std.debug.assert(restored.written == 1);
 <!-- END GENERATED -->
 
 ## Snapshots
+
+Checkout's `durability = .durable` syncs the selected file bytes, including
+files whose writes were skipped, then their directories before success.
+The default is `.none`. A snapshot store opened with `.durability = .durable`
+also makes its entire owned tree/blob closure durable before returning an ID
+and uses durable checkout for restore. `Odb.makeDurable(io, roots)` gives
+other callers the same barrier for selected objects, including commit history
+and tag targets. Record an intent only after that barrier succeeds, and record
+restoration only after durable checkout succeeds. A barrier failure is returned.
+
+Durable completion reads the object closure and opens and syncs each loose
+object or used pack/index and each affected directory. It waits on storage;
+on macOS it also requests drive-cache flushes. Directory barriers are requested
+on Windows through writable directory handles; a filesystem that refuses them
+returns an error. The caller owns durability of the supplied root directory's
+entry in its parent. Gitlinks and LFS payloads belong to separate stores.
 
 `worktree.snapshot.Store` records a working tree in a private object store.
 A snapshot is a tree ID. Before returning it, capture takes every tree and

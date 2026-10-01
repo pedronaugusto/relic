@@ -1520,6 +1520,9 @@ pub const Refusal = struct {
 
 /// How `checkout` behaves.
 pub const CheckoutOptions = struct {
+    /// Durable mode syncs selected file bytes, then all affected directories,
+    /// before success. Off by default; this costs opens and storage barriers.
+    durability: fs.Durability = .none,
     rules: Rules = .{},
     /// `true` is `read-tree --reset -u`: rewrite files with changes of
     /// their own and replace untracked files where the tree puts one. The
@@ -1801,6 +1804,8 @@ pub fn checkout(
         }
     }
 
+    if (options.durability == .durable) try syncCheckout(arena, io, wt, &wanted, &removed_dirs);
+
     // The tree the index now describes is exactly the tree asked for, so
     // the cache tree may be told so rather than rebuilt.
     const tree = try index.cacheTree();
@@ -1811,6 +1816,56 @@ pub fn checkout(
     index.dropResolveUndo();
 
     return outcome;
+}
+
+// Sync existing paths too: a skipped write is not evidence of durability.
+// Symlink bytes live in their directory; gitlinks belong to another store.
+fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringHashMapUnmanaged(TreeEntry), removed: *const std.StringHashMapUnmanaged(void)) Error!void {
+    const barrier = @import("durability.zig");
+    var dirs: std.StringHashMap(bool) = .init(arena);
+    try dirs.put(".", true);
+    var paths = wanted.iterator();
+    while (paths.next()) |entry| {
+        const path = entry.key_ptr.*;
+        if (entry.value_ptr.mode != .gitlink) {
+            const st = (try fs.statAt(io, wt, path)) orelse return error.FileNotFound;
+            if (st.kind == .file) try barrier.syncPath(io, wt, path);
+        }
+        try addSyncParents(&dirs, path, true);
+    }
+    // Parents of removed files may now be absent; syncing their first
+    // surviving ancestor makes the deletion durable.
+    var deleted = removed.keyIterator();
+    while (deleted.next()) |path| {
+        const slot = try dirs.getOrPut(path.*);
+        if (!slot.found_existing) slot.value_ptr.* = false;
+        try addSyncParents(&dirs, path.*, false);
+    }
+    var ordered: std.ArrayList([]const u8) = .empty;
+    var names = dirs.keyIterator();
+    while (names.next()) |name| try ordered.append(arena, name.*);
+    std.mem.sort([]const u8, ordered.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            if (std.mem.eql(u8, a, ".")) return false;
+            if (std.mem.eql(u8, b, ".")) return true;
+            return a.len > b.len;
+        }
+    }.less);
+    for (ordered.items) |path| {
+        barrier.syncDirectory(io, wt, path) catch |err| switch (err) {
+            error.FileNotFound => if (dirs.get(path).?) return err,
+            else => return err,
+        };
+    }
+}
+
+fn addSyncParents(dirs: *std.StringHashMap(bool), path: []const u8, required: bool) Allocator.Error!void {
+    var parent = std.fs.path.dirnamePosix(path);
+    while (parent) |p| {
+        const slot = try dirs.getOrPut(p);
+        slot.value_ptr.* = if (slot.found_existing) slot.value_ptr.* or required else required;
+        parent = std.fs.path.dirnamePosix(p);
+    }
 }
 
 /// Stat what was just written and put it in the index.
