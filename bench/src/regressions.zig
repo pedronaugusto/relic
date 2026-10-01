@@ -1,33 +1,20 @@
-//! The benchmark is a test with a budget.
+//! Quiet-machine regression measurements, kept on the bench branch.
 //!
-//! A regression in the cache tree or in the stat shortcut is a red build
-//! rather than a slow day. The absolute ceilings are loose, because a CI
-//! runner is not a quiet machine; the ratios are not, because they are what
-//! actually break when one of those two is lost.
-//!
-//! The numbers are printed under `--summary all`, so a run says what it
-//! measured and not only that it passed.
-//!
-//! These two tests allocate from `std.heap.smp_allocator` rather than from
-//! `std.testing.allocator`. Every other test in the suite uses the testing
-//! allocator and so checks for leaks; this one is measuring, and the testing
-//! allocator's bookkeeping is several times the cost of the work being
-//! measured, which would make the numbers say nothing about a real caller.
+//! Run only on a quiet machine. Ratios, speed limits and throughput are
+//! measurements here; shared unit suites count work and compare results.
+//! The production allocator keeps allocation checking out of these timings.
 
 const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
 
-const testgit = @import("testgit.zig");
-const hash = @import("hash.zig");
-const sha1dc = @import("sha1dc.zig");
-const odb_mod = @import("odb.zig");
-const index_mod = @import("index.zig");
-const worktree = @import("worktree.zig");
-const repo_mod = @import("repo.zig");
-const ignore = @import("ignore.zig");
-const attributes = @import("attributes.zig");
-const dirscan = @import("dirscan.zig");
+const testgit = @import("../../src/testgit.zig");
+const hash = @import("../../src/hash.zig");
+const odb_mod = @import("../../src/odb.zig");
+const worktree = @import("../../src/worktree.zig");
+const repo_mod = @import("../../src/repo.zig");
+const ignore = @import("../../src/ignore.zig");
+const dirscan = @import("../../src/dirscan.zig");
 
 /// How many files the generated tree holds.
 ///
@@ -385,7 +372,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
     // two filesystem calls a loose object costs.
     var ms: [2]f64 = undefined;
     var trees: [2]hash.Oid = undefined;
-    var packed_report: ?@import("pack.zig").WriteReport = null;
+    var packed_report: ?@import("../../src/pack.zig").WriteReport = null;
 
     for ([_]worktree.NewBlobs{ .loose, .pack }, 0..) |where, pass| {
         var repo_git = try testgit.Repo.init(gpa, io, &.{});

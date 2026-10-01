@@ -82,6 +82,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Regression measurements and their timing example run only from the quiet-machine bench harness, separate from the library unit suite.
+
 - A conversation with a program (ssh, a helper) that is cancelled stops the
   program on `close` or `diagnose` rather than waiting for it to end, so a
   fetch or push whose remote never answers returns when its caller cancels.

@@ -19,4 +19,18 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addOptions("bench_options", options);
     b.installArtifact(exe);
+    const measurements = b.addTest(.{
+        .name = "relic-regression-measurements",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("../bench_regressions.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"benchmark:"},
+    });
+    const compile_measurements = b.step("regressions-build", "Compile regression measurements without running them");
+    compile_measurements.dependOn(&measurements.step);
+    const run_measurements = b.addRunArtifact(measurements);
+    const regressions = b.step("regressions", "Run regression measurements on a quiet machine");
+    regressions.dependOn(&run_measurements.step);
 }

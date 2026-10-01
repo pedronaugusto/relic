@@ -83,7 +83,6 @@ test {
         _ = @import("worktree_test.zig");
         _ = @import("repo_test.zig");
         _ = @import("concurrency_test.zig");
-        _ = @import("bench_test.zig");
         _ = @import("diff_test.zig");
         _ = @import("submodule_test.zig");
         _ = @import("filter_test.zig");
