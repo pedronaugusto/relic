@@ -546,7 +546,7 @@ test "a signing write keeps only its own refused setting" {
     try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, fields, &diagnostic));
     var invalid = fields;
     invalid.target = @import("hash.zig").Hasher.object(.sha256, "tree", "");
-    try std.testing.expectError(error.UnexpectedObjectType, repo.writeTagWith(io, invalid, .{ .sign = .never }, &diagnostic));
+    try std.testing.expectError(error.MixedHashKinds, repo.writeTagWith(io, invalid, .{ .sign = .never }, &diagnostic));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
 }
 
@@ -880,4 +880,41 @@ test "a malformed worktree configuration policy is refused instead of disabling 
     try std.testing.expect(try repo.refreshConfig(io, &diagnostic));
     try std.testing.expectEqualStrings("worktree", repo.config.get("user.name").?);
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+}
+
+test "repository writes preserve signature and hash refusals" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    const tree = hash.Hasher.object(.sha1, "tree", "");
+    var invalid = fixture_who;
+    invalid.name = "broken\nname";
+    try std.testing.expectError(error.InvalidSignature, repo.writeCommit(io, .{
+        .tree = tree,
+        .author = invalid,
+        .committer = fixture_who,
+        .message = "m",
+    }, null));
+    try std.testing.expectError(error.MixedHashKinds, repo.writeCommit(io, .{
+        .tree = hash.Hasher.object(.sha256, "tree", ""),
+        .author = fixture_who,
+        .committer = fixture_who,
+        .message = "m",
+    }, null));
+    try std.testing.expectError(error.InvalidSignature, repo.writeTag(io, .{
+        .target = tree,
+        .target_type = .tree,
+        .name = "t",
+        .tagger = invalid,
+        .message = "m",
+    }, null));
+    try std.testing.expectError(error.MixedHashKinds, repo.writeTag(io, .{
+        .target = hash.Hasher.object(.sha256, "tree", ""),
+        .target_type = .tree,
+        .name = "t",
+        .message = "m",
+    }, null));
 }

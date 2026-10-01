@@ -74,7 +74,7 @@ pub const Error = error{
     refs_mod.ReadError || refs_mod.TransactionError || worktrees.Error;
 
 /// Errors from writing a commit or a tag, which may be signed.
-pub const WriteError = Error || signing.Error;
+pub const WriteError = Error || signing.Error || object.Commit.WriteError;
 
 /// How deep `open` walks upwards looking for a `.git`.
 pub const max_discovery_depth: u8 = 64;
@@ -991,13 +991,10 @@ pub const Repository = struct {
         };
         var signer = try repo.signerFor(request.signing, .commit, diagnostic);
         defer if (signer) |*s| s.deinit();
-        const bytes = (if (signer) |*s|
+        const bytes = try (if (signer) |*s|
             signing.signCommit(s, io, repo.kind, fields, request.signing.key)
         else
-            object.Commit.build(repo.gpa, repo.kind, fields)) catch |err| switch (err) {
-            error.InvalidSignature, error.MixedHashKinds => return error.UnexpectedObjectType,
-            else => |e| return e,
-        };
+            object.Commit.build(repo.gpa, repo.kind, fields));
         defer repo.gpa.free(bytes);
         return repo.odb.write(io, .commit, bytes);
     }
@@ -1017,13 +1014,10 @@ pub const Repository = struct {
         if (diagnostic) |output| output.clear();
         var signer = try repo.signerFor(request, .tag, diagnostic);
         defer if (signer) |*s| s.deinit();
-        const bytes = (if (signer) |*s|
+        const bytes = try (if (signer) |*s|
             signing.signTag(s, io, repo.kind, fields, request.key)
         else
-            object.Tag.build(repo.gpa, repo.kind, fields)) catch |err| switch (err) {
-            error.InvalidSignature, error.MixedHashKinds => return error.UnexpectedObjectType,
-            else => |e| return e,
-        };
+            object.Tag.build(repo.gpa, repo.kind, fields));
         defer repo.gpa.free(bytes);
         return repo.odb.write(io, .tag, bytes);
     }
