@@ -301,6 +301,8 @@ pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation)
         .path => |path| path,
         .dir => |dir| cwd_buffer[0..try dir.realPath(io, &cwd_buffer)],
     };
+    // Keep the default descendant policy: git helpers may deliberately leave
+    // a credential-cache daemon running after their normal, reaped exit.
     const options: Child.SpawnOptions = .{
         .argv = line.argv,
         .cwd = cwd,
