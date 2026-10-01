@@ -1318,8 +1318,11 @@ pub fn headIn(gpa: Allocator, arena: Allocator, io: Io, git_dir: Io.Dir, kind: K
 
 /// Whether the repository whose shared directory is `common_dir` keeps its
 /// refs in a reftable stack.
-pub fn isReftableRepository(io: Io, common_dir: Io.Dir) bool {
-    common_dir.access(io, "reftable/tables.list", .{}) catch return false;
+pub fn isReftableRepository(io: Io, common_dir: Io.Dir) Io.Dir.AccessError!bool {
+    common_dir.access(io, "reftable/tables.list", .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
     return true;
 }
 
