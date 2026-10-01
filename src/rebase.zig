@@ -152,6 +152,8 @@ pub const Options = struct {
     /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
     /// that sign. What was decided is kept between steps, as git keeps it.
     signing: signing_mod.Request = .{},
+    /// Caller-owned output for a refused write or failed signing program.
+    diagnostic: ?*repo_mod.Diagnostic = null,
     /// The sheet to work through in place of the one git would write: an
     /// interactive rebase, with the sheet a person would have left in the
     /// editor. `plan` gives the sheet to start from.
@@ -1542,7 +1544,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         .message = final_text,
         .extra = extra,
         .signing = r.options.signing,
-    }, null);
+    }, r.options.diagnostic);
     const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ reflog_action, firstLine(final_text) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     if (msg_source == .squash_edit) {
@@ -1648,7 +1650,7 @@ fn reword(r: *Run, reflog_action: []const u8) Error!void {
         .committer = r.options.who,
         .message = text,
         .signing = r.options.signing,
-    }, null);
+    }, r.options.diagnostic);
     const log = try std.fmt.allocPrint(r.arena, "{s}: {s}", .{ reflog_action, firstLine(text) });
     try head_mod.advance(r.io, r.repo, head, made, .{ .who = r.options.who, .message = log });
     // The amend is `git commit --amend`, which takes `AUTO_MERGE` away.
@@ -2229,7 +2231,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         .committer = r.options.who,
         .message = text,
         .signing = r.options.signing,
-    }, null);
+    }, r.options.diagnostic);
     const log = try std.fmt.allocPrint(r.arena, "rebase (merge): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
     // git makes this commit with `git commit`, whose clean-up takes
@@ -2256,6 +2258,7 @@ fn mergeAsGitMerge(r: *Run, item: todo.Item, merge_head: Oid, author: object.Sig
         .filters = r.options.filters,
         .programs = r.options.programs,
         .signing = r.options.signing,
+        .diagnostic = r.options.diagnostic,
         .hooks = r.options.hooks,
         .blocked = r.options.blocked,
         .rerere_autoupdate = r.options.rerere_autoupdate,
@@ -2466,7 +2469,7 @@ fn commitStagedChanges(r: *Run) Error!void {
         .message = text,
         .extra = if (amend) try extraHeadersOf(r, head_oid) else &.{},
         .signing = r.options.signing,
-    }, null);
+    }, r.options.diagnostic);
     const log = try std.fmt.allocPrint(r.arena, "rebase (continue): {s}", .{firstLine(text)});
     try head_mod.advance(io, repo, h, made, .{ .who = r.options.who, .message = log });
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");

@@ -163,6 +163,8 @@ pub const Options = struct {
     /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
     /// that sign. What was decided is kept between steps, as git keeps it.
     signing: signing_mod.Request = .{},
+    /// Caller-owned output for a refused write or failed signing program.
+    diagnostic: ?*repo_mod.Diagnostic = null,
     /// `--cleanup`: how the message is cleaned, in place of the default.
     cleanup: ?message.Cleanup = null,
     /// `null` asks `merge.conflictStyle`.
@@ -623,7 +625,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         .committer = r.options.who,
         .message = cleaned,
         .signing = r.options.signing,
-    }, null);
+    }, r.options.diagnostic);
     const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try commit_hooks.postCommit(arena, io, null);
@@ -869,7 +871,7 @@ fn commitStaged(r: *Replay) Error!Oid {
         .committer = r.options.who,
         .message = cleaned,
         .signing = r.options.signing,
-    }, null);
+    }, r.options.diagnostic);
     const log = if (picked != null)
         try std.fmt.allocPrint(arena, "commit (cherry-pick): {s}", .{firstLine(cleaned)})
     else

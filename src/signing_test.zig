@@ -405,3 +405,56 @@ test "a signing program is one path, spaces and all, as git runs it" {
     defer gpa.free(log);
     try testing.expect(std.mem.count(u8, log, "used\n") >= 4);
 }
+
+test "history writes leave signing refusals in caller-owned diagnostics" {
+    const merging = @import("merging.zig");
+    const sequencer = @import("sequencer.zig");
+    const rebase = @import("rebase.zig");
+    const gpa = testing.allocator;
+    const io = testing.io;
+    inline for (.{ "commit", "merge", "conclude", "pick", "rebase" }) |operation| {
+        var fixture = try testgit.Repo.init(gpa, io, &.{});
+        defer fixture.deinit();
+        try fixture.exec(io, &.{ "commit", "--allow-empty", "-qm", "base" });
+        try fixture.exec(io, &.{ "checkout", "-qb", "topic" });
+        try fixture.writeFile(io, "topic", "topic");
+        try fixture.exec(io, &.{ "add", "." });
+        try fixture.exec(io, &.{ "commit", "-qm", "topic" });
+        try fixture.exec(io, &.{ "checkout", "-q", "main" });
+        try fixture.writeFile(io, "main", "main");
+        try fixture.exec(io, &.{ "add", "." });
+        try fixture.exec(io, &.{ "commit", "-qm", "main" });
+        if (comptime std.mem.eql(u8, operation, "rebase")) try fixture.exec(io, &.{ "checkout", "-q", "topic" });
+        var repo = try Repository.open(gpa, io, fixture.dir, .{});
+        defer repo.deinit(io);
+        var diagnostic = repo_mod.Diagnostic.init(gpa);
+        defer diagnostic.deinit();
+        try repo.config.set("commit.gpgSign", "true");
+        if (comptime std.mem.eql(u8, operation, "commit")) {
+            var options: commit_mod.Options = .{ .allow_empty = true };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, commit_mod.commit(&repo, io, .{ .author = who, .committer = who, .message = "m" }, options));
+        } else if (comptime std.mem.eql(u8, operation, "merge")) {
+            var options: merging.Options = .{ .who = who };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, merging.start(gpa, io, &repo, try merging.resolve(gpa, io, &repo, "topic"), options));
+        } else if (comptime std.mem.eql(u8, operation, "conclude")) {
+            var outcome = try merging.start(gpa, io, &repo, try merging.resolve(gpa, io, &repo, "topic"), .{ .who = who, .commit = false });
+            defer outcome.deinit();
+            var options: merging.ConcludeOptions = .{ .who = who };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, merging.conclude(gpa, io, &repo, options));
+        } else if (comptime std.mem.eql(u8, operation, "pick")) {
+            const target = try merging.resolve(gpa, io, &repo, "topic");
+            var options: sequencer.Options = .{ .who = who };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, sequencer.pick(gpa, io, &repo, &.{target.oid}, options));
+        } else {
+            const target = try merging.resolve(gpa, io, &repo, "main");
+            var options: rebase.Options = .{ .who = who, .force = true };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, rebase.start(gpa, io, &repo, target.oid, options));
+        }
+        try testing.expectEqualStrings("commit.gpgSign", diagnostic.unsupported_setting);
+    }
+}

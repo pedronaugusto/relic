@@ -208,6 +208,8 @@ pub const Options = struct {
     /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
     /// that sign.
     signing: signing_mod.Request = .{},
+    /// Caller-owned output for a refused write or failed signing program.
+    diagnostic: ?*repo_mod.Diagnostic = null,
     /// Where a refusal writes the path that caused it.
     blocked: ?*threeway.Blocked = null,
     /// Stage what a recorded resolution resolves: `--rerere-autoupdate`,
@@ -371,7 +373,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
             .committer = options.who,
             .message = cleaned,
             .signing = options.signing,
-        }, null);
+        }, options.diagnostic);
         const log_message = try std.fmt.allocPrint(arena, "{s}: Merge made by the 'ort' strategy.", .{reflog_action});
         try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
         // `post-merge` runs before the merge's files go, as in git.
@@ -430,6 +432,8 @@ pub const ConcludeOptions = struct {
     /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
     /// that sign.
     signing: signing_mod.Request = .{},
+    /// Caller-owned output for a refused write or failed signing program.
+    diagnostic: ?*repo_mod.Diagnostic = null,
 };
 
 /// Commit the merge `MERGE_HEAD` describes, from the index as it stands:
@@ -472,7 +476,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
         .committer = options.who,
         .message = cleaned,
         .signing = options.signing,
-    }, null);
+    }, options.diagnostic);
     const log_message = try std.fmt.allocPrint(arena, "commit (merge): {s}", .{message.subjectLine(cleaned)});
     try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
     try finishCommit(gpa, io, repo);

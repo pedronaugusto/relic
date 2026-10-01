@@ -103,6 +103,8 @@ pub const Options = struct {
     /// Whether and how to sign it. By default `commit.gpgSign` decides,
     /// and signing needs the caller's `Programs`.
     signing: signing.Request = .{},
+    /// Caller-owned output for a refused write or failed signing program.
+    diagnostic: ?*repo_mod.Diagnostic = null,
 };
 
 /// Who, when, and what to say. The times are the caller's, because nothing
@@ -208,7 +210,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         .message = cleaned,
         .extra = carried,
         .signing = options.signing,
-    }, null);
+    }, options.diagnostic);
 
     const action = if (current == null)
         "commit (initial)"
