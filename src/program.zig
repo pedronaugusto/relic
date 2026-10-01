@@ -463,3 +463,45 @@ test "output past the limit is refused by name" {
         .argv = &.{ process_fixture, "bytes" },
     }, "", .{ .output = .limited(1000) }));
 }
+
+test "timeout bounds a helper that closes its output and keeps running" {
+    var env = try testEnviron();
+    defer env.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = run(.{ .environ = &env }, testing.allocator, testing.io, .{
+        .argv = &.{ process_fixture, "closed-output" },
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .cwd = .{ .dir = tmp.dir },
+    }, "", .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } });
+    defer if (result) |value| {
+        var outcome = value;
+        outcome.deinit(testing.allocator);
+    } else |_| {};
+    try testing.expectError(error.Timeout, if (result) |_| @as(Error!void, {}) else |err| @as(Error!void, err));
+}
+
+test "opposite full pipes refuse unavailable concurrency instead of deadlocking" {
+    var env = try testEnviron();
+    defer env.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: Io.Threaded = .init(testing.allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer threaded.deinit();
+    const input = try testing.allocator.alloc(u8, 4 << 20);
+    defer testing.allocator.free(input);
+    @memset(input, 'i');
+    const result = run(.{ .environ = &env }, testing.allocator, threaded.io(), .{
+        .argv = &.{ process_fixture, "opposite-pipes" },
+        .cwd = .{ .dir = tmp.dir },
+    }, input, .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } });
+    defer if (result) |value| {
+        var outcome = value;
+        outcome.deinit(testing.allocator);
+    } else |_| {};
+    try testing.expectError(error.ConcurrencyUnavailable, if (result) |_| @as(Error!void, {}) else |err| @as(Error!void, err));
+}
