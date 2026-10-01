@@ -41,6 +41,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Breaking: `Repository.requiredFilters` returns configuration value errors instead of treating malformed required policy as optional.
+
 - Breaking: `Odb.openAt` borrows its directory handle on success and failure; callers that transferred a handle must close their original.
 
 - Breaking: `CheckoutOptions`, snapshot `OpenOptions` and snapshot `Store` carry durability policy; callers depending on their layouts or constructing stores directly must migrate.

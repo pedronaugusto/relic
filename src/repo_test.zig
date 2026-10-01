@@ -1017,3 +1017,20 @@ test "required filter discovery keeps full names and resource failures" {
     defer r.config.gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Read.count(&r));
 }
+
+test "required filter discovery refuses malformed required policy" {
+    const Read = struct {
+        fn run(r: *repo_mod.Repository) !void {
+            const names = try r.requiredFilters(r.gpa);
+            defer r.gpa.free(names);
+        }
+    };
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+    defer r.deinit(io);
+    try r.config.set("filter.needed.required", "maybe");
+    try std.testing.expectError(error.NotABoolean, Read.run(&r));
+}

@@ -728,7 +728,7 @@ pub const Repository = struct {
     ///
     /// A repository naming one of these in its attributes is refused, by
     /// name, rather than handed a blob git would not write.
-    pub fn requiredFilters(repo: *const Repository, gpa: Allocator) Allocator.Error![][]const u8 {
+    pub fn requiredFilters(repo: *const Repository, gpa: Allocator) config_mod.ValueError![][]const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         errdefer out.deinit(gpa);
         const names = try repo.config.subsections(gpa, "filter");
@@ -736,10 +736,7 @@ pub const Repository = struct {
         for (names) |name| {
             const key = try std.fmt.allocPrint(gpa, "filter.{s}.required", .{name});
             defer gpa.free(key);
-            const required = repo.config.getBool(key, false) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.NotABoolean, error.NotAnInteger => false,
-            };
+            const required = try repo.config.getBool(key, false);
             if (required) try out.append(gpa, name);
         }
         return out.toOwnedSlice(gpa);
