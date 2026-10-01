@@ -48,10 +48,10 @@ pub const GitDir = struct {
     /// A ref store over the two directories, which it borrows.
     /// A store over its refs, in whichever format they are kept: a stack
     /// under `reftable/`, or loose files and `packed-refs`.
-    pub fn refStore(g: *const GitDir, gpa: Allocator, io: Io, kind: hash.Kind) refs_mod.Store {
-        var store: refs_mod.Store = .init(gpa, kind, g.git_dir, g.common_dir);
-        if (reftablestack.isReftableRepository(io, g.common_dir)) store.format = .reftable;
-        return store;
+    pub fn refStore(g: *const GitDir, gpa: Allocator, io: Io, kind: hash.Kind) Allocator.Error!refs_mod.Store {
+        return refs_mod.Store.initWithOptions(gpa, kind, g.git_dir, g.common_dir, .{
+            .format = if (reftablestack.isReftableRepository(io, g.common_dir)) .reftable else .files,
+        });
     }
 };
 
@@ -133,7 +133,8 @@ pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!
 pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8, kind: hash.Kind) Error!?Oid {
     var found = (try open(gpa, io, wt, path)) orelse return null;
     defer found.close(io);
-    const store = found.refStore(gpa, io, kind);
+    var store = try found.refStore(gpa, io, kind);
+    defer store.deinit();
     const resolved = (store.head(gpa, io) catch |err| switch (err) {
         error.MalformedRef, error.MalformedPackedRefs, error.SymbolicRefLoop, error.InvalidRefName => return null,
         else => |e| return e,

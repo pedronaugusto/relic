@@ -372,7 +372,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             var hex: [hash.max_hex_len]u8 = undefined;
             var idx_buf: [96]u8 = undefined;
             const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
-            fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
+            fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
         }
         const connected = if (fresh) |*index|
             objectwalk.checkReceived(gpa, io, &repo.odb, wants.items, index, &links, null, .{ .promisor = send_filter != null })
@@ -390,7 +390,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             return std.mem.order(u8, a.name, b.name) == .lt;
         }
     }.lessThan);
-    if (packed_entries.items.len != 0) try repo.refs.writePacked(io, packed_entries.items);
+    if (packed_entries.items.len != 0) try repo.refStore().writePacked(io, packed_entries.items);
 
     const display = try url_mod.anonymize(arena, recorded);
     const message = try std.fmt.allocPrint(arena, "clone: from {s}", .{display});

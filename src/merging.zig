@@ -105,7 +105,7 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Erro
         const full = try std.fmt.allocPrint(gpa, rule, .{name});
         defer gpa.free(full);
         if (std.mem.startsWith(u8, full, "refs/") or std.mem.eql(u8, rule, "{s}")) {
-            if (repo.refs.resolve(gpa, io, full) catch null) |resolved| {
+            if (repo.refStore().resolve(gpa, io, full) catch null) |resolved| {
                 defer gpa.free(resolved.name);
                 const kind: Kind = if (std.mem.startsWith(u8, resolved.name, "refs/heads/"))
                     .branch
@@ -150,7 +150,7 @@ pub fn upstream(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Err
         } else null;
         name = tracking orelse return error.UpstreamNotFetched;
     }
-    const resolved = (try repo.refs.resolve(gpa, io, name)) orelse return error.UpstreamNotFetched;
+    const resolved = (try repo.refStore().resolve(gpa, io, name)) orelse return error.UpstreamNotFetched;
     defer gpa.free(resolved.name);
     const kind: Kind = if (std.mem.startsWith(u8, name, "refs/heads/"))
         .branch
@@ -451,7 +451,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     try parents.append(arena, head.oid orelse return error.UnbornBranch);
     var lines = std.mem.tokenizeAny(u8, heads_text, "\r\n");
     while (lines.next()) |line| {
-        try parents.append(arena, Oid.parse(repo.kind, std.mem.trim(u8, line, " \t")) catch return error.MalformedRef);
+        try parents.append(arena, Oid.parse(repo.objectFormat(), std.mem.trim(u8, line, " \t")) catch return error.MalformedRef);
     }
 
     var index = try repo.openIndex(io);

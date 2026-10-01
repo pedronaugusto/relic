@@ -833,7 +833,7 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
         {
             const conn = try uploadPack(gpa, io, &env, source.dir, v2);
             defer conn.close(io);
-            var adv = try protocol.readAdvertisement(gpa, conn, repo.kind);
+            var adv = try protocol.readAdvertisement(gpa, conn, repo.objectFormat());
             defer adv.deinit();
             try testing.expectEqual(if (v2) protocol.Version.v2 else protocol.Version.v0, adv.version);
             const want = try Oid.parse(.sha1, old);
@@ -846,7 +846,7 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
         {
             const conn = try uploadPack(gpa, io, &env, source.dir, v2);
             defer conn.close(io);
-            var adv = try protocol.readAdvertisement(gpa, conn, repo.kind);
+            var adv = try protocol.readAdvertisement(gpa, conn, repo.objectFormat());
             defer adv.deinit();
             var list = try protocol.listRefs(gpa, conn, &adv, .{ .prefixes = &.{ "refs/heads/", "refs/tags/" } });
             defer list.deinit();
@@ -889,7 +889,7 @@ test "the server's refusal comes back by name, with its words" {
 
     const conn = try uploadPack(gpa, io, &env, source.dir, true);
     defer conn.close(io);
-    var adv = try protocol.readAdvertisement(gpa, conn, repo.kind);
+    var adv = try protocol.readAdvertisement(gpa, conn, repo.objectFormat());
     defer adv.deinit();
     // An object the server does not have.
     const nowhere = hash.Hasher.object(.sha1, "blob", "not on the server");

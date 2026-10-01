@@ -78,13 +78,13 @@ pub const Remote = struct {
         errdefer list.arena.deinit();
         const arena = list.arena.allocator();
         var out: std.ArrayList(protocol.RemoteRef) = .empty;
-        const kind = r.repo.kind;
+        const kind = r.repo.objectFormat();
 
         if (matches("HEAD", prefixes)) {
-            if (try r.repo.refs.read(gpa, io, "HEAD")) |head| switch (head) {
+            if (try r.repo.refStore().read(gpa, io, "HEAD")) |head| switch (head) {
                 .symbolic => |target| {
                     defer gpa.free(target);
-                    const resolved = try r.repo.refs.resolve(gpa, io, "HEAD");
+                    const resolved = try r.repo.refStore().resolve(gpa, io, "HEAD");
                     if (resolved) |res| {
                         defer gpa.free(res.name);
                         try out.append(arena, .{
@@ -105,7 +105,7 @@ pub const Remote = struct {
             };
         }
 
-        var listing = try r.repo.refs.list(gpa, io, "refs/");
+        var listing = try r.repo.refStore().list(gpa, io, "refs/");
         defer listing.deinit();
         for (listing.entries) |entry| {
             if (!matches(entry.name, prefixes)) continue;
@@ -113,7 +113,7 @@ pub const Remote = struct {
             switch (entry.target) {
                 .direct => |oid| ref.oid = oid,
                 .symbolic => |target| {
-                    const resolved = (try r.repo.refs.resolve(gpa, io, entry.name)) orelse continue;
+                    const resolved = (try r.repo.refStore().resolve(gpa, io, entry.name)) orelse continue;
                     defer gpa.free(resolved.name);
                     ref.oid = resolved.oid;
                     ref.symref_target = try arena.dupe(u8, target);
@@ -157,7 +157,7 @@ pub const Remote = struct {
             for (collected.entries) |entry| try sending.put(r.gpa, entry.oid, {});
             var extra: std.ArrayList(odb_mod.PackEntry) = .empty;
             defer extra.deinit(r.gpa);
-            var tags = try r.repo.refs.list(r.gpa, io, "refs/tags/");
+            var tags = try r.repo.refStore().list(r.gpa, io, "refs/tags/");
             defer tags.deinit();
             for (tags.entries) |entry| {
                 const start = switch (entry.target) {
@@ -177,7 +177,7 @@ pub const Remote = struct {
                     try chain.append(r.gpa, current);
                     const found = try r.repo.odb.read(io, current);
                     defer r.gpa.free(found.bytes);
-                    var tag = try @import("object.zig").Tag.parse(r.gpa, r.repo.kind, found.bytes);
+                    var tag = try @import("object.zig").Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes);
                     defer tag.deinit();
                     current = tag.target;
                 }
@@ -246,7 +246,7 @@ pub const Remote = struct {
 
         const config = &r.repo.config;
         const bare = r.repo.isBare();
-        const current = try r.repo.refs.currentBranch(gpa, io);
+        const current = try r.repo.refStore().currentBranch(gpa, io);
         defer if (current) |c| gpa.free(c);
         const deny_current = !bare and denies(config, "receive.denycurrentbranch", true);
         const deny_delete_current = !bare and denies(config, "receive.denydeletecurrent", true);

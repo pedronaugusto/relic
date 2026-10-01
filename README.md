@@ -115,7 +115,7 @@ whose closure has been completed. Reopening rebuilds that cache as needed.
 ```zig
 const snapshots = relic.worktree.snapshot;
 var store = try snapshots.Store.open(gpa, io, private_dir, .{
-    .kind = repo.kind,
+    .kind = repo.objectFormat(),
 });
 defer store.deinit(io);
 const first = (try store.capture(io, .{ .repository = &repo }, .{})).snapshot;

@@ -124,7 +124,7 @@ const Resolver = struct {
     /// A name with no suffix: `@{...}`, an object name, a ref, a `describe`
     /// name, an abbreviation.
     fn basic(r: *Resolver, name: []const u8) Error!Oid {
-        const kind = r.repo.kind;
+        const kind = r.repo.objectFormat();
         if (name.len == kind.hexLen()) {
             if (Oid.parse(kind, name)) |oid| return oid else |_| {}
         }
@@ -187,7 +187,7 @@ const Resolver = struct {
         if (!std.mem.startsWith(u8, full, "refs/")) {
             for (full) |c| if (!(std.ascii.isUpper(c) or c == '_')) return null;
         }
-        const resolved = r.repo.refs.resolve(r.gpa, r.io, full) catch |err| {
+        const resolved = r.repo.refStore().resolve(r.gpa, r.io, full) catch |err| {
             const mapped = revisionError(err);
             if (mapped == error.BadRevision) return null;
             return mapped;
@@ -230,7 +230,7 @@ const Resolver = struct {
     }
 
     fn currentBranchRef(r: *Resolver) Error![]const u8 {
-        const head = r.repo.refs.read(r.gpa, r.io, "HEAD") catch |err| return revisionError(err);
+        const head = r.repo.refStore().read(r.gpa, r.io, "HEAD") catch |err| return revisionError(err);
         const h = head orelse return error.BadRevision;
         return switch (h) {
             .symbolic => |target| {
@@ -353,7 +353,7 @@ const Resolver = struct {
     fn tagTarget(r: *Resolver, oid: Oid) Error!Oid {
         const found = r.repo.odb.read(r.io, oid) catch |err| return revisionError(err);
         defer r.repo.odb.gpa.free(found.bytes);
-        var tag = object.Tag.parse(r.gpa, r.repo.kind, found.bytes) catch |err| return revisionError(err);
+        var tag = object.Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
         defer tag.deinit();
         return tag.target;
     }
@@ -361,7 +361,7 @@ const Resolver = struct {
     fn treeOf(r: *Resolver, commit: Oid) Error!Oid {
         const found = r.repo.odb.read(r.io, commit) catch |err| return revisionError(err);
         defer r.repo.odb.gpa.free(found.bytes);
-        var c = object.Commit.parse(r.gpa, r.repo.kind, found.bytes) catch |err| return revisionError(err);
+        var c = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
         defer c.deinit();
         return c.tree;
     }
@@ -369,7 +369,7 @@ const Resolver = struct {
     fn parents(r: *Resolver, commit: Oid) Error![]const Oid {
         const found = r.repo.odb.read(r.io, commit) catch |err| return revisionError(err);
         defer r.repo.odb.gpa.free(found.bytes);
-        var c = object.Commit.parse(r.gpa, r.repo.kind, found.bytes) catch |err| return revisionError(err);
+        var c = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
         defer c.deinit();
         return r.a.dupe(Oid, c.parents);
     }
@@ -435,7 +435,7 @@ const Resolver = struct {
         if (from) |oid| {
             try walk.push(oid);
         } else {
-            var listing = r.repo.refs.list(r.gpa, r.io, "") catch |err| return revisionError(err);
+            var listing = r.repo.refStore().list(r.gpa, r.io, "") catch |err| return revisionError(err);
             defer listing.deinit();
             for (listing.entries) |entry| {
                 const oid = (try r.refMaybe(entry.name)) orelse continue;
@@ -449,7 +449,7 @@ const Resolver = struct {
         while (walk.next(r.io) catch |err| return revisionError(err)) |c| {
             const found = r.repo.odb.read(r.io, c.oid) catch |err| return revisionError(err);
             defer r.repo.odb.gpa.free(found.bytes);
-            var commit = object.Commit.parse(r.gpa, r.repo.kind, found.bytes) catch |err| return revisionError(err);
+            var commit = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
             defer commit.deinit();
             const hit = try pattern.search(r.gpa, commit.message);
             if (hit != negate) return c.oid;
@@ -465,7 +465,7 @@ const Resolver = struct {
             const found = r.repo.odb.read(r.io, current) catch |err| return revisionError(err);
             defer r.repo.odb.gpa.free(found.bytes);
             if (found.type != .tree) return error.BadRevision;
-            const entry = (object.Tree.parse(r.repo.kind, found.bytes).find(part) catch return error.BadRevision) orelse return error.BadRevision;
+            const entry = (object.Tree.parse(r.repo.objectFormat(), found.bytes).find(part) catch return error.BadRevision) orelse return error.BadRevision;
             current = entry.oid;
         }
         return current;

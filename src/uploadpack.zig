@@ -97,7 +97,7 @@ pub const Server = struct {
     }
 
     fn kind(s: *Server) hash.Kind {
-        return s.remote.repo.kind;
+        return s.remote.repo.objectFormat();
     }
 
     /// The server's first message: its refs and capabilities in v0, its
@@ -796,7 +796,7 @@ const Negotiation = struct {
     }
 
     fn resolveRef(n: *Negotiation, name: []const u8) Error!?Oid {
-        const store = &n.server.remote.repo.refs;
+        const store = n.server.remote.repo.refStore();
         for ([_][]const u8{ "", "refs/", "refs/tags/", "refs/heads/", "refs/remotes/" }) |prefix| {
             const full = try std.fmt.allocPrint(n.arena, "{s}{s}", .{ prefix, name });
             if (try store.resolve(n.arena, n.io(), full)) |r| return r.oid;
@@ -935,7 +935,7 @@ const Negotiation = struct {
     fn addTags(n: *Negotiation, entries: *std.ArrayList(odb_mod.PackEntry)) Error!void {
         var in_pack: Oid.Set = .empty;
         for (entries.items) |e| try in_pack.put(n.arena, e.oid, {});
-        var listing = try n.server.remote.repo.refs.list(n.server.gpa, n.io(), "refs/tags/");
+        var listing = try n.server.remote.repo.refStore().list(n.server.gpa, n.io(), "refs/tags/");
         defer listing.deinit();
         for (listing.entries) |entry| {
             const tip = switch (entry.target) {

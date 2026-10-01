@@ -230,7 +230,7 @@ test "git's partial clone is checked out by relic, which fetches what it reads f
         defer repo.deinit(io);
         const text = try git(gpa, io, lone, &.{ "rev-parse", "HEAD:big.txt" });
         defer gpa.free(text);
-        const blob = try Oid.parse(repo.kind, std.mem.trimEnd(u8, text, "\n"));
+        const blob = try Oid.parse(repo.objectFormat(), std.mem.trimEnd(u8, text, "\n"));
         try testing.expectError(error.ObjectNotFound, repo.odb.read(io, blob));
         var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
         defer lazy.deinit();
@@ -424,6 +424,6 @@ test "a promised object is fetched from the next promisor remote when one fails,
     const set = try git(gpa, io, twins.by_relic, &.{ "config", "remote.mirror.url", "file:///nowhere/mirror.git" });
     gpa.free(set);
     try repo.config.set("remote.mirror.url", "file:///nowhere/mirror.git");
-    const missing = try Oid.parse(repo.kind, "1111111111111111111111111111111111111111");
+    const missing = try Oid.parse(repo.objectFormat(), "1111111111111111111111111111111111111111");
     try testing.expectError(error.PromisorFetchFailed, repo.odb.read(io, missing));
 }

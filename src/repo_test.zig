@@ -53,7 +53,7 @@ test "a repository this creates is one git uses" {
 
     var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
-    try std.testing.expectEqual(hash.Kind.sha1, repo.kind);
+    try std.testing.expectEqual(hash.Kind.sha1, repo.objectFormat());
     try std.testing.expect(!repo.isBare());
 
     var git: testgit.Repo = .{ .gpa = gpa, .tmp = tmp, .dir = tmp.dir };
@@ -159,7 +159,7 @@ test "a sha256 repository this creates is one git uses" {
         else => return err,
     };
     defer repo.deinit(io);
-    try std.testing.expectEqual(hash.Kind.sha256, repo.kind);
+    try std.testing.expectEqual(hash.Kind.sha256, repo.objectFormat());
 
     var git: testgit.Repo = .{ .gpa = gpa, .tmp = tmp, .dir = tmp.dir };
     const format = git.line(io, &.{ "rev-parse", "--show-object-format" }) catch return error.SkipZigTest;
@@ -481,7 +481,7 @@ test "opening uses the format validated before worktree settings are read" {
     });
     var opened = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
     defer opened.deinit(io);
-    try std.testing.expectEqual(@import("refs.zig").Format.reftable, opened.refs.format);
+    try std.testing.expectEqual(@import("refs.zig").Format.reftable, opened.refStore().refFormat());
 }
 
 test "opening refuses a repository version that is not an integer" {
@@ -587,7 +587,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         defer repo.deinit(io);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
-        const cache = repo.refs.reftable_cache;
+        const cache = @import("refstate.zig").get(repo.refStore()._state).cache;
         const replacement = if (format == .files)
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[user]\nname = changed\n"
         else
@@ -595,8 +595,8 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = replacement });
         try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, &diagnostic));
         try std.testing.expectEqualStrings("extensions.refStorage", diagnostic.unsupported_setting);
-        try std.testing.expectEqual(format, repo.refs.format);
-        try std.testing.expectEqual(cache, repo.refs.reftable_cache);
+        try std.testing.expectEqual(format, repo.refStore().refFormat());
+        try std.testing.expectEqual(cache, @import("refstate.zig").get(repo.refStore()._state).cache);
         try std.testing.expect(repo.config.get("user.name") == null);
         // A refused refresh did not acknowledge the new file.
         try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, null));
@@ -608,7 +608,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         try std.testing.expect(try repo.refreshConfig(io, &diagnostic));
         try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
         try std.testing.expectEqualStrings("accepted", repo.config.get("user.name").?);
-        try std.testing.expectEqual(cache, repo.refs.reftable_cache);
+        try std.testing.expectEqual(cache, @import("refstate.zig").get(repo.refStore()._state).cache);
     }
 }
 
@@ -638,26 +638,26 @@ test "a refresh updates reftable write settings together with the configuration"
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = .reftable });
     defer repo.deinit(io);
-    const cache = repo.refs.reftable_cache;
+    const cache = @import("refstate.zig").get(repo.refStore()._state).cache;
     const prefix = "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[reftable]\n";
     try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = prefix ++
         "blockSize = 8192\nrestartInterval = 32\nindexObjects = false\ngeometricFactor = 4\nlockTimeout = 0\n" });
     try std.testing.expect(try repo.refreshConfig(io, null));
-    const options = repo.refs.reftable_options;
+    const options = repo.refStore().reftableOptions();
     try std.testing.expectEqual(@as(u32, 8192), options.write.block_size);
     try std.testing.expectEqual(@as(u16, 32), options.write.restart_interval);
     try std.testing.expect(!options.write.index_objects);
     try std.testing.expectEqual(@as(u8, 4), options.geometric_factor);
     try std.testing.expectEqual(@import("fs.zig").OnContention.fail, options.lock);
-    try std.testing.expectEqual(cache, repo.refs.reftable_cache);
+    try std.testing.expectEqual(cache, @import("refstate.zig").get(repo.refStore()._state).cache);
     try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = prefix ++ "blockSize = invalid\n" });
     try std.testing.expectError(error.NotAnInteger, repo.refreshConfig(io, null));
-    try std.testing.expectEqualDeep(options, repo.refs.reftable_options);
+    try std.testing.expectEqualDeep(options, repo.refStore().reftableOptions());
     try std.testing.expectEqualStrings("8192", repo.config.get("reftable.blocksize").?);
     try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = prefix ++ "lockTimeout = 200\n" });
     try std.testing.expect(try repo.refreshConfig(io, null));
-    try std.testing.expectEqualDeep(@import("reftablestack.zig").Options{ .lock = .{ .wait_ms = 200 } }, repo.refs.reftable_options);
-    try std.testing.expectEqual(cache, repo.refs.reftable_cache);
+    try std.testing.expectEqualDeep(@import("reftablestack.zig").Options{ .lock = .{ .wait_ms = 200 } }, repo.refStore().reftableOptions());
+    try std.testing.expectEqual(cache, @import("refstate.zig").get(repo.refStore()._state).cache);
 }
 
 test "a reftable HEAD read failure does not become a detached branch" {
@@ -951,4 +951,13 @@ test "worktree configuration adapters refuse malformed settings and allocation f
     repo.config.gpa = failing.allocator();
     defer repo.config.gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Adapter.core(&repo));
+}
+
+test "repository format and ref cache state have no writable public fields" {
+    try std.testing.expect(!@hasField(repo_mod.Repository, "kind"));
+    try std.testing.expect(!@hasField(repo_mod.Repository, "refs"));
+    const Store = @import("refs.zig").Store;
+    inline for (.{ "kind", "format", "reftable_options", "reftable_cache", "git_dir", "common_dir", "gpa" }) |field| {
+        try std.testing.expect(!@hasField(Store, field));
+    }
 }

@@ -1776,7 +1776,7 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     var hex: [hash.max_hex_len]u8 = undefined;
     var idx_buf: [96]u8 = undefined;
     const idx_name = try std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{result.name.?.hex(&hex)});
-    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
+    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
     defer index.deinit();
     try testing.expect(!links.unreadable);
     // The commit's parent is not there either; what the tree names is

@@ -472,14 +472,14 @@ const SubmoduleOpener = struct {
         errdefer opened.repo.deinit(s.io);
         var tips: std.ArrayList(Oid) = .empty;
         errdefer tips.deinit(s.gpa);
-        if (try opened.repo.refs.resolve(s.gpa, s.io, "HEAD")) |r| {
+        if (try opened.repo.refStore().resolve(s.gpa, s.io, "HEAD")) |r| {
             s.gpa.free(r.name);
             try tips.append(s.gpa, r.oid);
         }
-        var listing = try opened.repo.refs.list(s.gpa, s.io, "refs/");
+        var listing = try opened.repo.refStore().list(s.gpa, s.io, "refs/");
         defer listing.deinit();
         for (listing.entries) |entry| {
-            const resolved = (try opened.repo.refs.resolve(s.gpa, s.io, entry.name)) orelse continue;
+            const resolved = (try opened.repo.refStore().resolve(s.gpa, s.io, entry.name)) orelse continue;
             s.gpa.free(resolved.name);
             const peeled = opened.repo.peel(s.io, resolved.oid) catch continue;
             try tips.append(s.gpa, peeled);

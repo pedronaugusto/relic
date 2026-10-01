@@ -339,7 +339,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
     // `do_plain_rerere`.
     for (conflicts.items) |path| {
         const bytes = readWorktree(&r, path) orelse continue;
-        const n = try normalize(arena, bytes, try r.markerSize(path), repo.kind);
+        const n = try normalize(arena, bytes, try r.markerSize(path), repo.objectFormat());
         if (n.conflicts != 0) {
             if (rr.get(path)) |existing| {
                 if (existing) |id| try removeVariant(&r, id);
@@ -386,7 +386,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
 /// scanned on the way.
 fn readMergeRr(r: *Run) Error!std.StringArrayHashMapUnmanaged(?Id) {
     const text = (try head_mod.readState(r.arena, r.io, r.repo.git_dir, "MERGE_RR")) orelse return .empty;
-    var rr = try parseMergeRr(r.arena, text, r.repo.kind);
+    var rr = try parseMergeRr(r.arena, text, r.repo.objectFormat());
     for (rr.values()) |slot| {
         const id = slot.?;
         try fit(r.arena, try r.status(id.hex), id.variant);
@@ -471,7 +471,7 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
     // Resolved by hand already?
     if (id.variant >= 0) {
         if (readWorktree(r, path)) |bytes| {
-            const n = try normalize(r.arena, bytes, size, r.repo.kind);
+            const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
             if (n.conflicts == 0) {
                 try r.writeFile(try r.pathOf(id, "postimage"), bytes);
                 st.items[@intCast(id.variant)] |= has_postimage;
@@ -499,7 +499,7 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
     }
     try fit(r.arena, st, id.variant);
     if (readWorktree(r, path)) |bytes| {
-        const n = try normalize(r.arena, bytes, size, r.repo.kind);
+        const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
         try r.writeFile(try r.pathOf(id, "preimage"), n.text);
     }
     if (st.items[@intCast(id.variant)] & has_postimage != 0) {
@@ -514,7 +514,7 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
 /// the conflict at `path`; the file is rewritten when that is clean.
 fn replay(r: *Run, vid: Id, path: []const u8, size: usize) Error!bool {
     const bytes = readWorktree(r, path) orelse return false;
-    const n = try normalize(r.arena, bytes, size, r.repo.kind);
+    const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
     if (n.conflicts < 0) return false;
     try r.writeFile(try r.pathOf(vid, "thisimage"), n.text);
     const merged = (try tryMerge(r, vid, path, n.text, size)) orelse return false;
@@ -598,7 +598,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Error!void {
     const arena = arena_instance.allocator();
     var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = repo.work_dir orelse return error.BareRepository, .rules = .{} };
     if (try head_mod.readState(arena, io, repo.git_dir, "MERGE_RR")) |text| {
-        const hex_len = repo.kind.hexLen();
+        const hex_len = repo.objectFormat().hexLen();
         var records = std.mem.splitScalar(u8, text, 0);
         while (records.next()) |record| {
             if (record.len < hex_len + 2) continue;
@@ -909,7 +909,7 @@ fn handleCache(r: *Run, path: []const u8, stages: Stages, size: usize) Error!Nor
         text.* = try r.arena.dupe(u8, found.bytes);
     }
     const merged = try llMerge(r, path, texts[0], texts[1], texts[2], size, .{ .ours = "ours", .base = "", .theirs = "theirs" });
-    return normalize(r.arena, merged.bytes, size, r.repo.kind);
+    return normalize(r.arena, merged.bytes, size, r.repo.objectFormat());
 }
 
 /// Whether git's plain pathspec `items` names `path`: the path itself, a
@@ -960,8 +960,8 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now: i64) Error!void {
     var names: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (entry.name.len != repo.kind.hexLen()) continue;
-        _ = Oid.parse(repo.kind, entry.name) catch continue;
+        if (entry.name.len != repo.objectFormat().hexLen()) continue;
+        _ = Oid.parse(repo.objectFormat(), entry.name) catch continue;
         try names.append(arena, try arena.dupe(u8, entry.name));
     }
     var to_remove: std.ArrayList([]const u8) = .empty;

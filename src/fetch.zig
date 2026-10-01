@@ -279,7 +279,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 
     // The current branch's merge settings, when it follows this remote.
     var branch_merge: []const []const u8 = &.{};
-    const current = try repo.refs.currentBranch(gpa, io);
+    const current = try repo.refStore().currentBranch(gpa, io);
     defer if (current) |c| gpa.free(c);
     var branch_config: ?remote_mod.Branch = null;
     defer if (branch_config) |*b| b.deinit();
@@ -308,7 +308,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     };
 
     const url = remote.urls[0];
-    var session = try transport.Session.open(gpa, io, url, .upload_pack, repo.kind, .{
+    var session = try transport.Session.open(gpa, io, url, .upload_pack, repo.objectFormat(), .{
         .programs = options.programs,
         .config = &repo.config,
         .service_program = remote.upload_pack,
@@ -334,7 +334,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     defer remote_refs.deinit();
 
     // The local refs, by name.
-    var local_refs = try repo.refs.list(gpa, io, "refs/");
+    var local_refs = try repo.refStore().list(gpa, io, "refs/");
     defer local_refs.deinit();
     var local = try LocalIndex.init(gpa, &local_refs);
     defer local.deinit(gpa);
@@ -452,7 +452,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => {},
     };
-    if (try repo.refs.read(gpa, io, "HEAD")) |head| switch (head) {
+    if (try repo.refStore().read(gpa, io, "HEAD")) |head| switch (head) {
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => |target| gpa.free(target),
     };
@@ -545,7 +545,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
             var hex: [hash.max_hex_len]u8 = undefined;
             var idx_buf: [96]u8 = undefined;
             const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
-            fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
+            fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
         }
         if (fresh) |*index| {
             objectwalk.checkReceived(gpa, io, &repo.odb, all_tips.items, index, &links, options.missing, .{ .promisor = promisor }) catch |err| switch (err) {
@@ -932,7 +932,7 @@ fn rootsReached(arena: Allocator, io: Io, repo: *Repository, tip: Oid, roots: *c
         const found = repo.odb.read(io, oid) catch continue;
         defer repo.odb.gpa.free(found.bytes);
         if (found.type != .commit) continue;
-        var commit = try object.Commit.parse(arena, repo.kind, found.bytes);
+        var commit = try object.Commit.parse(arena, repo.objectFormat(), found.bytes);
         defer commit.deinit();
         for (commit.parents) |p| try stack.append(arena, p);
     }
@@ -995,7 +995,8 @@ fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repositor
     // The main working tree's `HEAD` is the shared directory's, whichever
     // worktree this repository was opened from.
     if (!repo.isBare() or repo.common_is_separate) {
-        var main_store: refs_mod.Store = .init(gpa, repo.kind, repo.common_dir, repo.common_dir);
+        var main_store: refs_mod.Store = try .init(gpa, repo.objectFormat(), repo.common_dir, repo.common_dir);
+        defer main_store.deinit();
         const bare = repo.config.getBool("core.bare", false) catch false;
         if (!bare) {
             if (try main_store.read(gpa, io, "HEAD")) |head| switch (head) {
@@ -1045,7 +1046,7 @@ fn decide(
     if (local.names.get(dst)) |value| {
         if (value) |oid| {
             old = oid;
-        } else if (try repo.refs.resolve(gpa, io, dst)) |resolved| {
+        } else if (try repo.refStore().resolve(gpa, io, dst)) |resolved| {
             gpa.free(resolved.name);
             old = resolved.oid;
         }
@@ -1147,7 +1148,7 @@ fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const Fe
 fn deleteLog(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Error!void {
     const path = try reflog.pathFor(gpa, name);
     defer gpa.free(path);
-    repo.refs.dirFor(name).deleteFile(io, path) catch |err| switch (err) {
+    repo.refStore().dirFor(name).deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => {},
     };
@@ -1166,7 +1167,7 @@ fn createRemoteHead(
 ) Error!void {
     var head_buf: [512]u8 = undefined;
     const local_head = std.fmt.bufPrint(&head_buf, "refs/remotes/{s}/HEAD", .{name}) catch return;
-    if (try repo.refs.read(gpa, io, local_head)) |existing| {
+    if (try repo.refStore().read(gpa, io, local_head)) |existing| {
         switch (existing) {
             .symbolic => |target| gpa.free(target),
             .direct => {},
@@ -1189,7 +1190,7 @@ fn createRemoteHead(
         if (std.mem.eql(u8, mapped, local_target)) kept = true;
     }
     if (!kept) return;
-    if (try repo.refs.resolve(gpa, io, local_target)) |resolved| {
+    if (try repo.refStore().resolve(gpa, io, local_target)) |resolved| {
         gpa.free(resolved.name);
     } else return;
     var tx = repo.beginRefs();

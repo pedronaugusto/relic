@@ -394,8 +394,8 @@ pub const Cache = struct {
 
     /// Bring the stacks up to date with the disk.
     fn refresh(c: *Cache, store: *const refs.Store, io: Io) Error!*const Stacks {
-        const main_now = try Validity.of(io, store.common_dir);
-        const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.git_dir) else null;
+        const main_now = try Validity.of(io, store.commonDir());
+        const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.gitDir()) else null;
         if (c.stacks) |*st| {
             if (Validity.same(c.main_seen, main_now) and
                 (!isLinked(store) or Validity.same(c.worktree_seen, worktree_now)))
@@ -405,12 +405,12 @@ pub const Cache = struct {
             // The stat moved; the list may not have. Reload only what did.
             c.reloads += 1;
             if (!Validity.same(c.main_seen, main_now)) {
-                const fresh = try reloadIn(c.gpa, io, store.common_dir, store.kind, &st.main);
+                const fresh = try reloadIn(c.gpa, io, store.commonDir(), store.objectFormat(), &st.main);
                 st.main.arena.deinit();
                 st.main = fresh;
             }
             if (isLinked(store) and !Validity.same(c.worktree_seen, worktree_now)) {
-                const fresh = try reloadIn(c.gpa, io, store.git_dir, store.kind, &st.worktree.?);
+                const fresh = try reloadIn(c.gpa, io, store.gitDir(), store.objectFormat(), &st.worktree.?);
                 st.worktree.?.arena.deinit();
                 st.worktree = fresh;
             }
@@ -455,7 +455,7 @@ const View = struct {
     stacks: *const Stacks,
 
     fn acquire(store: *const refs.Store, gpa: Allocator, io: Io, owned: *?Stacks) Error!View {
-        if (store.reftable_cache) |c| {
+        if (@import("refstate.zig").get(store._state).cache) |c| {
             c.mutex.lock(io) catch return error.Canceled;
             errdefer c.mutex.unlock(io);
             const st = try c.refresh(store, io);
@@ -479,9 +479,9 @@ const Stacks = struct {
     worktree: ?Stack,
 
     fn open(store: *const refs.Store, gpa: Allocator, io: Io) Error!Stacks {
-        var main = try loadIn(gpa, io, store.common_dir, store.kind);
+        var main = try loadIn(gpa, io, store.commonDir(), store.objectFormat());
         errdefer main.deinit();
-        const worktree: ?Stack = if (isLinked(store)) try loadIn(gpa, io, store.git_dir, store.kind) else null;
+        const worktree: ?Stack = if (isLinked(store)) try loadIn(gpa, io, store.gitDir(), store.objectFormat()) else null;
         return .{ .main = main, .worktree = worktree };
     }
 
@@ -515,11 +515,11 @@ fn reloadIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, old: ?*Stack) Er
 }
 
 fn isLinked(store: *const refs.Store) bool {
-    return store.git_dir.handle != store.common_dir.handle;
+    return store.gitDir().handle != store.commonDir().handle;
 }
 
 fn isPerWorktree(store: *const refs.Store, name: []const u8) bool {
-    return store.dirFor(name).handle == store.git_dir.handle;
+    return store.dirFor(name).handle == store.gitDir().handle;
 }
 
 /// Whether `name` is one git keeps as a file whatever the ref format:
@@ -769,13 +769,13 @@ pub fn prepare(tx: *refs.Transaction, io: Io) refs.TransactionError!void {
         if (isLinked(store) and isPerWorktree(store, edit.name)) needs_worktree = true;
     }
 
-    var main = try lockStack(gpa, io, store.common_dir, store.reftable_options.lock);
+    var main = try lockStack(gpa, io, store.commonDir(), store.reftableOptions().lock);
     errdefer {
         main.lock.deinit(io);
         gpa.free(main.buffer);
         main.dir.close(io);
     }
-    var worktree: ?Pending.Locked = if (needs_worktree) try lockStack(gpa, io, store.git_dir, store.reftable_options.lock) else null;
+    var worktree: ?Pending.Locked = if (needs_worktree) try lockStack(gpa, io, store.gitDir(), store.reftableOptions().lock) else null;
     errdefer if (worktree) |*w| {
         w.lock.deinit(io);
         gpa.free(w.buffer);
@@ -896,18 +896,18 @@ pub fn commit(tx: *refs.Transaction, io: Io, log: ?refs.LogMessage) refs.Transac
     if (pending.worktree) |*w| try addTable(tx, io, pending, w, &pending.stacks.worktree.?, true, log);
     try commitSpecial(tx, io);
 
-    const options = store.reftable_options;
+    const options = store.reftableOptions();
     const compact_worktree = pending.worktree != null;
     releasePending(tx, io);
     if (!options.auto_compact) return;
-    compactIn(tx.gpa, io, store.common_dir, store.kind, options, .auto) catch |err| switch (err) {
+    compactIn(tx.gpa, io, store.commonDir(), store.objectFormat(), options, .auto) catch |err| switch (err) {
         // Compaction is housekeeping: someone else holding a lock, or
         // compacting already, is not a failure of this transaction.
         error.LockHeld => {},
         else => |e| return e,
     };
     if (compact_worktree) {
-        compactIn(tx.gpa, io, store.git_dir, store.kind, options, .auto) catch |err| switch (err) {
+        compactIn(tx.gpa, io, store.gitDir(), store.objectFormat(), options, .auto) catch |err| switch (err) {
             error.LockHeld => {},
             else => |e| return e,
         };
@@ -929,14 +929,14 @@ pub fn appendLog(
 ) refs.TransactionError!void {
     if (std.mem.indexOfAny(u8, who.name, "<>\n") != null or
         std.mem.indexOfAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
-    const parent = if (isLinked(store) and isPerWorktree(store, name)) store.git_dir else store.common_dir;
-    var locked = try lockStack(gpa, io, parent, store.reftable_options.lock);
+    const parent = if (isLinked(store) and isPerWorktree(store, name)) store.gitDir() else store.commonDir();
+    var locked = try lockStack(gpa, io, parent, store.reftableOptions().lock);
     defer {
         if (!locked.written) locked.lock.deinit(io);
         gpa.free(locked.buffer);
         locked.dir.close(io);
     }
-    var stack = try Stack.load(gpa, io, locked.dir, store.kind);
+    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
     defer stack.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -948,13 +948,13 @@ pub fn appendLog(
         .email = who.email,
         .time = std.math.cast(u64, who.when_secs) orelse 0,
         .tz_offset = zoneFromMinutes(who.offset_minutes),
-        .message = try logMessage(arena_instance.allocator(), try reflog.normalizeMessage(arena_instance.allocator(), message), store.reftable_options.write.block_size),
+        .message = try logMessage(arena_instance.allocator(), try reflog.normalizeMessage(arena_instance.allocator(), message), store.reftableOptions().write.block_size),
     } } };
-    const bytes = try reftable.write(gpa, store.kind, store.reftable_options.write, update_index, update_index, &.{}, &.{record});
+    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, &.{}, &.{record});
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index);
-    if (!store.reftable_options.auto_compact) return;
-    compactIn(gpa, io, parent, store.kind, store.reftable_options, .auto) catch |err| switch (err) {
+    if (!store.reftableOptions().auto_compact) return;
+    compactIn(gpa, io, parent, store.objectFormat(), store.reftableOptions(), .auto) catch |err| switch (err) {
         error.LockHeld => {},
         else => |e| return e,
     };
@@ -1003,7 +1003,7 @@ fn addTable(
     var logs: std.ArrayList(reftable.LogRecord) = .empty;
     const text: ?[]const u8 = if (log) |message| blk: {
         const normal = try reflog.normalizeMessage(arena, message.message);
-        break :blk try logMessage(arena, normal, store.reftable_options.write.block_size);
+        break :blk try logMessage(arena, normal, store.reftableOptions().write.block_size);
     } else null;
     for (tx.edits.items) |edit| {
         if (isSpecial(edit.name)) continue;
@@ -1039,7 +1039,7 @@ fn addTable(
             // git writes no entry for a symbolic ref whose target does not
             // resolve yet.
             .symbolic => (try resolveIn(&pending.stacks, store, gpa, source.name, tx)) orelse continue,
-        } else Oid.zero(store.kind);
+        } else Oid.zero(store.objectFormat());
         if (std.mem.indexOfAny(u8, message.who.name, "<>\n") != null or
             std.mem.indexOfAny(u8, message.who.email, "<>\n") != null) return error.InvalidSignature;
         try logs.append(arena, .{
@@ -1047,7 +1047,7 @@ fn addTable(
             .update_index = update_index,
             .value = .{
                 .update = .{
-                    .old = source.old orelse Oid.zero(store.kind),
+                    .old = source.old orelse Oid.zero(store.objectFormat()),
                     .new = new_oid,
                     .name = message.who.name,
                     .email = message.who.email,
@@ -1055,7 +1055,7 @@ fn addTable(
                     .tz_offset = zoneFromMinutes(message.who.offset_minutes),
                     // An edit's own words, or the transaction's.
                     .message = if (source.message) |m|
-                        try logMessage(arena, try reflog.normalizeMessage(arena, m), store.reftable_options.write.block_size)
+                        try logMessage(arena, try reflog.normalizeMessage(arena, m), store.reftableOptions().write.block_size)
                     else
                         text.?,
                 },
@@ -1066,7 +1066,7 @@ fn addTable(
     std.mem.sort(reftable.RefRecord, records.items, {}, lessThanRef);
     std.mem.sort(reftable.LogRecord, logs.items, {}, logOrder);
 
-    const bytes = try reftable.write(gpa, store.kind, store.reftable_options.write, update_index, update_index, records.items, logs.items);
+    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, records.items, logs.items);
     defer gpa.free(bytes);
     try install(gpa, io, locked, stack, bytes, update_index);
 }
@@ -1423,17 +1423,17 @@ test "a reftable repository git made is read through the refs API" {
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    try std.testing.expectEqual(refs.Format.reftable, repo.refs.format);
+    try std.testing.expectEqual(refs.Format.reftable, repo.refStore().refFormat());
 
     const head = (try repo.head(io)).?;
     defer gpa.free(head.name);
     try std.testing.expectEqualStrings("refs/heads/topic", head.name);
-    const branch = (try repo.refs.currentBranch(gpa, io)).?;
+    const branch = (try repo.refStore().currentBranch(gpa, io)).?;
     defer gpa.free(branch);
     try std.testing.expectEqualStrings("topic", branch);
-    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/gone") == null);
+    try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/gone") == null);
 
-    var listing = try repo.refs.list(gpa, io, "refs/");
+    var listing = try repo.refStore().list(gpa, io, "refs/");
     defer listing.deinit();
     const ours = try forEachRef(gpa, &listing);
     defer gpa.free(ours);
@@ -1559,7 +1559,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
     // And git's own next write lands on the stack this left.
     try git.exec(io, &.{ "branch", "after", "main" });
     try git.exec(io, &.{"pack-refs"});
-    const after = (try repo.refs.read(gpa, io, "refs/heads/after")).?;
+    const after = (try repo.refStore().read(gpa, io, "refs/heads/after")).?;
     try std.testing.expect(after.direct.eql(commits[11]));
 }
 
@@ -1667,7 +1667,7 @@ test "a held tables.list.lock refuses the transaction and changes nothing" {
     const after = try tmp.dir.readFileAlloc(io, ".git/reftable/tables.list", gpa, .limited(4096));
     defer gpa.free(after);
     try std.testing.expectEqualStrings(before, after);
-    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/main") == null);
+    try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/main") == null);
 }
 
 test "a name and a directory of names conflict with what is already there" {
@@ -1698,7 +1698,7 @@ test "a name and a directory of names conflict with what is already there" {
         try tx.create("refs/heads/a-b", .{ .direct = one });
         try tx.commit(io, null);
     }
-    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/a") == null);
+    try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/a") == null);
 }
 
 test "FETCH_HEAD and MERGE_HEAD are files and the other pseudorefs are in the stack, as git keeps them" {
@@ -1737,7 +1737,7 @@ test "FETCH_HEAD and MERGE_HEAD are files and the other pseudorefs are in the st
         const seen = try git.line(io, &.{ "rev-parse", "--verify", "-q", name });
         defer gpa.free(seen);
         try std.testing.expectEqualStrings(tip_text, seen);
-        const ours = (try repo.refs.read(gpa, io, name)).?;
+        const ours = (try repo.refStore().read(gpa, io, name)).?;
         try std.testing.expect(ours.direct.eql(tip));
     }
     // The special ones get no log.
@@ -1790,7 +1790,7 @@ test "git waits on the lock a prepared transaction holds, and reads the result" 
     const ours = try git.line(io, &.{ "rev-parse", "refs/heads/ours" });
     defer gpa.free(ours);
     try std.testing.expectEqualStrings(tip_text, ours);
-    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/theirs") != null);
+    try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/theirs") != null);
 }
 
 test "a repository's stack is kept between reads and read again only when it changes" {
@@ -1805,7 +1805,7 @@ test "a repository's stack is kept between reads and read again only when it cha
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    const cache = repo.refs.reftable_cache.?;
+    const cache = @import("refstate.zig").get(repo.refStore()._state).cache.?;
     for (0..50) |_| {
         const head = (try repo.head(io)).?;
         gpa.free(head.name);
@@ -1815,16 +1815,16 @@ test "a repository's stack is kept between reads and read again only when it cha
     // git adds a table, then compacts the stack away under the reader: the
     // next read sees both.
     try git.exec(io, &.{ "branch", "later" });
-    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/later") != null);
+    try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/later") != null);
     try std.testing.expectEqual(@as(u64, 1), cache.reloads);
     try git.exec(io, &.{ "branch", "-D", "later" });
     try git.exec(io, &.{"pack-refs"});
-    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/later") == null);
-    const main = (try repo.refs.read(gpa, io, "refs/heads/main")).?;
+    try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/later") == null);
+    const main = (try repo.refStore().read(gpa, io, "refs/heads/main")).?;
     try std.testing.expect(main == .direct);
     try std.testing.expect(cache.reloads >= 2);
     const settled = cache.reloads;
-    var listing = try repo.refs.list(gpa, io, "refs/");
+    var listing = try repo.refStore().list(gpa, io, "refs/");
     defer listing.deinit();
     try std.testing.expectEqual(settled, cache.reloads);
 }
@@ -1851,7 +1851,7 @@ test "a log entry goes into the stack, and the files path refuses to write where
     try std.testing.expectError(error.ReftableRepository, reflog.read(gpa, io, repo.git_dir, "HEAD", .sha1));
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, ".git/logs/refs/heads/main", .{}));
 
-    try repo.refs.appendLog(gpa, io, "refs/heads/main", tip, tip, fixtureWho(1_700_000_000), "reset: moving to HEAD");
+    try repo.refStore().appendLog(gpa, io, "refs/heads/main", tip, tip, fixtureWho(1_700_000_000), "reset: moving to HEAD");
     const shown = try gitReflog(&git, io, "refs/heads/main");
     defer gpa.free(shown);
     try std.testing.expect(std.mem.startsWith(u8, shown, tip_text));
@@ -1890,11 +1890,11 @@ test "a writer waits for tables.list.lock as long as reftable.lockTimeout says" 
     {
         var repo = try openWithTimeout(gpa, io, tmp.dir, "0");
         defer repo.deinit(io);
-        try std.testing.expect(repo.refs.reftable_options.lock == .fail);
+        try std.testing.expect(repo.refStore().reftableOptions().lock == .fail);
     }
     var repo = try openWithTimeout(gpa, io, tmp.dir, "10000");
     defer repo.deinit(io);
-    try std.testing.expectEqual(@as(u32, 10000), repo.refs.reftable_options.lock.wait_ms);
+    try std.testing.expectEqual(@as(u32, 10000), repo.refStore().reftableOptions().lock.wait_ms);
 
     // Held, then let go while the writer is waiting on it: the writer gets
     // the lock and commits rather than giving up.
@@ -1907,7 +1907,7 @@ test "a writer waits for tables.list.lock as long as reftable.lockTimeout says" 
     try io.sleep(.fromMilliseconds(150), .awake);
     try tmp.dir.deleteFile(io, ".git/reftable/tables.list.lock");
     try pending.await(io);
-    try std.testing.expect(try repo.refs.read(gpa, io, "refs/heads/main") != null);
+    try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/main") != null);
 }
 
 /// `git refs verify`, where the git has it: 2.47 and later.
@@ -2127,10 +2127,10 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
     const main_head = try git.line(io, &.{ "symbolic-ref", "HEAD" });
     defer gpa.free(main_head);
     try std.testing.expectEqualStrings("refs/heads/main", main_head);
-    var shared = try repo.refs.list(gpa, io, "refs/");
+    var shared = try repo.refStore().list(gpa, io, "refs/");
     defer shared.deinit();
     try std.testing.expect(shared.find("refs/bisect/good") == null);
-    var own = try linked.refs.list(gpa, io, "refs/");
+    var own = try linked.refStore().list(gpa, io, "refs/");
     defer own.deinit();
     try std.testing.expect(own.find("refs/bisect/good") != null);
     try std.testing.expect(own.find("refs/heads/ours") != null);

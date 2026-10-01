@@ -170,7 +170,7 @@ fn relicCommit(k: *Keyed, io: Io, tree_from: []const u8) !Oid {
     const tree_text = try k.repo.line(io, &.{ "rev-parse", tree_from });
     defer k.gpa.free(tree_text);
     return repo.writeCommit(io, .{
-        .tree = try Oid.parse(repo.kind, tree_text),
+        .tree = try Oid.parse(repo.objectFormat(), tree_text),
         .author = who,
         .committer = who,
         .message = "signed here\n",
@@ -183,14 +183,14 @@ fn verifyHere(k: *Keyed, io: Io, rev: []const u8, tag: bool) !signing.Verdict {
     defer repo.deinit(io);
     const text = try k.repo.line(io, &.{ "rev-parse", rev });
     defer k.gpa.free(text);
-    const found = try repo.odb.read(io, try Oid.parse(repo.kind, text));
+    const found = try repo.odb.read(io, try Oid.parse(repo.objectFormat(), text));
     defer k.gpa.free(found.bytes);
     var signer = try signing.Signer.init(k.gpa, &repo.config, k.programs());
     defer signer.deinit();
     return if (tag)
-        signing.verifyTag(&signer, io, repo.kind, found.bytes)
+        signing.verifyTag(&signer, io, repo.objectFormat(), found.bytes)
     else
-        signing.verifyCommit(&signer, io, repo.kind, found.bytes);
+        signing.verifyCommit(&signer, io, repo.objectFormat(), found.bytes);
 }
 
 fn bothWays(format: signing.Format, init_args: []const []const u8) !void {

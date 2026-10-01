@@ -243,7 +243,7 @@ pub const Lazy = struct {
         var remote = try @import("remote.zig").Remote.get(l.gpa, &repo.config, name);
         defer remote.deinit();
         if (remote.urls.len == 0) return error.NotAPartialClone;
-        var session = try transport.Session.open(l.gpa, io, remote.urls[0], .upload_pack, repo.kind, .{
+        var session = try transport.Session.open(l.gpa, io, remote.urls[0], .upload_pack, repo.objectFormat(), .{
             .programs = l.options.programs,
             .config = &repo.config,
             .service_program = remote.upload_pack,

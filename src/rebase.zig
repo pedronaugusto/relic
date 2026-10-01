@@ -395,7 +395,7 @@ const Walker = struct {
         const found = try w.repo.odb.read(w.io, oid);
         defer w.repo.odb.gpa.free(found.bytes);
         if (found.type != .commit) return error.NotACommit;
-        var commit = try object.Commit.parse(w.gpa, w.repo.kind, found.bytes);
+        var commit = try object.Commit.parse(w.gpa, w.repo.objectFormat(), found.bytes);
         defer commit.deinit();
         const node: Node = .{
             .oid = oid,
@@ -550,7 +550,7 @@ fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
         if (empty and !r.options.keep_empty) continue;
         const found = try r.repo.odb.read(r.io, oid);
         defer r.repo.odb.gpa.free(found.bytes);
-        var commit = try object.Commit.parse(r.gpa, r.repo.kind, found.bytes);
+        var commit = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
         defer commit.deinit();
         const subject = try message.onelineSubject(r.arena, commit.message);
         const arg = if (empty)
@@ -586,7 +586,7 @@ fn rearrangeSquash(r: *Run, items: []todo.Item) Error![]todo.Item {
         if (item.command.isFixup()) return items;
         const found = try r.repo.odb.read(r.io, commit_oid);
         defer r.repo.odb.gpa.free(found.bytes);
-        var commit = try object.Commit.parse(r.gpa, r.repo.kind, found.bytes);
+        var commit = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
         defer commit.deinit();
         const subject = try message.onelineSubject(r.arena, message.fromSubject(commit.message));
         subjects[i] = subject;
@@ -690,7 +690,7 @@ const Tip = struct {
 fn resolveTip(r: *Run) Error!Tip {
     if (r.options.branch) |name| {
         const full = try std.fmt.allocPrint(r.arena, "refs/heads/{s}", .{name});
-        if (try r.repo.refs.resolve(r.gpa, r.io, full)) |resolved| {
+        if (try r.repo.refStore().resolve(r.gpa, r.io, full)) |resolved| {
             defer r.gpa.free(resolved.name);
             return .{ .head_name = full, .orig_head = resolved.oid };
         }
@@ -972,13 +972,13 @@ fn readBasicState(r: *Run) Error!Tip {
     }
     return .{
         .head_name = if (std.mem.startsWith(u8, name, "refs/")) name else null,
-        .orig_head = Oid.parse(r.repo.kind, std.mem.trimEnd(u8, orig, "\n")) catch return error.MalformedState,
+        .orig_head = Oid.parse(r.repo.objectFormat(), std.mem.trimEnd(u8, orig, "\n")) catch return error.MalformedState,
     };
 }
 
 fn ontoOf(r: *Run) Error!Oid {
     const text = (try r.readState("onto")) orelse return error.MalformedState;
-    return Oid.parse(r.repo.kind, std.mem.trimEnd(u8, text, "\n")) catch error.MalformedState;
+    return Oid.parse(r.repo.objectFormat(), std.mem.trimEnd(u8, text, "\n")) catch error.MalformedState;
 }
 
 /// `skip_unnecessary_picks`: leading picks whose parent is already where
@@ -1028,7 +1028,7 @@ fn checkoutOnto(r: *Run, base: Oid, orig_head: Oid, onto_name: []const u8) Error
     try head_mod.writeRef(r.io, r.repo, "ORIG_HEAD", orig_head);
     const log = try r.reflogMessage("start", try std.fmt.allocPrint(r.arena, "checkout {s}", .{onto_name}));
     try head_mod.detach(r.io, r.repo, h.oid, base, .{ .who = r.options.who, .message = log });
-    if (r.options.hooks) |runner| _ = try runner.postCheckout(r.io, h.oid orelse Oid.zero(r.repo.kind), base, .branch);
+    if (r.options.hooks) |runner| _ = try runner.postCheckout(r.io, h.oid orelse Oid.zero(r.repo.objectFormat()), base, .branch);
 }
 
 /// Switch to the branch being rebased when there is nothing else to do:
@@ -1056,7 +1056,7 @@ fn removeState(r: *Run) Error!void {
     if (try r.readState("refs-to-delete")) |text| {
         var lines = std.mem.tokenizeScalar(u8, text, '\n');
         while (lines.next()) |name| {
-            r.repo.refs.dirFor(name).deleteFile(r.io, name) catch {};
+            r.repo.refStore().dirFor(name).deleteFile(r.io, name) catch {};
         }
     }
     try r.repo.git_dir.deleteTree(r.io, state_dir);
@@ -1295,7 +1295,7 @@ fn errorWithPatch(r: *Run, commit: Oid, to_amend: bool) Error!void {
     if (!r.hasState("message")) {
         const found = try r.repo.odb.read(r.io, commit);
         defer r.repo.odb.gpa.free(found.bytes);
-        var parsed = try object.Commit.parse(r.gpa, r.repo.kind, found.bytes);
+        var parsed = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
         defer parsed.deinit();
         try r.state("message", try std.fmt.allocPrint(r.arena, "{s}\n", .{message.fromSubject(parsed.message)}));
     }
@@ -1311,7 +1311,7 @@ fn intendToAmend(r: *Run) Error!void {
 fn writePatch(r: *Run, commit_oid: Oid) Error!void {
     const found = try r.repo.odb.read(r.io, commit_oid);
     defer r.repo.odb.gpa.free(found.bytes);
-    var commit = try object.Commit.parse(r.gpa, r.repo.kind, found.bytes);
+    var commit = try object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes);
     defer commit.deinit();
     // `log_tree_commit` shows a merge commit no diff at all, so its patch
     // is empty.
@@ -1365,7 +1365,7 @@ fn readSource(r: *Run, oid: Oid) Error!Source {
     defer r.repo.odb.gpa.free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     const bytes = try r.arena.dupe(u8, found.bytes);
-    return .{ .oid = oid, .bytes = bytes, .commit = try object.Commit.parse(r.arena, r.repo.kind, bytes) };
+    return .{ .oid = oid, .bytes = bytes, .commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), bytes) };
 }
 
 /// `do_pick_commit` for the instructions that apply a commit.
@@ -1890,7 +1890,7 @@ fn doLabel(r: *Run, name: []const u8) Error!void {
 /// `lookup_label`: `refs/rewritten/<label>`, or any name a commit goes by.
 fn lookupLabel(r: *Run, name: []const u8) Error!Oid {
     const ref = try std.fmt.allocPrint(r.arena, "refs/rewritten/{s}", .{name});
-    if (try r.repo.refs.resolve(r.gpa, r.io, ref)) |resolved| {
+    if (try r.repo.refStore().resolve(r.gpa, r.io, ref)) |resolved| {
         r.gpa.free(resolved.name);
         return resolved.oid;
     }
@@ -1929,7 +1929,7 @@ fn doUpdateRef(r: *Run, ref: []const u8) Error!void {
 const UpdateRef = struct { ref: []const u8, before: Oid, after: Oid };
 
 fn parseUpdateRefs(r: *Run, text: []const u8) Error!std.ArrayList(UpdateRef) {
-    return parseUpdateRefsText(r.arena, r.repo.kind, text);
+    return parseUpdateRefsText(r.arena, r.repo.objectFormat(), text);
 }
 
 /// The records of an `update-refs` file: a ref, where it was, and where
@@ -1966,8 +1966,8 @@ fn lessThanRef(_: void, a: UpdateRef, b: UpdateRef) bool {
 /// A record for `ref` that has not moved yet: where it is now, and
 /// nothing after.
 fn freshUpdateRef(r: *Run, ref: []const u8) Error!UpdateRef {
-    const zero = Oid.zero(r.repo.kind);
-    const resolved = try r.repo.refs.resolve(r.gpa, r.io, ref);
+    const zero = Oid.zero(r.repo.objectFormat());
+    const resolved = try r.repo.refStore().resolve(r.gpa, r.io, ref);
     const before = if (resolved) |found| blk: {
         r.gpa.free(found.name);
         break :blk found.oid;
@@ -1981,7 +1981,7 @@ fn freshUpdateRef(r: *Run, ref: []const u8) Error!UpdateRef {
 /// in its place when another worktree has that branch checked out. With
 /// `write`, the refs are recorded in `update-refs` as git records them.
 fn addUpdateRefCommands(r: *Run, items: []todo.Item, write: bool) Error![]todo.Item {
-    var listing = try r.repo.refs.list(r.gpa, r.io, "refs/heads/");
+    var listing = try r.repo.refStore().list(r.gpa, r.io, "refs/heads/");
     defer listing.deinit();
     var head = try r.head();
     defer head.deinit(r.gpa);
@@ -1999,7 +1999,7 @@ fn addUpdateRefCommands(r: *Run, items: []todo.Item, write: bool) Error![]todo.I
             const oid = switch (entry.target) {
                 .direct => |oid| oid,
                 .symbolic => blk: {
-                    const resolved = (try r.repo.refs.resolve(r.gpa, r.io, entry.name)) orelse continue;
+                    const resolved = (try r.repo.refStore().resolve(r.gpa, r.io, entry.name)) orelse continue;
                     r.gpa.free(resolved.name);
                     break :blk resolved.oid;
                 },
@@ -2083,7 +2083,7 @@ fn checkedOutBranches(r: *Run) Error!std.StringHashMapUnmanaged([]const u8) {
         const main_path = if (std.mem.endsWith(u8, common, "/.git")) common[0 .. common.len - "/.git".len] else common;
         try addWorktreeBranches(r, &map, repo.common_dir, try r.arena.dupe(u8, main_path));
     }
-    var listing = try worktrees.list(r.gpa, io, repo.common_dir, repo.kind);
+    var listing = try worktrees.list(r.gpa, io, repo.common_dir, repo.objectFormat());
     defer listing.deinit();
     for (listing.entries) |entry| {
         const sub = try std.fmt.allocPrint(r.arena, "worktrees/{s}", .{entry.name});
@@ -2112,7 +2112,7 @@ fn addWorktreeBranches(r: *Run, map: *std.StringHashMapUnmanaged([]const u8), di
         const name = std.mem.trim(u8, text, " \t\r\n");
         // A bisection started from a detached `HEAD` names a commit.
         if (name.len != 0) {
-            if (Oid.parse(r.repo.kind, name)) |_| {} else |_| {
+            if (Oid.parse(r.repo.objectFormat(), name)) |_| {} else |_| {
                 try map.put(arena, try std.fmt.allocPrint(arena, "refs/heads/{s}", .{name}), where);
             }
         }
@@ -2280,7 +2280,7 @@ fn mergeAsGitMerge(r: *Run, item: todo.Item, merge_head: Oid, author: object.Sig
 
 fn lookupRewritten(r: *Run, name: []const u8) bool {
     const ref = std.fmt.allocPrint(r.arena, "refs/rewritten/{s}", .{name}) catch return false;
-    const found = r.repo.refs.read(r.gpa, r.io, ref) catch return false;
+    const found = r.repo.refStore().read(r.gpa, r.io, ref) catch return false;
     if (found) |f| switch (f) {
         .symbolic => |t| r.gpa.free(t),
         .direct => {},
@@ -2313,8 +2313,8 @@ fn finish(r: *Run) Error!Outcome {
         while (lines.next()) |line| {
             const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.MalformedState;
             try rewritten.append(r.arena, .{
-                .old = Oid.parse(repo.kind, line[0..space]) catch return error.MalformedState,
-                .new = Oid.parse(repo.kind, line[space + 1 ..]) catch return error.MalformedState,
+                .old = Oid.parse(repo.objectFormat(), line[0..space]) catch return error.MalformedState,
+                .new = Oid.parse(repo.objectFormat(), line[space + 1 ..]) catch return error.MalformedState,
             });
         }
     }
@@ -2369,7 +2369,7 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Erro
     try commitStagedChanges(&r);
     if (r.hasState("stopped-sha")) {
         const text = (try r.readState("stopped-sha")).?;
-        const oid = Oid.parse(repo.kind, std.mem.trim(u8, text, " \n")) catch return error.MalformedState;
+        const oid = Oid.parse(repo.objectFormat(), std.mem.trim(u8, text, " \n")) catch return error.MalformedState;
         try recordInRewritten(&r, oid, peekCommand(&r, 0));
     }
     return runLoop(&r);
@@ -2418,7 +2418,7 @@ fn commitStagedChanges(r: *Run) Error!void {
 
     var amend = false;
     if (try r.readState("amend")) |text| {
-        const to_amend = Oid.parse(repo.kind, std.mem.trim(u8, text, " \n")) catch return error.MalformedState;
+        const to_amend = Oid.parse(repo.objectFormat(), std.mem.trim(u8, text, " \n")) catch return error.MalformedState;
         if (!is_clean and !head_oid.eql(to_amend)) return error.DirtyWorktree;
         amend = true;
     }
@@ -2436,7 +2436,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     } else try parents.append(r.arena, head_oid);
     if (merge_head_text) |text| {
         var lines = std.mem.tokenizeAny(u8, text, "\r\n");
-        while (lines.next()) |line| try parents.append(r.arena, Oid.parse(repo.kind, std.mem.trim(u8, line, " ")) catch return error.MalformedState);
+        while (lines.next()) |line| try parents.append(r.arena, Oid.parse(repo.objectFormat(), std.mem.trim(u8, line, " ")) catch return error.MalformedState);
     }
     // The author the stop recorded; an amend keeps the one it amends.
     var author = r.options.who;

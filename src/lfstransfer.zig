@@ -1778,7 +1778,7 @@ fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, t
 
     if (refs_days > 0) {
         const since = (now orelse return error.LfsRecentNeedsTime) - refs_days * 86400;
-        var listing = try repo.refs.list(server.gpa, io, "refs/");
+        var listing = try repo.refStore().list(server.gpa, io, "refs/");
         defer listing.deinit();
         const remote_prefix = try std.fmt.allocPrint(arena, "refs/remotes/{s}/", .{server.remote});
         for (listing.entries) |entry| {
@@ -1788,14 +1788,14 @@ fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, t
             if (std.mem.startsWith(u8, entry.name, "refs/remotes/")) {
                 if (!remote_refs or !std.mem.startsWith(u8, entry.name, remote_prefix)) continue;
             }
-            const resolved = (try repo.refs.resolve(arena, io, entry.name)) orelse continue;
+            const resolved = (try repo.refStore().resolve(arena, io, entry.name)) orelse continue;
             const when = commitTime(arena, io, repo, resolved.oid) orelse continue;
             if (when < since) continue;
             if (containsOid(unique.items, resolved.oid)) continue;
             try unique.append(arena, resolved.oid);
             const found = try repo.odb.read(io, resolved.oid);
             defer repo.odb.gpa.free(found.bytes);
-            var commit = try object_mod.Commit.parse(arena, repo.kind, found.bytes);
+            var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
             defer commit.deinit();
             try scanTree(arena, io, repo, commit.tree, "", &out, &seen);
         }
@@ -1841,7 +1841,7 @@ fn commitTime(arena: Allocator, io: Io, repo: *Repository, oid: Oid) ?i64 {
     const found = repo.odb.read(io, oid) catch return null;
     defer repo.odb.gpa.free(found.bytes);
     if (found.type != .commit) return null;
-    var commit = object_mod.Commit.parse(arena, repo.kind, found.bytes) catch return null;
+    var commit = object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes) catch return null;
     defer commit.deinit();
     return commit.committer.when_secs;
 }
@@ -1849,7 +1849,7 @@ fn commitTime(arena: Allocator, io: Io, repo: *Repository, oid: Oid) ?i64 {
 fn treeOfCommit(arena: Allocator, io: Io, repo: *Repository, oid: Oid) FetchError!Oid {
     const found = try repo.odb.read(io, oid);
     defer repo.odb.gpa.free(found.bytes);
-    var commit = try object_mod.Commit.parse(arena, repo.kind, found.bytes);
+    var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
     defer commit.deinit();
     return commit.tree;
 }
@@ -1881,7 +1881,7 @@ fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips
         defer repo.odb.gpa.free(found.bytes);
         const tree = switch (found.type) {
             .commit => blk: {
-                var commit = try object_mod.Commit.parse(arena, repo.kind, found.bytes);
+                var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
                 defer commit.deinit();
                 break :blk commit.tree;
             },
@@ -1896,7 +1896,7 @@ fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips
 fn scanTree(arena: Allocator, io: Io, repo: *Repository, tree: Oid, prefix: []const u8, out: *std.ArrayList(Object), seen: *std.StringHashMapUnmanaged(void)) FetchError!void {
     const found = try repo.odb.read(io, tree);
     defer repo.odb.gpa.free(found.bytes);
-    var entries = object_mod.Tree.parse(repo.kind, found.bytes).iterate();
+    var entries = object_mod.Tree.parse(repo.objectFormat(), found.bytes).iterate();
     while (try entries.next()) |entry| {
         const path = if (prefix.len == 0) try arena.dupe(u8, entry.name) else try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
         switch (entry.mode) {
@@ -1932,10 +1932,10 @@ fn resolve(arena: Allocator, io: Io, repo: *Repository, name: []const u8) FetchE
     const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
     inline for (rules) |rule| {
         const full = try std.fmt.allocPrint(arena, rule, .{name});
-        if (try repo.refs.resolve(arena, io, full)) |found| return .{ .oid = found.oid, .ref = found.name };
+        if (try repo.refStore().resolve(arena, io, full)) |found| return .{ .oid = found.oid, .ref = found.name };
     }
-    if (name.len == repo.kind.hexLen()) {
-        if (Oid.parse(repo.kind, name)) |oid| {
+    if (name.len == repo.objectFormat().hexLen()) {
+        if (Oid.parse(repo.objectFormat(), name)) |oid| {
             if (try repo.odb.exists(io, oid)) return .{ .oid = oid, .ref = null };
         } else |_| {}
     }

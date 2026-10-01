@@ -147,7 +147,7 @@ pub const Session = struct {
                 errdefer if (owned) gpa.destroy(here);
                 here.* = try local.Remote.open(gpa, io, remote_url);
                 errdefer if (owned) here.deinit(io);
-                if (kind) |k| if (k != here.repo.kind) return error.ObjectFormatMismatch;
+                if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 const v2 = options.protocol_v2 orelse wantsV2(options.config);
                 const conn = try uploadpack.connect(gpa, io, here, if (v2) .v2 else .v0, .{});
                 owned = false;
@@ -158,7 +158,7 @@ pub const Session = struct {
                 errdefer gpa.destroy(here);
                 here.* = try local.Remote.open(gpa, io, remote_url);
                 errdefer here.deinit(io);
-                if (kind) |k| if (k != here.repo.kind) return error.ObjectFormatMismatch;
+                if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 return .{ .gpa = gpa, .service = service, .impl = .{ .local = here } };
             },
             .ssh => {
@@ -228,7 +228,7 @@ pub const Session = struct {
     /// The hash the remote's object names are written with.
     pub fn objectFormat(s: *const Session) hash.Kind {
         return switch (s.impl) {
-            .local => |here| here.repo.kind,
+            .local => |here| here.repo.objectFormat(),
             .smart => |smart| smart.advertisement.kind,
         };
     }

@@ -105,7 +105,7 @@ pub const Store = struct {
             .folder => null,
         };
         if (source_repo) |r| {
-            if (r.kind != store.db.kind) return error.ObjectFormatMismatch;
+            if (r.objectFormat() != store.db.kind) return error.ObjectFormatMismatch;
         }
         const wt = switch (source) {
             .repository => |r| r.work_dir orelse return error.BareRepository,
@@ -132,7 +132,7 @@ pub const Store = struct {
         rules.attrs = &attrs;
         rules.filters = if (drivers) |*d| d else null;
         var staged = if (source_repo) |r|
-            try index.Index.readWithResolution(store.gpa, io, r.git_dir, "index", r.common_dir, r.kind, r.odb.timestamp_resolution)
+            try index.Index.readWithResolution(store.gpa, io, r.git_dir, "index", r.common_dir, r.objectFormat(), r.odb.timestamp_resolution)
         else
             index.Index.initEmpty(store.gpa, store.db.kind);
         defer staged.deinit();

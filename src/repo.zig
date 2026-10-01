@@ -173,6 +173,8 @@ const IndexStamp = struct {
     checksum: [hash.max_raw_len]u8 = @splat(0),
 };
 
+const RefState = opaque {};
+
 pub const Repository = struct {
     gpa: Allocator,
     /// The per-worktree directory: `.git`, or a linked worktree's
@@ -185,8 +187,8 @@ pub const Repository = struct {
     work_dir: ?Io.Dir,
     /// Whether `common_dir` is a separate handle that must be closed.
     common_is_separate: bool,
-    /// The hash this repository's object names are written with.
-    kind: hash.Kind,
+    /// Owned ref state. Its format and cache are opaque to callers.
+    _refs: *RefState,
     /// What the configuration files held at `open`, or when `refreshConfig`
     /// last found one changed. Nothing reads them again behind the caller's
     /// back, so another process's `git config` is seen after a
@@ -197,7 +199,6 @@ pub const Repository = struct {
     /// and the branch `HEAD` was on when the files were read.
     config: config_mod.Config,
     odb: odb_mod.Odb,
-    refs: refs_mod.Store,
     /// What `lfsconfigText` last found, and what it was found from.
     lfsconfig_cache: ?LfsconfigCache = null,
     lfsconfig_mutex: Io.Mutex = .init,
@@ -355,10 +356,9 @@ pub const Repository = struct {
             .common_dir = discovered.common_dir,
             .work_dir = discovered.work_dir,
             .common_is_separate = discovered.common_is_separate,
-            .kind = .sha1,
             .config = .initEmpty(gpa),
             .odb = undefined,
-            .refs = undefined,
+            ._refs = undefined,
         };
 
         // The configuration is read before anything else, because it says
@@ -379,19 +379,16 @@ pub const Repository = struct {
         }, .{ .git_dir = git_dir_path, .branch = if (branch) |b| b["refs/heads/".len..] else null, .home = options.home }, options.diagnostic);
         repo.config = read.config;
         errdefer repo.config.deinit();
-        repo.kind = read.format.kind;
-
-        repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, repo.kind, options.odb);
+        repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, read.format.kind, options.odb);
         errdefer repo.odb.deinit(io);
-        repo.odb.shallow = try shallow.read(gpa, io, repo.common_dir, repo.kind);
-        repo.refs = .init(gpa, repo.kind, repo.git_dir, repo.common_dir);
-        repo.refs.format = read.format.ref_storage;
-        if (repo.refs.format == .reftable) {
-            repo.refs.reftable_options = try reftableOptions(&repo.config);
-            const cache = try gpa.create(reftablestack.Cache);
-            cache.* = .init(gpa);
-            repo.refs.reftable_cache = cache;
-        }
+        repo.odb.shallow = try shallow.read(gpa, io, repo.common_dir, read.format.kind);
+        const store = try gpa.create(refs_mod.Store);
+        errdefer gpa.destroy(store);
+        store.* = try refs_mod.Store.initWithOptions(gpa, read.format.kind, repo.git_dir, repo.common_dir, .{
+            .format = read.format.ref_storage,
+            .reftable = if (read.format.ref_storage == .reftable) try reftableOptions(&repo.config) else .{},
+        });
+        repo._refs = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
         return repo;
     }
 
@@ -470,21 +467,21 @@ pub const Repository = struct {
         context.branch = short;
         var fresh = try repo.readConfig(io, sources, context, diagnostic);
         errdefer fresh.config.deinit();
-        if (fresh.format.kind != repo.kind) {
+        if (fresh.format.kind != repo.objectFormat()) {
             try refuseSetting(diagnostic, "extensions.objectFormat");
             return error.ObjectFormatChanged;
         }
-        if (fresh.format.ref_storage != repo.refs.format) {
+        if (fresh.format.ref_storage != repo.refStore().refFormat()) {
             try refuseSetting(diagnostic, "extensions.refStorage");
             return error.RefStorageChanged;
         }
-        const ref_options = if (repo.refs.format == .reftable)
+        const ref_options = if (repo.refStore().refFormat() == .reftable)
             try reftableOptions(&fresh.config)
         else
-            repo.refs.reftable_options;
+            repo.refStore().reftableOptions();
         repo.config.deinit();
         repo.config = fresh.config;
-        repo.refs.reftable_options = ref_options;
+        repo.refStore().configureReftable(ref_options);
         return true;
     }
 
@@ -670,13 +667,25 @@ pub const Repository = struct {
     /// Close everything the repository holds.
     pub fn deinit(repo: *Repository, io: Io) void {
         if (repo.lfsconfig_cache) |c| if (c.text) |t| repo.gpa.free(t);
-        repo.refs.deinit();
+        repo.refStore().deinit();
+        repo.gpa.destroy(repo.refStore());
         repo.odb.deinit(io);
         repo.config.deinit();
         if (repo.common_is_separate) repo.common_dir.close(io);
         repo.git_dir.close(io);
         if (repo.work_dir) |w| w.close(io);
         repo.* = undefined;
+    }
+
+    /// The hash chosen when the repository was opened. A change requires reopening.
+    pub fn objectFormat(repo: *const Repository) hash.Kind {
+        return repo.refStore().objectFormat();
+    }
+
+    /// The repository owns this store; callers borrow it for ref operations.
+    /// Its backend and cache cannot be assigned separately.
+    pub fn refStore(repo: *const Repository) *refs_mod.Store {
+        return @ptrCast(@alignCast(repo._refs)); // safe: finish allocates _refs as an aligned Store.
     }
 
     /// Whether the repository has a working tree.
@@ -832,7 +841,7 @@ pub const Repository = struct {
                 defer file.close(io);
                 const st = try file.stat(io);
                 var stamp: IndexStamp = .{ .file = .of(st) };
-                const n = repo.kind.rawLen();
+                const n = repo.objectFormat().rawLen();
                 if (st.size >= n) _ = try file.readPositionalAll(io, stamp.checksum[0..n], st.size - n);
                 key.index = stamp;
             } else |err| switch (err) {
@@ -869,7 +878,7 @@ pub const Repository = struct {
         const tree = (try repo.headTree(io)) orelse return null;
         const found = try repo.odb.read(io, tree);
         defer repo.odb.gpa.free(found.bytes);
-        const entry = (object.Tree.parse(repo.kind, found.bytes).find(".lfsconfig") catch return null) orelse return null;
+        const entry = (object.Tree.parse(repo.objectFormat(), found.bytes).find(".lfsconfig") catch return null) orelse return null;
         if (entry.mode != .file and entry.mode != .exec) return null;
         const blob = try repo.odb.read(io, entry.oid);
         return blob.bytes;
@@ -896,7 +905,7 @@ pub const Repository = struct {
             repo.git_dir,
             "index",
             repo.common_dir,
-            repo.kind,
+            repo.objectFormat(),
             repo.odb.timestamp_resolution,
         );
     }
@@ -911,14 +920,14 @@ pub const Repository = struct {
         dir: Io.Dir,
         sub_path: []const u8,
     ) index_mod.ReadError!index_mod.Index {
-        return index_mod.Index.read(repo.gpa, io, dir, sub_path, repo.common_dir, repo.kind);
+        return index_mod.Index.read(repo.gpa, io, dir, sub_path, repo.common_dir, repo.objectFormat());
     }
 
     /// What `HEAD` resolves to, or `null` on an unborn branch.
     ///
     /// The returned name is the caller's.
     pub fn head(repo: *Repository, io: Io) refs_mod.ReadError!?refs_mod.Resolved {
-        return repo.refs.head(repo.gpa, io);
+        return repo.refStore().head(repo.gpa, io);
     }
 
     /// The tree `HEAD` points at, or `null` on an unborn branch.
@@ -933,7 +942,7 @@ pub const Repository = struct {
         const found = try repo.odb.read(io, commit_oid);
         defer repo.gpa.free(found.bytes);
         if (found.type != .commit) return error.UnexpectedObjectType;
-        var commit = try object.Commit.parse(repo.gpa, repo.kind, found.bytes);
+        var commit = try object.Commit.parse(repo.gpa, repo.objectFormat(), found.bytes);
         defer commit.deinit();
         return commit.tree;
     }
@@ -948,7 +957,7 @@ pub const Repository = struct {
             if (header.type != .tag) return current;
             const found = try repo.odb.read(io, current);
             defer repo.gpa.free(found.bytes);
-            var tag = try object.Tag.parse(repo.gpa, repo.kind, found.bytes);
+            var tag = try object.Tag.parse(repo.gpa, repo.objectFormat(), found.bytes);
             defer tag.deinit();
             current = tag.target;
         }
@@ -994,9 +1003,9 @@ pub const Repository = struct {
         var signer = try repo.signerFor(request.signing, .commit, diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|
-            signing.signCommit(s, io, repo.kind, fields, request.signing.key)
+            signing.signCommit(s, io, repo.objectFormat(), fields, request.signing.key)
         else
-            object.Commit.build(repo.gpa, repo.kind, fields)) catch |err| {
+            object.Commit.build(repo.gpa, repo.objectFormat(), fields)) catch |err| {
             if (err == error.SigningFailed) if (diagnostic) |output| {
                 output.signing_stderr = try output.gpa.dupe(u8, signer.?.diagnostics.items);
             };
@@ -1022,9 +1031,9 @@ pub const Repository = struct {
         var signer = try repo.signerFor(request, .tag, diagnostic);
         defer if (signer) |*s| s.deinit();
         const bytes = (if (signer) |*s|
-            signing.signTag(s, io, repo.kind, fields, request.key)
+            signing.signTag(s, io, repo.objectFormat(), fields, request.key)
         else
-            object.Tag.build(repo.gpa, repo.kind, fields)) catch |err| {
+            object.Tag.build(repo.gpa, repo.objectFormat(), fields)) catch |err| {
             if (err == error.SigningFailed) if (diagnostic) |output| {
                 output.signing_stderr = try output.gpa.dupe(u8, signer.?.diagnostics.items);
             };
@@ -1088,7 +1097,7 @@ pub const Repository = struct {
     /// repository's objects, which a reftable records beside the tag as git
     /// does. The repository must outlive the transaction.
     pub fn beginRefs(repo: *Repository) refs_mod.Transaction {
-        var tx = repo.refs.begin(repo.gpa);
+        var tx = repo.refStore().begin(repo.gpa);
         tx.peeler = .{ .context = repo, .peel = peelForRefs };
         return tx;
     }
@@ -1102,7 +1111,7 @@ pub const Repository = struct {
 
     /// A ref's log, oldest first, whichever format the refs are kept in.
     pub fn readLog(repo: *Repository, io: Io, name: []const u8) (refs_mod.ReadError || reflog.ReadError)!reflog.Log {
-        return repo.refs.readLog(repo.gpa, io, name);
+        return repo.refStore().readLog(repo.gpa, io, name);
     }
 
     /// A runner for this repository's hooks, carrying the caller's
@@ -1124,12 +1133,12 @@ pub const Repository = struct {
 
     /// Every linked worktree.
     pub fn listWorktrees(repo: *Repository, io: Io) worktrees.Error!worktrees.Listing {
-        return worktrees.list(repo.gpa, io, repo.common_dir, repo.kind);
+        return worktrees.list(repo.gpa, io, repo.common_dir, repo.objectFormat());
     }
 
     /// Remove the administrative directories whose working tree is gone,
     /// skipping any with a `locked` file.
     pub fn pruneWorktrees(repo: *Repository, io: Io) worktrees.Error!worktrees.PruneOutcome {
-        return worktrees.prune(repo.gpa, io, repo.common_dir, repo.kind);
+        return worktrees.prune(repo.gpa, io, repo.common_dir, repo.objectFormat());
     }
 };

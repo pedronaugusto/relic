@@ -171,7 +171,7 @@ pub fn loadGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const I
         const tree = (try repo.headTree(io)) orelse break :blk null;
         const found = try repo.odb.read(io, tree);
         defer gpa.free(found.bytes);
-        const parsed: object.Tree = .parse(repo.kind, found.bytes);
+        const parsed: object.Tree = .parse(repo.objectFormat(), found.bytes);
         const entry = (try parsed.find(".gitmodules")) orelse break :blk null;
         break :blk entry.oid;
     };
@@ -364,7 +364,7 @@ fn matchOne(spec: []const u8, path: []const u8, literal: bool, glob: bool) bool 
 /// `branch.<name>.remote`, else the only remote when there is one, else
 /// `origin`.
 fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
-    if (try repo.refs.currentBranch(arena, io)) |branch| {
+    if (try repo.refStore().currentBranch(arena, io)) |branch| {
         const key = try std.fmt.allocPrint(arena, "branch.{s}.remote", .{branch});
         if (try configString(arena, &repo.config, key)) |remote| return remote;
     }
@@ -697,7 +697,7 @@ fn statusInto(
         const module = entry.module orelse return refuse(options.refusal, display, "", error.NoSubmoduleMapping);
         const name = try arena.dupe(u8, module.name);
         const recorded = entry.recorded orelse {
-            try out.append(arena, .{ .state = .conflict, .oid = .zero(repo.kind), .path = display, .name = name, .depth = depth });
+            try out.append(arena, .{ .state = .conflict, .oid = .zero(repo.objectFormat()), .path = display, .name = name, .depth = depth });
             continue;
         };
         var found: ?gitlink.GitDir = if (try isActive(arena, repo, module.name, entry.path))
@@ -710,7 +710,7 @@ fn statusInto(
         }
         found.?.close(io);
 
-        const checked_out = try gitlink.head(gpa, io, wt, entry.path, repo.kind);
+        const checked_out = try gitlink.head(gpa, io, wt, entry.path, repo.objectFormat());
         if (checked_out == null or checked_out.?.eql(recorded)) {
             try out.append(arena, .{ .state = .current, .oid = recorded, .path = display, .name = name, .depth = depth });
         } else {
@@ -1199,7 +1199,7 @@ fn lookupPath(io: Io, repo: *Repository, tree: Oid, path: []const u8) Error!?Oid
         const found = try repo.odb.read(io, current);
         defer repo.gpa.free(found.bytes);
         if (found.type != .tree) return null;
-        const parsed: object.Tree = .parse(repo.kind, found.bytes);
+        const parsed: object.Tree = .parse(repo.objectFormat(), found.bytes);
         const entry = (try parsed.find(part)) orelse return null;
         current = entry.oid;
     }
@@ -1648,7 +1648,7 @@ fn checkoutCommit(
 
     var hex: [hash.max_hex_len]u8 = undefined;
     var from_hex: [hash.max_hex_len]u8 = undefined;
-    const from: []const u8 = if (try sub.refs.currentBranch(arena, io)) |branch|
+    const from: []const u8 = if (try sub.refStore().currentBranch(arena, io)) |branch|
         branch
     else if (try headOf(gpa, io, sub)) |old|
         try arena.dupe(u8, old.hex(&from_hex))

@@ -2265,7 +2265,7 @@ pub const Server = struct {
                 // current ref comes from resolving `HEAD`.
                 const head = try repo.head(io);
                 defer if (head) |h| gpa.free(h.name);
-                const branch = if (head != null) try repo.refs.currentBranch(scratch.allocator(), io) else null;
+                const branch = if (head != null) try repo.refStore().currentBranch(scratch.allocator(), io) else null;
                 break :blk try defaultRemote(scratch.allocator(), &s.settings, branch, .download);
             };
             s.remote = try gpa.dupe(u8, chosen);

@@ -75,7 +75,7 @@ pub fn relicCheckout(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, tree: Oid, run
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
-    var index = index_mod.Index.initEmpty(gpa, repo.kind);
+    var index = index_mod.Index.initEmpty(gpa, repo.objectFormat());
     defer index.deinit();
     const outcome = try worktree.checkout(gpa, io, dir, &index, &repo.odb, tree, .{
         .rules = rules,

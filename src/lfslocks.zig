@@ -232,7 +232,7 @@ pub const Listing = struct {
 /// branch pushes to a branch of its own name.
 fn refFor(arena: Allocator, io: Io, repo: *Repository, options: Options) Error!?[]const u8 {
     if (options.ref) |r| return r;
-    const branch = (try repo.refs.currentBranch(arena, io)) orelse return null;
+    const branch = (try repo.refStore().currentBranch(arena, io)) orelse return null;
     return try std.fmt.allocPrint(arena, "refs/heads/{s}", .{branch});
 }
 

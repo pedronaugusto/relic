@@ -140,7 +140,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    const current: ?Oid = if (try repo.refs.resolve(arena, io, "HEAD")) |r| r.oid else null;
+    const current: ?Oid = if (try repo.refStore().resolve(arena, io, "HEAD")) |r| r.oid else null;
     if (options.amend and current == null) return error.NothingToAmend;
 
     // The files named as git names them to a hook: `.git/index` and
@@ -174,7 +174,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         defer gpa.free(found.bytes);
         if (found.type != .commit) return error.UnexpectedObjectType;
         const bytes = try arena.dupe(u8, found.bytes);
-        const parsed = try object.Commit.parse(arena, repo.kind, bytes);
+        const parsed = try object.Commit.parse(arena, repo.objectFormat(), bytes);
         if (options.amend) {
             parents = parsed.parents;
             // An amend keeps the old commit's extra headers but not its

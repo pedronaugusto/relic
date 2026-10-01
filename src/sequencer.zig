@@ -438,7 +438,7 @@ fn readCommit(r: *Replay, oid: Oid) Error!struct { bytes: []const u8, commit: ob
     defer r.repo.odb.gpa.free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     const bytes = try r.arena.dupe(u8, found.bytes);
-    const commit = try object.Commit.parse(r.arena, r.repo.kind, bytes);
+    const commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), bytes);
     return .{ .bytes = bytes, .commit = commit };
 }
 
@@ -792,14 +792,14 @@ pub const ResolverContext = struct {
         const c: *ResolverContext = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a ResolverContext
         const gpa = c.repo.gpa;
         var oid: ?Oid = null;
-        if (text.len == c.repo.kind.hexLen()) oid = Oid.parse(c.repo.kind, text) catch null;
+        if (text.len == c.repo.objectFormat().hexLen()) oid = Oid.parse(c.repo.objectFormat(), text) catch null;
         if (oid == null) {
             const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
             inline for (rules) |rule| {
                 if (oid == null) {
                     if (std.fmt.allocPrint(gpa, rule, .{text})) |full| {
                         defer gpa.free(full);
-                        if (c.repo.refs.resolve(gpa, c.io, full) catch null) |resolved| {
+                        if (c.repo.refStore().resolve(gpa, c.io, full) catch null) |resolved| {
                             gpa.free(resolved.name);
                             oid = resolved.oid;
                         }
@@ -813,7 +813,7 @@ pub const ResolverContext = struct {
         const read = c.repo.odb.read(c.io, peeled) catch return null;
         defer c.repo.odb.gpa.free(read.bytes);
         if (read.type != .commit) return null;
-        var commit = object.Commit.parse(gpa, c.repo.kind, read.bytes) catch return null;
+        var commit = object.Commit.parse(gpa, c.repo.objectFormat(), read.bytes) catch return null;
         defer commit.deinit();
         return .{ .oid = peeled, .parents = commit.parents.len };
     }
@@ -966,7 +966,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     };
     defer gpa.free(text);
     const trimmed = std.mem.trimEnd(u8, text, "\n");
-    const start_oid = Oid.parse(repo.kind, trimmed) catch return error.MalformedState;
+    const start_oid = Oid.parse(repo.objectFormat(), trimmed) catch return error.MalformedState;
     if (start_oid.isZero()) return error.UnbornBranch;
     if (try abortIsSafe(gpa, io, repo)) try resetMerge(gpa, io, repo, start_oid, who, blocked);
     try removeSequencerState(io, repo);
@@ -995,7 +995,7 @@ fn abortIsSafe(gpa: Allocator, io: Io, repo: *Repository) Error!bool {
     defer gpa.free(text);
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     if (trimmed.len == 0) return head.oid == null;
-    const expected = Oid.parse(repo.kind, trimmed) catch return error.MalformedState;
+    const expected = Oid.parse(repo.objectFormat(), trimmed) catch return error.MalformedState;
     return head.oid != null and head.oid.?.eql(expected);
 }
 
