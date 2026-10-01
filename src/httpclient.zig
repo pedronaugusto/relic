@@ -751,10 +751,11 @@ pub const Connection = struct {
         // a Digest nonce gone stale.
         var attempts: u8 = 0;
         while (true) : (attempts += 1) {
-            return openOnce(c, target) catch |err| switch (err) {
+            var proxy_retry = false;
+            return openOnce(c, target, &proxy_retry) catch |err| switch (err) {
                 error.ProxyAuthenticationRequired => {
-                    if (attempts < 2 and c.proxy_retry) {
-                        c.proxy_retry = false;
+                    if (attempts < 2 and proxy_retry) {
+                        c.note("proxy_retry", false);
                         continue;
                     }
                     return err;
@@ -764,7 +765,7 @@ pub const Connection = struct {
         }
     }
 
-    fn openOnce(c: *Client, target: Target) Error!*Connection {
+    fn openOnce(c: *Client, target: Target, proxy_retry: *bool) Error!*Connection {
         const gpa = c.gpa;
         const io = c.io;
         const conn = try gpa.create(Connection);
@@ -811,7 +812,7 @@ pub const Connection = struct {
         if (c.proxy) |p| {
             if (p.tls) try conn.startTls(0, p.host);
             if (target.tls) {
-                try conn.tunnel(p, target);
+                try conn.tunnel(p, target, proxy_retry);
             } else conn.absolute_form = true;
         }
         if (target.tls) try conn.startTls(1, target.host);
@@ -1153,7 +1154,7 @@ pub const Connection = struct {
     }
 
     /// Ask the proxy for a tunnel to `target` with `CONNECT`, as curl asks.
-    fn tunnel(conn: *Connection, proxy: Proxy, target: Target) Error!void {
+    fn tunnel(conn: *Connection, proxy: Proxy, target: Target, proxy_retry: *bool) Error!void {
         const c = conn.client;
         const w = conn.writer();
         var authority_buf: [300]u8 = undefined;
@@ -1182,7 +1183,10 @@ pub const Connection = struct {
         if (status / 100 == 2) return;
         c.note("proxy_status", @as(?u16, status));
         if (status != 407) return error.ProxyRefused;
-        if (try c.proxyChallenged(&head)) c.note("proxy_retry", true);
+        if (try c.proxyChallenged(&head)) {
+            proxy_retry.* = true;
+            c.note("proxy_retry", true);
+        }
         return error.ProxyAuthenticationRequired;
     }
 
@@ -1292,17 +1296,22 @@ const TestServer = struct {
     listener: Io.net.Server,
     port: u16,
     silent: bool,
+    answer: []const u8,
     task: Io.Future(void) = undefined,
     group: Io.Group = .init,
     stopping: std.atomic.Value(bool) = .init(false),
 
     fn start(gpa: Allocator, io: Io, silent: bool) !*TestServer {
+        return startAnswer(gpa, io, silent, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    }
+
+    fn startAnswer(gpa: Allocator, io: Io, silent: bool, answer: []const u8) !*TestServer {
         const s = try gpa.create(TestServer);
         errdefer gpa.destroy(s);
         const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
         var listener = try address.listen(io, .{ .reuse_address = true });
         errdefer listener.deinit(io);
-        s.* = .{ .io = io, .listener = listener, .port = listener.socket.address.getPort(), .silent = silent };
+        s.* = .{ .io = io, .listener = listener, .port = listener.socket.address.getPort(), .silent = silent, .answer = answer };
         s.task = io.concurrent(serve, .{s}) catch return error.SkipZigTest;
         return s;
     }
@@ -1342,7 +1351,7 @@ const TestServer = struct {
             if (s.silent) {
                 while (true) r.interface.fillMore() catch return;
             }
-            w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch return;
+            w.interface.writeAll(s.answer) catch return;
             w.interface.flush() catch return;
         }
     }
@@ -1367,6 +1376,21 @@ test "a handshake or an answer that does not come is given up on as TimedOut, an
     try std.testing.expectError(error.TimedOut, waiting.send(.GET, .{ .tls = false, .host = "127.0.0.1", .port = server.port }, "/", &.{}, null));
     try std.testing.expectEqual(@as(usize, 0), waiting.idle.items.len);
     try std.testing.expectEqual(@as(u32, 0), waiting.unwatched);
+}
+
+test "a refused tunnel cannot consume another connection's pending proxy retry" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const server = try TestServer.startAnswer(gpa, io, false, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n");
+    defer server.stop(gpa);
+    var client: Client = .init(gpa, io);
+    defer client.deinit();
+    client.proxy = .{ .host = "127.0.0.1", .port = server.port };
+    // Another CONNECT has accepted a challenge. This request has no
+    // credential and cannot answer its own refusal, so it must not retry.
+    client.proxy_retry = true;
+    try std.testing.expectError(error.ProxyAuthenticationRequired, client.connect(.{ .tls = true, .host = "git.example.com", .port = 443 }));
+    try std.testing.expectEqual(@as(u32, 1), client.connections);
 }
 
 test "tasks sending at once through one client share the connections it keeps" {

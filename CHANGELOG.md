@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- HTTP CONNECT retries belong to the connection attempt that accepted the proxy challenge, so concurrent requests cannot consume each other’s retry decisions.
+
 - LFS transfer workers read and publish fatal errors under one lock, preserving the first failure without racing another worker.
 
 - Concurrent HTTP timeout fallbacks increment their diagnostic count under the client lock, preserving every connection made without a watchdog.
