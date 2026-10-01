@@ -916,7 +916,7 @@ fn writeBasicState(r: *Run, tip: Tip, onto: Oid) Error!void {
     }
     if (r.options.signoff) try r.state("signoff", "--signoff\n");
     // The signing decided on, as git's rebase records it: `-S` and the key.
-    if (sequencer.signs(r.repo, r.options.signing)) {
+    if (try sequencer.signs(r.repo, r.options.signing)) {
         try r.state("gpg_sign_opt", try std.fmt.allocPrint(r.arena, "-S{s}\n", .{r.options.signing.key orelse ""}));
     }
     switch (r.empty) {

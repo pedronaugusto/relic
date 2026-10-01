@@ -303,7 +303,7 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
         w.print("\tmainline = {d}\n", .{m}) catch return error.OutOfMemory;
     }
     // The signing decided on, with its key when one was named.
-    if (signs(repo, options.signing)) {
+    if (try signs(repo, options.signing)) {
         if (!any) w.writeAll("[options]\n") catch return error.OutOfMemory;
         any = true;
         const value = try config_mod.escapeValue(gpa, options.signing.key orelse "");
@@ -1070,11 +1070,11 @@ test "an opts file with a mainline past any parent number is malformed" {
 
 /// Whether `request` signs, `commit.gpgSign` deciding when it does not say:
 /// what git records for the rest of a sequence.
-pub fn signs(repo: *Repository, request: signing_mod.Request) bool {
+pub fn signs(repo: *Repository, request: signing_mod.Request) config_mod.ValueError!bool {
     return switch (request.sign) {
         .always => true,
         .never => false,
-        .config => repo.config.getBool("commit.gpgsign", false) catch false,
+        .config => try repo.config.getBool("commit.gpgsign", false),
     };
 }
 
@@ -1089,4 +1089,27 @@ test "sequencer settings preserve allocation resource failures" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "sequencer signing policy refuses malformed values and allocation failures" {
+    const Read = struct {
+        fn run(r: *Repository, request: signing_mod.Request) !bool {
+            return signs(r, request);
+        }
+    };
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Repository.init(gpa, io, tmp.dir, .{});
+    defer r.deinit(io);
+    try r.config.set("commit.gpgsign", "maybe");
+    try std.testing.expectError(error.NotABoolean, Read.run(&r, .{}));
+    try std.testing.expect(try Read.run(&r, .{ .sign = .always }));
+    try std.testing.expect(!try Read.run(&r, .{ .sign = .never }));
+    try r.config.set("commit.gpgsign", "true");
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    r.config.gpa = failing.allocator();
+    defer r.config.gpa = gpa;
+    try std.testing.expectError(error.OutOfMemory, Read.run(&r, .{}));
 }

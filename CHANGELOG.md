@@ -41,6 +41,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Breaking: `sequencer.signs` and persisted sequencer/rebase signing policy preserve configuration value and allocation errors instead of choosing unsigned writes.
+
 - Breaking: `Repository.requiredFilters` returns configuration value errors instead of treating malformed required policy as optional.
 
 - Breaking: `Odb.openAt` borrows its directory handle on success and failure; callers that transferred a handle must close their original.
