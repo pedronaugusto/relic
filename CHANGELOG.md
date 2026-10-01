@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Unit tests count work and compare results instead of asserting speed ratios or performance ceilings; all measurements and their timing example live in the bench branch harness.
+
 - The warm staging fixture gives its files an earlier modification time than the index instead of assuming two writes cannot share a clock tick.
 
 - Configuration source paths enter their owner only after copying succeeds, so allocation failure cannot leave a partial path for cleanup.
@@ -62,9 +64,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backwards to a delta's base reuses what the buffer already holds.
 - `worktree.status` does not read HEAD's side of a directory whose tree the
   index's cache tree already names; with nothing staged, HEAD is not read.
-- Measured on the 20 000-file bench repository against git 2.55, best of
-  seven, alternating: every blob through the pack 178 ms against 219,
-  status 46 ms against 52, `rev-list --objects` 62.6 ms against 61.3.
 
 ### Added
 

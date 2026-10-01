@@ -1,6 +1,6 @@
 --- std/crypto/tls/Client.zig zig-0.16.0 sha256:1464bd0d53f799e7714fa073a0783cb94c68c10fb1ab4381246e01f9cb130c8a
 +++ src/tls/Client.zig
-@@ -1,7 +1,63 @@
+@@ -1,7 +1,64 @@
 +//! A TLS 1.2 and 1.3 client: the standard library's `std.crypto.tls.Client`,
 +//! with client authentication added. A server that asks for a certificate
 +//! with a CertificateRequest is answered with the chain and key in
@@ -21,6 +21,7 @@
 +//! `lib/std/crypto/tls/Client.zig` with the changes in `Client.zig.diff`
 +//! beside it, and nothing else. They are:
 +//!
++//! - the upstream cipher timing table moved to the bench branch;
 +//! - this comment, and the imports: `std` by name, `ClientAuth`,
 +//!   `PrivateKey`, and the helpers in `auth_wire.zig`;
 +//! - `Options.client_auth` and `Options.certificate_requested`, 64 more
@@ -65,7 +66,7 @@
  const tls = std.crypto.tls;
  const Client = @This();
  const mem = std.mem;
-@@ -135,12 +191,31 @@
+@@ -135,12 +192,31 @@
      allow_truncation_attacks: bool = false,
      /// Populated when `error.TlsAlert` is returned from `init`.
      alert: ?*tls.Alert = null,
@@ -98,7 +99,7 @@
      DiskQuota,
      LockViolation,
      NotOpenForWriting,
-@@ -333,6 +408,18 @@
+@@ -333,6 +409,18 @@
      var main_cert_pub_key: CertificatePublicKey = undefined;
      var tls12_negotiated_group: ?tls.NamedGroup = null;
      const now_sec = options.realtime_now.toSeconds();
@@ -117,7 +118,7 @@
  
      var cleartext_fragment_start: usize = 0;
      var cleartext_fragment_end: usize = 0;
-@@ -520,6 +607,9 @@
+@@ -520,6 +608,9 @@
                                  p.transcript_hash.update(cleartext_header[tls.record_header_len..]); // Client Hello part 1
                                  p.transcript_hash.update(host); // Client Hello part 2
                                  p.transcript_hash.update(wrapped_handshake);
@@ -127,7 +128,7 @@
                              },
  
                              else => return error.TlsIllegalParameter,
-@@ -609,6 +699,7 @@
+@@ -609,6 +700,7 @@
                          switch (handshake_cipher) {
                              inline else => |*p| p.transcript_hash.update(wrapped_handshake),
                          }
@@ -135,7 +136,7 @@
  
                          switch (tls_version) {
                              .tls_1_3 => {
-@@ -713,6 +804,7 @@
+@@ -713,6 +805,7 @@
                          switch (handshake_cipher) {
                              inline else => |*p| p.transcript_hash.update(wrapped_handshake),
                          }
@@ -143,7 +144,7 @@
                          try hsd.ensure(1 + 2 + 1);
                          const curve_type = hsd.decode(u8);
                          if (curve_type != 0x03) return error.TlsIllegalParameter; // named_curve
-@@ -725,6 +817,34 @@
+@@ -725,6 +818,34 @@
                          try key_share.exchange(named_group, server_pub_key);
                          handshake_state = .server_hello_done;
                      },
@@ -178,7 +179,7 @@
                      .server_hello_done => {
                          if (tls_version != .tls_1_2) return error.TlsUnexpectedMessage;
                          if (cipher_state != .cleartext) return error.TlsUnexpectedMessage;
-@@ -747,12 +867,42 @@
+@@ -747,12 +868,42 @@
                              int(u16, @intFromEnum(tls.ProtocolVersion.tls_1_2)) ++
                              array(u16, tls.ChangeCipherSpecType, .{.change_cipher_spec});
                          const pre_master_secret = key_share.getSharedSecret().?;
@@ -221,7 +222,7 @@
                                  const master_secret = hmacExpandLabel(P.Hmac, pre_master_secret, &.{
                                      "master secret",
                                      &client_hello_rand,
-@@ -806,9 +956,11 @@
+@@ -806,9 +957,11 @@
                                      nonce,
                                      pv.app_cipher.client_write_key,
                                  );
@@ -236,7 +237,7 @@
                                      &client_change_cipher_spec_msg,
                                      &client_verify_msg,
                                  };
-@@ -856,8 +1008,53 @@
+@@ -856,8 +1009,53 @@
                                      p.transcript_hash.update(wrapped_handshake);
                                      const expected_server_verify_data = tls.hmac(P.Hmac, &finished_digest, pv.server_finished_key);
                                      if (!std.crypto.timing_safe.eql([P.Hmac.mac_length]u8, expected_server_verify_data, hsd.array(P.Hmac.mac_length).*)) return error.TlsDecryptError;
@@ -292,7 +293,7 @@
                                      const out_cleartext = .{@intFromEnum(tls.HandshakeType.finished)} ++
                                          array(u24, u8, verify_data) ++
                                          .{@intFromEnum(tls.ContentType.handshake)};
-@@ -871,14 +1068,10 @@
+@@ -871,14 +1069,10 @@
                                      const ad = finished_msg[0..tls.record_header_len];
                                      const ciphertext = finished_msg[tls.record_header_len..][0..out_cleartext.len];
                                      const auth_tag = finished_msg[finished_msg.len - P.AEAD.tag_length ..];
@@ -309,3 +310,33 @@
                                      try output.flush();
  
                                      const client_secret = hkdfExpandLabel(P.Hkdf, pv.master_secret, "c ap traffic", &handshake_hash, P.Hash.digest_length);
+@@ -1625,27 +1819,8 @@
+     return error.TlsCertificateNotVerified;
+ }
+ 
+-/// The priority order here is chosen based on what crypto algorithms Zig has
+-/// available in the standard library as well as what is faster. Following are
+-/// a few data points on the relative performance of these algorithms.
+-///
+-/// Measurement taken with 0.11.0-dev.810+c2f5848fe
+-/// on x86_64-linux Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz:
+-/// zig run .lib/std/crypto/benchmark.zig -OReleaseFast
+-///       aegis-128l:      15382 MiB/s
+-///        aegis-256:       9553 MiB/s
+-///       aes128-gcm:       3721 MiB/s
+-///       aes256-gcm:       3010 MiB/s
+-/// chacha20Poly1305:        597 MiB/s
+-///
+-/// Measurement taken with 0.11.0-dev.810+c2f5848fe
+-/// on x86_64-linux Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz:
+-/// zig run .lib/std/crypto/benchmark.zig -OReleaseFast -mcpu=baseline
+-///       aegis-128l:        629 MiB/s
+-/// chacha20Poly1305:        529 MiB/s
+-///        aegis-256:        461 MiB/s
+-///       aes128-gcm:        138 MiB/s
+-///       aes256-gcm:        120 MiB/s
++/// Cipher priority follows the algorithms available in std and whether
++/// hardware AES support is available. Measurements live on the bench branch.
+ const cipher_suites = if (crypto.core.aes.has_hardware_support)
+     array(u16, tls.CipherSuite, .{
+         .AEGIS_128L_SHA256,

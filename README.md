@@ -343,9 +343,9 @@ own descriptor is synced before the rename, which is the step that prevents an
 empty ref or a truncated index. Directory entries are not made durable unless
 asked: git does not do it either, and the guarantee it adds is one git does
 not make. On macOS `fsync(2)` reaches the device and not the drive's own
-cache, so `F_FULLFSYNC` is the real barrier and costs about thirty times as
-much per call, which is why it belongs at the end of a batch rather than on
-every object.
+cache, so `F_FULLFSYNC` is the real barrier. Waiting for the drive's cache
+adds a storage barrier, which is why ordinary object writes can put it at
+the end of a batch.
 
 **Every path from a tree is checked, on every platform.** A tree entry's name
 is written by whoever wrote the tree and becomes a filesystem path on
@@ -407,9 +407,8 @@ TLS client, and another checks that what crosses a proxy's tunnel is TLS.
 - **inflate** is relic's because std's zlib decoder reads the Adler-32 at the
   end of a stream and does not check it, so a corrupt object would be taken
   as it came; relic's checks it and refuses what zlib refuses. It decodes a
-  pack entry into one buffer of known size, which puts a large clone's
-  inflating at zlib's speed rather than about twice it, and it is fuzzed
-  against std's decoder and compressor.
+  pack entry into one buffer of known size and is fuzzed against std's
+  decoder and compressor.
 
 **A merge is git's merge-ort.** Renames, directory renames, directory/file and
 type conflicts, submodules and criss-cross histories resolve as git resolves
@@ -437,66 +436,18 @@ that choice away either: the aarch64 assembly asks for the extension itself
 and the x86-64 assembler does not gate these. One thing does take it away.
 Both arms are assembly, and the self-hosted x86-64 code generator has no
 encoding for these instructions, so a build that uses it — a Debug x86-64
-build, in practice — takes the software rounds. The aarch64 arm is what the
-figures below were measured on; the x86-64 arm is checked against the software
-rounds under emulation, on every length to eight kilobytes, and has not been
-timed on that hardware.
+build, in practice — takes the software rounds. The x86-64 arm is checked against the software rounds under emulation,
+on every length to eight kilobytes.
 
-**Speed.** `zig build test -Doptimize=ReleaseFast` runs the benchmark and
-prints these. On an Apple M3 Max, over three thousand files in sixty
-directories and 64 MiB hashed:
+Performance measurements live in the `bench` branch harness and run on a
+quiet machine. The unit suite counts objects written, fan-out directories,
+hashed files, cache-tree work, packed reads and bytes; it compares hashes,
+staged trees and pack sizes without clock ratios or speed limits.
 
-| | |
-|---|---|
-| `addAll`, nothing staged yet | 426 ms |
-| `addAll`, nothing staged yet, into one pack | 68 ms |
-| `addAll`, nothing changed | 5 ms |
-| `writeTree`, cache tree invalid | 9 ms |
-| `writeTree`, cache tree valid | under a millisecond |
-| `status`, one file in ten changed | 8 ms |
-| writing a deltified pack | 7 200 objects/s, 41 MiB/s of input |
-| SHA-1, the eighty rounds in software | 0.99 GiB/s |
-| SHA-1, the aarch64 instructions | 2.47 GiB/s |
-| SHA-1, with the collision check | 0.41 GiB/s |
-| SHA-256, from the standard library | 2.29 GiB/s |
-
-The warm numbers are what the stat shortcut and the `TREE` extension are for:
-an entry whose recorded stat still matches is neither opened nor hashed, and a
-cache-tree node that is still valid is used as it stands.
-
-The first cold number is three thousand loose objects written, and it was
-profiled before it was worked on. Naming them is under a millisecond, so it
-is not the number to read the hash by. Two calls are three quarters of it: the
-`O_CREAT|O_EXCL` that makes each temporary, at 35 µs, and the `rename` that
-finishes it, at 54 µs. Those are the filesystem's own figures — the same two
-calls straight through libc cost the same, so nothing is lost in a layer — and
-they are what one file per object costs on APFS. What was around them has
-gone: a `mkdir`, an `opendir` and a `close` per object became one `mkdir` per
-fan-out directory, of which at most two hundred and fifty-six exist; the walk
-asks the filesystem once per entry instead of twice, and on macOS once per
-*directory*; and a file whose length a stat has already reported is read
-without asking again. The benchmark asserts on the counts rather than the
-clock for that first one: three thousand objects written, at most two hundred
-and fifty-six directories made.
-
-A pack is one file where loose objects are one file each, which is the whole
-of the second row: the same three thousand files staged into one pack rather
-than three thousand loose objects is 392 ms against 68 ms, measured in one run
-of the same test, and the tree that comes out is the same tree. What it gives
-up is that another reader sees nothing until the pass is over, and that
-nothing is deltified — a delta wants the object before it and a walk hands
-them over one at a time. `Odb.repack` is what deltifies.
-
-The pack figures are a repository of twenty files each grown over six
-commits, 138 objects: the deltified pack is 29 692 bytes where the same
-objects written whole are 84 871. What the test asserts of the two is that the
-deltified one used deltas and came out smaller.
-
-What the suite holds to elsewhere is not these figures but two ratios timed in
-the same run — the warm pass against the cold one, and the hardware arm
-against the software rounds — which is what survives a runner under load and
-still fails if the shortcut or the hardware arm is lost. There is a ceiling on
-the walk as well, but it is a ceiling and not a budget.
+An entry whose recorded stat still matches is neither opened nor hashed, and
+a valid cache-tree node is used as it stands. A staging pass can put its new
+blobs into one pack instead of separate loose objects. Another reader sees
+that pack only after the pass finishes; `Odb.repack` can deltify it afterwards.
 
 **A pack is written in git's order, and nothing is taken away until it is
 there.** `odb.pack.Writer` streams the entries into a temporary and writes the
@@ -544,9 +495,9 @@ known disturbance vectors, and a block that could have come from such a pair
 is recognisable from the block alone. Per block it is a few dozen masked
 comparisons that reject nearly everything; a block that survives them has its
 sibling message reconstructed and the compression function re-run from the
-step the vector is anchored at. It costs about five times the hash, because
-the method needs the expanded message and the intermediate states, which the
-processor's SHA-1 instructions do not hand back. It reports rather than
+step the vector is anchored at. The method needs the expanded message and
+the intermediate states, which the processor's SHA-1 instructions do not
+hand back. It reports rather than
 repairs: `error.CollisionAttack`, with nothing written, in place of a quietly
 different name. And what it guards is git's object format rather than a file
 on the disk — the published colliding documents are not colliding *objects*,
@@ -655,10 +606,8 @@ ci/tls-fork.sh --check       # the TLS client's recorded diff against std's
 
 Every test runs under `std.testing.allocator` and `std.testing.io`, against
 real directories, and CI runs the suite in Debug, ReleaseSafe, ReleaseFast and
-ReleaseSmall on each of the three platforms. The benchmark is the one
-exception and says why in its own file: it allocates from a production
-allocator, because the testing allocator's bookkeeping costs several times the
-work it is measuring.
+ReleaseSmall on each of the three platforms. Speed measurements run only
+from the `bench` branch harness on a quiet machine.
 
 **The fixtures are generated by the git on the machine at test time**, in a
 temporary directory, and compared byte for byte where the format is exact.
