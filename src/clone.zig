@@ -435,7 +435,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             }
         }
     }
-    try @import("configstate.zig").get(repo._config).write(io, repo.common_dir, "config");
+    try @import("configstate.zig").writeLocal(repo._config, io);
 
     // The caller's configuration joins the repository's, as git reads
     // every level: the checkout's filters come from there.

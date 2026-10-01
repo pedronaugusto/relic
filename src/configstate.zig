@@ -3,6 +3,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const Allocator = std.mem.Allocator;
+const fs = @import("fs.zig");
 
 pub const State = opaque {};
 
@@ -33,6 +34,27 @@ pub fn destroy(state: *State) void {
 pub fn rememberLfs(state: *State, key: []const u8, value: []const u8) config.Config.SetError!void {
     if (!std.mem.startsWith(u8, key, "lfs.")) return error.InvalidKey;
     try get(state).setIn(.local, key, value);
+}
+
+/// A repository's shared edits select the same local source as setIn.
+/// A later worktree source must never supply the bytes for this path.
+pub fn writeLocal(state: *State, io: std.Io) config.Config.SetError!void {
+    const owned = get(state);
+    const path = owned.sources.local orelse return error.NoWritableSource;
+    for (owned.files.items) |*file| {
+        if (file.writable and file.level == .local) return writeFile(file, io, path.dir, path.sub_path);
+    }
+    return error.NoWritableSource;
+}
+
+pub fn writeFile(file: *const config.SourceFile, io: std.Io, dir: std.Io.Dir, sub_path: []const u8) config.Config.SetError!void {
+    const bytes = try file.render();
+    defer file.gpa.free(bytes);
+    var buffer: [16 * 1024]u8 = undefined;
+    var lock = try fs.LockFile.open(file.gpa, io, dir, sub_path, &buffer, .{});
+    defer lock.deinit(io);
+    lock.writer().writeAll(bytes) catch return error.WriteFailed;
+    try lock.commit(io);
 }
 
 pub fn copy(gpa: Allocator, source: *const config.Config) config.ParseError!config.Config {

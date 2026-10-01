@@ -1188,7 +1188,7 @@ pub const Client = struct {
             try @import("configstate.zig").rememberLfs(repo._config, l.key, l.value);
             changed = true;
         }
-        if (changed) try @import("configstate.zig").get(repo._config).write(io, repo.common_dir, "config");
+        if (changed) try @import("configstate.zig").writeLocal(repo._config, io);
     }
 
     /// Describe a request that failed for want of a credential, or that the
@@ -2827,4 +2827,38 @@ test "LFS proxy parsing preserves allocation resource failures" {
     var transport: httpclient.Client = undefined;
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, client.useProxy(&transport, failing.allocator(), "http://pro%78y:3128"));
+}
+
+test "learned LFS policy writes the shared source without replacing worktree configuration" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+        repo.deinit(io);
+    }
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".git/config",
+        .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nworktreeConfig = true\n[fixture]\nshared = kept\n",
+    });
+    const worktree = "[fixture]\nworktree = untouched\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = ".git/config.worktree", .data = worktree });
+    var repo = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    const settings: Settings = .{ .gpa = gpa, .config = repo.configuration() };
+    var client = try Client.init(gpa, io, &settings, "origin", .{}, .{});
+    defer client.deinit();
+    try client.learnLocksVerify("https://example.com/project", false);
+    try client.remember(io, &repo);
+    var shared = try Config.openFile(gpa, io, .{ .dir = repo.common_dir, .sub_path = "config" }, .local, .{});
+    defer shared.deinit();
+    try testing.expect(shared.get("fixture.shared") != null);
+    try testing.expectEqualStrings("kept", shared.get("fixture.shared").?);
+    try testing.expectEqualStrings("false", shared.get("lfs.https://example.com/project.locksverify").?);
+    const after = try repo.common_dir.readFileAlloc(io, "config.worktree", gpa, .limited(4096));
+    defer gpa.free(after);
+    try testing.expectEqualStrings(worktree, after);
+    _ = try repo.refreshConfig(io, null);
+    try testing.expectEqualStrings("untouched", repo.configuration().get("fixture.worktree").?);
 }

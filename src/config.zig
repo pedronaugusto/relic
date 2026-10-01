@@ -1069,21 +1069,14 @@ pub const Config = struct {
         for (0..config.files.items.len) |file_index| try config.indexFile(@intCast(file_index));
     }
 
-    /// Write the edited file back through `<path>.lock`.
+    /// Write the last writable file through `<path>.lock`.
     ///
-    /// Nothing is written unless `set` or `unset` was called; the bytes are
-    /// the original file with only the changed lines different.
+    /// The bytes are the original file with only the changed lines different.
+    /// With multiple writable sources, open the intended file on its own
+    /// before editing and writing it.
     pub fn write(config: *Config, io: Io, dir: Io.Dir, sub_path: []const u8) SetError!void {
         const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
-        const file = &config.files.items[file_index];
-        const bytes = try file.render();
-        defer config.gpa.free(bytes);
-
-        var buffer: [16 * 1024]u8 = undefined;
-        var lock = try fs.LockFile.open(config.gpa, io, dir, sub_path, &buffer, .{});
-        defer lock.deinit(io);
-        lock.writer().writeAll(bytes) catch return error.WriteFailed;
-        try lock.commit(io);
+        return @import("configstate.zig").writeFile(&config.files.items[file_index], io, dir, sub_path);
     }
 
     /// The bytes the writable file would be written as. The result is the

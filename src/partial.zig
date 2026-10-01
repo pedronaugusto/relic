@@ -241,7 +241,7 @@ pub const Lazy = struct {
             const key = try std.fmt.bufPrint(&buf, "remote.{s}.partialclonefilter", .{name});
             if (repo.configuration().get(key) == null) {
                 try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = key, .value = "blob:none" } }}, null);
-                try @import("configstate.zig").get(repo._config).write(io, repo.common_dir, "config");
+                try @import("configstate.zig").writeLocal(repo._config, io);
             }
         }
         var remote = try @import("remote.zig").Remote.get(l.gpa, repo.configuration(), name);

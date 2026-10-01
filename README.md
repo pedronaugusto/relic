@@ -128,8 +128,9 @@ in-memory changes with `editConfig(edits, diagnostic)`; a whole batch is
 validated before it replaces the old view and ref policy. Hash and backend
 changes require reopening. Changing worktree configuration sources requires
 a standalone configuration write followed by refresh; a memory-only edit
-returns `WorktreeConfigChanged`. Write edited configuration with
-`repo.configuration().write(io, repo.common_dir, "config")`.
+returns `WorktreeConfigChanged`. For persisted edits, open the intended file
+with `Config.openFile`, edit and write that configuration, then refresh the
+repository. `Config.write` selects the last writable source.
 
 `worktree.snapshot.Store` records a working tree in a private object store.
 A snapshot is a tree ID. Before returning it, capture takes every tree and

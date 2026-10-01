@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Shared LFS, promisor and clone configuration writes select their local source, preserving separate worktree configuration and shared repository settings.
+
 - Commit-graph chain discovery preserves filesystem refusals instead of interpreting an unreadable chain as absent.
 
 - Pack-index, multi-pack-index and commit-graph readers transfer their buffers to the parser once, so malformed on-disk data cannot free the same bytes twice.
