@@ -79,7 +79,7 @@ pub const WriteError = Error || signing.Error || object.Commit.WriteError;
 /// How deep `open` walks upwards looking for a `.git`.
 pub const max_discovery_depth: u8 = 64;
 
-/// A refused setting from an open, refresh or signing write, owned by the caller.
+/// A refused setting or signing stderr, owned by the caller.
 /// Initialize with `init` and release with `deinit`. Each operation clears it;
 /// its text stays valid until the next operation using it or `deinit`, even
 /// after failure or after the repository is closed.
@@ -87,13 +87,15 @@ pub const Diagnostic = struct {
     gpa: Allocator,
     /// The full setting that was refused, or an empty string.
     unsupported_setting: []const u8 = "",
+    /// Standard error from a failed signing program, or an empty string.
+    signing_stderr: []const u8 = "",
 
     /// Use this allocator for the diagnostic's own copy of the setting.
     pub fn init(gpa: Allocator) Diagnostic {
         return .{ .gpa = gpa };
     }
 
-    /// Release the setting's copy.
+    /// Release the diagnostic's copies.
     pub fn deinit(diagnostic: *Diagnostic) void {
         diagnostic.clear();
     }
@@ -101,6 +103,8 @@ pub const Diagnostic = struct {
     fn clear(diagnostic: *Diagnostic) void {
         if (diagnostic.unsupported_setting.len != 0) diagnostic.gpa.free(diagnostic.unsupported_setting);
         diagnostic.unsupported_setting = "";
+        if (diagnostic.signing_stderr.len != 0) diagnostic.gpa.free(diagnostic.signing_stderr);
+        diagnostic.signing_stderr = "";
     }
 
     fn set(diagnostic: *Diagnostic, text: []const u8) Allocator.Error!void {
@@ -974,7 +978,8 @@ pub const Repository = struct {
     ///
     /// A commit that is to be signed and comes with no `Programs` to sign it
     /// is `error.SigningRequiresPrograms`, never an unsigned commit.
-    /// `diagnostic`, when given, names the refused setting and is cleared on every call.
+    /// `diagnostic`, when given, keeps the refused setting or signing stderr
+    /// and is cleared on every call.
     pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest, diagnostic: ?*Diagnostic) WriteError!Oid {
         if (diagnostic) |output| output.clear();
         const fields: object.Commit.Fields = .{
@@ -988,10 +993,15 @@ pub const Repository = struct {
         };
         var signer = try repo.signerFor(request.signing, .commit, diagnostic);
         defer if (signer) |*s| s.deinit();
-        const bytes = try (if (signer) |*s|
+        const bytes = (if (signer) |*s|
             signing.signCommit(s, io, repo.kind, fields, request.signing.key)
         else
-            object.Commit.build(repo.gpa, repo.kind, fields));
+            object.Commit.build(repo.gpa, repo.kind, fields)) catch |err| {
+            if (err == error.SigningFailed) if (diagnostic) |output| {
+                output.signing_stderr = try output.gpa.dupe(u8, signer.?.diagnostics.items);
+            };
+            return err;
+        };
         defer repo.gpa.free(bytes);
         return repo.odb.write(io, .commit, bytes);
     }
@@ -1011,10 +1021,15 @@ pub const Repository = struct {
         if (diagnostic) |output| output.clear();
         var signer = try repo.signerFor(request, .tag, diagnostic);
         defer if (signer) |*s| s.deinit();
-        const bytes = try (if (signer) |*s|
+        const bytes = (if (signer) |*s|
             signing.signTag(s, io, repo.kind, fields, request.key)
         else
-            object.Tag.build(repo.gpa, repo.kind, fields));
+            object.Tag.build(repo.gpa, repo.kind, fields)) catch |err| {
+            if (err == error.SigningFailed) if (diagnostic) |output| {
+                output.signing_stderr = try output.gpa.dupe(u8, signer.?.diagnostics.items);
+            };
+            return err;
+        };
         defer repo.gpa.free(bytes);
         return repo.odb.write(io, .tag, bytes);
     }

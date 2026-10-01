@@ -27,6 +27,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Breaking: caller-owned `repo.Diagnostic` includes `signing_stderr`, preserved after a failed commit or tag signing program; layout-dependent callers must review the new field.
+
 - Breaking: commit, merge, sequencer and rebase options carry optional caller-owned write diagnostics; callers depending on their layouts must review the new field.
 
 - Breaking: `Repository.coreSettings` and `worktreeRules` return malformed-setting and resource failures; callers must handle their error unions.

@@ -458,3 +458,60 @@ test "history writes leave signing refusals in caller-owned diagnostics" {
         try testing.expectEqualStrings("commit.gpgSign", diagnostic.unsupported_setting);
     }
 }
+
+test "a failed signing program leaves its stderr after the repository closes" {
+    const Output = struct {
+        fn stderr(d: *const repo_mod.Diagnostic) []const u8 {
+            return d.signing_stderr;
+        }
+    };
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testgit.fixtureHook(gpa, io, tmp.dir, "failed-signer", "reject", "1\nsigner refused this key\n");
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const executable = try std.fs.path.join(gpa, &.{ root, if (builtin.os.tag == .windows) "failed-signer.exe" else "failed-signer" });
+    defer gpa.free(executable);
+    var environ: std.process.Environ.Map = .init(gpa);
+    defer environ.deinit();
+    const programs: @import("program.zig").Programs = .{ .environ = &environ };
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
+    inline for (.{ "commit", "tag" }) |target| {
+        {
+            var repo = try Repository.init(gpa, io, tmp.dir, .{});
+            defer repo.deinit(io);
+            try repo.config.set("gpg.program", executable);
+            const tree = hash.Hasher.object(.sha1, "tree", "");
+            if (comptime std.mem.eql(u8, target, "commit")) {
+                try testing.expectError(error.SigningFailed, repo.writeCommit(io, .{
+                    .tree = tree,
+                    .author = who,
+                    .committer = who,
+                    .message = "m",
+                    .signing = .{ .sign = .always, .programs = programs },
+                }, &diagnostic));
+            } else {
+                try testing.expectError(error.SigningFailed, repo.writeTagWith(io, .{
+                    .target = tree,
+                    .target_type = .tree,
+                    .name = "t",
+                    .tagger = who,
+                    .message = "m",
+                }, .{ .sign = .always, .programs = programs }, &diagnostic));
+            }
+        }
+        const expected = "signer refused this key\n";
+        const stderr = Output.stderr(&diagnostic);
+        try testing.expectEqualStrings(expected, stderr[0..@min(stderr.len, expected.len)]);
+        try testing.expectEqualStrings("", diagnostic.unsupported_setting);
+        // An unrelated failed open clears the previous signer output.
+        var not_repo = testing.tmpDir(.{});
+        defer not_repo.cleanup();
+        try testing.expectError(error.NotARepository, Repository.open(gpa, io, not_repo.dir, .{ .discover = false, .diagnostic = &diagnostic }));
+        try testing.expectEqualStrings("", Output.stderr(&diagnostic));
+        try tmp.dir.deleteTree(io, ".git");
+    }
+}
