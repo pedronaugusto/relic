@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Object discovery uses one absence policy for source directories and loose probes, preserving unreadable walks, prefix iteration, corrupt packs and optional-index or hint read resource failures instead of returning incomplete success.
+
 - Snapshot closure ownership validates tree and blob edge types, including objects already private, before certifying a retained tree.
 
 - The linked reftable fetch fixture requires Git 2.45, which can create its backend, while every assertion runs on the primary platform gates.

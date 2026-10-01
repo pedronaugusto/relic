@@ -433,7 +433,7 @@ pub const Odb = struct {
         while (lines.next()) |raw_line| {
             const line = (try parseAlternate(odb.backendData().gpa, raw_line)) orelse continue;
             defer odb.backendData().gpa.free(line);
-            const alt = dir.openDir(io, line, .{ .iterate = true }) catch continue;
+            const alt = (try opening.openDirectory(io, dir, line)) orelse continue;
             const before = odb.backendData().sources.items.len;
             odb.addSource(io, alt, false, depth + 1) catch |err| {
                 if (odb.backendData().sources.items.len == before) {
@@ -445,10 +445,7 @@ pub const Odb = struct {
                     for (odb.backendData().sources.items[before..]) |*source| odb.closeSource(io, source);
                     odb.backendData().sources.items.len = before;
                 }
-                switch (err) {
-                    error.AlternatesTooDeep, error.OutOfMemory, error.Canceled => return err,
-                    else => continue,
-                }
+                return err;
             };
         }
     }
@@ -473,8 +470,8 @@ pub const Odb = struct {
                 .access = if (odb.backendData().options.map_packs) .map else .read,
                 .max_depth = odb.backendData().options.max_delta_depth,
             }) catch |err| switch (err) {
-                error.OutOfMemory, error.Canceled => |failure| return failure,
-                else => continue,
+                error.FileNotFound, error.NotDir => continue,
+                else => return err,
             };
             errdefer opened.deinit(io);
             const name = try odb.backendData().gpa.dupe(u8, base);
@@ -498,8 +495,8 @@ pub const Odb = struct {
 
         const pack_dir = source.pack_dir orelse return;
         var index = (midx.Index.open(odb.backendData().gpa, io, pack_dir, odb.backendData().kind) catch |err| switch (err) {
-            error.OutOfMemory, error.Canceled => |failure| return failure,
-            else => return,
+            error.NotAMultiPackIndex, error.UnsupportedMidxVersion, error.ObjectFormatMismatch, error.CorruptMultiPackIndex, error.ChainUnsupported => return,
+            else => |failure| return failure,
         }) orelse return;
         errdefer index.deinit();
 
@@ -736,8 +733,7 @@ pub const Odb = struct {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |*source| {
-            source.dir.access(io, path, .{}) catch continue;
-            return true;
+            if (try opening.exists(io, source.dir, path)) return true;
         }
         for (odb.backendData().sources.items) |*source| {
             if ((try source.findPack(oid, &odb.stats)) != null) return true;
@@ -763,11 +759,11 @@ pub const Odb = struct {
         var found: ?Oid = null;
         for (odb.backendData().sources.items) |*source| {
             var dir_name: [3]u8 = .{ prefix[0], prefix[1], 0 };
-            const sub = source.dir.openDir(io, dir_name[0..2], .{ .iterate = true }) catch null;
+            const sub = try opening.openDirectory(io, source.dir, dir_name[0..2]);
             if (sub) |d| {
                 defer d.close(io);
                 var it = d.iterate();
-                while (it.next(io) catch null) |entry| {
+                while (try it.next(io)) |entry| {
                     if (entry.kind == .directory) continue;
                     if (entry.name.len != odb.backendData().kind.hexLen() - 2) continue;
                     var full: [hash.max_hex_len]u8 = undefined;
@@ -818,7 +814,7 @@ pub const Odb = struct {
         const source = odb.writableSource();
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
-        if (source.dir.access(io, path, .{})) |_| return true else |_| {}
+        if (try opening.exists(io, source.dir, path)) return true;
         return (try source.findPack(oid, &odb.stats)) != null;
     }
 
@@ -1110,7 +1106,7 @@ pub const Odb = struct {
                 if (entry.kind != .directory) continue;
                 if (entry.name.len != 2) continue;
                 if (hexPair(entry.name) == null) continue;
-                const sub = source.dir.openDir(io, entry.name, .{ .iterate = true }) catch continue;
+                const sub = (try opening.openDirectory(io, source.dir, entry.name)) orelse continue;
                 defer sub.close(io);
                 var it = sub.iterate();
                 while (try it.next(io)) |file_entry| {
@@ -1157,7 +1153,7 @@ pub const Odb = struct {
             while (try top.next(io)) |entry| {
                 if (entry.kind != .directory or entry.name.len != 2) continue;
                 if (hexPair(entry.name) == null) continue;
-                const sub = source.dir.openDir(io, entry.name, .{ .iterate = true }) catch continue;
+                const sub = (try opening.openDirectory(io, source.dir, entry.name)) orelse continue;
                 defer sub.close(io);
                 var it = sub.iterate();
                 while (try it.next(io)) |file_entry| {
@@ -1596,7 +1592,7 @@ pub const Odb = struct {
         while (try top.next(io)) |entry| {
             if (entry.kind != .directory or entry.name.len != 2) continue;
             if (hexPair(entry.name) == null) continue;
-            const sub = source.dir.openDir(io, entry.name, .{ .iterate = true }) catch continue;
+            const sub = (try opening.openDirectory(io, source.dir, entry.name)) orelse continue;
             defer sub.close(io);
             var it = sub.iterate();
             while (try it.next(io)) |file| {
@@ -1639,9 +1635,15 @@ pub const Odb = struct {
         var hints: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty;
         defer hints.deinit(odb.backendData().gpa);
         for (entries) |entry| {
-            const head = odb.readHeader(io, entry.oid) catch continue;
+            const head = odb.readHeader(io, entry.oid) catch |err| {
+                if (opening.readRefusal(err)) return err;
+                continue;
+            };
             if (head.type != .tree) continue;
-            const found = odb.read(io, entry.oid) catch continue;
+            const found = odb.read(io, entry.oid) catch |err| {
+                if (opening.readRefusal(err)) return err;
+                continue;
+            };
             defer odb.backendData().gpa.free(found.bytes);
             var it = object.Tree.parse(odb.backendData().kind, found.bytes).iterate();
             while (it.next() catch null) |child| {
@@ -2624,4 +2626,109 @@ test "selected object durability names a foreign object format" {
     var db = try Odb.openAt(std.testing.allocator, io, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false });
     defer db.deinit(io);
     try std.testing.expectError(error.ObjectFormatMismatch, db.makeDurable(io, &.{hash.Hasher.object(.sha256, "blob", "a")}));
+}
+
+test "object discovery refuses unreadable loose state instead of partial answers" {
+    const Probe = struct {
+        var failure: Io.Dir.OpenError = error.AccessDenied;
+        fn openDir(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+            if (path.len == 2) return failure;
+            return dir.openDir(std.testing.io, path, options);
+        }
+        fn access(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
+            return error.InputOutput;
+        }
+        fn next(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
+            return error.Canceled;
+        }
+    };
+    const gpa = std.testing.allocator;
+    const base = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var db = try Odb.openAt(gpa, base, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(base);
+    const oid = try db.write(base, .blob, "a");
+    var vtable = base.vtable.*;
+    vtable.dirOpenDir = Probe.openDir;
+    var io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+    var hex: [hash.max_hex_len]u8 = undefined;
+    for ([_]Io.Dir.OpenError{ error.AccessDenied, error.ProcessFdQuotaExceeded, error.Canceled }) |err| {
+        Probe.failure = err;
+        try std.testing.expectError(err, db.verify(io));
+        try std.testing.expectError(err, db.listObjects(io));
+        try std.testing.expectError(err, db.collectLoose(io, .{}));
+        try std.testing.expectError(err, db.collectAll(io, .{}));
+        try std.testing.expectError(err, db.findPrefix(io, oid.hex(&hex)[0..8]));
+    }
+    vtable = base.vtable.*;
+    vtable.dirAccess = Probe.access;
+    io.vtable = &vtable;
+    try std.testing.expectError(error.InputOutput, db.exists(io, oid));
+    try std.testing.expectError(error.InputOutput, db.existsOwn(io, oid));
+    // Iteration itself must not turn a failed prefix search into a miss.
+    vtable = base.vtable.*;
+    vtable.dirRead = Probe.next;
+    try std.testing.expectError(error.Canceled, db.findPrefix(io, oid.hex(&hex)[0..8]));
+}
+
+test "object source discovery keeps alternate and pack read refusals" {
+    const Probe = struct {
+        fn openDir(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+            if (std.mem.eql(u8, path, "../other")) return error.ProcessFdQuotaExceeded;
+            return dir.openDir(std.testing.io, path, options);
+        }
+    };
+    const gpa = std.testing.allocator;
+    const base = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(base, "objects/info");
+    try tmp.dir.createDirPath(base, "objects/pack");
+    try tmp.dir.writeFile(base, .{ .sub_path = "objects/info/alternates", .data = "../other\n" });
+    var vtable = base.vtable.*;
+    vtable.dirOpenDir = Probe.openDir;
+    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+    if (Odb.open(gpa, io, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false })) |value| {
+        var unexpected = value;
+        unexpected.deinit(base);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.ProcessFdQuotaExceeded, err);
+    try tmp.dir.deleteFile(base, "objects/info/alternates");
+    // A named pack with a truncated index cannot disappear from discovery.
+    try tmp.dir.writeFile(base, .{ .sub_path = "objects/pack/pack-invalid.idx", .data = "x" });
+    if (Odb.open(gpa, base, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false })) |value| {
+        var unexpected = value;
+        unexpected.deinit(base);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.TruncatedIndex, err);
+}
+
+test "object discovery preserves optional index and hint read resources" {
+    const Probe = struct {
+        fn openFile(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
+            if (std.mem.eql(u8, path, "multi-pack-index") or (path.len > 2 and path[2] == '/')) return error.SystemResources;
+            return dir.openFile(std.testing.io, path, options);
+        }
+        fn open(io: Io, dir: Io.Dir) !void {
+            var db = try Odb.openAt(std.testing.allocator, io, dir, .sha1, .{ .probe_timestamp_resolution = false });
+            defer db.deinit(std.testing.io);
+        }
+        fn collect(db: *Odb, io: Io) !void {
+            var found = try db.collectLoose(io, .{});
+            defer found.deinit();
+        }
+    };
+    const base = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(base, "pack");
+    var vtable = base.vtable.*;
+    vtable.dirOpenFile = Probe.openFile;
+    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+    try std.testing.expectError(error.SystemResources, Probe.open(io, tmp.dir));
+    var db = try Odb.openAt(std.testing.allocator, base, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(base);
+    _ = try db.write(base, .tree, "");
+    try std.testing.expectError(error.SystemResources, Probe.collect(&db, io));
 }
