@@ -162,7 +162,9 @@ pub const Session = struct {
                 return .{ .gpa = gpa, .service = service, .impl = .{ .local = here } };
             },
             .ssh => {
-                const conn = try ssh.connect(gpa, io, parsed, service, .{
+                var identity = try url.Identity.parse(gpa, remote_url);
+                defer identity.deinit();
+                const conn = try ssh.connect(gpa, io, identity.url, service, .{
                     .programs = options.programs,
                     .config = options.config,
                     .service_program = options.service_program,
@@ -171,7 +173,7 @@ pub const Session = struct {
                 });
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind) catch |err| switch (err) {
-                    error.RemoteHungUp, error.ConnectionFailed, error.ProtocolError => return ssh.explain(gpa, conn, io, err, parsed, options.auth_failure),
+                    error.RemoteHungUp, error.ConnectionFailed, error.ProtocolError => return ssh.explain(gpa, conn, io, err, identity.url, options.auth_failure),
                     else => |e| return e,
                 };
             },

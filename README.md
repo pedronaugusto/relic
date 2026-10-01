@@ -377,6 +377,11 @@ well as `ssh://`; an at-sign in a repository path stays in the path.
 is recognized and refused as `UnsupportedTransport`, since relic does not
 run remote helpers. Callers decide which schemes and default ports name the
 same remote; they do not need to split the URL themselves.
+`transport.url.Identity.parse(gpa, text)` owns the raw text and decoded
+SSH/file URL fields under `identity.url`; release them with `deinit`.
+Decoding precedes splitting, including home paths and encoded delimiters.
+Scp shorthand and plain paths keep percent signs literal, HTTP keeps its
+encoded request path, and `identity.url.raw` always retains the original.
 
 **TLS, HTTP and inflate are relic's own, each for something the standard
 library cannot do.** Every https connection goes through relic's TLS and HTTP

@@ -50,7 +50,12 @@ pub const Remote = struct {
     /// repository — its working tree, its `.git`, or a bare repository —
     /// and is not searched above, as git does not search above a remote's.
     pub fn open(gpa: Allocator, io: Io, location: []const u8) Error!Remote {
-        const parsed = url_mod.Url.parse(location) catch return error.NotARepository;
+        var identity = url_mod.Identity.parse(gpa, location) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NotARepository,
+        };
+        defer identity.deinit();
+        const parsed = identity.url;
         if (!parsed.isLocalRepository()) return error.NotARepository;
         var dir = Io.Dir.cwd().openDir(io, parsed.path, .{ .iterate = true }) catch return error.NotARepository;
         defer dir.close(io);

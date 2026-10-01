@@ -43,7 +43,7 @@ pub const Url = struct {
     /// Empty for a local path; a non-local file authority is kept here.
     host: []const u8 = "",
     port: ?u16 = null,
-    /// For ssh, exactly what the remote command is given: `~user/repo` or
+    /// For ssh, the path spelling (use Identity for decoded bytes): `~user/repo` or
     /// `/srv/repo.git`, or `path/repo` relative to the login directory for
     /// the scp-like form. For a local path, the path. For http, the path
     /// part of the URL with its query, if any.
@@ -129,6 +129,69 @@ pub const Url = struct {
     /// Whether the repository is on this machine.
     pub fn isLocalRepository(url: Url) bool {
         return url.scheme == .local or url.scheme == .file;
+    }
+};
+
+/// An allocator-owned URL identity. `url` borrows only this owner's bytes;
+/// raw text stays intact for transport and display. SSH, file and Git URL
+/// forms decode before splitting, as Git does; scp shorthand, local paths
+/// and HTTP URLs keep literal bytes. No equivalence policy is imposed.
+pub const Identity = struct {
+    gpa: Allocator,
+    url: Url,
+    raw: []u8,
+    decoded: ?[]u8,
+
+    pub fn parse(gpa: Allocator, text: []const u8) (Allocator.Error || ParseError)!Identity {
+        const raw = try gpa.dupe(u8, text);
+        errdefer gpa.free(raw);
+        var decoded: ?[]u8 = null;
+        errdefer if (decoded) |bytes| gpa.free(bytes);
+        // Read the scheme before decoding: escapes cannot invent a transport.
+        const sep = schemeEnd(raw);
+        const decode = if (sep) |end| blk: {
+            const scheme = raw[0..end];
+            break :blk std.ascii.eqlIgnoreCase(scheme, "ssh") or
+                std.ascii.eqlIgnoreCase(scheme, "git+ssh") or
+                std.ascii.eqlIgnoreCase(scheme, "ssh+git") or
+                std.ascii.eqlIgnoreCase(scheme, "file") or
+                std.ascii.eqlIgnoreCase(scheme, "git");
+        } else false;
+        var parsed: Url = undefined;
+        if (decode) {
+            decoded = try gpa.dupe(u8, raw);
+            const buffer = decoded.?;
+            var read: usize = sep.?;
+            var write: usize = read;
+            while (read < buffer.len) {
+                if (buffer[read] == '%' and buffer.len - read >= 3) {
+                    const hi = std.fmt.charToDigit(buffer[read + 1], 16) catch null;
+                    const lo = std.fmt.charToDigit(buffer[read + 2], 16) catch null;
+                    if (hi != null and lo != null) {
+                        const byte = hi.? * 16 + lo.?;
+                        // Git leaves zero and malformed escapes literal.
+                        if (byte != 0) {
+                            buffer[write] = byte;
+                            write += 1;
+                            read += 3;
+                            continue;
+                        }
+                    }
+                }
+                buffer[write] = buffer[read];
+                write += 1;
+                read += 1;
+            }
+            parsed = try Url.parse(buffer[0..write]);
+            parsed.raw = raw;
+        } else parsed = try Url.parse(raw);
+        return .{ .gpa = gpa, .url = parsed, .raw = raw, .decoded = decoded };
+    }
+
+    pub fn deinit(identity: *Identity) void {
+        if (identity.decoded) |bytes| identity.gpa.free(bytes);
+        identity.gpa.free(identity.raw);
+        identity.* = undefined;
     }
 };
 
@@ -409,4 +472,53 @@ test "file URL authorities follow git on this platform" {
     const parsed = try Url.parse(text);
     try testing.expectEqualStrings(path, parsed.path);
     try fixture.exec(io, &.{ "ls-remote", text });
+}
+
+test "decoded URL identities own their text and follow Git percent rules" {
+    const Check = struct {
+        fn run(gpa: Allocator) !void {
+            const cases = [_][2][]const u8{
+                .{ "ssh://ada%40example@[::1]:2222/%7Eada/a%20b%2Fc%25d+e", "~ada/a b/c%d+e" },
+                .{ "file:///a%20b/%2520/%00/%GG/%2", "/a b/%20/%00/%GG/%2" },
+                .{ "host:a%20b", "a%20b" },
+                .{ "./a%20b", "./a%20b" },
+                .{ "https://host/a%20b?q=%2F", "/a%20b?q=%2F" },
+            };
+            for (cases) |case| {
+                const input = try testing.allocator.dupe(u8, case[0]);
+                defer testing.allocator.free(input);
+                var identity = try Identity.parse(gpa, input);
+                defer identity.deinit();
+                @memset(input, 'x');
+                try testing.expectEqualStrings(case[0], identity.url.raw);
+                try testing.expectEqualStrings(case[1], identity.url.path);
+                if (identity.url.scheme == .ssh and identity.url.port != null) {
+                    try testing.expectEqualStrings("ada@example", identity.url.user.?);
+                    try testing.expectEqualStrings("::1", identity.url.host);
+                    try testing.expectEqual(@as(?u16, 2222), identity.url.port);
+                }
+            }
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+}
+
+test "encoded file URL paths reach the same repository as Git" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var fixture = try @import("testgit.zig").Repo.init(gpa, io, &.{});
+    defer fixture.deinit();
+    try fixture.exec(io, &.{ "init", "-q", "--bare", "a b%20" });
+    const path = try fixture.dir.realPathFileAlloc(io, "a b%20", gpa);
+    defer gpa.free(path);
+    const escaped_percent = try std.mem.replaceOwned(u8, gpa, path, "%", "%25");
+    defer gpa.free(escaped_percent);
+    const escaped = try std.mem.replaceOwned(u8, gpa, escaped_percent, " ", "%20");
+    defer gpa.free(escaped);
+    const text = try std.fmt.allocPrint(gpa, "file://{s}", .{escaped});
+    defer gpa.free(text);
+    try fixture.exec(io, &.{ "ls-remote", text });
+    var remote = try @import("local.zig").Remote.open(gpa, io, text);
+    defer remote.deinit(io);
+    try testing.expect(remote.repo.isBare());
 }

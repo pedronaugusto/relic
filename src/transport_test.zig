@@ -359,7 +359,10 @@ test "ssh is handed the same arguments git hands it" {
     defer gpa.free(url_inside);
     const url_scp_port = try std.fmt.allocPrint(gpa, "[example.invalid:2222]:{s}", .{source_path});
     defer gpa.free(url_scp_port);
+    const url_encoded = try std.fmt.allocPrint(gpa, "ssh://ada@example.invalid:2222{s}{s}/it%27s", .{ drive_slash, source_path });
+    defer gpa.free(url_encoded);
     const cases = [_]Case{
+        .{ .url = url_encoded },
         .{ .url = url_ipv6 },
         .{ .url = url_user_ipv6 },
         .{ .url = url_inside },
