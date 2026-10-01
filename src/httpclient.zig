@@ -232,6 +232,12 @@ pub const Client = struct {
         @field(c, field) = value;
     }
 
+    fn noteUnwatched(c: *Client) void {
+        c.lock.lockUncancelable(c.io);
+        defer c.lock.unlock(c.io);
+        c.unwatched += 1;
+    }
+
     /// The system's certificates, read at the first handshake that needs
     /// them when nothing was trusted before.
     fn ensureTrusted(c: *Client) Error!void {
@@ -797,7 +803,7 @@ pub const Connection = struct {
             if (io.concurrent(watch, .{conn})) |future| {
                 conn.watchdog = future;
             } else |_| {
-                c.note("unwatched", c.unwatched + 1);
+                c.noteUnwatched();
             }
         }
         errdefer conn.stopWatching();
@@ -825,7 +831,7 @@ pub const Connection = struct {
         var buffer: [2]Race = undefined;
         var race: Io.Select(Race) = .init(io, &buffer);
         race.concurrent(.connected, Io.net.HostName.connect, .{ host_name, io, port, .{ .mode = .stream } }) catch {
-            c.note("unwatched", c.unwatched + 1);
+            c.noteUnwatched();
             return plainDial(io, host_name, port);
         };
         race.concurrent(.expired, Io.sleep, .{ io, limit, .awake }) catch {
@@ -833,7 +839,7 @@ pub const Connection = struct {
                 .connected => |result| if (result) |stream| return stream else |_| {},
                 .expired => {},
             };
-            c.note("unwatched", c.unwatched + 1);
+            c.noteUnwatched();
             return plainDial(io, host_name, port);
         };
         const first = race.await() catch |err| {
@@ -1410,6 +1416,58 @@ test "tasks sending at once through one client share the connections it keeps" {
     if (client.connections > 4) std.debug.print("twenty requests opened {d} connections for four workers\n", .{client.connections});
     try std.testing.expect(client.connections <= 4);
     try std.testing.expect(client.idle.items.len <= 4);
+}
+
+test "concurrent timeout fallbacks count each unwatched connection" {
+    const Controlled = struct {
+        waiting: std.atomic.Value(usize) = .init(0),
+        ready: Io.Event = .unset,
+        threadlocal var state: *@This() = undefined;
+        threadlocal var counted: bool = false;
+
+        fn wait(_: ?*anyopaque, ptr: *const u32, expected: u32) void {
+            if (!counted) {
+                counted = true;
+                if (state.waiting.fetchAdd(1, .acq_rel) == 1) state.ready.set(std.testing.io);
+            }
+            std.testing.io.vtable.futexWaitUncancelable(std.testing.io.userdata, ptr, expected);
+        }
+
+        fn connect(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {
+            return error.ConnectionRefused;
+        }
+
+        fn run(c: *Client, control: *@This(), result: *Error!Io.net.Stream) void {
+            state = control;
+            counted = false;
+            result.* = Connection.dial(c, "127.0.0.1", 1);
+        }
+    };
+    const io = std.testing.io;
+    var state: Controlled = .{};
+    var vtable = io.vtable.*;
+    vtable.concurrent = Io.failing.vtable.concurrent;
+    vtable.groupConcurrent = Io.failing.vtable.groupConcurrent;
+    vtable.futexWaitUncancelable = Controlled.wait;
+    vtable.netConnectIp = Controlled.connect;
+    const guarded: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var client: Client = .init(std.testing.allocator, guarded);
+    defer client.deinit();
+    client.timeouts.connect = .fromSeconds(10);
+    var results: [2]Error!Io.net.Stream = undefined;
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    // Both fallbacks arrive at the locked counter before either may
+    // change it. Computing an increment outside the lock loses one.
+    client.lock.lockUncancelable(guarded);
+    {
+        defer client.lock.unlock(guarded);
+        for (&results) |*result| try group.concurrent(io, Controlled.run, .{ &client, &state, result });
+        try state.ready.wait(io);
+    }
+    try group.await(io);
+    for (results) |result| try std.testing.expectError(error.ConnectionFailed, result);
+    try std.testing.expectEqual(@as(u32, 2), client.unwatched);
 }
 
 test "the watchdog cannot expire activity begun after its clock sample" {
