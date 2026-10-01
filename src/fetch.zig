@@ -995,7 +995,7 @@ fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repositor
     // The main working tree's `HEAD` is the shared directory's, whichever
     // worktree this repository was opened from.
     if (!repo.isBare() or repo.common_is_separate) {
-        var main_store: refs_mod.Store = try .init(gpa, repo.objectFormat(), repo.common_dir, repo.common_dir);
+        var main_store = try refs_mod.Store.initWithOptions(gpa, repo.objectFormat(), repo.common_dir, repo.common_dir, .{ .format = repo.refStore().refFormat() });
         defer main_store.deinit();
         const bare = repo.config.getBool("core.bare", false) catch false;
         if (!bare) {
@@ -1458,4 +1458,25 @@ test "unshallowing a whole repository and a filtered fetch are refused by name" 
     defer repo.deinit(io);
     try testing.expectError(error.NotShallow, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true }));
     try testing.expectError(error.NotAPromisorRemote, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .filter = "blob:none" }));
+}
+
+test "a linked reftable fetch sees the main worktree branch through its backend" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var main = try testgit.Repo.init(gpa, io, &.{"--ref-format=reftable"});
+    defer main.deinit();
+    try main.exec(io, &.{ "commit", "--allow-empty", "-qm", "base" });
+    var linked = testing.tmpDir(.{ .iterate = true });
+    defer linked.cleanup();
+    var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const path = path_buf[0..try linked.dir.realPath(io, &path_buf)];
+    try main.exec(io, &.{ "worktree", "add", "-qb", "linked", path });
+    var repo = try Repository.open(gpa, io, linked.dir, .{});
+    defer repo.deinit(io);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const branches = try checkedOutBranches(arena.allocator(), gpa, io, &repo);
+    var main_found = false;
+    for (branches) |branch| main_found = main_found or std.mem.eql(u8, branch, "refs/heads/main");
+    try testing.expect(main_found);
 }
