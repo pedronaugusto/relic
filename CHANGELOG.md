@@ -77,6 +77,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- CI runs Debug and ReleaseSafe on every host, ReleaseFast and ThreadSanitizer once on Linux, and ReleaseSmall as a compile check.
+
 - Relic depends on conduit for process spawning, bounded input and output, waiting and termination. Git command preparation, environment scrubbing and caller execution policy remain in relic.
 
 - Breaking: `program.SpawnHook.start` receives an allocator and `conduit.Child.SpawnOptions`, returns `conduit.Child`, and reports its spawn errors; `terminate` receives that child too. `Running.child` uses conduit's stream accessors and ownership transfers. Conduit links libc on POSIX through its module.
