@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- TLS handshakes and trust refreshes sample current real time through the caller’s Io, so a long-lived client checks new connections against current certificate validity.
+
 - Process-filter parity tests count only each add's logs, excluding Git write-tree's separate racy-index rechecks.
 
 - Merge, rename/diff and revwalk parity corpora give every seed its own named test and deadline without reducing coverage.

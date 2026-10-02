@@ -22,7 +22,7 @@
 //! closed is kept, and the next request to the same place goes over it, as
 //! curl keeps one for git; a client used by several tasks at once keeps up
 //! to `max_idle`, one per task, as Go's transport keeps them for git-lfs.
-//! The time, which a certificate check needs, is read once per client.
+//! Each TLS handshake checks certificates against the current real time.
 //!
 //! Timeouts, when a caller sets them, are kept by a watchdog task beside
 //! each connection: a connection that takes too long to make, a handshake
@@ -170,16 +170,13 @@ pub const Client = struct {
     /// proxy.
     proxy_bundle: Certificate.Bundle = .empty,
     proxy_trusted: bool = false,
-    /// The time certificates are checked against, read at the first TLS
-    /// connection.
-    now: ?Io.Timestamp = null,
     /// How long each step may take.
     timeouts: Timeouts = .{},
     /// How many connections may be kept for the requests to come.
     max_idle: usize = 1,
     /// The connections kept, the most recently used last.
     idle: std.ArrayList(*Connection) = .empty,
-    /// Held for `idle`, `now`, `connections` and the two answers below, so
+    /// Held for `idle`, `connections` and the proxy answer below, so
     /// several tasks can send at once.
     lock: Io.Mutex = .init,
     /// The proxy's status when it last refused a tunnel.
@@ -218,12 +215,7 @@ pub const Client = struct {
     }
 
     fn clock(c: *Client) Io.Timestamp {
-        c.lock.lockUncancelable(c.io);
-        defer c.lock.unlock(c.io);
-        if (c.now) |t| return t;
-        const t = Io.Clock.real.now(c.io);
-        c.now = t;
-        return t;
+        return Io.Clock.real.now(c.io);
     }
 
     fn note(c: *Client, comptime field: []const u8, value: anytype) void {
@@ -1753,4 +1745,67 @@ test "fuzz: any response head is read or refused by name" {
             while (it.next()) |_| {}
         }
     }.one, .{ .corpus = &.{"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n"} });
+}
+
+const CertificateClock = struct {
+    threadlocal var current: Io.Timestamp = .zero;
+    threadlocal var reads: usize = 0;
+
+    fn now(context: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
+        if (clock != .real) return std.testing.io.vtable.now(context, clock);
+        reads += 1;
+        return current;
+    }
+
+    fn io(vtable: *Io.VTable) Io {
+        vtable.* = std.testing.io.vtable.*;
+        vtable.now = now;
+        return .{ .userdata = std.testing.io.userdata, .vtable = vtable };
+    }
+};
+
+test "trust refresh samples certificate time even after a failed read" {
+    var vtable: Io.VTable = undefined;
+    var client: Client = .init(std.testing.allocator, CertificateClock.io(&vtable));
+    defer client.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try @import("testremote.zig").absolutePath(std.testing.allocator, std.testing.io, tmp.dir);
+    defer std.testing.allocator.free(path);
+    const absent = try std.fs.path.join(std.testing.allocator, &.{ path, "absent.pem" });
+    defer std.testing.allocator.free(absent);
+    CertificateClock.current = Io.Clock.real.now(std.testing.io);
+    CertificateClock.reads = 0;
+    try std.testing.expectError(error.CertificateFileUnreadable, client.trustFile(absent));
+    CertificateClock.current.nanoseconds += std.time.ns_per_s;
+    try std.testing.expectError(error.CertificateFileUnreadable, client.trustProxyFile(absent));
+    try std.testing.expectEqual(@as(usize, 2), CertificateClock.reads);
+}
+
+test "new TLS connections check certificate validity at their own time" {
+    const gpa = std.testing.allocator;
+    const fixture_io = std.testing.io;
+    const front = try @import("testremote.zig").TlsFront.start(gpa, fixture_io, 1);
+    defer front.stop(fixture_io);
+    var vtable: Io.VTable = undefined;
+    var client: Client = .init(gpa, CertificateClock.io(&vtable));
+    defer client.deinit();
+    CertificateClock.current = Io.Clock.real.now(fixture_io);
+    try client.trustFile(front.cert_path);
+    const cert: Certificate = .{ .buffer = client.bundle.bytes.items, .index = 0 };
+    const validity = (try cert.parse()).validity;
+    const target: Target = .{ .tls = true, .host = "127.0.0.1", .port = front.port };
+    CertificateClock.current.nanoseconds = @as(i96, validity.not_before + 1) * std.time.ns_per_s;
+    (try client.connect(target)).close();
+    CertificateClock.current.nanoseconds = @as(i96, validity.not_after + 1) * std.time.ns_per_s;
+    if (client.connect(target)) |conn| {
+        conn.close();
+        return error.ExpiredCertificateAccepted;
+    } else |err| try std.testing.expectEqual(error.TlsFailed, err);
+    try std.testing.expectEqual(error.CertificateExpired, client.tls_error.?);
+    CertificateClock.current.nanoseconds = @as(i96, validity.not_before - 1) * std.time.ns_per_s;
+    try std.testing.expectError(error.TlsFailed, client.connect(target));
+    try std.testing.expectEqual(error.CertificateNotYetValid, client.tls_error.?);
+    CertificateClock.current.nanoseconds = @as(i96, validity.not_before + 1) * std.time.ns_per_s;
+    (try client.connect(target)).close();
 }
