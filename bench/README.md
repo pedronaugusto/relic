@@ -1,5 +1,7 @@
 # relic benchmark preparation
 
+Keep the `bench` worktree in the workspace’s `.bench/relic`, outside `.zig-cache`; `bench/quiet.sh` resolves its files from its own directory.
+
 Pinned before: `86045db483496f695795ec5ee653e99ebf2dd395`.
 Pinned current main: `3c7e039028fe0201b6d3b284bd99eb7547f37d22`.
 

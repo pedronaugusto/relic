@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Keep the quiet benchmark worktree outside Zig’s disposable cache.
+
 ### Changed
 
 - Breaking: HTTP Streaming.finish consumes its connection on success and failure; callers abort only before finish, and smart HTTP and LFS transfer cleanup with the stream.
