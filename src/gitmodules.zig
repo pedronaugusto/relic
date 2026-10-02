@@ -23,7 +23,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 
 /// Errors from reading `.gitmodules`.
 pub const ParseError = error{

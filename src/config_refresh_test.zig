@@ -11,7 +11,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const testgit = @import("testgit.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 
 const Repository = repo_mod.Repository;
 const testing = std.testing;

@@ -25,20 +25,20 @@ const Io = std.Io;
 const builtin = @import("builtin");
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const refs_mod = @import("refs.zig");
-const repo_mod = @import("repo.zig");
+const object = @import("object_core.zig");
+const refs_mod = @import("refs_core.zig");
+const repo_mod = @import("repo_core.zig");
 const pack = @import("pack.zig");
 const fetchpack = @import("fetchpack.zig");
 const shallow_mod = @import("shallow.zig");
 const indexpack = @import("indexpack.zig");
 const revindex = @import("revindex.zig");
 const partial = @import("partial.zig");
-const worktree = @import("worktree.zig");
+const worktree = @import("worktree_core.zig");
 const filter = @import("filter.zig");
 const url_mod = @import("url.zig");
 const program = @import("program.zig");
-const transport = @import("transport.zig");
+const transport = @import("transport_core.zig");
 const objectwalk = @import("objectwalk.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
@@ -46,7 +46,7 @@ const remote_mod = @import("remote.zig");
 const warning = @import("warning.zig");
 const clonelfs = @import("clonelfs.zig");
 const progress_mod = @import("progress.zig");
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -138,7 +138,7 @@ pub const Options = struct {
     /// Checks received objects the way git's `fsck` does.
     check_objects: bool = true,
     /// What the new repository's object database is opened with.
-    odb: @import("odb.zig").Options = .{},
+    odb: @import("odb_core.zig").Options = .{},
 };
 
 /// Clone `url` into `dir`, which must be empty, and return the new

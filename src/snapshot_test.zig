@@ -2,9 +2,9 @@ const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
 const snapshot = @import("snapshot.zig");
-const repo = @import("repo.zig");
-const odb = @import("odb.zig");
-const object = @import("object.zig");
+const repo = @import("repo_core.zig");
+const odb = @import("odb_core.zig");
+const object = @import("object_core.zig");
 const hash = @import("hash.zig");
 const testgit = @import("testgit.zig");
 
@@ -142,7 +142,7 @@ test "snapshot follows repository membership and current ignore and attribute ru
     const next = try store.capture(io, .{ .repository = &r }, .{});
     var changes = try store.diff(io, captured.snapshot, next.snapshot, .{});
     defer changes.deinit();
-    try testing.expectEqual(@import("diff.zig").Status.deleted, changes.find("sub/new").?.status);
+    try testing.expectEqual(@import("diff_core.zig").Status.deleted, changes.find("sub/new").?.status);
 }
 
 test "snapshot captures a plain folder incrementally and restores additions deletions and modes" {
@@ -240,7 +240,7 @@ test "snapshot keeps native LFS writes inside the private store" {
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
     const pointer_text = try dest.dir.readFileAlloc(io, "large.bin", gpa, .limited(1024));
     defer gpa.free(pointer_text);
-    const lfs = @import("lfs.zig");
+    const lfs = @import("lfs_core.zig");
     const pointer = try lfs.Pointer.decode(pointer_text);
     const payloads = lfs.Store{ .base = store.dir, .root = "lfs" };
     try testing.expect(try payloads.contains(io, &pointer));

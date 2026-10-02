@@ -21,7 +21,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const odb_mod = @import("odb.zig");
+const odb_mod = @import("odb_core.zig");
 const similarity = @import("similarity.zig");
 
 const Oid = hash.Oid;

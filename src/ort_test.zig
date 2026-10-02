@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const odb_mod = @import("odb.zig");
+const odb_mod = @import("odb_core.zig");
 const ort = @import("ort.zig");
 const testgit = @import("testgit.zig");
 
@@ -1106,7 +1106,7 @@ test "a rename search too big for merge.renameLimit is skipped as git skips it" 
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{ .rename_limit = 4 });
 }
 
-const diff = @import("diff.zig");
+const diff = @import("diff_core.zig");
 
 fn renderNameStatus(gpa: Allocator, changes: *const diff.Changes) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);

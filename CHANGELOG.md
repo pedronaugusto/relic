@@ -10,6 +10,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Supply concurrency fixtures through build options without importing the test root.
 
+- Reject undeclared dependencies, duplicate layer membership and imports of source executables.
+
+- Keep API namespaces above their implementations and shared storage contracts.
+
+- Check named source layers, cycles, entry files and dependency owners during source CI.
+
 - Bound local Zig build caches before builds, retaining downloaded packages and tools.
 
 ### Changed

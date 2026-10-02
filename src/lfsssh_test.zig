@@ -10,7 +10,7 @@ const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
 
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const lfstransfer = @import("lfstransfer.zig");
 const lfslocks = @import("lfslocks.zig");
 const lfspush = @import("lfspush.zig");

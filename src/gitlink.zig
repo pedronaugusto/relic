@@ -16,7 +16,7 @@ const Io = std.Io;
 
 const hash = @import("hash.zig");
 const fs = @import("fs.zig");
-const refs_mod = @import("refs.zig");
+const refs_mod = @import("refs_core.zig");
 const reftablestack = @import("reftablestack.zig");
 
 const Oid = hash.Oid;

@@ -21,16 +21,16 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const program = @import("program.zig");
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const progress_mod = @import("progress.zig");
-const submodule = @import("submodule.zig");
+const submodule = @import("submodule_core.zig");
 const clone_mod = @import("clone.zig");
 const fetch_mod = @import("fetch.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

@@ -15,7 +15,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const lfsapi = @import("lfsapi.zig");
 const lfslocks = @import("lfslocks.zig");
 const testlfs = @import("testlfs.zig");
@@ -172,7 +172,7 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
     gpa.free(listed);
     var theirs_repo = try repo_mod.Repository.open(gpa, io, pair.theirs, .{});
     defer theirs_repo.deinit(io);
-    const store: @import("lfs.zig").Store = .{ .base = theirs_repo.common_dir, .root = "lfs" };
+    const store: @import("lfs_core.zig").Store = .{ .base = theirs_repo.common_dir, .root = "lfs" };
     var table = try lfslocks.Table.cached(gpa, io, &store, "refs/heads/main");
     defer table.deinit();
     try testing.expectEqualStrings("ada", table.find("x.bin").?.owner.?);

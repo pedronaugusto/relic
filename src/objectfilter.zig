@@ -21,10 +21,10 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
+const object = @import("object_core.zig");
+const odb_mod = @import("odb_core.zig");
 const ignore = @import("ignore.zig");
-const objectwalk = @import("objectwalk.zig");
+const objectwalk = @import("walk_types.zig");
 
 const Oid = hash.Oid;
 const Odb = odb_mod.Odb;

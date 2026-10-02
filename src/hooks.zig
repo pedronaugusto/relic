@@ -34,8 +34,8 @@ const Io = std.Io;
 const Child = std.process.Child;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const config_mod = @import("config.zig");
+const object = @import("object_core.zig");
+const config_mod = @import("config_core.zig");
 const program = @import("program.zig");
 
 const Oid = hash.Oid;

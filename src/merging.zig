@@ -16,9 +16,9 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const merge = @import("merge.zig");
-const revwalk = @import("revwalk.zig");
+const object = @import("object_core.zig");
+const merge = @import("merge_core.zig");
+const revwalk = @import("revwalk_core.zig");
 const threeway = @import("threeway.zig");
 const refspec = @import("refspec.zig");
 const signing_mod = @import("signing.zig");
@@ -32,9 +32,9 @@ const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
 const message = @import("message.zig");
 const wildmatch = @import("wildmatch.zig");
-const worktree = @import("worktree.zig");
-const repo_mod = @import("repo.zig");
-const refs_mod = @import("refs.zig");
+const worktree = @import("worktree_core.zig");
+const repo_mod = @import("repo_core.zig");
+const refs_mod = @import("refs_core.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -524,7 +524,7 @@ pub fn removeMergeState(io: Io, repo: *Repository) head_mod.Error!void {
 fn configuredFastForward(repo: *Repository) FastForward {
     const text = repo.configuration().get("merge.ff") orelse return .allow;
     if (std.ascii.eqlIgnoreCase(text, "only")) return .only;
-    const on = @import("config.zig").parseBool(text) catch return .allow;
+    const on = @import("config_core.zig").parseBool(text) catch return .allow;
     return if (on) .allow else .never;
 }
 

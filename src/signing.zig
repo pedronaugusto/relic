@@ -36,8 +36,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const config_mod = @import("config.zig");
+const object = @import("object_core.zig");
+const config_mod = @import("config_core.zig");
 const program = @import("program.zig");
 const fs = @import("fs.zig");
 

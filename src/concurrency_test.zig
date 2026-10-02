@@ -8,8 +8,8 @@ const Io = std.Io;
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
 const fs = @import("fs.zig");
-const odb_mod = @import("odb.zig");
-const index_mod = @import("index.zig");
+const odb_mod = @import("odb_core.zig");
+const index_mod = @import("index_core.zig");
 const reflog = @import("reflog.zig");
 
 const Oid = hash.Oid;

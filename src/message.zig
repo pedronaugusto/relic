@@ -13,7 +13,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 
 /// How a message is cleaned before it is committed: `commit.cleanup`.
 pub const Cleanup = enum {

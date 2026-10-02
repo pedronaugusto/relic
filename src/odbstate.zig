@@ -9,7 +9,7 @@ const Oid = hash.Oid;
 const pack = @import("pack.zig");
 const midx = @import("midx.zig");
 const flate = std.compress.flate;
-const odb = @import("odb.zig");
+const odb = @import("odb_types.zig");
 const Error = odb.Error;
 const Stats = odb.Stats;
 

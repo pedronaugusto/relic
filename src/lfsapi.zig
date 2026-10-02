@@ -71,18 +71,18 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const http = std.http;
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const program = @import("program.zig");
 const credential = @import("credential.zig");
 const auth_mod = @import("auth.zig");
 const httpsettings = @import("httpsettings.zig");
 const url_mod = @import("url.zig");
 const remote_mod = @import("remote.zig");
-const repo_mod = @import("repo.zig");
-const lfs = @import("lfs.zig");
+const repo_mod = @import("repo_core.zig");
+const lfs = @import("lfs_core.zig");
 const mimesniff = @import("mimesniff.zig");
 const fs = @import("fs.zig");
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const netrc_mod = @import("netrc.zig");
 const timetext = @import("timetext.zig");
 const lfsssh = @import("lfsssh.zig");
@@ -2307,7 +2307,7 @@ pub const Server = struct {
 /// is for: the branch `HEAD` is on, or its `branch.<name>.merge` when that
 /// is set; `HEAD` when it is detached; and nothing on a branch with no
 /// commit yet, which git-lfs cannot resolve. The result is the caller's.
-pub fn downloadRef(gpa: Allocator, io: Io, repo: *repo_mod.Repository, settings: *const Settings) (Error || @import("refs.zig").ReadError)![]u8 {
+pub fn downloadRef(gpa: Allocator, io: Io, repo: *repo_mod.Repository, settings: *const Settings) (Error || @import("refs_core.zig").ReadError)![]u8 {
     const head = (try repo.head(io)) orelse return gpa.dupe(u8, "");
     defer repo.gpa.free(head.name);
     if (!std.mem.startsWith(u8, head.name, "refs/heads/")) return gpa.dupe(u8, head.name);

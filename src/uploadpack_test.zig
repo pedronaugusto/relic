@@ -10,8 +10,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
 
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
+const object = @import("object_core.zig");
+const repo_mod = @import("repo_core.zig");
 const clone_mod = @import("clone.zig");
 const fetch_mod = @import("fetch.zig");
 const warning = @import("warning.zig");
@@ -353,7 +353,7 @@ test "git and relic clone over HTTP from relic's upload-pack, one request at a t
         try tmp.dir.createDirPath(io, "relic-both");
         var c = try tmp.dir.openDir(io, "relic-both", .{ .iterate = true });
         defer c.close(io);
-        var config = try @import("config.zig").Config.parseText(gpa, if (std.mem.eql(u8, version, "0")) "[protocol]\nversion = 0\n" else "", .command);
+        var config = try @import("config_core.zig").Config.parseText(gpa, if (std.mem.eql(u8, version, "0")) "[protocol]\nversion = 0\n" else "", .command);
         defer config.deinit();
         var options: clone_mod.Options = .{ .who = test_who, .checkout = false, .programs = .{ .environ = &env }, .config = &config };
         for (extra) |arg| {

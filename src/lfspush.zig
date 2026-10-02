@@ -25,12 +25,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const odb_mod = @import("odb.zig");
-const repo_mod = @import("repo.zig");
+const odb_mod = @import("odb_core.zig");
+const repo_mod = @import("repo_core.zig");
 const program = @import("program.zig");
 const credential = @import("credential.zig");
 const progress_mod = @import("progress.zig");
-const lfs = @import("lfs.zig");
+const lfs = @import("lfs_core.zig");
 const lfsapi = @import("lfsapi.zig");
 const lfstransfer = @import("lfstransfer.zig");
 const lfslocks = @import("lfslocks.zig");
@@ -253,6 +253,6 @@ fn verifyState(a: Allocator, settings: *const lfsapi.Settings, url: []const u8) 
             std.ascii.eqlIgnoreCase(parts.host, "github.com");
         return if (known) .enabled else .unknown;
     };
-    const enabled = @import("config.zig").parseBool(value) catch false;
+    const enabled = @import("config_core.zig").parseBool(value) catch false;
     return if (enabled) .enabled else .disabled;
 }

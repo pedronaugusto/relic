@@ -17,7 +17,7 @@
 const std = @import("std");
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const safepath = @import("safepath.zig");
 
 const Oid = hash.Oid;

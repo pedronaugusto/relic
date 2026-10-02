@@ -27,10 +27,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const attributes = @import("attributes.zig");
 const fs = @import("fs.zig");
-const lfs = @import("lfs.zig");
+const lfs = @import("lfs_core.zig");
 const lfsapi = @import("lfsapi.zig");
 const lfsssh = @import("lfsssh.zig");
 
@@ -53,7 +53,7 @@ pub const Error = error{
     /// A path that is not inside the working tree, or is a directory.
     InvalidLockPath,
 } || attributes.Error || lfsapi.Error || fs.AtomicWriteError || Io.Dir.CreateDirPathError || Io.Dir.StatFileError ||
-    Io.Dir.SetFilePermissionsError || repo_mod.Error || @import("index.zig").ReadError ||
+    Io.Dir.SetFilePermissionsError || repo_mod.Error || @import("index_core.zig").ReadError ||
     lfsapi.Settings.LoadError || lfs.Lfs.LoadError;
 
 /// A lock, as the server reports it. Every slice is owned by whatever

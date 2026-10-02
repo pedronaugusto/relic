@@ -6,9 +6,9 @@ const builtin = @import("builtin");
 
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
-const odb_mod = @import("odb.zig");
-const worktree = @import("worktree.zig");
-const repo_mod = @import("repo.zig");
+const odb_mod = @import("odb_core.zig");
+const worktree = @import("worktree_core.zig");
+const repo_mod = @import("repo_core.zig");
 
 /// How many files the generated tree holds.
 ///

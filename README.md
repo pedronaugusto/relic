@@ -640,6 +640,7 @@ zig build test --test-timeout 60s   # the suite, and the examples, which are run
 zig build test -Dtest-filter=hooks --test-timeout 60s   # run matching tests while developing
 zig build examples      # the examples on their own
 zig build check         # compile everything, including the tests, run nothing
+zig build check-imports # named source layers and dependency owners
 zig build test --fuzz   # the fuzz tests, until stopped
 ci/readme_usage.sh --check   # the Usage block against the example
 ci/tls-fork.sh --check       # the TLS client's recorded diff against std's

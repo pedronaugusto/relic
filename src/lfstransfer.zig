@@ -45,12 +45,12 @@ const Io = std.Io;
 const http = std.http;
 
 const hash = @import("hash.zig");
-const object_mod = @import("object.zig");
-const odb_mod = @import("odb.zig");
-const index_mod = @import("index.zig");
-const repo_mod = @import("repo.zig");
+const object_mod = @import("object_core.zig");
+const odb_mod = @import("odb_core.zig");
+const index_mod = @import("index_core.zig");
+const repo_mod = @import("repo_core.zig");
 const fs = @import("fs.zig");
-const lfs = @import("lfs.zig");
+const lfs = @import("lfs_core.zig");
 const lfsapi = @import("lfsapi.zig");
 const objectwalk = @import("objectwalk.zig");
 const progress_mod = @import("progress.zig");
@@ -1778,7 +1778,7 @@ pub const FetchError = Error || objectwalk.Error || repo_mod.Error || error{
     /// A recent fetch counts `lfs.fetchrecentrefsdays` back from now, and
     /// `FetchOptions.now` was not given.
     LfsRecentNeedsTime,
-} || @import("revwalk.zig").Error || @import("diff.zig").Error || index_mod.ReadError || index_mod.WriteError || fs.AtomicWriteError || fs.StatError;
+} || @import("revwalk_core.zig").Error || @import("diff_core.zig").Error || index_mod.ReadError || index_mod.WriteError || fs.AtomicWriteError || fs.StatError;
 
 /// Bring the LFS objects the trees at `options.refs` point at into the
 /// store, as `git lfs fetch <remote> <refs>` does. A path
@@ -1849,7 +1849,7 @@ fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, t
         for (unique.items) |tip| {
             const tip_time = commitTime(arena, io, repo, tip) orelse continue;
             const since = tip_time - commits_days * 86400;
-            var walk = @import("revwalk.zig").Walk.init(server.gpa, &repo.odb);
+            var walk = @import("revwalk_core.zig").Walk.init(server.gpa, &repo.odb);
             defer walk.deinit();
             try walk.push(tip);
             while (try walk.next(io)) |c| {
@@ -1859,7 +1859,7 @@ fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, t
                 if (c.parents.len != 1) continue;
                 const old_tree = try treeOfCommit(arena, io, repo, c.parents[0]);
                 const new_tree = try treeOfCommit(arena, io, repo, c.oid);
-                var changes = try @import("diff.zig").tree(server.gpa, io, &repo.odb, old_tree, new_tree, .{});
+                var changes = try @import("diff_core.zig").tree(server.gpa, io, &repo.odb, old_tree, new_tree, .{});
                 defer changes.deinit();
                 for (changes.items) |change| {
                     const old = change.old orelse continue;
@@ -2225,7 +2225,7 @@ test "an ssh batch answer's lines become the objects and actions git-lfs reads f
 }
 
 test "LFS URL rewriting preserves allocation resource failures" {
-    var config = try @import("config.zig").Config.parseText(testing.allocator, "[lfs.transfer]\nenablehrefrewrite = true\n[url \"https://new/\"]\ninsteadOf = https://old/\npushInsteadOf = https://old/\n", .local);
+    var config = try @import("config_core.zig").Config.parseText(testing.allocator, "[lfs.transfer]\nenablehrefrewrite = true\n[url \"https://new/\"]\ninsteadOf = https://old/\npushInsteadOf = https://old/\n", .local);
     defer config.deinit();
     var server: lfsapi.Server = undefined;
     server.settings = .{ .gpa = testing.allocator, .config = &config };

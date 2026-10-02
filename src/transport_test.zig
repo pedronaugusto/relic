@@ -12,16 +12,16 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const credential = @import("credential.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const fetch_mod = @import("fetch.zig");
-const transport = @import("transport.zig");
+const transport = @import("transport_core.zig");
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
 const testlfs = @import("testlfs.zig");
 
-const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const test_who: @import("object_core.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 /// A bare copy of a history under a directory an HTTP server serves.
 fn servedRepo(gpa: Allocator, io: Io, root: *testing.TmpDir, commits: usize) !void {
@@ -390,7 +390,7 @@ test "ssh is handed the same arguments git hands it" {
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(gpa);
         try text.print(gpa, "[core]\nsshCommand = {s}\n[ssh]\nvariant = {s}\n", .{ fake, case.variant orelse "auto" });
-        var settings = try @import("config.zig").Config.parseText(gpa, text.items, .local);
+        var settings = try @import("config_core.zig").Config.parseText(gpa, text.items, .local);
         defer settings.deinit();
         if (transport.Session.open(gpa, io, case.url, .upload_pack, .sha1, .{
             .programs = .{ .environ = &env },

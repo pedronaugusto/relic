@@ -23,13 +23,13 @@ const auth = @import("auth.zig");
 const credential = @import("credential.zig");
 const fetch_mod = @import("fetch.zig");
 const program = @import("program.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const userconfig = @import("userconfig.zig");
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
 const testlfs = @import("testlfs.zig");
 
-const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const test_who: @import("object_core.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 /// A person, as far as git can tell: a home with a `~/.gitconfig`, a system
 /// file where their git was built to look, and their environment.

@@ -16,7 +16,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const odb_mod = @import("odb.zig");
+const odb_mod = @import("odb_core.zig");
 const pktline = @import("pktline.zig");
 const connection = @import("connection.zig");
 const protocol = @import("protocol.zig");

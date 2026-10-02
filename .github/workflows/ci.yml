@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, layers]
   pull_request:
   workflow_dispatch:
 
@@ -206,8 +206,8 @@ jobs:
       - run: zig build test -Doptimize=ReleaseSafe --test-timeout 60s
 
   # Usage and Git build flags can drift without changing compiled library code.
-  docs:
-    name: documented usage
+  source:
+    name: source checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -216,12 +216,16 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
       # Formatting and cast policy read the same sources on every host; once is enough.
-      - run: zig fmt --check src examples build.zig build.zig.zon
+      - run: zig fmt --check src examples build.zig build.zig.zon ci
       - run: ci/readme_usage.sh --check
       # the git the Linux image builds is the git the Linux job builds
       - run: ci/git-flags.sh
       # every cast out of the type system says why it is safe
       - run: python3 ci/casts.py
+      - name: Source import boundaries
+        run: zig build check-imports
+      - name: Import gate regression checks
+        run: python3 ci/test_imports.py
 
   # Cross compilation checks target-specific sources and linkage beyond native execution.
   cross-compile:

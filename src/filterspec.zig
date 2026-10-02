@@ -14,7 +14,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 
 /// Errors from reading a filter.
 pub const Error = error{

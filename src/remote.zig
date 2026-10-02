@@ -15,7 +15,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const refspec = @import("refspec.zig");
 
 const Config = config_mod.Config;

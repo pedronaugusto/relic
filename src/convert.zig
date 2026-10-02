@@ -26,9 +26,9 @@ const attributes = @import("attributes.zig");
 const fs = @import("fs.zig");
 const program = @import("program.zig");
 const filter = @import("filter.zig");
-const lfs = @import("lfs.zig");
-const index_mod = @import("index.zig");
-const odb_mod = @import("odb.zig");
+const lfs = @import("lfs_core.zig");
+const index_mod = @import("index_core.zig");
+const odb_mod = @import("odb_core.zig");
 
 /// Errors from converting.
 pub const Error = error{

@@ -28,17 +28,17 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const index_mod = @import("index.zig");
-const repo_mod = @import("repo.zig");
-const worktree = @import("worktree.zig");
+const object = @import("object_core.zig");
+const index_mod = @import("index_core.zig");
+const repo_mod = @import("repo_core.zig");
+const worktree = @import("worktree_core.zig");
 const attributes = @import("attributes.zig");
 const blobmerge = @import("blobmerge.zig");
 const fs = @import("fs.zig");
 const head_mod = @import("head.zig");
-const diff_mod = @import("diff.zig");
+const diff_mod = @import("diff_core.zig");
 const wildmatch = @import("wildmatch.zig");
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -63,7 +63,7 @@ pub const Error = error{
     UnreadableForDiff,
 } || Allocator.Error || head_mod.Error || odb_errors || worktree.Error || repo_mod.Error || index_mod.WriteError || index_mod.ReadError;
 
-const odb_errors = @import("odb.zig").Error;
+const odb_errors = @import("odb_core.zig").Error;
 
 /// How a run goes.
 pub const Options = struct {

@@ -6,8 +6,8 @@ const Io = std.Io;
 
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
-const odb_mod = @import("odb.zig");
-const diff = @import("diff.zig");
+const odb_mod = @import("odb_core.zig");
+const diff = @import("diff_core.zig");
 const textdiff = @import("textdiff.zig");
 
 const Oid = hash.Oid;
@@ -668,7 +668,7 @@ test "diff.algorithm picks the algorithm git picks when none is asked for" {
     var pair = try buildPair(gpa, io, setupAlgorithms);
     defer pair.deinit(io, gpa);
 
-    const config_mod = @import("config.zig");
+    const config_mod = @import("config_core.zig");
     for ([_][]const u8{ "patience", "Minimal", "Myers", "default" }) |value| {
         try pair.repo.exec(io, &.{ "config", "diff.algorithm", value });
         var git_dir = try pair.repo.gitDir(io);

@@ -2,8 +2,8 @@
 //! This module is package plumbing, reached by no public name.
 const std = @import("std");
 const hash = @import("hash.zig");
-const refs = @import("refs.zig");
-const stack = @import("reftablestack.zig");
+const refs = @import("ref_types.zig");
+const stack = @import("stack_cache.zig");
 
 pub const State = opaque {};
 
@@ -13,7 +13,7 @@ pub const Data = struct {
     common_dir: std.Io.Dir,
     kind: hash.Kind,
     format: refs.Format,
-    options: stack.Options,
+    options: @import("stack_types.zig").Options,
     cache: ?*stack.Cache,
 };
 
@@ -21,7 +21,7 @@ pub fn get(state: *State) *Data {
     return @ptrCast(@alignCast(state)); // safe: create allocates every State as an aligned Data.
 }
 
-pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, options: stack.Options, git_dir: std.Io.Dir, common_dir: std.Io.Dir) std.mem.Allocator.Error!*State {
+pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, options: @import("stack_types.zig").Options, git_dir: std.Io.Dir, common_dir: std.Io.Dir) std.mem.Allocator.Error!*State {
     const data = try gpa.create(Data);
     errdefer gpa.destroy(data);
     const cache = if (format == .reftable) blk: {

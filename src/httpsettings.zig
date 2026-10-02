@@ -24,7 +24,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const url_mod = @import("url.zig");
 
 /// What an HTTP conversation with one URL is configured to do.

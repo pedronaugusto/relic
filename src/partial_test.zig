@@ -10,9 +10,9 @@ const Io = std.Io;
 const testing = std.testing;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
-const worktree = @import("worktree.zig");
+const object = @import("object_core.zig");
+const repo_mod = @import("repo_core.zig");
+const worktree = @import("worktree_core.zig");
 const clone_mod = @import("clone.zig");
 const fetch_mod = @import("fetch.zig");
 const partial = @import("partial.zig");
@@ -332,7 +332,7 @@ test "a filter the server does not know is left off with a warning and everythin
         gpa.free(out);
         const text = try std.fmt.allocPrint(gpa, "[protocol]\n\tversion = {s}\n", .{version});
         defer gpa.free(text);
-        var settings = try @import("config.zig").Config.parseText(gpa, text, .command);
+        var settings = try @import("config_core.zig").Config.parseText(gpa, text, .command);
         defer settings.deinit();
         var warnings: @import("warning.zig").Warnings = .init(gpa);
         defer warnings.deinit();

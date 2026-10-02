@@ -1,7 +1,7 @@
 //! Repository configuration ownership and detached edit copies.
 //! Package plumbing, reached by no public name.
 const std = @import("std");
-const config = @import("config.zig");
+const config = @import("config_core.zig");
 const Allocator = std.mem.Allocator;
 const fs = @import("fs.zig");
 
@@ -47,15 +47,7 @@ pub fn writeLocal(state: *State, io: std.Io) config.Config.SetError!void {
     return error.NoWritableSource;
 }
 
-pub fn writeFile(file: *const config.SourceFile, io: std.Io, dir: std.Io.Dir, sub_path: []const u8) config.Config.SetError!void {
-    const bytes = try file.render();
-    defer file.gpa.free(bytes);
-    var buffer: [16 * 1024]u8 = undefined;
-    var lock = try fs.LockFile.open(file.gpa, io, dir, sub_path, &buffer, .{});
-    defer lock.deinit(io);
-    lock.writer().writeAll(bytes) catch return error.WriteFailed;
-    try lock.commit(io);
-}
+pub const writeFile = @import("config_write.zig").writeFile;
 
 pub fn copy(gpa: Allocator, source: *const config.Config) config.ParseError!config.Config {
     // open copies context and command sources without filesystem access.

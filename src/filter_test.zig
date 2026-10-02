@@ -12,12 +12,12 @@ const build_options = @import("build_options");
 
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
-const repo_mod = @import("repo.zig");
-const worktree = @import("worktree.zig");
+const repo_mod = @import("repo_core.zig");
+const worktree = @import("worktree_core.zig");
 const filter = @import("filter.zig");
 const program = @import("program.zig");
-const index_mod = @import("index.zig");
-const lfs = @import("lfs.zig");
+const index_mod = @import("index_core.zig");
+const lfs = @import("lfs_core.zig");
 
 const Oid = hash.Oid;
 const testing = std.testing;

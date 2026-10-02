@@ -2,6 +2,12 @@
     .name = .relic,
     .version = "0.3.0",
     .dependencies = .{
+        .gantry = .{
+            .url = "git+https://github.com/pedronaugusto/gantry#70fec2b48206b224b8f37b80a9ba4509fbceb9c4",
+            .hash = "gantry-0.1.0-1iNrkQGcBAB2GKOphtOijBq388UW2CCqJ18MsYkCHCSJ",
+            .lazy = true,
+        },
+
         .conduit = .{
             .url = "git+https://github.com/pedronaugusto/conduit#aa667171193b84235d3b7b59c88c2b990e842b6b",
             .hash = "conduit-0.5.1-4rIA734HEQD2Zi31NJeYsncrLFECALXiLdCh8FBxpySd",

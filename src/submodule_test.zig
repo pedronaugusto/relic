@@ -14,10 +14,10 @@ const Allocator = std.mem.Allocator;
 
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
-const worktree = @import("worktree.zig");
-const submodule = @import("submodule.zig");
+const object = @import("object_core.zig");
+const repo_mod = @import("repo_core.zig");
+const worktree = @import("worktree_core.zig");
+const submodule = @import("submodule_core.zig");
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 const testing = std.testing;

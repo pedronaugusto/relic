@@ -14,11 +14,11 @@ const Allocator = std.mem.Allocator;
 
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
+const object = @import("object_core.zig");
+const repo_mod = @import("repo_core.zig");
 const merging = @import("merging.zig");
 const rerere = @import("rerere.zig");
-const worktree = @import("worktree.zig");
+const worktree = @import("worktree_core.zig");
 const threeway = @import("threeway.zig");
 const ort = @import("ort.zig");
 

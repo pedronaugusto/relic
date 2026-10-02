@@ -27,7 +27,7 @@ const Io = std.Io;
 const Environ = std.process.Environ;
 
 const program = @import("program.zig");
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 
 /// Errors from finding the configuration.
 pub const Error = error{

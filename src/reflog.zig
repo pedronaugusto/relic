@@ -10,7 +10,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const fs = @import("fs.zig");
 
 const Oid = hash.Oid;
