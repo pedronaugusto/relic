@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Start Windows core tests before comparison jobs fill the runner queue.
+
 - Give process execution and transport fixtures one conduit owner.
 
 - Supply concurrency fixtures through build options without importing the test root.

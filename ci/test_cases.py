@@ -41,18 +41,30 @@ class Cases(unittest.TestCase):
         names = corpus_names()
         self.assertEqual(180, len(names))
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(set(matrix), {'core'} | {owner(name) for name in names})
+        self.assertEqual(set(matrix), {owner(name) for name in names})
         self.assertEqual(len(matrix), len(set(matrix)))
         self.assertIn('optimize: [Debug, ReleaseSafe]', windows)
         self.assertIn('-Dtest-case=${{ matrix.case }}', windows)
         self.assertIn('--test-timeout 60s', windows)
-        self.assertNotIn('windows-latest', workflow.split('  windows:\n', 1)[0].split('matrix:', 1)[1])
+        self.assertNotIn('windows-latest', workflow.split('  windows-core:\n', 1)[0].split('matrix:', 1)[1])
 
     def test_build_and_workflow_name_the_same_cases(self):
         source = (ROOT / 'ci/test_cases.zig').read_text().split('pub const cases =', 1)[1].split('};', 1)[0]
         cases = re.findall(r'"([^"]+)"', source)
         workflow = (ROOT / '.github/workflows/ci.yml').read_text().split('  windows:\n', 1)[1]
-        self.assertEqual(cases, re.search(r'case: \[([^]]+)\]', workflow).group(1).split(', '))
+        self.assertEqual(cases, ['core'] + re.search(r'case: \[([^]]+)\]', workflow).group(1).split(', '))
+
+    def test_core_can_start_before_comparison_jobs(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        self.assertTrue('  windows-core:\n' in workflow, 'core jobs must start independently of the comparison matrix')
+        core = workflow.split('  windows-core:\n', 1)[1].split('\n  windows:\n', 1)[0]
+        comparisons = workflow.split('  windows:\n', 1)[1].split('\n  # ReleaseSmall', 1)[0]
+        self.assertNotIn('needs:', core)
+        self.assertIn('needs: source', comparisons)
+        self.assertIn('optimize: [Debug, ReleaseSafe]', core)
+        self.assertIn('-Dtest-case=core', core)
+        self.assertIn('--test-timeout 60s', core)
+        self.assertNotIn('core', re.search(r'case: \[([^]]+)\]', comparisons).group(1).split(', '))
 
     def test_filters_are_checked_by_exact_names(self):
         selection = (ROOT / 'src/test_case.zig').read_text()

@@ -87,7 +87,44 @@ jobs:
       - name: Test — ${{ matrix.optimize }}
         run: zig build test -Doptimize=${{ matrix.optimize }} --test-timeout 60s
 
+  # Start the long core jobs before the comparison matrix enters the queue.
+  windows-core:
+    name: test (Windows, ${{ matrix.optimize }}, core)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseSafe]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install git (Windows)
+        if: runner.os == 'Windows'
+        run: choco upgrade git -y --no-progress
+
+      - name: Install Git LFS 3.8 (Windows)
+        if: runner.os == 'Windows'
+        run: choco upgrade git-lfs --version=3.8.0 -y --no-progress
+
+      - name: git version, at least 2.47
+        shell: bash
+        run: |
+          git --version
+          version=$(git --version | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1 \2/')
+          set -- $version
+          if [ "$1" -lt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -lt 47 ]; }; then
+            echo "git $1.$2 is older than the 2.47 every fixture needs" >&2
+            exit 1
+          fi
+
+      - name: Test named case
+        run: zig build test -Dtest-case=core -Doptimize=${{ matrix.optimize }} --test-timeout 60s
+
   windows:
+    needs: source
     name: test (Windows, ${{ matrix.optimize }}, ${{ matrix.case }})
     runs-on: windows-latest
     timeout-minutes: 45
@@ -95,7 +132,7 @@ jobs:
       fail-fast: false
       matrix:
         optimize: [Debug, ReleaseSafe]
-        case: [core, merge-file, diff-algorithms, revwalk, history-0, history-1, history-2, history-3, history-4, history-5, history-6, history-7, recursive-0, recursive-1, recursive-2, rename-0, rename-1, rename-2, rename-3, rename-4, rename-5]
+        case: [merge-file, diff-algorithms, revwalk, history-0, history-1, history-2, history-3, history-4, history-5, history-6, history-7, recursive-0, recursive-1, recursive-2, rename-0, rename-1, rename-2, rename-3, rename-4, rename-5]
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
