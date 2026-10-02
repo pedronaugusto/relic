@@ -1639,8 +1639,9 @@ pub const Client = struct {
     fn exchangeOnce(c: *Client, request: Request, url: []const u8, auth_header: ?[]const u8) Error!*Exchange {
         const ex = try c.gpa.create(Exchange);
         errdefer c.gpa.destroy(ex);
-        ex.* = .{ .client = c, .arena = .init(c.gpa) };
+        ex.* = .{ .client = c, .arena = .init(c.gpa), .diagnostic = .init(c.gpa) };
         errdefer ex.arena.deinit();
+        errdefer ex.diagnostic.deinit();
         const a = ex.arena.allocator();
 
         const request_url = try a.dupe(u8, try stripUserinfo(a, url));
@@ -1701,18 +1702,18 @@ pub const Client = struct {
         switch (request.body) {
             .none => {
                 const body: ?[]const u8 = if (request.method.requestHasBody()) "" else null;
-                ex.response = transport.send(request.method, target, path, headers.items, body) catch |err| return c.clientFailed(transport, err, request_url);
+                ex.response = transport.send(request.method, target, path, headers.items, body, &ex.diagnostic) catch |err| return c.clientFailed(&ex.diagnostic, err, request_url);
             },
             .bytes => |bytes| {
-                ex.response = transport.send(request.method, target, path, headers.items, bytes) catch |err| return c.clientFailed(transport, err, request_url);
+                ex.response = transport.send(request.method, target, path, headers.items, bytes, &ex.diagnostic) catch |err| return c.clientFailed(&ex.diagnostic, err, request_url);
             },
             .object => |o| {
                 const file = (o.store.open(c.io, &o.pointer) catch |err| return c.fail(error.ConnectionFailed, "{s}", .{@errorName(err)})) orelse
                     return c.fail(error.HttpStatus, "object {s} is not in the store", .{&o.pointer.oid});
                 defer file.close(c.io);
                 const body_buf = try a.alloc(u8, 64 * 1024);
-                var streaming = transport.stream(request.method, target, path, headers.items, if (chunked) null else o.pointer.size, body_buf) catch |err|
-                    return c.clientFailed(transport, err, request_url);
+                var streaming = transport.stream(request.method, target, path, headers.items, if (chunked) null else o.pointer.size, body_buf, &ex.diagnostic) catch |err|
+                    return c.clientFailed(&ex.diagnostic, err, request_url);
                 var sent_all = false;
                 defer if (!sent_all) streaming.abort();
                 var chunk: [64 * 1024]u8 = undefined;
@@ -1728,7 +1729,7 @@ pub const Client = struct {
                     if (request.on_bytes) |cb| cb.add(cb.context, n);
                 }
                 sent_all = true;
-                ex.response = streaming.finish() catch |err| return c.clientFailed(transport, err, request_url);
+                ex.response = streaming.finish() catch |err| return c.clientFailed(&ex.diagnostic, err, request_url);
             },
         }
         ex.in_flight = true;
@@ -1738,7 +1739,7 @@ pub const Client = struct {
     /// An error of the HTTP client's, as this module names it, with why in
     /// the message. A timeout is a connection that failed, which git-lfs
     /// retries as it retries any.
-    fn clientFailed(c: *Client, transport: *httpclient.Client, err: httpclient.Error, url: []const u8) Error {
+    fn clientFailed(c: *Client, diagnostic: *const httpclient.Diagnostic, err: httpclient.Error, url: []const u8) Error {
         const where = stripQuery(url);
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
@@ -1746,13 +1747,13 @@ pub const Client = struct {
             error.ConnectionFailed => c.fail(error.ConnectionFailed, "the connection failed: {s}", .{where}),
             error.TimedOut => c.fail(error.ConnectionFailed, "timed out: {s}", .{where}),
             error.BodyIncomplete => c.fail(error.ConnectionFailed, "upload cut short: {s}", .{where}),
-            error.TlsFailed => c.fail(error.ConnectionFailed, "TLS: {s}: {s}", .{ if (transport.tls_error) |e| @errorName(e) else "handshake failed", where }),
+            error.TlsFailed => c.fail(error.ConnectionFailed, "TLS: {s}: {s}", .{ if (diagnostic.tls_error) |e| @errorName(e) else "handshake failed", where }),
             error.ProxyAuthenticationRequired => c.fail(error.ConnectionFailed, "the proxy wants credentials: {s}", .{where}),
-            error.ProxyRefused => c.fail(error.ConnectionFailed, "the proxy answered {d}: {s}", .{ transport.proxy_status orelse 0, where }),
-            error.ProxyAuthMethodUnsupported => c.fail(error.ConnectionFailed, "the proxy asks for {s}: {s}", .{ transport.proxy_offered orelse "?", where }),
+            error.ProxyRefused => c.fail(error.ConnectionFailed, "the proxy answered {d}: {s}", .{ diagnostic.proxy_status orelse 0, where }),
+            error.ProxyAuthMethodUnsupported => c.fail(error.ConnectionFailed, "the proxy asks for {s}: {s}", .{ diagnostic.proxy_offered orelse "?", where }),
             error.HttpProtocolError => c.fail(error.MalformedResponse, "not an HTTP answer, or an encoding it cannot read: {s}", .{where}),
             error.CertificateBundleUnreadable => c.fail(error.SslCertificateUnreadable, "the system's certificates", .{}),
-            error.ClientCertificateRejected => c.fail(error.ClientCertificateRejected, "the server refused the client certificate ({s}): {s}", .{ if (transport.tls_error) |e| @errorName(e) else "?", where }),
+            error.ClientCertificateRejected => c.fail(error.ClientCertificateRejected, "the server refused the client certificate ({s}): {s}", .{ if (diagnostic.tls_error) |e| @errorName(e) else "?", where }),
             error.ClientCertificateSchemeUnsupported => c.fail(error.ClientCertificateSchemeUnsupported, "no signature scheme the server takes: {s}", .{where}),
         };
     }
@@ -2074,6 +2075,7 @@ pub const Client = struct {
 /// A request made and its answer, open for the body.
 pub const Exchange = struct {
     client: *Client,
+    diagnostic: httpclient.Diagnostic,
     arena: std.heap.ArenaAllocator,
     /// Where the request went, without a credential, in the exchange's
     /// arena.
@@ -2205,6 +2207,7 @@ pub const Exchange = struct {
     pub fn close(ex: *Exchange) void {
         const c = ex.client;
         if (ex.in_flight) ex.response.deinit();
+        ex.diagnostic.deinit();
         ex.arena.deinit();
         c.gpa.destroy(ex);
     }

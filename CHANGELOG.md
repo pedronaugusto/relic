@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: HTTP connect, send and stream take a caller-owned Diagnostic as their last argument (or null), replacing Client.tls_error, proxy_status and proxy_offered; LFS and smart HTTP keep diagnostics with each exchange.
+
 ### Fixed
 
 - TLS handshakes and trust refreshes sample current real time through the caller’s Io, so a long-lived client checks new connections against current certificate validity.

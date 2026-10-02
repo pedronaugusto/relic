@@ -436,6 +436,14 @@ TLS client, and another checks that what crosses a proxy's tunnel is TLS.
   pack entry into one buffer of known size and is fuzzed against std's
   decoder and compressor.
 
+The HTTP client's `connect`, `send` and `stream` take an optional caller-owned
+`transport.httpclient.Diagnostic` as their last argument. Initialize it with
+`Diagnostic.init(allocator)` and release it with `deinit`. Each exchange clears
+its diagnostic before starting. Keep it alive through connection release,
+response cleanup or streaming abort; separate simultaneous exchanges use
+separate diagnostics. Its TLS error, proxy status and owned offered schemes
+remain available after a failed exchange, even after the client is closed.
+
 **A merge is git's merge-ort.** Renames, directory renames, directory/file and
 type conflicts, submodules and criss-cross histories resolve as git resolves
 them, with git's conflict messages, and a stopped merge, cherry-pick or rebase

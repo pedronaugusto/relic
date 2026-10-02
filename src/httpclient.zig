@@ -45,9 +45,9 @@ pub const Error = error{
     ConnectionFailed,
     /// The TLS handshake failed: a certificate that is not trusted, a name
     /// that does not match, a protocol the other side does not speak.
-    /// `Client.tls_error` says which.
+    /// `Diagnostic.tls_error` says which.
     TlsFailed,
-    /// The proxy refused the tunnel. `Client.proxy_status` holds its answer.
+    /// The proxy refused the tunnel. `Diagnostic.proxy_status` holds its answer.
     ProxyRefused,
     /// The proxy wants credentials it was not given, or refused the ones it
     /// was: status 407.
@@ -60,18 +60,57 @@ pub const Error = error{
     TimedOut,
     /// The proxy asks to be answered only in schemes relic does not speak
     /// — Negotiate, NTLM — or none the credential's method allows.
-    /// `Client.proxy_offered` names them.
+    /// `Diagnostic.proxy_offered` names them.
     ProxyAuthMethodUnsupported,
     /// A body sent with a length was ended before that many bytes.
     BodyIncomplete,
     /// The server asked for a client certificate and refused the one it
     /// was sent, or wanted one and was sent none: its TLS alert is in
-    /// `Client.tls_error`.
+    /// `Diagnostic.tls_error`.
     ClientCertificateRejected,
     /// The server asked for a client certificate in signature schemes the
     /// key does not sign with.
     ClientCertificateSchemeUnsupported,
 } || Allocator.Error || Io.Cancelable;
+
+/// Caller-owned failure details for one HTTP exchange. Initialize with `init`
+/// and release with `deinit`. `connect`, `send` and `stream` clear it before
+/// starting; its values survive failure and connection closure. Keep it alive
+/// until the connection or response is released, or the stream is aborted.
+/// Simultaneous exchanges must use separate diagnostics.
+pub const Diagnostic = struct {
+    /// The allocator for this diagnostic's owned copies.
+    gpa: Allocator,
+    /// Why the handshake failed, or the peer's client-certificate refusal.
+    tls_error: ?anyerror = null,
+    /// The proxy's refusal status, including a 407 challenge.
+    proxy_status: ?u16 = null,
+    /// The offered schemes that could not be answered, owned here.
+    proxy_offered: ?[]const u8 = null,
+
+    /// Use this allocator for the diagnostic's copies.
+    pub fn init(gpa: Allocator) Diagnostic {
+        return .{ .gpa = gpa };
+    }
+
+    /// Release the copies and clear every failure detail.
+    pub fn deinit(d: *Diagnostic) void {
+        d.clear();
+    }
+
+    fn clear(d: *Diagnostic) void {
+        if (d.proxy_offered) |offered| d.gpa.free(offered);
+        d.proxy_offered = null;
+        d.proxy_status = null;
+        d.tls_error = null;
+    }
+
+    fn setOffered(d: *Diagnostic, names: []const u8) Allocator.Error!void {
+        const owned = try d.gpa.dupe(u8, names);
+        if (d.proxy_offered) |previous| d.gpa.free(previous);
+        d.proxy_offered = owned;
+    }
+};
 
 /// How long each step may take; `null` is no limit.
 pub const Timeouts = struct {
@@ -179,16 +218,10 @@ pub const Client = struct {
     /// Held for `idle`, `connections` and the proxy answer below, so
     /// several tasks can send at once.
     lock: Io.Mutex = .init,
-    /// The proxy's status when it last refused a tunnel.
-    proxy_status: ?u16 = null,
     /// The answer to the proxy's challenge, once it has asked.
     proxy_answer: ?ProxyAnswer = null,
     /// Set when a tunnel's 407 was taken and is to be asked again.
     proxy_retry: bool = false,
-    /// The schemes a proxy offered when none could be answered, in `gpa`.
-    proxy_offered: ?[]u8 = null,
-    /// Why the last TLS handshake failed.
-    tls_error: ?anyerror = null,
     /// The certificate and key a server that asks for one is answered
     /// with; without it, one that asks is sent none.
     client_auth: ?*const tls.ClientAuth = null,
@@ -206,7 +239,6 @@ pub const Client = struct {
     /// Close the kept connections and release everything.
     pub fn deinit(c: *Client) void {
         if (c.proxy_answer) |*a| a.deinit(c.gpa);
-        if (c.proxy_offered) |o| c.gpa.free(o);
         for (c.idle.items) |conn| conn.close();
         c.idle.deinit(c.gpa);
         c.bundle.deinit(c.gpa);
@@ -331,7 +363,7 @@ pub const Client = struct {
     /// again with an answer. `false` when there is no credential to answer
     /// with, or when the answer given was refused — a Digest nonce gone
     /// stale is answered again.
-    fn proxyChallenged(c: *Client, head: *const Head) Error!bool {
+    fn proxyChallenged(c: *Client, head: *const Head, diagnostic: ?*Diagnostic) Error!bool {
         const credential = (c.proxy orelse return false).credential orelse return false;
         var arena_state: std.heap.ArenaAllocator = .init(c.gpa);
         defer arena_state.deinit();
@@ -365,9 +397,7 @@ pub const Client = struct {
             .digest => |ch| c.proxy_answer = .{ .digest = try .init(c.gpa, ch, try c.cnonce(arena)) },
             .basic => c.proxy_answer = .{ .basic = try httpauth.basic(c.gpa, credential.user, credential.password) },
             .unsupported => |names| {
-                const offered = try c.gpa.dupe(u8, names);
-                if (c.proxy_offered) |o| c.gpa.free(o);
-                c.proxy_offered = offered;
+                if (diagnostic) |d| try d.setOffered(names);
                 return error.ProxyAuthMethodUnsupported;
             },
         }
@@ -386,14 +416,18 @@ pub const Client = struct {
     }
 
     /// A connection to `target`: a kept one when one goes there, a new one
-    /// otherwise.
-    pub fn connect(c: *Client, target: Target) Error!*Connection {
-        return (try c.connectNoting(target)).conn;
+    /// otherwise. `diagnostic` belongs to this exchange, or is `null`.
+    pub fn connect(c: *Client, target: Target, diagnostic: ?*Diagnostic) Error!*Connection {
+        if (diagnostic) |d| d.clear();
+        return (try c.connectNoting(target, diagnostic)).conn;
     }
 
-    fn connectNoting(c: *Client, target: Target) Error!struct { conn: *Connection, reused: bool } {
-        if (c.takeIdle(target)) |conn| return .{ .conn = conn, .reused = true };
-        return .{ .conn = try Connection.open(c, target), .reused = false };
+    fn connectNoting(c: *Client, target: Target, diagnostic: ?*Diagnostic) Error!struct { conn: *Connection, reused: bool } {
+        if (c.takeIdle(target)) |conn| {
+            conn.diagnostic = diagnostic;
+            return .{ .conn = conn, .reused = true };
+        }
+        return .{ .conn = try Connection.open(c, target, diagnostic), .reused = false };
     }
 
     fn takeIdle(c: *Client, target: Target) ?*Connection {
@@ -411,6 +445,7 @@ pub const Client = struct {
     /// Give back a connection after its exchange: kept when `reusable`,
     /// closed otherwise. The oldest kept one is closed to make room.
     pub fn release(c: *Client, conn: *Connection, reusable: bool) void {
+        conn.diagnostic = null;
         if (!reusable or conn.timed_out.load(.acquire) or c.max_idle == 0) return conn.close();
         const evicted = evicted: {
             c.lock.lockUncancelable(c.io);
@@ -424,29 +459,32 @@ pub const Client = struct {
 
     /// Send a request and read the head of its response. `body` is sent
     /// whole with its length; `null` sends none. The response is the
-    /// caller's to read and `deinit`.
-    pub fn send(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8) Error!Response {
-        var response = try c.sendKept(method, target, path, headers, body);
+    /// caller's to read and `deinit`. `diagnostic` belongs to this exchange,
+    /// or is `null`.
+    pub fn send(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8, diagnostic: ?*Diagnostic) Error!Response {
+        if (diagnostic) |d| d.clear();
+        var response = try c.sendKept(method, target, path, headers, body, diagnostic);
         errdefer response.deinit();
         // A proxy that asks, for a request it is handed whole: answered,
         // and the request made again, as curl makes it again.
         if (response.head.status == .proxy_auth_required and c.proxy != null and !target.tls) {
-            if (try c.proxyChallenged(&response.head)) {
+            if (diagnostic) |d| d.proxy_status = 407;
+            if (try c.proxyChallenged(&response.head, diagnostic)) {
                 _ = response.reader().discardRemaining() catch {};
                 response.deinit();
-                response = try c.sendKept(method, target, path, headers, body);
+                response = try c.sendKept(method, target, path, headers, body, diagnostic);
             }
         }
         return response;
     }
 
-    fn sendKept(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8) Error!Response {
-        const first = try c.connectNoting(target);
+    fn sendKept(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8, diagnostic: ?*Diagnostic) Error!Response {
+        const first = try c.connectNoting(target, diagnostic);
         return c.sendOn(first.conn, method, path, headers, body) catch |err| switch (err) {
             // A kept connection the server closed while it waited is
             // noticed only now; the request goes again on a new one, as
             // curl sends it again.
-            error.ConnectionFailed => if (first.reused) c.sendOn(try Connection.open(c, target), method, path, headers, body) else err,
+            error.ConnectionFailed => if (first.reused) c.sendOn(try Connection.open(c, target, diagnostic), method, path, headers, body) else err,
             else => err,
         };
     }
@@ -466,8 +504,9 @@ pub const Client = struct {
     /// Start a request whose body is sent as it is written: in chunks, or
     /// with `length` as its `Content-Length` when it is given.
     /// `Streaming.writer`, then `Streaming.finish` for the response.
-    pub fn stream(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, length: ?u64, buffer: []u8) Error!Streaming {
-        const conn = try c.connect(target);
+    /// `diagnostic` belongs to this exchange, or is `null`.
+    pub fn stream(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, length: ?u64, buffer: []u8, diagnostic: ?*Diagnostic) Error!Streaming {
+        const conn = try c.connect(target, diagnostic);
         errdefer conn.close();
         try conn.writeHead(method, path, headers, if (length) |n| .{ .content_length = n } else .chunked);
         return .{
@@ -714,6 +753,8 @@ fn refusesCertificate(description: std.crypto.tls.Alert.Description) bool {
 /// One connection: TCP, and the layers on it.
 pub const Connection = struct {
     client: *Client,
+    /// Borrowed only while this connection belongs to its caller.
+    diagnostic: ?*Diagnostic = null,
     target: Target,
     host_owned: []u8,
     stream: Io.net.Stream,
@@ -739,14 +780,14 @@ pub const Connection = struct {
     plain_reader: *const Io.Reader.VTable = undefined,
     plain_writer: *const Io.Writer.VTable = undefined,
 
-    fn open(c: *Client, target: Target) Error!*Connection {
+    fn open(c: *Client, target: Target, diagnostic: ?*Diagnostic) Error!*Connection {
         // A proxy that asks for an answer to a tunnel is asked again on a
         // new connection, as curl asks, with the answer; and once more for
         // a Digest nonce gone stale.
         var attempts: u8 = 0;
         while (true) : (attempts += 1) {
             var proxy_retry = false;
-            return openOnce(c, target, &proxy_retry) catch |err| switch (err) {
+            return openOnce(c, target, &proxy_retry, diagnostic) catch |err| switch (err) {
                 error.ProxyAuthenticationRequired => {
                     if (attempts < 2 and proxy_retry) {
                         c.note("proxy_retry", false);
@@ -759,7 +800,7 @@ pub const Connection = struct {
         }
     }
 
-    fn openOnce(c: *Client, target: Target, proxy_retry: *bool) Error!*Connection {
+    fn openOnce(c: *Client, target: Target, proxy_retry: *bool, diagnostic: ?*Diagnostic) Error!*Connection {
         const gpa = c.gpa;
         const io = c.io;
         const conn = try gpa.create(Connection);
@@ -783,6 +824,7 @@ pub const Connection = struct {
 
         conn.* = .{
             .client = c,
+            .diagnostic = diagnostic,
             .target = .{ .tls = target.tls, .host = host_owned, .port = target.port },
             .host_owned = host_owned,
             .stream = net_stream,
@@ -1080,7 +1122,7 @@ pub const Connection = struct {
             // read.
             if (err == error.TlsAlert and layer.certificate_requested) {
                 if (layer.client.alert) |alert| if (refusesCertificate(alert.description)) {
-                    conn.client.note("tls_error", alertError(alert.description));
+                    if (conn.diagnostic) |d| d.tls_error = alertError(alert.description);
                     return error.ClientCertificateRejected;
                 };
             }
@@ -1133,7 +1175,7 @@ pub const Connection = struct {
         }) catch |err| {
             if (conn.timed_out.load(.acquire)) return error.TimedOut;
             const named: anyerror = if (err == error.TlsAlert) alertError(alert_storage.description) else err;
-            c.note("tls_error", named);
+            if (conn.diagnostic) |d| d.tls_error = named;
             if (err == error.TlsAlert and layer.certificate_requested and refusesCertificate(alert_storage.description)) {
                 return error.ClientCertificateRejected;
             }
@@ -1175,9 +1217,9 @@ pub const Connection = struct {
         const head = Head.parse(bytes) catch return error.HttpProtocolError;
         const status = @intFromEnum(head.status);
         if (status / 100 == 2) return;
-        c.note("proxy_status", @as(?u16, status));
+        if (conn.diagnostic) |d| d.proxy_status = status;
         if (status != 407) return error.ProxyRefused;
-        if (try c.proxyChallenged(&head)) {
+        if (try c.proxyChallenged(&head, conn.diagnostic)) {
             proxy_retry.* = true;
             c.note("proxy_retry", true);
         }
@@ -1291,6 +1333,7 @@ const TestServer = struct {
     port: u16,
     silent: bool,
     answer: []const u8,
+    answerFor: ?*const fn ([]const u8) []const u8 = null,
     task: Io.Future(void) = undefined,
     group: Io.Group = .init,
     stopping: std.atomic.Value(bool) = .init(false),
@@ -1300,12 +1343,16 @@ const TestServer = struct {
     }
 
     fn startAnswer(gpa: Allocator, io: Io, silent: bool, answer: []const u8) !*TestServer {
+        return startRouted(gpa, io, silent, answer, null);
+    }
+
+    fn startRouted(gpa: Allocator, io: Io, silent: bool, answer: []const u8, answerFor: ?*const fn ([]const u8) []const u8) !*TestServer {
         const s = try gpa.create(TestServer);
         errdefer gpa.destroy(s);
         const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
         var listener = try address.listen(io, .{ .reuse_address = true });
         errdefer listener.deinit(io);
-        s.* = .{ .io = io, .listener = listener, .port = listener.socket.address.getPort(), .silent = silent, .answer = answer };
+        s.* = .{ .io = io, .listener = listener, .port = listener.socket.address.getPort(), .silent = silent, .answer = answer, .answerFor = answerFor };
         s.task = io.concurrent(serve, .{s}) catch return error.SkipZigTest;
         return s;
     }
@@ -1341,11 +1388,12 @@ const TestServer = struct {
                 r.interface.fillMore() catch return;
             }
             const end = std.mem.indexOf(u8, r.interface.buffered(), "\r\n\r\n").? + 4;
+            const answer = if (s.answerFor) |choose| choose(r.interface.buffered()[0..end]) else s.answer;
             r.interface.toss(end);
             if (s.silent) {
                 while (true) r.interface.fillMore() catch return;
             }
-            w.interface.writeAll(s.answer) catch return;
+            w.interface.writeAll(answer) catch return;
             w.interface.flush() catch return;
         }
     }
@@ -1362,12 +1410,12 @@ test "a handshake or an answer that does not come is given up on as TimedOut, an
     defer handshaking.deinit();
     handshaking.verify = false;
     handshaking.timeouts = .{ .handshake = limit };
-    try std.testing.expectError(error.TimedOut, handshaking.send(.GET, .{ .tls = true, .host = "127.0.0.1", .port = server.port }, "/", &.{}, null));
+    try std.testing.expectError(error.TimedOut, handshaking.send(.GET, .{ .tls = true, .host = "127.0.0.1", .port = server.port }, "/", &.{}, null, null));
 
     var waiting: Client = .init(gpa, io);
     defer waiting.deinit();
     waiting.timeouts = .{ .activity = limit };
-    try std.testing.expectError(error.TimedOut, waiting.send(.GET, .{ .tls = false, .host = "127.0.0.1", .port = server.port }, "/", &.{}, null));
+    try std.testing.expectError(error.TimedOut, waiting.send(.GET, .{ .tls = false, .host = "127.0.0.1", .port = server.port }, "/", &.{}, null, null));
     try std.testing.expectEqual(@as(usize, 0), waiting.idle.items.len);
     try std.testing.expectEqual(@as(u32, 0), waiting.unwatched);
 }
@@ -1383,7 +1431,7 @@ test "a refused tunnel cannot consume another connection's pending proxy retry" 
     // Another CONNECT has accepted a challenge. This request has no
     // credential and cannot answer its own refusal, so it must not retry.
     client.proxy_retry = true;
-    try std.testing.expectError(error.ProxyAuthenticationRequired, client.connect(.{ .tls = true, .host = "git.example.com", .port = 443 }));
+    try std.testing.expectError(error.ProxyAuthenticationRequired, client.connect(.{ .tls = true, .host = "git.example.com", .port = 443 }, null));
     try std.testing.expectEqual(@as(u32, 1), client.connections);
 }
 
@@ -1395,8 +1443,10 @@ test "a proxy challenge that cannot be answered releases its response" {
     var client: Client = .init(gpa, io);
     defer client.deinit();
     client.proxy = .{ .host = "127.0.0.1", .port = server.port, .credential = .{ .user = "a", .password = "b" } };
-    try std.testing.expectError(error.ProxyAuthMethodUnsupported, client.send(.GET, .{ .tls = false, .host = "git.example.com", .port = 80 }, "/", &.{}, null));
-    try std.testing.expectEqualStrings("Negotiate", client.proxy_offered.?);
+    var diagnostic: Diagnostic = .init(gpa);
+    defer diagnostic.deinit();
+    try std.testing.expectError(error.ProxyAuthMethodUnsupported, client.send(.GET, .{ .tls = false, .host = "git.example.com", .port = 80 }, "/", &.{}, null, &diagnostic));
+    try std.testing.expectEqualStrings("Negotiate", diagnostic.proxy_offered.?);
     // std.testing.allocator must have no retained response or connection.
 }
 
@@ -1406,15 +1456,17 @@ test "proxy challenges retain offered schemes when replacement allocation fails"
             var client: Client = .init(gpa, std.testing.io);
             defer client.deinit();
             client.proxy = .{ .host = "proxy.example.com", .port = 80, .credential = .{ .user = "a", .password = "b" } };
-            client.proxy_offered = try gpa.dupe(u8, "previous");
+            var diagnostic: Diagnostic = .init(gpa);
+            defer diagnostic.deinit();
+            diagnostic.proxy_offered = try gpa.dupe(u8, "previous");
             const head = try Head.parse("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n");
-            _ = client.proxyChallenged(&head) catch |err| switch (err) {
+            _ = client.proxyChallenged(&head, &diagnostic) catch |err| switch (err) {
                 error.OutOfMemory => {
-                    try std.testing.expectEqualStrings("previous", client.proxy_offered.?);
+                    try std.testing.expectEqualStrings("previous", diagnostic.proxy_offered.?);
                     return err;
                 },
                 error.ProxyAuthMethodUnsupported => {
-                    try std.testing.expectEqualStrings("Negotiate", client.proxy_offered.?);
+                    try std.testing.expectEqualStrings("Negotiate", diagnostic.proxy_offered.?);
                     return;
                 },
                 else => return err,
@@ -1439,7 +1491,7 @@ test "tasks sending at once through one client share the connections it keeps" {
     const Task = struct {
         fn run(c: *Client, t: Target, worker: usize) Error!void {
             for (0..5) |request| {
-                var response = c.send(.GET, t, "/", &.{}, null) catch |err| {
+                var response = c.send(.GET, t, "/", &.{}, null, null) catch |err| {
                     std.debug.print("worker {d}, request {d}: send failed: {s}\n", .{ worker, request, @errorName(err) });
                     return err;
                 };
@@ -1648,7 +1700,7 @@ test "a connection that is not taken within the connect timeout is given up on a
     var timed_out = false;
     for (0..8) |_| {
         const started = Io.Clock.awake.now(io);
-        const conn = client.connect(.{ .tls = false, .host = "127.0.0.1", .port = port }) catch |err| {
+        const conn = client.connect(.{ .tls = false, .host = "127.0.0.1", .port = port }, null) catch |err| {
             try std.testing.expectEqual(error.TimedOut, err);
             const waited = started.durationTo(Io.Clock.awake.now(io));
             try std.testing.expect(waited.nanoseconds >= 150 * std.time.ns_per_ms);
@@ -1790,22 +1842,143 @@ test "new TLS connections check certificate validity at their own time" {
     var vtable: Io.VTable = undefined;
     var client: Client = .init(gpa, CertificateClock.io(&vtable));
     defer client.deinit();
+    var diagnostic: Diagnostic = .init(gpa);
+    defer diagnostic.deinit();
     CertificateClock.current = Io.Clock.real.now(fixture_io);
     try client.trustFile(front.cert_path);
     const cert: Certificate = .{ .buffer = client.bundle.bytes.items, .index = 0 };
     const validity = (try cert.parse()).validity;
     const target: Target = .{ .tls = true, .host = "127.0.0.1", .port = front.port };
     CertificateClock.current.nanoseconds = @as(i96, validity.not_before + 1) * std.time.ns_per_s;
-    (try client.connect(target)).close();
+    (try client.connect(target, &diagnostic)).close();
     CertificateClock.current.nanoseconds = @as(i96, validity.not_after + 1) * std.time.ns_per_s;
-    if (client.connect(target)) |conn| {
+    if (client.connect(target, &diagnostic)) |conn| {
         conn.close();
         return error.ExpiredCertificateAccepted;
     } else |err| try std.testing.expectEqual(error.TlsFailed, err);
-    try std.testing.expectEqual(error.CertificateExpired, client.tls_error.?);
+    try std.testing.expectEqual(error.CertificateExpired, diagnostic.tls_error.?);
     CertificateClock.current.nanoseconds = @as(i96, validity.not_before - 1) * std.time.ns_per_s;
-    try std.testing.expectError(error.TlsFailed, client.connect(target));
-    try std.testing.expectEqual(error.CertificateNotYetValid, client.tls_error.?);
+    try std.testing.expectError(error.TlsFailed, client.connect(target, &diagnostic));
+    try std.testing.expectEqual(error.CertificateNotYetValid, diagnostic.tls_error.?);
     CertificateClock.current.nanoseconds = @as(i96, validity.not_before + 1) * std.time.ns_per_s;
-    (try client.connect(target)).close();
+    (try client.connect(target, &diagnostic)).close();
+}
+
+test "overlapping proxy failures keep their own offered schemes and status" {
+    const Fixture = struct {
+        fn answer(request: []const u8) []const u8 {
+            if (std.mem.indexOf(u8, request, "first.invalid") != null)
+                return "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n";
+            if (std.mem.indexOf(u8, request, "second.invalid") != null)
+                return "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: NTLM\r\nContent-Length: 0\r\n\r\n";
+            return "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+        }
+
+        fn first(client: *Client, failed: *Io.Event, inspected: *Io.Event) !void {
+            var diagnostic: Diagnostic = .init(client.gpa);
+            defer diagnostic.deinit();
+            try std.testing.expectError(error.ProxyAuthMethodUnsupported, client.connect(.{ .tls = true, .host = "first.invalid", .port = 443 }, &diagnostic));
+            failed.set(client.io);
+            const diagnostic_watchdog: Io.Duration = .fromSeconds(10);
+            try inspected.waitTimeout(client.io, .{ .duration = .{ .raw = diagnostic_watchdog, .clock = .awake } });
+            try std.testing.expectEqualStrings("Negotiate", diagnostic.proxy_offered.?);
+            try std.testing.expectEqual(@as(?u16, 407), diagnostic.proxy_status);
+        }
+    };
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const server = try TestServer.startRouted(gpa, io, false, "", Fixture.answer);
+    defer server.stop(gpa);
+    var client: Client = .init(gpa, io);
+    defer client.deinit();
+    client.proxy = .{ .host = "127.0.0.1", .port = server.port, .credential = .{ .user = "a", .password = "b" } };
+    var diagnostic: Diagnostic = .init(gpa);
+    defer diagnostic.deinit();
+    var refused: Diagnostic = .init(gpa);
+    defer refused.deinit();
+    var failed: Io.Event = .unset;
+    var inspected: Io.Event = .unset;
+    var first = try io.concurrent(Fixture.first, .{ &client, &failed, &inspected });
+    defer first.cancel(io) catch {};
+    const diagnostic_watchdog: Io.Duration = .fromSeconds(10);
+    try failed.waitTimeout(io, .{ .duration = .{ .raw = diagnostic_watchdog, .clock = .awake } });
+    try std.testing.expectError(error.ProxyAuthMethodUnsupported, client.connect(.{ .tls = true, .host = "second.invalid", .port = 443 }, &diagnostic));
+    try std.testing.expectEqualStrings("NTLM", diagnostic.proxy_offered.?);
+    try std.testing.expectError(error.ProxyRefused, client.connect(.{ .tls = true, .host = "third.invalid", .port = 443 }, &refused));
+    try std.testing.expectEqual(@as(?u16, 403), refused.proxy_status);
+    inspected.set(io);
+    try first.await(io);
+}
+
+test "overlapping TLS failures keep their own certificate diagnostic" {
+    const Fixture = struct {
+        fn expired(client: *Client, target: Target, time: u64, failed: *Io.Event, inspected: *Io.Event) !void {
+            CertificateClock.current.nanoseconds = @as(i96, time) * std.time.ns_per_s;
+            var diagnostic: Diagnostic = .init(client.gpa);
+            defer diagnostic.deinit();
+            try std.testing.expectError(error.TlsFailed, client.connect(target, &diagnostic));
+            failed.set(client.io);
+            const diagnostic_watchdog: Io.Duration = .fromSeconds(10);
+            try inspected.waitTimeout(client.io, .{ .duration = .{ .raw = diagnostic_watchdog, .clock = .awake } });
+            try std.testing.expectEqual(error.CertificateExpired, diagnostic.tls_error.?);
+        }
+    };
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const front = try @import("testremote.zig").TlsFront.start(gpa, io, 1);
+    defer front.stop(io);
+    var vtable: Io.VTable = undefined;
+    var client: Client = .init(gpa, CertificateClock.io(&vtable));
+    defer client.deinit();
+    CertificateClock.current = Io.Clock.real.now(io);
+    try client.trustFile(front.cert_path);
+    const cert: Certificate = .{ .buffer = client.bundle.bytes.items, .index = 0 };
+    const validity = (try cert.parse()).validity;
+    const target: Target = .{ .tls = true, .host = "127.0.0.1", .port = front.port };
+    var failed: Io.Event = .unset;
+    var inspected: Io.Event = .unset;
+    var first = try io.concurrent(Fixture.expired, .{ &client, target, validity.not_after + 1, &failed, &inspected });
+    defer first.cancel(io) catch {};
+    const diagnostic_watchdog: Io.Duration = .fromSeconds(10);
+    try failed.waitTimeout(io, .{ .duration = .{ .raw = diagnostic_watchdog, .clock = .awake } });
+    var diagnostic: Diagnostic = .init(gpa);
+    defer diagnostic.deinit();
+    CertificateClock.current.nanoseconds = @as(i96, validity.not_before - 1) * std.time.ns_per_s;
+    try std.testing.expectError(error.TlsFailed, client.connect(target, &diagnostic));
+    try std.testing.expectEqual(error.CertificateNotYetValid, diagnostic.tls_error.?);
+    inspected.set(io);
+    try first.await(io);
+}
+
+test "a pooled connection drops its previous exchange's diagnostic" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const server = try TestServer.start(gpa, io, false);
+    defer server.stop(gpa);
+    var client: Client = .init(gpa, io);
+    defer client.deinit();
+    const target: Target = .{ .tls = false, .host = "127.0.0.1", .port = server.port };
+    {
+        var diagnostic: Diagnostic = .init(gpa);
+        defer diagnostic.deinit();
+        var response = try client.send(.GET, target, "/", &.{}, null, &diagnostic);
+        const conn = response.conn.?;
+        try std.testing.expect(conn.diagnostic == &diagnostic);
+        _ = try response.reader().discardRemaining();
+        response.deinit();
+        try std.testing.expect(conn.diagnostic == null);
+    }
+    var diagnostic: Diagnostic = .init(gpa);
+    defer diagnostic.deinit();
+    diagnostic.tls_error = error.CertificateExpired;
+    diagnostic.proxy_status = 407;
+    try diagnostic.setOffered("previous");
+    var response = try client.send(.GET, target, "/", &.{}, null, &diagnostic);
+    defer response.deinit();
+    try std.testing.expect(response.conn.?.diagnostic == &diagnostic);
+    try std.testing.expect(diagnostic.tls_error == null);
+    try std.testing.expect(diagnostic.proxy_status == null);
+    try std.testing.expect(diagnostic.proxy_offered == null);
+    try std.testing.expectEqual(@as(u32, 1), client.connections);
+    _ = try response.reader().discardRemaining();
 }
