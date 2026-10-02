@@ -32,7 +32,7 @@ const file_count: usize = if (smoke) 30 else switch (builtin.mode) {
 const directory_count: usize = if (smoke) 3 else 60;
 
 fn elapsedMs(io: Io, from: Io.Timestamp) f64 {
-    const now = Io.Clock.awake.now(io);
+    const now = benchmarkNow(io);
     const nanoseconds: f64 = @floatFromInt(from.durationTo(now).toNanoseconds());
     return nanoseconds / std.time.ns_per_ms;
 }
@@ -46,7 +46,7 @@ fn elapsedMs(io: Io, from: Io.Timestamp) f64 {
 fn bestMs(io: Io, passes: usize, context: anytype, comptime pass: fn (@TypeOf(context)) void) f64 {
     var best: f64 = std.math.floatMax(f64);
     for (0..passes) |_| {
-        const start = Io.Clock.awake.now(io);
+        const start = benchmarkNow(io);
         pass(context);
         best = @min(best, elapsedMs(io, start));
     }
@@ -82,12 +82,12 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     var index = try repo.openIndex(io);
     defer index.deinit();
 
-    const cold_start = Io.Clock.awake.now(io);
+    const cold_start = benchmarkNow(io);
     const cold = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = wt_rules });
     const cold_add_ms = elapsedMs(io, cold_start);
     const cold_stats = repo.odb.stats;
 
-    const cold_tree_start = Io.Clock.awake.now(io);
+    const cold_tree_start = benchmarkNow(io);
     const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
     const cold_tree_ms = elapsedMs(io, cold_tree_start);
 
@@ -95,11 +95,11 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     index.deinit();
     index = try repo.openIndex(io);
 
-    const warm_start = Io.Clock.awake.now(io);
+    const warm_start = benchmarkNow(io);
     const warm = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{ .rules = wt_rules });
     const warm_add_ms = elapsedMs(io, warm_start);
 
-    const warm_tree_start = Io.Clock.awake.now(io);
+    const warm_tree_start = benchmarkNow(io);
     const same_tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
     const warm_tree_ms = elapsedMs(io, warm_tree_start);
 
@@ -111,7 +111,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
         const text = try std.fmt.bufPrint(&content, "file {d} changed\n", .{i * 10});
         try repo_git.writeFile(io, path, text);
     }
-    const status_start = Io.Clock.awake.now(io);
+    const status_start = benchmarkNow(io);
     var result = try worktree.status(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
         .rules = wt_rules,
         .head_tree = null,
@@ -218,7 +218,7 @@ test "benchmark: a packed object with a delta chain reads inside the budget" {
     var names = try db.listObjects(io);
     defer names.deinit(gpa);
 
-    const start = Io.Clock.awake.now(io);
+    const start = benchmarkNow(io);
     var read_count: usize = 0;
     var bytes: usize = 0;
     var it = names.keyIterator();
@@ -231,7 +231,7 @@ test "benchmark: a packed object with a delta chain reads inside the budget" {
     const ms = elapsedMs(io, start);
 
     // A second pass over the same objects, with the delta base cache warm.
-    const warm_start = Io.Clock.awake.now(io);
+    const warm_start = benchmarkNow(io);
     var warm_it = names.keyIterator();
     while (warm_it.next()) |oid| {
         const found = try db.read(io, oid.*);
@@ -395,7 +395,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
         var index = try repo.openIndex(io);
         defer index.deinit();
 
-        const start = Io.Clock.awake.now(io);
+        const start = benchmarkNow(io);
         const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
             .rules = wt_rules,
             .new_blobs = where,
@@ -447,11 +447,11 @@ test "benchmark: a staging pass into a pack, and writing one" {
     var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
 
-    const whole_start = Io.Clock.awake.now(io);
+    const whole_start = benchmarkNow(io);
     const whole = try db.writePack(io, pack_dir, collected.entries, .{ .delta = .none });
     const whole_ms = elapsedMs(io, whole_start);
 
-    const delta_start = Io.Clock.awake.now(io);
+    const delta_start = benchmarkNow(io);
     const deltified = try db.writePack(io, pack_dir, collected.entries, .{});
     const delta_ms = elapsedMs(io, delta_start);
 
@@ -503,4 +503,11 @@ test "benchmark: a staging pass into a pack, and writing one" {
 fn worktreeRules(repo: *repo_mod.Repository) !worktree.Rules {
     const result = repo.worktreeRules();
     return if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
+}
+
+// Smoke exercises correctness without sampling a benchmark clock.
+var smoke_ticks = std.atomic.Value(i64).init(0);
+fn benchmarkNow(io: std.Io) std.Io.Timestamp {
+    if (@import("bench_options").smoke) return .{ .nanoseconds = smoke_ticks.fetchAdd(1, .monotonic) };
+    return std.Io.Clock.awake.now(io);
 }

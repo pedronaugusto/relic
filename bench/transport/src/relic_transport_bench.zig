@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
     const env = init.environ_map;
     const cwd = std.Io.Dir.cwd();
     const check = args.len > 0 and std.mem.eql(u8, args[args.len - 1], "check");
-    const start = std.Io.Clock.awake.now(io);
+    const start = benchmarkNow(io);
     if (std.mem.eql(u8, args[1], "clone")) {
         // RELIC_BENCH_REPEAT runs the clone that many times in one process,
         // each into a fresh directory, for a sampling profiler to attach to.
@@ -50,8 +50,15 @@ pub fn main(init: std.process.Init) !void {
         });
         outcome.deinit();
     } else return error.UnknownCommand;
-    const elapsed = start.durationTo(std.Io.Clock.awake.now(io));
+    const elapsed = start.durationTo(benchmarkNow(io));
     var buf: [64]u8 = undefined;
     const line = try std.fmt.bufPrint(&buf, "{d:.1}\n", .{@as(f64, @floatFromInt(elapsed.nanoseconds)) / 1e6});
     try std.Io.File.stdout().writeStreamingAll(io, line);
+}
+
+// Smoke exercises correctness without sampling a benchmark clock.
+var smoke_ticks = std.atomic.Value(i64).init(0);
+fn benchmarkNow(io: std.Io) std.Io.Timestamp {
+    if (@import("bench_options").smoke) return .{ .nanoseconds = smoke_ticks.fetchAdd(1, .monotonic) };
+    return std.Io.Clock.awake.now(io);
 }

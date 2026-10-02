@@ -42,7 +42,7 @@ fn status(path: &str) {
     let mut best = f64::MAX;
     let mut entries = 0usize;
     for _ in 0..reps {
-        let start = Instant::now();
+        let start = BenchmarkInstant::now();
         let repo = Repository::open(path).unwrap();
         let mut opts = git2::StatusOptions::new();
         opts.include_untracked(true)
@@ -60,7 +60,7 @@ fn status(path: &str) {
 
 /// Workload 2: add -A then write-tree, on a fresh 1 %-dirty copy.
 fn add_all(path: &str) {
-    let start = Instant::now();
+    let start = BenchmarkInstant::now();
     let repo = Repository::open(path).unwrap();
     let mut index = repo.index().unwrap();
     index
@@ -79,7 +79,7 @@ fn rev_list(path: &str) {
     let mut best = f64::MAX;
     let mut objects = 0usize;
     for _ in 0..reps {
-        let start = Instant::now();
+        let start = BenchmarkInstant::now();
         let repo = Repository::open(path).unwrap();
         let mut walk = repo.revwalk().unwrap();
         walk.push_head().unwrap();
@@ -130,7 +130,7 @@ fn cat_blobs(path: &str, list: &str) {
         .map(|l| Oid::from_str(l.trim()).unwrap())
         .collect();
 
-    let start = Instant::now();
+    let start = BenchmarkInstant::now();
     let repo = Repository::open(path).unwrap();
     let odb = repo.odb().unwrap();
     let mut total: u64 = 0;
@@ -150,7 +150,7 @@ fn cat_blobs(path: &str, list: &str) {
 /// `git_packbuilder` is given every object the database holds — which in a
 /// loose-only copy is every loose object — and writes one pack.
 fn pack_write(path: &str) {
-    let start = Instant::now();
+    let start = BenchmarkInstant::now();
     let repo = Repository::open(path).unwrap();
     let odb = repo.odb().unwrap();
     let mut names: Vec<Oid> = Vec::new();
@@ -186,7 +186,7 @@ fn index_rw(path: &str, scratch: &str) {
     let mut entries = 0usize;
     for _ in 0..reps {
         std::fs::copy(&index_path, &out).unwrap();
-        let start = Instant::now();
+        let start = BenchmarkInstant::now();
         let mut index = git2::Index::open(&out).unwrap();
         let n = index.len();
         assert!(n > 0, "libgit2 index open read nothing");
@@ -196,4 +196,15 @@ fn index_rw(path: &str, scratch: &str) {
     }
     emit("indexrw", "time", best, "ms");
     emit("indexrw", "entries", entries as f64, "count");
+}
+
+// Runtime smoke mode never starts a performance clock.
+struct BenchmarkInstant(Option<Instant>);
+impl BenchmarkInstant {
+    fn now() -> Self {
+        Self(if std::env::var("BENCH_SMOKE").as_deref() == Ok("1") { None } else { Some(Instant::now()) })
+    }
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.map_or(std::time::Duration::from_nanos(1), |start| start.elapsed())
+    }
 }

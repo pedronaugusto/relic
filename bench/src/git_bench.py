@@ -1,3 +1,16 @@
+
+_smoke_ticks = 0
+def benchmark_clock_ns():
+    global _smoke_ticks
+    if os.environ.get("BENCH_SMOKE") == "1":
+        _smoke_ticks += 1
+        return _smoke_ticks
+    return time.perf_counter_ns()
+def benchmark_clock():
+    if os.environ.get("BENCH_SMOKE") == "1":
+        return benchmark_clock_ns() / 1e9
+    return time.perf_counter()
+
 #!/usr/bin/env python3
 """The machine's `git` binary as a rival, measured as a subprocess.
 
@@ -27,28 +40,28 @@ G = ["git", "-C", repo]
 if command == "status":
     best, entries = float("inf"), 0
     for _ in range(1 if os.environ.get("BENCH_SMOKE") == "1" else 5):
-        t = time.perf_counter()
+        t = benchmark_clock()
         out = subprocess.run(G + ["status", "--porcelain=v1", "--untracked-files=all"],
                              check=True, stdout=subprocess.PIPE)
-        took = (time.perf_counter() - t) * 1000.0
+        took = (benchmark_clock() - t) * 1000.0
         best = min(best, took)
         entries = len([l for l in out.stdout.split(b"\n") if l])
     emit("status", "time", best, "ms")
     emit("status", "entries", entries, "count")
 
 elif command == "addall":
-    t = time.perf_counter()
+    t = benchmark_clock()
     run(G + ["add", "-A"])
     run(G + ["write-tree"], stdout=subprocess.DEVNULL)
-    emit("addall", "time", (time.perf_counter() - t) * 1000.0, "ms")
+    emit("addall", "time", (benchmark_clock() - t) * 1000.0, "ms")
 
 elif command == "revlist":
     best, objects = float("inf"), 0
     for _ in range(1 if os.environ.get("BENCH_SMOKE") == "1" else 3):
-        t = time.perf_counter()
+        t = benchmark_clock()
         out = subprocess.run(G + ["rev-list", "--objects", "HEAD"],
                              check=True, stdout=subprocess.PIPE)
-        took = (time.perf_counter() - t) * 1000.0
+        took = (benchmark_clock() - t) * 1000.0
         best = min(best, took)
         objects = out.stdout.count(b"\n")
     emit("revlist", "time", best, "ms")
@@ -61,10 +74,10 @@ elif command == "catblobs":
     check = subprocess.run(G + ["cat-file", "--batch-check=%(objectsize)"],
                            input=names, check=True, stdout=subprocess.PIPE)
     total = sum(int(x) for x in check.stdout.split())
-    t = time.perf_counter()
+    t = benchmark_clock()
     p = subprocess.run(G + ["cat-file", "--batch"], input=names,
                        check=True, stdout=subprocess.DEVNULL)
-    took = (time.perf_counter() - t) * 1000.0
+    took = (benchmark_clock() - t) * 1000.0
     mb = total / 1e6
     emit("catblobs", "throughput", mb / (took / 1000.0), "MB/s")
     emit("catblobs", "time", took, "ms")
@@ -74,14 +87,14 @@ elif command == "packwrite":
     base = os.path.join(extra, "gitpack")
     for stale in glob.glob(base + "-*"):
         os.remove(stale)
-    t = time.perf_counter()
+    t = benchmark_clock()
     names = subprocess.run(G + ["cat-file", "--batch-all-objects",
                                 "--batch-check=%(objectname)"],
                            check=True, stdout=subprocess.PIPE).stdout
     subprocess.run(G + ["pack-objects", "--delta-base-offset",
                         "--window=10", "--depth=50", "-q", base],
                    input=names, check=True, stdout=subprocess.DEVNULL)
-    took = (time.perf_counter() - t) * 1000.0
+    took = (benchmark_clock() - t) * 1000.0
     packs = glob.glob(base + "-*.pack")
     size = os.path.getsize(packs[0]) if packs else 0
     emit("packwrite", "time", took, "ms")

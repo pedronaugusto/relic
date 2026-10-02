@@ -62,9 +62,7 @@ and 1 KiB hashed; full sizes retain the existing 3,000 files and 64 MiB.
 Speed conditions are reported in a quiet pass; deterministic result checks
 still fail on wrong counts, hashes, trees, or pack contents.
 
-Planning estimate: **45–90 minutes** for the full pass with dependencies ready;
-allow another **10–25 minutes** for a first setup. These are estimates, not
-measurements taken during preparation. `run.sh` and `transport/run.sh` remain
+Quiet-only planning estimate: **8–20 minutes**. See [QUIET-PREP.md](QUIET-PREP.md) for preparation, counts, sizes and assumptions. `run.sh` and `transport/run.sh` remain
 low-level helpers; use `quiet.sh` for the complete interleaved pass.
 
 Standalone `zig build -Doptimize=Debug` compiles the pinned after harness

@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     for (0..passes) |_| {
-        var t0 = std.Io.Clock.awake.now(io).nanoseconds;
+        var t0 = benchmarkNow(io).nanoseconds;
         for (offsets.items) |e| {
             var z: c.z_stream = std.mem.zeroes(c.z_stream);
             _ = c.inflateInit_(&z, c.ZLIB_VERSION, @sizeOf(c.z_stream));
@@ -108,15 +108,15 @@ pub fn main(init: std.process.Init) !void {
             _ = c.inflate(&z, c.Z_FINISH);
             _ = c.inflateEnd(&z);
         }
-        const zlib_ns = std.Io.Clock.awake.now(io).nanoseconds - t0;
-        t0 = std.Io.Clock.awake.now(io).nanoseconds;
+        const zlib_ns = benchmarkNow(io).nanoseconds - t0;
+        t0 = benchmarkNow(io).nanoseconds;
         for (offsets.items) |e| {
             var in: std.Io.Reader = .fixed(bytes[e.data..]);
             var d: std.compress.flate.Decompress = .init(&in, .zlib, window);
             try d.reader.readSliceAll(out[0..e.size]);
         }
-        const std_ns = std.Io.Clock.awake.now(io).nanoseconds - t0;
-        t0 = std.Io.Clock.awake.now(io).nanoseconds;
+        const std_ns = benchmarkNow(io).nanoseconds - t0;
+        t0 = benchmarkNow(io).nanoseconds;
         var chunk: [16 * 1024]u8 = undefined;
         for (offsets.items) |e| {
             var in: std.Io.Reader = .fixed(bytes[e.data..]);
@@ -129,14 +129,21 @@ pub fn main(init: std.process.Init) !void {
                 if (n < chunk.len) break;
             }
         }
-        const chunk_ns = std.Io.Clock.awake.now(io).nanoseconds - t0;
-        t0 = std.Io.Clock.awake.now(io).nanoseconds;
+        const chunk_ns = benchmarkNow(io).nanoseconds - t0;
+        t0 = benchmarkNow(io).nanoseconds;
         for (offsets.items) |e| {
             var in: std.Io.Reader = .fixed(bytes[e.data..]);
             const n = try decoder.zlib(&in, out[0..e.size]);
             if (n != e.size) return error.Size;
         }
-        const ours_ns = std.Io.Clock.awake.now(io).nanoseconds - t0;
+        const ours_ns = benchmarkNow(io).nanoseconds - t0;
         for (&best, [_]i96{ zlib_ns, std_ns, chunk_ns, ours_ns }) |*b, t| b.* = @min(b.*, t);
     }
+}
+
+// Smoke exercises correctness without sampling a benchmark clock.
+var smoke_ticks = std.atomic.Value(i64).init(0);
+fn benchmarkNow(io: std.Io) std.Io.Timestamp {
+    if (@import("bench_options").smoke) return .{ .nanoseconds = smoke_ticks.fetchAdd(1, .monotonic) };
+    return std.Io.Clock.awake.now(io);
 }

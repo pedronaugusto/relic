@@ -50,7 +50,7 @@ fn status(path: &str) {
     let mut best = f64::MAX;
     let mut entries = 0usize;
     for _ in 0..reps {
-        let start = Instant::now();
+        let start = BenchmarkInstant::now();
         let repo = gix::open(path).unwrap();
         let mut iter = repo
             .status(gix::progress::Discard)
@@ -118,7 +118,7 @@ fn rev_list(path: &str) {
     let mut best = f64::MAX;
     let mut objects = 0usize;
     for _ in 0..reps {
-        let start = Instant::now();
+        let start = BenchmarkInstant::now();
         let repo = gix::open(path).unwrap();
         let head = repo.head_id().unwrap();
         let mut seen = gix::hashtable::HashSet::<gix::ObjectId>::default();
@@ -156,7 +156,7 @@ fn cat_blobs(path: &str, list: &str) {
         .map(|l| gix::ObjectId::from_hex(l.trim().as_bytes()).unwrap())
         .collect();
 
-    let start = Instant::now();
+    let start = BenchmarkInstant::now();
     let repo = gix::open(path).unwrap();
     let mut buf: Vec<u8> = Vec::with_capacity(1 << 20);
     let mut total: u64 = 0;
@@ -180,7 +180,7 @@ fn cat_blobs(path: &str, list: &str) {
 fn pack_write(path: &str, scratch: &str) {
     use gix_pack::data::output;
 
-    let start = Instant::now();
+    let start = BenchmarkInstant::now();
     let repo = gix::open(path).unwrap();
     let head = repo.head_id().unwrap();
     let tips: Vec<gix::ObjectId> = repo
@@ -254,7 +254,7 @@ fn index_rw(path: &str, scratch: &str) {
     let mut best = f64::MAX;
     let mut entries = 0usize;
     for _ in 0..reps {
-        let start = Instant::now();
+        let start = BenchmarkInstant::now();
         let mut file = gix::index::File::at(
             &index_path,
             gix::hash::Kind::Sha1,
@@ -274,4 +274,15 @@ fn index_rw(path: &str, scratch: &str) {
     }
     emit("indexrw", "time", best, "ms");
     emit("indexrw", "entries", entries as f64, "count");
+}
+
+// Runtime smoke mode never starts a performance clock.
+struct BenchmarkInstant(Option<Instant>);
+impl BenchmarkInstant {
+    fn now() -> Self {
+        Self(if std::env::var("BENCH_SMOKE").as_deref() == Ok("1") { None } else { Some(Instant::now()) })
+    }
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.map_or(std::time::Duration::from_nanos(1), |start| start.elapsed())
+    }
 }

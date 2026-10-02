@@ -22,7 +22,7 @@ const smoke = @import("bench_options").smoke;
 const Oid = relic.hash.Oid;
 
 fn ms(io: Io, from: Io.Timestamp) f64 {
-    const now = Io.Clock.awake.now(io);
+    const now = benchmarkNow(io);
     const ns: f64 = @floatFromInt(from.durationTo(now).toNanoseconds());
     return ns / std.time.ns_per_ms;
 }
@@ -85,7 +85,7 @@ fn status(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
     var best: f64 = std.math.floatMax(f64);
     var entries: usize = 0;
     for (0..reps) |_| {
-        const start = Io.Clock.awake.now(io);
+        const start = benchmarkNow(io);
 
         var repo = try relic.repo.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
@@ -122,7 +122,7 @@ fn status(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
 /// Workload 2: add -A then write-tree over a worktree with 1 % of its files
 /// modified. The repository is a fresh copy, so this runs once.
 fn addAll(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
-    const start = Io.Clock.awake.now(io);
+    const start = benchmarkNow(io);
 
     var repo = try relic.repo.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
@@ -164,7 +164,7 @@ fn revList(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
     var best: f64 = std.math.floatMax(f64);
     var objects: usize = 0;
     for (0..reps) |_| {
-        const start = Io.Clock.awake.now(io);
+        const start = benchmarkNow(io);
 
         var repo = try relic.repo.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
@@ -217,7 +217,7 @@ fn revList(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
     // builds each object's path for a later delta search.
     var best_collect: f64 = std.math.floatMax(f64);
     for (0..reps) |_| {
-        const start = Io.Clock.awake.now(io);
+        const start = benchmarkNow(io);
         var repo = try relic.repo.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
         const head = (try repo.head(io)) orelse return error.UnbornHead;
@@ -247,7 +247,7 @@ fn catBlobs(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, dir: Io.Dir, list_path:
         try oids.append(gpa, try Oid.parse(.sha1, trimmed));
     }
 
-    const start = Io.Clock.awake.now(io);
+    const start = benchmarkNow(io);
     var repo = try relic.repo.Repository.open(gpa, io, dir, .{
         .odb = .{ .delta_cache_bytes = delta_cache_mb << 20 },
     });
@@ -268,7 +268,7 @@ fn catBlobs(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, dir: Io.Dir, list_path:
 
 /// Workload 5: pack every loose object, with deltas.
 fn packWrite(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
-    const start = Io.Clock.awake.now(io);
+    const start = benchmarkNow(io);
     var repo = try relic.repo.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
     // relic's own defaults: window 10, depth 50, offset deltas — git's
@@ -302,7 +302,7 @@ fn indexReadWrite(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, dir: Io.Dir, scra
 
     for (0..reps) |_| {
         // Like for like: no rival fsyncs the index it writes.
-        const start = Io.Clock.awake.now(io);
+        const start = benchmarkNow(io);
         var index = try relic.index.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
         defer index.deinit();
         try index.write(io, scratch_dir, "index.relic", .{ .lock = .{ .sync = .none } });
@@ -310,7 +310,7 @@ fn indexReadWrite(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, dir: Io.Dir, scra
         entries = index.items().len;
 
         // And relic's own default, which fsyncs before the rename.
-        const durable_start = Io.Clock.awake.now(io);
+        const durable_start = benchmarkNow(io);
         var durable = try relic.index.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
         defer durable.deinit();
         try durable.write(io, scratch_dir, "index.relic.durable", .{});
@@ -329,4 +329,11 @@ fn worktreeRules(repo: *relic.repo.Repository) !relic.worktree.Rules {
 
 fn objectFormat(repo: *const relic.repo.Repository) relic.hash.Kind {
     return if (@hasDecl(relic.repo.Repository, "objectFormat")) repo.objectFormat() else repo.kind;
+}
+
+// Smoke exercises correctness without sampling a benchmark clock.
+var smoke_ticks = std.atomic.Value(i64).init(0);
+fn benchmarkNow(io: std.Io) std.Io.Timestamp {
+    if (@import("bench_options").smoke) return .{ .nanoseconds = smoke_ticks.fetchAdd(1, .monotonic) };
+    return std.Io.Clock.awake.now(io);
 }

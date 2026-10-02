@@ -22,9 +22,11 @@ def main():
         env=p.env.copy();env.update(BENCH_BUILD_DIR=str(tools),PYTHON=sys.executable)
         if p.smoke:env['BENCH_SMOKE']='1';p.env['BENCH_SMOKE']='1'
         else:env.pop('BENCH_SMOKE',None);p.env.pop('BENCH_SMOKE',None)
-        p.run([p.here/'run.sh','build'],env=env)
+        p.setup_run([p.here/'run.sh','build'],env=env)
         fx=tools/('fixture-smoke' if p.smoke else 'fixture-full');env['BENCH_FIXTURE']=str(fx)
-        p.run([p.here/'run.sh','fixture'],env=env)
+        p.setup_run([p.here/'run.sh','fixture'],env=env)
+        for asset in ('gix_bench','git2_bench','gogit_bench'):p.prepared.require(tools/asset)
+        p.prepared.require(fx)
         scratch=p.build/'work';scratch.mkdir(exist_ok=True)
         commands={'git':[sys.executable,p.here/'src/git_bench.py'],'gix':[tools/'gix_bench'],
                   'libgit2':[tools/'git2_bench'],'go-git':[tools/'gogit_bench']}
@@ -76,21 +78,24 @@ def main():
 def transport_pass(p,source,binary):
     fx=p.build/'transport-fixtures';fx.mkdir(exist_ok=True)
     specs={'smoke':(1,32,1,1,1)} if p.smoke else {'small':(200,1000,100,3,20),'medium':(3000,2000,1000,10,20),'large':(20000,2000,300,20,20)}
-    for size,spec in specs.items():
-        repo=fx/(size+'.git')
-        if repo.exists():shutil.rmtree(repo)
-        p.run(['git','init','-q','--bare',repo]);p.run(['git','-C',repo,'symbolic-ref','HEAD','refs/heads/main'])
-        stream=subprocess.check_output([sys.executable,p.here/'transport/src/genrepo.py',*map(str,spec)])
-        subprocess.run(['git','-C',str(repo),'fast-import','--quiet','--done'],input=stream,env=p.env,check=True,capture_output=True)
-        p.run(['git','-C',repo,'repack','-adq'])
-        base=fx/(size+'-base.git')
-        if base.exists():shutil.rmtree(base)
-        p.run(['git','clone','-q','--bare',repo,base]);p.run(['git','-C',base,'update-ref','refs/heads/main','refs/tags/base'])
-        p.run(['git','-C',base,'repack','-adq']);p.run(['git','-C',base,'prune'])
-        for state,origin in [('tip',repo),('base',base)]:
-            client=fx/(size+'-client-'+state)
-            if client.exists():shutil.rmtree(client)
-            p.run(['git','clone','-q','--no-checkout',origin,client])
+    if p.preparing:
+        for size,spec in specs.items():
+            repo=fx/(size+'.git')
+            if repo.exists():shutil.rmtree(repo)
+            p.run(['git','init','-q','--bare',repo]);p.run(['git','-C',repo,'symbolic-ref','HEAD','refs/heads/main'])
+            stream=subprocess.check_output([sys.executable,p.here/'transport/src/genrepo.py',*map(str,spec)])
+            subprocess.run(['git','-C',str(repo),'fast-import','--quiet','--done'],input=stream,env=p.env,check=True,capture_output=True)
+            p.run(['git','-C',repo,'repack','-adq'])
+            base=fx/(size+'-base.git')
+            if base.exists():shutil.rmtree(base)
+            p.run(['git','clone','-q','--bare',repo,base]);p.run(['git','-C',base,'update-ref','refs/heads/main','refs/tags/base'])
+            p.run(['git','-C',base,'repack','-adq']);p.run(['git','-C',base,'prune'])
+            for state,origin in [('tip',repo),('base',base)]:
+                client=fx/(size+'-client-'+state)
+                if client.exists():shutil.rmtree(client)
+                p.run(['git','clone','-q','--no-checkout',origin,client])
+    p.prepared.require(fx)
+    if p.plan_only:return
     env=p.env.copy();env['GIT_SSH_COMMAND']=str(p.here/'transport/src/ssh-standin.sh')
     server=subprocess.Popen([sys.executable,p.here/'transport/src/httpgit.py',str(fx)],env=env,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
     try:
