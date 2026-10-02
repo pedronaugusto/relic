@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Keep suffix-related test modules in one Windows family so substring filters do not run them twice.
+
 - Divide remaining Windows tests into five named source families without changing their assertions.
 
 - Start Windows core tests before comparison jobs fill the runner queue.

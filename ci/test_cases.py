@@ -83,6 +83,21 @@ class Cases(unittest.TestCase):
         cross = workflow.split('  cross-compile:\n', 1)[1]
         self.assertIn('needs: source', cross)
 
+    def test_source_family_filters_do_not_overlap(self):
+        source = (ROOT / 'ci/core_cases.zig').read_text()
+        groups = {name: re.findall(r'"([^" ]+\.test)"', body)
+                  for name, body in re.findall(r'\.name = "([^"]+)", \.filters = &\.\{(.*?)\n    \} \}', source, re.S)}
+        count = 0
+        for path in (ROOT / 'src').rglob('*.zig'):
+            module = '.'.join(path.relative_to(ROOT / 'src').with_suffix('').parts)
+            for name in re.findall(r'^test "((?:[^"\\]|\\.)*)"', path.read_text(), re.M):
+                qualified = f'{module}.test.{name}'
+                owners = [group for group, filters in groups.items()
+                          if any(pattern in qualified for pattern in filters)]
+                self.assertEqual(1, len(owners), f'{qualified}: {owners}')
+                count += 1
+        self.assertEqual(1102, count)
+
     def test_filters_are_checked_by_exact_names(self):
         selection = (ROOT / 'src/test_case.zig').read_text()
         self.assertIn('std.mem.eql(u8, name, chosen)', selection)
