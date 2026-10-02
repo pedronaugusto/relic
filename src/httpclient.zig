@@ -1676,40 +1676,84 @@ test "the watchdog cannot expire activity refreshed before its clock sample" {
     try checkWatchdogActivity(1, 10 * std.time.ns_per_s, 10 * std.time.ns_per_s + 1);
 }
 
-test "a connection that is not taken within the connect timeout is given up on as TimedOut" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    // A listener that accepts nothing and queues one connection: past the
-    // queue the kernel leaves a connection unanswered, as a host behind a
-    // firewall that drops it does.
-    const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
-    var listener = try address.listen(io, .{ .kernel_backlog = 1 });
-    defer listener.deinit(io);
-    const port = listener.socket.address.getPort();
+test "a connection expires at its controlled connect deadline and cancels the dial" {
+    const Controlled = struct {
+        var active: *@This() = undefined;
+        const base = std.testing.io;
+        clock: std.atomic.Value(i64) = .init(0),
+        connecting: Io.Event = .unset,
+        timer_started: Io.Event = .unset,
+        before_deadline: Io.Event = .unset,
+        checked_before: Io.Event = .unset,
+        at_deadline: Io.Event = .unset,
+        never_connected: Io.Event = .unset,
+        done: Io.Event = .unset,
+        dial_canceled: std.atomic.Value(bool) = .init(false),
+        requested_timeout: bool = false,
+        result: Error!Io.net.Stream = undefined,
 
-    var client: Client = .init(gpa, io);
+        fn now(context: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
+            if (clock != .awake) return base.vtable.now(context, clock);
+            return .{ .nanoseconds = active.clock.load(.acquire) };
+        }
+
+        fn connect(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {
+            const state = active;
+            state.connecting.set(base);
+            state.never_connected.wait(base) catch |err| {
+                state.dial_canceled.store(true, .release);
+                return err;
+            };
+            return error.ConnectionRefused;
+        }
+
+        fn sleep(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
+            const state = active;
+            const duration = timeout.duration;
+            state.requested_timeout = duration.clock == .awake and duration.raw.nanoseconds == 200 * std.time.ns_per_ms;
+            const deadline = state.clock.load(.acquire) + duration.raw.nanoseconds;
+            state.timer_started.set(base);
+            try state.before_deadline.wait(base);
+            if (state.clock.load(.acquire) < deadline) {
+                state.checked_before.set(base);
+                try state.at_deadline.wait(base);
+            }
+        }
+
+        fn run(client: *Client, state: *@This()) void {
+            state.result = Connection.dial(client, "127.0.0.1", 1);
+            state.done.set(base);
+        }
+    };
+    const io = std.testing.io;
+    var state: Controlled = .{};
+    Controlled.active = &state;
+    var vtable = io.vtable.*;
+    vtable.now = Controlled.now;
+    vtable.netConnectIp = Controlled.connect;
+    vtable.sleep = Controlled.sleep;
+    const controlled: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var client: Client = .init(std.testing.allocator, controlled);
     defer client.deinit();
-    client.timeouts = .{ .connect = .fromMilliseconds(200) };
-    var held: std.ArrayList(*Connection) = .empty;
-    defer {
-        for (held.items) |conn| conn.close();
-        held.deinit(gpa);
-    }
-    // Fill the queue — its length is the kernel's to choose — until a
-    // connection is not taken.
-    var timed_out = false;
-    for (0..8) |_| {
-        const started = Io.Clock.awake.now(io);
-        const conn = client.connect(.{ .tls = false, .host = "127.0.0.1", .port = port }, null) catch |err| {
-            try std.testing.expectEqual(error.TimedOut, err);
-            const waited = started.durationTo(Io.Clock.awake.now(io));
-            try std.testing.expect(waited.nanoseconds >= 150 * std.time.ns_per_ms);
-            timed_out = true;
-            break;
-        };
-        try held.append(gpa, conn);
-    }
-    try std.testing.expect(timed_out);
+    client.timeouts.connect = .fromMilliseconds(200);
+    var task = try io.concurrent(Controlled.run, .{ &client, &state });
+    defer task.cancel(io);
+    const connect_watchdog: Io.Duration = .fromSeconds(5);
+    const watchdog: Io.Timeout = .{ .duration = .{ .raw = connect_watchdog, .clock = .awake } };
+    state.connecting.waitTimeout(io, watchdog) catch return error.ConnectReadinessWatchdogExpired;
+    state.timer_started.waitTimeout(io, watchdog) catch return error.ConnectTimerWatchdogExpired;
+    try std.testing.expect(state.requested_timeout);
+    state.clock.store(199 * std.time.ns_per_ms, .release);
+    state.before_deadline.set(io);
+    state.checked_before.waitTimeout(io, watchdog) catch return error.ConnectBoundaryWatchdogExpired;
+    try std.testing.expect(!state.done.isSet());
+    try std.testing.expect(!state.dial_canceled.load(.acquire));
+    state.clock.store(200 * std.time.ns_per_ms, .release);
+    state.at_deadline.set(io);
+    state.done.waitTimeout(io, watchdog) catch @panic("connect completion watchdog expired");
+    task.await(io);
+    try std.testing.expectError(error.TimedOut, state.result);
+    try std.testing.expect(state.dial_canceled.load(.acquire));
     try std.testing.expectEqual(@as(u32, 0), client.unwatched);
 }
 

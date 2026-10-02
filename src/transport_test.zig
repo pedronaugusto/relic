@@ -974,20 +974,75 @@ fn withoutAgent(gpa: Allocator, bytes: []const u8) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn fetchForever(gpa: Allocator, io: Io, repo: *repo_mod.Repository, env: *const std.process.Environ.Map) void {
-    var outcome = fetch_mod.fetch(gpa, io, repo, "origin", .{ .who = test_who, .programs = .{ .environ = env } }) catch return;
-    outcome.deinit();
-}
-
-fn nap(io: Io, ms: i64) void {
-    io.sleep(.fromMilliseconds(ms), .awake) catch {};
-}
-
-test "a fetch cancelled while its ssh never answers stops the ssh and returns at once" {
+test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     // the stand-in is a shell script; Windows has no /bin/sh to run it
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
-    const io = testing.io;
+    const Child = @import("conduit").Child;
+    const Controlled = struct {
+        threadlocal var active: ?*@This() = null;
+        reading: Io.Event = .unset,
+        never_answered: Io.Event = .unset,
+        canceled: Io.Event = .unset,
+        stdout: ?Io.File.Handle = null,
+        child: ?Child = null,
+        reaped: bool = false,
+        read_canceled: bool = false,
+        failure: ?anyerror = null,
+
+        fn start(raw: *anyopaque, task_io: Io, allocator: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {
+            const state: *@This() = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Controlled state
+            const child = try Child.spawn(task_io, allocator, options);
+            for (options.argv) |arg| if (std.mem.eql(u8, arg, "-G")) return child;
+            state.child = child;
+            state.stdout = child.stdoutFile().?.handle;
+            return child;
+        }
+
+        fn terminate(raw: *anyopaque, child: *Child, task_io: Io) void {
+            const state: *@This() = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Controlled state
+            const tracked = state.child != null and state.child.? == child.*;
+            _ = child.killWait(task_io, 0) catch return;
+            if (tracked) state.reaped = true;
+        }
+
+        fn operate(context: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+            if (active) |state| {
+                if (operation == .file_read_streaming and state.stdout != null and operation.file_read_streaming.file.handle == state.stdout.?) {
+                    // This is the fetch's advertisement read, after the real
+                    // child was spawned. Hold it until cancellation, so the
+                    // caller cannot race a completed or unstarted fetch.
+                    state.reading.set(testing.io);
+                    state.never_answered.wait(testing.io) catch |err| {
+                        state.read_canceled = true;
+                        return err;
+                    };
+                }
+            }
+            return testing.io.vtable.operate(context, operation);
+        }
+
+        fn fetch(allocator: Allocator, task_io: Io, repo: *repo_mod.Repository, env: *const std.process.Environ.Map, state: *@This()) void {
+            active = state;
+            defer active = null;
+            var outcome = fetch_mod.fetch(allocator, task_io, repo, "origin", .{
+                .who = test_who,
+                .programs = .{ .environ = env, .spawn = .{ .context = state, .start = start, .terminate = terminate } },
+            }) catch |err| {
+                state.failure = err;
+                return;
+            };
+            outcome.deinit();
+        }
+
+        fn cancel(task: *Io.Future(void), state: *@This()) void {
+            task.cancel(testing.io);
+            state.canceled.set(testing.io);
+        }
+    };
+    var vtable = testing.io.vtable.*;
+    vtable.operate = Controlled.operate;
+    const io: Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "ssh", .data = "#!/bin/sh\n[ \"$1\" = \"-G\" ] && exit 1\nexec sleep 30\n" });
@@ -1008,15 +1063,17 @@ test "a fetch cancelled while its ssh never answers stops the ssh and returns at
     defer env.deinit();
     try env.put("PATH", "/usr/bin:/bin");
 
-    const began = Io.Clock.awake.now(io);
-    const Outcome = union(enum) { fetched: void, late: void };
-    var outcomes: [2]Outcome = undefined;
-    var select = Io.Select(Outcome).init(io, &outcomes);
-    try select.concurrent(.fetched, fetchForever, .{ gpa, io, &repo, &env });
-    try select.concurrent(.late, nap, .{ io, 300 });
-    try testing.expectEqual(Outcome.late, try select.await());
-    select.cancelDiscard();
-    const took = began.durationTo(Io.Clock.awake.now(io)).toMilliseconds();
-    // the stand-in would have held the fetch for thirty seconds
-    try testing.expect(took < 5_000);
+    var state: Controlled = .{};
+    var task = try testing.io.concurrent(Controlled.fetch, .{ gpa, io, &repo, &env, &state });
+    defer task.cancel(testing.io);
+    const ssh_watchdog: Io.Duration = .fromSeconds(5);
+    const watchdog: Io.Timeout = .{ .duration = .{ .raw = ssh_watchdog, .clock = .awake } };
+    state.reading.waitTimeout(testing.io, watchdog) catch return error.SshReadinessWatchdogExpired;
+    var cancel = try testing.io.concurrent(Controlled.cancel, .{ &task, &state });
+    defer cancel.cancel(testing.io);
+    state.canceled.waitTimeout(testing.io, watchdog) catch @panic("ssh cancellation watchdog expired");
+    cancel.await(testing.io);
+    try testing.expectEqual(error.Canceled, state.failure.?);
+    try testing.expect(state.read_canceled);
+    try testing.expect(state.reaped);
 }
