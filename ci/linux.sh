@@ -44,7 +44,7 @@ docker run --rm "$image" git --version
 docker run --rm "$image" sh -ec 'gpg --version | head -1; command -v gpgconf ssh-keygen'
 
 for mode in Debug ReleaseSafe; do
-    echo "==> zig build test -Doptimize=$mode (linux, in $image)"
+    echo "==> zig build test -Doptimize=$mode --test-timeout 60s (linux, in $image)"
     docker run --rm \
         -e RELIC_REQUIRE_SIGNERS=1 \
         -v "$PWD:/src:ro" \
@@ -53,7 +53,7 @@ for mode in Debug ReleaseSafe; do
             mkdir /tmp/relic
             tar -C /src --exclude=./.zig-cache --exclude=./zig-out -cf - . | tar -C /tmp/relic -xf -
             cd /tmp/relic
-            exec zig build test --cache-dir /tmp/zc --global-cache-dir /tmp/zg "$@"
+            exec zig build test --cache-dir /tmp/zc --global-cache-dir /tmp/zg --test-timeout 60s "$@"
         ' sh -Doptimize="$mode" "$@"
 done
 

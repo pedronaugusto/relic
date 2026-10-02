@@ -1482,11 +1482,12 @@ test "tasks sending at once through one client share the connections it keeps" {
     try std.testing.expect(client.idle.items.len <= 4);
 }
 
-test "concurrent timeout fallbacks count each unwatched connection" {
+fn checkConcurrentTimeoutFallbacks(notify: bool, readiness_limit: Io.Duration) !void {
     const Controlled = struct {
         waiting: std.atomic.Value(usize) = .init(0),
         ready: Io.Event = .unset,
         waiting_on: *const anyopaque = undefined,
+        notify: bool,
         threadlocal var state: ?*@This() = null;
         threadlocal var counted: bool = false;
 
@@ -1494,7 +1495,7 @@ test "concurrent timeout fallbacks count each unwatched connection" {
             if (state) |control| {
                 if (@as(*const anyopaque, ptr) == control.waiting_on and !counted) {
                     counted = true;
-                    if (control.waiting.fetchAdd(1, .acq_rel) == 1) control.ready.set(std.testing.io);
+                    if (control.waiting.fetchAdd(1, .acq_rel) == 1 and control.notify) control.ready.set(std.testing.io);
                 }
             }
             std.testing.io.vtable.futexWaitUncancelable(std.testing.io.userdata, ptr, expected);
@@ -1518,7 +1519,7 @@ test "concurrent timeout fallbacks count each unwatched connection" {
         }
     };
     const io = std.testing.io;
-    var state: Controlled = .{};
+    var state: Controlled = .{ .notify = notify };
     var vtable = io.vtable.*;
     vtable.concurrent = Io.failing.vtable.concurrent;
     vtable.groupConcurrent = Io.failing.vtable.groupConcurrent;
@@ -1543,11 +1544,28 @@ test "concurrent timeout fallbacks count each unwatched connection" {
     {
         defer client.lock.unlock(guarded);
         for (&results) |*result| try group.concurrent(io, Controlled.run, .{ &client, &state, result });
-        try state.ready.wait(io);
+        const deadline = Io.Clock.Timestamp.fromNow(io, .{ .raw = readiness_limit, .clock = .awake });
+        // A missed arrival must release the mutex before joining workers.
+        // Spurious wakes share this deadline rather than starting it again.
+        while (!state.ready.isSet()) {
+            if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+            state.ready.waitTimeout(io, .{ .deadline = deadline }) catch |err| switch (err) {
+                error.Timeout => continue,
+                error.Canceled => return err,
+            };
+        }
     }
     try group.await(io);
     for (results) |result| try std.testing.expectError(error.ConnectionFailed, result);
     try std.testing.expectEqual(@as(u32, 2), client.unwatched);
+}
+
+test "concurrent timeout fallbacks count each unwatched connection" {
+    try checkConcurrentTimeoutFallbacks(true, .fromSeconds(10));
+}
+
+test "the HTTP counter fixture gives up when worker readiness is not signaled" {
+    try std.testing.expectError(error.Timeout, checkConcurrentTimeoutFallbacks(false, .fromMilliseconds(10)));
 }
 
 fn checkWatchdogActivity(initial_start: u64, sampled: u64, fresh: u64) !void {

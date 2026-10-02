@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- HTTP counter fixtures release their held mutex when worker readiness times out, and CI reports each stalled test by name before the job limit.
+
 - Proxy authentication allocates replacement offered schemes before releasing the previous diagnostic, so allocation failure leaves a valid value to release.
 
 - The HTTP timeout-counter fixture observes only its client mutex and clears worker state, so hostname helper threads can wait on their own queues safely.
