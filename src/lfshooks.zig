@@ -25,9 +25,9 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
-const diff = @import("diff.zig");
+const object = @import("object_core.zig");
+const repo_mod = @import("repo_core.zig");
+const diff = @import("diff_core.zig");
 const hooks = @import("hooks.zig");
 const lfslocks = @import("lfslocks.zig");
 

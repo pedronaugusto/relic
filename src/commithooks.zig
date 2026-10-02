@@ -17,9 +17,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const hooks = @import("hooks.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const fs = @import("fs.zig");
 
 const Repository = repo_mod.Repository;

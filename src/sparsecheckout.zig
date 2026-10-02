@@ -20,13 +20,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const fs = @import("fs.zig");
-const index_mod = @import("index.zig");
-const repo_mod = @import("repo.zig");
+const index_mod = @import("index_core.zig");
+const repo_mod = @import("repo_core.zig");
 const sparse = @import("sparse.zig");
 const sparseindex = @import("sparseindex.zig");
-const worktree = @import("worktree.zig");
+const worktree = @import("worktree_core.zig");
 
 const Config = config_mod.Config;
 const Repository = repo_mod.Repository;

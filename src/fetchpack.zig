@@ -22,8 +22,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
+const object = @import("object_core.zig");
+const odb_mod = @import("odb_core.zig");
 const pktline = @import("pktline.zig");
 const connection = @import("connection.zig");
 const warning = @import("warning.zig");
@@ -31,7 +31,7 @@ const protocol = @import("protocol.zig");
 const sideband = @import("sideband.zig");
 const indexpack = @import("indexpack.zig");
 const progress_mod = @import("progress.zig");
-const revwalk = @import("revwalk.zig");
+const revwalk = @import("revwalk_core.zig");
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;
@@ -795,7 +795,7 @@ const Negotiator = struct {
 const testing = std.testing;
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const objectwalk = @import("objectwalk.zig");
 /// A conversation with `git upload-pack` run on this machine, in `dir`.
 fn uploadPack(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, dir: Io.Dir, v2: bool) !*Connection {

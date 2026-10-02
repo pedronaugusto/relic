@@ -5,18 +5,18 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const odb = @import("odb.zig");
+const odb = @import("odb_types.zig");
 const hash = @import("hash.zig");
 const fs = @import("fs.zig");
 
-pub fn empty(gpa: Allocator, io: Io, kind: hash.Kind, options: odb.Options) odb.Error!odb.Odb {
+pub fn empty(comptime Odb: type, gpa: Allocator, io: Io, kind: hash.Kind, options: odb.Options) odb.Error!Odb {
     _ = io;
     return .{ ._state = try @import("odbstate.zig").create(gpa, kind, options) };
 }
 
 /// The caller owns `dir` until append succeeds; the database owns it after.
 /// The pack directory is acquired here and follows the same transfer.
-pub fn register(db: *odb.Odb, io: Io, dir: Io.Dir, writable: bool) odb.Error!void {
+pub fn register(db: anytype, io: Io, dir: Io.Dir, writable: bool) odb.Error!void {
     const pack_dir = try openDirectory(io, dir, "pack");
     errdefer if (pack_dir) |d| d.close(io);
     try @import("odbstate.zig").get(db._state).sources.append(@import("odbstate.zig").get(db._state).gpa, .{
@@ -29,8 +29,8 @@ pub fn register(db: *odb.Odb, io: Io, dir: Io.Dir, writable: bool) odb.Error!voi
     });
 }
 
-pub fn openOwn(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: hash.Kind, options: odb.Options) odb.Error!odb.Odb {
-    var db = try empty(gpa, io, kind, options);
+pub fn openOwn(comptime Odb: type, gpa: Allocator, io: Io, git_dir: Io.Dir, kind: hash.Kind, options: odb.Options) odb.Error!Odb {
+    var db = try empty(Odb, gpa, io, kind, options);
     errdefer db.deinit(io);
     const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
     errdefer if (@import("odbstate.zig").get(db._state).sources.items.len == 0) objects.close(io);

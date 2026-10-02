@@ -10,7 +10,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const odb_mod = @import("odb.zig");
+const odb_mod = @import("odb_core.zig");
 const ort = @import("ort.zig");
 const strategy = @import("strategy.zig");
 const blobmerge = @import("blobmerge.zig");

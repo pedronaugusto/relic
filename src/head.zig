@@ -16,10 +16,10 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const refs_mod = @import("refs.zig");
+const object = @import("object_core.zig");
+const refs_mod = @import("refs_core.zig");
 const reflog = @import("reflog.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const fs = @import("fs.zig");
 
 const Oid = hash.Oid;

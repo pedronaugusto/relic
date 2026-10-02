@@ -6,9 +6,9 @@ const Io = std.Io;
 
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
-const worktree = @import("worktree.zig");
+const object = @import("object_core.zig");
+const repo_mod = @import("repo_core.zig");
+const worktree = @import("worktree_core.zig");
 const worktrees = @import("worktrees.zig");
 const Oid = hash.Oid;
 
@@ -481,10 +481,10 @@ test "opening uses the format validated before worktree settings are read" {
     });
     var opened = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
     defer opened.deinit(io);
-    try std.testing.expectEqual(@import("refs.zig").Format.reftable, opened.refStore().refFormat());
+    try std.testing.expectEqual(@import("refs_core.zig").Format.reftable, opened.refStore().refFormat());
     try opened.editConfig(&.{.{ .set = .{ .level = .local, .name = "fixture.edited", .value = "shared" } }}, null);
     try std.testing.expectEqualStrings("shared", opened.configuration().get("fixture.edited").?);
-    try std.testing.expectEqual(@import("refs.zig").Format.reftable, opened.refStore().refFormat());
+    try std.testing.expectEqual(@import("refs_core.zig").Format.reftable, opened.refStore().refFormat());
     try std.testing.expectError(error.RefStorageChanged, opened.editConfig(&.{.{ .set = .{ .level = .local, .name = "extensions.refstorage", .value = "files" } }}, null));
 }
 
@@ -534,7 +534,7 @@ test "a signing write keeps only its own refused setting" {
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
     try repo.editConfig(&.{.{ .set = .{ .name = "tag.gpgSign", .value = "true" } }}, null);
-    const fields: @import("object.zig").Tag.Fields = .{
+    const fields: @import("object_core.zig").Tag.Fields = .{
         .target = @import("hash.zig").Hasher.object(.sha1, "tree", ""),
         .target_type = .tree,
         .name = "t",
@@ -570,7 +570,7 @@ test "a refusal preserves the diagnostic allocator's resource failure" {
     try std.testing.expectEqual(@as(i64, 0), try repo.configuration().getInt("core.repositoryformatversion", -1));
     try std.testing.expectError(error.UnsupportedRepositoryVersion, repo.refreshConfig(io, null));
     try repo.editConfig(&.{.{ .set = .{ .name = "tag.gpgSign", .value = "true" } }}, null);
-    const fields: @import("object.zig").Tag.Fields = .{
+    const fields: @import("object_core.zig").Tag.Fields = .{
         .target = @import("hash.zig").Hasher.object(.sha1, "tree", ""),
         .target_type = .tree,
         .name = "t",
@@ -584,7 +584,7 @@ test "a refusal preserves the diagnostic allocator's resource failure" {
 test "a refresh changing the ref backend requires reopening and keeps the old state" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    for ([_]@import("refs.zig").Format{ .files, .reftable }) |format| {
+    for ([_]@import("refs_core.zig").Format{ .files, .reftable }) |format| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = format });
@@ -949,7 +949,7 @@ test "worktree configuration adapters refuse malformed settings and allocation f
         try repo.editConfig(&.{.{ .set = .{ .name = setting, .value = if (comptime std.mem.eql(u8, setting, "core.eol")) "native" else "default" } }}, null);
     }
     @import("configstate.zig").get(repo._config).deinit();
-    @import("configstate.zig").get(repo._config).* = try @import("config.zig").Config.parseText(gpa, "[core]\n autocrlf = \"input\"\n", .local);
+    @import("configstate.zig").get(repo._config).* = try @import("config_core.zig").Config.parseText(gpa, "[core]\n autocrlf = \"input\"\n", .local);
     try std.testing.expectEqual(worktree.attributes.CoreSettings.AutoCrlf.input, (try Adapter.core(&repo)).autocrlf);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     @import("configstate.zig").get(repo._config).gpa = failing.allocator();
@@ -960,7 +960,7 @@ test "worktree configuration adapters refuse malformed settings and allocation f
 test "repository format and ref cache state have no writable public fields" {
     try std.testing.expect(!@hasField(repo_mod.Repository, "kind"));
     try std.testing.expect(!@hasField(repo_mod.Repository, "refs"));
-    const Store = @import("refs.zig").Store;
+    const Store = @import("refs_core.zig").Store;
     inline for (.{ "kind", "format", "reftable_options", "reftable_cache", "git_dir", "common_dir", "gpa" }) |field| {
         try std.testing.expect(!@hasField(Store, field));
     }
@@ -1041,7 +1041,7 @@ test "required filter discovery refuses malformed required policy" {
 
 test "object backend and repository configuration have opaque owners" {
     inline for (.{ "kind", "options", "sources", "cache", "generation", "deflate_window", "deflate_state", "gpa" }) |field| {
-        try std.testing.expect(!@hasField(@import("odb.zig").Odb, field));
+        try std.testing.expect(!@hasField(@import("odb_core.zig").Odb, field));
     }
     try std.testing.expect(!@hasField(repo_mod.Repository, "config"));
 }
@@ -1067,7 +1067,7 @@ test "repository configuration edits publish policy only after validating the wh
         .{ .set = .{ .name = "core.repositoryformatversion", .value = "1" } },
         .{ .set = .{ .name = "extensions.refstorage", .value = "reftable" } },
     }, &diagnostic));
-    try std.testing.expectEqual(@import("refs.zig").Format.files, r.refStore().refFormat());
+    try std.testing.expectEqual(@import("refs_core.zig").Format.files, r.refStore().refFormat());
     try std.testing.expectError(error.WorktreeConfigChanged, r.editConfig(&.{.{ .set = .{ .name = "extensions.worktreeconfig", .value = "true" } }}, &diagnostic));
     try std.testing.expectEqualStrings("extensions.worktreeConfig", diagnostic.unsupported_setting);
     try std.testing.expect(r.configuration().sources.worktree == null);

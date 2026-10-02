@@ -12,7 +12,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const push_mod = @import("push.zig");
 const lfspush = @import("lfspush.zig");
 const testlfs = @import("testlfs.zig");
@@ -20,7 +20,7 @@ const lt = @import("lfstransfer_test.zig");
 
 const Fixture = lt.Fixture;
 
-const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const test_who: @import("object_core.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 fn relicPush(fx: *Fixture, d: Io.Dir, report: *lfspush.Report) !push_mod.Outcome {
     var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});

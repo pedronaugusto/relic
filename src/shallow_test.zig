@@ -10,9 +10,9 @@ const Io = std.Io;
 const testing = std.testing;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
-const revwalk = @import("revwalk.zig");
+const object = @import("object_core.zig");
+const repo_mod = @import("repo_core.zig");
+const revwalk = @import("revwalk_core.zig");
 const clone_mod = @import("clone.zig");
 const fetch_mod = @import("fetch.zig");
 const testgit = @import("testgit.zig");

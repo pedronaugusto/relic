@@ -13,8 +13,8 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const repo_mod = @import("repo.zig");
-const lfs = @import("lfs.zig");
+const repo_mod = @import("repo_core.zig");
+const lfs = @import("lfs_core.zig");
 const lfsapi = @import("lfsapi.zig");
 const lfstransfer = @import("lfstransfer.zig");
 const objectwalk = @import("objectwalk.zig");
@@ -545,7 +545,7 @@ test "checkout fetches what the store lacks through the server, many at once, an
     var index = try repo.openIndex(io);
     defer index.deinit();
     const tree = (try repo.headTree(io)).?;
-    const worktree = @import("worktree.zig");
+    const worktree = @import("worktree_core.zig");
     // Every file is written again, as `git checkout -f` writes it.
     const outcome = try worktree.checkout(gpa, io, ours, &index, &repo.odb, tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher(), .force = true });
     try testing.expectEqual(@as(u32, 0), outcome.lfs_pointers);
@@ -1232,7 +1232,7 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
                 var index = try repo.openIndex(io);
                 defer index.deinit();
                 const tree = (try repo.headTree(io)).?;
-                const worktree = @import("worktree.zig");
+                const worktree = @import("worktree_core.zig");
                 // Every file is written again, as `git checkout -f` writes it.
                 const done = worktree.checkout(gpa, io, d, &index, &repo.odb, tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher(), .force = true });
                 if (skip) {

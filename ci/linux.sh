@@ -26,6 +26,7 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+sh ci/cache.sh
 
 ci/git-flags.sh
 digest=$(git hash-object ci/linux.Dockerfile | cut -c1-12)

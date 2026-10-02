@@ -633,11 +633,14 @@ calls it.
 
 ## Testing
 
+Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap in `ci/cache.sh`; run `sh ci/cache.sh` before direct Zig builds (only a rebuild is lost).
+
 ```sh
 zig build test --test-timeout 60s   # the suite, and the examples, which are run
 zig build test -Dtest-filter=hooks --test-timeout 60s   # run matching tests while developing
 zig build examples      # the examples on their own
 zig build check         # compile everything, including the tests, run nothing
+zig build check-imports # named source layers and dependency owners
 zig build test --fuzz   # the fuzz tests, until stopped
 ci/readme_usage.sh --check   # the Usage block against the example
 ci/tls-fork.sh --check       # the TLS client's recorded diff against std's
@@ -646,7 +649,12 @@ ci/tls-fork.sh --check       # the TLS client's recorded diff against std's
 Every test runs under `std.testing.allocator` and `std.testing.io`, against
 real directories. CI runs Debug and ReleaseSafe on all three platforms,
 ReleaseFast once on Linux, ReleaseSmall as a compile check, and ThreadSanitizer
-once on Linux. Each parity corpus seed has its own named test. The test timeout
+once on Linux. Each parity corpus seed has its own named test. Windows runs the same cases in
+parallel groups: core, merge-file, diff-algorithms, revwalk, and numbered history,
+recursive and rename groups. `zig build test -Dtest-case=history-0` runs one group;
+omitting `test-case` runs the whole suite. The remaining tests run in five source families:
+formats, worktree, history, transport and integrations. These start immediately; comparison
+and cross-compilation jobs wait for source checks so they do not queue ahead of core runs. The test timeout
 reports a stalled test by name; CI and the Linux script also bound each test. Speed
 measurements run only from the `bench` branch harness on a quiet machine.
 

@@ -33,10 +33,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const program = @import("program.zig");
 const pktline = @import("pktline.zig");
-const lfs = @import("lfs.zig");
+const lfs = @import("lfs_core.zig");
 
 /// One `filter.<name>` section.
 pub const Driver = struct {

@@ -20,10 +20,10 @@ const testing = std.testing;
 
 const testgit = @import("testgit.zig");
 const signing = @import("signing.zig");
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const hash = @import("hash.zig");
-const repo_mod = @import("repo.zig");
-const commit_mod = @import("commit.zig");
+const repo_mod = @import("repo_core.zig");
+const commit_mod = @import("commit_core.zig");
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;
 

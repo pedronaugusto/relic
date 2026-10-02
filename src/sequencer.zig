@@ -18,8 +18,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const merge = @import("merge.zig");
+const object = @import("object_core.zig");
+const merge = @import("merge_core.zig");
 const threeway = @import("threeway.zig");
 const signing_mod = @import("signing.zig");
 const hooks_mod = @import("hooks.zig");
@@ -31,12 +31,12 @@ const head_mod = @import("head.zig");
 const message = @import("message.zig");
 const abbrev = @import("abbrev.zig");
 const todo = @import("todo.zig");
-const worktree = @import("worktree.zig");
+const worktree = @import("worktree_core.zig");
 const merging = @import("merging.zig");
 const rerere = @import("rerere.zig");
-const config_mod = @import("config.zig");
-const repo_mod = @import("repo.zig");
-const refs_mod = @import("refs.zig");
+const config_mod = @import("config_core.zig");
+const repo_mod = @import("repo_core.zig");
+const refs_mod = @import("refs_core.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

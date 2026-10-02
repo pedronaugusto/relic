@@ -5,8 +5,8 @@ const std = @import("std");
 const Io = std.Io;
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
+const object = @import("object_core.zig");
+const odb_mod = @import("odb_core.zig");
 const pack = @import("pack.zig");
 const sha1dc = @import("sha1dc.zig");
 const fs = @import("fs.zig");
@@ -218,7 +218,7 @@ test "a loose object this writes is one git reads" {
     try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
 
-const index_mod = @import("index.zig");
+const index_mod = @import("index_core.zig");
 
 /// Read the index git wrote, write it back, and compare the bytes.
 fn expectIndexRoundTrip(
@@ -646,7 +646,7 @@ test "includeIf reads the file git reads" {
     try std.testing.expectEqualStrings("included", theirs);
 }
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 
 test "sparse checkout takes paths out of the working tree and puts them back" {
     const io = std.testing.io;
@@ -698,14 +698,14 @@ test "sparse checkout takes paths out of the working tree and puts them back" {
 }
 
 const sparse_mod = @import("sparse.zig");
-const worktree = @import("worktree.zig");
+const worktree = @import("worktree_core.zig");
 
 const commitgraph_mod = @import("commitgraph.zig");
 const midx_mod = @import("midx.zig");
-const merge_mod = @import("merge.zig");
-const revwalk = @import("revwalk.zig");
+const merge_mod = @import("merge_core.zig");
+const revwalk = @import("revwalk_core.zig");
 const worktrees_mod = @import("worktrees.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 
 test "the commit-graph and the multi-pack index read what git wrote" {
     const io = std.testing.io;
@@ -1688,8 +1688,8 @@ test "loose objects move into a pack and the pack is the only copy" {
     try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
 
-const worktree_mod = @import("worktree.zig");
-const repo_mod2 = @import("repo.zig");
+const worktree_mod = @import("worktree_core.zig");
+const repo_mod2 = @import("repo_core.zig");
 
 test "a staging pass that writes a pack stages what one that writes loose objects does" {
     const io = std.testing.io;

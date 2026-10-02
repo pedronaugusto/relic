@@ -8,17 +8,14 @@ const Io = std.Io;
 const testgit = @import("testgit.zig");
 const hash = @import("hash.zig");
 const fs = @import("fs.zig");
-const odb_mod = @import("odb.zig");
-const index_mod = @import("index.zig");
+const odb_mod = @import("odb_core.zig");
+const index_mod = @import("index_core.zig");
 const reflog = @import("reflog.zig");
 
 const Oid = hash.Oid;
 
 /// The helper's path, compiled in by `build.zig`.
-const lock_helper_path: []const u8 = if (@hasDecl(@import("root"), "dummy"))
-    ""
-else
-    @import("build_options").lock_helper_path;
+const lock_helper_path: []const u8 = @import("build_options").lock_helper_path;
 
 /// Run the helper, which takes a lock and holds it until its standard input
 /// closes.

@@ -115,3 +115,11 @@ test {
         _ = @import("tls_fork_test.zig");
     }
 }
+
+test {
+    _ = @import("revindex_test.zig");
+    _ = @import("sparseindex_test.zig");
+    _ = @import("reftablestack_test.zig");
+    _ = @import("url_owner_test.zig");
+    _ = @import("refs_owner_test.zig");
+}

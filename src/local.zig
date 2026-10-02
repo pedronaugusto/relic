@@ -14,15 +14,15 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const refs_mod = @import("refs.zig");
-const repo_mod = @import("repo.zig");
-const odb_mod = @import("odb.zig");
+const refs_mod = @import("refs_core.zig");
+const repo_mod = @import("repo_core.zig");
+const odb_mod = @import("odb_core.zig");
 const pack = @import("pack.zig");
 const protocol = @import("protocol.zig");
 const objectwalk = @import("objectwalk.zig");
 const url_mod = @import("url.zig");
-const object = @import("object.zig");
-const revwalk = @import("revwalk.zig");
+const object = @import("object_core.zig");
+const revwalk = @import("revwalk_core.zig");
 const shallow_mod = @import("shallow.zig");
 const safepath = @import("safepath.zig");
 const sendpack = @import("sendpack.zig");
@@ -182,7 +182,7 @@ pub const Remote = struct {
                     try chain.append(r.gpa, current);
                     const found = try r.repo.odb.read(io, current);
                     defer r.gpa.free(found.bytes);
-                    var tag = try @import("object.zig").Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes);
+                    var tag = try @import("object_core.zig").Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes);
                     defer tag.deinit();
                     current = tag.target;
                 }
@@ -354,7 +354,7 @@ pub const Remote = struct {
             const found = from.read(io, oid) catch continue;
             defer from.allocator().free(found.bytes);
             if (found.type != .commit) continue;
-            var commit = try @import("object.zig").Commit.parse(arena, from.objectFormat(), found.bytes);
+            var commit = try @import("object_core.zig").Commit.parse(arena, from.objectFormat(), found.bytes);
             defer commit.deinit();
             for (commit.parents) |p| try stack.append(arena, p);
         }
@@ -398,12 +398,12 @@ pub const Remote = struct {
 
 /// Whether a `receive.deny*` setting denies: `refuse` and true do, and so
 /// does an unset one whose default is to.
-fn denies(config: *const @import("config.zig").Config, key: []const u8, default: bool) bool {
+fn denies(config: *const @import("config_core.zig").Config, key: []const u8, default: bool) bool {
     const raw = config.get(key) orelse return default;
     if (std.ascii.eqlIgnoreCase(raw, "refuse")) return true;
     if (std.ascii.eqlIgnoreCase(raw, "warn") or std.ascii.eqlIgnoreCase(raw, "ignore")) return false;
     if (std.ascii.eqlIgnoreCase(raw, "updateinstead")) return true;
-    return @import("config.zig").parseBool(raw) catch default;
+    return @import("config_core.zig").parseBool(raw) catch default;
 }
 
 fn matches(name: []const u8, prefixes: []const []const u8) bool {

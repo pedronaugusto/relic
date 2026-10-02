@@ -31,13 +31,13 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
+const object = @import("object_core.zig");
+const odb_mod = @import("odb_core.zig");
 const merge = @import("blobmerge.zig");
 const subtreeshift = @import("subtreeshift.zig");
 const rename = @import("rename.zig");
 const attributes = @import("attributes.zig");
-const revwalk = @import("revwalk.zig");
+const revwalk = @import("revwalk_core.zig");
 const abbrev = @import("abbrev.zig");
 const convert = @import("convert.zig");
 

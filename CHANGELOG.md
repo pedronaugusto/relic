@@ -7,8 +7,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 - Keep the quiet benchmark worktree outside Zig’s disposable cache.
+- Keep suffix-related test modules in one Windows family so substring filters do not run them twice.
+
+- Divide remaining Windows tests into five named source families without changing their assertions.
+
+- Start Windows core tests before comparison jobs fill the runner queue.
+
+- Give process execution and transport fixtures one conduit owner.
+
+- Supply concurrency fixtures through build options without importing the test root.
+
+- Reject undeclared dependencies, duplicate layer membership and imports of source executables.
+
+- Keep API namespaces above their implementations and shared storage contracts.
+- Split Windows git-comparison corpora across named parallel cases with the same assertions.
+
+- Check named source layers, cycles, entry files and dependency owners during source CI.
+
+- Bound local Zig build caches before builds, retaining downloaded packages and tools.
 
 ### Changed
+
+- Breaking: pin conduit at confirmed per-child scope completion; callers releasing an unfinished contained `program.Child` use its fallible `release`.
 
 - Breaking: HTTP Streaming.finish consumes its connection on success and failure; callers abort only before finish, and smart HTTP and LFS transfer cleanup with the stream.
 

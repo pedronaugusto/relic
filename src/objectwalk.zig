@@ -22,10 +22,10 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
+const object = @import("object_core.zig");
+const odb_mod = @import("odb_core.zig");
 const pack = @import("pack.zig");
-const revwalk = @import("revwalk.zig");
+const revwalk = @import("revwalk_core.zig");
 const objectfilter = @import("objectfilter.zig");
 const ignore = @import("ignore.zig");
 const indexpack = @import("indexpack.zig");
@@ -34,14 +34,7 @@ const Oid = hash.Oid;
 const Odb = odb_mod.Odb;
 
 /// Errors from walking objects.
-pub const Error = error{
-    /// An object below a tip is not in the database. `missing_out` names
-    /// it.
-    MissingObject,
-    /// A commit named something that is not a commit as its parent, or a
-    /// tree named a tree entry that is not a tree.
-    UnexpectedObjectType,
-} || odb_mod.Error || object.ParseError || Allocator.Error;
+pub const Error = @import("walk_types.zig").Error;
 
 const flag_uninteresting: u8 = 1;
 const flag_seen: u8 = 2;
@@ -74,25 +67,7 @@ pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: 
 }
 
 /// What a server's pack leaves out: git's `--filter` specs.
-pub const Filter = union(enum) {
-    none,
-    /// `blob:none`: no blob.
-    blob_none,
-    /// `blob:limit=<n>`: no blob of `n` bytes or more.
-    blob_limit: u64,
-    /// `tree:<depth>`: no tree or blob at `depth` or deeper, a commit's
-    /// root tree being at depth zero.
-    tree_depth: u64,
-    /// `object:type=<type>`: only objects of the type.
-    object_type: object.Type,
-    /// `sparse:oid=<blob>`: every tree, and the blobs the blob's
-    /// sparse-checkout patterns take in, a path no pattern decides taking
-    /// its directory's answer, as git's sparse filter decides. One to a
-    /// filter.
-    sparse: *const ignore.Rules,
-    /// `combine:<a>+<b>…`: what every one of them keeps.
-    combine: []const Filter,
-};
+pub const Filter = @import("walk_types.zig").Filter;
 
 /// How `missingWith` walks.
 pub const MissingOptions = struct {
@@ -534,7 +509,7 @@ pub fn checkConnectedWith(
 
 const testing = std.testing;
 const testgit = @import("testgit.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 
 test "what is missing is what git rev-list --objects lists" {
     const gpa = testing.allocator;

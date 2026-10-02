@@ -23,24 +23,24 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const fs = @import("fs.zig");
-const refs_mod = @import("refs.zig");
+const refs_mod = @import("refs_core.zig");
 const reflog = @import("reflog.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const pack = @import("pack.zig");
-const revwalk = @import("revwalk.zig");
+const revwalk = @import("revwalk_core.zig");
 const fetchpack = @import("fetchpack.zig");
 const shallow_mod = @import("shallow.zig");
 const revindex = @import("revindex.zig");
 const partial = @import("partial.zig");
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const refspec_mod = @import("refspec.zig");
 const remote_mod = @import("remote.zig");
 const url_mod = @import("url.zig");
 const program = @import("program.zig");
 const protocol = @import("protocol.zig");
-const transport = @import("transport.zig");
+const transport = @import("transport_core.zig");
 const objectwalk = @import("objectwalk.zig");
 const indexpack = @import("indexpack.zig");
 const progress_mod = @import("progress.zig");
@@ -691,7 +691,7 @@ fn expectation(old: ?Oid) refs_mod.Expected {
 
 /// Whether `remote.<name>.followRemoteHEAD` asks for `refs/remotes/<name>/HEAD`
 /// to be created when it is missing, which is its default.
-fn followRemoteHead(config: *const @import("config.zig").Config, name: []const u8) bool {
+fn followRemoteHead(config: *const @import("config_core.zig").Config, name: []const u8) bool {
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "remote.{s}.followremotehead", .{name}) catch return false;
     const value = config.get(key) orelse return true;

@@ -25,14 +25,14 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const pack = @import("pack.zig");
 const program = @import("program.zig");
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
-const transport = @import("transport.zig");
-const repo_mod = @import("repo.zig");
+const transport = @import("transport_core.zig");
+const repo_mod = @import("repo_core.zig");
 const revindex = @import("revindex.zig");
 const filterspec = @import("filterspec.zig");
 

@@ -28,7 +28,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const program = @import("program.zig");
 const url_mod = @import("url.zig");
 const auth = @import("auth.zig");

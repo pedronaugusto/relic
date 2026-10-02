@@ -15,7 +15,7 @@ const flate = std.compress.flate;
 const inflate_mod = @import("inflate.zig");
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const delta = @import("delta.zig");
 const revindex = @import("revindex.zig");
 const fs = @import("fs.zig");
@@ -1402,11 +1402,7 @@ pub const WriteReport = struct {
 
 /// One entry, as the index will need it: its name, where it begins in the
 /// pack, and the CRC32 of its bytes there.
-pub const IndexEntry = struct {
-    oid: Oid,
-    offset: u64,
-    crc: u32,
-};
+pub const IndexEntry = @import("pack_types.zig").IndexEntry;
 
 const WrittenEntry = IndexEntry;
 

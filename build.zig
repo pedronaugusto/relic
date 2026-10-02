@@ -1,8 +1,16 @@
 const std = @import("std");
+const test_cases = @import("ci/test_cases.zig");
 
 pub fn build(b: *std.Build) void {
+    importChecks(b);
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const selected_case = b.option([]const u8, "test-case", "Select a named Windows comparison shard");
+    const case_names = if (selected_case) |name| test_cases.filters(b, name) else &.{};
+    const case_options = b.addOptions();
+    case_options.addOption([]const u8, "name", selected_case orelse "");
+    case_options.addOption([]const []const u8, "names", case_names);
 
     //=====================================================================
     // The module. Conduit runs programs and carries its platform linkage;
@@ -18,6 +26,7 @@ pub fn build(b: *std.Build) void {
     });
 
     module.addImport("conduit", conduit);
+    module.addOptions("relic_test_cases", case_options);
 
     //=====================================================================
     // Tests. The suite lives beside the code it tests, so the root module's
@@ -176,6 +185,7 @@ pub fn build(b: *std.Build) void {
         .error_tracing = false,
     });
     test_module.addImport("conduit", conduit);
+    test_module.addOptions("relic_test_cases", case_options);
     upload_pack_helper.root_module.addImport("conduit", conduit);
     hook_fixture.root_module.addImport("conduit", conduit);
     test_module.addOptions("build_options", build_options);
@@ -183,7 +193,7 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{
         .name = "relic-tests",
         .root_module = test_module,
-        .filters = if (b.option([]const u8, "test-filter", "Select tests by name")) |filter| &.{filter} else &.{},
+        .filters = if (b.option([]const u8, "test-filter", "Select tests by name")) |filter| &.{filter} else case_names,
     });
 
     const run_tests = b.addRunArtifact(tests);
@@ -254,3 +264,23 @@ pub fn build(b: *std.Build) void {
 const example_sources = [_][]const u8{
     "examples/usage.zig",
 };
+
+// Build-only tooling belongs to a root invocation, never a consumer's dependency graph.
+fn importChecks(b: *std.Build) void {
+    const step = b.step("check-imports", "Check source layers and import boundaries");
+    if (b.pkg_hash.len != 0) return;
+    const dependency = if (b.lazyDependency("gantry", .{ .target = b.graph.host, .optimize = .Debug })) |dep| dep.module("gantry") else return;
+    const checker = b.addExecutable(.{
+        .name = "check-imports",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("ci/imports.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "gantry", .module = dependency }},
+        }),
+    });
+    const run = b.addRunArtifact(checker);
+    run.setCwd(b.path("."));
+    if (b.args) |args| run.addArgs(args);
+    step.dependOn(&run.step);
+}

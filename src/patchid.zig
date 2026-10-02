@@ -16,9 +16,9 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
-const diff = @import("diff.zig");
+const object = @import("object_core.zig");
+const odb_mod = @import("odb_core.zig");
+const diff = @import("diff_core.zig");
 const textdiff = @import("textdiff.zig");
 
 const Oid = hash.Oid;

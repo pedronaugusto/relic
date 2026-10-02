@@ -24,9 +24,9 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const repo_mod = @import("repo.zig");
-const revwalk = @import("revwalk.zig");
+const object = @import("object_core.zig");
+const repo_mod = @import("repo_core.zig");
+const revwalk = @import("revwalk_core.zig");
 const remote_mod = @import("remote.zig");
 const ere = @import("ere.zig");
 

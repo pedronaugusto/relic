@@ -37,7 +37,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const http = std.http;
 
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const program = @import("program.zig");
 const pktline = @import("pktline.zig");
 const url_mod = @import("url.zig");

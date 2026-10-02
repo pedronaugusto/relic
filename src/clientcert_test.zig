@@ -14,13 +14,13 @@ const program = @import("program.zig");
 const httpclient = @import("httpclient.zig");
 const clientcert = @import("clientcert.zig");
 const tls = @import("tls/root.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const fetch_mod = @import("fetch.zig");
 const testgit = @import("testgit.zig");
 const testlfs = @import("testlfs.zig");
 const testremote = @import("testremote.zig");
 
-const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const test_who: @import("object_core.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 const Pki = testremote.Pki;
 const passphrase = testremote.Pki.passphrase;
 

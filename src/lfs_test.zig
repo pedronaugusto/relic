@@ -9,10 +9,10 @@ const std = @import("std");
 const Io = std.Io;
 
 const testgit = @import("testgit.zig");
-const repo_mod = @import("repo.zig");
-const worktree = @import("worktree.zig");
+const repo_mod = @import("repo_core.zig");
+const worktree = @import("worktree_core.zig");
 const filter = @import("filter.zig");
-const lfs = @import("lfs.zig");
+const lfs = @import("lfs_core.zig");
 const ft = @import("filter_test.zig");
 
 const testing = std.testing;

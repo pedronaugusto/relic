@@ -10,8 +10,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const repo_mod = @import("repo.zig");
-const lfs = @import("lfs.zig");
+const repo_mod = @import("repo_core.zig");
+const lfs = @import("lfs_core.zig");
 const lfsapi = @import("lfsapi.zig");
 const lfstransfer = @import("lfstransfer.zig");
 

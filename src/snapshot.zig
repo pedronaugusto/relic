@@ -11,12 +11,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb = @import("odb.zig");
-const index = @import("index.zig");
-const repo = @import("repo.zig");
-const worktree = @import("worktree.zig");
-const diff_mod = @import("diff.zig");
+const object = @import("object_core.zig");
+const odb = @import("odb_core.zig");
+const index = @import("index_core.zig");
+const repo = @import("repo_core.zig");
+const worktree = @import("worktree_core.zig");
+const diff_mod = @import("diff_core.zig");
 const filter = @import("filter.zig");
 const program = @import("program.zig");
 const fs = @import("fs.zig");
@@ -86,7 +86,7 @@ pub const Store = struct {
         errdefer owned.close(io);
         try owned.createDirPath(io, "objects/pack");
         try owned.createDirPath(io, "objects/info");
-        var db = try opening.openOwn(gpa, io, owned, options.kind, options.odb);
+        var db = try opening.openOwn(odb.Odb, gpa, io, owned, options.kind, options.odb);
         errdefer db.deinit(io);
         return .{ .gpa = gpa, .dir = owned, .db = db, .durability = options.durability };
     }
@@ -144,7 +144,7 @@ pub const Store = struct {
         // The source index is a membership list, not a cache for this store.
         // Sparse directories keep their indexed contents from the source.
         const source_db: ?*odb.Odb = if (source_repo) |r| &r.odb else null;
-        try index.sparseindex.expand(store.gpa, io, &staged, source_db orelse &store.db, null);
+        try @import("sparseindex.zig").expand(store.gpa, io, &staged, source_db orelse &store.db, null);
         for (staged.entries.items) |*entry| {
             entry.stat = .none;
             entry.assume_valid = false;

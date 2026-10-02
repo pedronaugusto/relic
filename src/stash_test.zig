@@ -14,8 +14,8 @@ const testing = std.testing;
 
 const testgit = @import("testgit.zig");
 const stash = @import("stash.zig");
-const object = @import("object.zig");
-const Repository = @import("repo.zig").Repository;
+const object = @import("object_core.zig");
+const Repository = @import("repo_core.zig").Repository;
 
 const who: object.Signature = .{
     .name = "Fixture",

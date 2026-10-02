@@ -17,11 +17,11 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const index_mod = @import("index.zig");
-const worktree = @import("worktree.zig");
+const index_mod = @import("index_core.zig");
+const worktree = @import("worktree_core.zig");
 const convert = @import("convert.zig");
 const fs = @import("fs.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 const threeway = @import("threeway.zig");
 
 const Oid = hash.Oid;

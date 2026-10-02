@@ -25,15 +25,15 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
 const inflate_mod = @import("inflate.zig");
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
+const object = @import("object_core.zig");
 const revindex = @import("revindex.zig");
 const pack = @import("pack.zig");
 const delta = @import("delta.zig");
 const fs = @import("fs.zig");
-const odb_mod = @import("odb.zig");
+const odb_mod = @import("odb_core.zig");
 const fsck = @import("fsck.zig");
 const progress_mod = @import("progress.zig");
 
@@ -1316,7 +1316,7 @@ fn encodeTypeAndSize(buf: *[16]u8, t: object.Type, size: u64) usize {
 const testing = std.testing;
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
-const repo_mod = @import("repo.zig");
+const repo_mod = @import("repo_core.zig");
 
 /// One entry of a pack built by hand, for the shapes a real packer does not
 /// write.

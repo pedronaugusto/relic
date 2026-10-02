@@ -23,7 +23,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const program = @import("program.zig");
-const config_mod = @import("config.zig");
+const config_mod = @import("config_core.zig");
 const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
 const auth = @import("auth.zig");
@@ -303,7 +303,7 @@ test "ssh without the permission to run it, or a port a simple ssh cannot take, 
     try testing.expectError(error.ProgramsNotGranted, connect(gpa, io, url, .upload_pack, .{}));
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    var config = try @import("config.zig").Config.parseText(gpa, "[ssh]\nvariant = simple\n", .local);
+    var config = try @import("config_core.zig").Config.parseText(gpa, "[ssh]\nvariant = simple\n", .local);
     defer config.deinit();
     try testing.expectError(error.SshVariantRefusesPort, connect(gpa, io, url, .upload_pack, .{
         .programs = .{ .environ = &env },

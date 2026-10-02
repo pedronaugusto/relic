@@ -21,15 +21,15 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
+const object = @import("object_core.zig");
+const odb_mod = @import("odb_core.zig");
 const pktline = @import("pktline.zig");
 const protocol = @import("protocol.zig");
 const objectwalk = @import("objectwalk.zig");
 const revparse = @import("revparse.zig");
 const filterspec = @import("filterspec.zig");
 const ignore = @import("ignore.zig");
-const revwalk = @import("revwalk.zig");
+const revwalk = @import("revwalk_core.zig");
 const local = @import("local.zig");
 const connection = @import("connection.zig");
 const Oid = hash.Oid;
@@ -1146,7 +1146,7 @@ test "fuzz: whatever a client sends is answered or refused, in v2 and v0" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try @import("repo.zig").Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try @import("repo_core.zig").Repository.init(gpa, io, tmp.dir, .{ .bare = true });
     repo.deinit(io);
     const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);

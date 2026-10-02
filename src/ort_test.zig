@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const odb_mod = @import("odb.zig");
+const odb_mod = @import("odb_core.zig");
 const ort = @import("ort.zig");
 const testgit = @import("testgit.zig");
 
@@ -511,322 +511,402 @@ fn checkScenario(seed: u64, crowded: bool) !void {
 }
 
 test "random histories merge to git's trees, stages and messages: seed 0, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 0, sparse")) return error.SkipZigTest;
     try checkScenario(0, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 1, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 1, sparse")) return error.SkipZigTest;
     try checkScenario(1, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 2, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 2, sparse")) return error.SkipZigTest;
     try checkScenario(2, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 3, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 3, sparse")) return error.SkipZigTest;
     try checkScenario(3, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 4, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 4, sparse")) return error.SkipZigTest;
     try checkScenario(4, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 5, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 5, sparse")) return error.SkipZigTest;
     try checkScenario(5, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 6, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 6, sparse")) return error.SkipZigTest;
     try checkScenario(6, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 7, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 7, sparse")) return error.SkipZigTest;
     try checkScenario(7, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 8, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 8, sparse")) return error.SkipZigTest;
     try checkScenario(8, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 9, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 9, sparse")) return error.SkipZigTest;
     try checkScenario(9, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 10, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 10, sparse")) return error.SkipZigTest;
     try checkScenario(10, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 11, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 11, sparse")) return error.SkipZigTest;
     try checkScenario(11, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 12, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 12, sparse")) return error.SkipZigTest;
     try checkScenario(12, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 13, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 13, sparse")) return error.SkipZigTest;
     try checkScenario(13, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 14, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 14, sparse")) return error.SkipZigTest;
     try checkScenario(14, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 15, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 15, sparse")) return error.SkipZigTest;
     try checkScenario(15, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 16, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 16, sparse")) return error.SkipZigTest;
     try checkScenario(16, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 17, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 17, sparse")) return error.SkipZigTest;
     try checkScenario(17, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 18, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 18, sparse")) return error.SkipZigTest;
     try checkScenario(18, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 19, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 19, sparse")) return error.SkipZigTest;
     try checkScenario(19, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 20, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 20, sparse")) return error.SkipZigTest;
     try checkScenario(20, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 21, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 21, sparse")) return error.SkipZigTest;
     try checkScenario(21, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 22, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 22, sparse")) return error.SkipZigTest;
     try checkScenario(22, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 23, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 23, sparse")) return error.SkipZigTest;
     try checkScenario(23, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 24, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 24, sparse")) return error.SkipZigTest;
     try checkScenario(24, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 25, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 25, sparse")) return error.SkipZigTest;
     try checkScenario(25, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 26, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 26, sparse")) return error.SkipZigTest;
     try checkScenario(26, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 27, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 27, sparse")) return error.SkipZigTest;
     try checkScenario(27, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 28, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 28, sparse")) return error.SkipZigTest;
     try checkScenario(28, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 29, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 29, sparse")) return error.SkipZigTest;
     try checkScenario(29, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 30, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 30, sparse")) return error.SkipZigTest;
     try checkScenario(30, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 31, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 31, sparse")) return error.SkipZigTest;
     try checkScenario(31, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 32, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 32, sparse")) return error.SkipZigTest;
     try checkScenario(32, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 33, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 33, sparse")) return error.SkipZigTest;
     try checkScenario(33, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 34, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 34, sparse")) return error.SkipZigTest;
     try checkScenario(34, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 35, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 35, sparse")) return error.SkipZigTest;
     try checkScenario(35, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 36, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 36, sparse")) return error.SkipZigTest;
     try checkScenario(36, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 37, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 37, sparse")) return error.SkipZigTest;
     try checkScenario(37, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 38, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 38, sparse")) return error.SkipZigTest;
     try checkScenario(38, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 39, sparse" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 39, sparse")) return error.SkipZigTest;
     try checkScenario(39, false);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 0, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 0, crowded")) return error.SkipZigTest;
     try checkScenario(0, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 1, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 1, crowded")) return error.SkipZigTest;
     try checkScenario(1, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 2, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 2, crowded")) return error.SkipZigTest;
     try checkScenario(2, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 3, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 3, crowded")) return error.SkipZigTest;
     try checkScenario(3, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 4, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 4, crowded")) return error.SkipZigTest;
     try checkScenario(4, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 5, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 5, crowded")) return error.SkipZigTest;
     try checkScenario(5, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 6, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 6, crowded")) return error.SkipZigTest;
     try checkScenario(6, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 7, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 7, crowded")) return error.SkipZigTest;
     try checkScenario(7, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 8, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 8, crowded")) return error.SkipZigTest;
     try checkScenario(8, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 9, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 9, crowded")) return error.SkipZigTest;
     try checkScenario(9, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 10, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 10, crowded")) return error.SkipZigTest;
     try checkScenario(10, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 11, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 11, crowded")) return error.SkipZigTest;
     try checkScenario(11, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 12, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 12, crowded")) return error.SkipZigTest;
     try checkScenario(12, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 13, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 13, crowded")) return error.SkipZigTest;
     try checkScenario(13, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 14, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 14, crowded")) return error.SkipZigTest;
     try checkScenario(14, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 15, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 15, crowded")) return error.SkipZigTest;
     try checkScenario(15, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 16, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 16, crowded")) return error.SkipZigTest;
     try checkScenario(16, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 17, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 17, crowded")) return error.SkipZigTest;
     try checkScenario(17, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 18, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 18, crowded")) return error.SkipZigTest;
     try checkScenario(18, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 19, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 19, crowded")) return error.SkipZigTest;
     try checkScenario(19, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 20, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 20, crowded")) return error.SkipZigTest;
     try checkScenario(20, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 21, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 21, crowded")) return error.SkipZigTest;
     try checkScenario(21, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 22, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 22, crowded")) return error.SkipZigTest;
     try checkScenario(22, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 23, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 23, crowded")) return error.SkipZigTest;
     try checkScenario(23, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 24, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 24, crowded")) return error.SkipZigTest;
     try checkScenario(24, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 25, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 25, crowded")) return error.SkipZigTest;
     try checkScenario(25, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 26, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 26, crowded")) return error.SkipZigTest;
     try checkScenario(26, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 27, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 27, crowded")) return error.SkipZigTest;
     try checkScenario(27, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 28, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 28, crowded")) return error.SkipZigTest;
     try checkScenario(28, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 29, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 29, crowded")) return error.SkipZigTest;
     try checkScenario(29, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 30, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 30, crowded")) return error.SkipZigTest;
     try checkScenario(30, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 31, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 31, crowded")) return error.SkipZigTest;
     try checkScenario(31, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 32, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 32, crowded")) return error.SkipZigTest;
     try checkScenario(32, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 33, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 33, crowded")) return error.SkipZigTest;
     try checkScenario(33, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 34, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 34, crowded")) return error.SkipZigTest;
     try checkScenario(34, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 35, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 35, crowded")) return error.SkipZigTest;
     try checkScenario(35, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 36, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 36, crowded")) return error.SkipZigTest;
     try checkScenario(36, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 37, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 37, crowded")) return error.SkipZigTest;
     try checkScenario(37, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 38, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 38, crowded")) return error.SkipZigTest;
     try checkScenario(38, true);
 }
 
 test "random histories merge to git's trees, stages and messages: seed 39, crowded" {
+    if (!@import("test_case.zig").selected("random histories merge to git's trees, stages and messages: seed 39, crowded")) return error.SkipZigTest;
     try checkScenario(39, true);
 }
 
@@ -886,122 +966,152 @@ fn checkCrissCross(seed: u64) !void {
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 0" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 0")) return error.SkipZigTest;
     try checkCrissCross(0);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 1" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 1")) return error.SkipZigTest;
     try checkCrissCross(1);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 2" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 2")) return error.SkipZigTest;
     try checkCrissCross(2);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 3" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 3")) return error.SkipZigTest;
     try checkCrissCross(3);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 4" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 4")) return error.SkipZigTest;
     try checkCrissCross(4);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 5" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 5")) return error.SkipZigTest;
     try checkCrissCross(5);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 6" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 6")) return error.SkipZigTest;
     try checkCrissCross(6);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 7" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 7")) return error.SkipZigTest;
     try checkCrissCross(7);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 8" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 8")) return error.SkipZigTest;
     try checkCrissCross(8);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 9" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 9")) return error.SkipZigTest;
     try checkCrissCross(9);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 10" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 10")) return error.SkipZigTest;
     try checkCrissCross(10);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 11" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 11")) return error.SkipZigTest;
     try checkCrissCross(11);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 12" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 12")) return error.SkipZigTest;
     try checkCrissCross(12);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 13" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 13")) return error.SkipZigTest;
     try checkCrissCross(13);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 14" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 14")) return error.SkipZigTest;
     try checkCrissCross(14);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 15" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 15")) return error.SkipZigTest;
     try checkCrissCross(15);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 16" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 16")) return error.SkipZigTest;
     try checkCrissCross(16);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 17" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 17")) return error.SkipZigTest;
     try checkCrissCross(17);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 18" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 18")) return error.SkipZigTest;
     try checkCrissCross(18);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 19" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 19")) return error.SkipZigTest;
     try checkCrissCross(19);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 20" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 20")) return error.SkipZigTest;
     try checkCrissCross(20);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 21" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 21")) return error.SkipZigTest;
     try checkCrissCross(21);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 22" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 22")) return error.SkipZigTest;
     try checkCrissCross(22);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 23" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 23")) return error.SkipZigTest;
     try checkCrissCross(23);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 24" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 24")) return error.SkipZigTest;
     try checkCrissCross(24);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 25" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 25")) return error.SkipZigTest;
     try checkCrissCross(25);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 26" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 26")) return error.SkipZigTest;
     try checkCrissCross(26);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 27" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 27")) return error.SkipZigTest;
     try checkCrissCross(27);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 28" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 28")) return error.SkipZigTest;
     try checkCrissCross(28);
 }
 
 test "criss-cross histories merge their bases first, as git's recursive merge does: seed 29" {
+    if (!@import("test_case.zig").selected("criss-cross histories merge their bases first, as git's recursive merge does: seed 29")) return error.SkipZigTest;
     try checkCrissCross(29);
 }
 
@@ -1106,7 +1216,7 @@ test "a rename search too big for merge.renameLimit is skipped as git skips it" 
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{ .rename_limit = 4 });
 }
 
-const diff = @import("diff.zig");
+const diff = @import("diff_core.zig");
 
 fn renderNameStatus(gpa: Allocator, changes: *const diff.Changes) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -1177,242 +1287,302 @@ fn checkDiffScenario(seed: u64) !void {
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 0" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 0")) return error.SkipZigTest;
     try checkDiffScenario(0);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 1" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 1")) return error.SkipZigTest;
     try checkDiffScenario(1);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 2" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 2")) return error.SkipZigTest;
     try checkDiffScenario(2);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 3" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 3")) return error.SkipZigTest;
     try checkDiffScenario(3);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 4" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 4")) return error.SkipZigTest;
     try checkDiffScenario(4);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 5" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 5")) return error.SkipZigTest;
     try checkDiffScenario(5);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 6" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 6")) return error.SkipZigTest;
     try checkDiffScenario(6);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 7" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 7")) return error.SkipZigTest;
     try checkDiffScenario(7);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 8" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 8")) return error.SkipZigTest;
     try checkDiffScenario(8);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 9" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 9")) return error.SkipZigTest;
     try checkDiffScenario(9);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 10" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 10")) return error.SkipZigTest;
     try checkDiffScenario(10);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 11" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 11")) return error.SkipZigTest;
     try checkDiffScenario(11);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 12" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 12")) return error.SkipZigTest;
     try checkDiffScenario(12);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 13" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 13")) return error.SkipZigTest;
     try checkDiffScenario(13);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 14" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 14")) return error.SkipZigTest;
     try checkDiffScenario(14);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 15" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 15")) return error.SkipZigTest;
     try checkDiffScenario(15);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 16" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 16")) return error.SkipZigTest;
     try checkDiffScenario(16);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 17" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 17")) return error.SkipZigTest;
     try checkDiffScenario(17);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 18" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 18")) return error.SkipZigTest;
     try checkDiffScenario(18);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 19" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 19")) return error.SkipZigTest;
     try checkDiffScenario(19);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 20" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 20")) return error.SkipZigTest;
     try checkDiffScenario(20);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 21" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 21")) return error.SkipZigTest;
     try checkDiffScenario(21);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 22" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 22")) return error.SkipZigTest;
     try checkDiffScenario(22);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 23" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 23")) return error.SkipZigTest;
     try checkDiffScenario(23);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 24" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 24")) return error.SkipZigTest;
     try checkDiffScenario(24);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 25" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 25")) return error.SkipZigTest;
     try checkDiffScenario(25);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 26" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 26")) return error.SkipZigTest;
     try checkDiffScenario(26);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 27" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 27")) return error.SkipZigTest;
     try checkDiffScenario(27);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 28" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 28")) return error.SkipZigTest;
     try checkDiffScenario(28);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 29" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 29")) return error.SkipZigTest;
     try checkDiffScenario(29);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 30" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 30")) return error.SkipZigTest;
     try checkDiffScenario(30);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 31" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 31")) return error.SkipZigTest;
     try checkDiffScenario(31);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 32" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 32")) return error.SkipZigTest;
     try checkDiffScenario(32);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 33" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 33")) return error.SkipZigTest;
     try checkDiffScenario(33);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 34" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 34")) return error.SkipZigTest;
     try checkDiffScenario(34);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 35" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 35")) return error.SkipZigTest;
     try checkDiffScenario(35);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 36" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 36")) return error.SkipZigTest;
     try checkDiffScenario(36);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 37" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 37")) return error.SkipZigTest;
     try checkDiffScenario(37);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 38" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 38")) return error.SkipZigTest;
     try checkDiffScenario(38);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 39" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 39")) return error.SkipZigTest;
     try checkDiffScenario(39);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 40" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 40")) return error.SkipZigTest;
     try checkDiffScenario(40);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 41" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 41")) return error.SkipZigTest;
     try checkDiffScenario(41);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 42" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 42")) return error.SkipZigTest;
     try checkDiffScenario(42);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 43" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 43")) return error.SkipZigTest;
     try checkDiffScenario(43);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 44" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 44")) return error.SkipZigTest;
     try checkDiffScenario(44);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 45" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 45")) return error.SkipZigTest;
     try checkDiffScenario(45);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 46" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 46")) return error.SkipZigTest;
     try checkDiffScenario(46);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 47" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 47")) return error.SkipZigTest;
     try checkDiffScenario(47);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 48" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 48")) return error.SkipZigTest;
     try checkDiffScenario(48);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 49" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 49")) return error.SkipZigTest;
     try checkDiffScenario(49);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 50" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 50")) return error.SkipZigTest;
     try checkDiffScenario(50);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 51" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 51")) return error.SkipZigTest;
     try checkDiffScenario(51);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 52" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 52")) return error.SkipZigTest;
     try checkDiffScenario(52);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 53" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 53")) return error.SkipZigTest;
     try checkDiffScenario(53);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 54" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 54")) return error.SkipZigTest;
     try checkDiffScenario(54);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 55" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 55")) return error.SkipZigTest;
     try checkDiffScenario(55);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 56" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 56")) return error.SkipZigTest;
     try checkDiffScenario(56);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 57" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 57")) return error.SkipZigTest;
     try checkDiffScenario(57);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 58" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 58")) return error.SkipZigTest;
     try checkDiffScenario(58);
 }
 
 test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 59" {
+    if (!@import("test_case.zig").selected("diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 59")) return error.SkipZigTest;
     try checkDiffScenario(59);
 }
 
