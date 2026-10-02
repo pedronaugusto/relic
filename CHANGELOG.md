@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Breaking: pin conduit at confirmed per-child scope completion; callers releasing an unfinished contained `program.Child` use its fallible `release`.
+
 - Breaking: HTTP Streaming.finish consumes its connection on success and failure; callers abort only before finish, and smart HTTP and LFS transfer cleanup with the stream.
 
 - Breaking: HTTP connect, send and stream take a caller-owned Diagnostic as their last argument (or null), replacing Client.tls_error, proxy_status and proxy_offered; LFS and smart HTTP keep diagnostics with each exchange.
