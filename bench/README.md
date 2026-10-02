@@ -1,108 +1,66 @@
-# relic benchmarks
+# relic benchmark preparation
 
-Compares status, staging/write-tree, history walk, blob reads, pack writing
-and index read/write with Git, Rust gix/libgit2 (git2), and Go go-git.
-Unsupported rival APIs report unavailable rows. `transport/` compares
-HTTP/stand-in SSH clone/fetch with Git, and inflate with Zig flate/system zlib.
+Pinned before: `86045db483496f695795ec5ee653e99ebf2dd395`.
+Pinned current main: `3c7e039028fe0201b6d3b284bd99eb7547f37d22`.
 
-From `bench/`, run `./run.sh` or `./transport/run.sh` on a quiet machine.
-`BENCH_SMOKE=1` selects a one-file/one-change fixture and one iteration
-without warm-up. Full runs take best-of-five after warm-up (`PASSES`);
-write workloads default to at most three. `./run.sh build` builds only.
-Both harnesses consume this repository (`..` or `../..`).
+`bench/quiet.sh` is the complete pass. `bench/quiet.sh --smoke` exercises
+all available workloads once on tiny fixtures, without warmups or saved timing
+values. Smoke is a correctness check, and never evidence for speed. Both
+modes write plain Markdown and JSON to `bench/results/<local-date>/`; generated
+results and build products are ignored. Smoke writes `smoke.md` / `smoke.json`;
+the quiet pass writes `report.md` / `report.json`, so smoke cannot overwrite a
+real pass. Use `--output <directory>` for a separate run on the same day.
 
-Rust gix 0.87.1/git2 0.21.0 and pack-writing crates are exact in
-`src/rival_rs/Cargo.toml`, with transitive pins in `Cargo.lock`.
-Go go-git v5.19.2 is pinned in `src/rival_go/go.mod`/`go.sum`. Git, zlib,
-standard libraries and Zig use installed tools; record versions with results.
-`BENCH_BUILD_DIR`/`BENCH_RESULTS` select output, defaulting to `build/`;
-`BENCH_FIXTURE`, `SIZES`, `PASSES` control fixtures/runs. `ZIG`, `GO`,
-`CARGO`, `PYTHON` select tools. All generated files are ignored.
+The full pass warms each workload, then repeats A (before), B (after), and the
+comparison tools five times. `--runs N` changes the repetition count. Setup,
+fixture generation and compilation happen before the measured work. Both
+package builds use the same harness, toolchain and workloads. Compilation uses
+ReleaseFast. Sources come from `git archive` of the pinned revisions, independent
+of the working checkout or later main changes. `--before <revision>` and
+`--after <revision>` explicitly override the pins in `revisions.json`.
 
-`zig build regressions-build` compiles without measuring.
-`zig build regressions --summary all` runs the former unit-suite measurements
-on a quiet machine: cold/warm staging, cache-tree reuse, status, packed delta
-reads, SHA throughput, loose versus packed staging, and whole/delta pack
-writing. The timing ratios and ceilings live here; shared CI runs deterministic
-work and result checks instead. This command is part of the bench harness only.
+The cutoff is `2026-09-30T00:00:00+01:00` (Lisbon). Use an explicit midnight:
+Git's date-only `--before=2026-09-30` retains a time of day. Reports record the
+full package revisions, harness revision, machine model, OS, CPU, memory and
+tool versions, without a hostname or personal paths. Keep the raw samples;
+these are warm-cache measurements, with no cold-disk or universal speed claim.
 
-## Earlier measurements
+`PYTHON` overrides the interpreter. With it unset, the wrapper prefers an
+already installed Python 3.13 found by `uv`, then falls back to `python3`; it
+installs no interpreter. This avoids the host's Python 3.14 ensurepip failure.
+Requires installed Zig 0.16.0, Git, Rust/Cargo, Go and Python. Build dependencies
+are pinned in the existing lockfiles. `--build-dir <directory>` changes the
+scratch/build location. Run the full pass only in the owner's quiet window.
 
-**Speed.** `zig build regressions --summary all` runs the measurements. On an Apple M3 Max, over three thousand files in sixty
-directories and 64 MiB hashed:
+Harness history stays on `bench`; never merge this branch into main.
 
-| | |
-|---|---|
-| `addAll`, nothing staged yet | 426 ms |
-| `addAll`, nothing staged yet, into one pack | 68 ms |
-| `addAll`, nothing changed | 5 ms |
-| `writeTree`, cache tree invalid | 9 ms |
-| `writeTree`, cache tree valid | under a millisecond |
-| `status`, one file in ten changed | 8 ms |
-| writing a deltified pack | 7 200 objects/s, 41 MiB/s of input |
-| SHA-1, the eighty rounds in software | 0.99 GiB/s |
-| SHA-1, the aarch64 instructions | 2.47 GiB/s |
-| SHA-1, with the collision check | 0.41 GiB/s |
-| SHA-256, from the standard library | 2.29 GiB/s |
+The complete pass includes status, staging/write-tree, history walk, packed
+blob reads, pack writing and index read/write; all four former regression
+measurement workloads; HTTP and local SSH-stand-in clone, clone with object
+checking, no-op fetch and fetch with new objects; and pack-entry inflation
+with relic, Zig flate (whole and chunked) and system zlib.
 
-The warm numbers are what the stat shortcut and the `TREE` extension are for:
-an entry whose recorded stat still matches is neither opened nor hashed, and a
-cache-tree node that is still valid is used as it stands.
+Same-job tools retained: installed Git, gix 0.87.1, git2/libgit2 0.21.0,
+go-git 5.19.2, Zig flate and system zlib. Unsupported tool operations remain
+explicit unavailable rows. Git subprocess timings include startup; the
+library timings begin inside the process. They answer different integration
+choices and are labelled accordingly. No additional tool was added.
 
-The first cold number is three thousand loose objects written, and it was
-profiled before it was worked on. Naming them is under a millisecond, so it
-is not the number to read the hash by. Two calls are three quarters of it: the
-`O_CREAT|O_EXCL` that makes each temporary, at 35 µs, and the `rename` that
-finishes it, at 54 µs. Those are the filesystem's own figures — the same two
-calls straight through libc cost the same, so nothing is lost in a layer — and
-they are what one file per object costs on APFS. What was around them has
-gone: a `mkdir`, an `opendir` and a `close` per object became one `mkdir` per
-fan-out directory, of which at most two hundred and fifty-six exist; the walk
-asks the filesystem once per entry instead of twice, and on macOS once per
-*directory*; and a file whose length a stat has already reported is read
-without asking again. The benchmark asserts on the counts rather than the
-clock for that first one: three thousand objects written, at most two hundred
-and fifty-six directories made.
+Each write starts from a fresh copy of the same fixture, with index refresh
+and mutation outside timing. Every transport output is checked against the
+expected remote tip and with `git fsck --strict`. The server is bound to
+loopback and is stopped on exit. Network timings are local protocol costs.
+The full transport uses the existing small, medium and large fixture shapes.
 
-A pack is one file where loose objects are one file each, which is the whole
-of the second row: the same three thousand files staged into one pack rather
-than three thousand loose objects is 392 ms against 68 ms, measured in one run
-of the same test, and the tree that comes out is the same tree. What it gives
-up is that another reader sees nothing until the pass is over, and that
-nothing is deltified — a delta wants the object before it and a walk hands
-them over one at a time. `Odb.repack` is what deltifies.
+Compatibility adapters consume errors from refreshed worktree rules and
+borrow object format through the final repository API. The regression
+harness uses the current source implementation, including its declared
+Conduit dependency. Its smoke sizes are 30 staged files, three history rounds
+and 1 KiB hashed; full sizes retain the existing 3,000 files and 64 MiB.
+Speed conditions are reported in a quiet pass; deterministic result checks
+still fail on wrong counts, hashes, trees, or pack contents.
 
-The pack figures are a repository of twenty files each grown over six
-commits, 138 objects: the deltified pack is 29 692 bytes where the same
-objects written whole are 84 871. What the test asserts of the two is that the
-deltified one used deltas and came out smaller.
-
-Timing ratios and ceilings belong to this quiet-machine harness. Shared
-unit-suite builds compare hashes, trees, object counts, reads and bytes.
-
-The former library text also quoted three measured costs: macOS full sync
-at about thirty times a writeout sync, the previous inflater at about twice
-zlib, and checked SHA-1 at about five times an unchecked hash. Treat these
-as historical observations to remeasure on a quiet machine, not guarantees.
-
-Historical upstream TLS cipher measurements (Zig 0.11 development version):
-
-```text
-Measurement taken with 0.11.0-dev.810+c2f5848fe
-on x86_64-linux Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz:
-zig run .lib/std/crypto/benchmark.zig -OReleaseFast
-      aegis-128l:      15382 MiB/s
-       aegis-256:       9553 MiB/s
-      aes128-gcm:       3721 MiB/s
-      aes256-gcm:       3010 MiB/s
-chacha20Poly1305:        597 MiB/s
-
-Measurement taken with 0.11.0-dev.810+c2f5848fe
-on x86_64-linux Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz:
-zig run .lib/std/crypto/benchmark.zig -OReleaseFast -mcpu=baseline
-      aegis-128l:        629 MiB/s
-chacha20Poly1305:        529 MiB/s
-       aegis-256:        461 MiB/s
-      aes128-gcm:        138 MiB/s
-      aes256-gcm:        120 MiB/s
-```
+Planning estimate: **45–90 minutes** for the full pass with dependencies ready;
+allow another **10–25 minutes** for a first setup. These are estimates, not
+measurements taken during preparation. `run.sh` and `transport/run.sh` remain
+low-level helpers; use `quiet.sh` for the complete interleaved pass.

@@ -4,6 +4,7 @@
 const std = @import("std");
 const c = @cImport(@cInclude("zlib.h"));
 const inflate = @import("inflate");
+const smoke = @import("bench_options").smoke;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -13,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(bytes);
     const count = std.mem.readInt(u32, bytes[8..12], .big);
     // Entry offsets and sizes, found by inflating once with zlib.
-    var offsets: std.ArrayList(struct { data: usize, size: usize }) = .empty;
+    var offsets: std.ArrayList(struct { data: usize, size: usize, checksum: u64 }) = .empty;
     defer offsets.deinit(gpa);
     const out = try gpa.alloc(u8, 64 << 20);
     defer gpa.free(out);
@@ -48,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
         const rc = c.inflate(&z, c.Z_FINISH);
         if (rc != c.Z_STREAM_END) return error.Zlib;
         const used = bytes.len - at - z.avail_in;
-        try offsets.append(gpa, .{ .data = at, .size = size });
+        try offsets.append(gpa, .{ .data = at, .size = size, .checksum = std.hash.Wyhash.hash(0, out[0..size]) });
         total_in += used;
         total_out += size;
         _ = c.inflateEnd(&z);
@@ -61,6 +62,29 @@ pub fn main(init: std.process.Init) !void {
     const decoder = try gpa.create(inflate.Decoder);
     defer gpa.destroy(decoder);
     decoder.* = .{};
+    // Untimed correctness pass: all decoders must reproduce zlib's bytes.
+    for (offsets.items) |e| {
+        var input: std.Io.Reader = .fixed(bytes[e.data..]);
+        var std_decoder: std.compress.flate.Decompress = .init(&input, .zlib, window);
+        try std_decoder.reader.readSliceAll(out[0..e.size]);
+        if (std.hash.Wyhash.hash(0, out[0..e.size]) != e.checksum) return error.StandardBytesDiffer;
+        var chunk_input: std.Io.Reader = .fixed(bytes[e.data..]);
+        var chunk_decoder: std.compress.flate.Decompress = .init(&chunk_input, .zlib, window);
+        var digest = std.hash.Wyhash.init(0);
+        var chunk_buffer: [16 * 1024]u8 = undefined;
+        var total: usize = 0;
+        while (true) {
+            const n = try chunk_decoder.reader.readSliceShort(&chunk_buffer);
+            digest.update(chunk_buffer[0..n]);
+            total += n;
+            if (n < chunk_buffer.len) break;
+        }
+        if (total != e.size or digest.final() != e.checksum) return error.ChunkedBytesDiffer;
+        var ours_input: std.Io.Reader = .fixed(bytes[e.data..]);
+        const decoded = try decoder.zlib(&ours_input, out[0..e.size]);
+        if (decoded != e.size or std.hash.Wyhash.hash(0, out[0..e.size]) != e.checksum) return error.RelicBytesDiffer;
+    }
+    if (smoke) return;
     var best = [_]i96{std.math.maxInt(i96)} ** 4;
     defer std.debug.print("best: zlib {d} ms  std {d} ms  std-chunked {d} ms  relic {d} ms\n", .{ @divTrunc(best[0], 1_000_000), @divTrunc(best[1], 1_000_000), @divTrunc(best[2], 1_000_000), @divTrunc(best[3], 1_000_000) });
     const passes = if (args.len > 2) try std.fmt.parseUnsigned(usize, args[2], 10) else 3;

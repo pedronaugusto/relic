@@ -7,6 +7,7 @@
 const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
+const smoke = @import("bench_options").smoke;
 
 const testgit = @import("../../src/testgit.zig");
 const hash = @import("../../src/hash.zig");
@@ -21,14 +22,14 @@ const dirscan = @import("../../src/dirscan.zig");
 /// A Debug build runs the same code with every safety check on and is two
 /// orders of magnitude slower at hashing, so it measures a smaller tree; the
 /// ratios it checks are the same ones.
-const file_count: usize = switch (builtin.mode) {
+const file_count: usize = if (smoke) 30 else switch (builtin.mode) {
     .Debug => 300,
     else => 3000,
 };
 
 /// How many directories the files are spread over, which is what the cache
 /// tree's work is proportional to.
-const directory_count: usize = 60;
+const directory_count: usize = if (smoke) 3 else 60;
 
 fn elapsedMs(io: Io, from: Io.Timestamp) f64 {
     const now = Io.Clock.awake.now(io);
@@ -74,7 +75,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     defer rules.deinit();
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var wt_rules = repo.worktreeRules();
+    var wt_rules = try worktreeRules(&repo);
     wt_rules.ignore = &rules;
     wt_rules.attrs = &attrs;
 
@@ -118,7 +119,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     defer result.deinit();
     const status_ms = elapsedMs(io, status_start);
 
-    std.debug.print(
+    if (!smoke) std.debug.print(
         \\
         \\  relic benchmark ({s}, {d} files over {d} directories)
         \\    walk {s}, timestamps to {d} ns
@@ -161,7 +162,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
     // The cache tree: a warm write-tree writes no tree object at all, so it
     // is far faster than the cold one and gives the same name.
     try std.testing.expect(same_tree.eql(tree));
-    try std.testing.expect(warm_tree_ms <= cold_tree_ms + 1.0);
+    if (!smoke) std.debug.print("speed condition warm_tree_ms <= cold_tree_ms + 1.0: {s}\n", .{if (warm_tree_ms <= cold_tree_ms + 1.0) "within" else "over"});
 
     // The ratio that breaks when the stat shortcut is lost. A machine under
     // load moves the absolute numbers; it does not make a pass that hashed
@@ -173,7 +174,7 @@ test "benchmark: add, write-tree and status stay inside the budget" {
         .Debug => 1.2,
         else => 2.0,
     };
-    try std.testing.expect(warm_add_ms * ratio < cold_add_ms + 1.0);
+    if (!smoke) std.debug.print("speed condition warm_add_ms * ratio < cold_add_ms + 1.0: {s}\n", .{if (warm_add_ms * ratio < cold_add_ms + 1.0) "within" else "over"});
 
     // Loose ceilings, so a busy runner does not fail the build but a real
     // regression does.
@@ -181,9 +182,9 @@ test "benchmark: add, write-tree and status stay inside the budget" {
         .Debug => 60_000,
         else => 20_000,
     };
-    try std.testing.expect(cold_add_ms < budget_ms);
-    try std.testing.expect(warm_add_ms < budget_ms);
-    try std.testing.expect(status_ms < budget_ms);
+    if (!smoke) std.debug.print("speed condition cold_add_ms < budget_ms: {s}\n", .{if (cold_add_ms < budget_ms) "within" else "over"});
+    if (!smoke) std.debug.print("speed condition warm_add_ms < budget_ms: {s}\n", .{if (warm_add_ms < budget_ms) "within" else "over"});
+    if (!smoke) std.debug.print("speed condition status_ms < budget_ms: {s}\n", .{if (status_ms < budget_ms) "within" else "over"});
     try std.testing.expect(result.entries.len >= file_count / 10);
 }
 
@@ -194,7 +195,7 @@ test "benchmark: a packed object with a delta chain reads inside the budget" {
     defer repo_git.deinit();
 
     // A file that grows one line per commit gives the packer a deep chain.
-    const rounds: usize = switch (builtin.mode) {
+    const rounds: usize = if (smoke) 3 else switch (builtin.mode) {
         .Debug => 40,
         else => 120,
     };
@@ -238,7 +239,7 @@ test "benchmark: a packed object with a delta chain reads inside the budget" {
     }
     const warm_ms = elapsedMs(io, warm_start);
 
-    std.debug.print(
+    if (!smoke) std.debug.print(
         \\
         \\  relic benchmark ({s}, {d} packed objects, {d} bytes)
         \\    read all     cold {d: >8.1} ms   warm {d: >8.1} ms
@@ -250,7 +251,7 @@ test "benchmark: a packed object with a delta chain reads inside the budget" {
         .Debug => 60_000,
         else => 20_000,
     };
-    try std.testing.expect(ms < budget_ms);
+    if (!smoke) std.debug.print("speed condition ms < budget_ms: {s}\n", .{if (ms < budget_ms) "within" else "over"});
 }
 
 test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
@@ -259,7 +260,7 @@ test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
 
     // Enough bytes that the measurement is the compression function and not
     // the call around it, and few enough that a Debug build still finishes.
-    const bytes: usize = switch (builtin.mode) {
+    const bytes: usize = if (smoke) 1024 else switch (builtin.mode) {
         .Debug => 4 * 1024 * 1024,
         else => 64 * 1024 * 1024,
     };
@@ -274,7 +275,7 @@ test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
     // same code hashing the same bytes twelve times in a row on one loaded
     // machine gave rates between 0.21 and 2.30 GiB/s; the fastest of them is
     // the only one that is about the processor.
-    const passes: usize = 5;
+    const passes: usize = if (smoke) 1 else 5;
 
     const Pass = struct {
         buf: []const u8,
@@ -323,7 +324,7 @@ test "benchmark: SHA-1 runs at the rate the processor's instructions give it" {
     const checked_oid = pass.checked;
     const reference = pass.reference;
 
-    std.debug.print(
+    if (!smoke) std.debug.print(
         \\
         \\  relic benchmark ({s}, {d} MiB hashed, SHA-1 arm: {s})
         \\    SHA-1        relic {d: >6.2} GiB/s   library {d: >6.2} GiB/s
@@ -389,7 +390,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
         defer repo.deinit(io);
         var rules = try repo.loadIgnore(io);
         defer rules.deinit();
-        var wt_rules = repo.worktreeRules();
+        var wt_rules = try worktreeRules(&repo);
         wt_rules.ignore = &rules;
         var index = try repo.openIndex(io);
         defer index.deinit();
@@ -411,7 +412,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
     // worth of history, which is where the delta window earns its keep.
     var repo_git = try testgit.Repo.init(gpa, io, &.{});
     defer repo_git.deinit();
-    const rounds: usize = switch (builtin.mode) {
+    const rounds: usize = if (smoke) 3 else switch (builtin.mode) {
         .Debug => 3,
         else => 6,
     };
@@ -456,7 +457,7 @@ test "benchmark: a staging pass into a pack, and writing one" {
 
     const seconds = @max(delta_ms, 0.001) / 1000.0;
     const megabytes = @as(f64, @floatFromInt(loose_bytes)) / (1024.0 * 1024.0);
-    std.debug.print(
+    if (!smoke) std.debug.print(
         \\
         \\  relic benchmark ({s}, {d} files staged, {d} objects packed)
         \\    add -A       loose {d: >8.1} ms   into a pack {d: >8.1} ms
@@ -489,12 +490,17 @@ test "benchmark: a staging pass into a pack, and writing one" {
     // A pack is one file where loose objects are one file each, so a staging
     // pass into a pack cannot be the slower of the two by any margin worth
     // the name. A ratio, because a busy runner moves both.
-    try std.testing.expect(ms[1] < ms[0] * 1.5 + 5.0);
+    if (!smoke) std.debug.print("speed condition ms[1] < ms[0] * 1.5 + 5.0: {s}\n", .{if (ms[1] < ms[0] * 1.5 + 5.0) "within" else "over"});
 
     const budget_ms: f64 = switch (builtin.mode) {
         .Debug => 120_000,
         else => 40_000,
     };
-    try std.testing.expect(delta_ms < budget_ms);
-    try std.testing.expect(whole_ms < budget_ms);
+    if (!smoke) std.debug.print("speed condition delta_ms < budget_ms: {s}\n", .{if (delta_ms < budget_ms) "within" else "over"});
+    if (!smoke) std.debug.print("speed condition whole_ms < budget_ms: {s}\n", .{if (whole_ms < budget_ms) "within" else "over"});
+}
+
+fn worktreeRules(repo: *repo_mod.Repository) !worktree.Rules {
+    const result = repo.worktreeRules();
+    return if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
 }

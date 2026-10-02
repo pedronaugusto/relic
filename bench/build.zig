@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "smoke", b.option(bool, "smoke", "Run one tiny iteration") orelse false);
     // ReleaseFast, always: this is a benchmark and a Debug build measures
     // the safety checks rather than the package.
+    _ = b.standardOptimizeOption(.{});
     const optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const relic = b.dependency("relic", .{ .target = target, .optimize = optimize });
     const exe = b.addExecutable(.{
@@ -28,6 +29,9 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{"benchmark:"},
     });
+    measurements.root_module.addOptions("bench_options", options);
+    if (relic.module("relic").import_table.get("conduit")) |conduit| measurements.root_module.addImport("conduit", conduit);
+    b.installArtifact(measurements);
     const compile_measurements = b.step("regressions-build", "Compile regression measurements without running them");
     compile_measurements.dependOn(&measurements.step);
     const run_measurements = b.addRunArtifact(measurements);

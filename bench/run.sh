@@ -33,6 +33,8 @@ build_all() {
   (cd "$here" && "${ZIG:-zig}" build -j1 --prefix "$build/zig" --cache-dir "$build/zig-cache" -Dsmoke=$([ "${BENCH_SMOKE:-0}" = 1 ] && echo true || echo false))
   say "building rust side (cargo --release: gix, libgit2)"
   (cd "$here/src/rival_rs" && "${CARGO:-cargo}" build -j1 --release --locked --quiet)
+  # Replace the inode: overwriting an executed Mach-O can retain stale code-signature state.
+  rm -f "$build/git2_bench" "$build/gix_bench"
   cp -f "$CARGO_TARGET_DIR/release/git2_bench" "$build/git2_bench"
   cp -f "$CARGO_TARGET_DIR/release/gix_bench" "$build/gix_bench"
   say "building go side ("${GO:-go}" build -p=1 -mod=readonly -ldflags='-s -w')"

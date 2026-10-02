@@ -93,7 +93,7 @@ fn status(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
         defer ignore_rules.deinit();
         var attrs = try repo.loadAttrs(io);
         defer attrs.deinit();
-        var rules = repo.worktreeRules();
+        var rules = try worktreeRules(&repo);
         rules.ignore = &ignore_rules;
         rules.attrs = &attrs;
         const t_open = ms(io, start);
@@ -130,7 +130,7 @@ fn addAll(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
     defer ignore_rules.deinit();
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try worktreeRules(&repo);
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     var index = try repo.openIndex(io);
@@ -193,7 +193,7 @@ fn revList(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
             count += 1;
             const found = try repo.odb.read(io, tree_oid);
             defer gpa.free(found.bytes);
-            var it = relic.object.Tree.parse(repo.kind, found.bytes).iterate();
+            var it = relic.object.Tree.parse(objectFormat(&repo), found.bytes).iterate();
             while (try it.next()) |entry| switch (entry.mode) {
                 .tree => {
                     if (seen.contains(entry.oid)) continue;
@@ -319,4 +319,14 @@ fn indexReadWrite(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, dir: Io.Dir, scra
     emit(io, "indexrw", "time", best, "ms");
     emit(io, "indexrw", "time_durable", best_durable, "ms");
     emit(io, "indexrw", "entries", @floatFromInt(entries), "count");
+}
+
+// The final API validates refreshed repository configuration.
+fn worktreeRules(repo: *relic.repo.Repository) !relic.worktree.Rules {
+    const result = repo.worktreeRules();
+    return if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
+}
+
+fn objectFormat(repo: *const relic.repo.Repository) relic.hash.Kind {
+    return if (@hasDecl(relic.repo.Repository, "objectFormat")) repo.objectFormat() else repo.kind;
 }
