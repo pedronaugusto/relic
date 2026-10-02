@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Divide remaining Windows tests into five named source families without changing their assertions.
+
 - Start Windows core tests before comparison jobs fill the runner queue.
 
 - Give process execution and transport fixtures one conduit owner.

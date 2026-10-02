@@ -1,17 +1,16 @@
 //! Windows runs the same named comparison cases across parallel jobs.
 const std = @import("std");
+const core_cases = @import("core_cases.zig");
 
 pub const cases = [_][]const u8{
-    "core",        "merge-file",  "diff-algorithms", "revwalk",
-    "history-0",   "history-1",   "history-2",       "history-3",
-    "history-4",   "history-5",   "history-6",       "history-7",
-    "recursive-0", "recursive-1", "recursive-2",     "rename-0",
-    "rename-1",    "rename-2",    "rename-3",        "rename-4",
-    "rename-5",
+    "core",        "core-formats", "core-worktree", "core-history", "core-transport", "core-integrations", "merge-file", "diff-algorithms", "revwalk",
+    "history-0",   "history-1",    "history-2",     "history-3",    "history-4",      "history-5",         "history-6",  "history-7",       "recursive-0",
+    "recursive-1", "recursive-2",  "rename-0",      "rename-1",     "rename-2",       "rename-3",          "rename-4",   "rename-5",
 };
 
 pub fn filters(b: *std.Build, name: []const u8) []const []const u8 {
     if (std.mem.eql(u8, name, "core")) return &.{};
+    for (core_cases.families) |family| if (std.mem.eql(u8, name, family.name)) return family.filters;
     if (std.mem.eql(u8, name, "merge-file")) return &.{"a random corpus of three-way merges matches git merge-file in every style and every algorithm"};
     if (std.mem.eql(u8, name, "diff-algorithms")) return &.{"the histogram, patience and minimal diffs land on the lines git's do, over a random corpus"};
     if (std.mem.eql(u8, name, "revwalk")) {

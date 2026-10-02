@@ -52,7 +52,9 @@ class Cases(unittest.TestCase):
         source = (ROOT / 'ci/test_cases.zig').read_text().split('pub const cases =', 1)[1].split('};', 1)[0]
         cases = re.findall(r'"([^"]+)"', source)
         workflow = (ROOT / '.github/workflows/ci.yml').read_text().split('  windows:\n', 1)[1]
-        self.assertEqual(cases, ['core'] + re.search(r'case: \[([^]]+)\]', workflow).group(1).split(', '))
+        core = (ROOT / '.github/workflows/ci.yml').read_text().split('  windows-core:\n', 1)[1].split('\n  windows:\n', 1)[0]
+        core_cases = re.search(r'case: \[([^]]+)\]', core).group(1).split(', ')
+        self.assertEqual(cases, ['core'] + core_cases + re.search(r'case: \[([^]]+)\]', workflow).group(1).split(', '))
 
     def test_core_can_start_before_comparison_jobs(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
@@ -62,9 +64,24 @@ class Cases(unittest.TestCase):
         self.assertNotIn('needs:', core)
         self.assertIn('needs: source', comparisons)
         self.assertIn('optimize: [Debug, ReleaseSafe]', core)
-        self.assertIn('-Dtest-case=core', core)
+        self.assertIn('-Dtest-case=${{ matrix.case }}', core)
         self.assertIn('--test-timeout 60s', core)
         self.assertNotIn('core', re.search(r'case: \[([^]]+)\]', comparisons).group(1).split(', '))
+
+    def test_core_source_families_cover_each_test_module_once(self):
+        path = ROOT / 'ci/core_cases.zig'
+        self.assertTrue(path.exists(), 'the remaining core suites need named source families')
+        source = path.read_text()
+        modules = re.findall(r'"([^" ]+)\.test"', source)
+        test_modules = [p.stem for p in (ROOT / 'src').rglob('*.zig')
+                        if re.search(r'^test\b', p.read_text(), re.M)]
+        self.assertEqual(set(test_modules), set(modules))
+        self.assertEqual(len(modules), len(set(modules)))
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        core = workflow.split('  windows-core:\n', 1)[1].split('\n  windows:\n', 1)[0]
+        self.assertEqual(5, len(re.search(r'case: \[([^]]+)\]', core).group(1).split(', ')))
+        cross = workflow.split('  cross-compile:\n', 1)[1]
+        self.assertIn('needs: source', cross)
 
     def test_filters_are_checked_by_exact_names(self):
         selection = (ROOT / 'src/test_case.zig').read_text()

@@ -652,8 +652,9 @@ ReleaseFast once on Linux, ReleaseSmall as a compile check, and ThreadSanitizer
 once on Linux. Each parity corpus seed has its own named test. Windows runs the same cases in
 parallel groups: core, merge-file, diff-algorithms, revwalk, and numbered history,
 recursive and rename groups. `zig build test -Dtest-case=history-0` runs one group;
-omitting `test-case` runs the whole suite. The core jobs start immediately; comparison
-jobs wait for source checks so they do not queue ahead of the long core runs. The test timeout
+omitting `test-case` runs the whole suite. The remaining tests run in five source families:
+formats, worktree, history, transport and integrations. These start immediately; comparison
+and cross-compilation jobs wait for source checks so they do not queue ahead of core runs. The test timeout
 reports a stalled test by name; CI and the Linux script also bound each test. Speed
 measurements run only from the `bench` branch harness on a quiet machine.
 
