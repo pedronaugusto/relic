@@ -1714,21 +1714,21 @@ pub const Client = struct {
                 const body_buf = try a.alloc(u8, 64 * 1024);
                 var streaming = transport.stream(request.method, target, path, headers.items, if (chunked) null else o.pointer.size, body_buf, &ex.diagnostic) catch |err|
                     return c.clientFailed(&ex.diagnostic, err, request_url);
-                var sent_all = false;
-                defer if (!sent_all) streaming.abort();
-                var chunk: [64 * 1024]u8 = undefined;
-                var fr = file.reader(c.io, &.{});
-                var left = o.pointer.size;
-                while (left > 0) {
-                    const want: usize = @intCast(@min(left, chunk.len));
-                    const n = fr.interface.readSliceShort(chunk[0..want]) catch return c.fail(error.ConnectionFailed, "upload: reading the object", .{});
-                    if (n == 0) return c.fail(error.ConnectionFailed, "upload: the object is shorter than its pointer", .{});
-                    streaming.writer().writeAll(chunk[0..n]) catch return c.fail(error.ConnectionFailed, "upload: the connection broke", .{});
-                    left -= n;
-                    if (request.sent) |count| count.* += n;
-                    if (request.on_bytes) |cb| cb.add(cb.context, n);
+                {
+                    errdefer streaming.abort();
+                    var chunk: [64 * 1024]u8 = undefined;
+                    var fr = file.reader(c.io, &.{});
+                    var left = o.pointer.size;
+                    while (left > 0) {
+                        const want: usize = @intCast(@min(left, chunk.len));
+                        const n = fr.interface.readSliceShort(chunk[0..want]) catch return c.fail(error.ConnectionFailed, "upload: reading the object", .{});
+                        if (n == 0) return c.fail(error.ConnectionFailed, "upload: the object is shorter than its pointer", .{});
+                        streaming.writer().writeAll(chunk[0..n]) catch return c.fail(error.ConnectionFailed, "upload: the connection broke", .{});
+                        left -= n;
+                        if (request.sent) |count| count.* += n;
+                        if (request.on_bytes) |cb| cb.add(cb.context, n);
+                    }
                 }
-                sent_all = true;
                 ex.response = streaming.finish() catch |err| return c.clientFailed(&ex.diagnostic, err, request_url);
             },
         }

@@ -76,7 +76,8 @@ pub const Error = error{
 /// Caller-owned failure details for one HTTP exchange. Initialize with `init`
 /// and release with `deinit`. `connect`, `send` and `stream` clear it before
 /// starting; its values survive failure and connection closure. Keep it alive
-/// until the connection or response is released, or the stream is aborted.
+/// until the connection or response is released, or the stream is aborted or
+/// finish fails.
 /// Simultaneous exchanges must use separate diagnostics.
 pub const Diagnostic = struct {
     /// The allocator for this diagnostic's owned copies.
@@ -503,7 +504,9 @@ pub const Client = struct {
 
     /// Start a request whose body is sent as it is written: in chunks, or
     /// with `length` as its `Content-Length` when it is given.
-    /// `Streaming.writer`, then `Streaming.finish` for the response.
+    /// Write through `Streaming.writer`, then call `Streaming.finish` for the
+    /// response. Finish consumes the stream on success and failure; abort it
+    /// only when giving up before finish.
     /// `diagnostic` belongs to this exchange, or is `null`.
     pub fn stream(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, length: ?u64, buffer: []u8, diagnostic: ?*Diagnostic) Error!Streaming {
         const conn = try c.connect(target, diagnostic);
@@ -530,7 +533,8 @@ pub const Client = struct {
     }
 };
 
-/// A request whose body is being sent in chunks.
+/// A request whose body is being sent, in chunks or with a known length.
+/// Call `finish` or `abort` once; either consumes the stream.
 pub const Streaming = struct {
     conn: *Connection,
     method: http.Method,
@@ -541,26 +545,28 @@ pub const Streaming = struct {
         return &s.body.writer;
     }
 
-    /// End the body and read the head of the response. A body with a
-    /// length that is short of it is `BodyIncomplete`, and the connection
-    /// is closed.
+    /// End the body and read the head of the response. Consumes the stream
+    /// on every outcome: the response owns the connection on success, and
+    /// failure closes it. Do not use or abort the stream after calling this.
+    /// A body shorter than its declared length is `BodyIncomplete`.
     pub fn finish(s: *Streaming) Error!Response {
-        s.body.writer.flush() catch return s.conn.writeFailed();
+        const conn = s.conn;
+        defer s.* = undefined;
+        errdefer conn.close();
+        s.body.writer.flush() catch return conn.writeFailed();
         switch (s.body.state) {
-            .content_length => |left| if (left != 0) {
-                s.conn.close();
-                return error.BodyIncomplete;
-            },
+            .content_length => |left| if (left != 0) return error.BodyIncomplete,
             else => {},
         }
-        s.body.endUnflushed() catch return s.conn.writeFailed();
-        s.conn.flush() catch return s.conn.writeFailed();
-        return s.conn.receive(s.method);
+        s.body.endUnflushed() catch return conn.writeFailed();
+        conn.flush() catch return conn.writeFailed();
+        return conn.receive(s.method);
     }
 
-    /// Give up on the request; its connection is closed.
+    /// Give up before finish; consumes the stream and closes its connection.
     pub fn abort(s: *Streaming) void {
         s.conn.close();
+        s.* = undefined;
     }
 };
 
@@ -2025,4 +2031,91 @@ test "a pooled connection drops its previous exchange's diagnostic" {
     try std.testing.expect(diagnostic.proxy_offered == null);
     try std.testing.expectEqual(@as(u32, 1), client.connections);
     _ = try response.reader().discardRemaining();
+}
+
+/// Test-only: finish must release the socket and every connection allocation,
+/// including its watchdog, while preserving the error that ended the exchange.
+fn checkStreamingFinishFailure(stage: enum { body_flush, body_end, connection_flush, head_read, malformed_head, allocation, incomplete }) !void {
+    const Closed = struct {
+        threadlocal var count: usize = 0;
+
+        fn close(context: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
+            count += handles.len;
+            std.testing.io.vtable.netClose(context, handles);
+        }
+
+        fn fail(_: *Io.Writer, _: []const []const u8, _: usize) Io.Writer.Error!usize {
+            return error.WriteFailed;
+        }
+    };
+    const io = std.testing.io;
+    const server = try TestServer.startAnswer(std.testing.allocator, io, false, if (stage == .malformed_head) "not HTTP\r\n\r\n" else "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    defer server.stop(std.testing.allocator);
+    var allocations: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    var vtable = io.vtable.*;
+    vtable.netClose = Closed.close;
+    var client: Client = .init(allocations.allocator(), .{ .userdata = io.userdata, .vtable = &vtable });
+    defer client.deinit();
+    client.timeouts.activity = .fromSeconds(10);
+    var buffer: [32]u8 = undefined;
+    var streaming = try client.stream(.POST, .{ .tls = false, .host = "127.0.0.1", .port = server.port }, "/", &.{}, if (stage == .incomplete) 4 else null, &buffer, null);
+    const conn = streaming.conn;
+    try std.testing.expect(conn.watchdog != null);
+    Closed.count = 0;
+    // Clean up the unfixed implementation too, so the regression reports its
+    // assertion instead of abandoning a socket and watchdog after failing.
+    defer if (Closed.count == 0) conn.close();
+    const expected: Error = switch (stage) {
+        .body_flush, .body_end, .connection_flush => blk: {
+            if (stage != .connection_flush) {
+                try conn.flush();
+                conn.stream_writer.interface.buffer = &.{};
+            }
+            conn.stream_writer.interface.vtable = &.{ .drain = Closed.fail };
+            if (stage == .body_flush or stage == .connection_flush) try streaming.writer().writeAll("body");
+            break :blk error.ConnectionFailed;
+        },
+        .head_read => blk: {
+            conn.stream_reader.interface.vtable = Io.Reader.failing.vtable;
+            break :blk error.ConnectionFailed;
+        },
+        .malformed_head => error.HttpProtocolError,
+        .allocation => blk: {
+            allocations.fail_index = allocations.alloc_index;
+            break :blk error.OutOfMemory;
+        },
+        .incomplete => error.BodyIncomplete,
+    };
+    try std.testing.expectError(expected, streaming.finish());
+    try std.testing.expectEqual(@as(usize, 1), Closed.count);
+    try std.testing.expectEqual(allocations.allocated_bytes, allocations.freed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), client.idle.items.len);
+}
+
+test "streaming finish consumes its connection when the buffered body cannot be written" {
+    try checkStreamingFinishFailure(.body_flush);
+}
+
+test "streaming finish consumes its connection when the chunk terminator cannot be written" {
+    try checkStreamingFinishFailure(.body_end);
+}
+
+test "streaming finish consumes its connection when the connection cannot be flushed" {
+    try checkStreamingFinishFailure(.connection_flush);
+}
+
+test "streaming finish consumes its connection when the response head cannot be read" {
+    try checkStreamingFinishFailure(.head_read);
+}
+
+test "streaming finish consumes its connection when the response head is malformed" {
+    try checkStreamingFinishFailure(.malformed_head);
+}
+
+test "streaming finish consumes its connection when the response cannot be allocated" {
+    try checkStreamingFinishFailure(.allocation);
+}
+
+test "streaming finish consumes its connection when the body is incomplete" {
+    try checkStreamingFinishFailure(.incomplete);
 }

@@ -440,9 +440,14 @@ The HTTP client's `connect`, `send` and `stream` take an optional caller-owned
 `transport.httpclient.Diagnostic` as their last argument. Initialize it with
 `Diagnostic.init(allocator)` and release it with `deinit`. Each exchange clears
 its diagnostic before starting. Keep it alive through connection release,
-response cleanup or streaming abort; separate simultaneous exchanges use
-separate diagnostics. Its TLS error, proxy status and owned offered schemes
-remain available after a failed exchange, even after the client is closed.
+response cleanup, streaming abort or a failed finish; separate simultaneous
+exchanges use separate diagnostics. Its TLS error, proxy status and owned
+offered schemes remain available after a failed exchange, even after the
+client is closed.
+
+A streaming request ends with `finish` or `abort`. `finish` consumes the stream
+on every outcome: the response owns the connection on success, and failure
+closes it. Abort only when giving up before finish.
 
 **A merge is git's merge-ort.** Renames, directory renames, directory/file and
 type conflicts, submodules and criss-cross histories resolve as git resolves

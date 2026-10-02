@@ -756,11 +756,9 @@ const Http = struct {
         if (h.streaming) |*s| {
             s.writer().writeAll(h.post.buffered()) catch return h.fail(error.ConnectionFailed, "write failed");
             h.post.end = 0;
-            h.in_flight = s.finish() catch |err| {
-                h.streaming = null;
-                return h.clientFailed(err);
-            };
+            var streaming = s.*;
             h.streaming = null;
+            h.in_flight = streaming.finish() catch |err| return h.clientFailed(err);
         } else {
             var suffix_buf: [64]u8 = undefined;
             const suffix = std.fmt.bufPrint(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
