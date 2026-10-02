@@ -78,7 +78,7 @@ point() {  # size transport workload side url
 }
 
 zig_build() {
-  (cd "$here" && "${ZIG:-zig}" build -j1 --prefix "$build/zig" --cache-dir "$build/zig-cache")
+  (cd "$here" && "${ZIG:-zig}" build -j1 -Doptimize=ReleaseFast --prefix "$build/zig" --cache-dir "$build/zig-cache")
 }
 
 server=""

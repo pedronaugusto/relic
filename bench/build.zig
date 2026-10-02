@@ -4,11 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const options = b.addOptions();
     options.addOption(bool, "smoke", b.option(bool, "smoke", "Run one tiny iteration") orelse false);
-    // ReleaseFast, always: this is a benchmark and a Debug build measures
-    // the safety checks rather than the package.
-    _ = b.standardOptimizeOption(.{});
-    const optimize: std.builtin.OptimizeMode = .ReleaseFast;
-    const relic = b.dependency("relic", .{ .target = target, .optimize = optimize });
+    const optimize = b.standardOptimizeOption(.{});
+    const relic = b.dependency(if (b.option(bool, "snapshot", "Build the archived local revision") orelse false) "relic" else "after", .{ .target = target, .optimize = optimize });
     const exe = b.addExecutable(.{
         .name = "relic_bench",
         .root_module = b.createModule(.{

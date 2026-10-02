@@ -6,5 +6,9 @@
     .paths = .{ "build.zig", "build.zig.zon", "src" },
     .dependencies = .{
         .relic = .{ .path = ".." },
+        .after = .{
+            .url = "https://github.com/pedronaugusto/relic/archive/999fd1866f4c13e3eeb3ba33eb38af374a261aa1.tar.gz",
+            .hash = "relic-0.3.0-n6Y3YJ7XUgBtM3FfP9wslI5oJ40QrP4EJvhCtQQI3Es5",
+        },
     },
 }

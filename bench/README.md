@@ -3,7 +3,7 @@
 Keep the `bench` worktree in the workspace’s `.bench/relic`, outside `.zig-cache`; `bench/quiet.sh` resolves its files from its own directory.
 
 Pinned before: `86045db483496f695795ec5ee653e99ebf2dd395`.
-Pinned current main: `3c7e039028fe0201b6d3b284bd99eb7547f37d22`.
+Pinned current main: `999fd1866f4c13e3eeb3ba33eb38af374a261aa1`.
 
 `bench/quiet.sh` is the complete pass. `bench/quiet.sh --smoke` exercises
 all available workloads once on tiny fixtures, without warmups or saved timing
@@ -66,3 +66,7 @@ Planning estimate: **45–90 minutes** for the full pass with dependencies ready
 allow another **10–25 minutes** for a first setup. These are estimates, not
 measurements taken during preparation. `run.sh` and `transport/run.sh` remain
 low-level helpers; use `quiet.sh` for the complete interleaved pass.
+
+Standalone `zig build -Doptimize=Debug` compiles the pinned after harness
+without running it. Snapshot builds pass `-Dsnapshot=true` to compile the
+archived local revision instead; quiet runs retain ReleaseFast.
