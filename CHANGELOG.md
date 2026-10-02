@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Give process execution and transport fixtures one conduit owner.
+
 - Supply concurrency fixtures through build options without importing the test root.
 
 - Bound local Zig build caches before builds, retaining downloaded packages and tools.

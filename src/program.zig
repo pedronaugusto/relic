@@ -23,7 +23,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
-const conduit = @import("conduit");
+const conduit = @import("dependencies.zig").conduit;
 pub const Child = conduit.Child;
 const Term = std.process.Child.Term;
 

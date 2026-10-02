@@ -978,7 +978,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     // the stand-in is a shell script; Windows has no /bin/sh to run it
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
-    const Child = @import("conduit").Child;
+    const Child = @import("dependencies.zig").conduit.Child;
     const Controlled = struct {
         threadlocal var active: ?*@This() = null;
         reading: Io.Event = .unset,
