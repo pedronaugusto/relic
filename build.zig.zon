@@ -3,8 +3,8 @@
     .version = "0.3.0",
     .dependencies = .{
         .conduit = .{
-            .url = "git+https://github.com/pedronaugusto/conduit#dc47b42b1966fc011cf2349b7139ae8f2ce6e6b0",
-            .hash = "conduit-0.5.1-4rIA7_DUDwDKi8YSgyhX-XPkn7wGPsA9rM8Wd70D1TSs",
+            .url = "git+https://github.com/pedronaugusto/conduit#aa667171193b84235d3b7b59c88c2b990e842b6b",
+            .hash = "conduit-0.5.1-4rIA734HEQD2Zi31NJeYsncrLFECALXiLdCh8FBxpySd",
         },
     },
     .minimum_zig_version = "0.16.0",
