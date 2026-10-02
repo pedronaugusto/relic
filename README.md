@@ -633,6 +633,8 @@ calls it.
 
 ## Testing
 
+Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap in `ci/cache.sh`; run `sh ci/cache.sh` before direct Zig builds (only a rebuild is lost).
+
 ```sh
 zig build test --test-timeout 60s   # the suite, and the examples, which are run
 zig build test -Dtest-filter=hooks --test-timeout 60s   # run matching tests while developing
