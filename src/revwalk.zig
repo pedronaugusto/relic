@@ -811,10 +811,41 @@ fn expectWalkLikeRevList(gpa: Allocator, io: Io, repo: *testgit.Repo, db: *odb_m
     };
 }
 
-test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed" {
-    const io = std.testing.io;
-    const gpa = std.testing.allocator;
-    for (0..walk_seeds) |seed| try walkLikeRevList(gpa, io, seed);
+fn checkWalkLikeRevList(seed: u64) !void {
+    if (seed >= walk_seeds) return error.SkipZigTest;
+    try walkLikeRevList(std.testing.allocator, std.testing.io, seed);
+}
+
+test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 0" {
+    try checkWalkLikeRevList(0);
+}
+
+test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 1" {
+    try checkWalkLikeRevList(1);
+}
+
+test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 2" {
+    try checkWalkLikeRevList(2);
+}
+
+test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 3" {
+    try checkWalkLikeRevList(3);
+}
+
+test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 4" {
+    try checkWalkLikeRevList(4);
+}
+
+test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 5" {
+    try checkWalkLikeRevList(5);
+}
+
+test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 6" {
+    try checkWalkLikeRevList(6);
+}
+
+test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 7" {
+    try checkWalkLikeRevList(7);
 }
 
 const walk_seeds = testgit.corpusCases(8);
