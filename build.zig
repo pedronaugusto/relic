@@ -240,6 +240,11 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(b.getInstallStep());
         run.setCwd(b.path("zig-out"));
         examples_step.dependOn(&run.step);
+
+        const example_tests = b.addTest(.{ .root_module = example.root_module });
+        const run_example_tests = b.addRunArtifact(example_tests);
+        examples_step.dependOn(&run_example_tests.step);
+        check_step.dependOn(&example_tests.step);
     }
     test_step.dependOn(examples_step);
 }

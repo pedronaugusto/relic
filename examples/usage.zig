@@ -10,13 +10,26 @@ const std = @import("std");
 const relic = @import("relic");
 
 pub fn main(init: std.process.Init) !void {
-    const gpa = init.gpa;
-    const io = init.io;
+    try run(init.gpa, init.io, .cwd());
+}
 
-    var cwd: std.Io.Dir = .cwd();
-    defer cwd.deleteTree(io, "relic-example") catch {};
-    try cwd.createDirPath(io, "relic-example");
-    var dir = try cwd.openDir(io, "relic-example", .{ .iterate = true });
+fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
+    const prefix = "relic-example-";
+    var scratch_name: [prefix.len + 32]u8 = undefined;
+    @memcpy(scratch_name[0..prefix.len], prefix);
+    while (true) {
+        var random: [16]u8 = undefined;
+        io.random(&random);
+        const suffix = std.fmt.bytesToHex(random, .lower);
+        @memcpy(scratch_name[prefix.len..], &suffix);
+        cwd.createDir(io, &scratch_name, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        break;
+    }
+    defer cwd.deleteTree(io, &scratch_name) catch {};
+    var dir = try cwd.openDir(io, &scratch_name, .{ .iterate = true });
     defer dir.close(io);
 
     // The caller supplies the time and the identity: this package reads no
@@ -117,4 +130,67 @@ pub fn main(init: std.process.Init) !void {
     var buf: [64]u8 = undefined;
     std.debug.assert(std.mem.eql(u8, try dir.readFile(io, "src/main.zig", &buf), "pub fn main() void {}\n"));
     std.debug.assert(std.mem.eql(u8, try dir.readFile(io, "build.log", &buf), "not staged\n"));
+}
+
+test "overlapping usage examples own different scratch directories" {
+    const Io = std.Io;
+    const Controlled = struct {
+        parent: Io.Dir,
+        lock: Io.Mutex = .init,
+        opened: usize = 0,
+        paths: [2][256]u8 = undefined,
+        lengths: [2]usize = undefined,
+        ready: Io.Event = .unset,
+        proceed: Io.Event = .unset,
+        threadlocal var state: ?*@This() = null;
+        threadlocal var intercepted: bool = false;
+
+        fn open(context: ?*anyopaque, parent: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+            const dir = try std.testing.io.vtable.dirOpenDir(context, parent, path, options);
+            errdefer dir.close(std.testing.io);
+            if (state) |control| {
+                if (!intercepted and parent.handle == control.parent.handle and std.mem.startsWith(u8, path, "relic-example")) {
+                    intercepted = true;
+                    {
+                        control.lock.lockUncancelable(std.testing.io);
+                        defer control.lock.unlock(std.testing.io);
+                        const i = control.opened;
+                        @memcpy(control.paths[i][0..path.len], path);
+                        control.lengths[i] = path.len;
+                        control.opened += 1;
+                        if (control.opened == 2) control.ready.set(std.testing.io);
+                    }
+                    control.proceed.wait(std.testing.io) catch return error.Canceled;
+                }
+            }
+            return dir;
+        }
+
+        fn example(control: *@This(), io: Io) !void {
+            state = control;
+            intercepted = false;
+            defer state = null;
+            try run(std.testing.allocator, io, control.parent);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var control: Controlled = .{ .parent = tmp.dir };
+    var vtable = io.vtable.*;
+    vtable.dirOpenDir = Controlled.open;
+    const guarded: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var first = try io.concurrent(Controlled.example, .{ &control, guarded });
+    defer first.cancel(io) catch {};
+    var second = try io.concurrent(Controlled.example, .{ &control, guarded });
+    defer second.cancel(io) catch {};
+    defer control.proceed.set(io);
+    const example_watchdog: Io.Duration = .fromSeconds(5);
+    try control.ready.waitTimeout(io, .{ .duration = .{ .raw = example_watchdog, .clock = .awake } });
+    try std.testing.expect(!std.mem.eql(u8, control.paths[0][0..control.lengths[0]], control.paths[1][0..control.lengths[1]]));
+    control.proceed.set(io);
+    try first.await(io);
+    try second.await(io);
+    var entries = tmp.dir.iterate();
+    try std.testing.expectEqual(@as(?Io.Dir.Entry, null), try entries.next(io));
 }

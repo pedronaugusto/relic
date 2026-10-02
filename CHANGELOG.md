@@ -14,6 +14,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Each usage-example execution creates and removes its own scratch directory, so concurrent builds cannot share or delete another run’s repository.
+
 - Connect timeout and SSH cancellation tests use controlled deadlines and read barriers, with named watchdogs for hangs, instead of elapsed wall-time assertions.
 
 - TLS handshakes and trust refreshes sample current real time through the caller’s Io, so a long-lived client checks new connections against current certificate validity.
