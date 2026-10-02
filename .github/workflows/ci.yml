@@ -139,7 +139,7 @@ jobs:
       - name: Use the built git (Linux)
         run: echo /opt/git/bin >> "$GITHUB_PATH"
 
-      - run: zig --version && git --version
+      - run: git --version
       - run: zig build test -Dthread-sanitizer -Doptimize=Debug --test-timeout 120s
 
   # Git 2.30 checks the oldest supported formats and version-dependent fixture skips.
