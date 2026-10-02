@@ -125,6 +125,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- Breaking: Client.proxy_retry is removed; HTTP proxy retry decisions belong only to the connection attempt that accepted the challenge.
+
 - `repo.fs.macos_fsync_is_writeout_only`, a constant nothing read.
 
 ### Performance

@@ -221,8 +221,6 @@ pub const Client = struct {
     lock: Io.Mutex = .init,
     /// The answer to the proxy's challenge, once it has asked.
     proxy_answer: ?ProxyAnswer = null,
-    /// Set when a tunnel's 407 was taken and is to be asked again.
-    proxy_retry: bool = false,
     /// The certificate and key a server that asks for one is answered
     /// with; without it, one that asks is sent none.
     client_auth: ?*const tls.ClientAuth = null,
@@ -249,12 +247,6 @@ pub const Client = struct {
 
     fn clock(c: *Client) Io.Timestamp {
         return Io.Clock.real.now(c.io);
-    }
-
-    fn note(c: *Client, comptime field: []const u8, value: anytype) void {
-        c.lock.lockUncancelable(c.io);
-        defer c.lock.unlock(c.io);
-        @field(c, field) = value;
     }
 
     fn noteUnwatched(c: *Client) void {
@@ -795,10 +787,7 @@ pub const Connection = struct {
             var proxy_retry = false;
             return openOnce(c, target, &proxy_retry, diagnostic) catch |err| switch (err) {
                 error.ProxyAuthenticationRequired => {
-                    if (attempts < 2 and proxy_retry) {
-                        c.note("proxy_retry", false);
-                        continue;
-                    }
+                    if (attempts < 2 and proxy_retry) continue;
                     return err;
                 },
                 else => return err,
@@ -1227,7 +1216,6 @@ pub const Connection = struct {
         if (status != 407) return error.ProxyRefused;
         if (try c.proxyChallenged(&head, conn.diagnostic)) {
             proxy_retry.* = true;
-            c.note("proxy_retry", true);
         }
         return error.ProxyAuthenticationRequired;
     }
@@ -1424,21 +1412,6 @@ test "a handshake or an answer that does not come is given up on as TimedOut, an
     try std.testing.expectError(error.TimedOut, waiting.send(.GET, .{ .tls = false, .host = "127.0.0.1", .port = server.port }, "/", &.{}, null, null));
     try std.testing.expectEqual(@as(usize, 0), waiting.idle.items.len);
     try std.testing.expectEqual(@as(u32, 0), waiting.unwatched);
-}
-
-test "a refused tunnel cannot consume another connection's pending proxy retry" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const server = try TestServer.startAnswer(gpa, io, false, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n");
-    defer server.stop(gpa);
-    var client: Client = .init(gpa, io);
-    defer client.deinit();
-    client.proxy = .{ .host = "127.0.0.1", .port = server.port };
-    // Another CONNECT has accepted a challenge. This request has no
-    // credential and cannot answer its own refusal, so it must not retry.
-    client.proxy_retry = true;
-    try std.testing.expectError(error.ProxyAuthenticationRequired, client.connect(.{ .tls = true, .host = "git.example.com", .port = 443 }, null));
-    try std.testing.expectEqual(@as(u32, 1), client.connections);
 }
 
 test "a proxy challenge that cannot be answered releases its response" {
