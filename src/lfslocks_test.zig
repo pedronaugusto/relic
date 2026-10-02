@@ -289,8 +289,8 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     defer repo.deinit(io);
     const head = (try repo.head(io)).?;
     defer gpa.free(head.name);
-    const zero = @import("hash.zig").Oid.zero(repo.kind);
-    const place: hooks.Place = .{ .config = &repo.config, .git_dir = repo.git_dir, .common_dir = repo.common_dir, .work_dir = repo.work_dir };
+    const zero = @import("hash.zig").Oid.zero(repo.objectFormat());
+    const place: hooks.Place = .{ .config = repo.configuration(), .git_dir = repo.git_dir, .common_dir = repo.common_dir, .work_dir = repo.work_dir };
 
     // Run as they are, they stop: git-lfs was not found.
     {

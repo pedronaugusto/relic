@@ -172,9 +172,9 @@ const Traversal = struct {
         if (begin.show) try t.emit(oid, path);
         if (!begin.skip) {
             const found = try t.db.read(t.io, oid);
-            defer t.db.gpa.free(found.bytes);
+            defer t.db.allocator().free(found.bytes);
             if (found.type != .tree) return error.UnexpectedObjectType;
-            var entries = object.Tree.parse(t.db.kind, found.bytes).iterate();
+            var entries = object.Tree.parse(t.db.objectFormat(), found.bytes).iterate();
             while (try entries.next()) |entry| {
                 const child = if (path.len == 0)
                     try t.a.dupe(u8, entry.name)

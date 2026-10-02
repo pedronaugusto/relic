@@ -73,8 +73,8 @@ pub const Native = struct {
             // `<old> <new> 1` for a branch checked out from somewhere;
             // anything else checks every lockable file.
             if (args.len == 3 and std.mem.eql(u8, args[2], "1")) {
-                const old = Oid.parse(n.repo.kind, args[0]) catch null;
-                const new = Oid.parse(n.repo.kind, args[1]) catch null;
+                const old = Oid.parse(n.repo.objectFormat(), args[0]) catch null;
+                const new = Oid.parse(n.repo.objectFormat(), args[1]) catch null;
                 if (old != null and new != null and !old.?.isZero()) {
                     paths = try n.changed(arena, io, old.?, new.?);
                 }
@@ -83,8 +83,8 @@ pub const Native = struct {
             const head = (try n.repo.head(io)) orelse return;
             defer n.gpa.free(head.name);
             const found = try n.repo.odb.read(io, head.oid);
-            defer n.repo.odb.gpa.free(found.bytes);
-            var commit = try object.Commit.parse(arena, n.repo.kind, found.bytes);
+            defer n.repo.odb.allocator().free(found.bytes);
+            var commit = try object.Commit.parse(arena, n.repo.objectFormat(), found.bytes);
             defer commit.deinit();
             // git's diff-tree of a root commit lists nothing.
             if (commit.parents.len == 0) return;
@@ -108,9 +108,9 @@ pub const Native = struct {
 fn treeOf(arena: Allocator, io: Io, repo: *Repository, commit_oid: Oid) !Oid {
     const peeled = try repo.peel(io, commit_oid);
     const found = try repo.odb.read(io, peeled);
-    defer repo.odb.gpa.free(found.bytes);
+    defer repo.odb.allocator().free(found.bytes);
     if (found.type == .tree) return peeled;
-    var commit = try object.Commit.parse(arena, repo.kind, found.bytes);
+    var commit = try object.Commit.parse(arena, repo.objectFormat(), found.bytes);
     defer commit.deinit();
     return commit.tree;
 }

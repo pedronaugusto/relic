@@ -8,7 +8,6 @@
 //! own home directory. Nothing of the person running the suite is reached.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;

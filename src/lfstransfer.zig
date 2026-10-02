@@ -427,6 +427,12 @@ const Run = struct {
         if (r.fatal == null) r.fatal = err;
     }
 
+    fn failure(r: *Run) ?Error {
+        r.fatal_mutex.lockUncancelable(r.io());
+        defer r.fatal_mutex.unlock(r.io());
+        return r.fatal;
+    }
+
     fn dupe(r: *Run, bytes: []const u8) Allocator.Error![]const u8 {
         r.arena_mutex.lockUncancelable(r.io());
         defer r.arena_mutex.unlock(r.io());
@@ -730,7 +736,7 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
     for (jobs.items) |j| state.total_bytes += j.result.size;
 
     try runJobs(&state);
-    if (state.fatal) |err| return err;
+    if (state.failure()) |err| return err;
     return outcome;
 }
 
@@ -778,6 +784,44 @@ fn runJobs(state: *Run) Error!void {
     try group.await(io);
 }
 
+test "a transfer worker observes a fatal error under its publication lock" {
+    const Controlled = struct {
+        run: *Run,
+        waited: bool = false,
+
+        fn wait(raw: ?*anyopaque, _: *const u32, _: u32) void {
+            const state: *@This() = @ptrCast(@alignCast(raw.?));
+            state.waited = true;
+            // Another worker already holds the lock, and publishes its
+            // failure before handing it to this worker.
+            state.run.fatal = error.OutOfMemory;
+            state.run.fatal_mutex.state.store(.unlocked, .release);
+        }
+
+        fn wake(_: ?*anyopaque, _: *const u32, _: u32) void {}
+    };
+    var server: lfsapi.Server = undefined;
+    var state: Run = .{
+        .server = &server,
+        .operation = .download,
+        .options = .{},
+        .limits = undefined,
+        .arena = std.testing.allocator,
+        .jobs = &.{},
+    };
+    var control: Controlled = .{ .run = &state };
+    var vtable = std.testing.io.vtable.*;
+    vtable.futexWaitUncancelable = Controlled.wait;
+    vtable.futexWake = Controlled.wake;
+    server.io = .{ .userdata = &control, .vtable = &vtable };
+    state.fatal_mutex.state.store(.locked_once, .release);
+    work(&state, 0);
+    try std.testing.expect(control.waited);
+    try std.testing.expectEqual(@as(usize, 0), state.next.load(.acquire));
+    state.setFatal(error.Canceled);
+    try std.testing.expectEqual(error.OutOfMemory, state.fatal.?);
+}
+
 fn workerTask(state: *Run, worker: usize) void {
     work(state, worker);
     state.say(.worker_done);
@@ -785,7 +829,7 @@ fn workerTask(state: *Run, worker: usize) void {
 
 fn work(state: *Run, worker: usize) void {
     while (true) {
-        if (state.fatal != null) return;
+        if (state.failure() != null) return;
         const i = state.next.fetchAdd(1, .monotonic);
         if (i >= state.jobs.len) return;
         runJob(state, &state.jobs[i], worker) catch |err| state.setFatal(err);
@@ -916,9 +960,15 @@ fn rewriteHref(state: *Run, scratch: Allocator, href: []const u8) Error![]const 
     if (!state.server.settings.getBool("lfs.transfer.enablehrefrewrite", false)) return href;
     const config = state.server.settings.config;
     const rewrite = @import("remote.zig").rewrite;
-    const pushed = if (state.operation == .upload) rewrite(scratch, config, href, .push) catch return error.MalformedValue else null;
+    const pushed = if (state.operation == .upload) rewrite(scratch, config, href, .push) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedValue,
+    } else null;
     if (pushed) |p| return p;
-    return (rewrite(scratch, config, href, .fetch) catch return error.MalformedValue) orelse href;
+    return (rewrite(scratch, config, href, .fetch) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedValue,
+    }) orelse href;
 }
 
 /// The URL whose access mode a transfer uses, as git-lfs finds it: the
@@ -1583,7 +1633,7 @@ fn copyLocal(
     defer dir.close(io);
     var remote = Repository.open(gpa, io, dir, .{ .discover = false }) catch return error.LfsLocalRemoteUnreadable;
     defer remote.deinit(io);
-    var remote_lfs = lfs.Lfs.load(gpa, io, &remote.config, remote.common_dir, null, .{}) catch return error.LfsLocalRemoteUnreadable;
+    var remote_lfs = lfs.Lfs.load(gpa, io, remote.configuration(), remote.common_dir, null, .{}) catch return error.LfsLocalRemoteUnreadable;
     defer remote_lfs.deinit();
     const here = server.store();
     const there = &remote_lfs.store;
@@ -1772,7 +1822,7 @@ fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, t
 
     if (refs_days > 0) {
         const since = (now orelse return error.LfsRecentNeedsTime) - refs_days * 86400;
-        var listing = try repo.refs.list(server.gpa, io, "refs/");
+        var listing = try repo.refStore().list(server.gpa, io, "refs/");
         defer listing.deinit();
         const remote_prefix = try std.fmt.allocPrint(arena, "refs/remotes/{s}/", .{server.remote});
         for (listing.entries) |entry| {
@@ -1782,14 +1832,14 @@ fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, t
             if (std.mem.startsWith(u8, entry.name, "refs/remotes/")) {
                 if (!remote_refs or !std.mem.startsWith(u8, entry.name, remote_prefix)) continue;
             }
-            const resolved = (try repo.refs.resolve(arena, io, entry.name)) orelse continue;
+            const resolved = (try repo.refStore().resolve(arena, io, entry.name)) orelse continue;
             const when = commitTime(arena, io, repo, resolved.oid) orelse continue;
             if (when < since) continue;
             if (containsOid(unique.items, resolved.oid)) continue;
             try unique.append(arena, resolved.oid);
             const found = try repo.odb.read(io, resolved.oid);
-            defer repo.odb.gpa.free(found.bytes);
-            var commit = try object_mod.Commit.parse(arena, repo.kind, found.bytes);
+            defer repo.odb.allocator().free(found.bytes);
+            var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
             defer commit.deinit();
             try scanTree(arena, io, repo, commit.tree, "", &out, &seen);
         }
@@ -1833,17 +1883,17 @@ fn containsOid(list: []const Oid, oid: Oid) bool {
 /// The committer time of `oid` when it is a commit.
 fn commitTime(arena: Allocator, io: Io, repo: *Repository, oid: Oid) ?i64 {
     const found = repo.odb.read(io, oid) catch return null;
-    defer repo.odb.gpa.free(found.bytes);
+    defer repo.odb.allocator().free(found.bytes);
     if (found.type != .commit) return null;
-    var commit = object_mod.Commit.parse(arena, repo.kind, found.bytes) catch return null;
+    var commit = object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes) catch return null;
     defer commit.deinit();
     return commit.committer.when_secs;
 }
 
 fn treeOfCommit(arena: Allocator, io: Io, repo: *Repository, oid: Oid) FetchError!Oid {
     const found = try repo.odb.read(io, oid);
-    defer repo.odb.gpa.free(found.bytes);
-    var commit = try object_mod.Commit.parse(arena, repo.kind, found.bytes);
+    defer repo.odb.allocator().free(found.bytes);
+    var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
     defer commit.deinit();
     return commit.tree;
 }
@@ -1872,10 +1922,10 @@ fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips
     }
     for (tips.items) |tip| {
         const found = try repo.odb.read(io, tip);
-        defer repo.odb.gpa.free(found.bytes);
+        defer repo.odb.allocator().free(found.bytes);
         const tree = switch (found.type) {
             .commit => blk: {
-                var commit = try object_mod.Commit.parse(arena, repo.kind, found.bytes);
+                var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
                 defer commit.deinit();
                 break :blk commit.tree;
             },
@@ -1889,8 +1939,8 @@ fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips
 
 fn scanTree(arena: Allocator, io: Io, repo: *Repository, tree: Oid, prefix: []const u8, out: *std.ArrayList(Object), seen: *std.StringHashMapUnmanaged(void)) FetchError!void {
     const found = try repo.odb.read(io, tree);
-    defer repo.odb.gpa.free(found.bytes);
-    var entries = object_mod.Tree.parse(repo.kind, found.bytes).iterate();
+    defer repo.odb.allocator().free(found.bytes);
+    var entries = object_mod.Tree.parse(repo.objectFormat(), found.bytes).iterate();
     while (try entries.next()) |entry| {
         const path = if (prefix.len == 0) try arena.dupe(u8, entry.name) else try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
         switch (entry.mode) {
@@ -1909,7 +1959,7 @@ fn addPointer(arena: Allocator, io: Io, repo: *Repository, oid: Oid, size: u64, 
     // a pointer.
     if (size >= lfs.pointer_size_cutoff or size == 0) return;
     const found = try repo.odb.read(io, oid);
-    defer repo.odb.gpa.free(found.bytes);
+    defer repo.odb.allocator().free(found.bytes);
     const pointer = lfs.Pointer.decode(found.bytes) catch return;
     if (pointer.size == 0 or pointer.extension_count != 0) return;
     const key = try arena.dupe(u8, &pointer.oid);
@@ -1926,10 +1976,10 @@ fn resolve(arena: Allocator, io: Io, repo: *Repository, name: []const u8) FetchE
     const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
     inline for (rules) |rule| {
         const full = try std.fmt.allocPrint(arena, rule, .{name});
-        if (try repo.refs.resolve(arena, io, full)) |found| return .{ .oid = found.oid, .ref = found.name };
+        if (try repo.refStore().resolve(arena, io, full)) |found| return .{ .oid = found.oid, .ref = found.name };
     }
-    if (name.len == repo.kind.hexLen()) {
-        if (Oid.parse(repo.kind, name)) |oid| {
+    if (name.len == repo.objectFormat().hexLen()) {
+        if (Oid.parse(repo.objectFormat(), name)) |oid| {
             if (try repo.odb.exists(io, oid)) return .{ .oid = oid, .ref = null };
         } else |_| {}
     }
@@ -1982,7 +2032,7 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
         const header = repo.odb.readHeader(io, entry.oid) catch continue;
         if (header.size >= lfs.pointer_size_cutoff or header.size == 0) continue;
         const found = try repo.odb.read(io, entry.oid);
-        defer repo.odb.gpa.free(found.bytes);
+        defer repo.odb.allocator().free(found.bytes);
         const pointer = lfs.Pointer.decode(found.bytes) catch continue;
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         // Only a file that is still exactly its pointer is replaced.
@@ -2055,7 +2105,7 @@ pub fn pushObjects(server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb
         const header = try db.readHeader(io, e.oid);
         if (header.type != .blob or header.size >= lfs.pointer_size_cutoff or header.size == 0) continue;
         const found = try db.read(io, e.oid);
-        defer db.gpa.free(found.bytes);
+        defer db.allocator().free(found.bytes);
         const pointer = lfs.Pointer.decode(found.bytes) catch continue;
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         try objects.append(arena, .of(pointer, e.hint));
@@ -2172,4 +2222,18 @@ test "an ssh batch answer's lines become the objects and actions git-lfs reads f
     try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{"short line"}));
     try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{b ++ " x download"}));
     try testing.expectError(error.MalformedResponse, parseSshBatch(a, &.{b ++ " 1 download expires-at=soon"}));
+}
+
+test "LFS URL rewriting preserves allocation resource failures" {
+    var config = try @import("config.zig").Config.parseText(testing.allocator, "[lfs.transfer]\nenablehrefrewrite = true\n[url \"https://new/\"]\ninsteadOf = https://old/\npushInsteadOf = https://old/\n", .local);
+    defer config.deinit();
+    var server: lfsapi.Server = undefined;
+    server.settings = .{ .gpa = testing.allocator, .config = &config };
+    var state: Run = undefined;
+    state.server = &server;
+    inline for (.{ lfsapi.Operation.download, lfsapi.Operation.upload }) |op| {
+        state.operation = op;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        try testing.expectError(error.OutOfMemory, rewriteHref(&state, failing.allocator(), "https://old/object"));
+    }
 }

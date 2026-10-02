@@ -23,7 +23,6 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
-const textdiff = @import("textdiff.zig");
 const attributes = @import("attributes.zig");
 
 const Oid = hash.Oid;
@@ -229,7 +228,7 @@ pub fn treesWithOptions(
     }
     std.mem.sort([]const u8, paths.items, {}, lessThanPath);
 
-    var index: index_mod.Index = .initEmpty(gpa, db.kind);
+    var index: index_mod.Index = .initEmpty(gpa, db.objectFormat());
     errdefer index.deinit();
     var conflicts: std.ArrayList(Conflict) = .empty;
 
@@ -341,7 +340,7 @@ pub fn fromOrt(gpa: Allocator, io: Io, db: *odb_mod.Odb, merged: *const ort.Resu
     try flatten(arena, io, db, merged.tree, "", &files, 0);
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
     var conflicts: std.ArrayList(Conflict) = .empty;
-    var index: index_mod.Index = .initEmpty(gpa, db.kind);
+    var index: index_mod.Index = .initEmpty(gpa, db.objectFormat());
     errdefer index.deinit();
     for (merged.conflicted) |c| {
         const path = try arena.dupe(u8, c.path);
@@ -426,9 +425,9 @@ fn flatten(
 ) Error!void {
     if (depth > 64) return error.TreeTooDeep;
     const found = try db.read(io, tree_oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.NotATree;
-    const parsed: object.Tree = .parse(db.kind, found.bytes);
+    const parsed: object.Tree = .parse(db.objectFormat(), found.bytes);
     var it = parsed.iterate();
     while (try it.next()) |entry| {
         const path = if (prefix.len == 0)
@@ -464,7 +463,7 @@ pub fn tree(
 /// one, every resolved path and our side of every conflicted one.
 pub fn conflictedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, result: *const Result) Error!Oid {
     if (result.tree) |merged| return merged;
-    var index: index_mod.Index = .initEmpty(gpa, db.kind);
+    var index: index_mod.Index = .initEmpty(gpa, db.objectFormat());
     defer index.deinit();
     var entries: std.ArrayList(index_mod.Entry) = .empty;
     defer entries.deinit(gpa);

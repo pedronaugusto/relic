@@ -17,7 +17,7 @@
 //! upload-pack request over a kilobyte, as git sends it; a larger one is
 //! sent in chunks as it is written. Connections are kept between requests.
 //!
-//! `https://` is TLS from `std.crypto.tls`, against the system's root
+//! `https://` is TLS from relic's client, against the system's root
 //! certificates, or against `http.sslCAInfo` in their place and
 //! `http.sslCAPath` besides — a company's own authority, a self-hosted
 //! server's — or against nothing at all when `http.sslVerify` is false,
@@ -28,9 +28,9 @@
 //! find in the environment: an `https` URL goes through it in a `CONNECT`
 //! tunnel with TLS inside, an `http` one as a whole URL. A proxy's
 //! credentials are the ones its URL carries, a username there with the
-//! password from the person's helpers, as git fills them. A client
-//! certificate is refused by name: the standard library's TLS client cannot
-//! present one.
+//! password from the person's helpers, as git fills them. Client certificates
+//! come from `http.sslCert` and `http.sslKey`, or `http.proxySSLCert` and
+//! `http.proxySSLKey` for an https proxy, and relic's TLS client presents them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -135,6 +135,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, optio
         .io = io,
         .arena = .init(gpa),
         .client = .init(gpa, io),
+        .diagnostic = .init(gpa),
         .target = undefined,
         .base_path = undefined,
         .service = service,
@@ -147,6 +148,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, optio
     };
     errdefer h.arena.deinit();
     errdefer h.client.deinit();
+    errdefer h.diagnostic.deinit();
     errdefer h.credentials.deinit();
     errdefer h.endRequest();
     errdefer if (h.proxy_credentials) |*p| p.deinit();
@@ -167,6 +169,7 @@ const Http = struct {
     io: Io,
     arena: std.heap.ArenaAllocator,
     client: httpclient.Client,
+    diagnostic: httpclient.Diagnostic,
     /// Where the repository is, and the path of its URL without a
     /// trailing slash; a redirect of the first request moves both.
     target: httpclient.Target,
@@ -441,7 +444,7 @@ const Http = struct {
             session.reject(h.io, h.credentialOptions()) catch {};
         }
         var buf: [32]u8 = undefined;
-        return h.fail(error.ProxyAuthenticationFailed, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.client.proxy_status orelse 407}) catch "proxy answered 407");
+        return h.fail(error.ProxyAuthenticationFailed, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.diagnostic.proxy_status orelse 407}) catch "proxy answered 407");
     }
 
     /// Give back the request in flight, reading what is left of its body
@@ -494,19 +497,19 @@ const Http = struct {
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
             error.ConnectionFailed => h.fail(error.ConnectionFailed, "the connection failed"),
-            error.TlsFailed => h.fail(error.TlsFailed, if (h.client.tls_error) |e| @errorName(e) else "TLS handshake failed"),
+            error.TlsFailed => h.fail(error.TlsFailed, if (h.diagnostic.tls_error) |e| @errorName(e) else "TLS handshake failed"),
             error.ProxyAuthenticationRequired => h.rejectProxy(),
-            error.ProxyAuthMethodUnsupported => h.fail(error.ProxyAuthMethodUnsupported, h.client.proxy_offered orelse "the proxy's scheme"),
+            error.ProxyAuthMethodUnsupported => h.fail(error.ProxyAuthMethodUnsupported, h.diagnostic.proxy_offered orelse "the proxy's scheme"),
             error.ProxyRefused => {
                 var buf: [32]u8 = undefined;
-                return h.fail(error.ProxyRefused, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.client.proxy_status orelse 0}) catch "proxy refused");
+                return h.fail(error.ProxyRefused, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.diagnostic.proxy_status orelse 0}) catch "proxy refused");
             },
             error.HttpProtocolError => h.fail(error.ProtocolError, "not an HTTP response"),
             error.CertificateBundleUnreadable => h.fail(error.SslCertificateUnreadable, "the system's certificates"),
             // git sets no timeout of these kinds, so none is set here.
             error.TimedOut => h.fail(error.ConnectionFailed, "timed out"),
             error.BodyIncomplete => h.fail(error.ConnectionFailed, "the body was cut short"),
-            error.ClientCertificateRejected => h.fail(error.ClientCertificateRejected, if (h.client.tls_error) |e| @errorName(e) else "the server refused the certificate"),
+            error.ClientCertificateRejected => h.fail(error.ClientCertificateRejected, if (h.diagnostic.tls_error) |e| @errorName(e) else "the server refused the certificate"),
             error.ClientCertificateSchemeUnsupported => h.fail(error.ClientCertificateSchemeUnsupported, "no signature scheme the server takes"),
         };
     }
@@ -527,7 +530,7 @@ const Http = struct {
             h.endRequest();
             const authorization = h.credentials.authorization();
             const list = try h.headers(h.arena.allocator(), .GET, authorization, false);
-            h.in_flight = h.client.send(.GET, h.target, path, list, null) catch |err| return h.clientFailed(err);
+            h.in_flight = h.client.send(.GET, h.target, path, list, null, &h.diagnostic) catch |err| return h.clientFailed(err);
             const res = &h.in_flight.?;
             if (h.client.proxy != null) try h.approveProxy();
             const status = @intFromEnum(res.head.status);
@@ -736,7 +739,7 @@ const Http = struct {
         const arena = h.arena.allocator();
         if (h.stream_buffer.len == 0) h.stream_buffer = try arena.alloc(u8, 64 * 1024);
         const list = try h.headers(arena, .POST, h.credentials.authorization(), false);
-        h.streaming = h.client.stream(.POST, h.target, try h.pathFor(suffix), list, null, h.stream_buffer) catch |err| return h.clientFailed(err);
+        h.streaming = h.client.stream(.POST, h.target, try h.pathFor(suffix), list, null, h.stream_buffer, &h.diagnostic) catch |err| return h.clientFailed(err);
     }
 
     fn response(context: *anyopaque, _: *Connection) connection.Error!*Io.Reader {
@@ -753,11 +756,9 @@ const Http = struct {
         if (h.streaming) |*s| {
             s.writer().writeAll(h.post.buffered()) catch return h.fail(error.ConnectionFailed, "write failed");
             h.post.end = 0;
-            h.in_flight = s.finish() catch |err| {
-                h.streaming = null;
-                return h.clientFailed(err);
-            };
+            var streaming = s.*;
             h.streaming = null;
+            h.in_flight = streaming.finish() catch |err| return h.clientFailed(err);
         } else {
             var suffix_buf: [64]u8 = undefined;
             const suffix = std.fmt.bufPrint(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
@@ -768,7 +769,7 @@ const Http = struct {
             const gzipped = h.service == .upload_pack and body.len > gzip_threshold;
             if (gzipped) body = try gzip(arena, body);
             const list = try h.headers(arena, .POST, h.credentials.authorization(), gzipped);
-            h.in_flight = h.client.send(.POST, h.target, try h.pathFor(suffix), list, body) catch |err| return h.clientFailed(err);
+            h.in_flight = h.client.send(.POST, h.target, try h.pathFor(suffix), list, body, &h.diagnostic) catch |err| return h.clientFailed(err);
             h.post.end = 0;
         }
         const res = &h.in_flight.?;
@@ -806,6 +807,7 @@ const Http = struct {
         const h = self(context);
         h.endRequest();
         h.client.deinit();
+        h.diagnostic.deinit();
         h.credentials.deinit();
         if (h.proxy_credentials) |*p| p.deinit();
         h.freeClientCertificates();

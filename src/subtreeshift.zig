@@ -99,18 +99,18 @@ const Shifter = struct {
 
     /// A tree's entries in its own order; the empty tree needs no object.
     fn entries(s: Shifter, oid: Oid) Error![]Entry {
-        if (oid.eql(hash.Hasher.object(s.db.kind, "tree", ""))) return &.{};
+        if (oid.eql(hash.Hasher.object(s.db.objectFormat(), "tree", ""))) return &.{};
         const bytes = try s.treeBytes(oid);
         var out: std.ArrayList(Entry) = .empty;
-        var it = object.Tree.parse(s.db.kind, bytes).iterate();
+        var it = object.Tree.parse(s.db.objectFormat(), bytes).iterate();
         while (try it.next()) |e| try out.append(s.arena, .{ .name = e.name, .mode = e.mode.raw(), .oid = e.oid });
         return out.items;
     }
 
     fn treeBytes(s: Shifter, oid: Oid) Error![]const u8 {
-        if (oid.eql(hash.Hasher.object(s.db.kind, "tree", ""))) return "";
+        if (oid.eql(hash.Hasher.object(s.db.objectFormat(), "tree", ""))) return "";
         const found = try s.db.read(s.io, oid);
-        defer s.db.gpa.free(found.bytes);
+        defer s.db.allocator().free(found.bytes);
         if (found.type != .tree) return error.NotATree;
         return s.arena.dupe(u8, found.bytes);
     }
@@ -171,8 +171,8 @@ const Shifter = struct {
         const top = prefix[0 .. slash orelse prefix.len];
         const rest = if (slash) |at| prefix[at + 1 ..] else "";
         const bytes = try s.arena.dupe(u8, try s.treeBytes(oid1));
-        const raw_len = s.db.kind.rawLen();
-        var it = object.Tree.parse(s.db.kind, bytes).iterate();
+        const raw_len = s.db.objectFormat().rawLen();
+        var it = object.Tree.parse(s.db.objectFormat(), bytes).iterate();
         while (try it.next()) |e| {
             if (!std.mem.eql(u8, e.name, top)) continue;
             // git refuses here; the paths it is given are all directories.

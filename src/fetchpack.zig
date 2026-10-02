@@ -693,10 +693,10 @@ const Negotiator = struct {
             }
             if (!try n.db.exists(n.io, oid)) return null;
             const found = try n.db.read(n.io, oid);
-            defer n.db.gpa.free(found.bytes);
+            defer n.db.allocator().free(found.bytes);
             switch (found.type) {
                 .tag => {
-                    var tag = try object.Tag.parse(n.gpa, n.db.kind, found.bytes);
+                    var tag = try object.Tag.parse(n.gpa, n.db.objectFormat(), found.bytes);
                     defer tag.deinit();
                     oid = tag.target;
                     continue;
@@ -704,7 +704,7 @@ const Negotiator = struct {
                 .commit => {},
                 else => return null,
             }
-            var commit = try object.Commit.parse(n.gpa, n.db.kind, found.bytes);
+            var commit = try object.Commit.parse(n.gpa, n.db.objectFormat(), found.bytes);
             defer commit.deinit();
             const parents = try n.arena.allocator().dupe(Oid, revwalk.parentsOf(n.db, oid, commit.parents));
             const gop = try n.nodes.getOrPut(n.gpa, oid);
@@ -797,8 +797,6 @@ const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
 const repo_mod = @import("repo.zig");
 const objectwalk = @import("objectwalk.zig");
-const pack_mod = @import("pack.zig");
-
 /// A conversation with `git upload-pack` run on this machine, in `dir`.
 fn uploadPack(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, dir: Io.Dir, v2: bool) !*Connection {
     return connection.Process.start(gpa, io, .{ .environ = env }, .{
@@ -835,7 +833,7 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
         {
             const conn = try uploadPack(gpa, io, &env, source.dir, v2);
             defer conn.close(io);
-            var adv = try protocol.readAdvertisement(gpa, conn, repo.kind);
+            var adv = try protocol.readAdvertisement(gpa, conn, repo.objectFormat());
             defer adv.deinit();
             try testing.expectEqual(if (v2) protocol.Version.v2 else protocol.Version.v0, adv.version);
             const want = try Oid.parse(.sha1, old);
@@ -848,7 +846,7 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
         {
             const conn = try uploadPack(gpa, io, &env, source.dir, v2);
             defer conn.close(io);
-            var adv = try protocol.readAdvertisement(gpa, conn, repo.kind);
+            var adv = try protocol.readAdvertisement(gpa, conn, repo.objectFormat());
             defer adv.deinit();
             var list = try protocol.listRefs(gpa, conn, &adv, .{ .prefixes = &.{ "refs/heads/", "refs/tags/" } });
             defer list.deinit();
@@ -891,7 +889,7 @@ test "the server's refusal comes back by name, with its words" {
 
     const conn = try uploadPack(gpa, io, &env, source.dir, true);
     defer conn.close(io);
-    var adv = try protocol.readAdvertisement(gpa, conn, repo.kind);
+    var adv = try protocol.readAdvertisement(gpa, conn, repo.objectFormat());
     defer adv.deinit();
     // An object the server does not have.
     const nowhere = hash.Hasher.object(.sha1, "blob", "not on the server");

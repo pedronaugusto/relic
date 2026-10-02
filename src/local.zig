@@ -50,7 +50,12 @@ pub const Remote = struct {
     /// repository — its working tree, its `.git`, or a bare repository —
     /// and is not searched above, as git does not search above a remote's.
     pub fn open(gpa: Allocator, io: Io, location: []const u8) Error!Remote {
-        const parsed = url_mod.Url.parse(location) catch return error.NotARepository;
+        var identity = url_mod.Identity.parse(gpa, location) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NotARepository,
+        };
+        defer identity.deinit();
+        const parsed = identity.url;
         if (!parsed.isLocalRepository()) return error.NotARepository;
         var dir = Io.Dir.cwd().openDir(io, parsed.path, .{ .iterate = true }) catch return error.NotARepository;
         defer dir.close(io);
@@ -78,13 +83,13 @@ pub const Remote = struct {
         errdefer list.arena.deinit();
         const arena = list.arena.allocator();
         var out: std.ArrayList(protocol.RemoteRef) = .empty;
-        const kind = r.repo.kind;
+        const kind = r.repo.objectFormat();
 
         if (matches("HEAD", prefixes)) {
-            if (try r.repo.refs.read(gpa, io, "HEAD")) |head| switch (head) {
+            if (try r.repo.refStore().read(gpa, io, "HEAD")) |head| switch (head) {
                 .symbolic => |target| {
                     defer gpa.free(target);
-                    const resolved = try r.repo.refs.resolve(gpa, io, "HEAD");
+                    const resolved = try r.repo.refStore().resolve(gpa, io, "HEAD");
                     if (resolved) |res| {
                         defer gpa.free(res.name);
                         try out.append(arena, .{
@@ -105,7 +110,7 @@ pub const Remote = struct {
             };
         }
 
-        var listing = try r.repo.refs.list(gpa, io, "refs/");
+        var listing = try r.repo.refStore().list(gpa, io, "refs/");
         defer listing.deinit();
         for (listing.entries) |entry| {
             if (!matches(entry.name, prefixes)) continue;
@@ -113,7 +118,7 @@ pub const Remote = struct {
             switch (entry.target) {
                 .direct => |oid| ref.oid = oid,
                 .symbolic => |target| {
-                    const resolved = (try r.repo.refs.resolve(gpa, io, entry.name)) orelse continue;
+                    const resolved = (try r.repo.refStore().resolve(gpa, io, entry.name)) orelse continue;
                     defer gpa.free(resolved.name);
                     ref.oid = resolved.oid;
                     ref.symref_target = try arena.dupe(u8, target);
@@ -157,7 +162,7 @@ pub const Remote = struct {
             for (collected.entries) |entry| try sending.put(r.gpa, entry.oid, {});
             var extra: std.ArrayList(odb_mod.PackEntry) = .empty;
             defer extra.deinit(r.gpa);
-            var tags = try r.repo.refs.list(r.gpa, io, "refs/tags/");
+            var tags = try r.repo.refStore().list(r.gpa, io, "refs/tags/");
             defer tags.deinit();
             for (tags.entries) |entry| {
                 const start = switch (entry.target) {
@@ -177,7 +182,7 @@ pub const Remote = struct {
                     try chain.append(r.gpa, current);
                     const found = try r.repo.odb.read(io, current);
                     defer r.gpa.free(found.bytes);
-                    var tag = try @import("object.zig").Tag.parse(r.gpa, r.repo.kind, found.bytes);
+                    var tag = try @import("object.zig").Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes);
                     defer tag.deinit();
                     current = tag.target;
                 }
@@ -240,13 +245,13 @@ pub const Remote = struct {
         if (needs_pack and objects.len != 0) {
             var pack_dir = try r.repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
             defer pack_dir.close(io);
-            _ = try from.writePack(io, pack_dir, objects, .{ .reverse_index = @import("revindex.zig").wanted(&r.repo.config) });
+            _ = try from.writePack(io, pack_dir, objects, .{ .reverse_index = @import("revindex.zig").wanted(r.repo.configuration()) });
             try r.repo.odb.refresh(io);
         }
 
-        const config = &r.repo.config;
+        const config = r.repo.configuration();
         const bare = r.repo.isBare();
-        const current = try r.repo.refs.currentBranch(gpa, io);
+        const current = try r.repo.refStore().currentBranch(gpa, io);
         defer if (current) |c| gpa.free(c);
         const deny_current = !bare and denies(config, "receive.denycurrentbranch", true);
         const deny_delete_current = !bare and denies(config, "receive.denydeletecurrent", true);
@@ -347,9 +352,9 @@ pub const Remote = struct {
                 continue;
             }
             const found = from.read(io, oid) catch continue;
-            defer from.gpa.free(found.bytes);
+            defer from.allocator().free(found.bytes);
             if (found.type != .commit) continue;
-            var commit = try @import("object.zig").Commit.parse(arena, from.kind, found.bytes);
+            var commit = try @import("object.zig").Commit.parse(arena, from.objectFormat(), found.bytes);
             defer commit.deinit();
             for (commit.parents) |p| try stack.append(arena, p);
         }
@@ -367,7 +372,7 @@ pub const Remote = struct {
 
     /// Refuse a repository whose push would run hooks.
     fn refuseHooks(r: *Remote, io: Io) Error!void {
-        const hooks_path = r.repo.config.get("core.hookspath");
+        const hooks_path = r.repo.configuration().get("core.hookspath");
         var dir = (if (hooks_path) |path|
             Io.Dir.cwd().openDir(io, path, .{})
         else

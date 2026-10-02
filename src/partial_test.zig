@@ -230,7 +230,7 @@ test "git's partial clone is checked out by relic, which fetches what it reads f
         defer repo.deinit(io);
         const text = try git(gpa, io, lone, &.{ "rev-parse", "HEAD:big.txt" });
         defer gpa.free(text);
-        const blob = try Oid.parse(repo.kind, std.mem.trimEnd(u8, text, "\n"));
+        const blob = try Oid.parse(repo.objectFormat(), std.mem.trimEnd(u8, text, "\n"));
         try testing.expectError(error.ObjectNotFound, repo.odb.read(io, blob));
         var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
         defer lazy.deinit();
@@ -246,12 +246,12 @@ test "git's partial clone is checked out by relic, which fetches what it reads f
     const head = (try repo.headTree(io)).?;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    try testing.expectError(error.ObjectNotFound, worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = repo.worktreeRules() }));
+    try testing.expectError(error.ObjectNotFound, worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = try repo.worktreeRules() }));
     var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
     defer lazy.deinit();
     lazy.install();
     try lazy.prefetchTree(io, head);
-    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = repo.worktreeRules() });
+    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = try repo.worktreeRules() });
     try index.write(io, repo.git_dir, "index", .{});
     try testing.expectEqual(@as(u32, 1), lazy.fetches);
     try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
@@ -402,7 +402,7 @@ test "a promised object is fetched from the next promisor remote when one fails,
     const names = blk: {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        const list = try partial.promisorRemotes(arena.allocator(), &repo.config);
+        const list = try partial.promisorRemotes(arena.allocator(), repo.configuration());
         var joined: std.ArrayList(u8) = .empty;
         for (list) |n| try joined.print(gpa, "{s} ", .{n});
         break :blk try joined.toOwnedSlice(gpa);
@@ -416,14 +416,14 @@ test "a promised object is fetched from the next promisor remote when one fails,
     defer lazy.deinit();
     lazy.install();
     try lazy.prefetchTree(io, head);
-    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = repo.worktreeRules() });
+    _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, head, .{ .rules = try repo.worktreeRules() });
     try index.write(io, repo.git_dir, "index", .{});
     try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
 
     // With no promisor remote that has them, the read fails by name.
     const set = try git(gpa, io, twins.by_relic, &.{ "config", "remote.mirror.url", "file:///nowhere/mirror.git" });
     gpa.free(set);
-    try repo.config.set("remote.mirror.url", "file:///nowhere/mirror.git");
-    const missing = try Oid.parse(repo.kind, "1111111111111111111111111111111111111111");
+    try repo.editConfig(&.{.{ .set = .{ .name = "remote.mirror.url", .value = "file:///nowhere/mirror.git" } }}, null);
+    const missing = try Oid.parse(repo.objectFormat(), "1111111111111111111111111111111111111111");
     try testing.expectError(error.PromisorFetchFailed, repo.odb.read(io, missing));
 }

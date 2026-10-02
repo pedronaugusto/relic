@@ -232,7 +232,7 @@ pub const Listing = struct {
 /// branch pushes to a branch of its own name.
 fn refFor(arena: Allocator, io: Io, repo: *Repository, options: Options) Error!?[]const u8 {
     if (options.ref) |r| return r;
-    const branch = (try repo.refs.currentBranch(arena, io)) orelse return null;
+    const branch = (try repo.refStore().currentBranch(arena, io)) orelse return null;
     return try std.fmt.allocPrint(arena, "refs/heads/{s}", .{branch});
 }
 
@@ -899,13 +899,13 @@ pub const Fixed = struct {
 pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const []const u8, options: Options) Error!Fixed {
     var fixed: Fixed = .{};
     const wt = repo.work_dir orelse return fixed;
-    var settings = try lfsapi.Settings.load(gpa, io, &repo.config, repo.work_dir);
+    var settings = try lfsapi.Settings.load(gpa, io, repo.configuration(), repo.work_dir);
     defer settings.deinit();
     if (!readOnlyWanted(&settings)) return fixed;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var store_settings = try lfs.Lfs.load(gpa, io, &repo.config, repo.common_dir, repo.work_dir, .{});
+    var store_settings = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.common_dir, repo.work_dir, .{});
     defer store_settings.deinit();
     const ref = try refFor(arena, io, repo, options);
     const cache = try Cache.read(arena, io, &store_settings.store, ref);

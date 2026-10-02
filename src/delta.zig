@@ -23,6 +23,8 @@ pub const Error = error{
     InvalidDeltaCommand,
     /// A size varint wider than 64 bits.
     DeltaSizeOverflow,
+    /// The stated result exceeds `max_result_bytes` or the address space.
+    DeltaSizeLimitExceeded,
 };
 
 /// A little-endian 7-bits-per-byte varint, the one a delta uses for its two
@@ -70,7 +72,8 @@ pub fn header(delta: []const u8) Error!Sizes {
 /// `out` is expected to be empty or to be appended to deliberately; the
 /// produced length is checked against the delta's stated target size, so a
 /// delta that lies about its own output is a named error rather than a short
-/// object.
+/// object. A result over `max_result_bytes` or the address space is
+/// `DeltaSizeLimitExceeded`, checked before reserving any output.
 pub fn applyTo(
     gpa: Allocator,
     out: *std.ArrayList(u8),
@@ -79,9 +82,10 @@ pub fn applyTo(
 ) (Error || Allocator.Error)!void {
     const sizes = try header(delta);
     if (sizes.source != base.len) return error.DeltaBaseSizeMismatch;
-    if (sizes.target > max_result_bytes) return error.DeltaSizeOverflow;
+    if (sizes.target > max_result_bytes) return error.DeltaSizeLimitExceeded;
+    const target = std.math.cast(usize, sizes.target) orelse return error.DeltaSizeLimitExceeded;
     const start = out.items.len;
-    try out.ensureUnusedCapacity(gpa, @intCast(sizes.target));
+    try out.ensureUnusedCapacity(gpa, target);
 
     var i: usize = sizes.len;
     while (i < delta.len) {
@@ -592,4 +596,29 @@ fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
         const out = apply(gpa, base_buf[0..n], input) catch continue;
         gpa.free(out);
     }
+}
+
+test "a valid delta over the result limit is not a size overflow" {
+    const gpa = std.testing.allocator;
+    const base: [0x10000]u8 = @splat('a');
+    // 65 536 copies of 65 536 bytes, then one inserted byte: 4 GiB + 1.
+    const delta = [_]u8{ 0x80, 0x80, 0x04, 0x81, 0x80, 0x80, 0x80, 0x10 } ++
+        ([_]u8{0x80} ** 0x10000) ++ [_]u8{ 1, 'x' };
+    const sizes = try header(&delta);
+    try std.testing.expectEqual(max_result_bytes + 1, sizes.target);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try out.appendSlice(gpa, "prefix");
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try std.testing.expectError(error.DeltaSizeLimitExceeded, applyTo(failing.allocator(), &out, &base, &delta));
+    try std.testing.expectEqualStrings("prefix", out.items);
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    try std.testing.expectError(error.DeltaSizeLimitExceeded, apply(gpa, &base, &delta));
+    // At the policy limit, a failure to reserve the result is a resource failure.
+    const at_limit = [_]u8{ 0x80, 0x80, 0x04, 0x80, 0x80, 0x80, 0x80, 0x10 } ++
+        ([_]u8{0x80} ** 0x10000);
+    var empty: std.ArrayList(u8) = .empty;
+    try std.testing.expectError(if (@sizeOf(usize) > 4) error.OutOfMemory else error.DeltaSizeLimitExceeded, applyTo(failing.allocator(), &empty, &base, &at_limit));
+    // A size that does not fit the wire's u64 is still malformed input.
+    try std.testing.expectError(error.DeltaSizeOverflow, readSize(&([_]u8{0xff} ** 9 ++ [_]u8{2})));
 }

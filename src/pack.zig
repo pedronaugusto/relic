@@ -105,7 +105,7 @@ pub const Index = struct {
         max_bytes: usize,
     ) IndexError!Index {
         const bytes = try dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes));
-        errdefer gpa.free(bytes);
+        // parse takes ownership on success and failure.
         return parse(gpa, kind, bytes);
     }
 
@@ -329,7 +329,7 @@ pub const Error = error{
     /// The compressed entry did not match the CRC the index carries.
     ChecksumMismatch,
 } || IndexError || delta.Error || Io.File.OpenError ||
-    Io.File.ReadPositionalError || Io.File.StatError || Io.File.MemoryMap.CreateError;
+    Io.File.ReadPositionalError || Io.File.Reader.Error || Io.File.Reader.SeekError || Io.File.StatError || Io.File.MemoryMap.CreateError;
 
 /// The kinds a pack entry header can name.
 pub const EntryKind = union(enum) {
@@ -495,6 +495,14 @@ pub const Pack = struct {
         return r.seekTo(offset);
     }
 
+    fn seekError(p: *const Pack, err: Io.File.Reader.SeekError) Error {
+        return switch (err) {
+            error.EndOfStream => error.TruncatedPack,
+            error.ReadFailed => p.file_reader.err orelse error.ReadFailed,
+            else => |e| e,
+        };
+    }
+
     /// Close the pack and release everything it holds.
     pub fn deinit(p: *Pack, io: Io) void {
         p.gpa.free(p.window);
@@ -535,7 +543,7 @@ pub const Pack = struct {
         // through the reader, so the entry's data behind its header is then
         // already buffered for the inflate that follows
         _ = io;
-        p.seekTo(offset) catch return error.TruncatedPack;
+        p.seekTo(offset) catch |err| return p.seekError(err);
         const have = p.file_reader.interface.peekGreedy(1) catch |err| switch (err) {
             error.EndOfStream => return 0,
             error.ReadFailed => return p.file_reader.err orelse error.TruncatedPack,
@@ -609,7 +617,7 @@ pub const Pack = struct {
     /// Inflate `size` bytes of the zlib stream at `at`. The result is the
     /// caller's.
     fn inflateAt(p: *Pack, at: u64, size: u64) Error![]u8 {
-        if (size > delta.max_result_bytes) return error.PackEntrySizeMismatch;
+        if (size > delta.max_result_bytes) return error.StreamTooLong;
         const out = try p.gpa.alloc(u8, @intCast(size));
         errdefer p.gpa.free(out);
 
@@ -619,13 +627,16 @@ pub const Pack = struct {
             fixed_reader = .fixed(mem[@intCast(at)..]);
             break :blk &fixed_reader;
         } else blk: {
-            p.seekTo(at) catch return error.TruncatedPack;
+            p.seekTo(at) catch |err| return p.seekError(err);
             break :blk &p.file_reader.interface;
         };
 
         // the whole entry in one pass into a buffer its header sized: no
         // window, no streaming state (`inflate.zig`)
-        const n = p.decoder.zlib(input, out) catch return error.CorruptPackEntry;
+        const n = p.decoder.zlib(input, out) catch |err| switch (err) {
+            error.ReadFailed => return p.file_reader.err orelse error.ReadFailed,
+            error.EndOfStream, error.CorruptStream, error.OutputTooLong => return error.CorruptPackEntry,
+        };
         if (n != out.len) return error.CorruptPackEntry;
         return out;
     }
@@ -750,11 +761,16 @@ pub const Pack = struct {
             fixed_reader = .fixed(mem[@intCast(at)..]);
             break :blk &fixed_reader;
         } else blk: {
-            p.seekTo(at) catch return error.TruncatedPack;
+            p.seekTo(at) catch |err| return p.seekError(err);
             break :blk &p.file_reader.interface;
         };
         var decompress: flate.Decompress = .init(input, .zlib, p.window);
-        decompress.reader.readSliceAll(out[0..want]) catch return error.CorruptPackEntry;
+        decompress.reader.readSliceAll(out[0..want]) catch {
+            if (decompress.err) |cause| {
+                if (cause == error.ReadFailed) return p.file_reader.err orelse error.ReadFailed;
+            }
+            return error.CorruptPackEntry;
+        };
         return out;
     }
 
@@ -2240,4 +2256,67 @@ fn encodeBackOffset(buf: []u8, back: u64) []const u8 {
         buf[pos] = 0x80 | @as(u8, @intCast(value & 0x7f));
     }
     return buf[pos..];
+}
+
+test "pack inflates preserve I/O and cancellation resource failures" {
+    const Fault = struct {
+        threadlocal var failure: Io.File.ReadPositionalError = error.InputOutput;
+        fn read(_: ?*anyopaque, _: Io.File, _: []const []u8, _: u64) Io.File.ReadPositionalError!usize {
+            return failure;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "pack", .{ .read = true });
+    defer file.close(io);
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Fault.read;
+    const failing_io: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var buffer: [128]u8 = undefined;
+    var window: [flate.max_window_len]u8 = undefined;
+    var decoder: inflate_mod.Decoder = .{};
+    var p: Pack = undefined;
+    p.gpa = std.testing.allocator;
+    p.memory = null;
+    p.decoder = &decoder;
+    p.window = &window;
+    for ([_]Io.File.ReadPositionalError{ error.InputOutput, error.Canceled }) |failure| {
+        Fault.failure = failure;
+        p.file_reader = file.reader(failing_io, &buffer);
+        try std.testing.expectError(failure, p.inflateAt(0, 6));
+        p.file_reader = file.reader(failing_io, &buffer);
+        try std.testing.expectError(failure, p.inflateHead(0, 6));
+    }
+}
+
+test "pack inflate distinguishes policy resource failures from malformed lengths" {
+    var p: Pack = undefined;
+    try std.testing.expectError(error.StreamTooLong, p.inflateAt(0, delta.max_result_bytes + 1));
+}
+
+test "pack seeks preserve I/O and cancellation resource failures" {
+    var p: Pack = undefined;
+    p.gpa = std.testing.allocator;
+    p.memory = null;
+    for ([_]Io.File.SeekError{ error.AccessDenied, error.Canceled }) |failure| {
+        p.file_reader = undefined;
+        p.file_reader.mode = .failure;
+        p.file_reader.seek_err = failure;
+        p.file_reader.pos = 0;
+        p.file_reader.interface = .fixed(&.{});
+        var bytes: [1]u8 = undefined;
+        try std.testing.expectError(failure, p.readAtUpTo(std.testing.io, 0, &bytes));
+        try std.testing.expectError(failure, p.inflateAt(0, 1));
+        try std.testing.expectError(failure, p.inflateHead(0, 1));
+    }
+}
+
+test "a refused on-disk pack index releases its bytes once" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad.idx", .data = "x" });
+    try std.testing.expectError(error.TruncatedIndex, Index.open(gpa, io, tmp.dir, "bad.idx", .sha1, 1024));
 }

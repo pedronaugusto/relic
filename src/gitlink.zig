@@ -48,10 +48,10 @@ pub const GitDir = struct {
     /// A ref store over the two directories, which it borrows.
     /// A store over its refs, in whichever format they are kept: a stack
     /// under `reftable/`, or loose files and `packed-refs`.
-    pub fn refStore(g: *const GitDir, gpa: Allocator, io: Io, kind: hash.Kind) refs_mod.Store {
-        var store: refs_mod.Store = .init(gpa, kind, g.git_dir, g.common_dir);
-        if (reftablestack.isReftableRepository(io, g.common_dir)) store.format = .reftable;
-        return store;
+    pub fn refStore(g: *const GitDir, gpa: Allocator, io: Io, kind: hash.Kind) (Allocator.Error || Io.Dir.AccessError)!refs_mod.Store {
+        return refs_mod.Store.initWithOptions(gpa, kind, g.git_dir, g.common_dir, .{
+            .format = if (try reftablestack.isReftableRepository(io, g.common_dir)) .reftable else .files,
+        });
     }
 };
 
@@ -133,7 +133,8 @@ pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!
 pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8, kind: hash.Kind) Error!?Oid {
     var found = (try open(gpa, io, wt, path)) orelse return null;
     defer found.close(io);
-    const store = found.refStore(gpa, io, kind);
+    var store = try found.refStore(gpa, io, kind);
+    defer store.deinit();
     const resolved = (store.head(gpa, io) catch |err| switch (err) {
         error.MalformedRef, error.MalformedPackedRefs, error.SymbolicRefLoop, error.InvalidRefName => return null,
         else => |e| return e,
@@ -159,4 +160,34 @@ pub fn isGitDirectory(io: Io, dir: Io.Dir) bool {
     dir.access(io, "objects", .{}) catch return false;
     dir.access(io, "refs", .{}) catch return false;
     return true;
+}
+
+test "ref backend probes preserve filesystem refusals" {
+    const Probe = struct {
+        var failure: Io.Dir.AccessError = error.AccessDenied;
+        fn access(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
+            return failure;
+        }
+        fn stack(io: Io, dir: Io.Dir) !bool {
+            return reftablestack.isReftableRepository(io, dir);
+        }
+        fn store(g: *const GitDir, io: Io) !void {
+            var refs = try g.refStore(std.testing.allocator, io, .sha1);
+            defer refs.deinit();
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var vtable = Io.failing.vtable.*;
+    vtable.dirAccess = Probe.access;
+    const io: Io = .{ .userdata = null, .vtable = &vtable };
+    const g: GitDir = .{ .git_dir = tmp.dir, .common_dir = tmp.dir, .common_is_separate = false, .via_file = false };
+    for ([_]Io.Dir.AccessError{ error.AccessDenied, error.InputOutput, error.Canceled }) |err| {
+        Probe.failure = err;
+        try std.testing.expectError(err, Probe.stack(io, tmp.dir));
+        try std.testing.expectError(err, Probe.store(&g, io));
+    }
+    Probe.failure = error.FileNotFound;
+    try std.testing.expect(!try Probe.stack(io, tmp.dir));
+    try Probe.store(&g, io);
 }

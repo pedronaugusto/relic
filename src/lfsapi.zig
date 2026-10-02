@@ -215,7 +215,7 @@ pub const Settings = struct {
     /// The settings of `repo`, with `.lfsconfig` found where git-lfs finds
     /// it: `Repository.lfsconfigText`. `repo`'s configuration is borrowed.
     pub fn loadRepo(gpa: Allocator, io: Io, repo: *repo_mod.Repository) (LoadError || LfsconfigError)!Settings {
-        var s: Settings = .{ .gpa = gpa, .config = &repo.config };
+        var s: Settings = .{ .gpa = gpa, .config = repo.configuration() };
         const text = (try repo.lfsconfigText(io)) orelse return s;
         defer repo.gpa.free(text);
         s.file = try Config.parseText(gpa, text, .local);
@@ -1182,13 +1182,13 @@ pub const Client = struct {
     pub fn remember(c: *Client, io: Io, repo: *repo_mod.Repository) config_mod.Config.SetError!void {
         var changed = false;
         for (c.learned.items) |l| {
-            if (repo.config.get(l.key)) |existing| {
+            if (repo.configuration().get(l.key)) |existing| {
                 if (std.mem.eql(u8, existing, l.value)) continue;
             }
-            try repo.config.setIn(.local, l.key, l.value);
+            try @import("configstate.zig").rememberLfs(repo._config, l.key, l.value);
             changed = true;
         }
-        if (changed) try repo.config.write(io, repo.common_dir, "config");
+        if (changed) try @import("configstate.zig").writeLocal(repo._config, io);
     }
 
     /// Describe a request that failed for want of a credential, or that the
@@ -1639,8 +1639,9 @@ pub const Client = struct {
     fn exchangeOnce(c: *Client, request: Request, url: []const u8, auth_header: ?[]const u8) Error!*Exchange {
         const ex = try c.gpa.create(Exchange);
         errdefer c.gpa.destroy(ex);
-        ex.* = .{ .client = c, .arena = .init(c.gpa) };
+        ex.* = .{ .client = c, .arena = .init(c.gpa), .diagnostic = .init(c.gpa) };
         errdefer ex.arena.deinit();
+        errdefer ex.diagnostic.deinit();
         const a = ex.arena.allocator();
 
         const request_url = try a.dupe(u8, try stripUserinfo(a, url));
@@ -1701,34 +1702,34 @@ pub const Client = struct {
         switch (request.body) {
             .none => {
                 const body: ?[]const u8 = if (request.method.requestHasBody()) "" else null;
-                ex.response = transport.send(request.method, target, path, headers.items, body) catch |err| return c.clientFailed(transport, err, request_url);
+                ex.response = transport.send(request.method, target, path, headers.items, body, &ex.diagnostic) catch |err| return c.clientFailed(&ex.diagnostic, err, request_url);
             },
             .bytes => |bytes| {
-                ex.response = transport.send(request.method, target, path, headers.items, bytes) catch |err| return c.clientFailed(transport, err, request_url);
+                ex.response = transport.send(request.method, target, path, headers.items, bytes, &ex.diagnostic) catch |err| return c.clientFailed(&ex.diagnostic, err, request_url);
             },
             .object => |o| {
                 const file = (o.store.open(c.io, &o.pointer) catch |err| return c.fail(error.ConnectionFailed, "{s}", .{@errorName(err)})) orelse
                     return c.fail(error.HttpStatus, "object {s} is not in the store", .{&o.pointer.oid});
                 defer file.close(c.io);
                 const body_buf = try a.alloc(u8, 64 * 1024);
-                var streaming = transport.stream(request.method, target, path, headers.items, if (chunked) null else o.pointer.size, body_buf) catch |err|
-                    return c.clientFailed(transport, err, request_url);
-                var sent_all = false;
-                defer if (!sent_all) streaming.abort();
-                var chunk: [64 * 1024]u8 = undefined;
-                var fr = file.reader(c.io, &.{});
-                var left = o.pointer.size;
-                while (left > 0) {
-                    const want: usize = @intCast(@min(left, chunk.len));
-                    const n = fr.interface.readSliceShort(chunk[0..want]) catch return c.fail(error.ConnectionFailed, "upload: reading the object", .{});
-                    if (n == 0) return c.fail(error.ConnectionFailed, "upload: the object is shorter than its pointer", .{});
-                    streaming.writer().writeAll(chunk[0..n]) catch return c.fail(error.ConnectionFailed, "upload: the connection broke", .{});
-                    left -= n;
-                    if (request.sent) |count| count.* += n;
-                    if (request.on_bytes) |cb| cb.add(cb.context, n);
+                var streaming = transport.stream(request.method, target, path, headers.items, if (chunked) null else o.pointer.size, body_buf, &ex.diagnostic) catch |err|
+                    return c.clientFailed(&ex.diagnostic, err, request_url);
+                {
+                    errdefer streaming.abort();
+                    var chunk: [64 * 1024]u8 = undefined;
+                    var fr = file.reader(c.io, &.{});
+                    var left = o.pointer.size;
+                    while (left > 0) {
+                        const want: usize = @intCast(@min(left, chunk.len));
+                        const n = fr.interface.readSliceShort(chunk[0..want]) catch return c.fail(error.ConnectionFailed, "upload: reading the object", .{});
+                        if (n == 0) return c.fail(error.ConnectionFailed, "upload: the object is shorter than its pointer", .{});
+                        streaming.writer().writeAll(chunk[0..n]) catch return c.fail(error.ConnectionFailed, "upload: the connection broke", .{});
+                        left -= n;
+                        if (request.sent) |count| count.* += n;
+                        if (request.on_bytes) |cb| cb.add(cb.context, n);
+                    }
                 }
-                sent_all = true;
-                ex.response = streaming.finish() catch |err| return c.clientFailed(transport, err, request_url);
+                ex.response = streaming.finish() catch |err| return c.clientFailed(&ex.diagnostic, err, request_url);
             },
         }
         ex.in_flight = true;
@@ -1738,7 +1739,7 @@ pub const Client = struct {
     /// An error of the HTTP client's, as this module names it, with why in
     /// the message. A timeout is a connection that failed, which git-lfs
     /// retries as it retries any.
-    fn clientFailed(c: *Client, transport: *httpclient.Client, err: httpclient.Error, url: []const u8) Error {
+    fn clientFailed(c: *Client, diagnostic: *const httpclient.Diagnostic, err: httpclient.Error, url: []const u8) Error {
         const where = stripQuery(url);
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
@@ -1746,13 +1747,13 @@ pub const Client = struct {
             error.ConnectionFailed => c.fail(error.ConnectionFailed, "the connection failed: {s}", .{where}),
             error.TimedOut => c.fail(error.ConnectionFailed, "timed out: {s}", .{where}),
             error.BodyIncomplete => c.fail(error.ConnectionFailed, "upload cut short: {s}", .{where}),
-            error.TlsFailed => c.fail(error.ConnectionFailed, "TLS: {s}: {s}", .{ if (transport.tls_error) |e| @errorName(e) else "handshake failed", where }),
+            error.TlsFailed => c.fail(error.ConnectionFailed, "TLS: {s}: {s}", .{ if (diagnostic.tls_error) |e| @errorName(e) else "handshake failed", where }),
             error.ProxyAuthenticationRequired => c.fail(error.ConnectionFailed, "the proxy wants credentials: {s}", .{where}),
-            error.ProxyRefused => c.fail(error.ConnectionFailed, "the proxy answered {d}: {s}", .{ transport.proxy_status orelse 0, where }),
-            error.ProxyAuthMethodUnsupported => c.fail(error.ConnectionFailed, "the proxy asks for {s}: {s}", .{ transport.proxy_offered orelse "?", where }),
+            error.ProxyRefused => c.fail(error.ConnectionFailed, "the proxy answered {d}: {s}", .{ diagnostic.proxy_status orelse 0, where }),
+            error.ProxyAuthMethodUnsupported => c.fail(error.ConnectionFailed, "the proxy asks for {s}: {s}", .{ diagnostic.proxy_offered orelse "?", where }),
             error.HttpProtocolError => c.fail(error.MalformedResponse, "not an HTTP answer, or an encoding it cannot read: {s}", .{where}),
             error.CertificateBundleUnreadable => c.fail(error.SslCertificateUnreadable, "the system's certificates", .{}),
-            error.ClientCertificateRejected => c.fail(error.ClientCertificateRejected, "the server refused the client certificate ({s}): {s}", .{ if (transport.tls_error) |e| @errorName(e) else "?", where }),
+            error.ClientCertificateRejected => c.fail(error.ClientCertificateRejected, "the server refused the client certificate ({s}): {s}", .{ if (diagnostic.tls_error) |e| @errorName(e) else "?", where }),
             error.ClientCertificateSchemeUnsupported => c.fail(error.ClientCertificateSchemeUnsupported, "no signature scheme the server takes: {s}", .{where}),
         };
     }
@@ -1936,7 +1937,10 @@ pub const Client = struct {
             true
         else
             return c.fail(error.InvalidProxy, "{s} is not an HTTP proxy", .{text});
-        const host = uri.getHostAlloc(arena) catch return c.fail(error.InvalidProxy, "{s}", .{text});
+        const host = uri.getHostAlloc(arena) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return c.fail(error.InvalidProxy, "{s}", .{text}),
+        };
         // Go sends Basic from the first request, with the proxy URL's user
         // and password percent-decoded, and nothing else.
         var proxy_credential: ?httpclient.Proxy.Credential = null;
@@ -2071,6 +2075,7 @@ pub const Client = struct {
 /// A request made and its answer, open for the body.
 pub const Exchange = struct {
     client: *Client,
+    diagnostic: httpclient.Diagnostic,
     arena: std.heap.ArenaAllocator,
     /// Where the request went, without a credential, in the exchange's
     /// arena.
@@ -2202,6 +2207,7 @@ pub const Exchange = struct {
     pub fn close(ex: *Exchange) void {
         const c = ex.client;
         if (ex.in_flight) ex.response.deinit();
+        ex.diagnostic.deinit();
         ex.arena.deinit();
         c.gpa.destroy(ex);
     }
@@ -2251,7 +2257,7 @@ pub const Server = struct {
         errdefer gpa.free(s.base_path);
         const lfsconfig = try repo.lfsconfigText(io);
         defer if (lfsconfig) |t| repo.gpa.free(t);
-        s.settings = .{ .gpa = gpa, .config = &repo.config };
+        s.settings = .{ .gpa = gpa, .config = repo.configuration() };
         if (lfsconfig) |t| s.settings.file = try Config.parseText(gpa, t, .local);
         errdefer s.settings.deinit();
         {
@@ -2262,7 +2268,7 @@ pub const Server = struct {
                 // current ref comes from resolving `HEAD`.
                 const head = try repo.head(io);
                 defer if (head) |h| gpa.free(h.name);
-                const branch = if (head != null) try repo.refs.currentBranch(scratch.allocator(), io) else null;
+                const branch = if (head != null) try repo.refStore().currentBranch(scratch.allocator(), io) else null;
                 break :blk try defaultRemote(scratch.allocator(), &s.settings, branch, .download);
             };
             s.remote = try gpa.dupe(u8, chosen);
@@ -2272,7 +2278,7 @@ pub const Server = struct {
         errdefer if (s.fetch_head) |f| gpa.free(f);
         s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
         errdefer gpa.free(s.download_ref);
-        s.lfs = try lfs.Lfs.load(gpa, io, &repo.config, repo.common_dir, null, .{ .lfsconfig = lfsconfig });
+        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), repo.common_dir, null, .{ .lfsconfig = lfsconfig });
         errdefer s.lfs.deinit();
         s.client = try Client.init(gpa, io, &s.settings, s.remote, .{ .base = s.base_path, .fetch_head = s.fetch_head }, options);
         return s;
@@ -2815,4 +2821,47 @@ test "Retry-After is a number of seconds, or a date counted from the time the ca
     try testing.expect(expiresWithin(1000, 0, 1004, 5));
     try testing.expect(!expiresWithin(1000, 0, 1005, 5));
     try testing.expect(!expiresWithin(1000, 0, null, 5));
+}
+
+test "LFS proxy parsing preserves allocation resource failures" {
+    var client: Client = undefined;
+    client.io = testing.io;
+    client.message_mutex = .init;
+    var transport: httpclient.Client = undefined;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, client.useProxy(&transport, failing.allocator(), "http://pro%78y:3128"));
+}
+
+test "learned LFS policy writes the shared source without replacing worktree configuration" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
+        repo.deinit(io);
+    }
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".git/config",
+        .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nworktreeConfig = true\n[fixture]\nshared = kept\n",
+    });
+    const worktree = "[fixture]\nworktree = untouched\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = ".git/config.worktree", .data = worktree });
+    var repo = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
+    defer repo.deinit(io);
+    const settings: Settings = .{ .gpa = gpa, .config = repo.configuration() };
+    var client = try Client.init(gpa, io, &settings, "origin", .{}, .{});
+    defer client.deinit();
+    try client.learnLocksVerify("https://example.com/project", false);
+    try client.remember(io, &repo);
+    var shared = try Config.openFile(gpa, io, .{ .dir = repo.common_dir, .sub_path = "config" }, .local, .{});
+    defer shared.deinit();
+    try testing.expect(shared.get("fixture.shared") != null);
+    try testing.expectEqualStrings("kept", shared.get("fixture.shared").?);
+    try testing.expectEqualStrings("false", shared.get("lfs.https://example.com/project.locksverify").?);
+    const after = try repo.common_dir.readFileAlloc(io, "config.worktree", gpa, .limited(4096));
+    defer gpa.free(after);
+    try testing.expectEqualStrings(worktree, after);
+    _ = try repo.refreshConfig(io, null);
+    try testing.expectEqualStrings("untouched", repo.configuration().get("fixture.worktree").?);
 }

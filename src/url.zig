@@ -40,10 +40,10 @@ pub const Url = struct {
     scheme: Scheme,
     user: ?[]const u8 = null,
     password: ?[]const u8 = null,
-    /// Empty for a local path.
+    /// Empty for a local path; a non-local file authority is kept here.
     host: []const u8 = "",
     port: ?u16 = null,
-    /// For ssh, exactly what the remote command is given: `~user/repo` or
+    /// For ssh, the path spelling (use Identity for decoded bytes): `~user/repo` or
     /// `/srv/repo.git`, or `path/repo` relative to the login directory for
     /// the scp-like form. For a local path, the path. For http, the path
     /// part of the URL with its query, if any.
@@ -54,7 +54,7 @@ pub const Url = struct {
     /// Read a URL the way git decides what it names.
     pub fn parse(text: []const u8) ParseError!Url {
         if (text.len == 0) return error.MalformedUrl;
-        if (std.mem.indexOf(u8, text, "://")) |sep| {
+        if (schemeEnd(text)) |sep| {
             const scheme_text = text[0..sep];
             const scheme: Scheme = if (std.ascii.eqlIgnoreCase(scheme_text, "ssh") or
                 std.ascii.eqlIgnoreCase(scheme_text, "git+ssh") or
@@ -77,27 +77,19 @@ pub const Url = struct {
                 if (builtin.os.tag == .windows and rest.len >= 2 and std.ascii.isAlphabetic(rest[0]) and rest[1] == ':') {
                     return .{ .scheme = .file, .path = rest, .raw = text };
                 }
-                // `file://host/path` names a host other than this one only
-                // when it is not empty and not `localhost`; git refuses the
-                // rest the same way.
+                // git for Windows keeps an authority as a UNC path.
+                // On Unix only the path after the authority is used.
                 const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
                 const host = rest[0..slash];
-                if (host.len != 0 and !std.ascii.eqlIgnoreCase(host, "localhost")) return error.UnsupportedTransport;
                 if (slash == rest.len) return error.MalformedUrl;
+                if (builtin.os.tag == .windows and host.len != 0) {
+                    return .{ .scheme = .file, .host = host, .path = text[sep + 1 ..], .raw = text };
+                }
                 return .{ .scheme = .file, .path = rest[slash..], .raw = text };
             }
             var url: Url = .{ .scheme = scheme, .path = "", .raw = text };
             const path_at = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
-            var authority = rest[0..path_at];
-            if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
-                const userinfo = authority[0..at];
-                authority = authority[at + 1 ..];
-                if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
-                    url.user = userinfo[0..colon];
-                    url.password = userinfo[colon + 1 ..];
-                } else url.user = userinfo;
-            }
-            try splitHostPort(&url, authority);
+            try splitAuthority(&url, rest[0..path_at], true);
             if (url.host.len == 0) return error.MalformedUrl;
             url.path = rest[path_at..];
             if (scheme == .ssh or scheme == .git) {
@@ -110,46 +102,27 @@ pub const Url = struct {
             return url;
         }
         if (isLocal(text)) return .{ .scheme = .local, .path = text, .raw = text };
-        // `<helper>::<address>` is the remote-helper form: a colon before any
-        // slash, and a second one straight after it.
-        if (std.mem.indexOf(u8, text, "::")) |_| {
-            const colon = std.mem.indexOfScalar(u8, text, ':').?;
-            if (text.len > colon + 1 and text[colon + 1] == ':') return error.UnsupportedTransport;
-        }
-        // The scp-like form: `[user@]host:path`, with the host optionally
-        // in brackets so that it may hold a colon of its own.
+        // git's transport_get recognizes a helper only after scheme characters.
+        // A colon inside a bracketed host is part of that host.
+        var helper_end: usize = 0;
+        while (helper_end < text.len and (std.ascii.isAlphabetic(text[helper_end]) or
+            (helper_end != 0 and (std.ascii.isDigit(text[helper_end]) or
+                text[helper_end] == '+' or text[helper_end] == '-' or text[helper_end] == '.')))) : (helper_end += 1)
+        {}
+        if (std.mem.startsWith(u8, text[helper_end..], "::")) return error.UnsupportedTransport;
+
         var url: Url = .{ .scheme = .ssh, .path = "", .raw = text };
-        var rest = text;
-        var host_end: usize = undefined;
-        if (rest[0] == '[') {
-            const close = std.mem.indexOfScalar(u8, rest, ']') orelse return error.MalformedUrl;
-            if (close + 1 >= rest.len or rest[close + 1] != ':') return error.MalformedUrl;
-            var inside = rest[1..close];
-            if (std.mem.lastIndexOfScalar(u8, inside, '@')) |at| {
-                url.user = inside[0..at];
-                inside = inside[at + 1 ..];
-            }
-            // `[host:port]` is how the scp-like form carries a port.
-            if (std.mem.lastIndexOfScalar(u8, inside, ':')) |colon| {
-                if (std.mem.indexOfScalar(u8, inside[0..colon], ':') == null) {
-                    url.host = inside[0..colon];
-                    url.port = std.fmt.parseInt(u16, inside[colon + 1 ..], 10) catch return error.MalformedUrl;
-                } else url.host = inside;
-            } else url.host = inside;
-            host_end = close + 1;
-        } else {
-            host_end = std.mem.indexOfScalar(u8, rest, ':').?;
-            var host = rest[0..host_end];
-            if (std.mem.lastIndexOfScalar(u8, host, '@')) |at| {
-                url.user = host[0..at];
-                host = host[at + 1 ..];
-            }
-            url.host = host;
-        }
+        const bracket = if (std.mem.indexOf(u8, text, "@[")) |at| at + 1 else @as(usize, 0);
+        const host_end = if (text[bracket] == '[') blk: {
+            const close = std.mem.indexOfScalarPos(u8, text, bracket + 1, ']') orelse return error.MalformedUrl;
+            if (close + 1 >= text.len or text[close + 1] != ':') return error.MalformedUrl;
+            break :blk close + 1;
+        } else std.mem.indexOfScalar(u8, text, ':').?;
+        try splitAuthority(&url, text[0..host_end], false);
         if (url.host.len == 0) return error.MalformedUrl;
-        rest = rest[host_end + 1 ..];
-        if (rest.len == 0) return error.MalformedUrl;
-        url.path = rest;
+        url.path = text[host_end + 1 ..];
+        if (url.path.len == 0) return error.MalformedUrl;
+        if (std.mem.startsWith(u8, url.path, "/~")) url.path = url.path[1..];
         return url;
     }
 
@@ -159,36 +132,132 @@ pub const Url = struct {
     }
 };
 
-fn splitHostPort(url: *Url, authority: []const u8) ParseError!void {
+/// An allocator-owned URL identity. `url` borrows only this owner's bytes;
+/// raw text stays intact for transport and display. SSH, file and Git URL
+/// forms decode before splitting, as Git does; scp shorthand, local paths
+/// and HTTP URLs keep literal bytes. No equivalence policy is imposed.
+pub const Identity = struct {
+    gpa: Allocator,
+    url: Url,
+    raw: []u8,
+    decoded: ?[]u8,
+
+    pub fn parse(gpa: Allocator, text: []const u8) (Allocator.Error || ParseError)!Identity {
+        const raw = try gpa.dupe(u8, text);
+        errdefer gpa.free(raw);
+        var decoded: ?[]u8 = null;
+        errdefer if (decoded) |bytes| gpa.free(bytes);
+        // Read the scheme before decoding: escapes cannot invent a transport.
+        const sep = schemeEnd(raw);
+        const decode = if (sep) |end| blk: {
+            const scheme = raw[0..end];
+            break :blk std.ascii.eqlIgnoreCase(scheme, "ssh") or
+                std.ascii.eqlIgnoreCase(scheme, "git+ssh") or
+                std.ascii.eqlIgnoreCase(scheme, "ssh+git") or
+                std.ascii.eqlIgnoreCase(scheme, "file") or
+                std.ascii.eqlIgnoreCase(scheme, "git");
+        } else false;
+        var parsed: Url = undefined;
+        if (decode) {
+            decoded = try gpa.dupe(u8, raw);
+            const buffer = decoded.?;
+            var read: usize = sep.?;
+            var write: usize = read;
+            while (read < buffer.len) {
+                if (buffer[read] == '%' and buffer.len - read >= 3) {
+                    const hi = std.fmt.charToDigit(buffer[read + 1], 16) catch null;
+                    const lo = std.fmt.charToDigit(buffer[read + 2], 16) catch null;
+                    if (hi != null and lo != null) {
+                        const byte = hi.? * 16 + lo.?;
+                        // Git leaves zero and malformed escapes literal.
+                        if (byte != 0) {
+                            buffer[write] = byte;
+                            write += 1;
+                            read += 3;
+                            continue;
+                        }
+                    }
+                }
+                buffer[write] = buffer[read];
+                write += 1;
+                read += 1;
+            }
+            parsed = try Url.parse(buffer[0..write]);
+            parsed.raw = raw;
+        } else parsed = try Url.parse(raw);
+        return .{ .gpa = gpa, .url = parsed, .raw = raw, .decoded = decoded };
+    }
+
+    pub fn deinit(identity: *Identity) void {
+        if (identity.decoded) |bytes| identity.gpa.free(bytes);
+        identity.gpa.free(identity.raw);
+        identity.* = undefined;
+    }
+};
+
+/// A URL scheme must precede :// at the start, not inside a local path.
+fn schemeEnd(text: []const u8) ?usize {
+    if (text.len == 0 or !std.ascii.isAlphabetic(text[0])) return null;
+    var end: usize = 1;
+    while (end < text.len and (std.ascii.isAlphanumeric(text[end]) or
+        text[end] == '+' or text[end] == '-' or text[end] == '.')) : (end += 1)
+    {}
+    return if (std.mem.startsWith(u8, text[end..], "://")) end else null;
+}
+
+fn splitAuthority(url: *Url, text: []const u8, password: bool) ParseError!void {
+    var authority = text;
+    // git accepts [user@host] as well as user@[host]. Unwrap the former
+    // before finding the user, so its closing bracket cannot enter the host.
     if (authority.len != 0 and authority[0] == '[') {
         const close = std.mem.indexOfScalar(u8, authority, ']') orelse return error.MalformedUrl;
-        url.host = authority[1..close];
-        const after = authority[close + 1 ..];
-        if (after.len == 0) return;
-        if (after[0] != ':') return error.MalformedUrl;
-        if (after.len == 1) return;
-        url.port = std.fmt.parseInt(u16, after[1..], 10) catch return error.MalformedUrl;
+        try splitAuthority(url, authority[1..close], password);
+        try splitPort(url, authority[close + 1 ..]);
         return;
     }
-    if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
-        url.host = authority[0..colon];
-        // `host:` with nothing after the colon is the default port.
-        if (colon + 1 < authority.len) {
-            url.port = std.fmt.parseInt(u16, authority[colon + 1 ..], 10) catch return error.MalformedUrl;
-        }
+    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+        const userinfo = authority[0..at];
+        authority = authority[at + 1 ..];
+        if (password) {
+            if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+                url.user = userinfo[0..colon];
+                url.password = userinfo[colon + 1 ..];
+            } else url.user = userinfo;
+        } else url.user = userinfo;
+    }
+    if (authority.len != 0 and authority[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return error.MalformedUrl;
+        try splitAuthority(url, authority[1..close], false);
+        try splitPort(url, authority[close + 1 ..]);
         return;
+    }
+    // An unbracketed IPv6 address has several colons and no port. git's
+    // get_host_and_port and get_port leave it whole too.
+    if (std.mem.indexOfScalar(u8, authority, ':')) |colon| {
+        if (std.mem.indexOfScalarPos(u8, authority, colon + 1, ':') == null) {
+            url.host = authority[0..colon];
+            return splitPort(url, authority[colon..]);
+        }
     }
     url.host = authority;
 }
 
+fn splitPort(url: *Url, suffix: []const u8) ParseError!void {
+    if (suffix.len == 0) return;
+    if (suffix[0] != ':') return error.MalformedUrl;
+    if (suffix.len == 1) return;
+    url.port = std.fmt.parseInt(u16, suffix[1..], 10) catch return error.MalformedUrl;
+}
+
 /// git's `url_is_local_not_ssh`: no colon, or a slash before the first
-/// colon, or a DOS drive letter.
+/// colon, or a DOS drive letter on Windows.
 pub fn isLocal(text: []const u8) bool {
     const colon = std.mem.indexOfScalar(u8, text, ':') orelse return true;
     if (std.mem.indexOfScalar(u8, text, '/')) |slash| {
         if (slash < colon) return true;
     }
-    return text.len >= 2 and std.ascii.isAlphabetic(text[0]) and text[1] == ':' and colon == 1;
+    return builtin.os.tag == .windows and text.len >= 2 and
+        std.ascii.isAlphabetic(text[0]) and text[1] == ':' and colon == 1;
 }
 
 /// The URL with any `user[:password]@` taken out, which is how git writes a
@@ -199,7 +268,7 @@ pub fn isLocal(text: []const u8) bool {
 /// the user part of its authority; the scp-like form loses everything up to
 /// the `@` before its colon.
 pub fn anonymize(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
-    if (std.mem.indexOf(u8, text, "://")) |sep| {
+    if (schemeEnd(text)) |sep| {
         const start = sep + 3;
         const path_at = std.mem.indexOfScalarPos(u8, text, start, '/') orelse text.len;
         if (std.mem.lastIndexOfScalar(u8, text[start..path_at], '@')) |at| {
@@ -257,7 +326,7 @@ test "each shape of URL is read as git reads it" {
     }
     try testing.expectEqual(Scheme.local, (try Url.parse("../other/repo")).scheme);
     try testing.expectEqual(Scheme.local, (try Url.parse("/srv/a:b")).scheme);
-    try testing.expectEqual(Scheme.local, (try Url.parse("C:\\repos\\x")).scheme);
+    try testing.expectEqual(if (builtin.os.tag == .windows) Scheme.local else Scheme.ssh, (try Url.parse("C:\\repos\\x")).scheme);
     {
         const url = try Url.parse("file:///srv/repo.git");
         try testing.expectEqual(Scheme.file, url.scheme);
@@ -273,7 +342,6 @@ test "each shape of URL is read as git reads it" {
 test "a transport relic does not have is refused by name" {
     try testing.expectError(error.UnsupportedTransport, Url.parse("rsync://example.com/repo"));
     try testing.expectError(error.UnsupportedTransport, Url.parse("ext::ssh -i key host %S repo"));
-    try testing.expectError(error.UnsupportedTransport, Url.parse("file://elsewhere/repo"));
     try testing.expectError(error.MalformedUrl, Url.parse("ssh://example.com:port/repo"));
     try testing.expectError(error.MalformedUrl, Url.parse("https:///repo"));
     try testing.expectError(error.MalformedUrl, Url.parse("host:"));
@@ -315,4 +383,142 @@ fn fuzzParse(_: void, smith: *testing.Smith) anyerror!void {
     const shown = try anonymize(testing.allocator, input);
     defer testing.allocator.free(shown);
     try testing.expect(shown.len <= input.len);
+}
+
+test "bracketed remote identities follow git t5601 clone URLs" {
+    // git's t/t5601-clone.sh: bracketed scp, SSH IPv6, home paths,
+    // optional ports and users both inside and outside the brackets.
+    const Case = struct { text: []const u8, user: ?[]const u8 = null, host: []const u8, port: ?u16 = null, path: []const u8 };
+    const cases = [_]Case{
+        .{ .text = "[::1]:owner/repo.git", .host = "::1", .path = "owner/repo.git" },
+        .{ .text = "user@[::1]:rep/home/project", .user = "user", .host = "::1", .path = "rep/home/project" },
+        .{ .text = "[user@::1]:123", .user = "user", .host = "::1", .path = "123" },
+        .{ .text = "[::1]:/~repo", .host = "::1", .path = "~repo" },
+        .{ .text = "host:/~repo", .host = "host", .path = "~repo" },
+        .{ .text = "[myhost:123]:src", .host = "myhost", .port = 123, .path = "src" },
+        .{ .text = "user@[myhost:123]:src", .user = "user", .host = "myhost", .port = 123, .path = "src" },
+        .{ .text = "ssh://::1/home/user/repo", .host = "::1", .path = "/home/user/repo" },
+        .{ .text = "ssh://user@::1/~repo", .user = "user", .host = "::1", .path = "~repo" },
+        .{ .text = "ssh://[user@::1]:22/~repo", .user = "user", .host = "::1", .port = 22, .path = "~repo" },
+        .{ .text = "ssh://user@[::1]:/home/user/repo", .user = "user", .host = "::1", .path = "/home/user/repo" },
+        .{ .text = "ssh://user@domain@host:2222/owner/repo@work.git", .user = "user@domain", .host = "host", .port = 2222, .path = "/owner/repo@work.git" },
+        .{ .text = "ssh://git@[::1]:2222/owner/repo.git", .user = "git", .host = "::1", .port = 2222, .path = "/owner/repo.git" },
+    };
+    for (cases) |case| {
+        const parsed = try Url.parse(case.text);
+        try testing.expectEqual(Scheme.ssh, parsed.scheme);
+        if (case.user) |user| try testing.expectEqualStrings(user, parsed.user.?) else try testing.expect(parsed.user == null);
+        try testing.expectEqualStrings(case.host, parsed.host);
+        try testing.expectEqual(case.port, parsed.port);
+        try testing.expectEqualStrings(case.path, parsed.path);
+    }
+    for ([_][]const u8{ "foo/bar:baz", "[foo]bar/baz:qux", "[foo/bar]:baz", "./ext::repo" }) |path| {
+        const parsed = try Url.parse(path);
+        try testing.expectEqual(Scheme.local, parsed.scheme);
+        try testing.expectEqualStrings(path, parsed.path);
+    }
+    try testing.expectError(error.UnsupportedTransport, Url.parse("ext::ssh host repo"));
+    // Double colons in the address do not make its host a helper.
+    try testing.expectEqualStrings("a::b", (try Url.parse("host:a::b")).path);
+}
+
+test "file and local URL identities follow git path and scheme boundaries" {
+    const remote_file = try Url.parse("file://server/share/repo.git");
+    try testing.expectEqual(Scheme.file, remote_file.scheme);
+    try testing.expectEqualStrings(if (builtin.os.tag == .windows) "server" else "", remote_file.host);
+    try testing.expectEqualStrings(if (builtin.os.tag == .windows) "//server/share/repo.git" else "/share/repo.git", remote_file.path);
+    const local_file = try Url.parse("file://localhost/srv/repo.git");
+    try testing.expectEqualStrings(if (builtin.os.tag == .windows) "//localhost/srv/repo.git" else "/srv/repo.git", local_file.path);
+    const embedded = try Url.parse("./folder/ssh://host/repo");
+    try testing.expectEqual(Scheme.local, embedded.scheme);
+    try testing.expectEqualStrings("./folder/ssh://host/repo", embedded.path);
+    const helper_path = try Url.parse("./ext::repo");
+    try testing.expectEqual(Scheme.local, helper_path.scheme);
+}
+
+test "local URL classification follows the platform and survives display" {
+    // t5601: c:temp is SSH on Unix and a drive-relative path on Windows.
+    const drive = try Url.parse("c:temp");
+    try testing.expectEqual(if (builtin.os.tag == .windows) Scheme.local else Scheme.ssh, drive.scheme);
+    if (builtin.os.tag != .windows) {
+        try testing.expectEqualStrings("c", drive.host);
+        try testing.expectEqualStrings("temp", drive.path);
+    }
+    const path = "./folder/ssh://user@host/repo";
+    const parsed = try Url.parse(path);
+    try testing.expectEqual(Scheme.local, parsed.scheme);
+    const shown = try anonymize(testing.allocator, path);
+    defer testing.allocator.free(shown);
+    try testing.expectEqualStrings(path, shown);
+}
+
+test "file URL authorities follow git on this platform" {
+    if (builtin.os.tag == .windows) {
+        const parsed = try Url.parse("file://server/share/repo.git");
+        try testing.expectEqualStrings("//server/share/repo.git", parsed.path);
+        return;
+    }
+    const testgit = @import("testgit.zig");
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var fixture = try testgit.Repo.init(gpa, io, &.{});
+    defer fixture.deinit();
+    const path = try fixture.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(path);
+    // connect.c uses only the slash onwards on Unix; this authority is
+    // neither resolved nor opened. Windows retains it as a UNC path.
+    const text = try std.fmt.allocPrint(gpa, "file://elsewhere{s}", .{path});
+    defer gpa.free(text);
+    const parsed = try Url.parse(text);
+    try testing.expectEqualStrings(path, parsed.path);
+    try fixture.exec(io, &.{ "ls-remote", text });
+}
+
+test "decoded URL identities own their text and follow Git percent rules" {
+    const Check = struct {
+        fn run(gpa: Allocator) !void {
+            const cases = [_][2][]const u8{
+                .{ "ssh://ada%40example@[::1]:2222/%7Eada/a%20b%2Fc%25d+e", "~ada/a b/c%d+e" },
+                .{ "file:///a%20b/%2520/%00/%GG/%2", "/a b/%20/%00/%GG/%2" },
+                .{ "host:a%20b", "a%20b" },
+                .{ "./a%20b", "./a%20b" },
+                .{ "https://host/a%20b?q=%2F", "/a%20b?q=%2F" },
+            };
+            for (cases) |case| {
+                const input = try testing.allocator.dupe(u8, case[0]);
+                defer testing.allocator.free(input);
+                var identity = try Identity.parse(gpa, input);
+                defer identity.deinit();
+                @memset(input, 'x');
+                try testing.expectEqualStrings(case[0], identity.url.raw);
+                try testing.expectEqualStrings(case[1], identity.url.path);
+                if (identity.url.scheme == .ssh and identity.url.port != null) {
+                    try testing.expectEqualStrings("ada@example", identity.url.user.?);
+                    try testing.expectEqualStrings("::1", identity.url.host);
+                    try testing.expectEqual(@as(?u16, 2222), identity.url.port);
+                }
+            }
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+}
+
+test "encoded file URL paths reach the same repository as Git" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var fixture = try @import("testgit.zig").Repo.init(gpa, io, &.{});
+    defer fixture.deinit();
+    try fixture.exec(io, &.{ "init", "-q", "--bare", "a b%20" });
+    const path = try fixture.dir.realPathFileAlloc(io, "a b%20", gpa);
+    defer gpa.free(path);
+    const escaped_percent = try std.mem.replaceOwned(u8, gpa, path, "%", "%25");
+    defer gpa.free(escaped_percent);
+    const escaped = try std.mem.replaceOwned(u8, gpa, escaped_percent, " ", "%20");
+    defer gpa.free(escaped);
+    const text = try std.fmt.allocPrint(gpa, "file://{s}", .{escaped});
+    defer gpa.free(text);
+    try fixture.exec(io, &.{ "ls-remote", text });
+    var remote = try @import("local.zig").Remote.open(gpa, io, text);
+    defer remote.deinit(io);
+    try testing.expect(remote.repo.isBare());
 }

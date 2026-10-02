@@ -6,6 +6,7 @@
 //! whoever wrote the tree.
 
 // The modules relic's API puts under this one, as `relic.worktree.<name>`.
+pub const snapshot = @import("snapshot.zig");
 pub const worktrees = @import("worktrees.zig");
 pub const sparse = @import("sparse.zig");
 pub const sparsecheckout = @import("sparsecheckout.zig");
@@ -15,7 +16,6 @@ pub const wildmatch = @import("wildmatch.zig");
 pub const convert = @import("convert.zig");
 pub const filter = @import("filter.zig");
 pub const dirscan = @import("dirscan.zig");
-const platstat = @import("platstat.zig");
 pub const safepath = @import("safepath.zig");
 
 const std = @import("std");
@@ -148,6 +148,9 @@ pub const AddOutcome = struct {
     /// Files staged after `core.safecrlf=warn` found a line-ending conversion
     /// that would not round-trip.
     safecrlf_warnings: u32 = 0,
+    /// Files skipped under `AddOptions.ignore_errors`. `error_report` names
+    /// each path and the error that prevented staging it.
+    skipped_errors: u32 = 0,
 };
 
 /// Where the blobs a staging pass writes are put.
@@ -178,9 +181,13 @@ pub const AddOptions = struct {
     /// Whether to stage deletions for index entries whose file is gone.
     /// `git add -A` does; `git add .` without `-A` does not.
     stage_deletions: bool = true,
-    /// Whether to stop at the first unreadable file or to skip it, which is
-    /// what `--ignore-errors` asks for.
+    /// Skip files that cannot be read or hashed and keep staging the rest,
+    /// as `git add --ignore-errors` does. `error_report` records each path
+    /// and error; `AddOutcome.skipped_errors` counts them. Without this,
+    /// the first such error stops the walk.
     ignore_errors: bool = false,
+    /// Where files skipped under `ignore_errors` are reported.
+    error_report: ?*AddErrorReport = null,
     /// A path prefix to limit the walk to, `/`-separated. Empty walks the
     /// whole tree.
     prefix: []const u8 = "",
@@ -191,6 +198,38 @@ pub const AddOptions = struct {
     /// Where the path is written when a repository inside the working tree
     /// stops the walk with `error.NoCommitCheckedOut`.
     refusal: ?*Refusal = null,
+};
+
+/// Files a staging pass skipped under `AddOptions.ignore_errors`.
+/// The caller owns this report and hands it in through `error_report`.
+pub const AddErrorReport = struct {
+    gpa: Allocator,
+    /// Paths and errors in the order the walk met them. Paths are owned by
+    /// this report and remain valid after `addAll` returns.
+    failures: std.ArrayList(Failure) = .empty,
+
+    pub const Failure = struct {
+        path: []u8,
+        err: Error,
+    };
+
+    /// An empty report allocated from `gpa`.
+    pub fn init(gpa: Allocator) AddErrorReport {
+        return .{ .gpa = gpa };
+    }
+
+    /// Release the paths and the list.
+    pub fn deinit(r: *AddErrorReport) void {
+        for (r.failures.items) |failure| r.gpa.free(failure.path);
+        r.failures.deinit(r.gpa);
+        r.* = undefined;
+    }
+
+    fn record(r: *AddErrorReport, path: []const u8, err: Error) Allocator.Error!void {
+        const owned = try r.gpa.dupe(u8, path);
+        errdefer r.gpa.free(owned);
+        try r.failures.append(r.gpa, .{ .path = owned, .err = err });
+    }
 };
 
 /// `git add -A`: walk the working tree, stage what changed, stage deletions,
@@ -241,7 +280,7 @@ pub fn addAll(
 
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -305,6 +344,16 @@ pub fn addAll(
     return outcome;
 }
 
+// Every filesystem walk uses the same distinction: a vanished directory
+// can be absent, but a directory that could not be read cannot be empty.
+fn openWalkDirectory(io: Io, wt: Io.Dir, path: []const u8) Error!?Io.Dir {
+    if (path.len == 0) return wt;
+    return wt.openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => null,
+        else => return err,
+    };
+}
+
 const Walker = struct {
     gpa: Allocator,
     /// The conversions, and the filter processes, for the whole walk.
@@ -328,11 +377,8 @@ const Walker = struct {
     filling: ?Odb.OpenPack = null,
 
     fn walk(w: *Walker, dir_path: []const u8, depth: u32) Error!void {
-        if (depth > 64) return;
-        const dir = if (dir_path.len == 0)
-            w.wt
-        else
-            w.wt.openDir(w.io, dir_path, .{ .iterate = true }) catch return;
+        if (depth > 64) return error.TreeTooDeep;
+        const dir = (try openWalkDirectory(w.io, w.wt, dir_path)) orelse return;
         defer if (dir_path.len != 0) dir.close(w.io);
 
         if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt, dir_path, depth);
@@ -353,10 +399,9 @@ const Walker = struct {
         defer scan.deinit();
         while (try scan.next()) |item| {
             if (std.mem.eql(u8, item.name, ".git")) continue;
-            try entries.append(w.gpa, .{
-                .name = try w.gpa.dupe(u8, item.name),
-                .entry = item.entry,
-            });
+            const name = try w.gpa.dupe(u8, item.name);
+            errdefer w.gpa.free(name);
+            try entries.append(w.gpa, .{ .name = name, .entry = item.entry });
         }
         std.mem.sort(Found, entries.items, {}, lessThanFound);
 
@@ -385,7 +430,7 @@ const Walker = struct {
         if (w.index.find(path)) |entry| {
             if (entry.mode == .gitlink) {
                 try w.markSeen(path);
-                const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.kind)) orelse {
+                const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.objectFormat())) orelse {
                     w.outcome.unchanged += 1;
                     return;
                 };
@@ -423,7 +468,7 @@ const Walker = struct {
             w.outcome.unsafe_paths += 1;
             return;
         }
-        const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.kind)) orelse {
+        const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path, w.db.objectFormat())) orelse {
             if (w.options.refusal) |r| r.set(null, path);
             return error.NoCommitCheckedOut;
         };
@@ -491,7 +536,19 @@ const Walker = struct {
             if (racy) w.outcome.racy_checked += 1;
         }
 
-        const blob = try w.hashAndStore(path, found);
+        const bytes = w.readForAdd(path, found) catch |err| {
+            try w.skipFile(path, err);
+            return;
+        };
+        const blob = w.store(bytes) catch |err| switch (err) {
+            error.CollisionAttack => {
+                try w.skipFile(path, err);
+                return;
+            },
+            // A failed object write, especially halfway through a pack,
+            // cannot be recovered by passing over a working-tree file.
+            else => return err,
+        };
         w.outcome.hashed += 1;
 
         if (tracked) |entry| {
@@ -524,14 +581,22 @@ const Walker = struct {
         }
     }
 
-    fn hashAndStore(w: *Walker, path: []const u8, found: fs.Entry) Error!Oid {
+    fn skipFile(w: *Walker, path: []const u8, err: Error) Error!void {
+        // Cancellation and allocation failure stop the operation even when
+        // individual files may be passed over.
+        if (!w.options.ignore_errors or err == error.Canceled or err == error.OutOfMemory) return err;
+        if (w.options.error_report) |report| try report.record(path, err);
+        w.outcome.skipped_errors += 1;
+    }
+
+    fn readForAdd(w: *Walker, path: []const u8, found: fs.Entry) Error![]const u8 {
         _ = w.scratch.reset(.retain_capacity);
         const a = w.scratch.allocator();
 
         if (found.kind == .sym_link) {
             var buf: [4096]u8 = undefined;
             const len = try w.wt.readLink(w.io, path, &buf);
-            return w.store(buf[0..len]);
+            return a.dupe(u8, buf[0..len]);
         }
 
         if (w.options.rules.attrs) |attrs| {
@@ -542,10 +607,9 @@ const Walker = struct {
                 .true => return error.IrreversibleConversion,
                 .warn => w.outcome.safecrlf_warnings += 1,
             };
-            return w.store(converted.bytes);
+            return converted.bytes;
         }
-        const bytes = try fs.readFileSized(a, w.io, w.wt, path, found.stat.size, 1 << 31);
-        return w.store(bytes);
+        return fs.readFileSized(a, w.io, w.wt, path, found.stat.size, 1 << 31);
     }
 
     /// Put a blob where this pass puts them.
@@ -839,7 +903,7 @@ pub fn status(
     // compared through what it would be stored as, clean filter and all.
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -923,9 +987,9 @@ fn flattenStaged(
 ) Error!void {
     if (depth > 64) return error.UnsupportedEntry;
     const found = try db.read(io, tree_oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.UnsupportedEntry;
-    const tree: object.Tree = .parse(db.kind, found.bytes);
+    const tree: object.Tree = .parse(db.objectFormat(), found.bytes);
     var it = tree.iterate();
     while (try it.next()) |entry| {
         const path = if (prefix.len == 0)
@@ -974,9 +1038,9 @@ fn treeAt(io: Io, db: *Odb, root: Oid, dir: []const u8) Error!?Oid {
     var parts = std.mem.splitScalar(u8, dir, '/');
     while (parts.next()) |name| {
         const found = try db.read(io, current);
-        defer db.gpa.free(found.bytes);
+        defer db.allocator().free(found.bytes);
         if (found.type != .tree) return null;
-        const tree: object.Tree = .parse(db.kind, found.bytes);
+        const tree: object.Tree = .parse(db.objectFormat(), found.bytes);
         const entry = (try tree.find(name)) orelse return null;
         if (entry.mode != .tree) return null;
         current = entry.oid;
@@ -1017,11 +1081,8 @@ const StatusScan = struct {
     }
 
     fn walk(s: *StatusScan, dir_path: []const u8, depth: u32) Error!void {
-        if (depth > 64) return;
-        const dir = if (dir_path.len == 0)
-            s.wt
-        else
-            s.wt.openDir(s.io, dir_path, .{ .iterate = true }) catch return;
+        if (depth > 64) return error.TreeTooDeep;
+        const dir = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
         defer if (dir_path.len != 0) dir.close(s.io);
 
         if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
@@ -1143,7 +1204,7 @@ const StatusScan = struct {
     /// nothing but ignored paths, by its name. A repository inside counts
     /// as untracked content, whatever it holds, and is not looked into.
     fn classify(s: *StatusScan, path: []const u8, depth: u32, ignored: *std.ArrayList([]const u8)) Error!bool {
-        if (depth > 64) return false;
+        if (depth > 64) return error.TreeTooDeep;
         if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, path, depth);
         defer if (s.options.rules.ignore) |rules| rules.popTo(depth + 2);
 
@@ -1189,7 +1250,7 @@ const StatusScan = struct {
     /// Whether `path` holds a file, or a repository, anywhere below it: an
     /// ignored directory that holds nothing is not listed.
     fn holdsAnything(s: *StatusScan, path: []const u8, depth: u32) Error!bool {
-        if (depth > 64) return false;
+        if (depth > 64) return error.TreeTooDeep;
         var names = try s.readNames(path);
         defer names.deinit(s.gpa);
         for (names.items) |item| {
@@ -1210,8 +1271,8 @@ const StatusScan = struct {
     fn readNames(s: *StatusScan, path: []const u8) Error!std.ArrayList(Name) {
         var out: std.ArrayList(Name) = .empty;
         errdefer out.deinit(s.gpa);
-        var dir = s.wt.openDir(s.io, path, .{ .iterate = true }) catch return out;
-        defer dir.close(s.io);
+        const dir = (try openWalkDirectory(s.io, s.wt, path)) orelse return out;
+        defer if (path.len != 0) dir.close(s.io);
         var scan = try dirscan.Scan.init(s.gpa, s.io, dir);
         defer scan.deinit();
         while (try scan.next()) |item| {
@@ -1250,7 +1311,7 @@ const StatusScan = struct {
             const applied = try attrs.lookup(a, path, false);
             break :blk (try s.conv.toGitFile(a, path, found.stat.size, applied, .hash_only)).bytes;
         } else try s.wt.readFileAlloc(s.io, path, a, .limited(1 << 31));
-        const oid = hash.Hasher.object(s.db.kind, "blob", content);
+        const oid = hash.Hasher.object(s.db.objectFormat(), "blob", content);
         if (oid.eql(entry.oid)) return .unmodified;
         return .modified;
     }
@@ -1262,7 +1323,7 @@ const StatusScan = struct {
         const state: SubmoduleState = if (s.options.submodules) |probe|
             try probe.inspect(s.io, path, entry.oid)
         else blk: {
-            const checked_out = try gitlink.head(s.gpa, s.io, s.wt, path, s.db.kind);
+            const checked_out = try gitlink.head(s.gpa, s.io, s.wt, path, s.db.objectFormat());
             break :blk .{ .new_commits = checked_out != null and !checked_out.?.eql(entry.oid) };
         };
         if (state.isClean()) return;
@@ -1295,9 +1356,9 @@ fn flattenTree(
 ) Error!void {
     if (depth > 64) return error.UnsupportedEntry;
     const found = try db.read(io, tree_oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.UnsupportedEntry;
-    const tree: object.Tree = .parse(db.kind, found.bytes);
+    const tree: object.Tree = .parse(db.objectFormat(), found.bytes);
     var it = tree.iterate();
     while (try it.next()) |entry| {
         const path = if (prefix.len == 0)
@@ -1459,6 +1520,9 @@ pub const Refusal = struct {
 
 /// How `checkout` behaves.
 pub const CheckoutOptions = struct {
+    /// Durable mode syncs selected file bytes, then all affected directories,
+    /// before success. Off by default; this costs opens and storage barriers.
+    durability: fs.Durability = .none,
     rules: Rules = .{},
     /// `true` is `read-tree --reset -u`: rewrite files with changes of
     /// their own and replace untracked files where the tree puts one. The
@@ -1530,7 +1594,7 @@ pub fn checkout(
 
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -1740,6 +1804,8 @@ pub fn checkout(
         }
     }
 
+    if (options.durability == .durable) try syncCheckout(arena, io, wt, &wanted, &removed_dirs);
+
     // The tree the index now describes is exactly the tree asked for, so
     // the cache tree may be told so rather than rebuilt.
     const tree = try index.cacheTree();
@@ -1750,6 +1816,56 @@ pub fn checkout(
     index.dropResolveUndo();
 
     return outcome;
+}
+
+// Sync existing paths too: a skipped write is not evidence of durability.
+// Symlink bytes live in their directory; gitlinks belong to another store.
+fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringHashMapUnmanaged(TreeEntry), removed: *const std.StringHashMapUnmanaged(void)) Error!void {
+    const barrier = @import("durability.zig");
+    var dirs: std.StringHashMap(bool) = .init(arena);
+    try dirs.put(".", true);
+    var paths = wanted.iterator();
+    while (paths.next()) |entry| {
+        const path = entry.key_ptr.*;
+        if (entry.value_ptr.mode != .gitlink) {
+            const st = (try fs.statAt(io, wt, path)) orelse return error.FileNotFound;
+            if (st.kind == .file) try barrier.syncPath(io, wt, path);
+        }
+        try addSyncParents(&dirs, path, true);
+    }
+    // Parents of removed files may now be absent; syncing their first
+    // surviving ancestor makes the deletion durable.
+    var deleted = removed.keyIterator();
+    while (deleted.next()) |path| {
+        const slot = try dirs.getOrPut(path.*);
+        if (!slot.found_existing) slot.value_ptr.* = false;
+        try addSyncParents(&dirs, path.*, false);
+    }
+    var ordered: std.ArrayList([]const u8) = .empty;
+    var names = dirs.keyIterator();
+    while (names.next()) |name| try ordered.append(arena, name.*);
+    std.mem.sort([]const u8, ordered.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            if (std.mem.eql(u8, a, ".")) return false;
+            if (std.mem.eql(u8, b, ".")) return true;
+            return a.len > b.len;
+        }
+    }.less);
+    for (ordered.items) |path| {
+        barrier.syncDirectory(io, wt, path) catch |err| switch (err) {
+            error.FileNotFound => if (dirs.get(path).?) return err,
+            else => return err,
+        };
+    }
+}
+
+fn addSyncParents(dirs: *std.StringHashMap(bool), path: []const u8, required: bool) Allocator.Error!void {
+    var parent = std.fs.path.dirnamePosix(path);
+    while (parent) |p| {
+        const slot = try dirs.getOrPut(p);
+        slot.value_ptr.* = if (slot.found_existing) slot.value_ptr.* or required else required;
+        parent = std.fs.path.dirnamePosix(p);
+    }
 }
 
 /// Stat what was just written and put it in the index.
@@ -1789,7 +1905,7 @@ pub fn addTreeAttributes(
             continue;
         if (!item.value_ptr.mode.isBlob() or item.value_ptr.mode == .symlink) continue;
         const found = try db.read(io, item.value_ptr.oid);
-        defer db.gpa.free(found.bytes);
+        defer db.allocator().free(found.bytes);
         const depth: u32 = if (base.len == 0) 0 else @intCast(std.mem.count(u8, base, "/") + 1);
         try attrs.addText(try arena.dupe(u8, found.bytes), base, path, depth + 1);
     }
@@ -1849,7 +1965,7 @@ pub fn writePaths(
 
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -2019,7 +2135,7 @@ pub fn writeEntry(
             defer scratch.deinit();
             const a = scratch.allocator();
             const found = try db.read(io, oid);
-            defer db.gpa.free(found.bytes);
+            defer db.allocator().free(found.bytes);
             const applied: attributes.Attributes = if (rules.attrs) |attrs| try attrs.lookup(a, path, false) else .{ .items = &.{} };
             const smudged = try conv.toWorktree(a, path, found.bytes, applied, .{ .blob = oid });
             try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
@@ -2424,7 +2540,7 @@ pub fn applySparse(
     defer scratch.deinit();
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
         .drivers = options.rules.filters,
@@ -2464,7 +2580,7 @@ pub fn applySparse(
                             content = (try conv.toGit(a, entry.path, raw, applied, .hash_only)).bytes;
                         }
                     }
-                    if (!hash.Hasher.object(db.kind, "blob", content).eql(entry.oid)) {
+                    if (!hash.Hasher.object(db.objectFormat(), "blob", content).eql(entry.oid)) {
                         outcome.kept_dirty += 1;
                         continue;
                     }
@@ -2605,11 +2721,8 @@ const ListScan = struct {
     out: *std.ArrayList([]const u8),
 
     fn walk(s: *ListScan, dir_path: []const u8, depth: u32) Error!void {
-        if (depth > 64) return;
-        const dir = if (dir_path.len == 0)
-            s.wt
-        else
-            s.wt.openDir(s.io, dir_path, .{ .iterate = true }) catch return;
+        if (depth > 64) return error.TreeTooDeep;
+        const dir = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
         defer if (dir_path.len != 0) dir.close(s.io);
 
         if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);

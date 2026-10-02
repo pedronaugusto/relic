@@ -32,8 +32,6 @@ const ignore = @import("ignore.zig");
 const revwalk = @import("revwalk.zig");
 const local = @import("local.zig");
 const connection = @import("connection.zig");
-const config_mod = @import("config.zig");
-
 const Oid = hash.Oid;
 const Connection = connection.Connection;
 
@@ -49,7 +47,7 @@ pub const Error = error{
     FilterRefused,
     /// Writing to the client failed.
     WriteFailed,
-} || odb_mod.Error || objectwalk.Error || local.Error || Allocator.Error || Io.Cancelable;
+} || Io.Reader.Error || odb_mod.Error || objectwalk.Error || local.Error || Allocator.Error || Io.Cancelable;
 
 /// What the server allows, as git's `uploadpack.*` settings say; `null`
 /// takes the served repository's own setting.
@@ -79,7 +77,7 @@ pub const Server = struct {
     /// Serve `remote` in `version`; `stateless` for HTTP, where every
     /// request stands alone.
     pub fn init(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, stateless: bool, options: Options) Server {
-        const config = &remote.repo.config;
+        const config = remote.repo.configuration();
         const any = options.allow_any orelse (config.getBool("uploadpack.allowanysha1inwant", false) catch false);
         return .{
             .gpa = gpa,
@@ -99,7 +97,7 @@ pub const Server = struct {
     }
 
     fn kind(s: *Server) hash.Kind {
-        return s.remote.repo.kind;
+        return s.remote.repo.objectFormat();
     }
 
     /// The server's first message: its refs and capabilities in v0, its
@@ -203,6 +201,7 @@ pub const Server = struct {
         while (true) {
             const packet = pktline.read(in) catch |err| switch (err) {
                 error.EndOfStream => return false,
+                error.ReadFailed => return error.ReadFailed,
                 else => return error.ProtocolError,
             };
             switch (packet) {
@@ -217,7 +216,10 @@ pub const Server = struct {
         }
         var args: std.ArrayList([]const u8) = .empty;
         while (true) {
-            const packet = pktline.read(in) catch return error.ProtocolError;
+            const packet = pktline.read(in) catch |err| switch (err) {
+                error.ReadFailed => return error.ReadFailed,
+                else => return error.ProtocolError,
+            };
             switch (packet) {
                 .flush => break,
                 .data => |raw| try args.append(arena, try arena.dupe(u8, std.mem.trimEnd(u8, raw, "\n"))),
@@ -356,6 +358,7 @@ pub const Server = struct {
             const packet = pktline.read(in) catch |err| switch (err) {
                 // Asked nothing: `ls-remote`, or a client that has all of it.
                 error.EndOfStream => if (!any) return else return error.ProtocolError,
+                error.ReadFailed => return error.ReadFailed,
                 else => return error.ProtocolError,
             };
             any = true;
@@ -539,9 +542,9 @@ const Negotiation = struct {
     fn commit(n: *Negotiation, oid: Oid) Error!?object.Commit {
         if (!try n.db().exists(n.io(), oid)) return null;
         const found = try n.db().read(n.io(), oid);
-        defer n.db().gpa.free(found.bytes);
+        defer n.db().allocator().free(found.bytes);
         if (found.type != .commit) return null;
-        return try object.Commit.parse(n.arena, n.db().kind, found.bytes);
+        return try object.Commit.parse(n.arena, n.db().objectFormat(), found.bytes);
     }
 
     fn peelToCommit(n: *Negotiation, start: Oid) Error!?Oid {
@@ -550,11 +553,11 @@ const Negotiation = struct {
         while (depth < 16) : (depth += 1) {
             if (!try n.db().exists(n.io(), oid)) return null;
             const found = try n.db().read(n.io(), oid);
-            defer n.db().gpa.free(found.bytes);
+            defer n.db().allocator().free(found.bytes);
             switch (found.type) {
                 .commit => return oid,
                 .tag => {
-                    var tag = try object.Tag.parse(n.arena, n.db().kind, found.bytes);
+                    var tag = try object.Tag.parse(n.arena, n.db().objectFormat(), found.bytes);
                     oid = tag.target;
                     tag.deinit();
                 },
@@ -617,6 +620,7 @@ const Negotiation = struct {
         while (true) {
             const packet = pktline.read(in) catch |err| switch (err) {
                 error.EndOfStream => return false,
+                error.ReadFailed => return error.ReadFailed,
                 else => return error.ProtocolError,
             };
             const raw = switch (packet) {
@@ -792,7 +796,7 @@ const Negotiation = struct {
     }
 
     fn resolveRef(n: *Negotiation, name: []const u8) Error!?Oid {
-        const store = &n.server.remote.repo.refs;
+        const store = n.server.remote.repo.refStore();
         for ([_][]const u8{ "", "refs/", "refs/tags/", "refs/heads/", "refs/remotes/" }) |prefix| {
             const full = try std.fmt.allocPrint(n.arena, "{s}{s}", .{ prefix, name });
             if (try store.resolve(n.arena, n.io(), full)) |r| return r.oid;
@@ -877,7 +881,7 @@ const Negotiation = struct {
             error.ObjectNotFound => return null,
             else => |e| return e,
         };
-        defer repo.odb.gpa.free(found.bytes);
+        defer repo.odb.allocator().free(found.bytes);
         if (found.type != .blob) return null;
         const rules = try n.arena.create(ignore.Rules);
         rules.* = try .init(n.arena, false);
@@ -931,7 +935,7 @@ const Negotiation = struct {
     fn addTags(n: *Negotiation, entries: *std.ArrayList(odb_mod.PackEntry)) Error!void {
         var in_pack: Oid.Set = .empty;
         for (entries.items) |e| try in_pack.put(n.arena, e.oid, {});
-        var listing = try n.server.remote.repo.refs.list(n.server.gpa, n.io(), "refs/tags/");
+        var listing = try n.server.remote.repo.refStore().list(n.server.gpa, n.io(), "refs/tags/");
         defer listing.deinit();
         for (listing.entries) |entry| {
             const tip = switch (entry.target) {
@@ -948,8 +952,8 @@ const Negotiation = struct {
                 if (header.type != .tag) break;
                 try chain.append(n.arena, current);
                 const found = try n.db().read(n.io(), current);
-                defer n.db().gpa.free(found.bytes);
-                var tag = try object.Tag.parse(n.arena, n.db().kind, found.bytes);
+                defer n.db().allocator().free(found.bytes);
+                var tag = try object.Tag.parse(n.arena, n.db().objectFormat(), found.bytes);
                 current = tag.target;
                 tag.deinit();
             }
@@ -1162,5 +1166,24 @@ fn fuzzServe(remote: *local.Remote, smith: *std.testing.Smith) anyerror!void {
         var out: Io.Writer.Allocating = .init(std.testing.allocator);
         defer out.deinit();
         server.serveRequest(&limited.interface, &out.writer) catch {};
+    }
+}
+
+test "upload-pack reads preserve transport resource failures" {
+    const Broken = struct {
+        fn stream(_: *Io.Reader, _: *Io.Writer, _: Io.Limit) Io.Reader.StreamError!usize {
+            return error.ReadFailed;
+        }
+    };
+    var server: Server = undefined;
+    server.gpa = std.testing.allocator;
+    var writer: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    // Fail in the command, and then in the arguments after its delimiter.
+    for ([_][]const u8{ "", "0014command=ls-refs\n0001" }) |buffered| {
+        var buf: [pktline.max_line]u8 = undefined;
+        @memcpy(buf[0..buffered.len], buffered);
+        var reader: Io.Reader = .{ .vtable = &.{ .stream = Broken.stream }, .buffer = &buf, .seek = 0, .end = buffered.len };
+        try std.testing.expectError(error.ReadFailed, server.commandV2(&reader, &writer.writer));
     }
 }

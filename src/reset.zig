@@ -17,11 +17,9 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
 const index_mod = @import("index.zig");
 const worktree = @import("worktree.zig");
 const convert = @import("convert.zig");
-const attributes = @import("attributes.zig");
 const fs = @import("fs.zig");
 const repo_mod = @import("repo.zig");
 const threeway = @import("threeway.zig");
@@ -59,7 +57,7 @@ pub fn toTree(
     const wt = repo.work_dir orelse return error.BareRepository;
     const db = &repo.odb;
 
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.required_filters = try repo.requiredFilters(arena);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
@@ -134,7 +132,7 @@ pub fn toTree(
     }
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = rules.required_filters,
         .drivers = rules.filters,

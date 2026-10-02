@@ -6,6 +6,131 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: HTTP Streaming.finish consumes its connection on success and failure; callers abort only before finish, and smart HTTP and LFS transfer cleanup with the stream.
+
+- Breaking: HTTP connect, send and stream take a caller-owned Diagnostic as their last argument (or null), replacing Client.tls_error, proxy_status and proxy_offered; LFS and smart HTTP keep diagnostics with each exchange.
+
+### Fixed
+
+- Each usage-example execution creates and removes its own scratch directory, so concurrent builds cannot share or delete another run’s repository.
+
+- Connect timeout and SSH cancellation tests use controlled deadlines and read barriers, with named watchdogs for hangs, instead of elapsed wall-time assertions.
+
+- TLS handshakes and trust refreshes sample current real time through the caller’s Io, so a long-lived client checks new connections against current certificate validity.
+
+- Process-filter parity tests count only each add's logs, excluding Git write-tree's separate racy-index rechecks.
+
+- Merge, rename/diff and revwalk parity corpora give every seed its own named test and deadline without reducing coverage.
+
+- HTTP counter fixtures release their held mutex when worker readiness times out, and CI reports each stalled test by name before the job limit.
+
+- Proxy authentication allocates replacement offered schemes before releasing the previous diagnostic, so allocation failure leaves a valid value to release.
+
+- The HTTP timeout-counter fixture observes only its client mutex and clears worker state, so hostname helper threads can wait on their own queues safely.
+
+- Digest session authentication releases its intermediate credential hash if allocating the session hash fails.
+
+- An HTTP proxy challenge that cannot be answered releases its response and connection before returning the refusal.
+
+- HTTP CONNECT retries belong to the connection attempt that accepted the proxy challenge, so concurrent requests cannot consume each other’s retry decisions.
+
+- LFS transfer workers read and publish fatal errors under one lock, preserving the first failure without racing another worker.
+
+- Concurrent HTTP timeout fallbacks increment their diagnostic count under the client lock, preserving every connection made without a watchdog.
+
+- HTTP watchdogs observe refreshed activity after sampling the clock, so a previous operation's start cannot expire the new one.
+
+- HTTP watchdogs reject starts later than their clock sample when computing elapsed time, so concurrent activity cannot underflow and close a fresh connection as timed out.
+
+- Program timeouts cover feeding stdin, collecting output, waiting and cleanup under one deadline, ending the child on expiry; unavailable concurrency is refused instead of feeding a pipe synchronously.
+
+- Shared LFS, promisor and clone configuration writes select their local source, preserving separate worktree configuration and shared repository settings.
+
+- Commit-graph chain discovery preserves filesystem refusals instead of interpreting an unreadable chain as absent.
+
+- Pack-index, multi-pack-index and commit-graph readers transfer their buffers to the parser once, so malformed on-disk data cannot free the same bytes twice.
+
+- Object discovery uses one absence policy for source directories and loose probes, preserving unreadable walks, prefix iteration, corrupt packs and optional-index or hint read resource failures instead of returning incomplete success.
+
+- Snapshot closure ownership validates tree and blob edge types, including objects already private, before certifying a retained tree.
+
+- The linked reftable fetch fixture requires Git 2.45, which can create its backend, while every assertion runs on the primary platform gates.
+
+- Required-filter discovery keeps full filter names and allocation failures instead of silently omitting a required driver.
+
+- Fetch checks the main worktree’s checked-out branch through the repository’s ref backend, including linked reftable worktrees.
+
+- History entry points clear earlier diagnostic output even when they refuse the operation before a repository write, through the diagnostic owner.
+
+- Replacing a setting added in memory transfers its name to the new line before freeing the old text, so subsequent reads and edits retain the setting.
+
+- Ignore and attribute loaders preserve malformed case-folding policy and allocation failures instead of loading a different policy.
+
+- Unit tests count work and compare results instead of asserting speed ratios or performance ceilings; all measurements and their timing example live in the bench branch harness.
+
+- The warm staging fixture gives its files an earlier modification time than the index instead of assuming two writes cannot share a clock tick.
+
+- Configuration source paths enter their owner only after copying succeeds, so allocation failure cannot leave a partial path for cleanup.
+
+- Snapshot reads and reopening use only private objects, borrowing the source database for capture alone, so damaged source packs and alternate metadata cannot affect recorded snapshots.
+
+- Staging, status and listing share one directory-read policy so unreadable contents cannot disappear from an otherwise successful result.
+- Filesystem staging, status and listing return `TreeTooDeep` at their walk limit instead of returning a partial result.
+- Snapshots keep the indexed contents of sparse tracked paths absent by policy and read edits to skipped paths present on disk.
+- URL parsing and display share scheme boundaries, and drive prefixes and file authorities follow Git's platform rules.
+- GnuPG fixtures use private homes under `.zig-cache/gpg` by default; `-Dgnupg-fixture-root=/short/path` gives long checkouts a short root for agent sockets, and each home is removed after its daemons stop.
+- An object source transfers its directory handles once on registration, rolls back failed alternate sources, and preserves allocation failure and cancellation.
+- A registered pack and its name have one owner, and allocation failure or cancellation while opening packs and their multi-pack index remains a resource failure.
+- Staging refuses a directory it cannot open instead of recording its tracked files as deleted.
+- A staging scan keeps ownership of each copied directory name until its entry has been appended, including allocation failure.
+- Remote URLs keep bracketed IPv6 hosts, users, ports and home paths distinct from remote helpers, and file authorities and local paths follow Git's scheme boundaries.
+
+### Changed
+
+- CI runs Debug and ReleaseSafe on every host, ReleaseFast and ThreadSanitizer once on Linux, and ReleaseSmall as a compile check.
+
+- Relic depends on conduit for process spawning, bounded input and output, waiting and termination. Git command preparation, environment scrubbing and caller execution policy remain in relic.
+
+- Breaking: `program.SpawnHook.start` receives an allocator and `conduit.Child.SpawnOptions`, returns `conduit.Child`, and reports its spawn errors; `terminate` receives that child too. `Running.child` uses conduit's stream accessors and ownership transfers. Conduit links libc on POSIX through its module.
+
+- Breaking: Odb allocator, format, source, policy and storage fields are opaque state read through `allocator`, `objectFormat` and `settings`; repository configuration is borrowed through `configuration` and changed atomically through `editConfig`, with format/backend checks and ref policy publication shared with refresh; memory-only source changes return `WorktreeConfigChanged` and require a standalone write followed by refresh.
+
+- Breaking: `Odb.makeDurable` reports foreign hashes as `ObjectFormatMismatch`, distinct from an unexpected object type.
+
+- Breaking: `reftablestack.isReftableRepository` and `GitDir.refStore` preserve backend-probe I/O refusals; only absent paths select the files backend.
+
+- Breaking: `sequencer.signs` and persisted sequencer/rebase signing policy preserve configuration value and allocation errors instead of choosing unsigned writes.
+
+- Breaking: `Repository.requiredFilters` returns configuration value errors instead of treating malformed required policy as optional.
+
+- Breaking: `Odb.openAt` borrows its directory handle on success and failure; callers that transferred a handle must close their original.
+
+- Breaking: `CheckoutOptions`, snapshot `OpenOptions` and snapshot `Store` carry durability policy; callers depending on their layouts or constructing stores directly must migrate.
+
+- Breaking: repository hash/ref fields and ref-store allocator/directory/backend/cache fields are opaque owner state accessed through `objectFormat`, `refStore`, `refFormat` and `reftableOptions`; ref-store construction is fallible and requires `deinit`, including `GitDir.refStore`, with backend selection at construction and write-policy changes through `configureReftable`.
+
+- Breaking: caller-owned `repo.Diagnostic` includes `signing_stderr`, preserved after a failed commit or tag signing program; layout-dependent callers must review the new field.
+
+- Breaking: commit, merge, sequencer and rebase options carry optional caller-owned write diagnostics; callers depending on their layouts must review the new field.
+
+- Breaking: `Repository.coreSettings` and `worktreeRules` return malformed-setting and resource failures; callers must handle their error unions.
+
+- Breaking: repository commit and tag writes preserve `InvalidSignature` and `MixedHashKinds` in `WriteError` instead of reporting `UnexpectedObjectType`.
+
+- Breaking: delta results over the size limit return `DeltaSizeLimitExceeded`; `DeltaSizeOverflow` means a size encoding wider than 64 bits.
+
+- Breaking: a refresh that changes the ref backend returns `RefStorageChanged`, requires reopening and keeps the old configuration and ref store.
+
+- Breaking: `refreshConfig`, `writeCommit`, `writeTag` and `writeTagWith` take caller-owned `repo.Diagnostic` output; the repository's `unsupported`, `unsupported_len` and `unsupportedSetting` are removed.
+
+### Removed
+
+- Breaking: Client.proxy_retry is removed; HTTP proxy retry decisions belong only to the connection attempt that accepted the challenge.
+
+- `repo.fs.macos_fsync_is_writeout_only`, a constant nothing read.
+
 ### Performance
 
 - A racily clean index entry is smudged on the way out only when its file
@@ -21,12 +146,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backwards to a delta's base reuses what the buffer already holds.
 - `worktree.status` does not read HEAD's side of a directory whose tree the
   index's cache tree already names; with nothing staged, HEAD is not read.
-- Measured on the 20 000-file bench repository against git 2.55, best of
-  seven, alternating: every blob through the pack 178 ms against 219,
-  status 46 ms against 52, `rev-list --objects` 62.6 ms against 61.3.
 
 ### Added
 
+- `transport.url.Identity` owns decoded SSH/file URL identities and their raw text; SSH and file transports use decoded paths while scp, local and HTTP spellings stay literal.
+
+- `worktree.snapshot.Store.adoptTree` migrates retained borrowed trees into owned storage without recapturing files, with the same closure and durability policy as capture.
+
+- Checkout and snapshot stores offer opt-in durable completion, and `Odb.makeDurable` owns and syncs selected object closures before an intent is recorded; file barriers precede directory barriers, with drive-cache flushes on macOS and failures preserved.
+
+- `worktree.snapshot.Store` captures repository working trees and plain folders with an owned tree-and-blob closure, restores and diffs snapshots, and copies only objects the private store does not already hold.
+- `Repository.OpenOptions.diagnostic` keeps the full refused setting in caller-owned output after a failed open.
+
+- A test that holds the TLS client to the standard library's: it fails when
+  the compiler ships a different `std/crypto/tls/Client.zig` than the diff
+  was taken against, and when the copy is not std's file with the diff
+  applied.
 - `zig build test -Dtest-filter=…` selects tests by name for focused fixture checks.
 - `Odb.listAlternates`, `addAlternate` and `removeAlternate` read and update
   git's alternates file, including comments and quoted paths, with changes
@@ -43,9 +178,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Breaking:** the root is one module per concern, each holding the modules
-  that belong to it, in place of 106 flat modules. The fifteen at the top are
+  that belong to it, in place of 106 flat modules. The sixteen at the top are
   `repo`, `hash`, `object`, `odb`, `refs`, `config`, `index`, `worktree`,
-  `diff`, `revwalk`, `merge`, `commit`, `transport`, `submodule` and `lfs`;
+  `wildmatch`, `diff`, `revwalk`, `merge`, `commit`, `transport`, `submodule` and `lfs`;
   the rest moved under them:
 
   | Under | Modules |
@@ -82,8 +217,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Regression measurements and their timing example run only from the quiet-machine bench harness, separate from the library unit suite.
+- Opening or refreshing refuses an invalid `extensions.worktreeConfig` boolean by name and preserves resource failures instead of ignoring the worktree file.
 
+- The smart HTTP doc comments describe relic's TLS client and its configured client certificates.
+
+- Commit and tag writes name refused `gpg.format` and `gpg.minTrustLevel` settings in caller-owned diagnostics.
+
+- A `commondir` that cannot be opened returns the filesystem error instead of reading shared state from the worktree directory.
+
+- Listing loose refs preserves allocation and filesystem failures instead of returning an incomplete list or an older packed value.
+
+- Repository discovery keeps each directory handle until it can transfer ownership, closing them when opening or reading the next part fails.
+
+- Reading `packed-refs` gives its bytes to the parser once, avoiding a double free when parsing or allocation stops.
+
+- A signing policy that is not a boolean is refused by name, and allocation failures while reading it remain resource failures; neither writes an unsigned object.
+
+- Reading a reftable `HEAD` during open or refresh preserves stack failures instead of treating them as a detached branch.
+
+- A config refresh updates the ref store's `reftable.*` settings together with the configuration, keeping both when the settings are invalid.
+
+- A tag signing refusal names `tag.forceSignAnnotated` when that is what requires signing.
+
+- Repository format decisions come from the shared configuration once, and an invalid version is refused rather than read as zero.
+
+- A configuration keeps one owner for copied command values when a later source allocation fails.
+
+- A config refresh clears an earlier refused setting and names a changed object format itself.
+
+- Allocation, cancellation, I/O and size-limit failures stay distinct from corrupt objects, malformed settings and bad revisions.
+
+- A cache-tree rebuild that stops on a staged conflict frees the directory
+  node it took out of the tree, which it leaked.
+- A corrupt cache tree that fails below a directory frees that directory's
+  name once, not twice; an index that carries `TREE` or `REUC` twice keeps
+  the later one and frees the first.
+- `LockFile.Options.sync_directory` now syncs the target's parent directory
+  after the commit rename where the platform supports it.
+- `AddOptions.ignore_errors` now skips files that cannot be read or hashed,
+  reports each path and error through `error_report`, and stages the rest.
 - A conversation with a program (ssh, a helper) that is cancelled stops the
   program on `close` or `diagnose` rather than waiting for it to end, so a
   fetch or push whose remote never answers returns when its caller cancels.
@@ -118,13 +290,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wording, and one knew `openssl s_server`'s peer signature line only as
   OpenSSL 3.2 and later print it.
 
-- The suite runs from a checkout at any path. gpg-agent puts its sockets in
-  `GNUPGHOME`, and a home inside a test's temporary directory, under the
-  checkout, gave a socket path past the 104 bytes Darwin allows, so every
-  OpenPGP test failed from a long path. The signing tests' gpg home is now a
-  short directory of their own under `/tmp` (`testgit.GnupgHome`), removed
-  once gpg's daemons for it are stopped.
-
 - `Signer.init` and `Lfs.load` leaked memory when a setting was long. Each
   took its arena's state before its last allocations, so the blocks those
   allocations made were not in the state `deinit` freed: a signing key,
@@ -139,13 +304,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   helper the concurrency tests start is given that environment too, and the
   gpg tests stop every daemon gpg started for their home rather than only the
   agent.
-
-### Added
-
-- A test that holds the TLS client to the standard library's: it fails when
-  the compiler ships a different `std/crypto/tls/Client.zig` than the diff
-  was taken against, and when the copy is not std's file with the diff
-  applied.
 
 ## [0.3.0] - 2026-09-25
 

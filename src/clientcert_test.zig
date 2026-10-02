@@ -41,7 +41,7 @@ const SServer = struct {
         }) catch return error.SkipZigTest;
         errdefer running.deinit(io);
         var line_buf: [256]u8 = undefined;
-        var reader = running.child.stdout.?.readerStreaming(io, &line_buf);
+        var reader = running.child.stdoutFile().?.readerStreaming(io, &line_buf);
         while (true) {
             const line = reader.interface.takeDelimiterExclusive('\n') catch return error.SkipZigTest;
             reader.interface.toss(1);
@@ -90,7 +90,7 @@ fn relicGet(gpa: Allocator, io: Io, pki: *Pki, port: u16, auth: ?*const tls.Clie
     defer gpa.free(server_cert);
     try client.trustFile(server_cert);
     client.client_auth = auth;
-    var res = try client.send(.GET, .{ .tls = true, .host = "127.0.0.1", .port = port }, "/", &.{}, null);
+    var res = try client.send(.GET, .{ .tls = true, .host = "127.0.0.1", .port = port }, "/", &.{}, null, null);
     defer res.deinit();
     return res.reader().allocRemaining(gpa, .limited(1 << 20)) catch return res.failure();
 }

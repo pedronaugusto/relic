@@ -99,8 +99,9 @@ test "a pack holds both ofs-delta and ref-delta entries and both resolve" {
     defer db.deinit(io);
 
     var saw_ref_delta = false;
-    for (db.sources.items) |*source| {
-        for (source.packs.items) |*p| {
+    for (@import("odbstate.zig").get(db._state).sources.items) |*source| {
+        for (source.packs.items) |*named| {
+            const p = &named.pack;
             var it = p.index.iterate();
             while (try it.next()) |found| {
                 const header = try p.entryHeaderAt(io, found.located.offset);
@@ -118,8 +119,9 @@ test "a pack holds both ofs-delta and ref-delta entries and both resolve" {
     var db2 = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db2.deinit(io);
     var saw_ofs_delta = false;
-    for (db2.sources.items) |*source| {
-        for (source.packs.items) |*p| {
+    for (@import("odbstate.zig").get(db2._state).sources.items) |*source| {
+        for (source.packs.items) |*named| {
+            const p = &named.pack;
             var it = p.index.iterate();
             while (try it.next()) |found| {
                 const header = try p.entryHeaderAt(io, found.located.offset);
@@ -1716,7 +1718,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
         defer repo.deinit(io);
         var rules = try repo.loadIgnore(io);
         defer rules.deinit();
-        var wt_rules = repo.worktreeRules();
+        var wt_rules = try repo.worktreeRules();
         wt_rules.ignore = &rules;
 
         var index = try repo.openIndex(io);

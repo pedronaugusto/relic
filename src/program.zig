@@ -20,11 +20,12 @@
 //! which is every Unix's and which git for Windows installs.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
-const Child = std.process.Child;
+const conduit = @import("conduit");
+pub const Child = conduit.Child;
+const Term = std.process.Child.Term;
 
 /// The permission to run programs, and the environment they start from.
 pub const Programs = struct {
@@ -42,10 +43,10 @@ pub const SpawnHook = struct {
     context: *anyopaque,
     /// `options` borrows the prepared command and environment for this call;
     /// spawn the child before returning rather than retaining them.
-    start: *const fn (*anyopaque, Io, std.process.SpawnOptions) std.process.SpawnError!Child,
+    start: *const fn (*anyopaque, Io, Allocator, Child.SpawnOptions) Child.SpawnError!Child,
     /// Called on cleanup after normal completion too, as well as on timeout
     /// and error paths. It must reap or kill the child; when absent, relic
-    /// calls `Child.kill`.
+    /// ends it through conduit.
     terminate: ?*const fn (*anyopaque, *Child, Io) void = null,
 };
 
@@ -62,7 +63,7 @@ pub const Invocation = struct {
     argv: []const []const u8,
     /// Read `argv[0]` as git reads a configured command.
     shell: bool = false,
-    cwd: Child.Cwd = .inherit,
+    cwd: std.process.Child.Cwd = .inherit,
     /// Set on top of `Programs.environ`, after `unset`.
     set: []const Var = &.{},
     /// Removed from it: git clears a repository's own variables before it
@@ -81,11 +82,11 @@ pub const Invocation = struct {
 pub const Error = error{
     /// The program's output passed `Limits`.
     OutputTooLong,
-} || Allocator.Error || std.process.SpawnError || Io.File.MultiReader.UnendingError ||
-    Io.Timeout.Error || Child.WaitError || Io.ConcurrentError;
+} || std.process.SpawnError || Child.SpawnError || Child.OutputError || conduit.InputWriter.StartError ||
+    conduit.InputWriter.QueueError || Io.Timeout.Error || Io.Dir.RealPathError || Io.File.Reader.Error;
 
 pub const Outcome = struct {
-    term: Child.Term,
+    term: Term,
     /// Empty unless `Invocation.stdout` is `.capture`.
     stdout: []u8,
     /// Empty unless `Invocation.stderr` is `.capture`.
@@ -109,6 +110,7 @@ pub const Outcome = struct {
 pub const Limits = struct {
     /// The most standard output kept, each stream alike.
     output: Io.Limit = .unlimited,
+    /// One deadline for input, output, the exit status and cleanup.
     timeout: Io.Timeout = .none,
 };
 
@@ -123,79 +125,119 @@ pub fn run(
     input: []const u8,
     limits: Limits,
 ) Error!Outcome {
-    var started = try start(programs, gpa, io, invocation);
-    defer started.deinit(io);
+    // Convert a duration once. The completion event is published only after
+    // feeding, collection, waiting and cleanup have all finished.
+    const deadline = limits.timeout.toDeadline(io);
+    if (deadline == .none) return exchange(programs, gpa, io, invocation, input, limits);
+    const Task = struct {
+        done: Io.Event = .unset,
+        result: Error!Outcome = undefined,
 
-    const stdin = started.child.stdin.?;
-    started.child.stdin = null;
-    var feeding = io.concurrent(feed, .{ io, stdin, input }) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => blk: {
-            // One task only: write it all first. Only a program that answers
-            // before it has read its input can then wait on a full pipe.
-            feed(io, stdin, input);
-            break :blk null;
-        },
-    };
-    defer if (feeding) |*f| f.cancel(io);
-
-    // Whichever of the two streams are pipes, in a fixed order: standard
-    // output first when it is one.
-    var pipes: [2]Io.File = undefined;
-    var count: usize = 0;
-    const stdout_at: ?usize = if (started.child.stdout) |f| blk: {
-        pipes[count] = f;
-        count += 1;
-        break :blk count - 1;
-    } else null;
-    const stderr_at: ?usize = if (started.child.stderr) |f| blk: {
-        pipes[count] = f;
-        count += 1;
-        break :blk count - 1;
-    } else null;
-
-    var buffers: Io.File.MultiReader.Buffer(2) = undefined;
-    var multi: Io.File.MultiReader = undefined;
-    // The layout is computed from the count, so a buffer for two holds one.
-    // A reader over no streams at all cannot be made, and there is nothing
-    // for it to do.
-    const streams = buffers.toStreams();
-    streams.len = @intCast(count);
-    if (count != 0) multi.init(gpa, io, streams, pipes[0..count]);
-    defer if (count != 0) multi.deinit();
-    // On a limit or read error the child can still be writing into a full
-    // pipe. Stop it before MultiReader waits for its reading tasks.
-    errdefer started.child.kill(io);
-
-    if (count != 0) {
-        while (multi.fill(64, limits.timeout)) |_| {
-            if (limits.output.toInt()) |most| {
-                for (0..count) |i| {
-                    if (multi.reader(i).buffered().len > most) return error.OutputTooLong;
-                }
-            }
-        } else |err| switch (err) {
-            error.EndOfStream => {},
-            else => |e| return e,
+        fn work(task: *@This(), p: Programs, allocator: Allocator, executor: Io, command: Invocation, bytes: []const u8, bounds: Limits) void {
+            task.result = exchange(p, allocator, executor, command, bytes, bounds);
+            task.done.set(executor);
         }
-        try multi.checkAnyError();
-    }
-    if (feeding) |*f| {
-        f.await(io);
-        feeding = null;
-    }
-
-    const term = try started.wait(io);
-    const stdout = if (stdout_at) |i| try multi.toOwnedSlice(i) else try gpa.alloc(u8, 0);
-    errdefer gpa.free(stdout);
-    const stderr = if (stderr_at) |i| try multi.toOwnedSlice(i) else try gpa.alloc(u8, 0);
-    return .{ .term = term, .stdout = stdout, .stderr = stderr };
+    };
+    var task: Task = .{};
+    var work = try io.concurrent(Task.work, .{ &task, programs, gpa, io, invocation, input, limits });
+    task.done.waitTimeout(io, deadline) catch |err| {
+        work.cancel(io);
+        // Completion can race the deadline. Its owned output still needs
+        // releasing when the caller receives the timeout or cancellation.
+        if (task.result) |value| {
+            var outcome = value;
+            outcome.deinit(gpa);
+        } else |_| {}
+        return err;
+    };
+    work.await(io);
+    return task.result;
 }
 
-fn feed(io: Io, stdin: Io.File, input: []const u8) void {
-    // A program that exits without reading its input is not a failure of
-    // the writer: git ignores the broken pipe the same way.
-    stdin.writeStreamingAll(io, input) catch {};
-    stdin.close(io);
+fn exchange(programs: Programs, allocator: Allocator, io: Io, invocation: Invocation, input: []const u8, limits: Limits) Error!Outcome {
+    // Conduit's writer and output collectors allocate on their tasks. Relic
+    // also accepts arenas, so serialize this exchange's use of the caller's
+    // allocator. All those tasks are joined before this adapter goes away.
+    var serial: SerialAllocator = .{ .parent = allocator, .io = io };
+    const gpa = serial.allocator();
+    var started = try start(programs, gpa, io, invocation);
+    defer started.deinit(io);
+    var feeding = try started.child.inputWriter(io, gpa, .{ .max_backlog = input.len });
+    defer feeding.deinit(io);
+    // Stop the child before joining a writer it may never read from.
+    errdefer started.kill(io);
+    feeding.queue(io, input) catch |err| switch (err) {
+        error.OutOfMemory, error.Canceled, error.BacklogFull, error.InputClosed => return err,
+        // git accepts a program that exits without reading its input.
+        else => {},
+    };
+    feeding.end(io) catch |err| switch (err) {
+        error.Canceled => return err,
+        else => {},
+    };
+    var output = try started.child.output(io, gpa, .{
+        .max_bytes = limits.output.toInt() orelse std.math.maxInt(usize),
+        .grace_ms = 0,
+    });
+    defer output.deinit(gpa);
+    if (output.stdoutTruncated() or output.stderrTruncated()) return error.OutputTooLong;
+    feeding.wait(io) catch |err| switch (err) {
+        error.Canceled => return err,
+        else => {},
+    };
+    return .{ .term = gitTerm(output.term()), .stdout = output.takeStdout(), .stderr = output.takeStderr() };
+}
+
+const SerialAllocator = struct {
+    parent: Allocator,
+    io: Io,
+    mutex: Io.Mutex = .init,
+
+    fn allocator(serial: *SerialAllocator) Allocator {
+        return .{ .ptr = serial, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn of(raw: *anyopaque) *SerialAllocator {
+        return @ptrCast(@alignCast(raw)); // safe: allocator installs its live SerialAllocator as ptr.
+    }
+
+    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const serial = of(raw);
+        serial.mutex.lockUncancelable(serial.io);
+        defer serial.mutex.unlock(serial.io);
+        return serial.parent.rawAlloc(len, alignment, ret);
+    }
+
+    fn resize(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
+        const serial = of(raw);
+        serial.mutex.lockUncancelable(serial.io);
+        defer serial.mutex.unlock(serial.io);
+        return serial.parent.rawResize(memory, alignment, len, ret);
+    }
+
+    fn remap(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
+        const serial = of(raw);
+        serial.mutex.lockUncancelable(serial.io);
+        defer serial.mutex.unlock(serial.io);
+        return serial.parent.rawRemap(memory, alignment, len, ret);
+    }
+
+    fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const serial = of(raw);
+        serial.mutex.lockUncancelable(serial.io);
+        defer serial.mutex.unlock(serial.io);
+        serial.parent.rawFree(memory, alignment, ret);
+    }
+};
+
+// relic's status is git's byte-sized exit status, as std's Child exposed it.
+fn gitTerm(term: Child.Term) Term {
+    return switch (term) {
+        .exited => |code| .{ .exited = @truncate(code) },
+        .signal => |signal| .{ .signal = signal },
+        .stopped => |signal| .{ .stopped = signal },
+        .unknown => |code| .{ .unknown = code },
+    };
 }
 
 /// A program running with its standard input and output as pipes, for a
@@ -204,24 +246,38 @@ fn feed(io: Io, stdin: Io.File, input: []const u8) void {
 pub const Running = struct {
     child: Child,
     spawn: ?SpawnHook,
+    terminated: bool = false,
     environ: Environ.Map,
     line: CommandLine,
     gpa: Allocator,
 
-    /// Close what is still open, then wait for its end.
-    pub fn wait(running: *Running, io: Io) Child.WaitError!Child.Term {
-        if (running.child.stdin) |stdin| {
-            stdin.close(io);
-            running.child.stdin = null;
+    /// Close standard input, then wait for its end.
+    pub fn wait(running: *Running, io: Io) Child.WaitError!Term {
+        running.child.closeStdin(io);
+        return gitTerm(try running.child.wait(io));
+    }
+
+    /// The caller's termination policy, or conduit's immediate kill and reap.
+    pub fn kill(running: *Running, io: Io) void {
+        if (running.terminated) return;
+        running.terminated = true;
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        if (running.spawn) |hook| {
+            if (hook.terminate) |terminate| {
+                terminate(hook.context, &running.child, io);
+                return;
+            }
         }
-        return running.child.wait(io);
+        _ = running.child.killWait(io, 0) catch {};
     }
 
     /// Stop it if it is still running and release everything.
     pub fn deinit(running: *Running, io: Io) void {
-        if (running.spawn) |hook| {
-            if (hook.terminate) |terminate| terminate(hook.context, &running.child, io) else running.child.kill(io);
-        } else running.child.kill(io);
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        running.kill(io);
+        running.child.deinit(io);
         running.environ.deinit();
         running.line.deinit(running.gpa);
         running.* = undefined;
@@ -239,24 +295,34 @@ pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation)
     const line: CommandLine = try .init(gpa, invocation);
     errdefer line.deinit(gpa);
 
-    const options: std.process.SpawnOptions = .{
-        .argv = line.argv,
-        .cwd = invocation.cwd,
-        .environ_map = &environ,
-        .stdin = .pipe,
-        .stdout = switch (invocation.stdout) {
-            .capture => .pipe,
-            .inherit => .inherit,
-            .to_stderr => .{ .file = Io.File.stderr() },
-            .ignore => .ignore,
-        },
-        .stderr = switch (invocation.stderr) {
-            .capture => .pipe,
-            .inherit => .inherit,
-            .ignore => .ignore,
-        },
+    var cwd_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd: ?[]const u8 = switch (invocation.cwd) {
+        .inherit => null,
+        .path => |path| path,
+        .dir => |dir| cwd_buffer[0..try dir.realPath(io, &cwd_buffer)],
     };
-    const child = if (programs.spawn) |hook| try hook.start(hook.context, io, options) else try std.process.spawn(io, options);
+    // Keep the default descendant policy: git helpers may deliberately leave
+    // a credential-cache daemon running after their normal, reaped exit.
+    const options: Child.SpawnOptions = .{
+        .argv = line.argv,
+        .cwd = cwd,
+        .environ = &environ,
+        .stdio = .{ .streams = .{
+            .stdin = .pipe,
+            .stdout = switch (invocation.stdout) {
+                .capture => .pipe,
+                .inherit => .inherit,
+                .to_stderr => .{ .file = Io.File.stderr() },
+                .ignore => .ignore,
+            },
+            .stderr = switch (invocation.stderr) {
+                .capture => .pipe,
+                .inherit => .inherit,
+                .ignore => .ignore,
+            },
+        } },
+    };
+    const child = if (programs.spawn) |hook| try hook.start(hook.context, io, gpa, options) else try Child.spawn(io, gpa, options);
     return .{ .child = child, .spawn = programs.spawn, .environ = environ, .line = line, .gpa = gpa };
 }
 
@@ -334,19 +400,19 @@ test "Programs spawn hook receives prepared options and owns termination" {
         started: bool = false,
         ended: bool = false,
 
-        fn start(raw: *anyopaque, io: Io, options: std.process.SpawnOptions) std.process.SpawnError!Child {
+        fn start(raw: *anyopaque, io: Io, gpa: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.started = true;
             testing.expectEqualStrings(process_fixture, options.argv[0]) catch unreachable;
             testing.expectEqualStrings("copy", options.argv[1]) catch unreachable;
-            testing.expectEqualStrings("hooked", options.environ_map.?.get("RELIC_HOOKED").?) catch unreachable;
-            return std.process.spawn(io, options);
+            testing.expectEqualStrings("hooked", options.environ.?.get("RELIC_HOOKED").?) catch unreachable;
+            return Child.spawn(io, gpa, options);
         }
 
         fn terminate(raw: *anyopaque, child: *Child, io: Io) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.ended = true;
-            child.kill(io);
+            _ = child.killWait(io, 0) catch {};
         }
     };
     var env = try testEnviron();
@@ -425,7 +491,7 @@ test "a failing program is its status, its diagnostics kept apart" {
     }, "ignored input", .{});
     defer outcome.deinit(gpa);
     try testing.expect(!outcome.succeeded());
-    try testing.expectEqual(Child.Term{ .exited = 3 }, outcome.term);
+    try testing.expectEqual(Term{ .exited = 3 }, outcome.term);
     try testing.expectEqualStrings("out\n", outcome.stdout);
     try testing.expectEqualStrings("err\n", outcome.stderr);
 }
@@ -442,7 +508,7 @@ test "output sent elsewhere is not collected, and the status still is" {
         .stderr = .ignore,
     }, "", .{});
     defer outcome.deinit(gpa);
-    try testing.expectEqual(Child.Term{ .exited = 4 }, outcome.term);
+    try testing.expectEqual(Term{ .exited = 4 }, outcome.term);
     try testing.expectEqualStrings("", outcome.stdout);
     try testing.expectEqualStrings("", outcome.stderr);
 
@@ -463,4 +529,72 @@ test "output past the limit is refused by name" {
     try testing.expectError(error.OutputTooLong, run(.{ .environ = &environ }, gpa, io, .{
         .argv = &.{ process_fixture, "bytes" },
     }, "", .{ .output = .limited(1000) }));
+}
+
+test "timeout bounds a helper that closes its output and keeps running" {
+    var env = try testEnviron();
+    defer env.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input = try testing.allocator.alloc(u8, 4 << 20);
+    defer testing.allocator.free(input);
+    @memset(input, 'i');
+    // Exercise both EOF followed by a wait, and a writer blocked on a child
+    // that never reads. Ignored output also proves no reader is needed for
+    // the deadline to apply.
+    for ([_][]const u8{ "", input }) |bytes| {
+        for ([_]bool{ false, true }) |capture| {
+            const result = run(.{ .environ = &env }, testing.allocator, testing.io, .{
+                .argv = &.{ process_fixture, "closed-output" },
+                .stdout = if (capture) .capture else .ignore,
+                .stderr = if (capture) .capture else .ignore,
+                .cwd = .{ .dir = tmp.dir },
+            }, bytes, .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } });
+            defer if (result) |value| {
+                var outcome = value;
+                outcome.deinit(testing.allocator);
+            } else |_| {};
+            try testing.expectError(error.Timeout, if (result) |_| @as(Error!void, {}) else |err| @as(Error!void, err));
+        }
+    }
+}
+
+test "opposite full pipes refuse unavailable concurrency instead of deadlocking" {
+    var env = try testEnviron();
+    defer env.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: Io.Threaded = .init(testing.allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer threaded.deinit();
+    const input = try testing.allocator.alloc(u8, 4 << 20);
+    defer testing.allocator.free(input);
+    @memset(input, 'i');
+    for ([_]Limits{
+        .{ .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } },
+        .{},
+    }) |limits| {
+        const result = run(.{ .environ = &env }, testing.allocator, threaded.io(), .{
+            .argv = &.{ process_fixture, "opposite-pipes" },
+            .cwd = .{ .dir = tmp.dir },
+        }, input, limits);
+        defer if (result) |value| {
+            var outcome = value;
+            outcome.deinit(testing.allocator);
+        } else |_| {};
+        try testing.expectError(error.ConcurrencyUnavailable, if (result) |_| @as(Error!void, {}) else |err| @as(Error!void, err));
+    }
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var outcome = try run(.{ .environ = &env }, arena.allocator(), testing.io, .{
+        .argv = &.{ process_fixture, "opposite-pipes" },
+        .cwd = .{ .dir = tmp.dir },
+    }, input, .{});
+    defer outcome.deinit(arena.allocator());
+    try testing.expect(outcome.succeeded());
+    try testing.expectEqual(input.len, outcome.stdout.len);
+    for (outcome.stdout) |byte| try testing.expectEqual(@as(u8, 'x'), byte);
 }

@@ -58,7 +58,7 @@ pub const Index = struct {
     pub fn open(gpa: Allocator, io: Io, pack_dir: Io.Dir, kind: hash.Kind) Error!?Index {
         const bytes = (try fs.readFileAlloc(gpa, io, pack_dir, "multi-pack-index", 1 << 30)) orelse
             return null;
-        errdefer gpa.free(bytes);
+        // parse takes ownership on success and failure.
         return try parse(gpa, kind, bytes);
     }
 
@@ -218,4 +218,13 @@ fn fuzzMidx(_: void, smith: *std.testing.Smith) anyerror!void {
     defer index.deinit();
     _ = index.find(Oid.zero(.sha1)) catch {};
     _ = index.packName(0);
+}
+
+test "a refused on-disk multi-pack index releases its bytes once" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "multi-pack-index", .data = "nope" });
+    try std.testing.expectError(error.NotAMultiPackIndex, Index.open(gpa, io, tmp.dir, .sha1));
 }

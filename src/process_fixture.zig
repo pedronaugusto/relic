@@ -13,7 +13,29 @@ pub fn main(init: std.process.Init) !void {
     var out = Io.File.stdout().writerStreaming(io, &out_buf);
     var err_buf: [4096]u8 = undefined;
     var err = Io.File.stderr().writerStreaming(io, &err_buf);
-    if (std.mem.eql(u8, args[1], "copy")) {
+    if (std.mem.eql(u8, args[1], "closed-output")) {
+        Io.File.stdout().close(io);
+        Io.File.stderr().close(io);
+        try io.sleep(.fromSeconds(1), .awake);
+        return;
+    } else if (std.mem.eql(u8, args[1], "opposite-pipes")) {
+        // End a broken implementation's deadlock without leaving a child
+        // behind. A working runner drains output while it feeds input.
+        const Guard = struct {
+            fn stop(guard_io: Io) void {
+                guard_io.sleep(.fromSeconds(1), .awake) catch return;
+                std.process.exit(7);
+            }
+        };
+        var guard = try io.concurrent(Guard.stop, .{io});
+        defer guard.cancel(io);
+        const block = "x" ** 1024;
+        for (0..4096) |_| try out.interface.writeAll(block);
+        try out.interface.flush();
+        var in_buf: [4096]u8 = undefined;
+        var in = Io.File.stdin().readerStreaming(io, &in_buf);
+        _ = try in.interface.discardRemaining();
+    } else if (std.mem.eql(u8, args[1], "copy")) {
         var in_buf: [4096]u8 = undefined;
         var in = Io.File.stdin().readerStreaming(io, &in_buf);
         _ = try in.interface.streamRemaining(&out.interface);

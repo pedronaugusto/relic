@@ -276,12 +276,12 @@ pub const Digest = struct {
         const nc = std.fmt.bufPrint(&nc_buf, "{x:0>8}", .{d.nc}) catch unreachable;
 
         var ha1 = try d.hash(gpa, &.{ user, ":", d.realm, ":", password });
+        defer gpa.free(ha1);
         if (d.session) {
             const outer = try d.hash(gpa, &.{ ha1, ":", d.nonce, ":", d.cnonce });
             gpa.free(ha1);
             ha1 = outer;
         }
-        defer gpa.free(ha1);
         const ha2 = try d.hash(gpa, &.{ method, ":", uri });
         defer gpa.free(ha2);
         const response = if (d.qop_auth)
@@ -381,6 +381,22 @@ test "a Digest answer is RFC 7616's, for its worked examples" {
         };
         try testing.expect(std.mem.indexOf(u8, value, "nc=00000001, qop=auth") != null);
     }
+}
+
+test "Digest session answers release intermediate hashes when allocation stops" {
+    const Check = struct {
+        fn run(gpa: Allocator) !void {
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            const challenges = try parse(arena.allocator(), "Digest realm=\"proxy\", nonce=\"nonce\", qop=\"auth\", algorithm=SHA-256-sess");
+            var digest = try Digest.init(gpa, challenges[0], "client");
+            defer digest.deinit(gpa);
+            const answer = try digest.answer(gpa, "a", "b", "CONNECT", "git.example.com:443");
+            defer gpa.free(answer);
+            try testing.expect(std.mem.indexOf(u8, answer, "algorithm=SHA-256-sess") != null);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
 }
 
 test "fuzz: any Proxy-Authenticate value is read or refused by name" {

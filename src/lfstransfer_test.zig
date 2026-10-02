@@ -539,7 +539,7 @@ test "checkout fetches what the store lacks through the server, many at once, an
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, .{});
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
     var index = try repo.openIndex(io);
@@ -1226,7 +1226,7 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
                 defer attrs.deinit();
                 var drivers = try repo.loadFilters(io, .{});
                 defer drivers.deinit();
-                var rules = repo.worktreeRules();
+                var rules = try repo.worktreeRules();
                 rules.attrs = &attrs;
                 rules.filters = &drivers;
                 var index = try repo.openIndex(io);

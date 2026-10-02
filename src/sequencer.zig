@@ -19,7 +19,6 @@ const Io = std.Io;
 
 const hash = @import("hash.zig");
 const object = @import("object.zig");
-const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const threeway = @import("threeway.zig");
 const signing_mod = @import("signing.zig");
@@ -164,6 +163,8 @@ pub const Options = struct {
     /// `--no-gpg-sign`, or `commit.gpgSign` by default, with the programs
     /// that sign. What was decided is kept between steps, as git keeps it.
     signing: signing_mod.Request = .{},
+    /// Caller-owned output for a refused write or failed signing program.
+    diagnostic: ?*repo_mod.Diagnostic = null,
     /// `--cleanup`: how the message is cleaned, in place of the default.
     cleanup: ?message.Cleanup = null,
     /// `null` asks `merge.conflictStyle`.
@@ -212,11 +213,13 @@ pub const Outcome = struct {
 
 /// Cherry-pick `commits` in order onto `HEAD`.
 pub fn pick(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     return start(gpa, io, repo, .pick, commits, options);
 }
 
 /// Revert `commits` in order.
 pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     return start(gpa, io, repo, .revert, commits, options);
 }
 
@@ -300,7 +303,7 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
         w.print("\tmainline = {d}\n", .{m}) catch return error.OutOfMemory;
     }
     // The signing decided on, with its key when one was named.
-    if (signs(repo, options.signing)) {
+    if (try signs(repo, options.signing)) {
         if (!any) w.writeAll("[options]\n") catch return error.OutOfMemory;
         any = true;
         const value = try config_mod.escapeValue(gpa, options.signing.key orelse "");
@@ -340,7 +343,10 @@ const OptsError = error{ MalformedState, EditorRequested, UnsupportedStrategy, O
 /// Read the settings in an `opts` file's text into `options`. The strategy
 /// options are added to the ones `options` has, copied into `arena`.
 fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Options) OptsError!void {
-    var parsed = config_mod.Config.parseText(gpa, text, .local) catch return error.MalformedState;
+    var parsed = config_mod.Config.parseText(gpa, text, .local) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedState,
+    };
     defer parsed.deinit();
     var words: std.ArrayList([]const u8) = .empty;
     try words.appendSlice(arena, options.strategy_options);
@@ -431,10 +437,10 @@ const Picked = enum { committed, conflicted, empty, dropped, staged };
 
 fn readCommit(r: *Replay, oid: Oid) Error!struct { bytes: []const u8, commit: object.Commit } {
     const found = try r.repo.odb.read(r.io, oid);
-    defer r.repo.odb.gpa.free(found.bytes);
+    defer r.repo.odb.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
     const bytes = try r.arena.dupe(u8, found.bytes);
-    const commit = try object.Commit.parse(r.arena, r.repo.kind, bytes);
+    const commit = try object.Commit.parse(r.arena, r.repo.objectFormat(), bytes);
     return .{ .bytes = bytes, .commit = commit };
 }
 
@@ -505,7 +511,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     var author: ?object.Signature = null;
     switch (r.action) {
         .revert => {
-            if (repo.config.getBool("revert.reference", false) catch false) return error.RevertReferenceNeedsEditor;
+            if (repo.configuration().getBool("revert.reference", false) catch false) return error.RevertReferenceNeedsEditor;
             base_tree = commit.tree;
             base_label = label;
             next_tree = if (parent) |p| try repo.commitTree(io, p) else null;
@@ -621,7 +627,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         .committer = r.options.who,
         .message = cleaned,
         .signing = r.options.signing,
-    });
+    }, r.options.diagnostic);
     const log = try std.fmt.allocPrint(arena, "{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try commit_hooks.postCommit(arena, io, null);
@@ -640,7 +646,7 @@ fn firstLine(text: []const u8) []const u8 {
 
 /// `commit.cleanup`, or the message as it is.
 fn configuredCleanup(repo: *Repository) message.Cleanup {
-    const text = repo.config.get("commit.cleanup") orelse return .verbatim;
+    const text = repo.configuration().get("commit.cleanup") orelse return .verbatim;
     return message.Cleanup.parse(text) orelse .verbatim;
 }
 
@@ -684,8 +690,8 @@ fn newReplay(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, action
         .repo = repo,
         .action = action,
         .options = options,
-        .comment = message.commentString(repo.config.get("core.commentchar"), ""),
-        .abbrev_len = abbrev.defaultLength(&repo.config, &repo.odb),
+        .comment = message.commentString(repo.configuration().get("core.commentchar"), ""),
+        .abbrev_len = abbrev.defaultLength(repo.configuration(), &repo.odb),
     };
 }
 
@@ -788,14 +794,14 @@ pub const ResolverContext = struct {
         const c: *ResolverContext = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a ResolverContext
         const gpa = c.repo.gpa;
         var oid: ?Oid = null;
-        if (text.len == c.repo.kind.hexLen()) oid = Oid.parse(c.repo.kind, text) catch null;
+        if (text.len == c.repo.objectFormat().hexLen()) oid = Oid.parse(c.repo.objectFormat(), text) catch null;
         if (oid == null) {
             const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
             inline for (rules) |rule| {
                 if (oid == null) {
                     if (std.fmt.allocPrint(gpa, rule, .{text})) |full| {
                         defer gpa.free(full);
-                        if (c.repo.refs.resolve(gpa, c.io, full) catch null) |resolved| {
+                        if (c.repo.refStore().resolve(gpa, c.io, full) catch null) |resolved| {
                             gpa.free(resolved.name);
                             oid = resolved.oid;
                         }
@@ -807,9 +813,9 @@ pub const ResolverContext = struct {
         const found = oid orelse return null;
         const peeled = c.repo.peel(c.io, found) catch return null;
         const read = c.repo.odb.read(c.io, peeled) catch return null;
-        defer c.repo.odb.gpa.free(read.bytes);
+        defer c.repo.odb.allocator().free(read.bytes);
         if (read.type != .commit) return null;
-        var commit = object.Commit.parse(gpa, c.repo.kind, read.bytes) catch return null;
+        var commit = object.Commit.parse(gpa, c.repo.objectFormat(), read.bytes) catch return null;
         defer commit.deinit();
         return .{ .oid = peeled, .parents = commit.parents.len };
     }
@@ -867,7 +873,7 @@ fn commitStaged(r: *Replay) Error!Oid {
         .committer = r.options.who,
         .message = cleaned,
         .signing = r.options.signing,
-    });
+    }, r.options.diagnostic);
     const log = if (picked != null)
         try std.fmt.allocPrint(arena, "commit (cherry-pick): {s}", .{firstLine(cleaned)})
     else
@@ -886,6 +892,7 @@ fn commitStaged(r: *Replay) Error!Oid {
 /// commit what is staged for the one that stopped, then carry on with the
 /// rest of the sequence.
 pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -938,6 +945,7 @@ fn requireIndexIsHead(r: *Replay) Error!void {
 
 /// Leave out the pick that stopped and carry on with the rest.
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
     if (!head_mod.stateExists(io, repo.git_dir, action.headRef())) {
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
@@ -962,7 +970,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
     };
     defer gpa.free(text);
     const trimmed = std.mem.trimEnd(u8, text, "\n");
-    const start_oid = Oid.parse(repo.kind, trimmed) catch return error.MalformedState;
+    const start_oid = Oid.parse(repo.objectFormat(), trimmed) catch return error.MalformedState;
     if (start_oid.isZero()) return error.UnbornBranch;
     if (try abortIsSafe(gpa, io, repo)) try resetMerge(gpa, io, repo, start_oid, who, blocked);
     try removeSequencerState(io, repo);
@@ -991,7 +999,7 @@ fn abortIsSafe(gpa: Allocator, io: Io, repo: *Repository) Error!bool {
     defer gpa.free(text);
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     if (trimmed.len == 0) return head.oid == null;
-    const expected = Oid.parse(repo.kind, trimmed) catch return error.MalformedState;
+    const expected = Oid.parse(repo.objectFormat(), trimmed) catch return error.MalformedState;
     return head.oid != null and head.oid.?.eql(expected);
 }
 
@@ -1062,10 +1070,46 @@ test "an opts file with a mainline past any parent number is malformed" {
 
 /// Whether `request` signs, `commit.gpgSign` deciding when it does not say:
 /// what git records for the rest of a sequence.
-pub fn signs(repo: *Repository, request: signing_mod.Request) bool {
+pub fn signs(repo: *Repository, request: signing_mod.Request) config_mod.ValueError!bool {
     return switch (request.sign) {
         .always => true,
         .never => false,
-        .config => repo.config.getBool("commit.gpgsign", false) catch false,
+        .config => try repo.configuration().getBool("commit.gpgsign", false),
     };
+}
+
+test "sequencer settings preserve allocation resource failures" {
+    const Check = struct {
+        fn run(gpa: Allocator) !void {
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            var options: Options = .{ .who = undefined };
+            try parseOpts(gpa, arena.allocator(), "[options]\nsignoff = true\nmainline = 2\n", &options);
+            try std.testing.expect(options.signoff);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "sequencer signing policy refuses malformed values and allocation failures" {
+    const Read = struct {
+        fn run(r: *Repository, request: signing_mod.Request) !bool {
+            return signs(r, request);
+        }
+    };
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Repository.init(gpa, io, tmp.dir, .{});
+    defer r.deinit(io);
+    try r.editConfig(&.{.{ .set = .{ .name = "commit.gpgsign", .value = "maybe" } }}, null);
+    try std.testing.expectError(error.NotABoolean, Read.run(&r, .{}));
+    try std.testing.expect(try Read.run(&r, .{ .sign = .always }));
+    try std.testing.expect(!try Read.run(&r, .{ .sign = .never }));
+    try r.editConfig(&.{.{ .set = .{ .name = "commit.gpgsign", .value = "true" } }}, null);
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    @import("configstate.zig").get(r._config).gpa = failing.allocator();
+    defer @import("configstate.zig").get(r._config).gpa = gpa;
+    try std.testing.expectError(error.OutOfMemory, Read.run(&r, .{}));
 }

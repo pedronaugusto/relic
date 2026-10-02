@@ -120,7 +120,7 @@ pub const Outcome = struct {
 /// gone. Everything allocated is `arena`'s.
 pub fn detect(arena: Allocator, io: Io, db: *odb_mod.Odb, queue: *std.ArrayList(*Pair), options: Options) Error!Outcome {
     var r: Run = .{ .arena = arena, .io = io, .db = db, .options = options };
-    const empty = hash.Hasher.object(db.kind, "blob", "");
+    const empty = hash.Hasher.object(db.objectFormat(), "blob", "");
     for (queue.items) |p| {
         if (!p.one.valid()) {
             if (!p.two.valid()) continue;
@@ -200,7 +200,7 @@ const Run = struct {
     fn blob(r: *Run, oid: Oid) Error![]const u8 {
         if (r.blobs.get(oid)) |bytes| return bytes;
         const found = try r.db.read(r.io, oid);
-        defer r.db.gpa.free(found.bytes);
+        defer r.db.allocator().free(found.bytes);
         if (found.type != .blob) return error.NotABlob;
         const bytes = try r.arena.dupe(u8, found.bytes);
         try r.blobs.put(r.arena, oid, bytes);

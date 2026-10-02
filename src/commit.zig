@@ -37,7 +37,6 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const object = @import("object.zig");
 const refs_mod = @import("refs.zig");
-const reflog = @import("reflog.zig");
 const repo_mod = @import("repo.zig");
 const worktree = @import("worktree.zig");
 const index_mod = @import("index.zig");
@@ -104,6 +103,8 @@ pub const Options = struct {
     /// Whether and how to sign it. By default `commit.gpgSign` decides,
     /// and signing needs the caller's `Programs`.
     signing: signing.Request = .{},
+    /// Caller-owned output for a refused write or failed signing program.
+    diagnostic: ?*repo_mod.Diagnostic = null,
 };
 
 /// Who, when, and what to say. The times are the caller's, because nothing
@@ -128,6 +129,7 @@ pub const Outcome = struct {
 /// `git commit -m <message>`: run the hooks, write the tree the index
 /// describes and a commit of it, and move the branch `HEAD` is on.
 pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Error!Outcome {
+    @import("repodiagnostic.zig").reset(options.diagnostic);
     const gpa = repo.gpa;
     if (repo.work_dir == null) return error.BareRepository;
     for ([_][]const u8{ "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD" }) |name| {
@@ -139,7 +141,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    const current: ?Oid = if (try repo.refs.resolve(arena, io, "HEAD")) |r| r.oid else null;
+    const current: ?Oid = if (try repo.refStore().resolve(arena, io, "HEAD")) |r| r.oid else null;
     if (options.amend and current == null) return error.NothingToAmend;
 
     // The files named as git names them to a hook: `.git/index` and
@@ -173,7 +175,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         defer gpa.free(found.bytes);
         if (found.type != .commit) return error.UnexpectedObjectType;
         const bytes = try arena.dupe(u8, found.bytes);
-        const parsed = try object.Commit.parse(arena, repo.kind, bytes);
+        const parsed = try object.Commit.parse(arena, repo.objectFormat(), bytes);
         if (options.amend) {
             parents = parsed.parents;
             // An amend keeps the old commit's extra headers but not its
@@ -209,7 +211,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         .message = cleaned,
         .extra = carried,
         .signing = options.signing,
-    });
+    }, options.diagnostic);
 
     const action = if (current == null)
         "commit (initial)"
@@ -244,7 +246,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
 }
 
 fn configuredCleanup(repo: *Repository) error{InvalidCleanupMode}!Cleanup {
-    const text = repo.config.get("commit.cleanup") orelse return .whitespace;
+    const text = repo.configuration().get("commit.cleanup") orelse return .whitespace;
     // With no editor, `default` and `scissors` are both `whitespace`.
     if (std.mem.eql(u8, text, "default") or std.mem.eql(u8, text, "whitespace") or
         std.mem.eql(u8, text, "scissors")) return .whitespace;
@@ -254,7 +256,7 @@ fn configuredCleanup(repo: *Repository) error{InvalidCleanupMode}!Cleanup {
 }
 
 fn commentPrefix(repo: *Repository) []const u8 {
-    const text = repo.config.get("core.commentstring") orelse repo.config.get("core.commentchar") orelse return "#";
+    const text = repo.configuration().get("core.commentstring") orelse repo.configuration().get("core.commentchar") orelse return "#";
     // `auto` picks a character the message does not use, which only matters
     // to an editor's template; with no template it is `#`.
     if (text.len == 0 or std.mem.eql(u8, text, "auto")) return "#";

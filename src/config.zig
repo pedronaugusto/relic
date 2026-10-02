@@ -387,36 +387,46 @@ pub const Config = struct {
         const fields = [_][]const u8{ "system", "xdg", "global", "local", "worktree" };
         inline for (fields) |field| {
             if (@field(sources, field)) |path| {
-                @field(config.sources, field) = .{ .dir = path.dir, .sub_path = try gpa.dupe(u8, path.sub_path) };
+                // Copy before publishing even the optional's presence. A
+                // fallible struct initializer can write directly into its
+                // result location, leaving a partial path for deinit.
+                const sub_path = try gpa.dupe(u8, path.sub_path);
+                @field(config.sources, field) = .{ .dir = path.dir, .sub_path = sub_path };
             }
         }
-        const command = try gpa.alloc([]const u8, sources.command.len);
-        var kept: usize = 0;
-        errdefer {
-            for (command[0..kept]) |value| gpa.free(value);
-            gpa.free(command);
-        }
-        for (sources.command) |value| {
-            command[kept] = try gpa.dupe(u8, value);
-            kept += 1;
-        }
-        config.sources.command = command;
-        const pairs = try gpa.alloc(Sources.Pair, sources.pairs.len);
-        var kept_pairs: usize = 0;
-        errdefer {
-            for (pairs[0..kept_pairs]) |pair| {
-                gpa.free(pair.name);
-                if (pair.value) |v| gpa.free(v);
+        // The temporary owns a copy until it is complete; after the block
+        // returns, only Config.deinit owns it, even if the next copy fails.
+        config.sources.command = command: {
+            const copy = try gpa.alloc([]const u8, sources.command.len);
+            var kept: usize = 0;
+            errdefer {
+                for (copy[0..kept]) |value| gpa.free(value);
+                gpa.free(copy);
             }
-            gpa.free(pairs);
-        }
-        for (sources.pairs) |pair| {
-            const name = try gpa.dupe(u8, pair.name);
-            errdefer gpa.free(name);
-            pairs[kept_pairs] = .{ .name = name, .value = if (pair.value) |v| try gpa.dupe(u8, v) else null };
-            kept_pairs += 1;
-        }
-        config.sources.pairs = pairs;
+            for (sources.command) |value| {
+                copy[kept] = try gpa.dupe(u8, value);
+                kept += 1;
+            }
+            break :command copy;
+        };
+        config.sources.pairs = pairs: {
+            const copy = try gpa.alloc(Sources.Pair, sources.pairs.len);
+            var kept: usize = 0;
+            errdefer {
+                for (copy[0..kept]) |pair| {
+                    gpa.free(pair.name);
+                    if (pair.value) |v| gpa.free(v);
+                }
+                gpa.free(copy);
+            }
+            for (sources.pairs) |pair| {
+                const name = try gpa.dupe(u8, pair.name);
+                errdefer gpa.free(name);
+                copy[kept] = .{ .name = name, .value = if (pair.value) |v| try gpa.dupe(u8, v) else null };
+                kept += 1;
+            }
+            break :pairs copy;
+        };
     }
 
     /// Whether a file this configuration was read from now holds other
@@ -862,10 +872,18 @@ pub const Config = struct {
                 });
             };
             const parsed = parseVariableLine(replacement) catch unreachable;
+            const name = blk: {
+                errdefer config.gpa.free(replacement);
+                var names = file.names.promote(config.gpa);
+                defer file.names = names.state;
+                break :blk try lowered(names.allocator(), parsed.name);
+            };
             if (line.owned) config.gpa.free(line.text);
             line.text = replacement;
             line.owned = true;
-            // The name is the one already read, and already lower-cased.
+            // A lowercase name may borrow the text of its line. Transfer
+            // it with the replacement, before the old text is released.
+            line.name = name;
             line.value_start = parsed.value_start;
             line.value_end = parsed.value_end;
             line.has_value = parsed.has_value;
@@ -1051,21 +1069,14 @@ pub const Config = struct {
         for (0..config.files.items.len) |file_index| try config.indexFile(@intCast(file_index));
     }
 
-    /// Write the edited file back through `<path>.lock`.
+    /// Write the last writable file through `<path>.lock`.
     ///
-    /// Nothing is written unless `set` or `unset` was called; the bytes are
-    /// the original file with only the changed lines different.
+    /// The bytes are the original file with only the changed lines different.
+    /// With multiple writable sources, open the intended file on its own
+    /// before editing and writing it.
     pub fn write(config: *Config, io: Io, dir: Io.Dir, sub_path: []const u8) SetError!void {
         const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
-        const file = &config.files.items[file_index];
-        const bytes = try file.render();
-        defer config.gpa.free(bytes);
-
-        var buffer: [16 * 1024]u8 = undefined;
-        var lock = try fs.LockFile.open(config.gpa, io, dir, sub_path, &buffer, .{});
-        defer lock.deinit(io);
-        lock.writer().writeAll(bytes) catch return error.WriteFailed;
-        try lock.commit(io);
+        return @import("configstate.zig").writeFile(&config.files.items[file_index], io, dir, sub_path);
     }
 
     /// The bytes the writable file would be written as. The result is the
@@ -2294,4 +2305,58 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
     defer gpa.free(removed);
     var third = try Config.parseText(gpa, removed, .local);
     third.deinit();
+}
+
+test "configuration sources have one owner when allocation stops" {
+    const Check = struct {
+        fn run(gpa: Allocator) !void {
+            var config = try Config.open(gpa, std.testing.io, .{
+                .command = &.{"test.one=1"},
+                .pairs = &.{.{ .name = "test.two", .value = "2" }},
+            }, .{});
+            defer config.deinit();
+            try std.testing.expectEqualStrings("1", config.get("test.one").?);
+            try std.testing.expectEqualStrings("2", config.get("test.two").?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "configuration source paths enter their owner only after copying succeeds" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "[test]\nvalue = kept\n" });
+    const Check = struct {
+        fn run(gpa: Allocator, dir: Io.Dir) !void {
+            const path: Sources.Path = .{ .dir = dir, .sub_path = "config" };
+            var config = try Config.open(gpa, std.testing.io, .{
+                .system = path,
+                .xdg = path,
+                .global = path,
+                .local = path,
+                .worktree = path,
+            }, .{});
+            defer config.deinit();
+            try std.testing.expectEqualStrings("kept", config.get("test.value").?);
+            inline for (.{ "system", "xdg", "global", "local", "worktree" }) |field| {
+                try std.testing.expectEqualStrings("config", @field(config.sources, field).?.sub_path);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{tmp.dir});
+}
+
+test "replacing an inserted setting keeps its name under the new line owner" {
+    const gpa = std.testing.allocator;
+    var config = try Config.parseText(gpa, "[core]\n", .local);
+    defer config.deinit();
+    config.files.items[0].writable = true;
+    try config.set("core.ignorecase", "maybe");
+    try config.set("core.ignorecase", "true");
+    try std.testing.expectEqualStrings("true", config.get("core.ignorecase") orelse "missing");
+    try std.testing.expect(try config.getBool("core.ignorecase", false));
+    try config.set("core.ignorecase", "false");
+    try std.testing.expectEqualStrings("false", config.get("core.ignorecase") orelse "missing");
+    try std.testing.expect(!try config.getBool("core.ignorecase", true));
 }

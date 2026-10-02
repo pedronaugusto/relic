@@ -54,12 +54,12 @@ pub const Head = struct {
 
 /// Read where `HEAD` is.
 pub fn read(gpa: Allocator, io: Io, repo: *Repository) refs_mod.ReadError!Head {
-    const raw = (try repo.refs.read(gpa, io, "HEAD")) orelse return .{ .branch = null, .oid = null };
+    const raw = (try repo.refStore().read(gpa, io, "HEAD")) orelse return .{ .branch = null, .oid = null };
     switch (raw) {
         .direct => |oid| return .{ .branch = null, .oid = oid },
         .symbolic => |target| {
             errdefer gpa.free(target);
-            const resolved = try repo.refs.resolve(gpa, io, target);
+            const resolved = try repo.refStore().resolve(gpa, io, target);
             if (resolved) |r| gpa.free(r.name);
             return .{ .branch = target, .oid = if (resolved) |r| r.oid else null };
         },
@@ -115,11 +115,11 @@ pub fn attach(io: Io, repo: *Repository, branch: []const u8, old: ?Oid, log: Log
     defer tx.deinit(io);
     try tx.update("HEAD", .{ .symbolic = branch }, .any);
     try tx.commit(io, null);
-    const resolved = try repo.refs.resolve(repo.gpa, io, branch);
+    const resolved = try repo.refStore().resolve(repo.gpa, io, branch);
     const new = if (resolved) |r| blk: {
         repo.gpa.free(r.name);
         break :blk r.oid;
-    } else Oid.zero(repo.kind);
+    } else Oid.zero(repo.objectFormat());
     try appendHeadLog(io, repo, old, new, log);
 }
 
@@ -134,7 +134,7 @@ pub fn moveBranch(io: Io, repo: *Repository, branch: []const u8, expected: refs_
 fn appendHeadLog(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error!void {
     const exists = try reflog.exists(io, repo.git_dir, repo.gpa, "HEAD");
     if (!reflog.shouldLog(repo.reflogPolicy(), "HEAD", exists)) return;
-    try repo.refs.appendLog(repo.gpa, io, "HEAD", old orelse Oid.zero(repo.kind), new, log.who, log.message);
+    try repo.refStore().appendLog(repo.gpa, io, "HEAD", old orelse Oid.zero(repo.objectFormat()), new, log.who, log.message);
 }
 
 /// Point the pseudo-ref `name` at `oid`, with no log, as git writes
@@ -148,7 +148,7 @@ pub fn writeRef(io: Io, repo: *Repository, name: []const u8, oid: Oid) Error!voi
 
 /// What the pseudo-ref `name` points at, or `null`.
 pub fn readRef(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) refs_mod.ReadError!?Oid {
-    const found = (try repo.refs.read(gpa, io, name)) orelse return null;
+    const found = (try repo.refStore().read(gpa, io, name)) orelse return null;
     switch (found) {
         .direct => |oid| return oid,
         .symbolic => |target| {
@@ -160,7 +160,7 @@ pub fn readRef(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) refs
 
 /// Remove the pseudo-ref `name`, which need not exist.
 pub fn deleteRef(io: Io, repo: *Repository, name: []const u8) Error!void {
-    repo.refs.dirFor(name).deleteFile(io, name) catch |err| switch (err) {
+    repo.refStore().dirFor(name).deleteFile(io, name) catch |err| switch (err) {
         error.FileNotFound => {},
         else => |e| return e,
     };

@@ -293,7 +293,7 @@ pub fn receive(
     in: *Io.Reader,
     options: Options,
 ) Error!Result {
-    const kind = db.kind;
+    const kind = db.objectFormat();
     const raw_len = kind.rawLen();
 
     var temp_buf: [64]u8 = undefined;
@@ -589,7 +589,7 @@ const Indexer = struct {
             .gpa = gpa,
             .io = io,
             .db = db,
-            .kind = db.kind,
+            .kind = db.objectFormat(),
             .file = file,
             .options = options,
             .read_buffer = read_buffer,
@@ -796,7 +796,7 @@ const Indexer = struct {
     }
 
     fn hashOptions(x: *const Indexer) hash.Hasher.Options {
-        return .{ .detect_collisions = x.db.options.detect_sha1_collisions };
+        return .{ .detect_collisions = x.db.settings().detect_sha1_collisions };
     }
 
     fn checkObject(x: *Indexer, oid: Oid, t: object.Type, bytes: []const u8, offset: u64) Error!void {
@@ -932,10 +932,10 @@ const Indexer = struct {
                     // The database's bytes are its allocator's; the stack
                     // frees with this one.
                     const bytes = x.gpa.dupe(u8, found.bytes) catch |err| {
-                        x.db.gpa.free(found.bytes);
+                        x.db.allocator().free(found.bytes);
                         return err;
                     };
-                    x.db.gpa.free(found.bytes);
+                    x.db.allocator().free(found.bytes);
                     x.thin_bases.append(x.gpa, base) catch |err| {
                         x.gpa.free(bytes);
                         return err;
@@ -982,7 +982,7 @@ const Indexer = struct {
         defer x.gpa.destroy(compressor);
         for (x.thin_bases.items) |oid| {
             const found = try x.db.read(io, oid);
-            defer x.db.gpa.free(found.bytes);
+            defer x.db.allocator().free(found.bytes);
 
             var head: [16]u8 = undefined;
             const head_len = encodeTypeAndSize(&head, found.type, found.bytes.len);
@@ -1688,6 +1688,7 @@ fn fuzzReceive(_: void, smith: *testing.Smith) anyerror!void {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var db = try odb_mod.Odb.openAt(gpa, io, objects, .sha1, .{ .probe_timestamp_resolution = false });
     defer db.deinit(io);
     var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
@@ -1776,7 +1777,7 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     var hex: [hash.max_hex_len]u8 = undefined;
     var idx_buf: [96]u8 = undefined;
     const idx_name = try std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{result.name.?.hex(&hex)});
-    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
+    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
     defer index.deinit();
     try testing.expect(!links.unreadable);
     // The commit's parent is not there either; what the tree names is

@@ -8,7 +8,6 @@
 //! the files themselves — is compared with what git left in the other twin.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;

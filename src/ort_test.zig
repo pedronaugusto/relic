@@ -501,13 +501,333 @@ fn runScenario(gpa: Allocator, io: Io, seed: u64, crowded: bool) !void {
     };
 }
 
-test "random histories merge to git's trees, stages and messages" {
+fn checkScenario(seed: u64, crowded: bool) !void {
+    if (seed >= scenario_count) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // `merge-tree --write-tree` is git 2.38's.
     try testgit.requireGitVersion(gpa, io, 2, 38);
-    for (0..scenario_count) |seed| try runScenario(gpa, io, seed, false);
-    for (0..scenario_count) |seed| try runScenario(gpa, io, seed, true);
+    try runScenario(gpa, io, seed, crowded);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 0, sparse" {
+    try checkScenario(0, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 1, sparse" {
+    try checkScenario(1, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 2, sparse" {
+    try checkScenario(2, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 3, sparse" {
+    try checkScenario(3, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 4, sparse" {
+    try checkScenario(4, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 5, sparse" {
+    try checkScenario(5, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 6, sparse" {
+    try checkScenario(6, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 7, sparse" {
+    try checkScenario(7, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 8, sparse" {
+    try checkScenario(8, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 9, sparse" {
+    try checkScenario(9, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 10, sparse" {
+    try checkScenario(10, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 11, sparse" {
+    try checkScenario(11, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 12, sparse" {
+    try checkScenario(12, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 13, sparse" {
+    try checkScenario(13, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 14, sparse" {
+    try checkScenario(14, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 15, sparse" {
+    try checkScenario(15, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 16, sparse" {
+    try checkScenario(16, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 17, sparse" {
+    try checkScenario(17, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 18, sparse" {
+    try checkScenario(18, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 19, sparse" {
+    try checkScenario(19, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 20, sparse" {
+    try checkScenario(20, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 21, sparse" {
+    try checkScenario(21, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 22, sparse" {
+    try checkScenario(22, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 23, sparse" {
+    try checkScenario(23, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 24, sparse" {
+    try checkScenario(24, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 25, sparse" {
+    try checkScenario(25, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 26, sparse" {
+    try checkScenario(26, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 27, sparse" {
+    try checkScenario(27, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 28, sparse" {
+    try checkScenario(28, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 29, sparse" {
+    try checkScenario(29, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 30, sparse" {
+    try checkScenario(30, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 31, sparse" {
+    try checkScenario(31, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 32, sparse" {
+    try checkScenario(32, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 33, sparse" {
+    try checkScenario(33, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 34, sparse" {
+    try checkScenario(34, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 35, sparse" {
+    try checkScenario(35, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 36, sparse" {
+    try checkScenario(36, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 37, sparse" {
+    try checkScenario(37, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 38, sparse" {
+    try checkScenario(38, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 39, sparse" {
+    try checkScenario(39, false);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 0, crowded" {
+    try checkScenario(0, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 1, crowded" {
+    try checkScenario(1, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 2, crowded" {
+    try checkScenario(2, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 3, crowded" {
+    try checkScenario(3, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 4, crowded" {
+    try checkScenario(4, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 5, crowded" {
+    try checkScenario(5, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 6, crowded" {
+    try checkScenario(6, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 7, crowded" {
+    try checkScenario(7, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 8, crowded" {
+    try checkScenario(8, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 9, crowded" {
+    try checkScenario(9, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 10, crowded" {
+    try checkScenario(10, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 11, crowded" {
+    try checkScenario(11, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 12, crowded" {
+    try checkScenario(12, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 13, crowded" {
+    try checkScenario(13, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 14, crowded" {
+    try checkScenario(14, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 15, crowded" {
+    try checkScenario(15, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 16, crowded" {
+    try checkScenario(16, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 17, crowded" {
+    try checkScenario(17, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 18, crowded" {
+    try checkScenario(18, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 19, crowded" {
+    try checkScenario(19, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 20, crowded" {
+    try checkScenario(20, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 21, crowded" {
+    try checkScenario(21, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 22, crowded" {
+    try checkScenario(22, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 23, crowded" {
+    try checkScenario(23, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 24, crowded" {
+    try checkScenario(24, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 25, crowded" {
+    try checkScenario(25, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 26, crowded" {
+    try checkScenario(26, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 27, crowded" {
+    try checkScenario(27, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 28, crowded" {
+    try checkScenario(28, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 29, crowded" {
+    try checkScenario(29, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 30, crowded" {
+    try checkScenario(30, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 31, crowded" {
+    try checkScenario(31, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 32, crowded" {
+    try checkScenario(32, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 33, crowded" {
+    try checkScenario(33, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 34, crowded" {
+    try checkScenario(34, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 35, crowded" {
+    try checkScenario(35, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 36, crowded" {
+    try checkScenario(36, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 37, crowded" {
+    try checkScenario(37, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 38, crowded" {
+    try checkScenario(38, true);
+}
+
+test "random histories merge to git's trees, stages and messages: seed 39, crowded" {
+    try checkScenario(39, true);
 }
 
 const scenario_count = testgit.corpusCases(40);
@@ -556,12 +876,133 @@ fn runCrissCross(gpa: Allocator, io: Io, seed: u64) !void {
     };
 }
 
-test "criss-cross histories merge their bases first, as git's recursive merge does" {
+fn checkCrissCross(seed: u64) !void {
+    if (seed >= criss_cross_count) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // `merge-tree --write-tree` is git 2.38's.
     try testgit.requireGitVersion(gpa, io, 2, 38);
-    for (0..criss_cross_count) |seed| try runCrissCross(gpa, io, seed);
+    try runCrissCross(gpa, io, seed);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 0" {
+    try checkCrissCross(0);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 1" {
+    try checkCrissCross(1);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 2" {
+    try checkCrissCross(2);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 3" {
+    try checkCrissCross(3);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 4" {
+    try checkCrissCross(4);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 5" {
+    try checkCrissCross(5);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 6" {
+    try checkCrissCross(6);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 7" {
+    try checkCrissCross(7);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 8" {
+    try checkCrissCross(8);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 9" {
+    try checkCrissCross(9);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 10" {
+    try checkCrissCross(10);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 11" {
+    try checkCrissCross(11);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 12" {
+    try checkCrissCross(12);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 13" {
+    try checkCrissCross(13);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 14" {
+    try checkCrissCross(14);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 15" {
+    try checkCrissCross(15);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 16" {
+    try checkCrissCross(16);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 17" {
+    try checkCrissCross(17);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 18" {
+    try checkCrissCross(18);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 19" {
+    try checkCrissCross(19);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 20" {
+    try checkCrissCross(20);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 21" {
+    try checkCrissCross(21);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 22" {
+    try checkCrissCross(22);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 23" {
+    try checkCrissCross(23);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 24" {
+    try checkCrissCross(24);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 25" {
+    try checkCrissCross(25);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 26" {
+    try checkCrissCross(26);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 27" {
+    try checkCrissCross(27);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 28" {
+    try checkCrissCross(28);
+}
+
+test "criss-cross histories merge their bases first, as git's recursive merge does: seed 29" {
+    try checkCrissCross(29);
 }
 
 const criss_cross_count = testgit.corpusCases(30);
@@ -727,11 +1168,252 @@ fn runDiffScenario(gpa: Allocator, io: Io, seed: u64) !void {
     try expectSameDiff(gpa, io, &repo, &.{ "-C", "--find-copies-harder" }, .{ .detect_copies = true, .find_copies_harder = true });
 }
 
-test "diff -M, -M30%, -C and --find-copies-harder pair what git's do" {
+fn checkDiffScenario(seed: u64) !void {
+    if (seed >= diff_scenario_count) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try testgit.requireGit(gpa, io);
-    for (0..diff_scenario_count) |seed| try runDiffScenario(gpa, io, seed);
+    try runDiffScenario(gpa, io, seed);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 0" {
+    try checkDiffScenario(0);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 1" {
+    try checkDiffScenario(1);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 2" {
+    try checkDiffScenario(2);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 3" {
+    try checkDiffScenario(3);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 4" {
+    try checkDiffScenario(4);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 5" {
+    try checkDiffScenario(5);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 6" {
+    try checkDiffScenario(6);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 7" {
+    try checkDiffScenario(7);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 8" {
+    try checkDiffScenario(8);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 9" {
+    try checkDiffScenario(9);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 10" {
+    try checkDiffScenario(10);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 11" {
+    try checkDiffScenario(11);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 12" {
+    try checkDiffScenario(12);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 13" {
+    try checkDiffScenario(13);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 14" {
+    try checkDiffScenario(14);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 15" {
+    try checkDiffScenario(15);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 16" {
+    try checkDiffScenario(16);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 17" {
+    try checkDiffScenario(17);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 18" {
+    try checkDiffScenario(18);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 19" {
+    try checkDiffScenario(19);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 20" {
+    try checkDiffScenario(20);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 21" {
+    try checkDiffScenario(21);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 22" {
+    try checkDiffScenario(22);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 23" {
+    try checkDiffScenario(23);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 24" {
+    try checkDiffScenario(24);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 25" {
+    try checkDiffScenario(25);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 26" {
+    try checkDiffScenario(26);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 27" {
+    try checkDiffScenario(27);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 28" {
+    try checkDiffScenario(28);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 29" {
+    try checkDiffScenario(29);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 30" {
+    try checkDiffScenario(30);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 31" {
+    try checkDiffScenario(31);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 32" {
+    try checkDiffScenario(32);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 33" {
+    try checkDiffScenario(33);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 34" {
+    try checkDiffScenario(34);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 35" {
+    try checkDiffScenario(35);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 36" {
+    try checkDiffScenario(36);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 37" {
+    try checkDiffScenario(37);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 38" {
+    try checkDiffScenario(38);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 39" {
+    try checkDiffScenario(39);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 40" {
+    try checkDiffScenario(40);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 41" {
+    try checkDiffScenario(41);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 42" {
+    try checkDiffScenario(42);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 43" {
+    try checkDiffScenario(43);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 44" {
+    try checkDiffScenario(44);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 45" {
+    try checkDiffScenario(45);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 46" {
+    try checkDiffScenario(46);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 47" {
+    try checkDiffScenario(47);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 48" {
+    try checkDiffScenario(48);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 49" {
+    try checkDiffScenario(49);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 50" {
+    try checkDiffScenario(50);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 51" {
+    try checkDiffScenario(51);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 52" {
+    try checkDiffScenario(52);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 53" {
+    try checkDiffScenario(53);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 54" {
+    try checkDiffScenario(54);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 55" {
+    try checkDiffScenario(55);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 56" {
+    try checkDiffScenario(56);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 57" {
+    try checkDiffScenario(57);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 58" {
+    try checkDiffScenario(58);
+}
+
+test "diff -M, -M30%, -C and --find-copies-harder pair what git's do: seed 59" {
+    try checkDiffScenario(59);
 }
 
 const diff_scenario_count = testgit.corpusCases(60);

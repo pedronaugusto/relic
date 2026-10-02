@@ -226,7 +226,7 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     errdefer outcome.arena.deinit();
     const arena = outcome.arena.allocator();
 
-    var remote = try remote_mod.Remote.get(gpa, &repo.config, remote_name);
+    var remote = try remote_mod.Remote.get(gpa, repo.configuration(), remote_name);
     defer remote.deinit();
 
     var specs: std.ArrayList(Refspec) = .empty;
@@ -259,9 +259,9 @@ fn pushTo(
     all_results: *std.ArrayList(RefResult),
     outcome: *Outcome,
 ) Error!void {
-    var session = try transport.Session.open(gpa, io, url, .receive_pack, repo.kind, .{
+    var session = try transport.Session.open(gpa, io, url, .receive_pack, repo.objectFormat(), .{
         .programs = options.programs,
-        .config = &repo.config,
+        .config = repo.configuration(),
         .service_program = remote.receive_pack,
         .progress = options.progress,
         .prompt = options.prompt,
@@ -274,7 +274,7 @@ fn pushTo(
     var remote_refs = try session.listRefs(gpa, io, &.{});
     defer remote_refs.deinit();
 
-    var local_refs = try repo.refs.list(gpa, io, "refs/");
+    var local_refs = try repo.refStore().list(gpa, io, "refs/");
     defer local_refs.deinit();
 
     const updates = try matchRefs(arena, gpa, io, repo, &local_refs, &remote_refs, specs);
@@ -282,7 +282,7 @@ fn pushTo(
     // Judge each before anything is sent.
     var results: std.ArrayList(RefResult) = .empty;
     for (updates) |u| {
-        const old = if (remote_refs.find(u.remote_ref)) |r| r.oid else Oid.zero(repo.kind);
+        const old = if (remote_refs.find(u.remote_ref)) |r| r.oid else Oid.zero(repo.objectFormat());
         var result: RefResult = .{
             .url = url,
             .local_ref = u.local_ref,
@@ -411,20 +411,20 @@ fn defaultRefspecs(
     remote_name: []const u8,
     specs: *std.ArrayList(Refspec),
 ) Error!void {
-    const mode_text = repo.config.get("push.default") orelse "simple";
+    const mode_text = repo.configuration().get("push.default") orelse "simple";
     if (std.ascii.eqlIgnoreCase(mode_text, "nothing")) return error.NoPushDestination;
     if (std.ascii.eqlIgnoreCase(mode_text, "matching")) {
         try specs.append(arena, try Refspec.parse(":", .push));
         return;
     }
-    const current = (try repo.refs.currentBranch(gpa, io)) orelse return error.NoPushDestination;
+    const current = (try repo.refStore().currentBranch(gpa, io)) orelse return error.NoPushDestination;
     defer gpa.free(current);
     const branch_ref = try std.fmt.allocPrint(arena, "refs/heads/{s}", .{current});
     if (std.ascii.eqlIgnoreCase(mode_text, "current")) {
         try specs.append(arena, try Refspec.parse(try std.fmt.allocPrint(arena, "{s}:{s}", .{ branch_ref, branch_ref }), .push));
         return;
     }
-    var branch = try remote_mod.Branch.get(gpa, &repo.config, current);
+    var branch = try remote_mod.Branch.get(gpa, repo.configuration(), current);
     defer branch.deinit();
     const same_remote = if (branch.remote) |r| std.mem.eql(u8, r, remote.name orelse remote_name) else false;
     const upstream_mode = std.ascii.eqlIgnoreCase(mode_text, "upstream") or std.ascii.eqlIgnoreCase(mode_text, "tracking");
@@ -489,11 +489,11 @@ const Source = struct { name: ?[]const u8, oid: Oid };
 /// an object name.
 fn resolveSource(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, local_names: []const []const u8, text: []const u8) Error!Source {
     if (std.mem.eql(u8, text, "HEAD")) {
-        const head = (try repo.refs.read(gpa, io, "HEAD")) orelse return error.SourceNotFound;
+        const head = (try repo.refStore().read(gpa, io, "HEAD")) orelse return error.SourceNotFound;
         switch (head) {
             .symbolic => |target| {
                 defer gpa.free(target);
-                const resolved = (try repo.refs.resolve(gpa, io, target)) orelse return error.SourceNotFound;
+                const resolved = (try repo.refStore().resolve(gpa, io, target)) orelse return error.SourceNotFound;
                 defer gpa.free(resolved.name);
                 return .{ .name = try arena.dupe(u8, target), .oid = resolved.oid };
             },
@@ -501,12 +501,12 @@ fn resolveSource(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, lo
         }
     }
     if (try bestMatch(text, local_names)) |name| {
-        const resolved = (try repo.refs.resolve(gpa, io, name)) orelse return error.SourceNotFound;
+        const resolved = (try repo.refStore().resolve(gpa, io, name)) orelse return error.SourceNotFound;
         defer gpa.free(resolved.name);
         return .{ .name = name, .oid = resolved.oid };
     }
-    if (text.len == repo.kind.hexLen()) {
-        const oid = Oid.parse(repo.kind, text) catch return error.SourceNotFound;
+    if (text.len == repo.objectFormat().hexLen()) {
+        const oid = Oid.parse(repo.objectFormat(), text) catch return error.SourceNotFound;
         if (try repo.odb.exists(io, oid)) return .{ .name = null, .oid = oid };
     }
     return error.SourceNotFound;
@@ -558,7 +558,7 @@ fn matchRefs(
             else
                 try bestMatch(dst_text, remote_names.items);
             const name = dst orelse return error.RemoteRefNotFound;
-            try out.append(arena, .{ .local_ref = null, .new = .zero(repo.kind), .remote_ref = try arena.dupe(u8, name), .force = spec.force });
+            try out.append(arena, .{ .local_ref = null, .new = .zero(repo.objectFormat()), .remote_ref = try arena.dupe(u8, name), .force = spec.force });
             continue;
         }
         const src = try resolveSource(arena, gpa, io, repo, local_names.items, spec.src);
@@ -615,7 +615,7 @@ fn judge(
     var reject: ?RefResult.Status = null;
     for (leases) |lease| {
         if (!std.mem.eql(u8, lease.ref, result.remote_ref)) continue;
-        const expected = lease.expect orelse (try trackingValue(gpa, io, repo, remote, result.remote_ref)) orelse Oid.zero(repo.kind);
+        const expected = lease.expect orelse (try trackingValue(gpa, io, repo, remote, result.remote_ref)) orelse Oid.zero(repo.objectFormat());
         if (!result.old.eql(expected)) {
             reject = .rejected_stale;
         } else forced = true;
@@ -662,7 +662,7 @@ fn trackingName(gpa: Allocator, remote: *const remote_mod.Remote, remote_ref: []
 fn trackingValue(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, remote_ref: []const u8) Error!?Oid {
     const name = (try trackingName(gpa, remote, remote_ref)) orelse return null;
     defer gpa.free(name);
-    const resolved = (try repo.refs.resolve(gpa, io, name)) orelse return null;
+    const resolved = (try repo.refStore().resolve(gpa, io, name)) orelse return null;
     defer gpa.free(resolved.name);
     return resolved.oid;
 }
@@ -670,7 +670,7 @@ fn trackingValue(gpa: Allocator, io: Io, repo: *Repository, remote: *const remot
 fn updateTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, result: RefResult, who: object.Signature) Error!void {
     const name = (try trackingName(gpa, remote, result.remote_ref)) orelse return;
     defer gpa.free(name);
-    const current = try repo.refs.resolve(gpa, io, name);
+    const current = try repo.refStore().resolve(gpa, io, name);
     defer if (current) |c| gpa.free(c.name);
     var tx = repo.beginRefs();
     defer tx.deinit(io);
@@ -680,7 +680,7 @@ fn updateTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remo
         try tx.commit(io, null);
         const path = try @import("reflog.zig").pathFor(gpa, name);
         defer gpa.free(path);
-        repo.refs.dirFor(name).deleteFile(io, path) catch {};
+        repo.refStore().dirFor(name).deleteFile(io, path) catch {};
         return;
     }
     if (current) |c| {
@@ -690,7 +690,6 @@ fn updateTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remo
     try tx.commit(io, .{ .who = who, .message = "update by push", .policy = repo.reflogPolicy() });
 }
 
-const builtin = @import("builtin");
 const testing = std.testing;
 const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
@@ -929,7 +928,7 @@ fn tagTarget(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) !Oid {
     defer repo.deinit(io);
     const full = try std.fmt.allocPrint(gpa, "refs/tags/{s}", .{name});
     defer gpa.free(full);
-    const resolved = (try repo.refs.resolve(gpa, io, full)).?;
+    const resolved = (try repo.refStore().resolve(gpa, io, full)).?;
     defer gpa.free(resolved.name);
     return repo.peel(io, resolved.oid);
 }

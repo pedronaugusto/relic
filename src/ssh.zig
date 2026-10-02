@@ -294,7 +294,6 @@ test "a path is quoted as git's sq_quote quotes it" {
     try testing.expectEqualStrings("git-upload-pack '/srv/it'\\''s'\\!''", try remoteCommand(arena, "git-upload-pack", "/srv/it's!"));
 }
 
-const builtin = @import("builtin");
 const testremote = @import("testremote.zig");
 
 test "ssh without the permission to run it, or a port a simple ssh cannot take, is refused by name" {

@@ -258,7 +258,7 @@ pub fn add(
         return error.InvalidWorktreeName;
     try writeLine(io, admin, "gitdir", gitfile_path);
 
-    if (reftablestack.isReftableRepository(io, common_dir)) {
+    if (try reftablestack.isReftableRepository(io, common_dir)) {
         // `HEAD` goes into a stack of the worktree's own, which is what git
         // reads there, and the file beside it is the placeholder.
         var config = try config_mod.Config.openFile(gpa, io, .{ .dir = common_dir, .sub_path = "config" }, .local, .{});
@@ -293,7 +293,7 @@ pub fn add(
     // git creates the log directory and an empty `logs/HEAD` so the first
     // ref update in the new worktree has somewhere to go. A reftable stack
     // keeps its logs in its tables.
-    if (!reftablestack.isReftableRepository(io, common_dir)) {
+    if (!try reftablestack.isReftableRepository(io, common_dir)) {
         admin.createDirPath(io, "logs") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,

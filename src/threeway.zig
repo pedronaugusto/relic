@@ -16,8 +16,6 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object.zig");
-const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const merge = @import("merge.zig");
 const worktree = @import("worktree.zig");
@@ -206,7 +204,7 @@ fn run(
         }
     }
 
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.required_filters = try repo.requiredFilters(arena);
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
@@ -218,7 +216,7 @@ fn run(
     // whether a stored version kept its CRLF endings.
     var normalizer: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = rules.required_filters,
         .drivers = rules.filters,
@@ -242,13 +240,13 @@ fn run(
         .attributes = &attrs,
         .attributes_dir = wt,
         .configured_drivers = try configuredDrivers(arena, repo),
-        .default_driver = repo.config.get("merge.default"),
+        .default_driver = repo.configuration().get("merge.default"),
         .submodules = .{ .context = &submodules, .openFn = SubmoduleOpener.open },
-        .abbrev_len = @import("abbrev.zig").defaultLength(&repo.config, db),
+        .abbrev_len = @import("abbrev.zig").defaultLength(repo.configuration(), db),
         .blocked = options.blocked,
         .renormalize = if (settings.renormalize) &normalizer else null,
         .attributes_from_merge = if (wt.access(io, ".gitattributes", .{})) |_| false else |_| true,
-        .inner_messages = options.inner_messages or (repo.config.getInt("merge.verbosity", 2) catch 2) >= 5,
+        .inner_messages = options.inner_messages or (repo.configuration().getInt("merge.verbosity", 2) catch 2) >= 5,
     };
     var merged = switch (sides) {
         .trees => |t| try ort.mergeTrees(gpa, io, db, t.base, t.ours, t.theirs, ort_options),
@@ -337,7 +335,7 @@ fn run(
         _ = merged_entries.remove(".gitattributes");
         if (merged.merged_attributes_blob) |oid| {
             const found = try db.read(io, oid);
-            defer db.gpa.free(found.bytes);
+            defer db.allocator().free(found.bytes);
             try write_attrs.addText(try arena.dupe(u8, found.bytes), "", ".gitattributes", 1);
         }
     }
@@ -347,7 +345,7 @@ fn run(
 
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
-        .kind = db.kind,
+        .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = rules.required_filters,
         .drivers = rules.filters,
@@ -474,14 +472,14 @@ const SubmoduleOpener = struct {
         errdefer opened.repo.deinit(s.io);
         var tips: std.ArrayList(Oid) = .empty;
         errdefer tips.deinit(s.gpa);
-        if (try opened.repo.refs.resolve(s.gpa, s.io, "HEAD")) |r| {
+        if (try opened.repo.refStore().resolve(s.gpa, s.io, "HEAD")) |r| {
             s.gpa.free(r.name);
             try tips.append(s.gpa, r.oid);
         }
-        var listing = try opened.repo.refs.list(s.gpa, s.io, "refs/");
+        var listing = try opened.repo.refStore().list(s.gpa, s.io, "refs/");
         defer listing.deinit();
         for (listing.entries) |entry| {
-            const resolved = (try opened.repo.refs.resolve(s.gpa, s.io, entry.name)) orelse continue;
+            const resolved = (try opened.repo.refStore().resolve(s.gpa, s.io, entry.name)) orelse continue;
             s.gpa.free(resolved.name);
             const peeled = opened.repo.peel(s.io, resolved.oid) catch continue;
             try tips.append(s.gpa, peeled);
@@ -503,9 +501,9 @@ fn configuredSettings(repo: *Repository, options: Options) Error!strategy.Settin
         .minimal = options.blob.minimal,
         .whitespace = options.blob.whitespace,
         .renames = configuredRenames(repo),
-        .renormalize = repo.config.getBool("merge.renormalize", false) catch false,
+        .renormalize = repo.configuration().getBool("merge.renormalize", false) catch false,
     };
-    if (repo.config.get("diff.algorithm")) |text| {
+    if (repo.configuration().get("diff.algorithm")) |text| {
         settings.configureAlgorithm(text) orelse return error.UnknownDiffAlgorithm;
     }
     for (options.strategy_options) |word| try settings.apply(word);
@@ -515,7 +513,7 @@ fn configuredSettings(repo: *Repository, options: Options) Error!strategy.Settin
 /// `merge.renameLimit`, then `diff.renameLimit`; zero for git's default.
 fn configuredRenameLimit(repo: *Repository) i64 {
     for ([_][]const u8{ "merge.renamelimit", "diff.renamelimit" }) |key| {
-        const text = repo.config.get(key) orelse continue;
+        const text = repo.configuration().get(key) orelse continue;
         return config_mod.parseInt(text) catch 0;
     }
     return 0;
@@ -524,7 +522,7 @@ fn configuredRenameLimit(repo: *Repository) i64 {
 /// `merge.directoryRenames`: `true`, `false` or `conflict`, which is the
 /// default.
 fn configuredDirectoryRenames(repo: *Repository) ort.DirectoryRenames {
-    const text = repo.config.get("merge.directoryrenames") orelse return .conflict;
+    const text = repo.configuration().get("merge.directoryrenames") orelse return .conflict;
     if (config_mod.parseBool(text)) |on| return if (on) .on else .off else |_| {}
     return .conflict;
 }
@@ -547,7 +545,7 @@ fn lessThanConflict(_: void, a: Conflict, b: Conflict) bool {
 /// `diff.renames`, and on when neither says otherwise. `copies` is on.
 fn configuredRenames(repo: *Repository) bool {
     for ([_][]const u8{ "merge.renames", "diff.renames" }) |key| {
-        const text = repo.config.get(key) orelse continue;
+        const text = repo.configuration().get(key) orelse continue;
         if (std.ascii.eqlIgnoreCase(text, "copies") or std.ascii.eqlIgnoreCase(text, "copy")) return true;
         return config_mod.parseBool(text) catch true;
     }
@@ -556,11 +554,11 @@ fn configuredRenames(repo: *Repository) bool {
 
 /// The names `merge.<name>.driver` configures.
 fn configuredDrivers(arena: Allocator, repo: *Repository) Allocator.Error![]const []const u8 {
-    const names = try repo.config.subsections(arena, "merge");
+    const names = try repo.configuration().subsections(arena, "merge");
     var out: std.ArrayList([]const u8) = .empty;
     for (names) |name| {
         const key = try std.fmt.allocPrint(arena, "merge.{s}.driver", .{name});
-        if (repo.config.get(key) != null) try out.append(arena, name);
+        if (repo.configuration().get(key) != null) try out.append(arena, name);
     }
     return out.items;
 }

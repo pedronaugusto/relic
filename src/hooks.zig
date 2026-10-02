@@ -951,14 +951,6 @@ fn testEnviron(gpa: Allocator) !std.process.Environ.Map {
     return map;
 }
 
-fn writeHook(io: Io, dir: Io.Dir, path: []const u8, body: []const u8) !void {
-    if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(io, parent);
-    try dir.writeFile(io, .{ .sub_path = path, .data = body });
-    const file = try dir.openFile(io, path, .{});
-    defer file.close(io);
-    try file.setPermissions(io, .fromMode(0o755));
-}
-
 fn openRunner(gpa: Allocator, io: Io, repo: *testgit.Repo, environ: *const std.process.Environ.Map, config_text: []const u8) !struct { runner: Runner, config: config_mod.Config, git_dir: Io.Dir } {
     var git_dir = try repo.gitDir(io);
     errdefer git_dir.close(io);

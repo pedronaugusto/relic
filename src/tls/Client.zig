@@ -18,6 +18,7 @@
 //! `lib/std/crypto/tls/Client.zig` with the changes in `Client.zig.diff`
 //! beside it, and nothing else. They are:
 //!
+//! - the upstream cipher timing table moved to the bench branch;
 //! - this comment, and the imports: `std` by name, `ClientAuth`,
 //!   `PrivateKey`, and the helpers in `auth_wire.zig`;
 //! - `Options.client_auth` and `Options.certificate_requested`, 64 more
@@ -1818,27 +1819,8 @@ fn tryDownloadRootCert(chain: *Certificate.Chain, options: *const Options) !void
     return error.TlsCertificateNotVerified;
 }
 
-/// The priority order here is chosen based on what crypto algorithms Zig has
-/// available in the standard library as well as what is faster. Following are
-/// a few data points on the relative performance of these algorithms.
-///
-/// Measurement taken with 0.11.0-dev.810+c2f5848fe
-/// on x86_64-linux Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz:
-/// zig run .lib/std/crypto/benchmark.zig -OReleaseFast
-///       aegis-128l:      15382 MiB/s
-///        aegis-256:       9553 MiB/s
-///       aes128-gcm:       3721 MiB/s
-///       aes256-gcm:       3010 MiB/s
-/// chacha20Poly1305:        597 MiB/s
-///
-/// Measurement taken with 0.11.0-dev.810+c2f5848fe
-/// on x86_64-linux Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz:
-/// zig run .lib/std/crypto/benchmark.zig -OReleaseFast -mcpu=baseline
-///       aegis-128l:        629 MiB/s
-/// chacha20Poly1305:        529 MiB/s
-///        aegis-256:        461 MiB/s
-///       aes128-gcm:        138 MiB/s
-///       aes256-gcm:        120 MiB/s
+/// Cipher priority follows the algorithms available in std and whether
+/// hardware AES support is available. Measurements live on the bench branch.
 const cipher_suites = if (crypto.core.aes.has_hardware_support)
     array(u16, tls.CipherSuite, .{
         .AEGIS_128L_SHA256,

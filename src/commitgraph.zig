@@ -72,10 +72,13 @@ pub const Graph = struct {
     pub fn open(gpa: Allocator, io: Io, objects_dir: Io.Dir, kind: hash.Kind) Error!?Graph {
         if (objects_dir.access(io, "info/commit-graphs/commit-graph-chain", .{})) |_| {
             return error.SplitGraphUnsupported;
-        } else |_| {}
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => |failure| return failure,
+        }
         const bytes = (try fs.readFileAlloc(gpa, io, objects_dir, "info/commit-graph", 1 << 30)) orelse
             return null;
-        errdefer gpa.free(bytes);
+        // parse takes ownership on success and failure.
         return try parse(gpa, kind, bytes);
     }
 
@@ -352,5 +355,34 @@ fn fuzzGraph(_: void, smith: *std.testing.Smith) anyerror!void {
         _ = graph.commitAt(i) catch {};
         const parents = graph.parentsOf(gpa, i) catch continue;
         gpa.free(parents);
+    }
+}
+
+test "a refused on-disk commit graph releases its bytes once" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "info");
+    try tmp.dir.writeFile(io, .{ .sub_path = "info/commit-graph", .data = "nope" });
+    try std.testing.expectError(error.NotACommitGraph, Graph.open(gpa, io, tmp.dir, .sha1));
+}
+
+test "commit graph chain discovery preserves filesystem refusals" {
+    const Probe = struct {
+        var refusal: Io.Dir.AccessError = error.AccessDenied;
+        fn access(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
+            return refusal;
+        }
+    };
+    const base = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var vtable = base.vtable.*;
+    vtable.dirAccess = Probe.access;
+    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+    for ([_]Io.Dir.AccessError{ error.AccessDenied, error.InputOutput, error.Canceled }) |err| {
+        Probe.refusal = err;
+        try std.testing.expectError(err, Graph.open(std.testing.allocator, io, tmp.dir, .sha1));
     }
 }

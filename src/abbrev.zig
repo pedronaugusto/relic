@@ -24,7 +24,7 @@ pub const fallback = 7;
 /// The length `core.abbrev` asks for, or git's automatic one when it says
 /// `auto` or nothing. `false` asks for whole names.
 pub fn defaultLength(config: *const config_mod.Config, db: *const odb_mod.Odb) usize {
-    const hex_len = db.kind.hexLen();
+    const hex_len = db.objectFormat().hexLen();
     if (config.get("core.abbrev")) |text| {
         if (!std.ascii.eqlIgnoreCase(text, "auto")) {
             if (config_mod.parseInt(text)) |n| {
@@ -44,8 +44,8 @@ pub fn defaultLength(config: *const config_mod.Config, db: *const odb_mod.Odb) u
 /// bits, rounded up, and never fewer than seven.
 pub fn automaticLength(db: *const odb_mod.Odb) usize {
     var count: u64 = 0;
-    for (db.sources.items) |*source| {
-        for (source.packs.items) |*p| count += p.index.count;
+    for (@import("odbstate.zig").get(db._state).sources.items) |*source| {
+        for (source.packs.items) |*p| count += p.pack.index.count;
     }
     // The most significant bit's place, plus one; zero objects is one bit,
     // as in git.
@@ -78,6 +78,7 @@ test "a short name grows until it names one object" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "objects/pack");
     const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
     var db = try odb_mod.Odb.openAt(gpa, io, objects, .sha1, .{});
     defer db.deinit(io);
 

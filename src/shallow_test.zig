@@ -94,7 +94,7 @@ fn expectSameShallow(gpa: Allocator, io: Io, by_git: Io.Dir, by_relic: Io.Dir) !
     defer gpa.free(head_text);
     var walk: revwalk.Walk = .init(gpa, &repo.odb);
     defer walk.deinit();
-    try walk.push(try Oid.parse(repo.kind, head_text));
+    try walk.push(try Oid.parse(repo.objectFormat(), head_text));
     const count_text = try git(gpa, io, by_relic, &.{ "rev-list", "--count", "HEAD" });
     defer gpa.free(count_text);
     try testing.expectEqual(try std.fmt.parseUnsigned(usize, count_text, 10), try walk.count(io));

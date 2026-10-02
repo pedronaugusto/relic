@@ -13,7 +13,7 @@
 //! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs`. | `reflog`, `reftable`, `reftablestack` |
 //! | `config` | `Config`: git's configuration files, lossless. | `userconfig` |
 //! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex` |
-//! | `worktree` | Staging, writing a tree, checking one out, status. | `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `safepath` |
+//! | `worktree` | Staging, writing a tree, checking one out, status. | `snapshot`, `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `safepath` |
 //! | `wildmatch` | Match a glob directly with git's pathname and case-fold flags. | |
 //! | `diff` | Tree against tree, blob against blob, unified text. | `textdiff`, `rename`, `similarity`, `patchid` |
 //! | `revwalk` | Walking history, merge bases. | `revparse`, `shallow` |
@@ -83,6 +83,7 @@ test {
         _ = @import("worktree_test.zig");
         _ = @import("repo_test.zig");
         _ = @import("concurrency_test.zig");
+        _ = @import("workcount_test.zig");
         _ = @import("diff_test.zig");
         _ = @import("submodule_test.zig");
         _ = @import("filter_test.zig");
@@ -91,6 +92,7 @@ test {
         _ = @import("testremote.zig");
         _ = @import("transport_test.zig");
         _ = @import("stash_test.zig");
+        _ = @import("snapshot_test.zig");
         _ = @import("signing_test.zig");
         _ = @import("embedded_repo_test.zig");
         _ = @import("config_refresh_test.zig");

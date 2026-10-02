@@ -97,8 +97,8 @@ pub const Outcome = struct {
 /// Whether rerere runs here: `rerere.enabled`, or, unset, whether
 /// `.git/rr-cache` is there.
 pub fn enabled(io: Io, repo: *Repository) bool {
-    const setting = repo.config.getBool("rerere.enabled", false) catch null;
-    if (repo.config.get("rerere.enabled") == null) return head_mod.stateExists(io, repo.common_dir, "rr-cache");
+    const setting = repo.configuration().getBool("rerere.enabled", false) catch null;
+    if (repo.configuration().get("rerere.enabled") == null) return head_mod.stateExists(io, repo.common_dir, "rr-cache");
     return setting orelse false;
 }
 
@@ -119,16 +119,6 @@ const Run = struct {
     rules: worktree.Rules,
     /// Per conflict name, which variants have a preimage and a postimage.
     dirs: std.StringHashMapUnmanaged(std.ArrayList(u8)) = .empty,
-
-    fn cache(r: *Run) Error!Io.Dir {
-        return r.repo.common_dir.openDir(r.io, "rr-cache", .{}) catch |err| switch (err) {
-            error.FileNotFound => {
-                r.repo.common_dir.createDirPath(r.io, "rr-cache") catch {};
-                return r.repo.common_dir.openDir(r.io, "rr-cache", .{ .iterate = true }) catch |e| return e;
-            },
-            else => |e| return e,
-        };
-    }
 
     fn pathOf(r: *Run, id: Id, file: []const u8) Allocator.Error![]const u8 {
         if (id.variant <= 0) return std.fmt.allocPrint(r.arena, "rr-cache/{s}/{s}", .{ id.hex, file });
@@ -318,10 +308,10 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
 
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = wt, .rules = rules };
-    const autoupdate = options.autoupdate orelse (repo.config.getBool("rerere.autoupdate", false) catch false);
+    const autoupdate = options.autoupdate orelse (repo.configuration().getBool("rerere.autoupdate", false) catch false);
 
     var rr = try readMergeRr(&r);
 
@@ -349,7 +339,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
     // `do_plain_rerere`.
     for (conflicts.items) |path| {
         const bytes = readWorktree(&r, path) orelse continue;
-        const n = try normalize(arena, bytes, try r.markerSize(path), repo.kind);
+        const n = try normalize(arena, bytes, try r.markerSize(path), repo.objectFormat());
         if (n.conflicts != 0) {
             if (rr.get(path)) |existing| {
                 if (existing) |id| try removeVariant(&r, id);
@@ -396,7 +386,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
 /// scanned on the way.
 fn readMergeRr(r: *Run) Error!std.StringArrayHashMapUnmanaged(?Id) {
     const text = (try head_mod.readState(r.arena, r.io, r.repo.git_dir, "MERGE_RR")) orelse return .empty;
-    var rr = try parseMergeRr(r.arena, text, r.repo.kind);
+    var rr = try parseMergeRr(r.arena, text, r.repo.objectFormat());
     for (rr.values()) |slot| {
         const id = slot.?;
         try fit(r.arena, try r.status(id.hex), id.variant);
@@ -481,7 +471,7 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
     // Resolved by hand already?
     if (id.variant >= 0) {
         if (readWorktree(r, path)) |bytes| {
-            const n = try normalize(r.arena, bytes, size, r.repo.kind);
+            const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
             if (n.conflicts == 0) {
                 try r.writeFile(try r.pathOf(id, "postimage"), bytes);
                 st.items[@intCast(id.variant)] |= has_postimage;
@@ -509,7 +499,7 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
     }
     try fit(r.arena, st, id.variant);
     if (readWorktree(r, path)) |bytes| {
-        const n = try normalize(r.arena, bytes, size, r.repo.kind);
+        const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
         try r.writeFile(try r.pathOf(id, "preimage"), n.text);
     }
     if (st.items[@intCast(id.variant)] & has_postimage != 0) {
@@ -524,7 +514,7 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
 /// the conflict at `path`; the file is rewritten when that is clean.
 fn replay(r: *Run, vid: Id, path: []const u8, size: usize) Error!bool {
     const bytes = readWorktree(r, path) orelse return false;
-    const n = try normalize(r.arena, bytes, size, r.repo.kind);
+    const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
     if (n.conflicts < 0) return false;
     try r.writeFile(try r.pathOf(vid, "thisimage"), n.text);
     const merged = (try tryMerge(r, vid, path, n.text, size)) orelse return false;
@@ -546,7 +536,7 @@ fn tryMerge(r: *Run, vid: Id, path: []const u8, cur: []const u8, size: usize) Er
 fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs: []const u8, size: usize, labels: blobmerge.Labels) Error!struct { bytes: []const u8, clean: bool } {
     // `find_ll_merge_driver`: set is text, unset binary, a name the driver
     // of that name, and nothing said `merge.default`.
-    var name: ?[]const u8 = r.repo.config.get("merge.default");
+    var name: ?[]const u8 = r.repo.configuration().get("merge.default");
     if (r.rules.attrs) |attrs| {
         const applied = try attrs.lookup(r.arena, path, false);
         if (applied.get("merge")) |state| switch (state) {
@@ -558,13 +548,13 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
     }
     var favor: blobmerge.Favor = .none;
     if (name) |driver| {
-        if (r.repo.config.get(try std.fmt.allocPrint(r.arena, "merge.{s}.driver", .{driver})) != null) {
+        if (r.repo.configuration().get(try std.fmt.allocPrint(r.arena, "merge.{s}.driver", .{driver})) != null) {
             return error.UnsupportedMergeDriver;
         } else if (std.mem.eql(u8, driver, "binary")) {
             return .{ .bytes = ours, .clean = false };
         } else if (std.mem.eql(u8, driver, "union")) favor = .union_;
     }
-    const style_text = r.repo.config.get("merge.conflictstyle");
+    const style_text = r.repo.configuration().get("merge.conflictstyle");
     const style = if (style_text) |text| blobmerge.ConflictStyle.parse(text) orelse .merge else .merge;
     var merged = blobmerge.blobs(r.arena, base, ours, theirs, .{
         .labels = labels,
@@ -608,7 +598,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Error!void {
     const arena = arena_instance.allocator();
     var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = repo.work_dir orelse return error.BareRepository, .rules = .{} };
     if (try head_mod.readState(arena, io, repo.git_dir, "MERGE_RR")) |text| {
-        const hex_len = repo.kind.hexLen();
+        const hex_len = repo.objectFormat().hexLen();
         var records = std.mem.splitScalar(u8, text, 0);
         while (records.next()) |record| {
             if (record.len < hex_len + 2) continue;
@@ -683,7 +673,7 @@ pub const Paths = struct {
 
 fn startRun(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, attrs: ?*attributes.Attrs) Error!Run {
     const wt = repo.work_dir orelse return error.BareRepository;
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = attrs;
     return .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = wt, .rules = rules };
 }
@@ -915,11 +905,11 @@ fn handleCache(r: *Run, path: []const u8, stages: Stages, size: usize) Error!Nor
     for (stages, &texts) |stage, *text| {
         const s = stage orelse continue;
         const found = try r.repo.odb.read(r.io, s.oid);
-        defer r.repo.odb.gpa.free(found.bytes);
+        defer r.repo.odb.allocator().free(found.bytes);
         text.* = try r.arena.dupe(u8, found.bytes);
     }
     const merged = try llMerge(r, path, texts[0], texts[1], texts[2], size, .{ .ours = "ours", .base = "", .theirs = "theirs" });
-    return normalize(r.arena, merged.bytes, size, r.repo.kind);
+    return normalize(r.arena, merged.bytes, size, r.repo.objectFormat());
 }
 
 /// Whether git's plain pathspec `items` names `path`: the path itself, a
@@ -970,8 +960,8 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now: i64) Error!void {
     var names: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (entry.name.len != repo.kind.hexLen()) continue;
-        _ = Oid.parse(repo.kind, entry.name) catch continue;
+        if (entry.name.len != repo.objectFormat().hexLen()) continue;
+        _ = Oid.parse(repo.objectFormat(), entry.name) catch continue;
         try names.append(arena, try arena.dupe(u8, entry.name));
     }
     var to_remove: std.ArrayList([]const u8) = .empty;
@@ -1015,7 +1005,7 @@ fn mtimeOf(r: *Run, sub: []const u8) Error!i64 {
 /// `repo_config_get_expiry_in_days`: a number of days before `now`, or
 /// `never` and `false` for none, `now` and `all` for everything.
 fn expiryInDays(repo: *Repository, key: []const u8, cutoff: *i64, now: i64) Error!void {
-    const text = repo.config.get(key) orelse return;
+    const text = repo.configuration().get(key) orelse return;
     if (config_mod.parseInt(text)) |days| {
         if (days >= std.math.minInt(i32) and days <= std.math.maxInt(i32)) {
             cutoff.* = now - days * 86400;

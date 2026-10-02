@@ -28,7 +28,6 @@ const fs = @import("fs.zig");
 const refs_mod = @import("refs.zig");
 const reflog = @import("reflog.zig");
 const repo_mod = @import("repo.zig");
-const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
 const revwalk = @import("revwalk.zig");
 const fetchpack = @import("fetchpack.zig");
@@ -251,7 +250,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     errdefer outcome.arena.deinit();
     const arena = outcome.arena.allocator();
 
-    var remote = try remote_mod.Remote.get(gpa, &repo.config, remote_name);
+    var remote = try remote_mod.Remote.get(gpa, repo.configuration(), remote_name);
     defer remote.deinit();
 
     const rla = options.reflog_action orelse blk: {
@@ -280,27 +279,27 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 
     // The current branch's merge settings, when it follows this remote.
     var branch_merge: []const []const u8 = &.{};
-    const current = try repo.refs.currentBranch(gpa, io);
+    const current = try repo.refStore().currentBranch(gpa, io);
     defer if (current) |c| gpa.free(c);
     var branch_config: ?remote_mod.Branch = null;
     defer if (branch_config) |*b| b.deinit();
     if (current) |name| {
-        branch_config = try remote_mod.Branch.get(gpa, &repo.config, name);
+        branch_config = try remote_mod.Branch.get(gpa, repo.configuration(), name);
         const b = &branch_config.?;
         if (b.merge.len != 0 and b.remote != null and remote.name != null and std.mem.eql(u8, b.remote.?, remote.name.?)) {
             branch_merge = b.merge;
         }
     }
 
-    const follow_head = cli_specs.items.len == 0 and remote.name != null and followRemoteHead(&repo.config, remote.name.?);
+    const follow_head = cli_specs.items.len == 0 and remote.name != null and followRemoteHead(repo.configuration(), remote.name.?);
 
     // A promisor remote's packs are filtered as the clone was, and what
     // they leave out is promised rather than missing.
-    const promisor = remote.name != null and partial.isPromisor(&repo.config, remote.name.?);
+    const promisor = remote.name != null and partial.isPromisor(repo.configuration(), remote.name.?);
     const filter_spec: ?[]const u8 = blk: {
         const spec = options.filter orelse if (promisor) configured: {
             const key = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{remote.name.?});
-            const raw = repo.config.get(key) orelse break :configured null;
+            const raw = repo.configuration().get(key) orelse break :configured null;
             break :configured try config_mod.unquote(arena, raw);
         } else null;
         const text = spec orelse break :blk null;
@@ -309,9 +308,9 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     };
 
     const url = remote.urls[0];
-    var session = try transport.Session.open(gpa, io, url, .upload_pack, repo.kind, .{
+    var session = try transport.Session.open(gpa, io, url, .upload_pack, repo.objectFormat(), .{
         .programs = options.programs,
-        .config = &repo.config,
+        .config = repo.configuration(),
         .service_program = remote.upload_pack,
         .progress = options.progress,
         .prompt = options.prompt,
@@ -335,7 +334,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     defer remote_refs.deinit();
 
     // The local refs, by name.
-    var local_refs = try repo.refs.list(gpa, io, "refs/");
+    var local_refs = try repo.refStore().list(gpa, io, "refs/");
     defer local_refs.deinit();
     var local = try LocalIndex.init(gpa, &local_refs);
     defer local.deinit(gpa);
@@ -453,7 +452,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => {},
     };
-    if (try repo.refs.read(gpa, io, "HEAD")) |head| switch (head) {
+    if (try repo.refStore().read(gpa, io, "HEAD")) |head| switch (head) {
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => |target| gpa.free(target),
     };
@@ -486,7 +485,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     }, .{
         .warnings = options.warnings,
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config), .links = &links, .threads = indexpack.configuredThreads(&repo.config) },
+        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(repo.configuration()), .links = &links, .threads = indexpack.configuredThreads(repo.configuration()) },
         .shallow_info = &shallow_info,
     });
     outcome.pack = fetched.pack;
@@ -530,7 +529,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
                 .tips = tips.items,
                 .common_tips = common_tips.items,
                 .include_tag = false,
-            }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(&repo.config), .threads = indexpack.configuredThreads(&repo.config) } });
+            }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(repo.configuration()), .threads = indexpack.configuredThreads(repo.configuration()) } });
         }
     }
 
@@ -546,7 +545,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
             var hex: [hash.max_hex_len]u8 = undefined;
             var idx_buf: [96]u8 = undefined;
             const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
-            fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.kind, 1 << 30);
+            fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
         }
         if (fresh) |*index| {
             objectwalk.checkReceived(gpa, io, &repo.odb, all_tips.items, index, &links, options.missing, .{ .promisor = promisor }) catch |err| switch (err) {
@@ -931,9 +930,9 @@ fn rootsReached(arena: Allocator, io: Io, repo: *Repository, tip: Oid, roots: *c
         }
         if (boundary.contains(oid) or (try index.find(oid)) == null) continue;
         const found = repo.odb.read(io, oid) catch continue;
-        defer repo.odb.gpa.free(found.bytes);
+        defer repo.odb.allocator().free(found.bytes);
         if (found.type != .commit) continue;
-        var commit = try object.Commit.parse(arena, repo.kind, found.bytes);
+        var commit = try object.Commit.parse(arena, repo.objectFormat(), found.bytes);
         defer commit.deinit();
         for (commit.parents) |p| try stack.append(arena, p);
     }
@@ -996,8 +995,9 @@ fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repositor
     // The main working tree's `HEAD` is the shared directory's, whichever
     // worktree this repository was opened from.
     if (!repo.isBare() or repo.common_is_separate) {
-        var main_store: refs_mod.Store = .init(gpa, repo.kind, repo.common_dir, repo.common_dir);
-        const bare = repo.config.getBool("core.bare", false) catch false;
+        var main_store = try refs_mod.Store.initWithOptions(gpa, repo.objectFormat(), repo.common_dir, repo.common_dir, .{ .format = repo.refStore().refFormat() });
+        defer main_store.deinit();
+        const bare = repo.configuration().getBool("core.bare", false) catch false;
         if (!bare) {
             if (try main_store.read(gpa, io, "HEAD")) |head| switch (head) {
                 .symbolic => |target| {
@@ -1046,7 +1046,7 @@ fn decide(
     if (local.names.get(dst)) |value| {
         if (value) |oid| {
             old = oid;
-        } else if (try repo.refs.resolve(gpa, io, dst)) |resolved| {
+        } else if (try repo.refStore().resolve(gpa, io, dst)) |resolved| {
             gpa.free(resolved.name);
             old = resolved.oid;
         }
@@ -1148,7 +1148,7 @@ fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const Fe
 fn deleteLog(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Error!void {
     const path = try reflog.pathFor(gpa, name);
     defer gpa.free(path);
-    repo.refs.dirFor(name).deleteFile(io, path) catch |err| switch (err) {
+    repo.refStore().dirFor(name).deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => {},
     };
@@ -1167,7 +1167,7 @@ fn createRemoteHead(
 ) Error!void {
     var head_buf: [512]u8 = undefined;
     const local_head = std.fmt.bufPrint(&head_buf, "refs/remotes/{s}/HEAD", .{name}) catch return;
-    if (try repo.refs.read(gpa, io, local_head)) |existing| {
+    if (try repo.refStore().read(gpa, io, local_head)) |existing| {
         switch (existing) {
             .symbolic => |target| gpa.free(target),
             .direct => {},
@@ -1190,7 +1190,7 @@ fn createRemoteHead(
         if (std.mem.eql(u8, mapped, local_target)) kept = true;
     }
     if (!kept) return;
-    if (try repo.refs.resolve(gpa, io, local_target)) |resolved| {
+    if (try repo.refStore().resolve(gpa, io, local_target)) |resolved| {
         gpa.free(resolved.name);
     } else return;
     var tx = repo.beginRefs();
@@ -1458,4 +1458,26 @@ test "unshallowing a whole repository and a filtered fetch are refused by name" 
     defer repo.deinit(io);
     try testing.expectError(error.NotShallow, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true }));
     try testing.expectError(error.NotAPromisorRemote, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .filter = "blob:none" }));
+}
+
+test "a linked reftable fetch sees the main worktree branch through its backend" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 45);
+    var main = try testgit.Repo.init(gpa, io, &.{"--ref-format=reftable"});
+    defer main.deinit();
+    try main.exec(io, &.{ "commit", "--allow-empty", "-qm", "base" });
+    var linked = testing.tmpDir(.{ .iterate = true });
+    defer linked.cleanup();
+    var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const path = path_buf[0..try linked.dir.realPath(io, &path_buf)];
+    try main.exec(io, &.{ "worktree", "add", "-qb", "linked", path });
+    var repo = try Repository.open(gpa, io, linked.dir, .{});
+    defer repo.deinit(io);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const branches = try checkedOutBranches(arena.allocator(), gpa, io, &repo);
+    var main_found = false;
+    for (branches) |branch| main_found = main_found or std.mem.eql(u8, branch, "refs/heads/main");
+    try testing.expect(main_found);
 }

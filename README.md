@@ -38,7 +38,7 @@ var ignore_rules = try repo.loadIgnore(io);
 defer ignore_rules.deinit();
 var attrs = try repo.loadAttrs(io);
 defer attrs.deinit();
-var rules = repo.worktreeRules();
+var rules = try repo.worktreeRules();
 rules.ignore = &ignore_rules;
 rules.attrs = &attrs;
 
@@ -62,7 +62,7 @@ const commit = try repo.writeCommit(io, .{
     .author = who,
     .committer = who,
     .message = "first commit\n",
-});
+}, null);
 
 // Move the branch under its lock, then append the reflog.
 var tx = repo.beginRefs();
@@ -101,6 +101,94 @@ std.debug.assert(restored.written == 1);
 ```
 <!-- END GENERATED -->
 
+## Snapshots
+
+Checkout's `durability = .durable` syncs the selected file bytes, including
+files whose writes were skipped, then their directories before success.
+The default is `.none`. A snapshot store opened with `.durability = .durable`
+also makes its entire owned tree/blob closure durable before returning an ID
+and uses durable checkout for restore. `Odb.makeDurable(io, roots)` gives
+other callers the same barrier for selected objects, including commit history
+and tag targets. Record an intent only after that barrier succeeds, and record
+restoration only after durable checkout succeeds. A barrier failure is returned.
+
+Durable completion reads the object closure and opens and syncs each loose
+object or used pack/index and each affected directory. It waits on storage;
+on macOS it also requests drive-cache flushes. Directory barriers are requested
+on Windows through writable directory handles; a filesystem that refuses them
+returns an error. The caller owns durability of the supplied root directory's
+entry in its parent. Gitlinks and LFS payloads belong to separate stores.
+
+`Odb.openAt` borrows its directory handle on success and failure; close
+that original handle in the caller. Odb owns its format, sources and storage
+policy together. Use `objectFormat()`, `settings()` and `allocator()` to
+read them; changing format or storage policy requires a new database.
+Repository configuration is borrowed through `configuration()`. Apply
+in-memory changes with `editConfig(edits, diagnostic)`; a whole batch is
+validated before it replaces the old view and ref policy. Hash and backend
+changes require reopening. Changing worktree configuration sources requires
+a standalone configuration write followed by refresh; a memory-only edit
+returns `WorktreeConfigChanged`. For persisted edits, open the intended file
+with `Config.openFile`, edit and write that configuration, then refresh the
+repository. `Config.write` selects the last writable source.
+
+`worktree.snapshot.Store` records a working tree in a private object store.
+A snapshot is a tree ID. Before returning it, capture takes every tree and
+blob it reaches into the store, including unchanged objects held only by
+the source. Reads and reopening use only the private objects, never the
+source's packs or alternate metadata. A rewrite and prune in the source
+cannot make a snapshot unreadable.
+Objects already owned are not copied again; a bounded cache skips subtrees
+whose closure has been completed. Reopening rebuilds that cache as needed.
+
+```zig
+const snapshots = relic.worktree.snapshot;
+var store = try snapshots.Store.open(gpa, io, private_dir, .{
+    .kind = repo.objectFormat(),
+});
+defer store.deinit(io);
+const first = (try store.capture(io, .{ .repository = &repo }, .{})).snapshot;
+const second = (try store.capture(io, .{ .repository = &repo }, .{})).snapshot;
+var changes = try store.diff(io, first, second, .{});
+defer changes.deinit();
+_ = try store.restore(io, first, destination_dir, .{});
+```
+
+The source index supplies tracked paths, including ignored ones. Capture
+reads their working files and untracked-not-ignored files under the source's
+ignore, attribute, line-ending and filter rules, without writing its index,
+refs or objects. Present files are read afresh each time; sparse tracked
+paths absent by policy keep their indexed contents. Configured filter programs
+need `CaptureOptions.programs`; native LFS writes into the private store even
+when the source has its own `lfs.storage`. For a folder without a repository,
+pass `.{ .folder = folder_dir }`: its `.gitignore` and `.gitattributes` apply,
+and no configuration is read from outside it.
+
+Like jj's working-copy snapshots, capture includes new files automatically
+and returns the same tree for unchanged contents. Like `git stash create`,
+it leaves the working tree alone and returns an object name. The result
+needs only its tree closure, with no history parents, stash stack or index
+snapshot. Gitlinks record submodule commits rather than their files. LFS
+pointers are Git blobs; referenced LFS payloads are outside the Git object
+closure, and restoring emits pointers unless filter drivers are supplied.
+
+Restore writes an empty destination by default and refuses files in the
+way. `RestoreOptions.from` names its previous snapshot so removed paths can
+be deleted; `checkout.force` allows discarding local changes. Tree attributes
+apply on restore, and `checkout.rules` supplies additional core settings and
+filter drivers. Paths outside the previous and new snapshots are left alone.
+
+The caller serializes operations, retains tree IDs, and decides sequence
+numbers, frames and retention. The store writes no refs. Objects needed by
+retained IDs must be kept; close the store before collecting its objects
+and reopen it afterwards. To migrate existing borrowed tree IDs, call
+`store.adoptTree(io, &source_db, tree)` while their old objects still exist.
+It copies the same tree and blob closure without recapturing files, including
+objects split between the source and store, and applies the store’s durability
+policy before returning the unchanged ID. A failed capture returns no snapshot, and any
+objects already written remain reusable. Set the object database's sync
+options when retained IDs need durable objects before they are published.
+
 ## Install
 
 ```sh
@@ -112,18 +200,22 @@ const relic_dep = b.dependency("relic", .{ .target = target, .optimize = optimiz
 exe.root_module.addImport("relic", relic_dep.module("relic"));
 ```
 
-One module and no dependencies: SHA-256 and the TLS primitives come from
-`std.crypto`, SHA-1, inflate and the TLS client are in the package, so there
-is nothing to link and no build option to forward. Every function that
-allocates takes the allocator as its first argument and every function that
+One module, with [conduit](https://github.com/pedronaugusto/conduit) for
+running programs. Conduit carries its libc linkage on POSIX; Windows needs
+no C runtime. SHA-256 and the TLS primitives come from `std.crypto`; SHA-1,
+inflate and the TLS client are in the package. There is no build option to
+forward. Every function that allocates takes the allocator as its first argument and every function that
 touches the disk or the network takes a `std.Io`. Concurrent work — the delta
 search when `PackOptions.threads` asks, resolving a received pack's deltas —
 goes to the caller's executor, never to threads of the package's own. A
 process starts only through a `repo.program.Programs` the caller hands in; without
 one, a hook is not run and a setting that would run a program is a named
-refusal. The only clock read is the HTTP client's: the certificates' dates,
-and its timeouts. Everything else that needs the time takes it from the
-caller, with the identity. One word outlives a call without a caller holding
+refusal. Relic prepares git commands, scrubs the supplied environment and
+keeps the caller's launcher and execution policy; conduit spawns, feeds,
+collects, waits and kills. `program.run` applies one deadline to input, output,
+waiting and cleanup, and refuses unavailable concurrency. Clocks are read
+for program deadlines and the HTTP client's certificates and timeouts.
+Everything else that needs the time takes it from the caller, with the identity. One word outlives a call without a caller holding
 it, and it is the answer to which SHA-1 instructions this processor has,
 asked once.
 
@@ -137,7 +229,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 |---|---|
 | `repo` | `Repository.open`, `init`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. The front door. |
 | `repo.hooks` | git's hooks with git's arguments, environment and input. |
-| `repo.program` | `Programs`, `SpawnHook`, `Invocation`, `run` — the one place a process starts. `Programs.spawn` can supply process creation and termination. |
+| `repo.program` | `Programs`, `SpawnHook`, `Invocation`, `run` — the one place a process starts. `Programs.spawn` supplies creation and termination using conduit children. |
 | `repo.warning` | What git would print as a warning, as a value. |
 | `repo.fs` | `Sync`, `OnContention`, `staleReport`, `Resolution` — the lock, durability and timestamp policies every writer and every stat comparison here goes through. |
 | `hash` | `Kind` (`sha1`, `sha256`), `Oid`, `Hasher` with `Options` and `nameObject`. The hash is a parameter from the first line, not a width bolted on later. |
@@ -158,6 +250,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `config.userconfig` | Where the person's git reads its configuration from. |
 | `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
 | `index.sparseindex` | The sparse index. |
+| `worktree.snapshot` | `Store`, `capture`, `adoptTree`, `restore`, `diff`: working trees whose complete Git object closure belongs to a private store. |
 | `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
 | `worktree.worktrees` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`. |
 | `worktree.sparse`, `worktree.sparsecheckout` | `Patterns` for `info/sparse-checkout`, and cone-mode sparse checkout as an operation. |
@@ -199,8 +292,15 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `lfs.netrc` | What the LFS client reads beside: `~/.netrc`. |
 
 Every public declaration carries a doc comment stating its contract, and every
-operation has one named error set. A refusal is always a named error carrying
-the setting that caused it.
+operation has one named error set. A refusal is a named error. For a refused
+repository format or extension,
+pass a caller-owned `repo.Diagnostic` in `Repository.OpenOptions.diagnostic`:
+its `unsupported_setting` survives a failed open, and `deinit` releases its copy.
+Pass the same output to `refreshConfig`, `writeCommit`, `writeTag` or
+`writeTagWith`, or pass `null` when the setting is not needed. Each call clears
+it; the repository never retains it. `OpenDiagnostic` is an alias for `Diagnostic`.
+A refresh that changes the hash or ref backend requires reopening and returns
+`ObjectFormatChanged` or `RefStorageChanged`, keeping the old configuration and store.
 
 A ref transaction acquires and validates every loose-ref lock before it writes
 any ref. Its commit is the same sequence of per-ref renames and reflog appends
@@ -264,9 +364,9 @@ own descriptor is synced before the rename, which is the step that prevents an
 empty ref or a truncated index. Directory entries are not made durable unless
 asked: git does not do it either, and the guarantee it adds is one git does
 not make. On macOS `fsync(2)` reaches the device and not the drive's own
-cache, so `F_FULLFSYNC` is the real barrier and costs about thirty times as
-much per call, which is why it belongs at the end of a batch rather than on
-every object.
+cache, so `F_FULLFSYNC` is the real barrier. Waiting for the drive's cache
+adds a storage barrier, which is why ordinary object writes can put it at
+the end of a batch.
 
 **Every path from a tree is checked, on every platform.** A tree entry's name
 is written by whoever wrote the tree and becomes a filesystem path on
@@ -286,6 +386,19 @@ asks them. It stores no secret of its own and asks the person nothing unless
 the caller passes a prompt. When a remote refuses, the caller gets values
 rather than a sentence — which helpers were asked and what they said, what
 the server or ssh said — so it can tell the person what to fix.
+
+`transport.url.Url.parse` gives the scheme, user, host, port and path as
+slices of the supplied text. Bracketed IPv6 and ports work in scp syntax as
+well as `ssh://`; an at-sign in a repository path stays in the path.
+`file://` and local paths name local repositories. `<helper>::<address>`
+is recognized and refused as `UnsupportedTransport`, since relic does not
+run remote helpers. Callers decide which schemes and default ports name the
+same remote; they do not need to split the URL themselves.
+`transport.url.Identity.parse(gpa, text)` owns the raw text and decoded
+SSH/file URL fields under `identity.url`; release them with `deinit`.
+Decoding precedes splitting, including home paths and encoded delimiters.
+Scp shorthand and plain paths keep percent signs literal, HTTP keeps its
+encoded request path, and `identity.url.raw` always retains the original.
 
 **TLS, HTTP and inflate are relic's own, each for something the standard
 library cannot do.** Every https connection goes through relic's TLS and HTTP
@@ -320,9 +433,21 @@ TLS client, and another checks that what crosses a proxy's tunnel is TLS.
 - **inflate** is relic's because std's zlib decoder reads the Adler-32 at the
   end of a stream and does not check it, so a corrupt object would be taken
   as it came; relic's checks it and refuses what zlib refuses. It decodes a
-  pack entry into one buffer of known size, which puts a large clone's
-  inflating at zlib's speed rather than about twice it, and it is fuzzed
-  against std's decoder and compressor.
+  pack entry into one buffer of known size and is fuzzed against std's
+  decoder and compressor.
+
+The HTTP client's `connect`, `send` and `stream` take an optional caller-owned
+`transport.httpclient.Diagnostic` as their last argument. Initialize it with
+`Diagnostic.init(allocator)` and release it with `deinit`. Each exchange clears
+its diagnostic before starting. Keep it alive through connection release,
+response cleanup, streaming abort or a failed finish; separate simultaneous
+exchanges use separate diagnostics. Its TLS error, proxy status and owned
+offered schemes remain available after a failed exchange, even after the
+client is closed.
+
+A streaming request ends with `finish` or `abort`. `finish` consumes the stream
+on every outcome: the response owns the connection on success, and failure
+closes it. Abort only when giving up before finish.
 
 **A merge is git's merge-ort.** Renames, directory renames, directory/file and
 type conflicts, submodules and criss-cross histories resolve as git resolves
@@ -350,66 +475,18 @@ that choice away either: the aarch64 assembly asks for the extension itself
 and the x86-64 assembler does not gate these. One thing does take it away.
 Both arms are assembly, and the self-hosted x86-64 code generator has no
 encoding for these instructions, so a build that uses it — a Debug x86-64
-build, in practice — takes the software rounds. The aarch64 arm is what the
-figures below were measured on; the x86-64 arm is checked against the software
-rounds under emulation, on every length to eight kilobytes, and has not been
-timed on that hardware.
+build, in practice — takes the software rounds. The x86-64 arm is checked against the software rounds under emulation,
+on every length to eight kilobytes.
 
-**Speed.** `zig build test -Doptimize=ReleaseFast` runs the benchmark and
-prints these. On an Apple M3 Max, over three thousand files in sixty
-directories and 64 MiB hashed:
+Performance measurements live in the `bench` branch harness and run on a
+quiet machine. The unit suite counts objects written, fan-out directories,
+hashed files, cache-tree work, packed reads and bytes; it compares hashes,
+staged trees and pack sizes without clock ratios or speed limits.
 
-| | |
-|---|---|
-| `addAll`, nothing staged yet | 426 ms |
-| `addAll`, nothing staged yet, into one pack | 68 ms |
-| `addAll`, nothing changed | 5 ms |
-| `writeTree`, cache tree invalid | 9 ms |
-| `writeTree`, cache tree valid | under a millisecond |
-| `status`, one file in ten changed | 8 ms |
-| writing a deltified pack | 7 200 objects/s, 41 MiB/s of input |
-| SHA-1, the eighty rounds in software | 0.99 GiB/s |
-| SHA-1, the aarch64 instructions | 2.47 GiB/s |
-| SHA-1, with the collision check | 0.41 GiB/s |
-| SHA-256, from the standard library | 2.29 GiB/s |
-
-The warm numbers are what the stat shortcut and the `TREE` extension are for:
-an entry whose recorded stat still matches is neither opened nor hashed, and a
-cache-tree node that is still valid is used as it stands.
-
-The first cold number is three thousand loose objects written, and it was
-profiled before it was worked on. Naming them is under a millisecond, so it
-is not the number to read the hash by. Two calls are three quarters of it: the
-`O_CREAT|O_EXCL` that makes each temporary, at 35 µs, and the `rename` that
-finishes it, at 54 µs. Those are the filesystem's own figures — the same two
-calls straight through libc cost the same, so nothing is lost in a layer — and
-they are what one file per object costs on APFS. What was around them has
-gone: a `mkdir`, an `opendir` and a `close` per object became one `mkdir` per
-fan-out directory, of which at most two hundred and fifty-six exist; the walk
-asks the filesystem once per entry instead of twice, and on macOS once per
-*directory*; and a file whose length a stat has already reported is read
-without asking again. The benchmark asserts on the counts rather than the
-clock for that first one: three thousand objects written, at most two hundred
-and fifty-six directories made.
-
-A pack is one file where loose objects are one file each, which is the whole
-of the second row: the same three thousand files staged into one pack rather
-than three thousand loose objects is 392 ms against 68 ms, measured in one run
-of the same test, and the tree that comes out is the same tree. What it gives
-up is that another reader sees nothing until the pass is over, and that
-nothing is deltified — a delta wants the object before it and a walk hands
-them over one at a time. `Odb.repack` is what deltifies.
-
-The pack figures are a repository of twenty files each grown over six
-commits, 138 objects: the deltified pack is 29 692 bytes where the same
-objects written whole are 84 871. What the test asserts of the two is that the
-deltified one used deltas and came out smaller.
-
-What the suite holds to elsewhere is not these figures but two ratios timed in
-the same run — the warm pass against the cold one, and the hardware arm
-against the software rounds — which is what survives a runner under load and
-still fails if the shortcut or the hardware arm is lost. There is a ceiling on
-the walk as well, but it is a ceiling and not a budget.
+An entry whose recorded stat still matches is neither opened nor hashed, and
+a valid cache-tree node is used as it stands. A staging pass can put its new
+blobs into one pack instead of separate loose objects. Another reader sees
+that pack only after the pass finishes; `Odb.repack` can deltify it afterwards.
 
 **A pack is written in git's order, and nothing is taken away until it is
 there.** `odb.pack.Writer` streams the entries into a temporary and writes the
@@ -457,9 +534,9 @@ known disturbance vectors, and a block that could have come from such a pair
 is recognisable from the block alone. Per block it is a few dozen masked
 comparisons that reject nearly everything; a block that survives them has its
 sibling message reconstructed and the compression function re-run from the
-step the vector is anchored at. It costs about five times the hash, because
-the method needs the expanded message and the intermediate states, which the
-processor's SHA-1 instructions do not hand back. It reports rather than
+step the vector is anchored at. The method needs the expanded message and
+the intermediate states, which the processor's SHA-1 instructions do not
+hand back. It reports rather than
 repairs: `error.CollisionAttack`, with nothing written, in place of a quietly
 different name. And what it guards is git's object format rather than a file
 on the disk — the published colliding documents are not colliding *objects*,
@@ -530,17 +607,17 @@ refresh and re-hash the whole working tree.
 
 Planned, in the order they are likely to come; none is promised for a date.
 
-- **Object reads through relic's own inflate.** Received packs already use
-  it; checkout and object reads still inflate through the standard library.
+- **Loose object reads through relic's own inflate.** Packed object reads
+  and received packs already use it; loose reads still use the standard library.
 - **`-s subtree`** as a strategy name, beside the `-X subtree` forms.
 
 ## Platforms
 
 | Platform | What it uses there | Tested |
 |---|---|---|
-| Linux | The executable bit, symlinks, and one `statx` per entry for the index's `dev`, `uid` and `gid` alongside everything `std.Io` reports | `ubuntu-latest` in CI, four optimize modes |
-| macOS | The same through `fstatat`, and `getattrlistbulk(2)` for a whole directory at once where the volume has it, which the walk falls back from on `ENOTSUP`; `fsync` is writeout-only, which is git's own default here | `macos-latest` in CI, four optimize modes |
-| Windows | No executable bit and no `dev`, `uid` or `gid`, so the index's mode is preserved rather than invented and those three are zero; symlinks may be refused, in which case the link target is written as file content and the outcome says so; renames retry on a sharing violation | `windows-latest` in CI, four optimize modes |
+| Linux | The executable bit, symlinks, and one `statx` per entry for the index's `dev`, `uid` and `gid` alongside everything `std.Io` reports | `ubuntu-latest` in CI, Debug, ReleaseSafe and ReleaseFast |
+| macOS | The same through `fstatat`, and `getattrlistbulk(2)` for a whole directory at once where the volume has it, which the walk falls back from on `ENOTSUP`; `fsync` is writeout-only, which is git's own default here | `macos-latest` in CI, Debug and ReleaseSafe |
+| Windows | No executable bit and no `dev`, `uid` or `gid`, so the index's mode is preserved rather than invented and those three are zero; symlinks may be refused, in which case the link target is written as file content and the outcome says so; renames retry on a sharing violation | `windows-latest` in CI, Debug and ReleaseSafe |
 
 Paths in trees and in the index are always `/`-separated byte strings; the
 working-tree layer converts. `core.ignoreCase` is honoured in matching, and a
@@ -557,8 +634,8 @@ calls it.
 ## Testing
 
 ```sh
-zig build test          # the suite, and the examples, which are run
-zig build test -Dtest-filter=hooks   # run matching tests while developing
+zig build test --test-timeout 60s   # the suite, and the examples, which are run
+zig build test -Dtest-filter=hooks --test-timeout 60s   # run matching tests while developing
 zig build examples      # the examples on their own
 zig build check         # compile everything, including the tests, run nothing
 zig build test --fuzz   # the fuzz tests, until stopped
@@ -567,11 +644,11 @@ ci/tls-fork.sh --check       # the TLS client's recorded diff against std's
 ```
 
 Every test runs under `std.testing.allocator` and `std.testing.io`, against
-real directories, and CI runs the suite in Debug, ReleaseSafe, ReleaseFast and
-ReleaseSmall on each of the three platforms. The benchmark is the one
-exception and says why in its own file: it allocates from a production
-allocator, because the testing allocator's bookkeeping costs several times the
-work it is measuring.
+real directories. CI runs Debug and ReleaseSafe on all three platforms,
+ReleaseFast once on Linux, ReleaseSmall as a compile check, and ThreadSanitizer
+once on Linux. Each parity corpus seed has its own named test. The test timeout
+reports a stalled test by name; CI and the Linux script also bound each test. Speed
+measurements run only from the `bench` branch harness on a quiet machine.
 
 **The fixtures are generated by the git on the machine at test time**, in a
 temporary directory, and compared byte for byte where the format is exact.
@@ -603,7 +680,11 @@ everything written.
 runs with the system's git configuration off (`GIT_CONFIG_NOSYSTEM`), a
 scratch `HOME` holding the only global configuration it reads, a scratch
 `GNUPGHOME` where gpg is involved, no ssh or gpg agent of the person's, and no
-prompt. gpg's daemons for a scratch home are stopped with it. The tests that
+prompt. gpg's daemons for a scratch home are stopped with it. GnuPG homes
+are under `.zig-cache/gpg` by default. From a long checkout, pass
+`-Dgnupg-fixture-root=/short/path` to give the agent's Unix sockets a short
+root; only the random private homes beneath that root are removed.
+The tests that
 exercise the person's credential helpers point git at stand-ins, and check
 each one answers as a stand-in before anything is asked of it, so no test
 reaches a real keychain.

@@ -225,7 +225,7 @@ fn pointersIn(a: Allocator, io: Io, db: *odb_mod.Odb, pushed: []const odb_mod.Pa
         const header = try db.readHeader(io, e.oid);
         if (header.type != .blob or header.size >= lfs.pointer_size_cutoff or header.size == 0) continue;
         const found = try db.read(io, e.oid);
-        defer db.gpa.free(found.bytes);
+        defer db.allocator().free(found.bytes);
         const pointer = lfs.Pointer.decode(found.bytes) catch continue;
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         try out.append(a, .of(pointer, try a.dupe(u8, e.hint)));
@@ -236,7 +236,7 @@ fn pointersIn(a: Allocator, io: Io, db: *odb_mod.Odb, pushed: []const odb_mod.Pa
 /// Whether the repository has anything to do with LFS: a `filter.lfs`
 /// setting, or an LFS directory.
 fn usesLfs(io: Io, repo: *Repository) bool {
-    for (repo.config.entries.items) |entry| {
+    for (repo.configuration().entries.items) |entry| {
         if (std.ascii.eqlIgnoreCase(entry.section, "filter") and std.mem.eql(u8, entry.subsection, "lfs")) return true;
     }
     repo.common_dir.access(io, "lfs", .{}) catch return false;

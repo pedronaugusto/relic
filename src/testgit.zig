@@ -314,18 +314,12 @@ pub fn isolate(map: *Environ.Map, home: []const u8) !void {
     try map.put("GIT_TERMINAL_PROMPT", "0");
 }
 
-/// A home for gpg of a test's own, at a path short enough for its sockets.
-///
-/// gpg-agent, and keyboxd and dirmngr where they run, put their sockets in
-/// `GNUPGHOME`, and a Unix socket's path is held to 104 bytes on Darwin and
-/// 108 on Linux. A home inside a test's temporary directory lives under the
-/// checkout, so from a checkout at a long path gpg could not bind its agent
-/// ("File name too long") and every OpenPGP test failed. On Unix this home
-/// is under `/tmp`; on Windows it is under the process's temporary directory.
-/// It has a random name, the permissions gpg asks for where available, and is removed by `deinit`,
-/// which is called once gpg's daemons for it have been told to stop.
-/// Nothing of the person's is in it: the tests that use it still put it in
-/// an environment `isolate` has emptied of theirs.
+/// A home for gpg of a test's own, under the build's `gnupg-fixture-root`.
+/// The default is `.zig-cache/gpg`; a long checkout selects a short root
+/// with `zig build test -Dgnupg-fixture-root=/short/path`. Each home has a
+/// random name and private permissions where available, and `deinit`
+/// removes it after its daemons have stopped. The environment `isolate`
+/// supplies carries nothing of the person's.
 pub const GnupgHome = struct {
     gpa: Allocator,
     name: []u8,
@@ -336,11 +330,11 @@ pub const GnupgHome = struct {
         io.random(&random_bytes);
         var suffix: [16]u8 = undefined;
         _ = std.base64.url_safe_no_pad.Encoder.encode(&suffix, &random_bytes);
-        const root = if (builtin.os.tag == .windows) try std.testing.environ.getAlloc(gpa, "TEMP") else try gpa.dupe(u8, "/tmp");
+        const fixture_root = @import("build_options").gnupg_fixture_root;
+        try Io.Dir.cwd().createDirPath(io, fixture_root);
+        const root = try Io.Dir.cwd().realPathFileAlloc(io, fixture_root, gpa);
         defer gpa.free(root);
-        const name = try std.fmt.allocPrint(gpa, "relic-gpg-{s}", .{suffix});
-        defer gpa.free(name);
-        const home_path = try std.fs.path.join(gpa, &.{ root, name });
+        const home_path = try std.fs.path.join(gpa, &.{ root, &suffix });
         errdefer gpa.free(home_path);
         try Io.Dir.createDirAbsolute(io, home_path, if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700));
         return .{ .gpa = gpa, .name = home_path };
@@ -622,4 +616,25 @@ test "a repository variable in the environment cannot send the harness's git to 
     const git_dir = try repo.line(io, &.{ "rev-parse", "--absolute-git-dir" });
     defer gpa.free(git_dir);
     try std.testing.expect(!std.mem.eql(u8, git_dir, other_git));
+}
+
+test "GnuPG test homes use the selected root and clean up independently" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const root = @import("build_options").gnupg_fixture_root;
+    var first = try GnupgHome.init(gpa, io);
+    defer first.deinit(io);
+    const removed = removed: {
+        var second = try GnupgHome.init(gpa, io);
+        defer second.deinit(io);
+        break :removed try gpa.dupe(u8, second.path());
+    };
+    defer gpa.free(removed);
+    const resolved = try Io.Dir.cwd().realPathFileAlloc(io, root, gpa);
+    defer gpa.free(resolved);
+    try std.testing.expectEqualStrings(resolved, std.fs.path.dirname(first.path()).?);
+    try std.testing.expectEqualStrings(resolved, std.fs.path.dirname(removed).?);
+    try std.testing.expect(!std.mem.eql(u8, first.path(), removed));
+    try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, removed, .{}));
+    try Io.Dir.cwd().access(io, first.path(), .{});
 }

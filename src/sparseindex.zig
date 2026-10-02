@@ -168,9 +168,9 @@ fn expandTree(
 ) Error!void {
     if (depth > max_depth) return error.TreeTooDeep;
     const found = try db.read(io, oid);
-    defer db.gpa.free(found.bytes);
+    defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.NotATree;
-    const tree: object.Tree = .parse(db.kind, found.bytes);
+    const tree: object.Tree = .parse(db.objectFormat(), found.bytes);
     var it = tree.iterate();
     const base_len = base.items.len;
     while (try it.next()) |item| {
@@ -537,7 +537,7 @@ fn code(change: worktree.Change) u8 {
 fn relicStatus(gpa: Allocator, io: Io, repo: *repo_mod.Repository, index: *Index) ![]u8 {
     var ignore_rules = try repo.loadIgnore(io);
     defer ignore_rules.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     var status = try worktree.status(gpa, io, repo.work_dir.?, index, &repo.odb, .{
         .rules = rules,
@@ -603,7 +603,7 @@ test "status, write-tree and add on a sparse index say what they say on the full
     // and stages what a full index would.
     var ignore_rules = try repo.loadIgnore(io);
     defer ignore_rules.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     _ = try worktree.addAll(gpa, io, git.dir, &index, &repo.odb, .{ .rules = rules });
     _ = try worktree.addAll(gpa, io, git.dir, &full, &repo.odb, .{ .rules = rules });

@@ -220,7 +220,7 @@ pub const Applied = struct {
 /// Every stash, newest first.
 pub fn list(repo: *Repository, io: Io) Error!List {
     const gpa = repo.gpa;
-    var log = try reflog.read(gpa, io, repo.common_dir, ref_name, repo.kind);
+    var log = try reflog.read(gpa, io, repo.common_dir, ref_name, repo.objectFormat());
     errdefer log.deinit();
     const entries = try gpa.alloc(Entry, log.entries.len);
     for (entries, 0..) |*e, i| {
@@ -244,7 +244,7 @@ pub fn inspect(repo: *Repository, io: Io, commit: Oid) Error!Stash {
     const found = try repo.odb.read(io, commit);
     defer gpa.free(found.bytes);
     if (found.type != .commit) return error.NotAStash;
-    var parsed = try object.Commit.parse(gpa, repo.kind, found.bytes);
+    var parsed = try object.Commit.parse(gpa, repo.objectFormat(), found.bytes);
     defer parsed.deinit();
     if (parsed.parents.len < 2) return error.NotAStash;
     const untracked: ?Oid = if (parsed.parents.len > 2) parsed.parents[2] else null;
@@ -301,7 +301,7 @@ const Ctx = struct {
             .wt = wt,
             .ignore_rules = try repo.loadIgnore(io),
             .attrs = undefined,
-            .rules = repo.worktreeRules(),
+            .rules = try repo.worktreeRules(),
             .index = undefined,
             .programs = programs,
             .conv = undefined,
@@ -318,7 +318,7 @@ const Ctx = struct {
         ctx.index = try repo.openIndex(io);
         ctx.conv = .init(repo.gpa, io, .{
             .wt = wt,
-            .kind = repo.kind,
+            .kind = repo.objectFormat(),
             .core = ctx.rules.core,
             .required_filters = ctx.rules.required_filters,
             .drivers = filters,
@@ -388,7 +388,7 @@ const Ctx = struct {
         const oid = if (write)
             try ctx.repo.odb.write(ctx.io, .blob, content)
         else
-            hash.Hasher.object(ctx.repo.kind, "blob", content);
+            hash.Hasher.object(ctx.repo.objectFormat(), "blob", content);
         return .{ .mode = mode, .oid = oid };
     }
 
@@ -450,7 +450,7 @@ pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
 
     const head_bytes = try repo.odb.read(io, head.oid);
     defer gpa.free(head_bytes.bytes);
-    const head_commit = try object.Commit.parse(arena, repo.kind, try arena.dupe(u8, head_bytes.bytes));
+    const head_commit = try object.Commit.parse(arena, repo.objectFormat(), try arena.dupe(u8, head_bytes.bytes));
     var head_map = try worktree.flatten(arena, io, &repo.odb, head_commit.tree);
 
     // Every pathspec must name something the index tracks, unless untracked
@@ -506,11 +506,11 @@ pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
     // A log that is gone with its ref still there is cleared first, as git
     // does, so the new stash starts a list rather than joining a broken one.
     if (!try reflog.exists(io, repo.common_dir, gpa, ref_name)) {
-        if (try repo.refs.read(arena, io, ref_name)) |_| try clear(repo, io, .{ .hooks = options.hooks });
+        if (try repo.refStore().read(arena, io, ref_name)) |_| try clear(repo, io, .{ .hooks = options.hooks });
     }
 
     // `<branch>: <abbrev> <subject>`, which every message builds on.
-    const branch = (try repo.refs.currentBranch(arena, io)) orelse "(no branch)";
+    const branch = (try repo.refStore().currentBranch(arena, io)) orelse "(no branch)";
     var abbrev_buf: [hash.max_hex_len]u8 = undefined;
     const abbrev = try abbreviate(repo, io, head.oid, &abbrev_buf);
     const subject = try oneline(arena, head_commit.message);
@@ -523,7 +523,7 @@ pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
     // `U`: the untracked files, in a tree of their own.
     var untracked_commit: ?Oid = null;
     if (untracked_files.items.len != 0) {
-        var temp: Index = .initEmpty(gpa, repo.kind);
+        var temp: Index = .initEmpty(gpa, repo.objectFormat());
         defer temp.deinit();
         for (untracked_files.items) |path| {
             const s = (try ctx.side(path, null, true)) orelse continue;
@@ -536,7 +536,7 @@ pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
     // `W`: the index, with every tracked file whose content differs from
     // `HEAD` taken from the disk.
     const work_tree = blk: {
-        var temp: Index = .initEmpty(gpa, repo.kind);
+        var temp: Index = .initEmpty(gpa, repo.objectFormat());
         defer temp.deinit();
         try temp.addMany(ctx.index.entries.items);
         for (updates.items) |u| {
@@ -649,7 +649,7 @@ fn resetAfterPush(
             if (std.fs.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, ctx.wt, parent);
         }
         _ = try worktree.checkout(ctx.gpa, io, ctx.wt, &ctx.index, db, head_tree, checkout_options);
-        if (options.keep_index and !isEmptyTree(ctx.repo.kind, index_tree)) {
+        if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
             _ = try worktree.checkout(ctx.gpa, io, ctx.wt, &ctx.index, db, index_tree, checkout_options);
         }
         return;
@@ -671,7 +671,7 @@ fn resetAfterPush(
     }
     _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, &ctx.index, db, writes.items, checkout_options);
 
-    if (options.keep_index and !isEmptyTree(ctx.repo.kind, index_tree)) {
+    if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
         var index_map = try worktree.flatten(ctx.arena, io, db, index_tree);
         var keep: std.StringArrayHashMapUnmanaged(void) = .empty;
         var it = index_map.keyIterator();
@@ -702,7 +702,7 @@ fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
 /// A stash commit, written as git writes one: unsigned whatever the
 /// configuration says, because git never signs them.
 fn writeCommit(repo: *Repository, io: Io, tree: Oid, parents: []const Oid, who: object.Signature, message: []const u8) Error!Oid {
-    const bytes = object.Commit.build(repo.gpa, repo.kind, .{
+    const bytes = object.Commit.build(repo.gpa, repo.objectFormat(), .{
         .tree = tree,
         .parents = parents,
         .author = who,
@@ -722,7 +722,7 @@ fn writeCommit(repo: *Repository, io: Io, tree: Oid, parents: []const Oid, who: 
 fn abbreviate(repo: *Repository, io: Io, oid: Oid, buf: *[hash.max_hex_len]u8) Error![]const u8 {
     const hex = oid.hex(buf);
     var len: usize = 7;
-    if (repo.config.getInt("core.abbrev", 7)) |configured| {
+    if (repo.configuration().getInt("core.abbrev", 7)) |configured| {
         if (configured >= 4) len = @intCast(@min(configured, @as(i64, @intCast(hex.len))));
     } else |_| {}
     while (len < hex.len) : (len += 1) {
@@ -792,7 +792,7 @@ pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions
     const current_tree = try worktree.writeTree(gpa, io, &ctx.index, db);
 
     // `--index`: the stash's staged changes, merged onto the index as it is.
-    const use_index = options.index orelse (repo.config.getBool("stash.index", false) catch false);
+    const use_index = options.index orelse (repo.configuration().getBool("stash.index", false) catch false);
     var restored_index: ?Oid = null;
     if (use_index and !stash.base_tree.eql(stash.index_tree) and !current_tree.eql(stash.index_tree)) {
         if (!try patchApplies(gpa, io, db, stash.base_tree, current_tree, stash.index_tree)) return error.IndexConflict;
@@ -1042,11 +1042,11 @@ pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid
     while (split.next()) |line| if (line.len != 0) try lines.append(gpa, line);
     if (n >= lines.items.len) return error.NoSuchStash;
 
-    const hex_len = repo.kind.hexLen();
+    const hex_len = repo.objectFormat().hexLen();
     const gone_at = lines.items.len - 1 - n;
     const gone_line = lines.items[gone_at];
     if (gone_line.len < 2 * hex_len + 1) return error.MalformedReflogEntry;
-    const dropped = Oid.parse(repo.kind, gone_line[hex_len + 1 .. 2 * hex_len + 1]) catch return error.MalformedReflogEntry;
+    const dropped = Oid.parse(repo.objectFormat(), gone_line[hex_len + 1 .. 2 * hex_len + 1]) catch return error.MalformedReflogEntry;
     _ = lines.orderedRemove(gone_at);
 
     if (lines.items.len == 0) {
@@ -1059,12 +1059,12 @@ pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid
     var log_buffer: [4096]u8 = undefined;
     var log_lock = try fs.LockFile.open(gpa, io, repo.common_dir, log_path, &log_buffer, .{});
     defer log_lock.deinit(io);
-    var last_kept = Oid.zero(repo.kind);
+    var last_kept = Oid.zero(repo.objectFormat());
     var hex: [hash.max_hex_len]u8 = undefined;
     for (lines.items) |line| {
         if (line.len < 2 * hex_len + 1) return error.MalformedReflogEntry;
         log_lock.writer().print("{s}{s}\n", .{ last_kept.hex(&hex), line[hex_len..] }) catch return error.WriteFailed;
-        last_kept = Oid.parse(repo.kind, line[hex_len + 1 .. 2 * hex_len + 1]) catch return error.MalformedReflogEntry;
+        last_kept = Oid.parse(repo.objectFormat(), line[hex_len + 1 .. 2 * hex_len + 1]) catch return error.MalformedReflogEntry;
     }
     try log_lock.commit(io);
     if (n == 0) {
@@ -1078,7 +1078,7 @@ pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid
 pub fn clear(repo: *Repository, io: Io, options: DropOptions) Error!void {
     var arena_instance: std.heap.ArenaAllocator = .init(repo.gpa);
     defer arena_instance.deinit();
-    if (try repo.refs.read(arena_instance.allocator(), io, ref_name)) |current| {
+    if (try repo.refStore().read(arena_instance.allocator(), io, ref_name)) |current| {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         tx.hooks = options.hooks;

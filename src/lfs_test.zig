@@ -338,7 +338,7 @@ test "status names an LFS file by hashing it, and stores nothing" {
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, .{});
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
     var index = try repo.openIndex(io);

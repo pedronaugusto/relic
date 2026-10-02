@@ -171,7 +171,7 @@ pub fn loadGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const I
         const tree = (try repo.headTree(io)) orelse break :blk null;
         const found = try repo.odb.read(io, tree);
         defer gpa.free(found.bytes);
-        const parsed: object.Tree = .parse(repo.kind, found.bytes);
+        const parsed: object.Tree = .parse(repo.objectFormat(), found.bytes);
         const entry = (try parsed.find(".gitmodules")) orelse break :blk null;
         break :blk entry.oid;
     };
@@ -292,11 +292,11 @@ fn configString(arena: Allocator, config: *const config_mod.Config, key: []const
 /// path when those are set, else whether `submodule.<name>.url` is.
 pub fn isActive(arena: Allocator, repo: *Repository, name: []const u8, path: []const u8) Error!bool {
     const active_key = try configKey(arena, name, "active");
-    if (repo.config.find(active_key) != null) return repo.config.getBool(active_key, false);
-    const specs = try repo.config.all("submodule.active");
-    defer repo.config.gpa.free(specs);
+    if (repo.configuration().find(active_key) != null) return repo.configuration().getBool(active_key, false);
+    const specs = try repo.configuration().all("submodule.active");
+    defer repo.configuration().gpa.free(specs);
     if (specs.len > 0) return pathspecMatches(arena, specs, path);
-    return repo.config.get(try configKey(arena, name, "url")) != null;
+    return repo.configuration().get(try configKey(arena, name, "url")) != null;
 }
 
 /// git's pathspec match for `submodule.active`: a path, a directory above
@@ -364,11 +364,11 @@ fn matchOne(spec: []const u8, path: []const u8, literal: bool, glob: bool) bool 
 /// `branch.<name>.remote`, else the only remote when there is one, else
 /// `origin`.
 fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
-    if (try repo.refs.currentBranch(arena, io)) |branch| {
+    if (try repo.refStore().currentBranch(arena, io)) |branch| {
         const key = try std.fmt.allocPrint(arena, "branch.{s}.remote", .{branch});
-        if (try configString(arena, &repo.config, key)) |remote| return remote;
+        if (try configString(arena, repo.configuration(), key)) |remote| return remote;
     }
-    const remotes = try repo.config.subsections(arena, "remote");
+    const remotes = try repo.configuration().subsections(arena, "remote");
     if (remotes.len == 1) return remotes[0];
     return "origin";
 }
@@ -379,7 +379,7 @@ fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
 fn superprojectUrl(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
     const remote = try defaultRemote(arena, io, repo);
     const key = try std.fmt.allocPrint(arena, "remote.{s}.url", .{remote});
-    if (try configString(arena, &repo.config, key)) |url| {
+    if (try configString(arena, repo.configuration(), key)) |url| {
         if (url.len > 0) return url;
     }
     return absolutePath(arena, io, repo.work_dir orelse return error.BareRepository);
@@ -406,7 +406,7 @@ fn resolvedUrl(
     display: []const u8,
     refusal: ?*Refusal,
 ) Error![]const u8 {
-    if (try configString(arena, &repo.config, try configKey(arena, module.name, "url"))) |url| return url;
+    if (try configString(arena, repo.configuration(), try configKey(arena, module.name, "url"))) |url| return url;
     return moduleUrl(arena, io, repo, module, null, display, refusal);
 }
 
@@ -449,13 +449,13 @@ const LocalEdits = struct {
 
     fn set(e: *LocalEdits, repo: *Repository, key: []const u8, value: []const u8) Error!void {
         try e.file.setIn(.local, key, value);
-        try repo.config.setIn(.local, key, value);
+        try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = key, .value = value } }}, null);
         e.changed = true;
     }
 
     fn removeSubmodule(e: *LocalEdits, repo: *Repository, name: []const u8) Error!bool {
         const removed = try e.file.removeSectionIn(.local, "submodule", name);
-        _ = try repo.config.removeSectionIn(.local, "submodule", name);
+        _ = try repo.editConfig(&.{.{ .remove_section = .{ .level = .local, .section = "submodule", .subsection = name } }}, null);
         if (removed) e.changed = true;
         return removed;
     }
@@ -478,7 +478,7 @@ fn editConfigFile(gpa: Allocator, io: Io, dir: Io.Dir, key: []const u8, value: ?
 /// written through its lock, and in the configuration the repository holds.
 fn setInRepository(gpa: Allocator, io: Io, repo: *Repository, key: []const u8, value: []const u8) Error!void {
     try editConfigFile(gpa, io, repo.common_dir, key, value);
-    try repo.config.setIn(.local, key, value);
+    try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = key, .value = value } }}, null);
 }
 
 //=========================================================================
@@ -697,7 +697,7 @@ fn statusInto(
         const module = entry.module orelse return refuse(options.refusal, display, "", error.NoSubmoduleMapping);
         const name = try arena.dupe(u8, module.name);
         const recorded = entry.recorded orelse {
-            try out.append(arena, .{ .state = .conflict, .oid = .zero(repo.kind), .path = display, .name = name, .depth = depth });
+            try out.append(arena, .{ .state = .conflict, .oid = .zero(repo.objectFormat()), .path = display, .name = name, .depth = depth });
             continue;
         };
         var found: ?gitlink.GitDir = if (try isActive(arena, repo, module.name, entry.path))
@@ -710,7 +710,7 @@ fn statusInto(
         }
         found.?.close(io);
 
-        const checked_out = try gitlink.head(gpa, io, wt, entry.path, repo.kind);
+        const checked_out = try gitlink.head(gpa, io, wt, entry.path, repo.objectFormat());
         if (checked_out == null or checked_out.?.eql(recorded)) {
             try out.append(arena, .{ .state = .current, .oid = recorded, .path = display, .name = name, .depth = depth });
         } else {
@@ -855,12 +855,12 @@ pub const StatusProbe = struct {
     fn ignoreFor(p: *StatusProbe, arena: Allocator, path: []const u8) Error!gitmodules.Ignore {
         if (p.options.ignore) |forced| return forced;
         if (p.modules.byPath(path)) |module| {
-            if (try configString(arena, &p.repo.config, try configKey(arena, module.name, "ignore"))) |text| {
+            if (try configString(arena, p.repo.configuration(), try configKey(arena, module.name, "ignore"))) |text| {
                 return gitmodules.Ignore.parse(text) orelse error.InvalidIgnore;
             }
             if (module.ignore) |from_file| return from_file;
         }
-        if (try configString(arena, &p.repo.config, "diff.ignoresubmodules")) |text| {
+        if (try configString(arena, p.repo.configuration(), "diff.ignoresubmodules")) |text| {
             return gitmodules.Ignore.parse(text) orelse error.InvalidIgnore;
         }
         return .none;
@@ -892,7 +892,7 @@ fn inspectRepository(
     defer attrs.deinit();
     const required = try sub.requiredFilters(gpa);
     defer gpa.free(required);
-    var rules = sub.worktreeRules();
+    var rules = try sub.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     rules.required_filters = required;
@@ -966,7 +966,7 @@ pub fn init(gpa: Allocator, io: Io, repo: *Repository, options: InitOptions) Err
     var edits = try LocalEdits.open(gpa, io, repo);
     defer edits.deinit();
 
-    const only_active = options.paths == null and repo.config.has("submodule.active");
+    const only_active = options.paths == null and repo.configuration().has("submodule.active");
     for (listing.entries) |entry| {
         if (only_active) {
             const m = entry.module orelse continue;
@@ -979,13 +979,13 @@ pub fn init(gpa: Allocator, io: Io, repo: *Repository, options: InitOptions) Err
             outcome.activated += 1;
         }
         const url_key = try configKey(arena, module.name, "url");
-        if (repo.config.get(url_key) == null) {
+        if (repo.configuration().get(url_key) == null) {
             const url = try moduleUrl(arena, io, repo, module, null, entry.path, options.refusal);
             try edits.set(repo, url_key, url);
             outcome.registered += 1;
         }
         const update_key = try configKey(arena, module.name, "update");
-        if (repo.config.get(update_key) == null) {
+        if (repo.configuration().get(update_key) == null) {
             if (module.update) |strategy| try edits.set(repo, update_key, strategy.name());
         }
     }
@@ -1199,7 +1199,7 @@ fn lookupPath(io: Io, repo: *Repository, tree: Oid, path: []const u8) Error!?Oid
         const found = try repo.odb.read(io, current);
         defer repo.gpa.free(found.bytes);
         if (found.type != .tree) return null;
-        const parsed: object.Tree = .parse(repo.kind, found.bytes);
+        const parsed: object.Tree = .parse(repo.objectFormat(), found.bytes);
         const entry = (try parsed.find(part)) orelse return null;
         current = entry.oid;
     }
@@ -1451,7 +1451,7 @@ fn updateIn(
             continue;
         };
         const update_key = try configKey(arena, module.name, "update");
-        const configured: ?gitmodules.Update = if (try configString(arena, &repo.config, update_key)) |text|
+        const configured: ?gitmodules.Update = if (try configString(arena, repo.configuration(), update_key)) |text|
             gitmodules.Update.parse(text) orelse return refuse(options.refusal, display, text, error.InvalidUpdate)
         else
             module.update;
@@ -1616,7 +1616,7 @@ fn checkoutCommit(
     defer attrs.deinit();
     const required = try sub.requiredFilters(gpa);
     defer gpa.free(required);
-    var rules = sub.worktreeRules();
+    var rules = try sub.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     rules.required_filters = required;
@@ -1648,7 +1648,7 @@ fn checkoutCommit(
 
     var hex: [hash.max_hex_len]u8 = undefined;
     var from_hex: [hash.max_hex_len]u8 = undefined;
-    const from: []const u8 = if (try sub.refs.currentBranch(arena, io)) |branch|
+    const from: []const u8 = if (try sub.refStore().currentBranch(arena, io)) |branch|
         branch
     else if (try headOf(gpa, io, sub)) |old|
         try arena.dupe(u8, old.hex(&from_hex))

@@ -47,7 +47,7 @@ pub fn relicAdd(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !Oid {
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, run.drivers);
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     rules.filters = &drivers;
@@ -72,10 +72,10 @@ pub fn relicCheckout(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, tree: Oid, run
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, run.drivers);
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
-    var index = index_mod.Index.initEmpty(gpa, repo.kind);
+    var index = index_mod.Index.initEmpty(gpa, repo.objectFormat());
     defer index.deinit();
     const outcome = try worktree.checkout(gpa, io, dir, &index, &repo.odb, tree, .{
         .rules = rules,
@@ -97,7 +97,7 @@ pub fn relicStatus(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !workt
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, run.drivers);
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
     rules.filters = &drivers;
@@ -286,6 +286,16 @@ fn helperCommand(gpa: std.mem.Allocator, args: []const u8) ![]u8 {
     return testgit.fixtureCommand(gpa, build_options.filter_helper_path, args);
 }
 
+/// Give each caller its own process logs, independent of later git commands.
+fn loggedHelperCommand(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) ![]u8 {
+    const path = try dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(path);
+    if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    const arg = try std.fmt.allocPrint(gpa, "--log={s}", .{path});
+    defer gpa.free(arg);
+    return helperCommand(gpa, arg);
+}
+
 /// The requests each helper process that ran was sent, one string per
 /// process.
 fn helperLogs(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !std.ArrayList([]u8) {
@@ -307,19 +317,26 @@ fn freeLogs(gpa: std.mem.Allocator, logs: *std.ArrayList([]u8)) void {
 }
 
 test "a process filter stores what git stores, one process for the whole add" {
+    try processFilterAdd(false);
+}
+
+test "a process filter's add log excludes write-tree's racy-index recheck" {
+    try processFilterAdd(true);
+}
+
+fn processFilterAdd(racy: bool) !void {
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try environ(gpa);
     defer env.deinit();
-    var log_tmp = testing.tmpDir(.{ .iterate = true });
-    defer log_tmp.cleanup();
-    const log_path = try log_tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(log_path);
-    if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, log_path, '\\', '/');
-    const log_arg = try std.fmt.allocPrint(gpa, "--log={s}", .{log_path});
-    defer gpa.free(log_arg);
-    const command = try helperCommand(gpa, log_arg);
+    var git_logs_tmp = testing.tmpDir(.{ .iterate = true });
+    defer git_logs_tmp.cleanup();
+    var relic_logs_tmp = testing.tmpDir(.{ .iterate = true });
+    defer relic_logs_tmp.cleanup();
+    const command = try loggedHelperCommand(gpa, io, git_logs_tmp.dir);
     defer gpa.free(command);
+    const relic_command = try loggedHelperCommand(gpa, io, relic_logs_tmp.dir);
+    defer gpa.free(relic_command);
     const fail = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "fail");
     defer gpa.free(fail);
 
@@ -335,24 +352,49 @@ test "a process filter stores what git stores, one process for the whole add" {
         .{ "c.r", "" },
     });
     defer twin.deinit();
+    try twin.ours.exec(io, &.{ "config", "filter.rot.process", relic_command });
+
+    if (racy) {
+        // Only a.r is newer than the index, so write-tree rechecks just it
+        // through a fresh filter process when it saves its cache-tree.
+        for ([_][]const u8{ ".gitattributes", "sub/b.r", "c.r" }) |path| {
+            try @import("fs.zig").setTimestamps(io, twin.theirs.dir, path, .{
+                .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } },
+            });
+        }
+        const later: i96 = (Io.Clock.real.now(io).toSeconds() + 60) * std.time.ns_per_s;
+        try @import("fs.zig").setTimestamps(io, twin.theirs.dir, "a.r", .{
+            .modify_timestamp = .{ .new = .{ .nanoseconds = later } },
+        });
+    }
 
     try twin.theirs.exec(io, &.{ "add", "-A" });
+    // Snapshot only the add's requests. write-tree can start another
+    // process to check racily clean entries before it writes the index.
+    var git_logs = try helperLogs(gpa, io, git_logs_tmp.dir);
+    defer freeLogs(gpa, &git_logs);
+    try testing.expectEqual(@as(usize, 1), git_logs.items.len);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, git_logs.items[0], "clean "));
     const theirs_tree = try treeOf(gpa, io, &twin.theirs);
     const blob = try twin.theirs.run(io, &.{ "cat-file", "blob", ":a.r" });
     defer gpa.free(blob);
     try testing.expectEqualStrings("Uryyb\n", blob);
 
-    // git's process has written its log; relic's is the next one.
-    var before = try helperLogs(gpa, io, log_tmp.dir);
-    const git_processes = before.items.len;
-    freeLogs(gpa, &before);
+    if (racy) {
+        var after = try helperLogs(gpa, io, git_logs_tmp.dir);
+        defer freeLogs(gpa, &after);
+        try testing.expectEqual(@as(usize, 2), after.items.len);
+        var requests: usize = 0;
+        for (after.items) |l| requests += std.mem.count(u8, l, "clean ");
+        try testing.expectEqual(@as(usize, 4), requests);
+    }
 
     const ours_tree = try relicAdd(gpa, io, twin.ours.dir, .{ .programs = .{ .environ = &env } });
     try testing.expect(ours_tree.eql(theirs_tree));
 
-    var logs = try helperLogs(gpa, io, log_tmp.dir);
+    var logs = try helperLogs(gpa, io, relic_logs_tmp.dir);
     defer freeLogs(gpa, &logs);
-    try testing.expectEqual(git_processes + 1, logs.items.len);
+    try testing.expectEqual(@as(usize, 1), logs.items.len);
     for (logs.items) |l| try testing.expectEqual(@as(usize, 3), std.mem.count(u8, l, "clean "));
 }
 
@@ -580,7 +622,7 @@ test "status compares a filtered file through what it would be stored as" {
     defer attrs.deinit();
     var drivers = try repo.loadFilters(io, .{});
     defer drivers.deinit();
-    var rules = repo.worktreeRules();
+    var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     rules.filters = &drivers;
     var index = try repo.openIndex(io);

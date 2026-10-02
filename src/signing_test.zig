@@ -170,12 +170,12 @@ fn relicCommit(k: *Keyed, io: Io, tree_from: []const u8) !Oid {
     const tree_text = try k.repo.line(io, &.{ "rev-parse", tree_from });
     defer k.gpa.free(tree_text);
     return repo.writeCommit(io, .{
-        .tree = try Oid.parse(repo.kind, tree_text),
+        .tree = try Oid.parse(repo.objectFormat(), tree_text),
         .author = who,
         .committer = who,
         .message = "signed here\n",
         .signing = .{ .programs = k.programs() },
-    });
+    }, null);
 }
 
 fn verifyHere(k: *Keyed, io: Io, rev: []const u8, tag: bool) !signing.Verdict {
@@ -183,14 +183,14 @@ fn verifyHere(k: *Keyed, io: Io, rev: []const u8, tag: bool) !signing.Verdict {
     defer repo.deinit(io);
     const text = try k.repo.line(io, &.{ "rev-parse", rev });
     defer k.gpa.free(text);
-    const found = try repo.odb.read(io, try Oid.parse(repo.kind, text));
+    const found = try repo.odb.read(io, try Oid.parse(repo.objectFormat(), text));
     defer k.gpa.free(found.bytes);
-    var signer = try signing.Signer.init(k.gpa, &repo.config, k.programs());
+    var signer = try signing.Signer.init(k.gpa, repo.configuration(), k.programs());
     defer signer.deinit();
     return if (tag)
-        signing.verifyTag(&signer, io, repo.kind, found.bytes)
+        signing.verifyTag(&signer, io, repo.objectFormat(), found.bytes)
     else
-        signing.verifyCommit(&signer, io, repo.kind, found.bytes);
+        signing.verifyCommit(&signer, io, repo.objectFormat(), found.bytes);
 }
 
 fn bothWays(format: signing.Format, init_args: []const []const u8) !void {
@@ -233,7 +233,7 @@ fn bothWays(format: signing.Format, init_args: []const []const u8) !void {
             .name = "v-relic",
             .tagger = who,
             .message = "tagged here\n",
-        }, .{ .programs = k.programs() });
+        }, .{ .programs = k.programs() }, null);
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         try tx.create("refs/tags/v-relic", .{ .direct = tag });
@@ -335,21 +335,23 @@ test "signing configured with no programs is refused by name, never written unsi
     try fixture.exec(io, &.{ "config", "tag.forceSignAnnotated", "true" });
     var repo = try Repository.open(gpa, io, fixture.dir, .{});
     defer repo.deinit(io);
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
     const empty = hash.Hasher.object(.sha1, "tree", "");
     try testing.expectError(error.SigningRequiresPrograms, repo.writeCommit(io, .{
         .tree = empty,
         .author = who,
         .committer = who,
         .message = "m\n",
-    }));
-    try testing.expectEqualStrings("commit.gpgSign", repo.unsupportedSetting());
+    }, &diagnostic));
+    try testing.expectEqualStrings("commit.gpgSign", diagnostic.unsupported_setting);
     try testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, .{
         .target = empty,
         .target_type = .tree,
         .name = "t",
         .tagger = who,
         .message = "m\n",
-    }));
+    }, &diagnostic));
     // Asked not to sign, it writes what it was asked to.
     _ = try repo.writeCommit(io, .{
         .tree = empty,
@@ -357,7 +359,7 @@ test "signing configured with no programs is refused by name, never written unsi
         .committer = who,
         .message = "m\n",
         .signing = .{ .sign = .never },
-    });
+    }, &diagnostic);
 }
 
 test "the commit porcelain signs as commit.gpgSign says" {
@@ -402,4 +404,150 @@ test "a signing program is one path, spaces and all, as git runs it" {
     const log = try k.repo.readFile(io, "keys/my tools/log");
     defer gpa.free(log);
     try testing.expect(std.mem.count(u8, log, "used\n") >= 4);
+}
+
+test "history writes leave signing refusals in caller-owned diagnostics" {
+    const merging = @import("merging.zig");
+    const sequencer = @import("sequencer.zig");
+    const rebase = @import("rebase.zig");
+    const gpa = testing.allocator;
+    const io = testing.io;
+    inline for (.{ "commit", "merge", "conclude", "pick", "rebase" }) |operation| {
+        var fixture = try testgit.Repo.init(gpa, io, &.{});
+        defer fixture.deinit();
+        try fixture.exec(io, &.{ "commit", "--allow-empty", "-qm", "base" });
+        try fixture.exec(io, &.{ "checkout", "-qb", "topic" });
+        try fixture.writeFile(io, "topic", "topic");
+        try fixture.exec(io, &.{ "add", "." });
+        try fixture.exec(io, &.{ "commit", "-qm", "topic" });
+        try fixture.exec(io, &.{ "checkout", "-q", "main" });
+        try fixture.writeFile(io, "main", "main");
+        try fixture.exec(io, &.{ "add", "." });
+        try fixture.exec(io, &.{ "commit", "-qm", "main" });
+        if (comptime std.mem.eql(u8, operation, "rebase")) try fixture.exec(io, &.{ "checkout", "-q", "topic" });
+        var repo = try Repository.open(gpa, io, fixture.dir, .{});
+        defer repo.deinit(io);
+        var diagnostic = repo_mod.Diagnostic.init(gpa);
+        defer diagnostic.deinit();
+        try repo.editConfig(&.{.{ .set = .{ .name = "commit.gpgSign", .value = "true" } }}, null);
+        if (comptime std.mem.eql(u8, operation, "commit")) {
+            var options: commit_mod.Options = .{ .allow_empty = true };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, commit_mod.commit(&repo, io, .{ .author = who, .committer = who, .message = "m" }, options));
+        } else if (comptime std.mem.eql(u8, operation, "merge")) {
+            var options: merging.Options = .{ .who = who };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, merging.start(gpa, io, &repo, try merging.resolve(gpa, io, &repo, "topic"), options));
+        } else if (comptime std.mem.eql(u8, operation, "conclude")) {
+            var outcome = try merging.start(gpa, io, &repo, try merging.resolve(gpa, io, &repo, "topic"), .{ .who = who, .commit = false });
+            defer outcome.deinit();
+            var options: merging.ConcludeOptions = .{ .who = who };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, merging.conclude(gpa, io, &repo, options));
+        } else if (comptime std.mem.eql(u8, operation, "pick")) {
+            const target = try merging.resolve(gpa, io, &repo, "topic");
+            var options: sequencer.Options = .{ .who = who };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, sequencer.pick(gpa, io, &repo, &.{target.oid}, options));
+        } else {
+            const target = try merging.resolve(gpa, io, &repo, "main");
+            var options: rebase.Options = .{ .who = who, .force = true };
+            options.diagnostic = &diagnostic;
+            try testing.expectError(error.SigningRequiresPrograms, rebase.start(gpa, io, &repo, target.oid, options));
+        }
+        try testing.expectEqualStrings("commit.gpgSign", diagnostic.unsupported_setting);
+    }
+}
+
+test "a failed signing program leaves its stderr after the repository closes" {
+    const Output = struct {
+        fn stderr(d: *const repo_mod.Diagnostic) []const u8 {
+            return d.signing_stderr;
+        }
+    };
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testgit.fixtureHook(gpa, io, tmp.dir, "failed-signer", "reject", "1\nsigner refused this key\n");
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const executable = try std.fs.path.join(gpa, &.{ root, if (builtin.os.tag == .windows) "failed-signer.exe" else "failed-signer" });
+    defer gpa.free(executable);
+    var environ: std.process.Environ.Map = .init(gpa);
+    defer environ.deinit();
+    const programs: @import("program.zig").Programs = .{ .environ = &environ };
+    var diagnostic = repo_mod.Diagnostic.init(gpa);
+    defer diagnostic.deinit();
+    inline for (.{ "commit", "tag" }) |target| {
+        {
+            var repo = try Repository.init(gpa, io, tmp.dir, .{});
+            defer repo.deinit(io);
+            try repo.editConfig(&.{.{ .set = .{ .name = "gpg.program", .value = executable } }}, null);
+            const tree = hash.Hasher.object(.sha1, "tree", "");
+            if (comptime std.mem.eql(u8, target, "commit")) {
+                try testing.expectError(error.SigningFailed, repo.writeCommit(io, .{
+                    .tree = tree,
+                    .author = who,
+                    .committer = who,
+                    .message = "m",
+                    .signing = .{ .sign = .always, .programs = programs },
+                }, &diagnostic));
+            } else {
+                try testing.expectError(error.SigningFailed, repo.writeTagWith(io, .{
+                    .target = tree,
+                    .target_type = .tree,
+                    .name = "t",
+                    .tagger = who,
+                    .message = "m",
+                }, .{ .sign = .always, .programs = programs }, &diagnostic));
+            }
+        }
+        const expected = "signer refused this key\n";
+        const stderr = Output.stderr(&diagnostic);
+        try testing.expectEqualStrings(expected, stderr[0..@min(stderr.len, expected.len)]);
+        try testing.expectEqualStrings("", diagnostic.unsupported_setting);
+        // An unrelated failed open clears the previous signer output.
+        var not_repo = testing.tmpDir(.{});
+        defer not_repo.cleanup();
+        try testing.expectError(error.NotARepository, Repository.open(gpa, io, not_repo.dir, .{ .discover = false, .diagnostic = &diagnostic }));
+        try testing.expectEqualStrings("", Output.stderr(&diagnostic));
+        try tmp.dir.deleteTree(io, ".git");
+    }
+}
+
+test "a history refusal before writing clears an earlier diagnostic" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    inline for (.{ "commit", "merge", "sequencer", "rebase" }) |operation| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var repo = try Repository.init(gpa, io, tmp.dir, .{});
+        defer repo.deinit(io);
+        try repo.editConfig(&.{.{ .set = .{ .name = "commit.gpgSign", .value = "true" } }}, null);
+        var diagnostic = repo_mod.Diagnostic.init(gpa);
+        defer diagnostic.deinit();
+        try testing.expectError(error.SigningRequiresPrograms, repo.writeCommit(io, .{
+            .tree = hash.Hasher.object(.sha1, "tree", ""),
+            .author = who,
+            .committer = who,
+            .message = "m",
+        }, &diagnostic));
+        diagnostic.signing_stderr = try gpa.dupe(u8, "earlier signer failure");
+        if (comptime std.mem.eql(u8, operation, "commit")) {
+            try testing.expectError(error.NothingToCommit, commit_mod.commit(&repo, io, .{
+                .author = who,
+                .committer = who,
+                .message = "m",
+            }, .{ .diagnostic = &diagnostic }));
+        } else if (comptime std.mem.eql(u8, operation, "merge")) {
+            try testing.expectError(error.NoMergeInProgress, @import("merging.zig").conclude(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
+        } else if (comptime std.mem.eql(u8, operation, "sequencer")) {
+            try testing.expectError(error.NoSequencerInProgress, @import("sequencer.zig").proceed(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
+        } else {
+            try testing.expectError(error.NoRebaseInProgress, @import("rebase.zig").proceed(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
+        }
+        try testing.expectEqualStrings("", diagnostic.unsupported_setting);
+        try testing.expectEqualStrings("", diagnostic.signing_stderr);
+    }
 }

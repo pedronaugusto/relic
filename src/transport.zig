@@ -48,7 +48,6 @@ const odb_mod = @import("odb.zig");
 const pack = @import("pack.zig");
 const program = @import("program.zig");
 const config_mod = @import("config.zig");
-const indexpack = @import("indexpack.zig");
 const warning = @import("warning.zig");
 const object = @import("object.zig");
 
@@ -148,7 +147,7 @@ pub const Session = struct {
                 errdefer if (owned) gpa.destroy(here);
                 here.* = try local.Remote.open(gpa, io, remote_url);
                 errdefer if (owned) here.deinit(io);
-                if (kind) |k| if (k != here.repo.kind) return error.ObjectFormatMismatch;
+                if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 const v2 = options.protocol_v2 orelse wantsV2(options.config);
                 const conn = try uploadpack.connect(gpa, io, here, if (v2) .v2 else .v0, .{});
                 owned = false;
@@ -159,11 +158,13 @@ pub const Session = struct {
                 errdefer gpa.destroy(here);
                 here.* = try local.Remote.open(gpa, io, remote_url);
                 errdefer here.deinit(io);
-                if (kind) |k| if (k != here.repo.kind) return error.ObjectFormatMismatch;
+                if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 return .{ .gpa = gpa, .service = service, .impl = .{ .local = here } };
             },
             .ssh => {
-                const conn = try ssh.connect(gpa, io, parsed, service, .{
+                var identity = try url.Identity.parse(gpa, remote_url);
+                defer identity.deinit();
+                const conn = try ssh.connect(gpa, io, identity.url, service, .{
                     .programs = options.programs,
                     .config = options.config,
                     .service_program = options.service_program,
@@ -172,7 +173,7 @@ pub const Session = struct {
                 });
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind) catch |err| switch (err) {
-                    error.RemoteHungUp, error.ConnectionFailed, error.ProtocolError => return ssh.explain(gpa, conn, io, err, parsed, options.auth_failure),
+                    error.RemoteHungUp, error.ConnectionFailed, error.ProtocolError => return ssh.explain(gpa, conn, io, err, identity.url, options.auth_failure),
                     else => |e| return e,
                 };
             },
@@ -229,7 +230,7 @@ pub const Session = struct {
     /// The hash the remote's object names are written with.
     pub fn objectFormat(s: *const Session) hash.Kind {
         return switch (s.impl) {
-            .local => |here| here.repo.kind,
+            .local => |here| here.repo.objectFormat(),
             .smart => |smart| smart.advertisement.kind,
         };
     }

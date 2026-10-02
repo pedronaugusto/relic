@@ -5,17 +5,19 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     //=====================================================================
-    // The module. Pure Zig, no dependencies, nothing to link: zlib comes
-    // from `std.compress.flate` and the two hashes from `std.crypto`, so a
-    // consumer's build graph has nothing to configure and nothing to
-    // disagree with.
+    // The module. Conduit runs programs and carries its platform linkage;
+    // command preparation and the permission to run remain here.
     //=====================================================================
+
+    const conduit = b.dependency("conduit", .{ .target = target, .optimize = optimize }).module("conduit");
 
     const module = b.addModule("relic", .{
         .root_source_file = b.path("src/relic.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    module.addImport("conduit", conduit);
 
     //=====================================================================
     // Tests. The suite lives beside the code it tests, so the root module's
@@ -120,6 +122,11 @@ pub fn build(b: *std.Build) void {
     const install_process_fixture = b.addInstallArtifact(process_fixture, .{});
 
     const build_options = b.addOptions();
+    build_options.addOption([]const u8, "gnupg_fixture_root", b.pathFromRoot(b.option(
+        []const u8,
+        "gnupg-fixture-root",
+        "A short directory for private GnuPG test homes (defaults to .zig-cache/gpg)",
+    ) orelse ".zig-cache/gpg"));
     build_options.addOption([]const u8, "lock_helper_path", b.getInstallPath(.bin, lock_helper.out_filename));
     build_options.addOption([]const u8, "filter_helper_path", b.getInstallPath(.bin, filter_helper.out_filename));
     build_options.addOption([]const u8, "lfs_transfer_helper_path", b.getInstallPath(.bin, lfs_transfer_helper.out_filename));
@@ -168,6 +175,9 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = if (thread_sanitizer) true else null,
         .error_tracing = false,
     });
+    test_module.addImport("conduit", conduit);
+    upload_pack_helper.root_module.addImport("conduit", conduit);
+    hook_fixture.root_module.addImport("conduit", conduit);
     test_module.addOptions("build_options", build_options);
 
     const tests = b.addTest(.{
@@ -230,6 +240,11 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(b.getInstallStep());
         run.setCwd(b.path("zig-out"));
         examples_step.dependOn(&run.step);
+
+        const example_tests = b.addTest(.{ .root_module = example.root_module });
+        const run_example_tests = b.addRunArtifact(example_tests);
+        examples_step.dependOn(&run_example_tests.step);
+        check_step.dependOn(&example_tests.step);
     }
     test_step.dependOn(examples_step);
 }
