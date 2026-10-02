@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
         optimize: [Debug, ReleaseSafe]
         include:
           # One unchecked run catches optimizer-dependent behavior.
@@ -72,6 +72,35 @@ jobs:
           brew install git || brew upgrade git
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
 
+      - name: git version, at least 2.47
+        shell: bash
+        run: |
+          git --version
+          version=$(git --version | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1 \2/')
+          set -- $version
+          if [ "$1" -lt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -lt 47 ]; }; then
+            echo "git $1.$2 is older than the 2.47 every fixture needs" >&2
+            exit 1
+          fi
+
+      # Each stalled test fails with its name before the job's outer limit.
+      - name: Test — ${{ matrix.optimize }}
+        run: zig build test -Doptimize=${{ matrix.optimize }} --test-timeout 60s
+
+  windows:
+    name: test (Windows, ${{ matrix.optimize }}, ${{ matrix.case }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseSafe]
+        case: [core, merge-file, diff-algorithms, revwalk, history-0, history-1, history-2, history-3, history-4, history-5, history-6, history-7, recursive-0, recursive-1, recursive-2, rename-0, rename-1, rename-2, rename-3, rename-4, rename-5]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - name: Install git (Windows)
         if: runner.os == 'Windows'
         run: choco upgrade git -y --no-progress
@@ -91,9 +120,9 @@ jobs:
             exit 1
           fi
 
-      # Each stalled test fails with its name before the job's outer limit.
-      - name: Test — ${{ matrix.optimize }}
-        run: zig build test -Doptimize=${{ matrix.optimize }} --test-timeout 60s
+      - name: Test named case
+        run: zig build test -Dtest-case=${{ matrix.case }} -Doptimize=${{ matrix.optimize }} --test-timeout 60s
+
 
   # ReleaseSmall must compile; its unchecked tests add no distinct assertion to ReleaseFast.
   small:
@@ -226,6 +255,8 @@ jobs:
         run: zig build check-imports
       - name: Import gate regression checks
         run: python3 ci/test_imports.py
+      - name: Windows comparison coverage
+        run: python3 ci/test_cases.py
 
   # Cross compilation checks target-specific sources and linkage beyond native execution.
   cross-compile:

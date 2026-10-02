@@ -650,6 +650,7 @@ test "binary blob content is refused like git merge-file" {
 }
 
 test "a random corpus of three-way merges matches git merge-file in every style and every algorithm" {
+    if (!@import("test_case.zig").selected("a random corpus of three-way merges matches git merge-file in every style and every algorithm")) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // `--diff-algorithm` reached merge-file in 2.44, and git before 2.54

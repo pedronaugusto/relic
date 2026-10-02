@@ -649,7 +649,10 @@ ci/tls-fork.sh --check       # the TLS client's recorded diff against std's
 Every test runs under `std.testing.allocator` and `std.testing.io`, against
 real directories. CI runs Debug and ReleaseSafe on all three platforms,
 ReleaseFast once on Linux, ReleaseSmall as a compile check, and ThreadSanitizer
-once on Linux. Each parity corpus seed has its own named test. The test timeout
+once on Linux. Each parity corpus seed has its own named test. Windows runs the same cases in
+parallel groups: core, merge-file, diff-algorithms, revwalk, and numbered history,
+recursive and rename groups. `zig build test -Dtest-case=history-0` runs one group;
+omitting `test-case` runs the whole suite. The test timeout
 reports a stalled test by name; CI and the Linux script also bound each test. Speed
 measurements run only from the `bench` branch harness on a quiet machine.
 

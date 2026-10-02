@@ -13,6 +13,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reject undeclared dependencies, duplicate layer membership and imports of source executables.
 
 - Keep API namespaces above their implementations and shared storage contracts.
+- Split Windows git-comparison corpora across named parallel cases with the same assertions.
 
 - Check named source layers, cycles, entry files and dependency owners during source CI.
 

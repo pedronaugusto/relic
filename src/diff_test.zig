@@ -533,6 +533,7 @@ fn parseRange(text: []const u8) !struct { start: usize, count: usize } {
 }
 
 test "the histogram, patience and minimal diffs land on the lines git's do, over a random corpus" {
+    if (!@import("test_case.zig").selected("the histogram, patience and minimal diffs land on the lines git's do, over a random corpus")) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var repo = try testgit.Repo.init(gpa, io, &.{});

@@ -21,6 +21,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/safepath.zig",
         "src/sha1.zig",
         "src/sha1dc.zig",
+        "src/test_case.zig",
         "src/testgit.zig",
         "src/testprogram.zig",
         "src/textdiff.zig",
@@ -267,11 +268,13 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         "build_options",
         "builtin",
         "conduit",
+        "relic_test_cases",
         "root",
         "std",
     } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
     .{ .name = "conduit owner", .target = "conduit", .except_from = &.{"src/dependencies.zig"} },
+    .{ .name = "relic_test_cases owner", .target = "relic_test_cases", .except_from = &.{"src/test_case.zig"} },
 };
 
 pub const required = blk: {
