@@ -737,7 +737,7 @@ pub const Pack = struct {
 
     /// The header at the start of `bytes`, which begin at `offset`, or
     /// `null` when it runs past their end.
-    fn parseEntryHeader(p: *const Pack, offset: u64, bytes: []const u8) Error!?EntryHeader {
+    pub fn parseEntryHeader(p: *const Pack, offset: u64, bytes: []const u8) Error!?EntryHeader {
         var i: usize = 0;
         if (i >= bytes.len) return null;
         var byte = bytes[i];

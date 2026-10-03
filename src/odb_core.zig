@@ -1187,12 +1187,148 @@ pub const Odb = struct {
             for (source.packs.items) |*named| {
                 const p = &named.pack;
                 defer pack_id += 1;
-                const pack_report = try p.verify(io, &odb.backendData().cache, pack_id);
+                const pack_report = try odb.verifyPack(io, p, pack_id);
                 report.packs += 1;
                 report.packed_objects += pack_report.objects;
                 report.bytes += pack_report.bytes;
             }
         }
+        return report;
+    }
+
+    /// `pack.Pack.verify`, on tasks of `io`. The pack is read forward a
+    /// batch at a time, one read each, into a buffer this task allocates
+    /// with the batch's whole objects' buffers; the tasks check each entry's
+    /// CRC and the whole objects' names from those bytes, and one of them
+    /// runs the pack's checksum on through the batch meanwhile. The deltas
+    /// are resolved here afterwards, through the delta-base cache, as
+    /// `verify` resolves them. The first failure in file order is the one
+    /// returned.
+    fn verifyPack(odb: *Odb, io: Io, p: *pack.Pack, pack_id: u32) Error!pack.Pack.Report {
+        const gpa = odb.backendData().gpa;
+        const workers = taskCount(0);
+        if (workers == 1 or p.count != p.index.count) return p.verify(io, &odb.backendData().cache, pack_id);
+
+        const Item = struct {
+            position: u32,
+            offset: u64,
+            end: u64,
+            header: pack.EntryHeader = undefined,
+            body: []u8 = &.{},
+        };
+        const n = p.index.count;
+        // Sorted as offsets and positions together, which move cheaply.
+        if (p.size >= 1 << 32) return p.verify(io, &odb.backendData().cache, pack_id);
+        const order = try gpa.alloc(u64, n);
+        defer gpa.free(order);
+        for (order, 0..) |*o, i| o.* = (try p.index.offsetAt(@intCast(i))) << 32 | i;
+        std.mem.sort(u64, order, {}, std.sort.asc(u64));
+        const items = try gpa.alloc(Item, n);
+        defer gpa.free(items);
+        for (items, order) |*item, o| item.* = .{ .position = @truncate(o), .offset = o >> 32, .end = 0 };
+        for (items, 0..) |*item, rank| {
+            item.end = if (rank + 1 < items.len) items[rank + 1].offset else p.bodyEnd();
+            if (item.end < item.offset or item.end > p.bodyEnd()) return error.TruncatedPack;
+        }
+        if (n != 0 and items[0].offset != 12) return error.TruncatedPack;
+        const readers = try gpa.alloc(pack.Pack.EntryReader, workers);
+        defer gpa.free(readers);
+        for (readers) |*r| r.* = .{};
+        var failures: std.ArrayList(?Error) = .empty;
+        defer failures.deinit(gpa);
+
+        // The pack's own checksum, over the header and then each batch.
+        var checksum: hash.Hasher = .init(p.kind);
+        var head: [12]u8 = undefined;
+        try p.readStored(io, 0, &head);
+        checksum.update(&head);
+
+        const Work = struct {
+            p: *const pack.Pack,
+            items: []Item,
+            span: []const u8,
+            span_at: u64,
+            checksum: *hash.Hasher,
+            readers: []pack.Pack.EntryReader,
+            fn work(c: @This(), _: Io, worker: usize, i: usize) Error!void {
+                if (i == c.items.len) return c.checksum.update(c.span);
+                const item = &c.items[i];
+                const stored = c.span[@intCast(item.offset - c.span_at)..@intCast(item.end - c.span_at)];
+                if (crc32.Crc32.hash(stored) != c.p.index.crcAt(item.position)) return error.ChecksumMismatch;
+                if (item.body.len == 0) return;
+                const len: usize = @intCast(item.header.size);
+                var stream: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
+                const got = c.readers[worker].decoder.zlib(&stream, item.body) catch return error.CorruptPackEntry;
+                if (got != len) return error.CorruptPackEntry;
+                const name = hash.Hasher.object(c.p.kind, item.header.kind.object.name(), item.body[0..len]);
+                if (!name.eql(c.p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+            }
+        };
+
+        var report: pack.Pack.Report = .{};
+        const budget: usize = 64 << 20;
+        var span: std.ArrayList(u8) = .empty;
+        defer span.deinit(gpa);
+        var start: usize = 0;
+        while (start < items.len) {
+            // A batch: entries while their bytes and whole bodies fit the
+            // budget, and always one; the last runs to the trailer.
+            var end = start;
+            var held: usize = 0;
+            while (end < items.len) {
+                const item = &items[end];
+                const stored_len = std.math.cast(usize, item.end - item.offset) orelse return error.StreamTooLong;
+                if (end > start and held +| stored_len > budget) break;
+                held +|= stored_len;
+                end += 1;
+            }
+            const batch = items[start..end];
+            const span_at = batch[0].offset;
+            try span.resize(gpa, @intCast(batch[batch.len - 1].end - span_at));
+            try p.readStored(io, span_at, span.items);
+            defer for (batch) |*item| if (item.body.len != 0) {
+                gpa.free(item.body);
+                item.body = &.{};
+            };
+            for (batch) |*item| {
+                const stored = span.items[@intCast(item.offset - span_at)..@intCast(item.end - span_at)];
+                item.header = (try p.parseEntryHeader(item.offset, stored)) orelse return error.TruncatedPack;
+                if (item.header.kind != .object) continue;
+                const len = std.math.cast(usize, item.header.size) orelse return error.StreamTooLong;
+                if (len > delta.max_result_bytes) return error.StreamTooLong;
+                item.body = try gpa.alloc(u8, len +| pack.Pack.inflate_slack);
+            }
+            // The batch's entries, and the checksum as the last item.
+            try failures.resize(gpa, batch.len + 1);
+            try runTasks(io, workers, failures.items, Work{
+                .p = p,
+                .items = batch,
+                .span = span.items,
+                .span_at = span_at,
+                .checksum = &checksum,
+                .readers = readers,
+            }, Work.work);
+            for (batch) |*item| {
+                if (item.body.len != 0) {
+                    report.objects += 1;
+                    report.bytes += item.header.size;
+                    continue;
+                }
+                const obj = try p.readAt(io, item.offset, &odb.backendData().cache, pack_id);
+                defer gpa.free(obj.bytes);
+                const name = hash.Hasher.object(p.kind, obj.type.name(), obj.bytes);
+                if (!name.eql(p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+                report.objects += 1;
+                report.bytes += obj.bytes.len;
+            }
+            start = end;
+        }
+        const computed = checksum.final();
+        var trailer: [hash.max_raw_len]u8 = undefined;
+        const raw_len = p.kind.rawLen();
+        try p.readStored(io, p.bodyEnd(), trailer[0..raw_len]);
+        const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable;
+        if (!computed.eql(stored) or !stored.eql(p.index.pack_checksum)) return error.ChecksumMismatch;
         return report;
     }
 

@@ -1162,3 +1162,74 @@ test "a stored delta whose bytes no longer match the pack index's CRC is refused
         try std.testing.expectError(error.CorruptPackEntry, repackInto(gpa, io, &repo, try std.fmt.bufPrint(&dir_name, "after{d}", .{threads}), .{ .threads = threads }));
     }
 }
+
+/// Which threads took an item of work through the Io: a task checks for
+/// cancelation before each. The calling thread's first check waits, for a
+/// while, until another thread has made one.
+const Checkers = struct {
+    var mutex: std.atomic.Mutex = .unlocked;
+    var ids: [64]std.Thread.Id = undefined;
+    var count: usize = 0;
+    var waiting_for_other: ?std.Thread.Id = null;
+
+    fn reset(wait_from: ?std.Thread.Id) void {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        count = 0;
+        waiting_for_other = wait_from;
+    }
+
+    fn distinct() usize {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        return count;
+    }
+
+    fn note() bool {
+        const me = std.Thread.getCurrentId();
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        for (ids[0..count]) |id| if (id == me) return false;
+        if (count < ids.len) {
+            ids[count] = me;
+            count += 1;
+        }
+        if (waiting_for_other != me) return false;
+        waiting_for_other = null;
+        return true;
+    }
+
+    fn checkCancel(userdata: ?*anyopaque) Io.Cancelable!void {
+        if (note()) {
+            var waited: usize = 0;
+            while (waited < 5000 and distinct() < 2) : (waited += 1) {
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch break;
+            }
+        }
+        return std.testing.io.vtable.checkCancel(userdata);
+    }
+};
+
+test "verifying a database checks its packs' entries on several tasks" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try gitPacked(gpa, io, "50");
+    defer repo.deinit();
+    var git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+
+    var vtable = io.vtable.*;
+    vtable.checkCancel = Checkers.checkCancel;
+    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var db = try odb_mod.Odb.openAt(gpa, watched, objects, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(watched);
+    Checkers.reset(std.Thread.getCurrentId());
+    const report = try db.verify(watched);
+    try std.testing.expect(report.packed_objects > 100);
+    if (Checkers.distinct() < 2) {
+        std.debug.print("the packs were verified on {d} thread\n", .{Checkers.distinct()});
+        return error.TestUnexpectedResult;
+    }
+}
