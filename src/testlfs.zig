@@ -27,9 +27,9 @@ const testgit = @import("testgit.zig");
 const testremote = @import("testremote.zig");
 
 /// The environment a program started by these tests sees: the test's
-/// `PATH`, `home` as its home directory, no system configuration and no
-/// terminal to prompt on. Nothing of the person's own configuration, agents
-/// or keychain can be reached from it.
+/// `PATH`, `home` as its home directory, no system configuration, no
+/// terminal to prompt on, and git's dates fixed. Nothing of the person's
+/// own configuration, agents or keychain can be reached from it.
 pub fn environ(gpa: Allocator, home: []const u8) !Environ.Map {
     var map: Environ.Map = .init(gpa);
     errdefer map.deinit();
@@ -45,6 +45,8 @@ pub fn environ(gpa: Allocator, home: []const u8) !Environ.Map {
     try map.put("GIT_CONFIG_NOSYSTEM", "1");
     try map.put("GIT_TERMINAL_PROMPT", "0");
     try map.put("GIT_LFS_SKIP_PUSH", "0");
+    // The dates every fixture commits with, as `testgit.isolate` fixes them.
+    try testgit.setDate(&map, testgit.fixture_date);
     return map;
 }
 

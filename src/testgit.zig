@@ -14,7 +14,8 @@
 //!
 //! And every git the harness starts runs in an environment of its own: a
 //! scratch home, no system or global config, no repository variables
-//! inherited from whoever ran the suite, no ssh or gpg agent, and no prompt.
+//! inherited from whoever ran the suite, no ssh or gpg agent, no prompt, and
+//! fixed author and committer dates.
 //! A test is a guest on the person's machine. It must not read their
 //! `~/.gitconfig`, reach their credential helper and store a test password
 //! in their keychain, sign with their keys, or push through their ssh agent
@@ -289,11 +290,21 @@ const personal_variables = [_][]const u8{
     "EMAIL",
 };
 
+/// The date every git a test starts commits, tags and logs with, unless the
+/// test sets its own: `fixture_date` seconds past the epoch, UTC.
+pub const fixture_date: i64 = 1_700_000_000;
+
 /// Make `map` an environment no setting of the person's reaches: every
 /// `GIT_*` variable and every entry of `personal_variables` removed, `HOME`
 /// set to `home`, the global config read from `home` alone, the system
-/// config not read at all, and no terminal prompt. What else the map holds
-/// — `PATH`, the locale, a test's own additions made afterwards — stays.
+/// config not read at all, no terminal prompt, and git's author and
+/// committer dates fixed at `fixture_date`. What else the map holds —
+/// `PATH`, the locale, a test's own additions made afterwards — stays.
+///
+/// The dates are part of every commit's name. Left to the clock, a fixture
+/// gets new names on every run, and with them a new order in every hash
+/// table keyed by name: a test whose counts depend on that order passes or
+/// fails by the second it ran in.
 pub fn isolate(map: *Environ.Map, home: []const u8) !void {
     var i = map.count();
     while (i > 0) {
@@ -312,6 +323,7 @@ pub fn isolate(map: *Environ.Map, home: []const u8) !void {
     try map.put("GIT_CONFIG_GLOBAL", try std.fmt.bufPrint(&global_buf, "{s}" ++ sep ++ ".gitconfig", .{home}));
     try map.put("GIT_CONFIG_NOSYSTEM", "1");
     try map.put("GIT_TERMINAL_PROMPT", "0");
+    try setDate(map, fixture_date);
 }
 
 /// A home for gpg of a test's own, under the build's `gnupg-fixture-root`.
@@ -451,7 +463,8 @@ pub fn datedEnv(gpa: Allocator, secs: i64) !Environ.Map {
     return map;
 }
 
-/// Move both of git's dates in an environment made by `datedEnv`.
+/// Move both of git's dates in an environment made by `datedEnv` or
+/// `isolate`.
 pub fn setDate(map: *Environ.Map, secs: i64) !void {
     var buf: [64]u8 = undefined;
     const text = try std.fmt.bufPrint(&buf, "{d} +0000", .{secs});
