@@ -170,6 +170,8 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "repository operations", .patterns = &.{
         "src/archive.zig",
         "src/archive_test.zig",
+        "src/clean.zig",
+        "src/clean_test.zig",
         "src/commithooks.zig",
         "src/config_refresh_test.zig",
         "src/embedded_repo_test.zig",
