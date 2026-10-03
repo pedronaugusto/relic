@@ -25,6 +25,10 @@ const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 const conduit = @import("dependencies.zig").conduit;
 pub const Child = conduit.Child;
+/// What a program's pipe holds now, read without waiting for more: once the
+/// program has ended, the rest of what it wrote, even while something it
+/// started still holds the pipe open.
+pub const readAvailable = conduit.readAvailable;
 const Term = std.process.Child.Term;
 
 /// The permission to run programs, and the environment they start from.

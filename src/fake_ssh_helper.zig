@@ -14,6 +14,10 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     if (args.len == 0) return error.MissingProgramName;
+    // The grandchild `refuse-held` leaves behind: it holds the standard
+    // error it inherited until the file named after it exists, and says so
+    // when it ends.
+    if (args.len == 3 and std.mem.eql(u8, args[1], "--hold-stderr")) return holdStderr(io, args[2]);
     const executable = try std.process.executablePathAlloc(io, arena);
     const stem = if (std.ascii.endsWithIgnoreCase(executable, ".exe")) executable[0 .. executable.len - 4] else executable;
     const fixture_path = try std.fmt.allocPrint(arena, "{s}.fixture", .{executable});
@@ -22,13 +26,17 @@ pub fn main(init: std.process.Init) !void {
         else => return err,
     };
     const mode = std.mem.sliceTo(fixture, '\n');
-    const message = if (mode.len < fixture.len) std.mem.trimEnd(u8, fixture[mode.len + 1 ..], "\r\n") else "";
+    var lines = std.mem.splitScalar(u8, if (mode.len < fixture.len) fixture[mode.len + 1 ..] else "", '\n');
+    const message = std.mem.trimEnd(u8, lines.next() orelse "", "\r");
+    // For `refuse-held`, the file that releases its grandchild.
+    const release = std.mem.trimEnd(u8, lines.next() orelse "", "\r");
     const log_name = try std.fmt.allocPrint(arena, "{s}.log", .{stem});
     const log = try Io.Dir.cwd().createFile(io, log_name, .{ .truncate = false, .read = true });
     defer log.close(io);
     var entry: std.ArrayList(u8) = .empty;
     for (args[1..]) |arg| try entry.print(arena, "[{s}]", .{arg});
-    if (std.mem.eql(u8, mode, "auth") or std.mem.eql(u8, mode, "refuse")) {
+    const held = std.mem.eql(u8, mode, "refuse-held");
+    if (std.mem.eql(u8, mode, "auth") or std.mem.eql(u8, mode, "refuse") or held) {
         try entry.print(arena, " agent={s} home={s}", .{
             init.environ_map.get("SSH_AUTH_SOCK") orelse "",
             init.environ_map.get("HOME") orelse "",
@@ -36,12 +44,22 @@ pub fn main(init: std.process.Init) !void {
     }
     try entry.append(arena, '\n');
     try log.writePositionalAll(io, entry.items, try log.length(io));
-    if (std.mem.eql(u8, mode, "warn") or std.mem.eql(u8, mode, "refuse")) {
+    if (std.mem.eql(u8, mode, "warn") or std.mem.eql(u8, mode, "refuse") or held) {
         var stderr_buf: [4096]u8 = undefined;
         var stderr = Io.File.stderr().writerStreaming(io, &stderr_buf);
         try stderr.interface.print("{s}\n", .{message});
         try stderr.interface.flush();
-        if (std.mem.eql(u8, mode, "refuse")) std.process.exit(255);
+        if (held) {
+            // As an ssh ControlMaster does: something started here keeps
+            // the standard error open after this program has ended.
+            _ = try std.process.spawn(io, .{
+                .argv = &.{ executable, "--hold-stderr", release },
+                .stdin = .ignore,
+                .stdout = .ignore,
+                .stderr = .inherit,
+            });
+        }
+        if (std.mem.eql(u8, mode, "refuse") or held) std.process.exit(255);
     }
 
     var at: usize = 1;
@@ -113,6 +131,17 @@ pub fn main(init: std.process.Init) !void {
         .exited => |code| if (code != 0) std.process.exit(code),
         else => std.process.exit(255),
     }
+}
+
+/// Hold the inherited standard error until `release` exists, a minute at
+/// most, then leave `<release>.ended` behind.
+fn holdStderr(io: Io, release: []const u8) !void {
+    for (0..6000) |_| {
+        if (Io.Dir.cwd().access(io, release, .{})) |_| break else |_| {}
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+    var name: [std.fs.max_path_bytes]u8 = undefined;
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name, "{s}.ended", .{release}), .data = "" });
 }
 
 fn teeStdin(io: Io, pipe: Io.File, path: []const u8) void {

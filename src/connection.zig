@@ -187,6 +187,24 @@ pub const Process = struct {
             }
         }
 
+        /// Stop reading once the program has ended. All it wrote is in
+        /// the pipe by then, but whatever it started may still hold the
+        /// pipe open — an ssh ControlMaster, a credential daemon — and the
+        /// reading task would wait for that to end too. So the task stops,
+        /// and what it had not reached is read here, without waiting for
+        /// more.
+        fn finish(tail: *Tail, io: Io) void {
+            if (tail.task) |*task| task.cancel(io);
+            tail.task = null;
+            const file = tail.file orelse return;
+            var chunk: [1024]u8 = undefined;
+            while (true) {
+                const n = program.readAvailable(file, io, &chunk) catch return;
+                if (n == 0) return;
+                tail.keep(chunk[0..n]);
+            }
+        }
+
         fn keep(tail: *Tail, bytes: []const u8) void {
             if (bytes.len >= tail.buffer.len) {
                 @memcpy(&tail.buffer, bytes[bytes.len - tail.buffer.len ..]);
@@ -332,9 +350,7 @@ pub const Process = struct {
             } else _ = p.running.wait(io) catch {};
         }
         if (p.stderr) |tail| {
-            // Something the program started may still hold its standard
-            // error open; the reading stops here either way.
-            if (tail.task) |*task| task.cancel(io);
+            tail.finish(io);
             if (tail.file) |file| file.close(io);
             if (p.said_to) |sink| {
                 const said = std.mem.trim(u8, tail.buffer[0..tail.len], " \t\r\n");
@@ -409,9 +425,7 @@ pub const Process = struct {
         }
         var said: []const u8 = "";
         if (p.stderr) |tail| {
-            // The program has ended, so its standard error is at its end
-            // unless something it started still holds it.
-            if (tail.task) |*task| task.await(io);
+            tail.finish(io);
             said = tail.buffer[0..tail.len];
         }
         const code: ?u8 = if (p.term) |term| switch (term) {

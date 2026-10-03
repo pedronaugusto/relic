@@ -712,6 +712,58 @@ fn sshStandIn(person: *Person, io: Io, refusal: ?[]const u8) ![]u8 {
     return path;
 }
 
+test "ssh's refusal is named once ssh has ended, while something it started still holds its standard error" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var person = try Person.init(gpa, io);
+    defer person.deinit();
+    const said = "git@work-github: Permission denied (publickey).";
+    const ssh = try testlfs.installProgram(gpa, io, person.tools.dir, "ssh", @import("build_options").fake_ssh_helper_path);
+    defer gpa.free(ssh);
+    const release = try std.fs.path.join(gpa, &.{ person.tools_path, "release" });
+    defer gpa.free(release);
+    const ended = try std.fmt.allocPrint(gpa, "{s}.ended", .{release});
+    defer gpa.free(ended);
+    {
+        const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{ssh});
+        defer gpa.free(sidecar);
+        const description = try std.fmt.allocPrint(gpa, "refuse-held\n{s}\n{s}\n", .{ said, release });
+        defer gpa.free(description);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = sidecar, .data = description });
+    }
+    try person.env.put("GIT_SSH_COMMAND", ssh);
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    try r.exec(io, &.{ "remote", "add", "origin", "git@work-github:org/repo.git" });
+    var locations: userconfig.Locations = undefined;
+    var repo = try person.open(io, r.dir, &locations);
+    defer repo.deinit(io);
+    defer locations.deinit();
+
+    // Released however the test ends, and waited for, since the
+    // grandchild runs from the folder the test removes.
+    defer {
+        Io.Dir.cwd().writeFile(io, .{ .sub_path = release, .data = "" }) catch {};
+        for (0..6000) |_| {
+            if (Io.Dir.cwd().access(io, ended, .{})) |_| break else |_| {}
+            io.sleep(.fromMilliseconds(10), .awake) catch break;
+        }
+    }
+    var failure: auth.Failure = .{};
+    defer failure.deinit();
+    try testing.expectError(error.AuthenticationFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{
+        .who = test_who,
+        .programs = .{ .environ = &person.env },
+        .auth_failure = &failure,
+    }));
+    try testing.expectEqualStrings(said, failure.server_message);
+    // The fetch did not wait for the grandchild, which is still there.
+    if (Io.Dir.cwd().access(io, ended, .{})) |_| {
+        std.debug.print("the fetch returned only once ssh's grandchild had ended\n", .{});
+        return error.TestUnexpectedResult;
+    } else |_| {}
+}
+
 test "ssh gets the person's host alias, agent and command line untouched, as git hands them over" {
     const gpa = testing.allocator;
     const io = testing.io;
