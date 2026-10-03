@@ -1,5 +1,6 @@
 {
   "before": "86045db483496f695795ec5ee653e99ebf2dd395",
-  "after": "8f0962d2462adea17a339cc2866a70c8295bb906",
-  "cutoff": "2026-09-30T00:00:00+01:00"
+  "after": "5937e9e24e531495f42dd7420aaaba81135237f2",
+  "cutoff": "2026-09-30T00:00:00+01:00",
+  "after_ref": "main"
 }
