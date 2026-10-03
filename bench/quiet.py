@@ -12,24 +12,32 @@ def copy_repo(p, src, dst):
     if dst.exists():shutil.rmtree(dst)
     p.run(['cp','-ac' if sys.platform=='darwin' else '-a',src,dst])
 
+# What the comparison writers leave in the scratch directory: git's
+# `gitpack-<hash>.pack`, gix's `gix.pack` and go-git's `gogit.pack`, with the
+# index and reverse index `git index-pack` writes beside each.
+WRITER_OUTPUTS=('gitpack-*','gix.*','gogit.*')
+
 def reset_pack_outputs(scratch):
-    """Remove the packs the comparison writers leave in the scratch directory."""
-    for old in scratch.glob('gitpack-*'):old.unlink()
-    (scratch/'gogit.pack').unlink(missing_ok=True)
+    """Remove every pack, and its indexes, the comparison writers left."""
+    for pattern in WRITER_OUTPUTS:
+        for old in scratch.glob(pattern):old.unlink()
 
 def written_packs(repo,scratch):
     """Every pack a pack-writing point can have left."""
     packs=list((repo/'.git/objects/pack').glob('*.pack'))
-    packs+=list(scratch.glob('gitpack-*.pack'))+list(scratch.glob('gogit.pack'))
-    return packs
+    for pattern in WRITER_OUTPUTS:packs+=[p for p in scratch.glob(pattern) if p.suffix=='.pack']
+    return sorted(packs)
 
 def check_packwrite(evidence,repo,scratch,run):
-    """Validate the packs a pack-writing point wrote, strictly."""
-    if evidence['unavailable']==0:
+    """Validate every pack a pack-writing point wrote, strictly. Only an
+    unavailable operation writes nothing; a metric the tool cannot report,
+    such as `deltas`, says nothing about the pack it wrote."""
+    if evidence['operation']=='available':
         packs=written_packs(repo,scratch)
         if not packs:raise ValueError('pack writer produced no pack')
         for pack in packs:run(['git','index-pack','--strict',pack])
         evidence['pack_verification']='passed'
+        evidence['packs_verified']=len(packs)
     return evidence
 
 def main():
@@ -73,7 +81,7 @@ def main():
             expected_tree = []
             def checked(out):
                 evidence=tsv(out)
-                if workload=='addall' and evidence['unavailable']==0:
+                if workload=='addall' and evidence['operation']=='available':
                     tree=p.run(['git','-C',repo,'write-tree']).strip()
                     if expected_tree and tree!=expected_tree[0]:raise ValueError('staging produced a different tree')
                     if not expected_tree:expected_tree.append(tree)

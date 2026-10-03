@@ -77,7 +77,7 @@ prep_addall() {
 prep_packwrite() {
   rm -rf "$scratch/loose"
   cp -ac "$fx/repo-loose" "$scratch/loose"
-  rm -f "$scratch"/gitpack-* "$scratch"/gogit.pack
+  rm -f "$scratch"/gitpack-* "$scratch"/gix.* "$scratch"/gogit.*
 }
 
 point() {

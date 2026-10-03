@@ -180,8 +180,14 @@ class Pass:
         print(f"{'Smoke passed; no timings recorded' if self.smoke else 'Pass complete'}: {self.out}",flush=True)
 
 def tsv(output):
+    """A point's five-column rows. `unavailable` counts the metrics the tool
+    cannot report; `operation` is unavailable only when the tool did not do
+    the work at all, which it says with an unavailable `time`."""
     rows = [line.split('\t') for line in output.splitlines() if '\t' in line]
     if not rows or any(len(row)!=5 for row in rows): raise ValueError('invalid five-column output')
     if any(row[3] == 'ERROR' for row in rows): raise ValueError('workload reported ERROR')
-    return {'rows':len(rows),'unavailable':sum(row[3] in ('n/a','unavailable') for row in rows),
+    missing = lambda row: row[3] in ('n/a','unavailable')
+    timed = [row for row in rows if row[2] == 'time'] or rows
+    return {'rows':len(rows),'unavailable':sum(map(missing, rows)),
+            'operation':'unavailable' if all(map(missing, timed)) else 'available',
             'counts':{row[2]:row[3] for row in rows if row[4] in ('count','bytes') and row[2] not in ('peak_rss','rss')}}
