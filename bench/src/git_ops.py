@@ -27,6 +27,7 @@ NAMES = (
     "merge-tree-clean", "merge-tree-conflict", "merge-clean", "merge-conflict", "rebase", "cherry-pick",
     "revert", "commit", "switch", "stash", "branch-create", "tag-create", "ref-list", "repack", "verify",
     "worktree-add", "lfs-add", "lfs-checkout", "submodule-status", "submodule-update", "snapshot", "patch-id",
+    "blame",
 )
 # The identity and clock every side commits with.
 IDENT = {"GIT_AUTHOR_NAME": "Bench", "GIT_AUTHOR_EMAIL": "bench" + chr(64) + "example.invalid",
@@ -105,6 +106,13 @@ def run(command, repo, extra):
         took, out = timed(lambda: git(repo, "log", "--format=%H", "main", "--", HOT), REPS)
         emit(w, "time", took, "ms")
         emit(w, "commits", out.count(b"\n"), "count")
+    elif w == "blame":
+        took, out = timed(lambda: git(repo, "blame", "--line-porcelain", "main", "--", HOT), REPS)
+        heads = [l.split()[0] for l in out.decode().splitlines() if len(l) > 40 and l[40] == " " and all(c in "0123456789abcdef" for c in l[:40])]
+        emit(w, "time", took, "ms")
+        emit(w, "lines", len(heads), "count")
+        emit(w, "commits", len(set(heads)), "count")
+        emit(w, "last", heads[-1], "oid")
     elif w == "revparse":
         exprs = open(extra).read().split()
         took, out = timed(lambda: git(repo, "rev-parse", *exprs), REPS)

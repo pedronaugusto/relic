@@ -29,6 +29,7 @@ var opNames = []string{
 	"rebase", "cherry-pick", "revert", "commit", "switch", "stash",
 	"branch-create", "tag-create", "ref-list", "repack", "verify", "worktree-add",
 	"lfs-add", "lfs-checkout", "submodule-status", "submodule-update", "snapshot", "patch-id",
+	"blame",
 }
 
 // What go-git cannot do, and why.
@@ -232,6 +233,27 @@ func runOp(w, repo, extra string) {
 		took := ms(start)
 		emit(w, "time", took, "ms")
 		emitCount(w, "commits", n)
+	case "blame":
+		var lines, commits int
+		var last plumbing.Hash
+		took := best(func() {
+			r, err := git.PlainOpen(repo)
+			check(err)
+			c, err := r.CommitObject(resolve(r, "refs/heads/main"))
+			check(err)
+			result, err := git.Blame(c, hotPath)
+			check(err)
+			seen := map[plumbing.Hash]bool{}
+			for _, l := range result.Lines {
+				seen[l.Hash] = true
+				last = l.Hash
+			}
+			lines, commits = len(result.Lines), len(seen)
+		})
+		emit(w, "time", took, "ms")
+		emitCount(w, "lines", lines)
+		emitCount(w, "commits", commits)
+		emitOid(w, "last", last)
 	case "revparse":
 		data, err := os.ReadFile(extra)
 		check(err)

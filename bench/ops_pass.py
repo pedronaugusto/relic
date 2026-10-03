@@ -18,7 +18,7 @@ OPS = {
     'diff-tree': ('ops/repo', None), 'diff-renames': ('ops/repo', None), 'diff-patch': ('ops/repo', None),
     'diff-index': ('ops/dirty', None), 'log': ('ops/repo', None), 'log-path': ('ops/repo', None),
     'revparse': ('ops/repo', 'exprs'), 'merge-base': ('ops/repo', None), 'patch-id': ('ops/repo', None),
-    'ref-list': ('ops/repo', None), 'verify': ('ops/repo', None),
+    'ref-list': ('ops/repo', None), 'verify': ('ops/repo', None), 'blame': ('ops/repo', None),
     'merge-tree-clean': ('ops/bare.git', 'copy'), 'merge-tree-conflict': ('ops/bare.git', 'copy'),
     'branch-create': ('ops/bare.git', 'copy'), 'tag-create': ('ops/bare.git', 'copy'),
     'repack': ('ops/bare.git', 'copy'), 'worktree-add': ('ops/bare.git', 'worktree'),

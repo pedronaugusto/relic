@@ -55,6 +55,7 @@ pub fn run(workload: &str, path: &str, extra: Option<&str>) -> bool {
         "diff-index" => diff_index(workload, path),
         "log" => log(workload, path),
         "log-path" => log_path(workload, path),
+        "blame" => blame(workload, path),
         "revparse" => revparse(workload, path, extra.expect("expressions")),
         "merge-base" => merge_base(workload, path),
         "merge-tree-clean" => merge_tree(workload, path, "side"),
@@ -238,6 +239,26 @@ fn log(w: &str, path: &str) {
     }
     emit(w, "time", best, "ms");
     count(w, "commits", commits);
+}
+
+/// `git blame main -- <hot path>`, following renames as git does.
+fn blame(w: &str, path: &str) {
+    let mut best = f64::MAX;
+    let (mut lines, mut commits, mut last) = (0, 0, None);
+    for _ in 0..reps() {
+        let start = BenchmarkInstant::now();
+        let repo = gix::open(path).unwrap();
+        let options = gix::repository::blame_file::Options { rewrites: Some(Default::default()), ..Default::default() };
+        let outcome = repo.blame_file(HOT.into(), id(&repo, "refs/heads/main"), options).unwrap();
+        best = best.min(ms(&start));
+        lines = outcome.entries.iter().map(|e| e.len.get() as usize).sum();
+        commits = outcome.entries.iter().map(|e| e.commit_id).collect::<BTreeSet<_>>().len();
+        last = outcome.entries.last().map(|e| e.commit_id);
+    }
+    emit(w, "time", best, "ms");
+    count(w, "lines", lines);
+    count(w, "commits", commits);
+    oid(w, "last", last.unwrap());
 }
 
 /// The commits whose change from their first parent touches the hot path.

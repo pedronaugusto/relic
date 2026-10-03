@@ -76,6 +76,7 @@ and 16 MiB; the submodule fixture is ten local submodules, at one size.
 | LFS staging and checkout | `lfs-add`, `lfs-checkout` |
 | submodules | `submodule-status`, `submodule-update` |
 | working-tree snapshot | `snapshot` (Git: `git stash create`) |
+| line attribution | `blame` (the hot file on main) |
 
 A workload that only reads runs on the fixture, best of three repetitions
 inside the process; one that writes runs once on a fresh APFS copy with its
