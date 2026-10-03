@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A lock names the process that holds it in its own first bytes, `pid <n>`, which the new contents write over, where it wrote `<path>~pid.lock` beside every lock and removed it after: a lock now costs one file, not two, and a transaction of a thousand refs half the directory changes. `staleReport` reads the name from the lock.
+
 - A repository handle keeps each commit it reads, its tree and parents, as git keeps a parsed commit: `revparse`'s `main~40` reads forty commits once rather than once per expression, and `commitTree` reads none twice. At most 8,192 are kept before the handle starts over. Add `Repository.commitInfo`.
 
 - Add `diff.blame.file`: which commit each line of a file comes from, the line it was there and the path the file had, as `git blame` gives them. It walks history as git's blame does, newest commit first, a line passing to the first parent whose copy leaves it unchanged by git's line diff, and follows a file to the path a whole-file rename gave it unless told not to (`--no-follow`). `-M` and `-C` are off, as in git. Tested line for line against `git blame --line-porcelain` on fixtures and on random histories with merges, renames and repeated lines.

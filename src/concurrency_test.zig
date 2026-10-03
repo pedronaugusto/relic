@@ -119,9 +119,7 @@ test "a stale lock is reported and never broken" {
     // A lock left behind by a process that is gone, with a pid nothing is
     // using. It stays exactly where it is.
     try tmp.dir.writeFile(io, .{ .sub_path = "thing", .data = "old\n" });
-    const lock = try tmp.dir.createFile(io, "thing.lock", .{ .exclusive = true });
-    lock.close(io);
-    try tmp.dir.writeFile(io, .{ .sub_path = "thing~pid.lock", .data = "pid 4294967294\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "thing.lock", .data = "pid 4294967294\n" });
 
     const report = fs.staleReport(io, tmp.dir, "thing");
     try std.testing.expect(report.held);
