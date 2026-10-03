@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `Odb.findPrefix` finds an abbreviated name in a pack index by bisection and looks at the one name after it; it walked every name past the match to the end of the index.
+
 - A ref store keeps `packed-refs` parsed between lookups and checks it with a stat of the file before each one, as git's files backend does: the file's identity, size and times, taken from the descriptor the bytes were read through. `read`, `resolve` and `list` no longer read and parse the whole file for every lookup, which made resolving a name in a repository with a thousand packed tags cost a parse of every line, three times over for a name tried under `refs/`, `refs/tags/` and `refs/heads/`. `readPacked` still reads the file afresh, and its listing is now sorted by name, as git sorts a file that does not say it is.
 
 - `Index.addMany` keeps the entry added last where one names a path and stage already in the index, as it says it does; its sort was not stable, so past a few dozen entries it could keep the older one.

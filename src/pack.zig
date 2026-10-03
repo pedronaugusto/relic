@@ -268,28 +268,30 @@ pub const Index = struct {
     /// typed by a person needs to hear.
     pub fn findPrefix(index: Index, prefix: []const u8) PrefixError!?Oid {
         if (prefix.len == 0 or prefix.len > index.kind.hexLen()) return null;
-        var found: ?Oid = null;
-        var i: u32 = 0;
-        // The first byte narrows to one fanout bucket; a prefix shorter than
-        // two digits does not, so the walk starts at the front.
+        // The smallest name that begins with the prefix: its digits, and
+        // zeros after them.
+        var least: [hash.max_raw_len]u8 = @splat(0);
+        for (prefix, 0..) |c, i| {
+            const digit = hexVal(c) catch return null;
+            least[i / 2] |= if (i % 2 == 0) digit << 4 else digit;
+        }
+        const raw = least[0..index.kind.rawLen()];
+        // A whole first byte narrows the search to its fanout bucket.
+        var lo: u32 = 0;
+        var hi: u32 = index.count;
         if (prefix.len >= 2) {
-            const first = (hexVal(prefix[0]) catch return null) * 16 + (hexVal(prefix[1]) catch return null);
-            i = if (first == 0) 0 else std.mem.readInt(u32, index.bytes[8 + (@as(usize, first) - 1) * 4 ..][0..4], .big);
+            lo = if (raw[0] == 0) 0 else std.mem.readInt(u32, index.bytes[8 + (@as(usize, raw[0]) - 1) * 4 ..][0..4], .big);
+            hi = std.mem.readInt(u32, index.bytes[8 + @as(usize, raw[0]) * 4 ..][0..4], .big);
         }
-        while (i < index.count) : (i += 1) {
-            const oid = index.nameAt(i);
-            if (!oid.startsWithHex(prefix)) {
-                if (prefix.len >= 2 and found == null and i > 0) {
-                    // Past the bucket: nothing further can match.
-                    var buf: [hash.max_hex_len]u8 = undefined;
-                    const text = oid.hex(&buf);
-                    if (std.mem.order(u8, text[0..2], prefix[0..2]) == .gt) break;
-                }
-                continue;
-            }
-            if (found != null) return error.AmbiguousPrefix;
-            found = oid;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (std.mem.order(u8, index.rawNameAt(mid), raw) == .lt) lo = mid + 1 else hi = mid;
         }
+        // Every name that begins with the prefix is in one run from here.
+        if (lo >= index.count) return null;
+        const found = index.nameAt(lo);
+        if (!found.startsWithHex(prefix)) return null;
+        if (lo + 1 < index.count and index.nameAt(lo + 1).startsWithHex(prefix)) return error.AmbiguousPrefix;
         return found;
     }
 

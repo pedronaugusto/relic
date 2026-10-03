@@ -105,3 +105,57 @@ test "a short name grows until it names one object" {
     try std.testing.expect(short.len >= 6);
     try std.testing.expectEqual(pair.?[0], try db.findPrefix(io, short));
 }
+
+test "a packed object is found by any prefix that names it alone" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+    var db = try odb_mod.Odb.openAt(gpa, io, objects, .sha1, .{});
+    defer db.deinit(io);
+
+    var oids: [600]Oid = undefined;
+    for (&oids, 0..) |*oid, n| {
+        var text: [32]u8 = undefined;
+        oid.* = try db.write(io, .blob, try std.fmt.bufPrint(&text, "{d}\n", .{n}));
+    }
+    _ = try db.repack(io, .{});
+
+    // Every length from one digit, odd ones too, and in capitals, against
+    // the answer a look at every name gives.
+    var prng: std.Random.DefaultPrng = .init(0x5eed);
+    const random = prng.random();
+    for (0..400) |_| {
+        var hex_buf: [hash.max_hex_len]u8 = undefined;
+        const full = oids[random.uintLessThan(usize, oids.len)].hex(&hex_buf);
+        var prefix_buf: [hash.max_hex_len]u8 = undefined;
+        const prefix = prefix_buf[0 .. 1 + random.uintLessThan(usize, 8)];
+        @memcpy(prefix, full[0..prefix.len]);
+        // Sometimes a prefix that names nothing.
+        if (random.boolean()) prefix[prefix.len - 1] = "0123456789abcdef"[random.uintLessThan(usize, 16)];
+        if (random.boolean()) for (prefix) |*c| {
+            c.* = std.ascii.toUpper(c.*);
+        };
+        var expected: ?Oid = null;
+        var ambiguous = false;
+        for (oids) |oid| {
+            if (!oid.startsWithHex(prefix)) continue;
+            if (expected != null) ambiguous = true;
+            expected = oid;
+        }
+        const got = db.findPrefix(io, prefix);
+        if (prefix.len < 2) {
+            // The database asks for two digits at least.
+            try std.testing.expectError(error.ObjectNotFound, got);
+        } else if (ambiguous) {
+            try std.testing.expectError(error.AmbiguousPrefix, got);
+        } else if (expected) |oid| {
+            try std.testing.expect((try got).eql(oid));
+        } else {
+            try std.testing.expectError(error.ObjectNotFound, got);
+        }
+    }
+}
