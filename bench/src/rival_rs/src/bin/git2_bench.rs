@@ -33,6 +33,10 @@ fn main() {
     let repo_path = args.get(2).expect("repository path").clone();
     let extra = args.get(3).cloned();
 
+    // relic and git do not rehash an object they read; libgit2 does by
+    // default, so the read workloads would time a hash the others skip.
+    git2::opts::strict_hash_verification(false);
+
     if ops::run(command, &repo_path, extra.as_deref()) || transport::run(command, &args[2..]) {
         return;
     }

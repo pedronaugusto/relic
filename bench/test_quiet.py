@@ -83,8 +83,10 @@ class PackCheckTests(unittest.TestCase):
             s.valid_pack(s.scratch/'gix.pack')
             evidence = check_packwrite(tsv(output('gix', 'packwrite', '0')), s.repo, s.scratch, s.run)
             self.assertEqual(evidence['pack_verification'], 'passed')
-            self.assertEqual([Path(c[-1]).name for c in s.calls], ['gix.pack'])
+            self.assertEqual([Path(c[-1]).name for c in s.calls], ['gix.pack', 'gix.idx'])
             self.assertEqual(s.calls[0][:3], ['git', 'index-pack', '--strict'])
+            self.assertEqual(s.calls[1][:3], ['git', 'verify-pack', '-v'])
+            self.assertEqual(evidence['deltas_in_pack'], 0)
             # A broken gix pack beside a good one fails the point.
             (s.scratch/'gix.pack').unlink()
             (s.scratch/'gix.pack').write_bytes(b'PACK but not one')

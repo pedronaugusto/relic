@@ -89,6 +89,22 @@ contents rather than pointers in the working tree, submodules at their
 recorded commits. A revision that lacks an operation reports it unavailable;
 the pinned before has no working-tree snapshots.
 
+## Like for like
+
+Where relic leads a native tool by more than 1.5 times, the sides were
+checked for doing the same work. Four settings make them do so. libgit2
+rehashes every object it reads unless told otherwise; relic and git do not,
+so libgit2 runs with `strict_hash_verification` off. gix bounds rename
+detection by sources times destinations against `diff.renameLimit` itself,
+where git and relic use its square, so gix gets git's bound. Git, libgit2, gix and
+go-git name every object with SHA-1's collision check, which relic leaves
+off by default; clone and fetch with new objects carry an `after-sha1dc`
+point that turns it on. Every pack-writing point reports the deltas its pack
+holds, counted by `git verify-pack` outside the clock, since git's
+pack-objects reports none; gix-pack writes every object whole. `revlist`'s
+`time_collect` builds every object's path, as `git rev-list --objects`
+prints them. The bare-repository repack writes no bitmap on any side.
+
 Each write starts from a fresh copy of the same fixture, with index refresh
 and mutation outside timing. Every transport output is checked against the
 expected remote tip and with `git fsck --strict`; a push is checked on the

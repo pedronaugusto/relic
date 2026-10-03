@@ -89,8 +89,11 @@ fn diff_tree(w: &str, path: &str, old: &str, new: &str, renames: bool) {
         let start = BenchmarkInstant::now();
         let repo = gix::open(path).unwrap();
         let (a, b) = (tree_of(&repo, old), tree_of(&repo, new));
-        let options = gix::diff::Options::default()
-            .with_rewrites(if renames { Some(gix::diff::Rewrites::default()) } else { None });
+        // git's diff.renameLimit of 1000 bounds sources times destinations
+        // by its square; gix compares the product with the limit itself, so
+        // its default of 1000 gives up where git and relic search.
+        let rewrites = gix::diff::Rewrites { limit: 1000 * 1000, ..Default::default() };
+        let options = gix::diff::Options::default().with_rewrites(if renames { Some(rewrites) } else { None });
         let changes = repo.diff_tree_to_tree(&a, &b, Some(options)).unwrap();
         best = best.min(ms(&start));
         counts = [0; 5];

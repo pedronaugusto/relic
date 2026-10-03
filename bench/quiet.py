@@ -37,9 +37,17 @@ def check_packwrite(evidence,repo,scratch,run):
     elif evidence['operation']=='available':
         packs=written_packs(repo,scratch)
         if not packs:raise ValueError('pack writer produced no pack')
-        for pack in packs:run(['git','index-pack','--strict',pack])
+        deltas=0
+        for pack in packs:
+            run(['git','index-pack','--strict',pack])
+            # Every side's delta count, from its pack: git's pack-objects and
+            # go-git report none themselves, and the count says how alike
+            # the packs' work was.
+            listing=run(['git','verify-pack','-v',pack.with_suffix('.idx')])
+            deltas+=sum(1 for line in listing.splitlines() if len(line.split())==7)
         evidence['pack_verification']='passed'
         evidence['packs_verified']=len(packs)
+        evidence['deltas_in_pack']=deltas
     return evidence
 
 def main():
@@ -154,6 +162,10 @@ def transport_pass(p,source,binary,rivals):
                     verb={'clone':['clone',url,dst],'clone-fsck':['clone',url,dst,'check'],
                           'fetch-noop':['fetch',dst],'fetch-new':['fetch',dst],'push':['push',dst]}[workload]
                     points=[(side,[binary[side]/'relic_transport_bench',*verb]) for side in source]
+                    # Like for like with every other side, which names each
+                    # received object with SHA-1's collision check.
+                    if workload in ('clone','clone-fsck','fetch-new'):
+                        points.append(('after-sha1dc',[binary['after']/'relic_transport_bench',*verb,'sha1dc']))
                     git=['git']
                     if workload=='clone-fsck':git+=['-c','transfer.fsckObjects=true']
                     git+={'clone':['clone','-q','--bare',url,dst],'fetch':['-C',dst,'fetch','-q','origin'],

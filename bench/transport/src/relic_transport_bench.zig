@@ -5,6 +5,10 @@
 //!   relic_transport_bench fetch <dir> [check]
 //!   relic_transport_bench push <dir>
 //!
+//! A trailing `sha1dc` names every received object with SHA-1's collision
+//! check on, as git, libgit2, gix and go-git all do by default: the
+//! like-for-like point beside relic's own default, which has it off.
+//!
 //! The environment is the process's own, handed to relic as its Programs:
 //! GIT_SSH_COMMAND names the stand-in ssh. Objects are checked as git's
 //! transfer.fsckObjects would check them only with `check`, which git does
@@ -20,7 +24,13 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const env = init.environ_map;
     const cwd = std.Io.Dir.cwd();
-    const check = args.len > 0 and std.mem.eql(u8, args[args.len - 1], "check");
+    var check = false;
+    var sha1dc = false;
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "check")) check = true;
+        if (std.mem.eql(u8, arg, "sha1dc")) sha1dc = true;
+    }
+    const odb_options: relic.odb.Options = .{ .detect_sha1_collisions = sha1dc };
     const start = benchmarkNow(io);
     if (std.mem.eql(u8, args[1], "clone")) {
         // RELIC_BENCH_REPEAT runs the clone that many times in one process,
@@ -36,13 +46,14 @@ pub fn main(init: std.process.Init) !void {
                 .bare = true,
                 .programs = .{ .environ = env },
                 .check_objects = check,
+                .odb = odb_options,
             });
             repo.deinit(io);
         }
     } else if (std.mem.eql(u8, args[1], "fetch")) {
         var dir = try cwd.openDir(io, args[2], .{ .iterate = true });
         defer dir.close(io);
-        var repo = try relic.repo.Repository.open(gpa, io, dir, .{});
+        var repo = try relic.repo.Repository.open(gpa, io, dir, .{ .odb = odb_options });
         defer repo.deinit(io);
         var outcome = try relic.transport.fetch.fetch(gpa, io, &repo, "origin", .{
             .who = who,
