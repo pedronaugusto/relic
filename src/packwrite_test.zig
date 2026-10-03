@@ -80,12 +80,26 @@ const Openers = struct {
     var waiting_for_other: ?std.Thread.Id = null;
 
     fn reset(wait_from: ?std.Thread.Id) void {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
         count = 0;
         waiting_for_other = wait_from;
     }
 
     fn distinct() usize {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
         return count;
+    }
+
+    /// Whether this is the first open on the waiting thread, which then
+    /// waits no more.
+    fn takeWait() bool {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        if (waiting_for_other != std.Thread.getCurrentId()) return false;
+        waiting_for_other = null;
+        return true;
     }
 
     fn note() bool {
@@ -105,9 +119,7 @@ const Openers = struct {
         // database reads other files first, on the calling thread.
         const loose = sub_path.len == 41 and sub_path[2] == '/';
         if (!loose) return std.testing.io.vtable.dirOpenFile(userdata, dir, sub_path, options);
-        const first = note();
-        if (first and waiting_for_other == std.Thread.getCurrentId()) {
-            waiting_for_other = null;
+        if (note() and takeWait()) {
             var waited: usize = 0;
             while (waited < 5000) : (waited += 1) {
                 {
