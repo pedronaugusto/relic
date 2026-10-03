@@ -594,7 +594,7 @@ const Phases = struct {
     }
 };
 
-test "the tasks read the next batch while this task searches one, and the pack is the serial writer's" {
+test "the tasks read the next batch while one is searched, and the pack is the serial writer's" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var corpus = try Corpus.init(gpa, io, 8, 6, 24);
@@ -744,4 +744,208 @@ test "collecting loose objects reads their trees on several tasks and hints as o
         if (a.hint.len != 0) hinted += 1;
     }
     try std.testing.expectEqual(@as(usize, 48), hinted);
+}
+
+/// Which threads made an allocation the size of a delta encoder's smallest
+/// index, which only the delta search makes, and a cancelation check that
+/// holds the calling thread, once the search has begun, until another
+/// thread has searched too: a serial search never lets it go.
+const Searchers = struct {
+    var mutex: std.atomic.Mutex = .unlocked;
+    var caller: ?std.Thread.Id = null;
+    var on_caller: bool = false;
+    var elsewhere: bool = false;
+    var held: bool = false;
+
+    fn reset(calling: ?std.Thread.Id) void {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        caller = calling;
+        on_caller = false;
+        elsewhere = false;
+        held = false;
+    }
+
+    fn searchedElsewhere() bool {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        return elsewhere;
+    }
+
+    fn note() void {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        if (std.Thread.getCurrentId() == caller) on_caller = true else elsewhere = true;
+    }
+
+    /// Whether to hold the calling thread here: once, after a search
+    /// allocation, and never inside an allocation, where it would hold the
+    /// lock the tasks allocate under.
+    fn takeHold() bool {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        if (held or caller != std.Thread.getCurrentId() or !(on_caller or elsewhere)) return false;
+        held = true;
+        return true;
+    }
+
+    fn checkCancel(userdata: ?*anyopaque) Io.Cancelable!void {
+        if (takeHold()) {
+            var waited: usize = 0;
+            while (waited < 5000 and !searchedElsewhere()) : (waited += 1) {
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch break;
+            }
+        }
+        return std.testing.io.vtable.checkCancel(userdata);
+    }
+
+    const Spy = struct {
+        child: std.mem.Allocator,
+        fn allocator(s: *Spy) std.mem.Allocator {
+            return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const s: *Spy = @ptrCast(@alignCast(ctx));
+            if (len == 4096 * @sizeOf(u32)) note();
+            return s.child.rawAlloc(len, alignment, ret);
+        }
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+            const s: *Spy = @ptrCast(@alignCast(ctx));
+            return s.child.rawResize(memory, alignment, new_len, ret);
+        }
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+            const s: *Spy = @ptrCast(@alignCast(ctx));
+            return s.child.rawRemap(memory, alignment, new_len, ret);
+        }
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const s: *Spy = @ptrCast(@alignCast(ctx));
+            s.child.rawFree(memory, alignment, ret);
+        }
+    };
+};
+
+/// Versions of enough files for several search groups.
+fn groupedCorpus(gpa: std.mem.Allocator, io: Io) !Corpus {
+    const versions = 8;
+    const files = 3 * odb_mod.search_group_objects / versions + 4;
+    return Corpus.init(gpa, io, files, versions, 0);
+}
+
+test "the delta search runs on several tasks, a group on each, and the pack is the serial writer's" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var corpus = try groupedCorpus(gpa, io);
+    defer corpus.deinit(gpa, io);
+    const serial = try corpus.write(gpa, io, .{ .threads = 1 });
+    try std.testing.expect(serial.deltas > 0);
+
+    var vtable = io.vtable.*;
+    vtable.checkCancel = Searchers.checkCancel;
+    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var spy: Searchers.Spy = .{ .child = gpa };
+    var db = try odb_mod.Odb.openAt(spy.allocator(), io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    var pack_dir = try corpus.objects.openDir(io, "pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    Searchers.reset(std.Thread.getCurrentId());
+    const parallel = try db.writePack(watched, pack_dir, corpus.entries.items, .{ .threads = 4 });
+    if (!Searchers.searchedElsewhere()) {
+        std.debug.print("the delta search ran on the calling thread alone\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(parallel.name.eql(serial.name));
+}
+
+test "a pack with several search groups is the same on 1, 2, 7 and 16 tasks, any Io, and any batch budget" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var corpus = try groupedCorpus(gpa, io);
+    defer corpus.deinit(gpa, io);
+    var single: Io.Threaded = .init_single_threaded;
+
+    const Case = struct { encoding: odb_mod.DeltaEncoding, io: Io, threads: u16, budget: usize };
+    // A budget of a few dozen objects a batch cuts groups across batches,
+    // which carry the window of the group they end inside.
+    const small = 128 * 1024;
+    const cases = [_]Case{
+        .{ .encoding = .offset, .io = io, .threads = 2, .budget = 64 << 20 },
+        .{ .encoding = .offset, .io = io, .threads = 7, .budget = 64 << 20 },
+        .{ .encoding = .offset, .io = io, .threads = 16, .budget = 64 << 20 },
+        .{ .encoding = .offset, .io = io, .threads = 2, .budget = small },
+        .{ .encoding = .offset, .io = io, .threads = 7, .budget = small },
+        .{ .encoding = .offset, .io = io, .threads = 16, .budget = small },
+        .{ .encoding = .offset, .io = single.io(), .threads = 7, .budget = small },
+        .{ .encoding = .reference, .io = io, .threads = 7, .budget = small },
+    };
+    var serial: [2]@import("pack.zig").WriteReport = undefined;
+    for ([_]odb_mod.DeltaEncoding{ .offset, .reference }, &serial) |encoding, *report| {
+        report.* = try corpus.write(gpa, io, .{ .threads = 1, .delta = encoding });
+        try std.testing.expect(report.deltas > 0);
+    }
+    for (cases) |c| {
+        const want = serial[@intFromEnum(c.encoding)];
+        const report = try corpus.write(gpa, c.io, .{ .threads = c.threads, .delta = c.encoding, .batch_bytes = c.budget });
+        if (!report.name.eql(want.name)) {
+            std.debug.print("{t}, {d} tasks, batch {d}: {d} deltas, {d} bytes; serial {d}, {d}\n", .{ c.encoding, c.threads, c.budget, report.deltas, report.pack_bytes, want.deltas, want.pack_bytes });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// An allocator that notes whether two threads were ever inside it at once.
+const OneAtATime = struct {
+    child: std.mem.Allocator,
+    inside: std.atomic.Value(u32) = .init(0),
+    overlapped: std.atomic.Value(bool) = .init(false),
+
+    fn allocator(o: *OneAtATime) std.mem.Allocator {
+        return .{ .ptr = o, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn enter(o: *OneAtATime) void {
+        if (o.inside.fetchAdd(1, .acquire) != 0) o.overlapped.store(true, .monotonic);
+        // Long enough inside for another thread to arrive, were it let in.
+        for (0..200) |_| std.atomic.spinLoopHint();
+    }
+    fn leave(o: *OneAtATime) void {
+        _ = o.inside.fetchSub(1, .release);
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx));
+        o.enter();
+        defer o.leave();
+        return o.child.rawAlloc(len, alignment, ret);
+    }
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx));
+        o.enter();
+        defer o.leave();
+        return o.child.rawResize(memory, alignment, new_len, ret);
+    }
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx));
+        o.enter();
+        defer o.leave();
+        return o.child.rawRemap(memory, alignment, new_len, ret);
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx));
+        o.enter();
+        defer o.leave();
+        o.child.rawFree(memory, alignment, ret);
+    }
+};
+
+test "the searching tasks enter the database's allocator one at a time" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var corpus = try groupedCorpus(gpa, io);
+    defer corpus.deinit(gpa, io);
+    var one: OneAtATime = .{ .child = gpa };
+    var db = try odb_mod.Odb.openAt(one.allocator(), io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    var pack_dir = try corpus.objects.openDir(io, "pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    const report = try db.writePack(io, pack_dir, corpus.entries.items, .{ .threads = 16 });
+    try std.testing.expect(report.deltas > 0);
+    try std.testing.expect(!one.overlapped.load(.monotonic));
 }

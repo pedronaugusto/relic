@@ -1319,9 +1319,10 @@ pub const Odb = struct {
     ///
     /// The objects are ordered the way git's packer orders them -- type,
     /// then the tail of the path hint, then size descending -- and each is
-    /// tried against a sliding window of the ones already written. What is
-    /// held at once is the window, which `PackOptions.window_bytes` bounds,
-    /// and, with `PackOptions.threads` one, the loose-body cache bounded by
+    /// tried against a sliding window of the ones before it in its search
+    /// group (`Build`). What is held at once is a window for each group
+    /// being searched, which `PackOptions.window_bytes` bounds each, and,
+    /// with `PackOptions.threads` one, the loose-body cache bounded by
     /// `PackOptions.loose_cache_bytes` and one object being written, or,
     /// with more, the batches `PackOptions.batch_bytes` bounds.
     ///
@@ -1436,13 +1437,18 @@ pub const Odb = struct {
         };
         defer writer.deinit(io);
 
-        var build: Build = .{
-            .odb = odb,
-            .gpa = gpa,
-            .options = options,
-            .ordered = ordered,
-            .offsets = try gpa.alloc(u64, ordered.len),
-            .writer = writer,
+        var build: Build = blk: {
+            const group_starts = try groupStarts(gpa, ordered);
+            errdefer gpa.free(group_starts);
+            break :blk .{
+                .odb = odb,
+                .gpa = gpa,
+                .options = options,
+                .ordered = ordered,
+                .offsets = try gpa.alloc(u64, ordered.len),
+                .writer = writer,
+                .group_starts = group_starts,
+            };
         };
         defer build.deinit();
         if (workers > 1) {
@@ -2133,14 +2139,18 @@ pub const PackOptions = struct {
     /// (`Io.Group.async`): zero for one per processor the machine has, one
     /// for none at all — the writer then runs on the calling task alone,
     /// with the loose-body cache below. Above one, the tasks read loose
-    /// objects, inflate the whole objects of packs and deflate entries ahead
-    /// of the writer, while the delta search, the deltas packs hold and the
-    /// writing stay on the calling task in pack order. An Io that cannot run
-    /// a task in parallel runs it inline. Every value writes the same bytes,
-    /// and the tasks never allocate: the calling task sizes and allocates
-    /// everything they fill, and, when objects come from packs, a decoder
-    /// and a 64 KiB read buffer for each task. A `-fsingle-threaded` build
-    /// always uses one.
+    /// objects, inflate the whole objects of packs, search for deltas and
+    /// deflate entries ahead of the writer, while the deltas packs hold and
+    /// the writing stay on the calling task in pack order. The search is cut
+    /// into groups of objects that depend on the objects alone (`Build`), so
+    /// every value writes the same bytes. An Io that cannot run a task in
+    /// parallel runs it inline. Reading and deflating tasks never allocate:
+    /// the calling task sizes and allocates everything they fill, and, when
+    /// objects come from packs, a decoder and a 64 KiB read buffer for each
+    /// task. Searching tasks allocate their delta indexes and candidates
+    /// from the database's allocator one call at a time, under a lock of
+    /// this write's, so it need not be thread-safe. A `-fsingle-threaded`
+    /// build always uses one.
     threads: u16 = 0,
     /// How many objects already written each new one is tried against.
     /// git's default is ten. Zero writes no deltas.
@@ -2325,8 +2335,163 @@ const WindowSlot = struct {
     }
 };
 
-/// A pack being built: the window, the delta choice for each object in pack
-/// order, and where each object was written.
+/// One search group's delta window: the objects chosen for before the next,
+/// newest last, which it is tried against.
+const Window = struct {
+    slots: std.ArrayList(WindowSlot) = .empty,
+    /// The bytes of the bodies in `slots`.
+    bytes: usize = 0,
+    /// Bodies let go of while objects that may be written from them still
+    /// wait, when the choosing runs ahead of the writing.
+    retired: std.ArrayList([]u8) = .empty,
+
+    fn deinit(w: *Window, gpa: Allocator) void {
+        w.clear(gpa);
+        w.slots.deinit(gpa);
+        for (w.retired.items) |bytes| gpa.free(bytes);
+        w.retired.deinit(gpa);
+    }
+
+    /// Let go of every slot, its body freed: the serial writer has written
+    /// them all.
+    fn clear(w: *Window, gpa: Allocator) void {
+        for (w.slots.items) |*slot| {
+            if (slot.encoder) |*encoder| encoder.deinit(gpa);
+            gpa.free(slot.bytes);
+        }
+        w.slots.clearRetainingCapacity();
+        w.bytes = 0;
+    }
+
+    /// Choose how object `pos`, whose bytes are `bytes`, is written, and
+    /// put it in the window when it may be a base. On success the bytes are
+    /// the window's when `kept`, and the caller's otherwise. A body the
+    /// window lets go of is freed, or, with `keep_retired`, kept readable
+    /// in `retired`.
+    fn choose(
+        w: *Window,
+        gpa: Allocator,
+        options: PackOptions,
+        raw_len: usize,
+        pos: usize,
+        t: object.Type,
+        bytes: []u8,
+        keep_retired: bool,
+    ) Error!Build.Choice {
+        const deltifiable = options.delta != .none and options.window != 0 and
+            bytes.len < options.big_file_bytes;
+        var choice: Build.Choice = .{};
+        var depth: u32 = 0;
+        if (deltifiable) {
+            // git's rule for what is worth writing: a delta must be at
+            // most half the object it stands in for, and each one after
+            // the first must beat the one before it.
+            var limit: usize = bytes.len / 2;
+            if (limit > raw_len) limit -= raw_len else limit = 0;
+            if (try findDelta(gpa, w.slots.items, t, bytes, options, limit)) |chosen| {
+                const slot = w.slots.items[chosen.slot];
+                depth = slot.depth + 1;
+                choice = .{ .base = slot.pos, .delta = chosen.bytes };
+            }
+            errdefer if (choice.delta) |d| gpa.free(d);
+            try w.slots.ensureUnusedCapacity(gpa, 1);
+            if (keep_retired) try w.retired.ensureUnusedCapacity(gpa, w.slots.items.len + 1);
+            w.slots.appendAssumeCapacity(.{ .pos = pos, .type = t, .bytes = bytes, .depth = depth, .encoder = null });
+            choice.kept = true;
+            w.bytes += bytes.len;
+            // The oldest go first, by count and then by weight, so the
+            // window is a bound on memory and not only on work.
+            while (w.slots.items.len > options.window or
+                (w.slots.items.len > 1 and w.bytes > options.window_bytes))
+            {
+                var oldest = w.slots.orderedRemove(0);
+                w.bytes -= oldest.bytes.len;
+                if (oldest.encoder) |*encoder| encoder.deinit(gpa);
+                if (keep_retired) w.retired.appendAssumeCapacity(oldest.bytes) else gpa.free(oldest.bytes);
+            }
+        }
+        return choice;
+    }
+};
+
+/// How many objects a search group takes before it may end. It then ends
+/// where the name hash changes, as git cuts its threads' segments, so that
+/// versions of one file stay together. Measured on a repack of ghostty
+/// (115,981 objects, 91.25 MB with one group): groups of 4,096, 1,024, 512,
+/// 256 and 128 objects cost 0.002%, 0.017%, 0.036%, 0.077% and 0.16% more
+/// bytes; groups cut at 16, 4 and 1 MiB instead cost 0.07%, 3.7% and 4.8%,
+/// so bytes do not cut them. Tests use smaller groups, so that small
+/// corpora have several.
+pub const search_group_objects = if (builtin.is_test) 64 else 512;
+
+/// Where the search groups of `ordered` start. Each object is tried only
+/// against the window of its own group, and the groups depend on the
+/// objects alone, so they are searched on any number of tasks and give the
+/// same pack.
+fn groupStarts(gpa: Allocator, ordered: []const Ordered) Allocator.Error![]bool {
+    const starts = try gpa.alloc(bool, ordered.len);
+    var objects: usize = 0;
+    for (ordered, 0..) |item, i| {
+        const run = i > 0 and item.name_hash != 0 and item.name_hash == ordered[i - 1].name_hash;
+        starts[i] = i == 0 or (objects >= search_group_objects and !run);
+        if (starts[i]) objects = 0;
+        objects += 1;
+    }
+    return starts;
+}
+
+/// The database's allocator for tasks that allocate, one call at a time,
+/// so that it need not be thread-safe itself.
+const LockedAllocator = struct {
+    child: Allocator,
+    io: Io,
+    mutex: Io.Mutex = .init,
+
+    fn allocator(l: *LockedAllocator) Allocator {
+        return .{ .ptr = l, .vtable = &vtable };
+    }
+
+    const vtable: Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // safe: installed only by `allocator` on a LockedAllocator
+        l.mutex.lockUncancelable(l.io);
+        defer l.mutex.unlock(l.io);
+        return l.child.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // safe: installed only by `allocator` on a LockedAllocator
+        l.mutex.lockUncancelable(l.io);
+        defer l.mutex.unlock(l.io);
+        return l.child.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // safe: installed only by `allocator` on a LockedAllocator
+        l.mutex.lockUncancelable(l.io);
+        defer l.mutex.unlock(l.io);
+        return l.child.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // safe: installed only by `allocator` on a LockedAllocator
+        l.mutex.lockUncancelable(l.io);
+        defer l.mutex.unlock(l.io);
+        l.child.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+/// A pack being built: the windows, the delta choice for each object in
+/// pack order, and where each object was written.
+///
+/// The objects in pack order are cut into search groups (`groupStarts`),
+/// and each object is tried only against the window of its own group,
+/// which starts empty. git cuts its order into one segment per thread
+/// (`ll_find_deltas`) and moves the cuts as threads steal work, so its
+/// deltas change with `pack.threads` and from run to run; here the cuts
+/// depend on the objects alone, so the groups are searched on any number of
+/// tasks, in any order, and the pack is the same.
 const Build = struct {
     odb: *Odb,
     gpa: Allocator,
@@ -2335,27 +2500,17 @@ const Build = struct {
     /// Where each object of `ordered` was written, once it was.
     offsets: []u64,
     writer: *pack.Writer,
-    window: std.ArrayList(WindowSlot) = .empty,
-    window_bytes: usize = 0,
-    /// Bodies the window let go of while objects of the batch that may be
-    /// written from them still wait; released once the batch is written.
-    retired: std.ArrayList([]u8) = .empty,
-    keep_retired: bool = false,
+    /// Whether each object of `ordered` begins a search group
+    /// (`groupStarts`).
+    group_starts: []bool,
+    /// The window of the group being searched, serially, or of the group a
+    /// batch ended inside, carried into the next.
+    window: Window = .{},
 
     fn deinit(b: *Build) void {
-        for (b.window.items) |*slot| {
-            if (slot.encoder) |*encoder| encoder.deinit(b.gpa);
-            b.gpa.free(slot.bytes);
-        }
         b.window.deinit(b.gpa);
-        b.releaseRetired();
-        b.retired.deinit(b.gpa);
+        b.gpa.free(b.group_starts);
         b.gpa.free(b.offsets);
-    }
-
-    fn releaseRetired(b: *Build) void {
-        for (b.retired.items) |bytes| b.gpa.free(bytes);
-        b.retired.clearRetainingCapacity();
     }
 
     /// How object `pos` is written, by git's rules against the window: the
@@ -2369,46 +2524,11 @@ const Build = struct {
         kept: bool = false,
     };
 
-    /// Choose how object `pos`, whose bytes are `bytes`, is written, and
-    /// put it in the window when it may be a base. On success the bytes are
-    /// the window's when `kept`, and the caller's otherwise; the window
-    /// keeps them readable until `releaseRetired` while `keep_retired`.
+    /// Choose how object `pos`, whose bytes are `bytes`, is written: the
+    /// serial writer's `Window.choose`.
     fn choose(b: *Build, pos: usize, t: object.Type, bytes: []u8) Error!Choice {
-        const options = b.options;
-        const deltifiable = options.delta != .none and options.window != 0 and
-            bytes.len < options.big_file_bytes;
-        var choice: Choice = .{};
-        var depth: u32 = 0;
-        if (deltifiable) {
-            // git's rule for what is worth writing: a delta must be at
-            // most half the object it stands in for, and each one after
-            // the first must beat the one before it.
-            const raw_len = b.odb.backendData().kind.rawLen();
-            var limit: usize = bytes.len / 2;
-            if (limit > raw_len) limit -= raw_len else limit = 0;
-            if (try findDelta(b.gpa, b.window.items, t, bytes, options, limit)) |chosen| {
-                const slot = b.window.items[chosen.slot];
-                depth = slot.depth + 1;
-                choice = .{ .base = slot.pos, .delta = chosen.bytes };
-            }
-            errdefer if (choice.delta) |d| b.gpa.free(d);
-            try b.window.ensureUnusedCapacity(b.gpa, 1);
-            if (b.keep_retired) try b.retired.ensureUnusedCapacity(b.gpa, b.window.items.len + 1);
-            b.window.appendAssumeCapacity(.{ .pos = pos, .type = t, .bytes = bytes, .depth = depth, .encoder = null });
-            choice.kept = true;
-            b.window_bytes += bytes.len;
-            // The oldest go first, by count and then by weight, so the
-            // window is a bound on memory and not only on work.
-            while (b.window.items.len > options.window or
-                (b.window.items.len > 1 and b.window_bytes > options.window_bytes))
-            {
-                var oldest = b.window.orderedRemove(0);
-                b.window_bytes -= oldest.bytes.len;
-                if (oldest.encoder) |*encoder| encoder.deinit(b.gpa);
-                if (b.keep_retired) b.retired.appendAssumeCapacity(oldest.bytes) else b.gpa.free(oldest.bytes);
-            }
-        }
-        return choice;
+        if (b.group_starts[pos]) b.window.clear(b.gpa);
+        return b.window.choose(b.gpa, b.options, b.odb.backendData().kind.rawLen(), pos, t, bytes, false);
     }
 
     /// Write object `pos` the way `choice` says, deflating it here.
@@ -2468,7 +2588,12 @@ const Build = struct {
         /// Whether the tasks open files for it, which caps how many read.
         opens: bool = false,
         pending: std.ArrayList(Pending) = .empty,
-        /// Bodies the window let go of during this batch's search, which
+        /// The batch cut at its search groups' starts, each part searched
+        /// by a task against its own group's window. The first continues
+        /// the window the batch before ended with, unless a group starts
+        /// with the batch.
+        parts: std.ArrayList(Part) = .empty,
+        /// Bodies the windows let go of during this batch's search, which
         /// this batch or the one before it may still be written from.
         retired: std.ArrayList([]u8) = .empty,
 
@@ -2484,6 +2609,8 @@ const Build = struct {
                 if (p.room.len != 0) gpa.free(p.room);
             }
             batch.pending.clearRetainingCapacity();
+            for (batch.parts.items) |*part| part.window.deinit(gpa);
+            batch.parts.clearRetainingCapacity();
             for (batch.retired.items) |bytes| gpa.free(bytes);
             batch.retired.clearRetainingCapacity();
         }
@@ -2491,15 +2618,23 @@ const Build = struct {
         fn deinit(batch: *Batch, gpa: Allocator) void {
             batch.release(gpa);
             batch.pending.deinit(gpa);
+            batch.parts.deinit(gpa);
             batch.retired.deinit(gpa);
         }
     };
 
-    /// Every object in pack order, with tasks reading bodies and deflating
-    /// entries ahead of this one, batch by batch. While this task searches
-    /// one batch for deltas, the tasks deflate the batch before it and read
-    /// the batch after it, so three batches are under way at once, each
-    /// within a third of `batch_bytes`.
+    /// Objects `start..end` of pack order, all of one search group.
+    const Part = struct {
+        start: usize,
+        end: usize,
+        window: Window = .{},
+    };
+
+    /// Every object in pack order, with tasks reading bodies, searching and
+    /// deflating entries ahead of this one, batch by batch. While the tasks
+    /// search one batch for deltas, a group on each, they also deflate the
+    /// batch before it and read the batch after it, so three batches are
+    /// under way at once, each within a third of `batch_bytes`.
     fn writeConcurrently(b: *Build, io: Io, workers: usize) Error!void {
         const gpa = b.gpa;
         const deflaters = try gpa.alloc(pack.Deflater, workers);
@@ -2523,8 +2658,8 @@ const Build = struct {
         defer failures.deinit(gpa);
         var slots: [3]Batch = @splat(.{});
         defer for (&slots) |*slot| slot.deinit(gpa);
-        b.keep_retired = true;
-        const stage: Stage = .{ .workers = workers, .deflaters = deflaters, .readers = readers, .failures = &failures };
+        var locked: LockedAllocator = .{ .child = gpa, .io = io };
+        const stage: Stage = .{ .workers = workers, .deflaters = deflaters, .readers = readers, .failures = &failures, .search_gpa = locked.allocator() };
 
         // The first batch read, then each searched while the one before is
         // deflated and the one after read, then the last deflated.
@@ -2574,6 +2709,9 @@ const Build = struct {
         deflaters: []pack.Deflater,
         readers: []pack.Pack.EntryReader,
         failures: *std.ArrayList(?Error),
+        /// What the searching tasks allocate with: the database's
+        /// allocator, one call at a time.
+        search_gpa: Allocator,
     };
 
     /// The batch from `start`: objects while their charges fit a third of
@@ -2596,6 +2734,7 @@ const Build = struct {
             .end = end,
             .alone = end == start + 1 and charged > share,
             .pending = batch.pending,
+            .parts = batch.parts,
             .retired = batch.retired,
         };
     }
@@ -2652,11 +2791,56 @@ const Build = struct {
         p.type = found.type;
     }
 
-    /// The delta search, in pack order, exactly as the serial writer makes
-    /// it. The bodies the window lets go of meanwhile stay the batch's.
-    fn search(b: *Build, batch: *Batch) Error!void {
-        for (batch.pending.items, batch.start..) |*p, pos| p.choice = try b.choose(pos, p.type, p.bytes.?);
-        std.mem.swap(std.ArrayList([]u8), &batch.retired, &b.retired);
+    /// Cut `batch` into its search groups' parts, the first taking the
+    /// window the batch before it ended with when no group starts here.
+    fn prepareSearch(b: *Build, batch: *Batch) Error!void {
+        const gpa = b.gpa;
+        var start = batch.start;
+        while (start < batch.end) {
+            var end = start + 1;
+            while (end < batch.end and !b.group_starts[end]) end += 1;
+            try batch.parts.append(gpa, .{ .start = start, .end = end });
+            start = end;
+        }
+        if (!b.group_starts[batch.start]) {
+            batch.parts.items[0].window = b.window;
+            b.window = .{};
+        }
+    }
+
+    /// One part's delta search, in pack order, exactly as the serial writer
+    /// makes it for its group.
+    fn searchPart(b: *const Build, gpa: Allocator, batch: *Batch, part: *Part) Error!void {
+        const raw_len = b.odb.backendData().kind.rawLen();
+        for (part.start..part.end) |pos| {
+            const p = &batch.pending.items[pos - batch.start];
+            p.choice = try part.window.choose(gpa, b.options, raw_len, pos, p.type, p.bytes.?, true);
+        }
+    }
+
+    /// After the search: the window of a group that goes on past the batch
+    /// is carried to the next, and every other part's window let go of. The
+    /// bodies they held stay the batch's until it is written.
+    fn finishSearch(b: *Build, batch: *Batch) Error!void {
+        const gpa = b.gpa;
+        const parts = batch.parts.items;
+        const continues = batch.end < b.ordered.len and !b.group_starts[batch.end];
+        for (parts, 0..) |*part, i| {
+            try batch.retired.appendSlice(gpa, part.window.retired.items);
+            part.window.retired.clearRetainingCapacity();
+            if (continues and i == parts.len - 1) {
+                b.window = part.window;
+                part.window = .{};
+                continue;
+            }
+            try batch.retired.ensureUnusedCapacity(gpa, part.window.slots.items.len);
+            for (part.window.slots.items) |*slot| {
+                if (slot.encoder) |*encoder| encoder.deinit(gpa);
+                batch.retired.appendAssumeCapacity(slot.bytes);
+            }
+            part.window.slots.clearRetainingCapacity();
+            part.window.bytes = 0;
+        }
     }
 
     /// Room for each entry the tasks deflate.
@@ -2665,14 +2849,19 @@ const Build = struct {
         for (batch.pending.items) |*p| p.room = try b.gpa.alloc(u8, pack.Deflater.room(p.payload().len));
     }
 
-    /// The tasks deflate `deflating` and read `reading`, either may be
-    /// absent, while this task searches `searching`, then takes what is
-    /// left of their work.
+    /// The tasks, this one among them, search the parts of `searching`,
+    /// deflate `deflating` and read `reading`, any of them absent.
     fn overlap(b: *Build, io: Io, stage: Stage, deflating: ?*Batch, reading: ?*Batch, searching: ?*Batch) Error!void {
         const deflates: []Pending = if (deflating) |d| (if (d.alone) &.{} else d.pending.items) else &.{};
         const reads: []Pending = if (reading) |r| (if (r.alone) &.{} else r.pending.items) else &.{};
-        try stage.failures.resize(b.gpa, deflates.len + reads.len);
+        if (searching) |s| try b.prepareSearch(s);
+        const parts: []Part = if (searching) |s| s.parts.items else &.{};
+        try stage.failures.resize(b.gpa, parts.len + deflates.len + reads.len);
         const Work = struct {
+            build: *const Build,
+            search_gpa: Allocator,
+            searching: ?*Batch,
+            parts: []Part,
             odb: *const Odb,
             deflates: []Pending,
             reads: []Pending,
@@ -2682,8 +2871,11 @@ const Build = struct {
             compression: pack.Compression,
 
             fn work(c: @This(), task_io: Io, worker: usize, i: usize) Error!void {
-                if (i < c.deflates.len) return c.deflate(worker, &c.deflates[i]);
-                const at = i - c.deflates.len;
+                // The parts first: they are the longest items.
+                if (i < c.parts.len) return c.build.searchPart(c.search_gpa, c.searching.?, &c.parts[i]);
+                const d = i - c.parts.len;
+                if (d < c.deflates.len) return c.deflate(worker, &c.deflates[d]);
+                const at = d - c.deflates.len;
                 return c.read(task_io, worker, c.read_items[at].oid, &c.reads[at]);
             }
 
@@ -2723,6 +2915,10 @@ const Build = struct {
             .io = io,
             .failures = stage.failures.items,
             .context = .{
+                .build = b,
+                .search_gpa = stage.search_gpa,
+                .searching = searching,
+                .parts = parts,
                 .odb = b.odb,
                 .deflates = deflates,
                 .reads = reads,
@@ -2731,22 +2927,17 @@ const Build = struct {
                 .readers = stage.readers,
                 .compression = b.options.compression,
             },
-            // The reads come after the deflating in item order; opening
-            // files is for a few workers only.
-            .limited_from = deflates.len,
+            // The reads come after the searching and the deflating in item
+            // order; opening files is for a few workers only.
+            .limited_from = parts.len + deflates.len,
             .limited_workers = if (opens) readTaskCount(stage.workers) else stage.workers,
         };
-        // The workers with something to take, and of them every one but
-        // this task, which searches meanwhile and joins them after, or
-        // joins them at once with nothing to search.
-        const busy = if (deflates.len != 0) stage.workers else @min(stage.workers, set.limited_workers);
-        const items = deflates.len + reads.len;
-        set.start(if (searching != null) @min(busy - 1, items) else @min(busy, items) -| 1);
-        if (searching) |s| b.search(s) catch |err| {
-            set.abandon();
-            return err;
-        };
+        // The workers with something to take, this task one of them.
+        const busy = if (parts.len + deflates.len != 0) stage.workers else @min(stage.workers, set.limited_workers);
+        const items = parts.len + deflates.len + reads.len;
+        set.start(@min(busy, items) -| 1);
         try set.finish();
+        if (searching) |s| try b.finishSearch(s);
     }
 
     /// A batch's entries, in pack order.
@@ -2882,6 +3073,39 @@ fn beforeInPackOrder(_: void, a: Ordered, b: Ordered) bool {
     if (a.name_hash != b.name_hash) return a.name_hash > b.name_hash;
     if (a.size != b.size) return a.size > b.size;
     return std.mem.order(u8, a.oid.raw(), b.oid.raw()) == .lt;
+}
+
+test "search groups end after enough objects, and never inside one name's run" {
+    const gpa = std.testing.allocator;
+    var ordered: [3 * search_group_objects]Ordered = undefined;
+    for (&ordered, 0..) |*item, i| item.* = .{
+        .oid = undefined,
+        .type = .blob,
+        .size = 100,
+        // Runs of ten objects with one name each, past the first group's
+        // end too.
+        .name_hash = @intCast(i / 10 + 1),
+        .cached = null,
+    };
+    const starts = try groupStarts(gpa, &ordered);
+    defer gpa.free(starts);
+    var groups: usize = 0;
+    for (starts, 0..) |start, i| {
+        if (!start) continue;
+        groups += 1;
+        try std.testing.expect(i == 0 or ordered[i].name_hash != ordered[i - 1].name_hash);
+    }
+    try std.testing.expectEqual(@as(usize, 3), groups);
+    // The first group ends at the first name change after its objects.
+    const second = std.mem.indexOfScalarPos(bool, starts, 1, true).?;
+    try std.testing.expectEqual((search_group_objects + 9) / 10 * 10, second);
+
+    // Objects with no name end a full group where they stand, whatever
+    // their sizes.
+    for (&ordered, 0..) |*item, i| item.* = .{ .oid = undefined, .type = .blob, .size = i * 1000, .name_hash = 0, .cached = null };
+    const unnamed = try groupStarts(gpa, &ordered);
+    defer gpa.free(unnamed);
+    for (unnamed, 0..) |start, i| try std.testing.expectEqual(i % search_group_objects == 0, start);
 }
 
 test "delta candidate bounds account for chain depth" {

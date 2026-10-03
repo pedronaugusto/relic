@@ -510,11 +510,18 @@ bytes to be filled before use instead of copying their unused storage.
 The writing is spread over tasks of the caller's `std.Io` (`Io.Group.async`),
 one per processor by default. They read the loose objects, inflate the whole
 objects of packs and deflate the entries, batch by batch, into buffers the
-calling task sized and allocated beforehand, so they allocate nothing and need
-no thread-safe allocator; the delta search, the deltas packs hold and the
-writing stay on the calling task, in pack order, so every task count, and
-every Io, writes the serial writer's bytes. While the calling task searches
-one batch, the tasks read the next and deflate the one before.
+calling task sized and allocated beforehand, so those allocate nothing. They
+search for deltas too: the objects in pack order are cut into groups of at
+least 512, each ending where the path hint changes, and an object is tried
+only against the window of its own group. The groups depend on the objects
+alone, so every task count, and every Io, writes the serial writer's bytes.
+git cuts one segment per thread and moves the cuts as threads steal work, so
+its deltas change with `pack.threads`; the groups here cost 0.04% of the pack
+on a repack of ghostty against one window over everything. A searching task
+allocates its delta indexes through the database's allocator one call at a
+time, under a lock, so that allocator need not be thread-safe. The deltas
+packs hold and the writing stay on the calling task, in pack order. While the
+tasks search one batch, they read the next and deflate the one before.
 `PackOptions.batch_bytes` bounds what the three batches hold ahead of the
 writer. At most six tasks read loose files at once: beyond a few, opening
 files contends in the kernel. An Io that cannot run a task in parallel runs it

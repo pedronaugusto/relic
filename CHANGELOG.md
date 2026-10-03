@@ -22,6 +22,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Index.addMany` keeps the entry added last where one names a path and stage already in the index, as it says it does; its sort was not stable, so past a few dozen entries it could keep the older one.
 
+- Pack writing on tasks searches for deltas on the tasks too. The objects in pack order are cut into groups of at least 512 that end where the path hint changes, and each object is tried against its own group's window only, so every task count still writes the bytes `threads = 1` writes; the serial writer cuts the same groups. Groups cost 0.04% of the pack on a repack of ghostty. A searching task allocates through the database's allocator one call at a time, under a lock, so that allocator still need not be thread-safe.
+
 - A pack keeps up to 32 MiB of the blocks positional reads read, never more than its own size, each allocated when it is first read (`Options.pack_read_cache_bytes`, `Pack.open`'s `read_cache_bytes`, both 256 KiB before): a pack that fits is read at most once in any order, as a map reads it, without the map. Reading 24,000 blobs in name order from a 14.5 MB pack made a read call for nearly every one.
 
 - Inflate builds its Huffman tables as libdeflate does: each code written once and the table doubled by copies, subtables only as large as their codes need, and the code lengths counted while they are read. Building them was a fifth of reading small packed objects; inflating every entry of a 14.5 MB pack takes 73 ms where it took 87.
