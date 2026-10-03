@@ -64,6 +64,36 @@ pub const Resolved = @import("ref_types.zig").Resolved;
 /// What an edit requires the ref's current value to be.
 pub const Expected = @import("ref_types.zig").Expected;
 
+/// One folder `Store.watchScopes` names.
+pub const WatchScope = struct {
+    /// The per-worktree directory or the shared one, as the store was
+    /// opened with them (`Store.gitDir`, `Store.commonDir`).
+    dir: enum { git, common },
+    /// The folder below it, `/`-separated; `""` the directory itself.
+    sub_path: []const u8,
+    /// Everything below the folder, at any depth; otherwise only the
+    /// entries directly in it.
+    recursive: bool = false,
+    /// When not empty, the only entries directly in the folder whose
+    /// change matters; otherwise every one.
+    names: []const []const u8 = &.{},
+};
+
+/// The folders `Store.watchScopes` names, at most four.
+pub const WatchScopes = struct {
+    buffer: [4]WatchScope = undefined,
+    len: usize = 0,
+
+    pub fn slice(scopes: *const WatchScopes) []const WatchScope {
+        return scopes.buffer[0..scopes.len];
+    }
+
+    fn add(scopes: *WatchScopes, scope: WatchScope) void {
+        scopes.buffer[scopes.len] = scope;
+        scopes.len += 1;
+    }
+};
+
 /// Loose refs and `packed-refs` behind one reader.
 ///
 /// `git_dir` is the per-worktree directory and `common_dir` the shared one;
@@ -119,6 +149,34 @@ pub const Store = struct {
     pub fn deinit(store: *Store) void {
         state_mod.destroy(state_mod.get(store._state).gpa, store._state);
         store.* = undefined;
+    }
+
+    /// Where on the disk a change to `HEAD` or to a ref under `refs/`
+    /// lands, for a caller that watches the folders rather than reading
+    /// every ref again: the loose files and `packed-refs`, or each reftable
+    /// stack. In a linked worktree that is both directories — its own
+    /// `HEAD` and per-worktree refs, and the branches and `packed-refs` it
+    /// shares. Pseudo-refs other than `HEAD`, such as `FETCH_HEAD`, are not
+    /// covered. A folder in the list need not exist yet.
+    pub fn watchScopes(store: *const Store) WatchScopes {
+        const linked = store.gitDir().handle != store.commonDir().handle;
+        var scopes: WatchScopes = .{};
+        if (store.refFormat() == .reftable) {
+            // every ref is in a stack, `HEAD` too: the shared stack, and a
+            // linked worktree's own for its `HEAD` and per-worktree refs
+            scopes.add(.{ .dir = .common, .sub_path = "reftable" });
+            if (linked) scopes.add(.{ .dir = .git, .sub_path = "reftable" });
+            return scopes;
+        }
+        if (linked) {
+            scopes.add(.{ .dir = .git, .sub_path = "", .names = &.{"HEAD"} });
+            scopes.add(.{ .dir = .git, .sub_path = "refs", .recursive = true });
+            scopes.add(.{ .dir = .common, .sub_path = "", .names = &.{"packed-refs"} });
+        } else {
+            scopes.add(.{ .dir = .git, .sub_path = "", .names = &.{ "HEAD", "packed-refs" } });
+        }
+        scopes.add(.{ .dir = .common, .sub_path = "refs", .recursive = true });
+        return scopes;
     }
 
     /// Which directory a ref lives in.
@@ -1754,4 +1812,108 @@ fn listLooseRefsForAllocation(gpa: Allocator, io: Io, dir: Io.Dir) !void {
     try std.testing.expectEqual(@as(usize, 1), listed.entries.len);
     try std.testing.expect(listed.entries[0].loose);
     try std.testing.expectEqualStrings("refs/heads/" ++ "a" ** 2000, listed.entries[0].target.symbolic);
+}
+
+/// Every file below `dir` but objects and logs, by its `/`-separated path,
+/// with its bytes: a before and after of what an operation wrote.
+fn refFilesSnapshot(gpa: Allocator, io: Io, dir: Io.Dir) !std.StringArrayHashMapUnmanaged([]u8) {
+    var out: std.StringArrayHashMapUnmanaged([]u8) = .empty;
+    errdefer freeRefFilesSnapshot(gpa, &out);
+    var walker = try dir.walk(gpa);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind == .directory) {
+            if (entry.depth() == 1 and (std.mem.eql(u8, entry.basename, "objects") or std.mem.eql(u8, entry.basename, "logs"))) walker.leave(io);
+            continue;
+        }
+        if (entry.kind != .file) continue;
+        const path = try gpa.dupe(u8, entry.path);
+        errdefer gpa.free(path);
+        std.mem.replaceScalar(u8, path, '\\', '/');
+        const bytes = try entry.dir.readFileAlloc(io, entry.basename, gpa, .unlimited);
+        errdefer gpa.free(bytes);
+        try out.put(gpa, path, bytes);
+    }
+    return out;
+}
+
+fn freeRefFilesSnapshot(gpa: Allocator, snapshot: *std.StringArrayHashMapUnmanaged([]u8)) void {
+    var it = snapshot.iterator();
+    while (it.next()) |entry| {
+        gpa.free(entry.key_ptr.*);
+        gpa.free(entry.value_ptr.*);
+    }
+    snapshot.deinit(gpa);
+}
+
+/// Whether one of `scopes` covers `path`, below the common directory;
+/// `git_prefix` is the per-worktree directory's place there.
+fn scopesCover(scopes: []const WatchScope, git_prefix: []const u8, path: []const u8) bool {
+    for (scopes) |scope| {
+        var buf: [256]u8 = undefined;
+        const base = if (scope.dir == .git) git_prefix else "";
+        const folder = if (base.len == 0) scope.sub_path else if (scope.sub_path.len == 0) base else std.fmt.bufPrint(&buf, "{s}/{s}", .{ base, scope.sub_path }) catch unreachable;
+        const rest = if (folder.len == 0) path else if (std.mem.startsWith(u8, path, folder) and path.len > folder.len and path[folder.len] == '/') path[folder.len + 1 ..] else continue;
+        if (!scope.recursive and std.mem.indexOfScalar(u8, rest, '/') != null) continue;
+        if (scope.names.len == 0) return true;
+        for (scope.names) |name| if (std.mem.eql(u8, name, rest)) return true;
+    }
+    return false;
+}
+
+test "the watch scopes cover every ref and HEAD move, in a linked worktree too" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]Format{ .files, .reftable }) |format| {
+        var git = try testgit.Repo.init(gpa, io, if (format == .reftable) &.{"--ref-format=reftable"} else &.{});
+        defer git.deinit();
+        try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "first" });
+        try git.exec(io, &.{ "branch", "gone" });
+        try git.exec(io, &.{ "pack-refs", "--all" });
+        try git.exec(io, &.{ "worktree", "add", "-q", "-b", "side", "linked" });
+        var common = try git.dir.openDir(io, ".git", .{ .iterate = true });
+        defer common.close(io);
+        var admin = try common.openDir(io, "worktrees/linked", .{});
+        defer admin.close(io);
+        var main_store: Store = try .initWithOptions(gpa, .sha1, common, common, .{ .format = format });
+        defer main_store.deinit();
+        var linked_store: Store = try .initWithOptions(gpa, .sha1, admin, common, .{ .format = format });
+        defer linked_store.deinit();
+        const main_scopes = main_store.watchScopes();
+        const linked_scopes = linked_store.watchScopes();
+
+        const Step = struct { args: []const []const u8, linked: bool, shared: bool };
+        for ([_]Step{
+            .{ .args = &.{ "commit", "-q", "--allow-empty", "-m", "main moves" }, .linked = false, .shared = true },
+            .{ .args = &.{ "checkout", "-q", "-b", "topic" }, .linked = false, .shared = false },
+            .{ .args = &.{ "-C", "linked", "commit", "-q", "--allow-empty", "-m", "side moves" }, .linked = true, .shared = true },
+            .{ .args = &.{ "-C", "linked", "checkout", "-q", "-b", "other" }, .linked = true, .shared = false },
+            // a branch only `packed-refs` holds: the file in the shared
+            // directory is all that changes
+            .{ .args = &.{ "-C", "linked", "branch", "-q", "-D", "gone" }, .linked = true, .shared = true },
+            .{ .args = &.{ "-C", "linked", "checkout", "-q", "--detach" }, .linked = true, .shared = false },
+        }) |step| {
+            var before = try refFilesSnapshot(gpa, io, common);
+            defer freeRefFilesSnapshot(gpa, &before);
+            try git.exec(io, step.args);
+            var after = try refFilesSnapshot(gpa, io, common);
+            defer freeRefFilesSnapshot(gpa, &after);
+            var own = false;
+            var other = false;
+            for ([_]*const std.StringArrayHashMapUnmanaged([]u8){ &before, &after }, [_]*const std.StringArrayHashMapUnmanaged([]u8){ &after, &before }) |one, two| {
+                var it = one.iterator();
+                while (it.next()) |entry| {
+                    const same = if (two.get(entry.key_ptr.*)) |bytes| std.mem.eql(u8, bytes, entry.value_ptr.*) else false;
+                    if (same) continue;
+                    const path = entry.key_ptr.*;
+                    if (scopesCover((if (step.linked) linked_scopes else main_scopes).slice(), if (step.linked) "worktrees/linked" else "", path)) own = true;
+                    if (scopesCover((if (step.linked) main_scopes else linked_scopes).slice(), if (step.linked) "" else "worktrees/linked", path)) other = true;
+                }
+            }
+            std.testing.expect(own and (!step.shared or other)) catch |err| {
+                std.debug.print("{t}: {s} not seen (own {}, other {})\n", .{ format, step.args[step.args.len - 1], own, other });
+                return err;
+            };
+        }
+    }
 }

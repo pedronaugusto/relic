@@ -38,6 +38,10 @@ pub const Named = core.Named;
 pub const Resolved = core.Resolved;
 /// What an edit requires the ref's current value to be.
 pub const Expected = core.Expected;
+/// One folder `Store.watchScopes` names: where a ref change lands.
+pub const WatchScope = core.WatchScope;
+/// The folders `Store.watchScopes` names.
+pub const WatchScopes = core.WatchScopes;
 /// Loose refs and `packed-refs` behind one reader.
 ///
 /// `git_dir` is the per-worktree directory and `common_dir` the shared one;

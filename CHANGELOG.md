@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Fix git's author and committer dates in every test fixture, so a fixture's object names do not change from run to run.
 
+- Add `refs.Store.watchScopes`: the folders a change to `HEAD` or a ref lands in, loose, packed or reftable, a linked worktree's shared `packed-refs` included.
+
 - Add `Repository.ignoreSources` and `Repository.indexPath`: the files `loadIgnore` and `openIndex` read, as absolute paths, a linked worktree's own index included.
 
 - Add `ignore.Checker`, a working tree's ignore rules asked one path at a time, reading each folder's `.gitignore` once and only after it reads; checkout's obstruction check uses it.
