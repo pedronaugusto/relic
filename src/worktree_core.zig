@@ -1573,6 +1573,11 @@ pub const CheckoutOptions = struct {
     /// What fetches LFS objects the store does not have. It is called once,
     /// with all of them, after every other file is written.
     lfs_fetch: ?lfs.Fetcher = null,
+    /// How many tasks of the caller's `Io` write the files, as git's
+    /// `checkout.workers`; zero is four, or the processors there are when
+    /// fewer. The files written, the index and the error returned are the
+    /// same whatever the count.
+    workers: usize = 0,
 };
 
 /// `read-tree --reset -u`: make the working tree and the index match `tree`.
@@ -1667,6 +1672,7 @@ pub fn checkout(
     var conflict_it = wanted.iterator();
     while (conflict_it.next()) |item| {
         if (item.value_ptr.mode == .gitlink) continue;
+        if (keeps(index, item.key_ptr.*, item.value_ptr.*, options.force)) continue;
         if (try fs.statAt(io, wt, item.key_ptr.*)) |found| {
             if (found.kind == .directory and
                 !try directoryIsReplaceable(arena, io, wt, item.key_ptr.*, index, &wanted))
@@ -1722,40 +1728,49 @@ pub fn checkout(
     std.mem.sort([]const u8, paths, {}, lessThanName);
 
     // Tracked children have now gone. Remove the empty directories they
-    // occupied before attempting the atomic file replacements.
+    // occupied before attempting the atomic file replacements. A path the
+    // checkout keeps as it is needs no look at the disk.
     for (paths) |path| {
         const want = wanted.get(path).?;
         if (want.mode == .gitlink) continue;
+        if (keeps(index, path, want, options.force)) continue;
         if (try fs.statAt(io, wt, path)) |found| {
             if (found.kind == .directory) try wt.deleteDir(io, path);
         }
     }
 
+    // Regular files are written on tasks, a batch at a time; everything
+    // else, and everything a batch needs first, here and in order.
+    var batch: WriteBatch = .{ .gpa = gpa, .workers = checkoutWorkers(options.workers) };
+    defer batch.deinit();
+    var made_parent: []const u8 = "";
     for (paths) |path| {
         const want = wanted.get(path).?;
-        const existing = index.find(path);
-        const on_disk = try fs.statAt(io, wt, path);
-
-        if (existing) |entry| {
-            if (entry.oid.eql(want.oid) and entry.mode == want.mode and on_disk != null and
-                !index.isRacy(entry.*) and entry.stat.matches(on_disk.?.stat, options.rules.check_stat, options.rules.timestamp_resolution))
-            {
-                outcome.unchanged += 1;
-                continue;
-            }
-            // Without `force` a path the tree does not change keeps its
-            // local changes, as git's checkout keeps them.
-            if (!options.force and entry.oid.eql(want.oid) and entry.mode == want.mode) {
-                outcome.unchanged += 1;
-                continue;
+        if (keeps(index, path, want, options.force)) {
+            outcome.unchanged += 1;
+            continue;
+        }
+        if (index.find(path)) |entry| {
+            // With `force`, a file whose stat says it is the one the index
+            // has is left as it is.
+            if (entry.oid.eql(want.oid) and entry.mode == want.mode and !index.isRacy(entry.*)) {
+                if (try fs.statAt(io, wt, path)) |on_disk| {
+                    if (entry.stat.matches(on_disk.stat, options.rules.check_stat, options.rules.timestamp_resolution)) {
+                        outcome.unchanged += 1;
+                        continue;
+                    }
+                }
             }
         }
 
         if (std.fs.path.dirnamePosix(path)) |parent| {
-            wt.createDirPath(io, parent) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => |e| return e,
-            };
+            if (!std.mem.eql(u8, parent, made_parent)) {
+                wt.createDirPath(io, parent) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => |e| return e,
+                };
+                made_parent = parent;
+            }
         }
 
         var scratch: std.heap.ArenaAllocator = .init(gpa);
@@ -1789,18 +1804,21 @@ pub fn checkout(
                 const found = try db.read(io, want.oid);
                 defer gpa.free(found.bytes);
                 const executable = want.mode == .exec and options.rules.file_mode;
-                if (options.rules.attrs) |attrs| {
-                    const applied = try attrs.lookup(a, path, false);
-                    const smudged = try conv.toWorktree(a, path, found.bytes, applied, .{
-                        .blob = want.oid,
-                        .treeish = tree_oid,
-                        .can_delay = true,
-                    });
+                const smudged: convert.Smudged = if (options.rules.attrs) |attrs| try conv.toWorktree(a, path, found.bytes, try attrs.lookup(a, path, false), .{
+                    .blob = want.oid,
+                    .treeish = tree_oid,
+                    .can_delay = true,
+                }) else .{ .bytes = found.bytes };
+                switch (smudged) {
                     // Its index entry is added when it arrives.
-                    if (smudged == .delayed) continue;
-                    try writeSmudged(io, wt, path, smudged, executable);
-                } else {
-                    try writeFile(io, wt, path, .{ .bytes = found.bytes }, executable);
+                    .delayed => continue,
+                    .bytes => |bytes| {
+                        if (try batch.add(path, want, bytes, executable)) {
+                            try batch.flush(io, wt, index, &outcome);
+                        }
+                        continue;
+                    },
+                    .file => try writeSmudged(io, wt, path, smudged, executable),
                 }
                 outcome.written += 1;
             },
@@ -1808,6 +1826,7 @@ pub fn checkout(
         }
         try recordWritten(io, wt, index, path, want);
     }
+    try batch.flush(io, wt, index, &outcome);
 
     var late: std.heap.ArenaAllocator = .init(gpa);
     defer late.deinit();
@@ -1889,6 +1908,123 @@ fn addSyncParents(dirs: *std.StringHashMap(bool), path: []const u8, required: bo
         slot.value_ptr.* = if (slot.found_existing) slot.value_ptr.* or required else required;
         parent = std.fs.path.dirnamePosix(p);
     }
+}
+
+/// Whether a checkout leaves `path` exactly as it is without looking at
+/// it: without `force`, a file the index already has as the tree has it
+/// keeps whatever local changes it has, as git's checkout keeps them.
+fn keeps(index: *const Index, path: []const u8, want: TreeEntry, force: bool) bool {
+    if (force) return false;
+    const entry = index.find(path) orelse return false;
+    return entry.oid.eql(want.oid) and entry.mode == want.mode;
+}
+
+/// How many tasks write a checkout's files: zero is four, or fewer where
+/// the machine has fewer processors. Past four, files created at once in
+/// one tree cost more than they save on APFS.
+fn checkoutWorkers(asked: usize) usize {
+    if (asked != 0) return asked;
+    const cpus = std.Thread.getCpuCount() catch 1;
+    return @max(1, @min(cpus, 4));
+}
+
+/// Regular files to write, gathered on the calling task and written on
+/// tasks of its `Io`. A batch ends by its bytes and its count alone, so
+/// which files are attempted together never depends on how many tasks
+/// write them; every file in a batch is attempted, each one that was
+/// written goes into the index, and the error a batch returns is its
+/// first file's in path order.
+const WriteBatch = struct {
+    gpa: Allocator,
+    workers: usize,
+    arena: std.heap.ArenaAllocator.State = .{},
+    jobs: std.ArrayList(Job) = .empty,
+    bytes: usize = 0,
+
+    const max_bytes = 16 << 20;
+    const max_files = 1024;
+
+    const Job = struct {
+        path: []const u8,
+        want: TreeEntry,
+        bytes: []const u8,
+        executable: bool,
+        result: Error!?fs.Stat = error.Canceled,
+    };
+
+    fn deinit(b: *WriteBatch) void {
+        b.jobs.deinit(b.gpa);
+        var arena = b.arena.promote(b.gpa);
+        arena.deinit();
+    }
+
+    /// Take a copy of a file to write; `true` when the batch is full.
+    fn add(b: *WriteBatch, path: []const u8, want: TreeEntry, bytes: []const u8, executable: bool) Allocator.Error!bool {
+        var arena = b.arena.promote(b.gpa);
+        defer b.arena = arena.state;
+        const owned = try arena.allocator().dupe(u8, bytes);
+        try b.jobs.append(b.gpa, .{ .path = path, .want = want, .bytes = owned, .executable = executable });
+        b.bytes += bytes.len;
+        return b.bytes >= max_bytes or b.jobs.items.len >= max_files;
+    }
+
+    fn flush(b: *WriteBatch, io: Io, wt: Io.Dir, index: *Index, outcome: *CheckoutOutcome) Error!void {
+        if (b.jobs.items.len == 0) return;
+        defer {
+            b.jobs.clearRetainingCapacity();
+            b.bytes = 0;
+            var arena = b.arena.promote(b.gpa);
+            _ = arena.reset(.retain_capacity);
+            b.arena = arena.state;
+        }
+        var next: std.atomic.Value(usize) = .init(0);
+        const tasks = @min(b.workers, b.jobs.items.len);
+        var group: Io.Group = .init;
+        var spawned: usize = 1;
+        while (spawned < tasks) : (spawned += 1) {
+            group.concurrent(io, run, .{ io, wt, b.jobs.items, &next }) catch break;
+        }
+        // This task writes too; with no others it writes them all.
+        run(io, wt, b.jobs.items, &next) catch {};
+        group.await(io) catch group.cancel(io);
+        var first: ?Error = null;
+        for (b.jobs.items) |*job| {
+            const stat = job.result catch |err| {
+                if (first == null) first = err;
+                continue;
+            };
+            try recordStat(index, job.path, job.want, stat);
+            outcome.written += 1;
+        }
+        if (first) |err| return err;
+    }
+
+    fn run(io: Io, wt: Io.Dir, jobs: []Job, next: *std.atomic.Value(usize)) Io.Cancelable!void {
+        while (true) {
+            const at = next.fetchAdd(1, .monotonic);
+            if (at >= jobs.len) return;
+            const job = &jobs[at];
+            job.result = write(io, wt, job);
+        }
+    }
+
+    fn write(io: Io, wt: Io.Dir, job: *const Job) Error!?fs.Stat {
+        try writeFile(io, wt, job.path, .{ .bytes = job.bytes }, job.executable);
+        const after = try fs.statAt(io, wt, job.path);
+        return if (after) |found| found.stat else null;
+    }
+};
+
+/// Put a path just written into the index with the stat it was found with.
+fn recordStat(index: *Index, path: []const u8, want: TreeEntry, stat: ?fs.Stat) Error!void {
+    const tree = try index.cacheTree();
+    tree.invalidate(path);
+    try index.add(.{
+        .path = path,
+        .oid = want.oid,
+        .mode = want.mode,
+        .stat = stat orelse .none,
+    });
 }
 
 /// Stat what was just written and put it in the index.
@@ -2524,6 +2660,8 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
     else
         temp_name;
 
+    // Created with git's mode, 0666 or 0777, which the umask then trims
+    // as it trims git's: no change of mode after.
     const file = try wt.createFile(io, temp_path, .{
         .exclusive = true,
         .permissions = fs.permissionsFor(executable),
@@ -2548,9 +2686,6 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
             },
         }
         try fw.interface.flush();
-        if (Io.File.Permissions.has_executable_bit) {
-            file.setPermissions(io, fs.permissionsFor(executable)) catch {};
-        }
     }
     try fs.renameWithRetry(io, wt, temp_path, path);
     failed = false;
