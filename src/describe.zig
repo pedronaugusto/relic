@@ -337,8 +337,10 @@ pub const Describer = struct {
             errdefer map.deinit(d.gpa);
             var it = d.names.valueIterator();
             while (it.next()) |n| {
-                const c = peelToCommit(d.repo, io, n.peeled) catch continue;
-                try map.put(d.gpa, c, n);
+                // `peeled` is past every tag already: only its type is asked.
+                const header = d.repo.odb.readHeader(io, n.peeled) catch continue;
+                if (header.type != .commit) continue;
+                try map.put(d.gpa, n.peeled, n);
             }
             d.on_commit = map;
         }
