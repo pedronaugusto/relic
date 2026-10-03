@@ -87,7 +87,10 @@ test "a bundle's header is git's byte for byte, and its pack unbundles in git to
         .{ .args = &.{ "--filter=blob:limit=1k", "main" }, .request = .{ .include = &.{"main"}, .filter = "blob:limit=1k" } },
         .{ .args = &.{ "v1", "^main" }, .request = .{ .include = &.{"v1"}, .exclude = &.{"main"} } },
     };
+    // Filtered bundles are git 2.36's.
+    const filters = try testgit.gitAtLeast(gpa, io, 2, 36);
     for (cases, 0..) |case, n| {
+        if (case.request.filter != null and !filters) continue;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
@@ -183,11 +186,14 @@ test "git's bundles are read, verified, listed, unbundled and fetched from as gi
         const heads = try twins[0].run(io, &.{ "bundle", "list-heads", path });
         defer gpa.free(heads);
         try std.testing.expectEqualStrings(heads, out.written());
-        out.clearRetainingCapacity();
-        try f.header.writeSummary(&out.writer);
-        const summary = try twins[0].run(io, &.{ "bundle", "verify", path });
-        defer gpa.free(summary);
-        try std.testing.expectEqualStrings(summary, out.written());
+        // The summary as a recent git prints it, with the hash algorithm.
+        if (try testgit.gitAtLeast(gpa, io, 2, 40)) {
+            out.clearRetainingCapacity();
+            try f.header.writeSummary(&out.writer);
+            const summary = try twins[0].run(io, &.{ "bundle", "verify", path });
+            defer gpa.free(summary);
+            try std.testing.expectEqualStrings(summary, out.written());
+        }
     }
 
     // An empty repository lacks the prerequisites, as git says.

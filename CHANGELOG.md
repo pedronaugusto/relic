@@ -38,6 +38,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Add `revwalk.bisect`: `git bisect` start, good, bad, skip, next, reset, log, replay and run, with git's `BISECT_*` state files and refs, the commit git picks (skips and `--first-parent` included), git's merge-base check and terms, and git's output; a pathspec is refused by name.
 
+- A trailer line whose token is followed by `://` is a URL and not a trailer, as git 2.56 reads it; `commit.message.Trailer.separated` says which lines of a trailer block had a separator.
+
+- Add `revwalk.bisect`: `git bisect` start, good, bad, skip, next, reset, log, replay and run as git 2.56 does them, `--reset-when-found` included, with git's `BISECT_*` state files and refs, the commit git picks (skips and `--first-parent` included), git's merge-base check and terms, and git's output; a pathspec is refused by name.
+
 - Add `revwalk.Walk.first_parent` (`--first-parent`), `Walk.isHidden`, and `revwalk.mergeBasesMany`, git's `get_merge_bases_many`.
 
 - Add `transport.bundle`: bundles created (v2 and v3, with `@object-format` and `@filter`), read, verified, listed and unbundled as `git bundle` does, the header byte for byte and the prerequisites git's boundary in git's order; a fetch or clone from a path that names a bundle reads it as git's bundle transport does.

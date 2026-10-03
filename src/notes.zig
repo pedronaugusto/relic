@@ -1513,6 +1513,8 @@ fn hexOf(oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
 }
 
 test "notes added, appended, copied and removed are git's commits, trees and logs, fanout included" {
+    // `--separator` is git 2.42's.
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 42);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var t: Twin = undefined;
