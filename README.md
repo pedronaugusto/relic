@@ -206,7 +206,7 @@ no C runtime. SHA-256 and the TLS primitives come from `std.crypto`; SHA-1,
 inflate and the TLS client are in the package. There is no build option to
 forward. Every function that allocates takes the allocator as its first argument and every function that
 touches the disk or the network takes a `std.Io`. Concurrent work — reading
-loose objects and deflating entries while a pack is written
+objects and deflating entries while a pack is written
 (`PackOptions.threads`, one task per processor unless asked otherwise),
 resolving a received pack's deltas — goes to the caller's executor, never to
 threads of the package's own. A
@@ -507,17 +507,20 @@ Starting an entry compressor copies its defined state, leaving token and chain
 bytes to be filled before use instead of copying their unused storage.
 
 The writing is spread over tasks of the caller's `std.Io` (`Io.Group.async`),
-one per processor by default. They read the loose objects and deflate the
-entries, batch by batch, into buffers the calling task sized and allocated
-beforehand, so they allocate nothing and need no thread-safe allocator; the
-delta search and the writing stay on the calling task, in pack order, so every
-task count, and every Io, writes the serial writer's bytes.
-`PackOptions.batch_bytes` bounds what a batch holds ahead of the writer. At
-most six tasks read loose files at once: beyond a few, opening files contends
-in the kernel. An Io that cannot run a task in parallel runs it inline, and
-`threads = 1` is the serial writer with no tasks at all. `collectLoose` and
-`collectAll` read the headers on tasks too, and hand them to `writePack`, which
-then reads every loose object once.
+one per processor by default. They read the loose objects, inflate the whole
+objects of packs and deflate the entries, batch by batch, into buffers the
+calling task sized and allocated beforehand, so they allocate nothing and need
+no thread-safe allocator; the delta search, the deltas packs hold and the
+writing stay on the calling task, in pack order, so every task count, and
+every Io, writes the serial writer's bytes. While the calling task searches
+one batch, the tasks read the next and deflate the one before.
+`PackOptions.batch_bytes` bounds what the three batches hold ahead of the
+writer. At most six tasks read loose files at once: beyond a few, opening
+files contends in the kernel. An Io that cannot run a task in parallel runs it
+inline, and `threads = 1` is the serial writer with no tasks at all.
+`collectLoose` and `collectAll` read the headers and the loose trees on tasks
+too, and hand the headers to `writePack`, which then reads every loose object
+once and an object `collectAll` found in a pack from the pack.
 
 The order the two files become visible in is not free to choose. A reader
 finds a pack by its `.idx`, so the pack is renamed into place first and the
@@ -591,8 +594,9 @@ a cold `addAll` writes one object per file. A database that is only read takes
 neither of those two. Writing a pack adds
 the delta window on top, which `PackOptions.window_bytes` bounds by weight as
 well as by count, its per-base delta indexes, and one index entry per object — a name, an offset and a
-CRC — which has to be sorted before it is written; written on several tasks, a
-batch of at most `PackOptions.batch_bytes` and a deflate state for each task. There is no object cache; a returned slice's
+CRC — which has to be sorted before it is written; written on several tasks,
+three batches within `PackOptions.batch_bytes` and a deflate state for each
+task, and a decoder and a read buffer for each when objects come from packs. There is no object cache; a returned slice's
 doc comment says who owns it.
 
 **The index is read and written at three versions.** Versions 2, 3 and
