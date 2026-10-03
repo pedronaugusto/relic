@@ -299,5 +299,6 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "process owner", .token = "posix_spawn" },
     .{ .name = "process owner", .token = "setsid" },
     .{ .name = "process owner", .token = "CreateProcessW" },
-    .{ .name = "windows declarations", .kind = .string, .token = "kernel32", .owners = &.{"src/fs.zig"} },
+    // the ssh stand-in is another program, holding its handles as ssh does
+    .{ .name = "windows declarations", .kind = .string, .token = "kernel32", .owners = &.{ "src/fs.zig", "src/fake_ssh_helper.zig" } },
 };
