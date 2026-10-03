@@ -2344,9 +2344,12 @@ const Window = struct {
     /// Bodies let go of while objects that may be written from them still
     /// wait, when the choosing runs ahead of the writing.
     retired: std.ArrayList([]u8) = .empty,
+    /// What `findDelta` encodes candidates into.
+    scratch: [2]std.ArrayList(u8) = .{ .empty, .empty },
 
     fn deinit(w: *Window, gpa: Allocator) void {
         w.clear(gpa);
+        for (&w.scratch) |*buffer| buffer.deinit(gpa);
         w.slots.deinit(gpa);
         for (w.retired.items) |bytes| gpa.free(bytes);
         w.retired.deinit(gpa);
@@ -2388,7 +2391,7 @@ const Window = struct {
             // the first must beat the one before it.
             var limit: usize = bytes.len / 2;
             if (limit > raw_len) limit -= raw_len else limit = 0;
-            if (try findDelta(gpa, w.slots.items, t, bytes, options, limit)) |chosen| {
+            if (try findDelta(gpa, w.slots.items, t, bytes, options, limit, &w.scratch)) |chosen| {
                 const slot = w.slots.items[chosen.slot];
                 depth = slot.depth + 1;
                 choice = .{ .base = slot.pos, .delta = chosen.bytes };
@@ -2961,6 +2964,9 @@ const Build = struct {
 const ChosenDelta = struct { slot: usize, bytes: []u8 };
 
 /// git's delta search for one object against the window, newest first.
+///
+/// The candidates are encoded into `scratch`, the best so far kept in the
+/// first buffer, so that a search allocates only the delta it returns.
 fn findDelta(
     gpa: Allocator,
     window: []WindowSlot,
@@ -2968,9 +2974,9 @@ fn findDelta(
     target: []const u8,
     options: PackOptions,
     initial_limit: usize,
+    scratch: *[2]std.ArrayList(u8),
 ) Error!?ChosenDelta {
     var chosen: ?ChosenDelta = null;
-    errdefer if (chosen) |c| gpa.free(c.bytes);
     var at = window.len;
     while (at != 0) {
         at -= 1;
@@ -2981,18 +2987,17 @@ fn findDelta(
         const limit = deltaCandidateLimit(initial_limit, options.depth, slot.depth, chosen, window);
         if (!worthTryingDelta(slot, target.len, options.depth, limit)) continue;
         const encoder = try slot.getEncoder(gpa);
-        const candidate = try encoder.encode(gpa, target, .{ .max_bytes = limit }) orelse continue;
+        if (!try encoder.encodeInto(gpa, target, .{ .max_bytes = limit }, &scratch[1])) continue;
+        const candidate = scratch[1].items;
         if (chosen) |c| {
             const chosen_depth = window[c.slot].depth + 1;
-            if (candidate.len == c.bytes.len and slot.depth + 1 >= chosen_depth) {
-                gpa.free(candidate);
-                continue;
-            }
-            gpa.free(c.bytes);
+            if (candidate.len == c.bytes.len and slot.depth + 1 >= chosen_depth) continue;
         }
-        chosen = .{ .slot = at, .bytes = candidate };
+        std.mem.swap(std.ArrayList(u8), &scratch[0], &scratch[1]);
+        chosen = .{ .slot = at, .bytes = scratch[0].items };
     }
-    return chosen;
+    const c = chosen orelse return null;
+    return .{ .slot = c.slot, .bytes = try gpa.dupe(u8, c.bytes) };
 }
 
 /// The maximum delta worth asking the encoder for against one base. Besides

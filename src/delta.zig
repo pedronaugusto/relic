@@ -231,8 +231,26 @@ pub const Encoder = struct {
     ) Allocator.Error!?[]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(gpa);
-        try writeSizeTo(gpa, &out, encoder.base.len);
-        try writeSizeTo(gpa, &out, target.len);
+        if (!try encoder.encodeInto(gpa, target, options, &out)) {
+            out.deinit(gpa);
+            return null;
+        }
+        return try out.toOwnedSlice(gpa);
+    }
+
+    /// `encode` into `out`, which is cleared first and keeps its capacity,
+    /// so that one buffer serves many searches: whether the delta fit
+    /// `options.max_bytes`. When it did, the delta is `out.items`.
+    pub fn encodeInto(
+        encoder: *const Encoder,
+        gpa: Allocator,
+        target: []const u8,
+        options: EncodeOptions,
+        out: *std.ArrayList(u8),
+    ) Allocator.Error!bool {
+        out.clearRetainingCapacity();
+        try writeSizeTo(gpa, out, encoder.base.len);
+        try writeSizeTo(gpa, out, target.len);
 
         var pending_at: usize = 0;
         var at: usize = 0;
@@ -249,29 +267,22 @@ pub const Encoder = struct {
                     null;
                 continue;
             }
-            try flushInsert(gpa, &out, target[pending_at..at]);
+            try flushInsert(gpa, out, target[pending_at..at]);
             var left = found.len;
             var from = found.at;
             while (left != 0) {
                 const chunk = @min(left, max_copy);
-                try emitCopy(gpa, &out, @intCast(from), @intCast(chunk));
+                try emitCopy(gpa, out, @intCast(from), @intCast(chunk));
                 from += chunk;
                 left -= chunk;
             }
             at += found.len;
             pending_at = at;
             window_hash = null;
-            if (options.max_bytes != 0 and out.items.len > options.max_bytes) {
-                out.deinit(gpa);
-                return null;
-            }
+            if (options.max_bytes != 0 and out.items.len > options.max_bytes) return false;
         }
-        try flushInsert(gpa, &out, target[pending_at..]);
-        if (options.max_bytes != 0 and out.items.len > options.max_bytes) {
-            out.deinit(gpa);
-            return null;
-        }
-        return try out.toOwnedSlice(gpa);
+        try flushInsert(gpa, out, target[pending_at..]);
+        return options.max_bytes == 0 or out.items.len <= options.max_bytes;
     }
 };
 
