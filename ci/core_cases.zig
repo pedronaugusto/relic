@@ -53,6 +53,8 @@ pub const families = [_]Family{
         "wildmatch.test",
     } },
     .{ .name = "core-worktree", .filters = &.{
+        "archive.test",
+        "archive_test.test",
         "attributes.test",
         "binarypatch.test",
         "concurrency_test.test",
@@ -91,6 +93,7 @@ pub const families = [_]Family{
         "ort_test.test",
         "patchid.test",
         "patchparse.test",
+        "pretty.test",
         "rebase.test",
         "rerere.test",
         "reset.test",

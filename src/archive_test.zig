@@ -1,0 +1,166 @@
+//! `archive` against `git archive`: the same tree, the same options, the
+//! same bytes.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+
+const archive_mod = @import("archive.zig");
+const hash = @import("hash.zig");
+const repo_mod = @import("repo_core.zig");
+const testgit = @import("testgit.zig");
+
+const Repository = repo_mod.Repository;
+const Oid = hash.Oid;
+
+fn oidOf(gpa: Allocator, io: Io, git: *testgit.Repo, rev: []const u8) !Oid {
+    const text = try git.line(io, &.{ "rev-parse", rev });
+    defer gpa.free(text);
+    return Oid.parse(.sha1, text);
+}
+
+fn ours(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options: archive_mod.Options) ![]u8 {
+    var out: Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    try archive_mod.archive(gpa, io, repo, treeish, options, &out.writer);
+    return out.toOwnedSlice();
+}
+
+fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *Repository, args: []const []const u8, treeish: Oid, options: archive_mod.Options) !void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, "archive");
+    try argv.appendSlice(gpa, args);
+    const theirs = try git.run(io, argv.items);
+    defer gpa.free(theirs);
+    const mine = try ours(gpa, io, repo, treeish, options);
+    defer gpa.free(mine);
+    if (!std.mem.eql(u8, theirs, mine)) {
+        std.debug.print("git archive {any}: {d} bytes, ours {d}\n", .{ args, theirs.len, mine.len });
+        const n = @min(theirs.len, mine.len);
+        for (0..n) |i| if (theirs[i] != mine[i]) {
+            std.debug.print("first difference at byte {d}\n", .{i});
+            break;
+        };
+    }
+    try std.testing.expect(std.mem.eql(u8, theirs, mine));
+}
+
+fn fixture(io: Io, git: *testgit.Repo) !void {
+    // UTC, so the zip's DOS times are the same on both sides
+    try git.isolated.?.put("TZ", "UTC");
+    try git.writeFile(io, "README", "readme\n");
+    try git.writeFile(io, "bin/run.sh", "#!/bin/sh\necho run\n");
+    try git.exec(io, &.{ "update-index", "--add", "README" });
+    try git.writeFile(io, "src/deep/er/still/file.c", "int x;\n");
+    try git.writeFile(io, "ignored/secret.txt", "do not ship\n");
+    try git.writeFile(io, "notes/skip.md", "skip me\n");
+    try git.writeFile(io, "crlf.txt", "one\ntwo\n");
+    // git writes `%aI` at UTC as `Z` since 2.45, and as `+00:00` before
+    const strict = if (try testgit.gitAtLeast(git.gpa, io, 2, 45)) "|%aI" else "";
+    var text_buf: [256]u8 = undefined;
+    try git.writeFile(io, "version.txt", try std.fmt.bufPrint(&text_buf, "Commit $Format:%H$ (%h) by $Format:%an <%ae>%n%ad|%ai{s}|%at$ $Format:%s%+b%-b$ $Format:%T %t %P %p %cn %ce %cd %ci%%x41$\n", .{strict}));
+    try git.writeFile(io, "data.bin", "\x00\x01\x02 binary " ** 50);
+    const long_dir = "a-directory-name-that-is-quite-long/another-directory-name-that-is-long-too/and-a-third-one";
+    try git.writeFile(io, long_dir ++ "/file-with-a-long-name-as-well.txt", "long path\n");
+    try git.writeFile(io, "x" ** 120 ++ "/" ++ "y" ** 120 ++ "/" ++ "z" ** 30, "longer than ustar holds\n");
+    try git.writeFile(io, ".gitattributes", "ignored/ export-ignore\nnotes/*.md export-ignore\ncrlf.txt eol=crlf\nversion.txt export-subst\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "update-index", "--chmod=+x", "bin/run.sh" });
+    if (builtin.os.tag != .windows) {
+        try git.dir.symLink(io, "README", "link", .{});
+        try git.dir.symLink(io, "t" ** 150, "longlink", .{});
+        try git.exec(io, &.{ "add", "link", "longlink" });
+    }
+    try git.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000,1234567890123456789012345678901234567890,sub" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "archive me\n\nWith a body line." });
+}
+
+test "a commit is archived as git archives it: tar with every kind of entry, attributes, prefixes and pathspecs" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try fixture(io, &git);
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const head = try oidOf(gpa, io, &git, "HEAD");
+    try compare(gpa, io, &git, &repo, &.{"HEAD"}, head, .{});
+    try compare(gpa, io, &git, &repo, &.{ "--prefix=pre/", "HEAD" }, head, .{ .prefix = "pre/" });
+    try compare(gpa, io, &git, &repo, &.{ "--prefix=pre-", "HEAD" }, head, .{ .prefix = "pre-" });
+    try compare(gpa, io, &git, &repo, &.{ "HEAD", "src", "bin" }, head, .{ .pathspecs = &.{ "src", "bin" } });
+    try compare(gpa, io, &git, &repo, &.{ "HEAD", "*.txt" }, head, .{ .pathspecs = &.{"*.txt"} });
+    // `--mtime` came in 2.42
+    if (try testgit.gitAtLeast(gpa, io, 2, 42)) {
+        try compare(gpa, io, &git, &repo, &.{ "--mtime=@1600000000", "HEAD" }, head, .{ .mtime = 1600000000 });
+        const tree = try oidOf(gpa, io, &git, "HEAD^{tree}");
+        try compare(gpa, io, &git, &repo, &.{ "--mtime=@1600000000", "HEAD^{tree}" }, tree, .{ .mtime = 1600000000 });
+    }
+    try git.exec(io, &.{ "config", "tar.umask", "022" });
+    var again = try Repository.open(gpa, io, git.dir, .{});
+    defer again.deinit(io);
+    try compare(gpa, io, &git, &again, &.{"HEAD"}, head, .{});
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectError(error.PathspecNoMatch, archive_mod.archive(gpa, io, &repo, head, .{ .pathspecs = &.{"nowhere"} }, &out.writer));
+}
+
+test "a stored zip is git's byte for byte, and a deflated one holds the same files" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try fixture(io, &git);
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const head = try oidOf(gpa, io, &git, "HEAD");
+    try compare(gpa, io, &git, &repo, &.{ "--format=zip", "-0", "HEAD" }, head, .{ .format = .zip, .level = 0 });
+    try compare(gpa, io, &git, &repo, &.{ "--format=zip", "-0", "--prefix=p/", "HEAD", "src" }, head, .{ .format = .zip, .level = 0, .prefix = "p/", .pathspecs = &.{"src"} });
+
+    // deflated: every entry's name, attributes, CRC and size agree, and
+    // ours inflates to the stored bytes
+    const theirs = try git.run(io, &.{ "archive", "--format=zip", "HEAD" });
+    defer gpa.free(theirs);
+    const mine = try ours(gpa, io, &repo, head, .{ .format = .zip });
+    defer gpa.free(mine);
+    const stored = try ours(gpa, io, &repo, head, .{ .format = .zip, .level = 0 });
+    defer gpa.free(stored);
+    var a_entries = try centralDirectory(gpa, theirs);
+    defer a_entries.deinit(gpa);
+    var b_entries = try centralDirectory(gpa, mine);
+    defer b_entries.deinit(gpa);
+    try std.testing.expectEqual(a_entries.items.len, b_entries.items.len);
+    for (a_entries.items, b_entries.items) |x, y| {
+        try std.testing.expectEqualStrings(x.name, y.name);
+        try std.testing.expectEqual(x.crc, y.crc);
+        try std.testing.expectEqual(x.size, y.size);
+        try std.testing.expectEqual(x.external, y.external);
+        try std.testing.expectEqual(x.internal, y.internal);
+    }
+}
+
+const CdEntry = struct { name: []const u8, crc: u32, size: u32, external: u32, internal: u16 };
+
+fn centralDirectory(gpa: Allocator, zip: []const u8) !std.ArrayList(CdEntry) {
+    var out: std.ArrayList(CdEntry) = .empty;
+    errdefer out.deinit(gpa);
+    // the end record: 22 bytes, then the comment
+    var end: usize = zip.len - 22;
+    while (std.mem.readInt(u32, zip[end..][0..4], .little) != 0x06054b50) end -= 1;
+    const count = std.mem.readInt(u16, zip[end + 10 ..][0..2], .little);
+    var at: usize = std.mem.readInt(u32, zip[end + 16 ..][0..4], .little);
+    for (0..count) |_| {
+        const name_len = std.mem.readInt(u16, zip[at + 28 ..][0..2], .little);
+        const extra_len = std.mem.readInt(u16, zip[at + 30 ..][0..2], .little);
+        try out.append(gpa, .{
+            .name = zip[at + 46 ..][0..name_len],
+            .crc = std.mem.readInt(u32, zip[at + 16 ..][0..4], .little),
+            .size = std.mem.readInt(u32, zip[at + 24 ..][0..4], .little),
+            .internal = std.mem.readInt(u16, zip[at + 36 ..][0..2], .little),
+            .external = std.mem.readInt(u32, zip[at + 38 ..][0..4], .little),
+        });
+        at += 46 + name_len + extra_len;
+    }
+    return out;
+}

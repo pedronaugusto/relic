@@ -298,6 +298,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `patch.mail` | `split`, `info` — `git mailsplit` and `git mailinfo`. |
 | `patch.am` | `start`, `proceed`, `skip`, `abort`, `quit` — `git am` with `--3way`, its state in `rebase-apply` as git keeps it. |
 | `grep` | `grep` — `git grep` over the working tree, the index or a tree: fixed, basic and extended patterns, `-i -w -v -n -l -c`, context, pathspecs, binary files, written as git writes it. |
+| `archive` | `archive` — `git archive` as tar or zip, git's bytes: the pax comment, `--prefix`, `export-ignore`, `export-subst`. |
 
 Every public declaration carries a doc comment stating its contract, and every
 operation has one named error set. A refusal is a named error. For a refused
@@ -647,6 +648,7 @@ refresh and re-hash the whole working tree.
 - **A binary hunk in a written patch is this package's deflate.** It decodes to the same file; the compressed bytes are not zlib's. A cover letter's shortlog under a mailmap is refused by name.
 - **`am` reads mailboxes only.** StGit and Mercurial patches are refused by name, as is a mail in a character set other than UTF-8, US-ASCII or ISO-8859-1.
 - **`grep` without Perl expressions, back-references, function context or `--and`/`--or`/`--not`.** Each is refused by name.
+- **A deflated zip entry is this package's deflate,** decoding to the same file; a stored zip and every tar are git's bytes. `export-subst` refuses placeholders that need decorations, notes, signatures or the mailmap, and `tar.umask=user` is refused by name.
 
 ## Ahead
 
