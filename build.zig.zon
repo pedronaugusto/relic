@@ -9,8 +9,8 @@
         },
 
         .conduit = .{
-            .url = "git+https://github.com/pedronaugusto/conduit#aa667171193b84235d3b7b59c88c2b990e842b6b",
-            .hash = "conduit-0.5.1-4rIA734HEQD2Zi31NJeYsncrLFECALXiLdCh8FBxpySd",
+            .url = "git+https://github.com/pedronaugusto/conduit#73c0ef79d59934cd154aea227eb0243af8405186",
+            .hash = "conduit-0.5.1-4rIA7wUkEgAzUIb8D-_-fSsW8hBtI2E2cUyZnszBtjHM",
         },
     },
     .minimum_zig_version = "0.16.0",
