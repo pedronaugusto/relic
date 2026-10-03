@@ -379,3 +379,673 @@ test "fuzz: any pattern compiles or is refused, and any search ends" {
         }
     }.one, .{ .corpus = &.{ "(ab)+c|d*xababc", "[[:alpha:]]{2,}x9" } });
 }
+
+//=========================================================================
+// Regex: basic and extended, with where the match is
+//=========================================================================
+
+/// Which grammar a `Regex` is written in.
+pub const Syntax = enum {
+    /// POSIX basic expressions with GNU's `\+`, `\?` and `\|`: `regcomp`
+    /// without `REG_EXTENDED`, what `git grep` uses by default.
+    basic,
+    /// POSIX extended expressions: `REG_EXTENDED`, `git grep -E`.
+    extended,
+};
+
+/// How a `Regex` is compiled.
+pub const Flags = struct {
+    syntax: Syntax = .extended,
+    /// `REG_ICASE`, for ASCII letters.
+    icase: bool = false,
+};
+
+/// Where a match is: `text[start..end]`.
+pub const Match = struct { start: usize, end: usize };
+
+const Inst = union(enum) {
+    byte: u8,
+    set: *const [256]bool,
+    any,
+    split: struct { x: u32, y: u32 },
+    jmp: u32,
+    bol,
+    eol,
+    word_boundary,
+    not_word_boundary,
+    word_start,
+    word_end,
+    match,
+};
+
+/// The most instructions a pattern may compile to, so a nest of intervals
+/// cannot blow up.
+const max_program = 1 << 16;
+
+/// A compiled pattern, matched one line at a time as `regexec` with
+/// `REG_NEWLINE` matches: the leftmost match, and of those the longest.
+/// GNU's `\w`, `\W`, `\s`, `\S`, `\b`, `\B`, `\<` and `\>` are understood;
+/// back-references are refused as `error.UnsupportedBackreference`.
+pub const Regex = struct {
+    arena: std.heap.ArenaAllocator,
+    program: []const Inst,
+
+    pub const CompileError = Error || error{UnsupportedBackreference};
+
+    /// Compile `text` under `flags`.
+    pub fn compile(gpa: Allocator, text: []const u8, flags: Flags) CompileError!Regex {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        var p: RParser = .{ .a = a, .text = text, .flags = flags };
+        const tree = try p.parseAlt(0);
+        if (p.at != text.len) return error.InvalidPattern;
+        var c: Compiler = .{ .a = a, .icase = flags.icase };
+        try c.emit(tree);
+        try c.push(.match);
+        return .{ .arena = arena, .program = c.prog.items };
+    }
+
+    pub fn deinit(r: *Regex) void {
+        r.arena.deinit();
+        r.* = undefined;
+    }
+
+    /// The leftmost-longest match in `line`, or `null`. `not_bol` is
+    /// `REG_NOTBOL`: the start of `line` is not the start of a line, as
+    /// when a search resumes after an earlier match.
+    pub fn find(r: *const Regex, gpa: Allocator, line: []const u8, not_bol: bool) Allocator.Error!?Match {
+        var vm: Vm = try .init(gpa, r.program.len);
+        defer vm.deinit(gpa);
+        return vm.run(r.program, line, not_bol);
+    }
+
+    /// `find` with scratch space the caller keeps between calls.
+    pub fn findWith(r: *const Regex, vm: *Vm, line: []const u8, not_bol: bool) ?Match {
+        return vm.run(r.program, line, not_bol);
+    }
+};
+
+/// Scratch space for matching, sized for one program and reused from line
+/// to line.
+pub const Vm = struct {
+    cur: Threads,
+    next: Threads,
+    stack: []u32,
+
+    const Threads = struct {
+        pcs: []u32,
+        starts: []usize,
+        len: usize = 0,
+        /// `mark[pc]` is the generation `pc` was last added in.
+        mark: []u64,
+    };
+
+    pub fn init(gpa: Allocator, n: usize) Allocator.Error!Vm {
+        var vm: Vm = undefined;
+        inline for (.{ &vm.cur, &vm.next }) |t| {
+            t.* = .{ .pcs = try gpa.alloc(u32, n), .starts = try gpa.alloc(usize, n), .mark = try gpa.alloc(u64, n) };
+            @memset(t.mark, std.math.maxInt(u64));
+        }
+        vm.stack = try gpa.alloc(u32, n * 2 + 2);
+        return vm;
+    }
+
+    pub fn deinit(vm: *Vm, gpa: Allocator) void {
+        inline for (.{ &vm.cur, &vm.next }) |t| {
+            gpa.free(t.pcs);
+            gpa.free(t.starts);
+            gpa.free(t.mark);
+        }
+        gpa.free(vm.stack);
+        vm.* = undefined;
+    }
+
+    fn isWord(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_';
+    }
+
+    /// Add `pc` and everything it reaches without reading, for a thread
+    /// that started at `start`, the earliest start winning a state.
+    fn add(vm: *Vm, t: *Threads, gen: u64, prog: []const Inst, pc0: u32, start: usize, line: []const u8, at: usize, not_bol: bool) void {
+        var sp: usize = 0;
+        vm.stack[sp] = pc0;
+        sp += 1;
+        while (sp > 0) {
+            sp -= 1;
+            const pc = vm.stack[sp];
+            if (t.mark[pc] == gen) continue;
+            t.mark[pc] = gen;
+            const prev: ?u8 = if (at > 0) line[at - 1] else null;
+            const nextc: ?u8 = if (at < line.len) line[at] else null;
+            const pw = if (prev) |c| isWord(c) else false;
+            const nw = if (nextc) |c| isWord(c) else false;
+            switch (prog[pc]) {
+                .jmp => |x| {
+                    vm.stack[sp] = x;
+                    sp += 1;
+                },
+                .split => |s| {
+                    // y pushed first so x is taken first
+                    vm.stack[sp] = s.y;
+                    vm.stack[sp + 1] = s.x;
+                    sp += 2;
+                },
+                .bol => if (at == 0 and !not_bol) {
+                    vm.stack[sp] = pc + 1;
+                    sp += 1;
+                },
+                .eol => if (at == line.len) {
+                    vm.stack[sp] = pc + 1;
+                    sp += 1;
+                },
+                .word_boundary => if (pw != nw) {
+                    vm.stack[sp] = pc + 1;
+                    sp += 1;
+                },
+                .not_word_boundary => if (pw == nw) {
+                    vm.stack[sp] = pc + 1;
+                    sp += 1;
+                },
+                .word_start => if (!pw and nw) {
+                    vm.stack[sp] = pc + 1;
+                    sp += 1;
+                },
+                .word_end => if (pw and !nw) {
+                    vm.stack[sp] = pc + 1;
+                    sp += 1;
+                },
+                else => {
+                    t.pcs[t.len] = pc;
+                    t.starts[t.len] = start;
+                    t.len += 1;
+                },
+            }
+        }
+    }
+
+    fn run(vm: *Vm, prog: []const Inst, line: []const u8, not_bol: bool) ?Match {
+        var best: ?Match = null;
+        var gen: u64 = 0;
+        vm.cur.len = 0;
+        @memset(vm.cur.mark, std.math.maxInt(u64));
+        @memset(vm.next.mark, std.math.maxInt(u64));
+        var at: usize = 0;
+        while (true) : (at += 1) {
+            // a new thread from here, unless a match already started earlier
+            if (best == null) vm.add(&vm.cur, gen, prog, 0, at, line, at, not_bol);
+            if (vm.cur.len == 0 and (best != null or at >= line.len)) break;
+            gen += 1;
+            vm.next.len = 0;
+            var i: usize = 0;
+            while (i < vm.cur.len) : (i += 1) {
+                const pc = vm.cur.pcs[i];
+                const start = vm.cur.starts[i];
+                if (best) |b| if (start > b.start) continue;
+                switch (prog[pc]) {
+                    .match => {
+                        if (best == null or start < best.?.start or (start == best.?.start and at > best.?.end)) best = .{ .start = start, .end = at };
+                    },
+                    .byte => |c| if (at < line.len and line[at] == c) vm.add(&vm.next, gen, prog, pc + 1, start, line, at + 1, not_bol),
+                    .set => |s| if (at < line.len and s[line[at]]) vm.add(&vm.next, gen, prog, pc + 1, start, line, at + 1, not_bol),
+                    .any => if (at < line.len and line[at] != '\n') vm.add(&vm.next, gen, prog, pc + 1, start, line, at + 1, not_bol),
+                    else => {},
+                }
+            }
+            std.mem.swap(Threads, &vm.cur, &vm.next);
+            if (at >= line.len) {
+                // the threads that read past the end are gone; what is
+                // left can only be a match at the very end
+                gen += 1;
+                var j: usize = 0;
+                while (j < vm.cur.len) : (j += 1) {
+                    if (prog[vm.cur.pcs[j]] == .match) {
+                        const start = vm.cur.starts[j];
+                        if (best == null or start < best.?.start or (start == best.?.start and line.len > best.?.end)) best = .{ .start = start, .end = line.len };
+                    }
+                }
+                break;
+            }
+        }
+        return best;
+    }
+};
+
+const RNode = union(enum) {
+    empty,
+    byte: u8,
+    set: *const [256]bool,
+    any,
+    bol,
+    eol,
+    word_boundary,
+    not_word_boundary,
+    word_start,
+    word_end,
+    concat: []const *const RNode,
+    alt: []const *const RNode,
+    repeat: struct { node: *const RNode, min: u32, max: ?u32 },
+};
+
+const RParser = struct {
+    a: Allocator,
+    text: []const u8,
+    flags: Flags,
+    at: usize = 0,
+
+    fn node(p: *RParser, n: RNode) Allocator.Error!*const RNode {
+        const out = try p.a.create(RNode);
+        out.* = n;
+        return out;
+    }
+
+    fn isBasic(p: *const RParser) bool {
+        return p.flags.syntax == .basic;
+    }
+
+    fn peek(p: *const RParser, off: usize) ?u8 {
+        return if (p.at + off < p.text.len) p.text[p.at + off] else null;
+    }
+
+    /// At an alternation bar: `|`, or `\|` in a basic expression.
+    fn atBar(p: *const RParser) bool {
+        if (p.isBasic()) return p.peek(0) == '\\' and p.peek(1) == '|';
+        return p.peek(0) == '|';
+    }
+
+    fn atClose(p: *const RParser, depth: u32) bool {
+        if (depth == 0) return false;
+        if (p.isBasic()) return p.peek(0) == '\\' and p.peek(1) == ')';
+        return p.peek(0) == ')';
+    }
+
+    fn parseAlt(p: *RParser, depth: u32) Regex.CompileError!*const RNode {
+        var branches: std.ArrayList(*const RNode) = .empty;
+        while (true) {
+            try branches.append(p.a, try p.parseConcat(depth));
+            if (p.atBar()) {
+                p.at += if (p.isBasic()) 2 else 1;
+                continue;
+            }
+            break;
+        }
+        if (branches.items.len == 1) return branches.items[0];
+        return p.node(.{ .alt = branches.items });
+    }
+
+    fn parseConcat(p: *RParser, depth: u32) Regex.CompileError!*const RNode {
+        var items: std.ArrayList(*const RNode) = .empty;
+        const branch_start = p.at;
+        while (p.at < p.text.len) {
+            if (p.atBar() or p.atClose(depth)) break;
+            const atom_start = p.at;
+            var atom = try p.parseAtom(depth, p.at == branch_start);
+            // quantifiers
+            while (p.at < p.text.len) {
+                var min: u32 = undefined;
+                var max: ?u32 = undefined;
+                const c = p.text[p.at];
+                if (c == '*') {
+                    // a basic expression's leading star is itself
+                    min = 0;
+                    max = null;
+                    p.at += 1;
+                } else if (!p.isBasic() and (c == '+' or c == '?')) {
+                    min = if (c == '+') 1 else 0;
+                    max = if (c == '+') null else 1;
+                    p.at += 1;
+                } else if (p.isBasic() and c == '\\' and (p.peek(1) == '+' or p.peek(1) == '?')) {
+                    min = if (p.peek(1) == '+') 1 else 0;
+                    max = if (p.peek(1) == '+') null else 1;
+                    p.at += 2;
+                } else if ((!p.isBasic() and c == '{') or (p.isBasic() and c == '\\' and p.peek(1) == '{')) {
+                    const save = p.at;
+                    p.at += if (p.isBasic()) 2 else 1;
+                    const interval = p.parseInterval() catch |err| {
+                        if (!p.isBasic() and err == error.InvalidPattern) {
+                            // an extended `{` that is no interval is itself
+                            p.at = save;
+                            break;
+                        }
+                        return err;
+                    };
+                    min = interval.min;
+                    max = interval.max;
+                } else break;
+                atom = try p.node(.{ .repeat = .{ .node = atom, .min = min, .max = max } });
+            }
+            _ = atom_start;
+            try items.append(p.a, atom);
+        }
+        if (items.items.len == 0) return p.node(.empty);
+        if (items.items.len == 1) return items.items[0];
+        return p.node(.{ .concat = items.items });
+    }
+
+    fn parseInterval(p: *RParser) Error!struct { min: u32, max: ?u32 } {
+        const close_text: []const u8 = if (p.isBasic()) "\\}" else "}";
+        const close = std.mem.indexOfPos(u8, p.text, p.at, close_text) orelse return error.InvalidPattern;
+        const inside = p.text[p.at..close];
+        var min: u32 = undefined;
+        var max: ?u32 = undefined;
+        if (std.mem.indexOfScalar(u8, inside, ',')) |comma| {
+            min = if (comma == 0) 0 else std.fmt.parseUnsigned(u32, inside[0..comma], 10) catch return error.InvalidPattern;
+            max = if (comma + 1 == inside.len) null else std.fmt.parseUnsigned(u32, inside[comma + 1 ..], 10) catch return error.InvalidPattern;
+        } else {
+            min = std.fmt.parseUnsigned(u32, inside, 10) catch return error.InvalidPattern;
+            max = min;
+        }
+        if (max) |m| if (m < min) return error.InvalidPattern;
+        if (min > 255 or (max orelse 0) > 255) return error.InvalidPattern;
+        p.at = close + close_text.len;
+        return .{ .min = min, .max = max };
+    }
+
+    fn literal(p: *RParser, c: u8) Allocator.Error!*const RNode {
+        if (p.flags.icase and std.ascii.isAlphabetic(c)) {
+            const set = try p.a.create([256]bool);
+            set.* = @splat(false);
+            set[std.ascii.toLower(c)] = true;
+            set[std.ascii.toUpper(c)] = true;
+            return p.node(.{ .set = set });
+        }
+        return p.node(.{ .byte = c });
+    }
+
+    fn classOf(p: *RParser, comptime f: fn (u8) bool, negate: bool) Allocator.Error!*const RNode {
+        const set = try p.a.create([256]bool);
+        for (set, 0..) |*b, i| b.* = f(@intCast(i)) != negate;
+        return p.node(.{ .set = set });
+    }
+
+    fn wordChar(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_';
+    }
+
+    fn spaceChar(c: u8) bool {
+        return std.ascii.isWhitespace(c);
+    }
+
+    fn parseAtom(p: *RParser, depth: u32, branch_start: bool) Regex.CompileError!*const RNode {
+        const c = p.text[p.at];
+        const basic = p.isBasic();
+        switch (c) {
+            '.' => {
+                p.at += 1;
+                return p.node(.any);
+            },
+            '[' => return p.node(.{ .set = try p.bracket() }),
+            '^' => {
+                p.at += 1;
+                // a basic expression's `^` anchors only where a branch starts
+                if (basic and !branch_start) return p.literal('^');
+                return p.node(.bol);
+            },
+            '$' => {
+                p.at += 1;
+                if (basic) {
+                    const at_end = p.at == p.text.len or
+                        (p.peek(0) == '\\' and (p.peek(1) == ')' or p.peek(1) == '|'));
+                    if (!at_end) return p.literal('$');
+                }
+                return p.node(.eol);
+            },
+            '*' => {
+                if (basic and branch_start) {
+                    p.at += 1;
+                    return p.literal('*');
+                }
+                if (!basic and branch_start) {
+                    p.at += 1;
+                    return p.literal('*');
+                }
+                return error.InvalidPattern;
+            },
+            '(' => if (!basic) {
+                p.at += 1;
+                const inner = try p.parseAlt(depth + 1);
+                if (p.peek(0) != ')') return error.InvalidPattern;
+                p.at += 1;
+                return inner;
+            } else {
+                p.at += 1;
+                return p.literal('(');
+            },
+            ')' => {
+                if (!basic) {
+                    if (depth == 0) {
+                        p.at += 1;
+                        return p.literal(')');
+                    }
+                    return error.InvalidPattern;
+                }
+                p.at += 1;
+                return p.literal(')');
+            },
+            '+', '?' => if (!basic) {
+                if (branch_start) {
+                    p.at += 1;
+                    return p.literal(c);
+                }
+                return error.InvalidPattern;
+            } else {
+                p.at += 1;
+                return p.literal(c);
+            },
+            '{' => {
+                p.at += 1;
+                return p.literal('{');
+            },
+            '\\' => {
+                if (p.at + 1 >= p.text.len) return error.InvalidPattern;
+                const e = p.text[p.at + 1];
+                p.at += 2;
+                switch (e) {
+                    '(' => if (basic) {
+                        const inner = try p.parseAlt(depth + 1);
+                        if (!(p.peek(0) == '\\' and p.peek(1) == ')')) return error.InvalidPattern;
+                        p.at += 2;
+                        return inner;
+                    },
+                    ')' => if (basic) return error.InvalidPattern,
+                    '{' => if (basic) return error.InvalidPattern,
+                    '1'...'9' => return error.UnsupportedBackreference,
+                    'w' => return p.classOf(wordChar, false),
+                    'W' => return p.classOf(wordChar, true),
+                    's' => return p.classOf(spaceChar, false),
+                    'S' => return p.classOf(spaceChar, true),
+                    'b' => return p.node(.word_boundary),
+                    'B' => return p.node(.not_word_boundary),
+                    '<' => return p.node(.word_start),
+                    '>' => return p.node(.word_end),
+                    '`' => return p.node(.bol),
+                    '\'' => return p.node(.eol),
+                    else => {},
+                }
+                return p.literal(e);
+            },
+            else => {
+                p.at += 1;
+                return p.literal(c);
+            },
+        }
+    }
+
+    fn bracket(p: *RParser) Error!*const [256]bool {
+        const set = try p.a.create([256]bool);
+        set.* = @splat(false);
+        p.at += 1;
+        var negate = false;
+        if (p.at < p.text.len and p.text[p.at] == '^') {
+            negate = true;
+            p.at += 1;
+        }
+        var first = true;
+        while (true) {
+            if (p.at >= p.text.len) return error.InvalidPattern;
+            const c = p.text[p.at];
+            if (c == ']' and !first) {
+                p.at += 1;
+                break;
+            }
+            first = false;
+            if (c == '[' and p.at + 1 < p.text.len and (p.text[p.at + 1] == ':' or p.text[p.at + 1] == '=' or p.text[p.at + 1] == '.')) {
+                const kind = p.text[p.at + 1];
+                const closing = [2]u8{ kind, ']' };
+                const close = std.mem.indexOfPos(u8, p.text, p.at + 2, &closing) orelse return error.InvalidPattern;
+                const name = p.text[p.at + 2 .. close];
+                if (kind == ':') {
+                    for (0..256) |b| {
+                        if (Parser.inClass(name, @intCast(b)) orelse return error.InvalidPattern) set[b] = true;
+                    }
+                } else {
+                    // an equivalence class or a collating symbol of one
+                    // byte is that byte
+                    if (name.len != 1) return error.InvalidPattern;
+                    set[name[0]] = true;
+                }
+                p.at = close + 2;
+                continue;
+            }
+            p.at += 1;
+            if (p.at + 1 < p.text.len and p.text[p.at] == '-' and p.text[p.at + 1] != ']') {
+                const hi = p.text[p.at + 1];
+                if (hi < c) return error.InvalidPattern;
+                for (c..@as(usize, hi) + 1) |b| set[b] = true;
+                p.at += 2;
+            } else set[c] = true;
+        }
+        if (p.flags.icase) {
+            for (0..256) |b| {
+                if (set[b] and std.ascii.isAlphabetic(@intCast(b))) {
+                    set[std.ascii.toLower(@intCast(b))] = true;
+                    set[std.ascii.toUpper(@intCast(b))] = true;
+                }
+            }
+        }
+        if (negate) {
+            for (set) |*b| b.* = !b.*;
+            // with REG_NEWLINE a negated bracket never takes a newline
+            set['\n'] = false;
+        }
+        return set;
+    }
+};
+
+const Compiler = struct {
+    a: Allocator,
+    icase: bool,
+    prog: std.ArrayList(Inst) = .empty,
+
+    fn push(c: *Compiler, i: Inst) Error!void {
+        if (c.prog.items.len >= max_program) return error.PatternTooComplex;
+        try c.prog.append(c.a, i);
+    }
+
+    fn pc(c: *const Compiler) u32 {
+        return @intCast(c.prog.items.len);
+    }
+
+    fn emit(c: *Compiler, n: *const RNode) Error!void {
+        switch (n.*) {
+            .empty => {},
+            .byte => |b| try c.push(.{ .byte = b }),
+            .set => |s| try c.push(.{ .set = s }),
+            .any => try c.push(.any),
+            .bol => try c.push(.bol),
+            .eol => try c.push(.eol),
+            .word_boundary => try c.push(.word_boundary),
+            .not_word_boundary => try c.push(.not_word_boundary),
+            .word_start => try c.push(.word_start),
+            .word_end => try c.push(.word_end),
+            .concat => |items| for (items) |item| try c.emit(item),
+            .alt => |branches| {
+                // split L1, next; L1: branch; jmp end; ...
+                var jumps: std.ArrayList(u32) = .empty;
+                for (branches, 0..) |branch, i| {
+                    if (i + 1 < branches.len) {
+                        const split_at = c.pc();
+                        try c.push(.{ .split = .{ .x = split_at + 1, .y = 0 } });
+                        try c.emit(branch);
+                        try jumps.append(c.a, c.pc());
+                        try c.push(.{ .jmp = 0 });
+                        c.prog.items[split_at].split.y = c.pc();
+                    } else try c.emit(branch);
+                }
+                const end = c.pc();
+                for (jumps.items) |j| c.prog.items[j] = .{ .jmp = end };
+            },
+            .repeat => |r| {
+                var i: u32 = 0;
+                while (i < r.min) : (i += 1) try c.emit(r.node);
+                if (r.max) |mx| {
+                    var holes: std.ArrayList(u32) = .empty;
+                    var k = r.min;
+                    while (k < mx) : (k += 1) {
+                        try holes.append(c.a, c.pc());
+                        try c.push(.{ .split = .{ .x = c.pc() + 1, .y = 0 } });
+                        try c.emit(r.node);
+                    }
+                    const end = c.pc();
+                    for (holes.items) |h| c.prog.items[h].split.y = end;
+                } else {
+                    const loop = c.pc();
+                    try c.push(.{ .split = .{ .x = loop + 1, .y = 0 } });
+                    try c.emit(r.node);
+                    try c.push(.{ .jmp = loop });
+                    c.prog.items[loop].split.y = c.pc();
+                }
+            },
+        }
+    }
+};
+
+test "a regex finds the leftmost, longest match, in basic and extended syntax" {
+    const Case = struct { pattern: []const u8, syntax: Syntax = .extended, icase: bool = false, text: []const u8, want: ?Match };
+    for ([_]Case{
+        .{ .pattern = "b+", .text = "abbbc", .want = .{ .start = 1, .end = 4 } },
+        .{ .pattern = "a|ab|abc", .text = "xabcd", .want = .{ .start = 1, .end = 4 } },
+        .{ .pattern = "x*", .text = "abc", .want = .{ .start = 0, .end = 0 } },
+        .{ .pattern = "c$", .text = "abc", .want = .{ .start = 2, .end = 3 } },
+        .{ .pattern = "\\(ab\\)*c", .syntax = .basic, .text = "zababc", .want = .{ .start = 1, .end = 6 } },
+        .{ .pattern = "a+b", .syntax = .basic, .text = "aa+b", .want = .{ .start = 1, .end = 4 } },
+        .{ .pattern = "a\\+b", .syntax = .basic, .text = "aaab", .want = .{ .start = 0, .end = 4 } },
+        .{ .pattern = "a\\|b", .syntax = .basic, .text = "xb", .want = .{ .start = 1, .end = 2 } },
+        .{ .pattern = "*a", .syntax = .basic, .text = "x*a", .want = .{ .start = 1, .end = 3 } },
+        .{ .pattern = "a^b", .syntax = .basic, .text = "a^b", .want = .{ .start = 0, .end = 3 } },
+        .{ .pattern = "HELLO", .icase = true, .text = "say hello", .want = .{ .start = 4, .end = 9 } },
+        .{ .pattern = "\\<is\\>", .text = "this is", .want = .{ .start = 5, .end = 7 } },
+        .{ .pattern = "[^a]", .text = "aab", .want = .{ .start = 2, .end = 3 } },
+        .{ .pattern = "a{2}", .text = "aaa", .want = .{ .start = 0, .end = 2 } },
+        .{ .pattern = "q", .text = "abc", .want = null },
+    }) |case| {
+        var r = try Regex.compile(testing.allocator, case.pattern, .{ .syntax = case.syntax, .icase = case.icase });
+        defer r.deinit();
+        const got = try r.find(testing.allocator, case.text, false);
+        testing.expectEqual(case.want, got) catch |err| {
+            std.debug.print("{s} on {s}\n", .{ case.pattern, case.text });
+            return err;
+        };
+    }
+    try testing.expectError(error.UnsupportedBackreference, Regex.compile(testing.allocator, "\\(a\\)\\1", .{ .syntax = .basic }));
+}
+
+test "fuzz: any regex compiles or is refused, and any match is within the line" {
+    try testing.fuzz({}, struct {
+        fn one(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [64]u8 = undefined;
+            const all = buf[0..smith.slice(&buf)];
+            const cut = all.len / 2;
+            for ([_]Syntax{ .basic, .extended }) |syntax| {
+                var r = Regex.compile(testing.allocator, all[0..cut], .{ .syntax = syntax }) catch |err| switch (err) {
+                    error.InvalidPattern, error.PatternTooComplex, error.UnsupportedBackreference => continue,
+                    else => return err,
+                };
+                defer r.deinit();
+                if (try r.find(testing.allocator, all[cut..], false)) |m| {
+                    try testing.expect(m.start <= m.end and m.end <= all.len - cut);
+                }
+            }
+        }
+    }.one, .{ .corpus = &.{ "\\(a\\|b\\)*c", "[[:alpha:]]{2,}x9" } });
+}
