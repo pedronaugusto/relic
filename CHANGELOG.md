@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Fix git's author and committer dates in every test fixture, so a fixture's object names do not change from run to run.
 
+- Add `ignore.Checker`, a working tree's ignore rules asked one path at a time, reading each folder's `.gitignore` once and only after it reads; checkout's obstruction check uses it.
+
 - Count the five new performance checks in Windows source-family coverage.
 
 - Copy only defined compressor state when starting each pack entry.

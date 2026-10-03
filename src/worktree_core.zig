@@ -2225,7 +2225,12 @@ pub fn verifyUpdates(
 
     var changed: std.ArrayList([]const u8) = .empty;
     var untracked: std.ArrayList([]const u8) = .empty;
-    var loaded_ignores: std.StringHashMapUnmanaged(void) = .empty;
+    // the caller's rules, with every `.gitignore` read along the way, go
+    // back to the caller; one that cannot be read counts as absent
+    var ignores: ?ignore.Checker = if (options.ignore) |rules| .init(rules.*, wt, .{ .unreadable = .skip }) else null;
+    defer if (ignores) |*checker| {
+        options.ignore.?.* = checker.release();
+    };
 
     const paths = try arena.dupe([]const u8, updates.keys());
     std.mem.sort([]const u8, paths, {}, lessThanName);
@@ -2248,7 +2253,7 @@ pub fn verifyUpdates(
                 else if (index.find(prefix) != null)
                     false
                 else
-                    !try isIgnoredPath(io, wt, options.ignore, &loaded_ignores, arena, prefix, false);
+                    !(if (ignores) |*checker| try checker.excluded(io, prefix, false) else false);
                 if (blocks) {
                     try untracked.append(arena, prefix);
                     break;
@@ -2290,35 +2295,6 @@ fn directoryGoes(
         if (want != null) return false;
     }
     return true;
-}
-
-/// Whether an untracked path is ignored, reading the `.gitignore` files
-/// along it into `rules` the first time they are needed.
-fn isIgnoredPath(
-    io: Io,
-    wt: Io.Dir,
-    rules: ?*ignore.Rules,
-    loaded: *std.StringHashMapUnmanaged(void),
-    arena: Allocator,
-    path: []const u8,
-    is_dir: bool,
-) Error!bool {
-    const r = rules orelse return false;
-    var depth: u32 = 0;
-    var at: usize = 0;
-    while (true) : (depth += 1) {
-        const base = path[0..at];
-        if (!loaded.contains(base)) {
-            try loaded.put(arena, try arena.dupe(u8, base), {});
-            r.addDirectory(io, wt, base, depth) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => {},
-            };
-        }
-        const slash = std.mem.indexOfScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
-        at = slash;
-    }
-    return r.matchPath(path, is_dir).excluded;
 }
 
 /// The check `index.WriteOptions.racy` asks for, over the working tree at

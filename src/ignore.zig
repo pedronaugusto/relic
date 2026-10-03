@@ -230,6 +230,96 @@ pub const Rules = struct {
     }
 };
 
+/// A working tree's ignore rules asked one path at a time, outside a walk:
+/// a file watcher deciding what to register, a list of changed paths, a
+/// checkout looking at an untracked file in its way.
+///
+/// The `.gitignore` of every folder above a path is read the first time a
+/// path below that folder is asked about, the shallowest first, so a deeper
+/// file still overrides a shallower one; what was read is kept for the next
+/// question. A folder is marked read only once its file has been read or
+/// found absent, so a question that failed asks again rather than answering
+/// from rules with a level missing. The checker owns its rules: start it
+/// with the two global levels, as `Repository.loadIgnore` returns them.
+pub const Checker = struct {
+    rules: Rules,
+    /// The working tree the paths are relative to. Borrowed.
+    wt: Io.Dir,
+    unreadable: Unreadable,
+    /// The folders whose `.gitignore` is in `rules`, or was found absent,
+    /// `""` the root. The keys live in the rules' arena.
+    read: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// What a `.gitignore` that is there but cannot be read does.
+    pub const Unreadable = enum {
+        /// The question fails with the error, and the next one reads the
+        /// file again: a caller that would rather not answer than answer
+        /// without a level.
+        fail,
+        /// The file counts as absent, as git warns and goes on.
+        skip,
+    };
+
+    pub const Options = struct {
+        unreadable: Unreadable = .fail,
+    };
+
+    /// A checker over `rules`, which it now owns, for the working tree `wt`.
+    pub fn init(rules: Rules, wt: Io.Dir, options: Options) Checker {
+        return .{ .rules = rules, .wt = wt, .unreadable = options.unreadable };
+    }
+
+    /// Release the rules and what was read into them.
+    pub fn deinit(checker: *Checker) void {
+        checker.read.deinit(checker.rules.gpa);
+        checker.rules.deinit();
+        checker.* = undefined;
+    }
+
+    /// The rules with every level read so far, handed back; the checker is
+    /// finished, and needs no `deinit`.
+    pub fn release(checker: *Checker) Rules {
+        checker.read.deinit(checker.rules.gpa);
+        const rules = checker.rules;
+        checker.* = undefined;
+        return rules;
+    }
+
+    /// Whether `path` is excluded, its parent folders considered
+    /// (`Rules.matchPath`). `path` is `/`-separated and relative to the
+    /// working tree's root. A tracked path is the caller's to keep: git
+    /// reports it whatever the rules say.
+    pub fn excluded(checker: *Checker, io: Io, path: []const u8, is_dir: bool) Error!bool {
+        return (try checker.match(io, path, is_dir)).excluded;
+    }
+
+    /// What decided `path`, and how, as `excluded` decides it.
+    pub fn match(checker: *Checker, io: Io, path: []const u8, is_dir: bool) Error!Match {
+        try checker.readAbove(io, path);
+        return checker.rules.matchPath(path, is_dir);
+    }
+
+    fn readAbove(checker: *Checker, io: Io, path: []const u8) Error!void {
+        const gpa = checker.rules.gpa;
+        var end: usize = 0;
+        var depth: u32 = 0;
+        while (true) : (depth += 1) {
+            const dir = path[0..end];
+            if (!checker.read.contains(dir)) {
+                try checker.read.ensureUnusedCapacity(gpa, 1);
+                const key = try checker.rules.arena.allocator().dupe(u8, dir);
+                checker.rules.addDirectory(io, checker.wt, key, depth) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => if (checker.unreadable == .fail) return err,
+                };
+                checker.read.putAssumeCapacity(key, {});
+            }
+            if (end + 1 >= path.len) return;
+            end = std.mem.indexOfScalarPos(u8, path, end + 1, '/') orelse return;
+        }
+    }
+};
+
 fn basename(path: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| return path[slash + 1 ..];
     return path;
@@ -377,6 +467,79 @@ test "the deciding pattern is reported" {
     try std.testing.expectEqualStrings("*.tmp", decided.by.?.glob);
     try std.testing.expectEqual(@as(u32, 2), decided.by.?.line);
     try std.testing.expectEqualStrings(".gitignore", decided.by.?.source);
+}
+
+test "a checker reads each folder's rules the first time a path below it is asked" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "sub/deep");
+    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.log\nbuild/\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub/.gitignore", .data = "!keep.log\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub/deep/.gitignore", .data = "*.tmp\n" });
+    var rules: Rules = try .init(gpa, false);
+    try rules.addText("*.secret\n", "", "info/exclude", 1);
+    var checker: Checker = .init(rules, tmp.dir, .{});
+    defer checker.deinit();
+
+    try std.testing.expect(try checker.excluded(io, "a.log", false));
+    try std.testing.expect(try checker.excluded(io, "x.secret", false));
+    try std.testing.expect(!try checker.excluded(io, "a.txt", false));
+    // a deeper file beats a shallower one, and applies only below itself
+    try std.testing.expect(!try checker.excluded(io, "sub/keep.log", false));
+    try std.testing.expect(try checker.excluded(io, "sub/other.log", false));
+    try std.testing.expect(try checker.excluded(io, "sub/deep/x.tmp", false));
+    try std.testing.expect(!try checker.excluded(io, "x.tmp", false));
+    // a folder-only rule decides by what the path is, and covers below it
+    try std.testing.expect(try checker.excluded(io, "build", true));
+    try std.testing.expect(!try checker.excluded(io, "build", false));
+    try std.testing.expect(try checker.excluded(io, "build/out.o", false));
+    try std.testing.expectEqualStrings("*.tmp", (try checker.match(io, "sub/deep/y.tmp", false)).by.?.glob);
+    // each folder read once: four levels of files and one of text
+    try std.testing.expectEqual(@as(usize, 4), checker.rules.levels.items.len);
+}
+
+test "a checker asks an unreadable folder's rules again, or skips them when told" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub/.gitignore", .data = "*.log\n" });
+    // larger than any ignore file is read: present, and unreadable
+    var big = try tmp.dir.createFile(io, ".gitignore", .{});
+    try big.setLength(io, (1 << 24) + 1);
+    big.close(io);
+
+    var failing: Checker = .init(try .init(gpa, false), tmp.dir, .{});
+    defer failing.deinit();
+    try std.testing.expect(std.meta.isError(failing.excluded(io, "sub/a.log", false)));
+    try std.testing.expect(!failing.read.contains(""));
+    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "!sub/a.log\n*.txt\n" });
+    try std.testing.expect(try failing.excluded(io, "b.txt", false));
+    try std.testing.expect(try failing.excluded(io, "sub/a.log", false));
+
+    var big_again = try tmp.dir.createFile(io, ".gitignore", .{});
+    try big_again.setLength(io, (1 << 24) + 1);
+    big_again.close(io);
+    var skipping: Checker = .init(try .init(gpa, false), tmp.dir, .{ .unreadable = .skip });
+    defer skipping.deinit();
+    try std.testing.expect(try skipping.excluded(io, "sub/a.log", false));
+    try std.testing.expect(!try skipping.excluded(io, "b.txt", false));
+}
+
+test "a checker hands back its rules with every level it read" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.o\n" });
+    var checker: Checker = .init(try .init(gpa, false), tmp.dir, .{});
+    try std.testing.expect(try checker.excluded(io, "a.o", false));
+    var rules = checker.release();
+    defer rules.deinit();
+    try std.testing.expect(rules.match("b.o", false).excluded);
 }
 
 test "fuzz: any ignore file answers without a crash" {
