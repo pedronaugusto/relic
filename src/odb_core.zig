@@ -1511,8 +1511,10 @@ pub const Odb = struct {
         /// only what they do not.
         exclude_packs: []const []const u8 = &.{},
         /// How many tasks `collectLoose` and `collectAll` read the objects'
-        /// headers with, through the caller's `std.Io`, as
-        /// `PackOptions.threads` says. The tasks allocate nothing.
+        /// headers and the loose trees with, through the caller's `std.Io`,
+        /// as `PackOptions.threads` says. The tasks allocate nothing: the
+        /// trees go into buffers sized from their headers, eight megabytes
+        /// of them at a time.
         threads: u16 = 0,
     };
 
@@ -1755,20 +1757,79 @@ pub const Odb = struct {
             entry.in_pack = false;
         }
 
+        // The trees, which name everything else. The loose ones are read by
+        // the tasks, a batch at a time, into buffers sized here from their
+        // headers, and the rest here; every one is parsed here, in order, so
+        // the first tree to name an object gives it its hint whatever the
+        // tasks' timing.
         var hints: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty;
         defer hints.deinit(gpa);
-        for (entries) |entry| {
-            const head = entry.header orelse continue;
-            if (head.type != .tree) continue;
-            const found = odb.read(io, entry.oid) catch |err| {
-                if (opening.readRefusal(err)) return err;
-                continue;
+        const TreeRead = struct {
+            oid: Oid,
+            bytes: ?[]u8 = null,
+            filled: bool = false,
+        };
+        var trees: std.ArrayList(TreeRead) = .empty;
+        defer trees.deinit(gpa);
+        defer for (trees.items) |t| if (t.bytes) |bytes| gpa.free(bytes);
+        var failures: std.ArrayList(?Error) = .empty;
+        defer failures.deinit(gpa);
+        var start: usize = 0;
+        while (start < entries.len) {
+            for (trees.items) |*t| if (t.bytes) |bytes| {
+                gpa.free(bytes);
+                t.bytes = null;
             };
-            defer gpa.free(found.bytes);
-            var it = object.Tree.parse(odb.backendData().kind, found.bytes).iterate();
-            while (it.next() catch null) |child| {
-                if (hints.contains(child.oid)) continue;
-                try hints.put(gpa, child.oid, try arena.dupe(u8, child.name));
+            trees.clearRetainingCapacity();
+            var held: usize = 0;
+            var end = start;
+            while (end < entries.len and held < hint_batch_bytes) : (end += 1) {
+                const head = entries[end].header orelse continue;
+                if (head.type != .tree) continue;
+                try trees.append(gpa, .{ .oid = entries[end].oid });
+                if (workers == 1 or entries[end].in_pack or head.size > odb.backendData().options.max_object_bytes) continue;
+                const len = std.math.cast(usize, head.size) orelse continue;
+                trees.items[trees.items.len - 1].bytes = try gpa.alloc(u8, len);
+                held += len;
+            }
+            start = end;
+            if (workers > 1) {
+                try failures.resize(gpa, trees.items.len);
+                const Trees = struct {
+                    odb: *const Odb,
+                    trees: []TreeRead,
+                    fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
+                        const t = &c.trees[i];
+                        const into = t.bytes orelse return;
+                        const found = c.odb.readLooseFor(task_io, t.oid, .{ .into = into }) catch |err| {
+                            if (opening.readRefusal(err)) return err;
+                            return;
+                        } orelse return;
+                        t.filled = found.header.type == .tree;
+                    }
+                };
+                try runTasks(io, readTaskCount(workers), failures.items, Trees{ .odb = odb, .trees = trees.items }, Trees.work);
+            }
+            for (trees.items) |*t| {
+                const tree_bytes = if (t.filled) t.bytes.? else blk: {
+                    if (t.bytes) |unused| gpa.free(unused);
+                    t.bytes = null;
+                    const found = odb.read(io, t.oid) catch |err| {
+                        if (opening.readRefusal(err)) return err;
+                        continue;
+                    };
+                    if (found.type != .tree) {
+                        gpa.free(found.bytes);
+                        continue;
+                    }
+                    t.bytes = found.bytes;
+                    break :blk found.bytes;
+                };
+                var it = object.Tree.parse(odb.backendData().kind, tree_bytes).iterate();
+                while (it.next() catch null) |child| {
+                    if (hints.contains(child.oid)) continue;
+                    try hints.put(gpa, child.oid, try arena.dupe(u8, child.name));
+                }
             }
         }
         for (entries) |*entry| {
@@ -2135,6 +2196,10 @@ fn taskCount(threads: u16) usize {
 /// from a fresh copy, took 2.3 s with four reading, 2.0 with six or eight
 /// and 3.3 with sixteen. Deflating has no such limit and uses every task.
 const read_task_limit = 6;
+
+/// How many bytes of trees `collectLoose` and `collectAll` read ahead of
+/// parsing them, when tasks read them.
+const hint_batch_bytes = 8 << 20;
 
 fn readTaskCount(workers: usize) usize {
     return @min(workers, read_task_limit);

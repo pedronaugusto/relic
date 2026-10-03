@@ -630,3 +630,118 @@ test "the tasks read the next batch while this task searches one, and the pack i
         }
     }
 }
+
+/// Which threads opened a tree a second time, after its header: the reads
+/// `collectLoose` gives its hints from.
+const TreeOpeners = struct {
+    var mutex: std.atomic.Mutex = .unlocked;
+    var trees: [64][41]u8 = undefined;
+    var opened: [64]u8 = @splat(0);
+    var tree_count: usize = 0;
+    var ids: [64]std.Thread.Id = undefined;
+    var count: usize = 0;
+    var waiting_for_other: ?std.Thread.Id = null;
+
+    fn reset(wait_from: ?std.Thread.Id) void {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        count = 0;
+        opened = @splat(0);
+        waiting_for_other = wait_from;
+    }
+
+    fn distinct() usize {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        return count;
+    }
+
+    /// Whether this is a tree's second open on this thread, the first such
+    /// on the thread that waits for another.
+    fn note(path: []const u8) bool {
+        const me = std.Thread.getCurrentId();
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        const at = for (trees[0..tree_count], 0..) |name, i| {
+            if (std.mem.eql(u8, &name, path)) break i;
+        } else return false;
+        opened[at] += 1;
+        if (opened[at] < 2) return false;
+        for (ids[0..count]) |id| if (id == me) return false;
+        if (count < ids.len) {
+            ids[count] = me;
+            count += 1;
+        }
+        if (waiting_for_other != me) return false;
+        waiting_for_other = null;
+        return true;
+    }
+
+    fn open(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
+        if (sub_path.len == 41 and note(sub_path)) {
+            var waited: usize = 0;
+            while (waited < 5000) : (waited += 1) {
+                if (distinct() > 1) break;
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch break;
+            }
+        }
+        return std.testing.io.vtable.dirOpenFile(userdata, dir, sub_path, options);
+    }
+};
+
+test "collecting loose objects reads their trees on several tasks and hints as one task does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var corpus = try Corpus.init(gpa, io, 8, 6, 0);
+    defer corpus.deinit(gpa, io);
+    {
+        // Trees naming the blobs, each version of each file in one of them.
+        var db = try odb_mod.Odb.openAt(gpa, io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
+        defer db.deinit(io);
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(gpa);
+        for (0..6) |v| {
+            body.clearRetainingCapacity();
+            for (0..8) |f| {
+                const blob = corpus.entries.items[f * 6 + v].oid;
+                try body.print(gpa, "100644 file{d}.txt\x00", .{f});
+                try body.appendSlice(gpa, blob.raw());
+            }
+            const tree = try db.write(io, .tree, body.items);
+            var path: [41]u8 = undefined;
+            var hex_buf: [40]u8 = undefined;
+            const hex = tree.hex(&hex_buf);
+            @memcpy(path[0..2], hex[0..2]);
+            path[2] = '/';
+            @memcpy(path[3..], hex[2..40]);
+            TreeOpeners.trees[TreeOpeners.tree_count] = path;
+            TreeOpeners.tree_count += 1;
+        }
+    }
+
+    var vtable = io.vtable.*;
+    vtable.dirOpenFile = TreeOpeners.open;
+    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var db = try odb_mod.Odb.openAt(gpa, io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+
+    TreeOpeners.reset(null);
+    var serial = try db.collectLoose(watched, .{ .threads = 1 });
+    defer serial.deinit();
+    try std.testing.expectEqual(@as(usize, 1), TreeOpeners.distinct());
+    TreeOpeners.reset(std.Thread.getCurrentId());
+    var parallel = try db.collectLoose(watched, .{ .threads = 4 });
+    defer parallel.deinit();
+    if (TreeOpeners.distinct() < 2) {
+        std.debug.print("the trees were read on {d} thread\n", .{TreeOpeners.distinct()});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(serial.entries.len, parallel.entries.len);
+    var hinted: usize = 0;
+    for (serial.entries, parallel.entries) |a, b| {
+        try std.testing.expect(a.oid.eql(b.oid));
+        try std.testing.expectEqualStrings(a.hint, b.hint);
+        if (a.hint.len != 0) hinted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 48), hinted);
+}

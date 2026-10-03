@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `collectLoose` and `collectAll` read the loose trees their hints come from on tasks too, eight megabytes at a time, and parse them in order, so every task count gives the same hints.
+
 - Pack writing on tasks overlaps the batches: while the calling task searches one batch for deltas, the tasks read the next and deflate the one before, so the search no longer waits on reads and compression. Each batch takes a third of `PackOptions.batch_bytes`, three being under way at once; the bytes written are unchanged.
 
 - A pack written from objects already in packs, as `repack` writes it, has their whole objects inflated by the pack tasks too, each task with a decoder and a read buffer of its own; deltas are still resolved on the calling task with the delta-base cache. `collectAll` marks what it found only in packs with the new `PackEntry.in_pack`, so neither it nor `writePack` looks for a loose copy of those first.
