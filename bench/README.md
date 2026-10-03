@@ -80,6 +80,7 @@ and 16 MiB; the submodule fixture is ten local submodules, at one size.
 | notes | `notes-add` (100 notes, a notes commit each) |
 | bundles | `bundle-create` (`main ^oldb`), `bundle-unbundle` (git's bundle of the same, into a copy) |
 | bisect | `bisect` (`--no-checkout main oldb`, `main~3` bad and every step to it) |
+| line attribution | `blame` (the hot file on main) |
 
 A workload that only reads runs on the fixture, best of three repetitions
 inside the process; one that writes runs once on a fresh APFS copy with its

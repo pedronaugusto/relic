@@ -58,6 +58,7 @@ pub fn run(workload: &str, path: &str, extra: Option<&str>) -> bool {
         "diff-index" => diff_index(workload, path),
         "log" => log(workload, path),
         "log-path" => log_path(workload, path),
+        "blame" => blame(workload, path),
         "revparse" => revparse(workload, path, extra.expect("expressions")),
         "merge-base" => merge_base(workload, path),
         "patch-id" => patch_id(workload, path),
@@ -201,6 +202,27 @@ fn log(w: &str, path: &str) {
     }
     emit(w, "time", best, "ms");
     count(w, "commits", commits);
+}
+
+/// `git blame main -- <hot path>`.
+fn blame(w: &str, path: &str) {
+    let mut best = f64::MAX;
+    let (mut lines, mut commits, mut last) = (0, 0, None);
+    for _ in 0..reps() {
+        let start = BenchmarkInstant::now();
+        let repo = Repository::open(path).unwrap();
+        let mut options = git2::BlameOptions::new();
+        options.newest_commit(id(&repo, "refs/heads/main"));
+        let found = repo.blame_file(Path::new(HOT), Some(&mut options)).unwrap();
+        best = best.min(ms(&start));
+        lines = found.iter().map(|h| h.lines_in_hunk()).sum();
+        commits = found.iter().map(|h| h.final_commit_id()).collect::<BTreeSet<_>>().len();
+        last = found.iter().last().map(|h| h.final_commit_id());
+    }
+    emit(w, "time", best, "ms");
+    count(w, "lines", lines);
+    count(w, "commits", commits);
+    oid(w, "last", last.unwrap());
 }
 
 fn log_path(w: &str, path: &str) {

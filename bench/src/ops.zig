@@ -27,12 +27,13 @@ const hot_path = "d00/d00/f0000.txt";
 const reps: usize = if (smoke) 1 else 3;
 
 pub const names = [_][]const u8{
-    "diff-tree",     "diff-renames", "diff-patch",       "diff-index",          "log",         "log-path",
-    "revparse",      "merge-base",   "merge-tree-clean", "merge-tree-conflict", "merge-clean", "merge-conflict",
-    "rebase",        "cherry-pick",  "revert",           "commit",              "switch",      "stash",
-    "branch-create", "tag-create",   "ref-list",         "repack",              "verify",      "worktree-add",
-    "lfs-add",       "lfs-checkout", "submodule-status", "submodule-update",    "snapshot",    "patch-id",
+    "diff-tree",     "diff-renames", "diff-patch",       "diff-index",          "log",             "log-path",
+    "revparse",      "merge-base",   "merge-tree-clean", "merge-tree-conflict", "merge-clean",     "merge-conflict",
+    "rebase",        "cherry-pick",  "revert",           "commit",              "switch",          "stash",
+    "branch-create", "tag-create",   "ref-list",         "repack",              "verify",          "worktree-add",
+    "lfs-add",       "lfs-checkout", "submodule-status", "submodule-update",    "snapshot",        "patch-id",
     "shortlog",      "describe",     "notes-add",        "bundle-create",       "bundle-unbundle", "bisect",
+    "blame",
 };
 
 pub fn isOp(command: []const u8) bool {
@@ -110,6 +111,7 @@ pub fn run(gpa: Allocator, io: Io, cwd: Io.Dir, command: []const u8, repo_path: 
     if (eql(u8, command, "bundle-create")) return c.bundleCreate();
     if (eql(u8, command, "bundle-unbundle")) return c.bundleUnbundle();
     if (eql(u8, command, "bisect")) return c.bisect();
+    if (eql(u8, command, "blame")) return c.blame();
     return error.UnknownCommand;
 }
 
@@ -397,6 +399,37 @@ const Ctx = struct {
         emit(c.io, c.name, "time", best, "ms");
         emitCount(c.io, c.name, "commits", count);
         emitOid(c.io, c.name, "tip", tip orelse return error.NoCommits);
+    }
+
+    /// `git blame main -- <path>`: every line of the hot file, by the
+    /// commit it comes from.
+    fn blame(c: Ctx) !void {
+        if (!@hasDecl(relic.diff, "blame")) return unavailable(c.io, c.name, "this revision has no diff.blame");
+        var best: f64 = std.math.floatMax(f64);
+        var lines: usize = 0;
+        var commits: usize = 0;
+        var last: ?Oid = null;
+        for (0..reps) |_| {
+            const start = benchmarkNow(c.io);
+            var repo = try c.open();
+            defer repo.deinit(c.io);
+            var found = try relic.diff.blame.file(c.gpa, c.io, &repo.odb, try c.resolve(&repo, "refs/heads/main"), hot_path, .{});
+            defer found.deinit();
+            best = @min(best, ms(c.io, start));
+            var seen: std.AutoHashMapUnmanaged(Oid, void) = .empty;
+            defer seen.deinit(c.gpa);
+            lines = 0;
+            for (found.hunks) |h| {
+                lines += h.count;
+                try seen.put(c.gpa, h.commit, {});
+                last = h.commit;
+            }
+            commits = seen.count();
+        }
+        emit(c.io, c.name, "time", best, "ms");
+        emitCount(c.io, c.name, "lines", lines);
+        emitCount(c.io, c.name, "commits", commits);
+        emitOid(c.io, c.name, "last", last orelse return error.EmptyBlame);
     }
 
     // --------------------------------------------------------------- merge
