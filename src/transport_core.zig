@@ -378,7 +378,7 @@ pub const Session = struct {
                 // git's bundle transport has no depth and no filter; it
                 // indexes the bundle's whole pack whatever is wanted.
                 if (request.deepen != null or request.filter != null) return error.UnsupportedTransport;
-                const result = try bundle.receive(gpa, io, db, pack_dir, f, options.receive);
+                const result = try bundle.receive(gpa, io, db, pack_dir, f, request.tips, options.receive);
                 return .{ .pack = result.name, .objects = result.objects };
             },
             .smart => |*smart| {

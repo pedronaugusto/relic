@@ -277,7 +277,7 @@ pub const Error = error{
     PrerequisitesNotConnected,
     /// A bundle in another object format than the repository's.
     ObjectFormatMismatch,
-} || Allocator.Error || odb_mod.Error || objectwalk.Error || indexpack.Error || OpenError || Io.File.Writer.Error;
+} || Allocator.Error || odb_mod.Error || objectwalk.Error || indexpack.Error || OpenError || Io.File.Writer.Error || refs_mod.ReadError;
 
 /// What `verify` found.
 pub const Verification = struct {
@@ -298,8 +298,11 @@ pub const Verification = struct {
 };
 
 /// `verify_bundle`: whether the object database has every prerequisite,
-/// and everything below them.
-pub fn verify(gpa: Allocator, io: Io, db: *odb_mod.Odb, header: *const Header) Error!Verification {
+/// and everything below them that its refs, `refs`, do not already reach --
+/// git's `check_connected`, `rev-list --objects <prerequisites> --not
+/// --all`. Pass the tip of every ref, `HEAD` included; `repositoryTips`
+/// collects them.
+pub fn verify(gpa: Allocator, io: Io, db: *odb_mod.Odb, header: *const Header, refs: []const Oid) Error!Verification {
     if (header.object_format != db.objectFormat()) return error.ObjectFormatMismatch;
     var missing: std.ArrayList(Oid) = .empty;
     errdefer missing.deinit(gpa);
@@ -311,12 +314,40 @@ pub fn verify(gpa: Allocator, io: Io, db: *odb_mod.Odb, header: *const Header) E
         var tips: std.ArrayList(Oid) = .empty;
         defer tips.deinit(gpa);
         for (header.prerequisites) |p| try tips.append(gpa, p.oid);
-        objectwalk.checkConnected(gpa, io, db, tips.items, null, null) catch |err| switch (err) {
-            error.MissingObject => connected = false,
-            else => |e| return e,
-        };
+        connected = try connectedBelow(gpa, io, db, tips.items, refs);
     }
     return .{ .gpa = gpa, .missing = try missing.toOwnedSlice(gpa), .connected = connected };
+}
+
+/// Whether every object `tips` reach and `refs` do not is in `db`.
+fn connectedBelow(gpa: Allocator, io: Io, db: *odb_mod.Odb, tips: []const Oid, refs: []const Oid) Error!bool {
+    var collected = objectwalk.missing(gpa, io, db, tips, refs) catch |err| switch (err) {
+        error.MissingObject, error.ObjectNotFound => return false,
+        else => |e| return e,
+    };
+    defer collected.deinit();
+    for (collected.entries) |entry| {
+        if (!try db.exists(io, entry.oid)) return false;
+    }
+    return true;
+}
+
+/// The tip of every ref of `repo`, and `HEAD`'s: what `--all` names. The
+/// result is the caller's.
+pub fn repositoryTips(gpa: Allocator, io: Io, repo: *Repository) (refs_mod.ReadError || Allocator.Error)![]Oid {
+    var out: std.ArrayList(Oid) = .empty;
+    errdefer out.deinit(gpa);
+    var listing = try repo.refStore().list(gpa, io, "refs/");
+    defer listing.deinit();
+    for (listing.entries) |e| switch (e.target) {
+        .direct => |o| try out.append(gpa, o),
+        .symbolic => {},
+    };
+    if (try repo.head(io)) |h| {
+        gpa.free(h.name);
+        try out.append(gpa, h.oid);
+    }
+    return out.toOwnedSlice(gpa);
 }
 
 /// How `unbundle` indexes the pack.
@@ -333,7 +364,9 @@ pub const UnbundleOptions = struct {
 pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, options: UnbundleOptions) Error!indexpack.Result {
     var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
-    return receive(gpa, io, &repo.odb, pack_dir, bundle, .{
+    const tips = try repositoryTips(gpa, io, repo);
+    defer gpa.free(tips);
+    return receive(gpa, io, &repo.odb, pack_dir, bundle, tips, .{
         .fix_thin = true,
         .check_objects = options.check_objects,
         .progress = options.progress,
@@ -342,10 +375,11 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
     });
 }
 
-/// `unbundle` into `db`, whose `objects/pack` is `pack_dir`, with the
-/// pack received as `options` says: what a fetch from a bundle does.
-pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bundle: *File, options: indexpack.Options) Error!indexpack.Result {
-    var v = try verify(gpa, io, db, &bundle.header);
+/// `unbundle` into `db`, whose `objects/pack` is `pack_dir` and whose refs
+/// point at `refs`, with the pack received as `options` says: what a fetch
+/// from a bundle does.
+pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bundle: *File, refs: []const Oid, options: indexpack.Options) Error!indexpack.Result {
+    var v = try verify(gpa, io, db, &bundle.header, refs);
     defer v.deinit();
     if (v.missing.len != 0) return error.MissingPrerequisites;
     if (!v.connected) return error.PrerequisitesNotConnected;
