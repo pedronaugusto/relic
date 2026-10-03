@@ -36,6 +36,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Inflate builds its Huffman tables as libdeflate does: each code written once and the table doubled by copies, subtables only as large as their codes need, and the code lengths counted while they are read. Building them was a fifth of reading small packed objects; inflating every entry of a 14.5 MB pack takes 73 ms where it took 87.
 
+- Add `revwalk.Walk.first_parent` (`--first-parent`), `Walk.isHidden`, and `revwalk.mergeBasesMany`, git's `get_merge_bases_many`.
+
 - Add `transport.bundle`: bundles created (v2 and v3, with `@object-format` and `@filter`), read, verified, listed and unbundled as `git bundle` does, the header byte for byte and the prerequisites git's boundary in git's order; a fetch or clone from a path that names a bundle reads it as git's bundle transport does.
 
 - Add `commit.notes`: notes read, added, appended, copied, removed, pruned and merged (`manual`, `ours`, `theirs`, `union`, `cat_sort_uniq`) as `git notes` does, with git's in-memory notes tree so the fanout written is git's, other entries in a notes tree kept, and `formatNote` for the notes `git log` shows.

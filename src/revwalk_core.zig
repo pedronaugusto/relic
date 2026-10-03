@@ -83,6 +83,10 @@ pub const Walk = struct {
     /// database, so the answers do not depend on it — which is what an
     /// accelerator has to mean.
     graph: ?*const commitgraph.Graph = null,
+    /// `--first-parent`: from a commit that is wanted, only its first parent
+    /// is followed. What the hidden commits reach is still marked through
+    /// every parent, as git marks it.
+    first_parent: bool = false,
 
     /// The commits given, in the order given: git's pending list.
     pending: std.ArrayList(Pending) = .empty,
@@ -206,10 +210,12 @@ pub const Walk = struct {
             if (n.uninteresting) p.uninteresting = true;
             try walk.parse(io, p);
             if (n.uninteresting and p.parents.len != 0) try walk.markParentsUninteresting(p);
-            if (p.seen) continue;
-            p.seen = true;
-            try queue.push(walk.gpa, .{ .node = p, .seq = seq.* });
-            seq.* += 1;
+            if (!p.seen) {
+                p.seen = true;
+                try queue.push(walk.gpa, .{ .node = p, .seq = seq.* });
+                seq.* += 1;
+            }
+            if (walk.first_parent and !n.uninteresting) break;
         }
     }
 
@@ -346,6 +352,14 @@ pub const Walk = struct {
     pub fn reset(walk: *Walk) void {
         walk.position = 0;
     }
+
+    /// Whether the prepared walk marked `oid` as reached from a hidden
+    /// commit: git's `UNINTERESTING` flag, as the walk left it. A commit the
+    /// walk never met is not marked.
+    pub fn isHidden(walk: *const Walk, oid: Oid) bool {
+        const n = walk.nodes.get(OidKey.of(oid)) orelse return false;
+        return n.uninteresting;
+    }
 };
 
 /// A hashable object name, for the maps the walk keeps.
@@ -399,17 +413,30 @@ pub const Virtual = struct {
 
 /// `mergeBases`, reading commits as `options` says.
 pub fn mergeBasesWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid, options: BaseOptions) Error![]Oid {
-    if (a.eql(b)) {
+    return mergeBasesManyWith(gpa, io, db, a, &.{b}, options);
+}
+
+/// git's `get_merge_bases_many`: the merge bases of `one` and the
+/// commit an octopus merge of all of `twos` would be -- every common
+/// ancestor of `one` and any of `twos` that no other one reaches -- newest
+/// first. The result is the caller's.
+pub fn mergeBasesMany(gpa: Allocator, io: Io, db: *odb_mod.Odb, one: Oid, twos: []const Oid) Error![]Oid {
+    return mergeBasesManyWith(gpa, io, db, one, twos, .{});
+}
+
+/// `mergeBasesMany`, reading commits as `options` says.
+pub fn mergeBasesManyWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, twos: []const Oid, options: BaseOptions) Error![]Oid {
+    for (twos) |b| if (a.eql(b)) {
         const out = try gpa.alloc(Oid, 1);
         out[0] = a;
         return out;
-    }
+    };
     var painter: Painter = .{ .gpa = gpa, .io = io, .db = db, .virtuals = options.virtuals, .graph = options.graph };
     defer painter.deinit();
 
     var found: std.ArrayList(Oid) = .empty;
     defer found.deinit(gpa);
-    try painter.paint(a, &.{b}, &found);
+    try painter.paint(a, twos, &found);
 
     var candidates: std.ArrayList(Oid) = .empty;
     errdefer candidates.deinit(gpa);
@@ -688,6 +715,83 @@ test "ancestry reports a missing commit instead of a negative answer" {
 }
 
 const testgit = @import("testgit.zig");
+
+test "first-parent walks and merge bases of many are git's" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    var env = try testgit.datedEnv(gpa, 1_700_000_000);
+    defer env.deinit();
+    repo.environ = &env;
+    const steps = [_][]const []const u8{
+        &.{ "commit", "-q", "--allow-empty", "-m", "root" },
+        &.{ "checkout", "-q", "-b", "side" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "s1" },
+        &.{ "checkout", "-q", "-b", "third", "main" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "t1" },
+        &.{ "checkout", "-q", "main" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "m1" },
+        &.{ "merge", "-q", "--no-ff", "-m", "m2", "side" },
+        &.{ "checkout", "-q", "side" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "s2" },
+        &.{ "merge", "-q", "--no-ff", "-m", "s3", "third" },
+        &.{ "checkout", "-q", "main" },
+        &.{ "commit", "-q", "--allow-empty", "-m", "m3" },
+        &.{ "merge", "-q", "--no-ff", "-m", "m4", "side" },
+    };
+    for (steps, 0..) |step, i| {
+        try testgit.setDate(&env, 1_700_000_000 + @as(i64, @intCast(i)) * 60);
+        try repo.exec(io, step);
+    }
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    const resolve = struct {
+        fn f(r: *testgit.Repo, i: Io, name: []const u8) !Oid {
+            const text = try r.line(i, &.{ "rev-parse", name });
+            defer r.gpa.free(text);
+            return Oid.parse(.sha1, text);
+        }
+    }.f;
+
+    for ([_][]const []const u8{ &.{"main"}, &.{ "main", "^side~1" }, &.{ "main", "^third" }, &.{ "side", "^main~2" } }) |revs| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "rev-list", "--first-parent" });
+        try args.appendSlice(gpa, revs);
+        const expected = try repo.run(io, args.items);
+        defer gpa.free(expected);
+        var walk: Walk = .init(gpa, &db);
+        defer walk.deinit();
+        walk.first_parent = true;
+        for (revs) |rev| {
+            if (rev[0] == '^') try walk.hide(try resolve(&repo, io, rev[1..])) else try walk.push(try resolve(&repo, io, rev));
+        }
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(gpa);
+        while (try walk.next(io)) |c| try got.print(gpa, "{f}\n", .{c.oid});
+        try std.testing.expectEqualStrings(expected, got.items);
+    }
+
+    for ([_][]const []const u8{ &.{ "main~1", "side", "third" }, &.{ "third", "main~2", "side~1" }, &.{ "side~1", "third", "main~3" } }) |revs| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "merge-base", "--all" });
+        try args.appendSlice(gpa, revs);
+        const expected = try repo.run(io, args.items);
+        defer gpa.free(expected);
+        var twos: [2]Oid = undefined;
+        for (revs[1..], &twos) |rev, *o| o.* = try resolve(&repo, io, rev);
+        const bases = try mergeBasesMany(gpa, io, &db, try resolve(&repo, io, revs[0]), &twos);
+        defer gpa.free(bases);
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(gpa);
+        for (bases) |oid| try got.print(gpa, "{f}\n", .{oid});
+        try std.testing.expectEqualStrings(expected, got.items);
+    }
+}
 
 test "merge bases are git's, in git's order, through a criss-cross" {
     const io = std.testing.io;

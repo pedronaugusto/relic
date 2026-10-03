@@ -65,6 +65,11 @@ pub const BaseOptions = core.BaseOptions;
 pub const Virtual = core.Virtual;
 /// `mergeBases`, reading commits as `options` says.
 pub const mergeBasesWith = core.mergeBasesWith;
+/// git's `get_merge_bases_many`: the merge bases of one commit and several
+/// others at once, newest first.
+pub const mergeBasesMany = core.mergeBasesMany;
+/// `mergeBasesMany`, reading commits as `options` says.
+pub const mergeBasesManyWith = core.mergeBasesManyWith;
 /// The first merge base of `a` and `b`, or `null` when they share no
 /// history.
 pub const mergeBase = core.mergeBase;
