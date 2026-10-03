@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `indexpack.receive` canceled while it resolves deltas cancels every resolving task, so one waiting in a read no longer holds the receive until the read ends; any failure among them now does the same.
+
 - Pin conduit at the version with `Child.exchange` and `processExists`.
 
 - Write packs on tasks of the caller's `std.Io` by default: `PackOptions.threads` is now zero, one task per processor. The tasks read loose objects and deflate entries into buffers the calling task allocates, bounded by the new `PackOptions.batch_bytes`; the delta search and the writing stay on the calling task in pack order, so every task count and every Io writes the bytes `threads = 1`, the unchanged serial writer, writes. A cancel or a failure on any task stops the write and leaves no temporary file.

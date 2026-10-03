@@ -902,6 +902,14 @@ const Indexer = struct {
         }
         // This thread is a worker too; with no others it is the only one.
         workers[0].run();
+        // A failure stops the others at their next object, but one may be
+        // waiting in a read. When the failure is this task's cancelation,
+        // meeting it used the request up, and nothing else would end that
+        // wait; so once anything failed, the others are canceled.
+        if (x.failed.load(.acquire)) {
+            group.cancel(x.io);
+            return x.failure.?;
+        }
         group.await(x.io) catch |err| {
             group.cancel(x.io);
             return err;
@@ -1675,6 +1683,121 @@ test "a damaged stream is a named error and leaves nothing behind" {
     const found = try repo.odb.read(io, hash.Hasher.object(.sha1, "blob", "basemore\n"));
     defer gpa.free(found.bytes);
     try testing.expectEqualStrings("basemore\n", found.bytes);
+}
+
+/// A pack read that, once armed, parks until the task it runs on is
+/// canceled: first on a task resolving beside the calling one, then on the
+/// calling task itself, so the cancel reaches the caller while another task
+/// waits in a read.
+const Park = struct {
+    var base: Io = undefined;
+    var caller: std.Thread.Id = undefined;
+    var armed: std.atomic.Value(bool) = .init(false);
+    var beside: std.atomic.Value(bool) = .init(false);
+    var on_caller: std.atomic.Value(bool) = .init(false);
+    var beside_canceled: std.atomic.Value(bool) = .init(false);
+
+    fn read(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+        if (armed.load(.acquire)) {
+            if (std.Thread.getCurrentId() != caller) {
+                // Only the resolving tasks read on another thread.
+                if (beside.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                    wait() catch |err| {
+                        beside_canceled.store(true, .release);
+                        return err;
+                    };
+                    return error.Unexpected;
+                }
+            } else if (beside.load(.acquire) and on_caller.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                try wait();
+                return error.Unexpected;
+            }
+        }
+        return base.vtable.fileReadPositional(userdata, file, data, offset);
+    }
+
+    /// Until canceled, a short sleep at a time, since a sleep may also end
+    /// early; twenty seconds is a hang, not a pass.
+    fn wait() Io.Cancelable!void {
+        for (0..2000) |_| try base.sleep(.fromMilliseconds(10), .awake);
+    }
+
+    fn receiveOn(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bytes: []const u8) Error!Result {
+        caller = std.Thread.getCurrentId();
+        armed.store(true, .release);
+        defer armed.store(false, .release);
+        var in: Io.Reader = .fixed(bytes);
+        return receive(gpa, io, db, pack_dir, &in, .{ .threads = 3 });
+    }
+};
+
+test "a receive canceled while it resolves stops every resolving task, even one waiting in a read" {
+    const gpa = testing.allocator;
+    // Its own Io, as the pack writer's cancel test has, with two tasks
+    // besides the calling one.
+    var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .limited(2) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    Park.base = io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    defer repo.deinit(io);
+    var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+
+    // Many whole objects, each with a delta and then an object larger than
+    // a resolving task's read buffer, so every whole object is a read of
+    // its own, and the calling task is still reading when another parks.
+    const pairs = 128;
+    const filler_len = 80 * 1024;
+    const patch = try appendDelta(gpa, 12, "more\n");
+    defer gpa.free(patch);
+    const fillers = try gpa.alloc(u8, pairs * filler_len);
+    defer gpa.free(fillers);
+    var prng: std.Random.DefaultPrng = .init(7);
+    prng.random().bytes(fillers);
+    var names: [pairs][12]u8 = undefined;
+    var entries: [3 * pairs]TestEntry = undefined;
+    for (0..pairs) |i| {
+        _ = std.fmt.bufPrint(&names[i], "base {d:0>6}\n", .{i}) catch unreachable;
+        entries[3 * i] = .{ .whole = .{ .t = .blob, .bytes = &names[i] } };
+        entries[3 * i + 1] = .{ .ofs_delta = .{ .back = 1, .patch = patch } };
+        entries[3 * i + 2] = .{ .whole = .{ .t = .blob, .bytes = fillers[i * filler_len ..][0..filler_len] } };
+    }
+    const bytes = try buildPack(gpa, .sha1, &entries);
+    defer gpa.free(bytes);
+
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Park.read;
+    const parked: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+
+    Park.beside.store(false, .release);
+    Park.on_caller.store(false, .release);
+    Park.beside_canceled.store(false, .release);
+    var future = try io.concurrent(Park.receiveOn, .{ gpa, parked, &repo.odb, pack_dir, bytes });
+    for (0..20_000) |_| {
+        if (Park.on_caller.load(.acquire)) break;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    } else {
+        _ = future.cancel(io) catch {};
+        std.debug.print("the calling task never read after another task parked (beside: {})\n", .{Park.beside.load(.acquire)});
+        return error.TestUnexpectedResult;
+    }
+    const started = Io.Clock.awake.now(io);
+    try testing.expectError(error.Canceled, future.cancel(io));
+    // The task that waited was canceled too, rather than left to its wait.
+    if (!Park.beside_canceled.load(.acquire)) {
+        const waited = started.durationTo(Io.Clock.awake.now(io));
+        std.debug.print("the task waiting in a read was left to its wait: the cancel took {d} ms\n", .{waited.toMilliseconds()});
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
+
+    // Unarmed, the same stream is received whole.
+    var in: Io.Reader = .fixed(bytes);
+    const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{ .threads = 3 });
+    try testing.expectEqual(@as(u32, 3 * pairs), result.objects);
 }
 
 test "fuzz: any stream is a pack or a named error, and a kept pack verifies" {
