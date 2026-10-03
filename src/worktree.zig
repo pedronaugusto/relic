@@ -146,6 +146,9 @@ pub const Written = core.Written;
 /// `path` is replaced; the directories above it are made. `conv` must not
 /// be one that may hand a file over late.
 pub const writeEntry = core.writeEntry;
+/// Write a blob's contents already in memory at `path`, as `writeEntry`
+/// writes a blob, for a caller that stores no object for them.
+pub const writeBytes = core.writeBytes;
 /// Remove one file from the working tree, and every directory above it that
 /// it leaves empty. A file that is already gone is not an error.
 pub const removeEntry = core.removeEntry;

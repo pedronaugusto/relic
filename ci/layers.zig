@@ -3,6 +3,7 @@ const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "primitives", .patterns = &.{
+        "src/cquote.zig",
         "src/delta.zig",
         "src/dependencies.zig",
         "src/durability.zig",
@@ -31,9 +32,11 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/tls_fork_test.zig",
         "src/varint.zig",
         "src/warning.zig",
+        "src/whitespace.zig",
         "src/wildmatch.zig",
     } },
     .{ .name = "binary and process inputs", .patterns = &.{
+        "src/binarypatch.zig",
         "src/blobmerge.zig",
         "src/fake_ssh_helper.zig",
         "src/fs.zig",
@@ -57,6 +60,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/lfs_transfer_helper.zig",
         "src/midx.zig",
         "src/object_core.zig",
+        "src/patchparse.zig",
         "src/refspec.zig",
         "src/reftable.zig",
         "src/shallow.zig",
@@ -197,6 +201,8 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/worktree.zig",
     } },
     .{ .name = "commit and local transport", .patterns = &.{
+        "src/apply.zig",
+        "src/apply_test.zig",
         "src/commit_core.zig",
         "src/fetchpack.zig",
         "src/lfshooks.zig",
@@ -223,6 +229,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "history and remote operations", .patterns = &.{
         "src/commit.zig",
+        "src/patch.zig",
         "src/history_test.zig",
         "src/partial.zig",
         "src/push.zig",

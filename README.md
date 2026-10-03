@@ -292,6 +292,8 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `lfs` | LFS without git-lfs: pointers and the store. |
 | `lfs.lfsapi`, `lfs.lfstransfer`, `lfs.lfsssh`, `lfs.lfslocks`, `lfs.lfspush`, `lfs.lfshooks` | The batch API over https or ssh, locks, pre-push, git-lfs's hooks. |
 | `lfs.netrc` | What the LFS client reads beside: `~/.netrc`. |
+| `patch` | `parse`, `Patch`, `FilePatch`, `Fragment`: git patches and plain unified diffs read as `git apply` reads them, from whatever surrounds them. |
+| `patch.apply` | `apply` — `git apply` to the working tree, the index or both: renames, copies, modes, binary hunks, `-R`, `--3way`, `--reject`, `--check`, whitespace checked or fixed, nothing written unless every file applies. |
 
 Every public declaration carries a doc comment stating its contract, and every
 operation has one named error set. A refusal is a named error. For a refused
@@ -637,6 +639,7 @@ refresh and re-hash the whole working tree.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
 - **No `git://`, dumb HTTP or remote helpers.** Refused by name.
 - **No `hasconfig:` includes.**
+- **`apply` with the index compares content where a stat differs.** git says "does not match index" until the index is refreshed; this reads the file and agrees when its content does.
 
 ## Ahead
 
@@ -738,14 +741,14 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Sixty-five fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Sixty-seven fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
 between them they cover every format relic reads: the object formats, packs
 and their indexes, the index file, refs, reftable and reflogs, config and
 attributes, the glob matcher, the accelerators, packet lines and the wire
 protocol's answers, credential helper answers, filter specs, LFS batch and
-lock answers, TLS handshake messages and private keys, and the merge state
-files. Five check
+lock answers, TLS handshake messages and private keys, the merge state files,
+patches and binary hunks. Five check
 more than that. The diff fuzzer applies the
 edit script it produced and checks that it reproduces the other side, which is
 the property that catches an off-by-one nothing else would. The
