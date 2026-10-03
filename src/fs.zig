@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
 const platstat = @import("platstat.zig");
+const conduit = @import("dependencies.zig").conduit;
 
 /// The end-of-operation policy for selected objects and checkout.
 pub const Durability = @import("durability.zig").Policy;
@@ -783,28 +784,12 @@ test "currentPid uses the host process API" {
     try std.testing.expectEqual(expected, currentPid());
 }
 
+/// Whether a process has the id `pid`, as conduit asks the system; a
+/// number the platform's ids cannot hold names no process at all: the file
+/// was written by something else.
 fn processAlive(pid: u32) ?bool {
-    switch (builtin.os.tag) {
-        .windows, .wasi => return null,
-        else => {
-            if (!builtin.link_libc and builtin.os.tag != .linux) return null;
-            // A pid that does not fit the platform's own type names no
-            // process at all; the file was written by something else.
-            const narrowed = std.math.cast(std.posix.pid_t, pid) orelse return false;
-            const rc = if (builtin.os.tag == .linux)
-                std.os.linux.kill(narrowed, @enumFromInt(0))
-            else
-                @as(usize, @bitCast(@as(isize, std.c.kill(narrowed, @enumFromInt(0)))));
-            const e = std.posix.errno(rc);
-            return switch (e) {
-                .SUCCESS => true,
-                // The process exists and is someone else's.
-                .PERM => true,
-                .SRCH => false,
-                else => null,
-            };
-        },
-    }
+    const id = std.math.cast(conduit.Child.Id, pid) orelse return false;
+    return conduit.processExists(id);
 }
 
 /// Whether `<sub_path>.lock` exists in `dir`.
