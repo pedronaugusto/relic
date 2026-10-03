@@ -115,17 +115,42 @@ const ReadWork = struct {
     }
 };
 
+/// What two passes over every object of a deep delta chain read: the
+/// objects and their bytes, the positional reads and the bytes those
+/// returned, and the bases the delta cache holds after each pass.
+const ChainScan = struct {
+    cold_objects: usize = 0,
+    warm_objects: usize = 0,
+    cold_object_bytes: usize = 0,
+    warm_object_bytes: usize = 0,
+    cold_reads: usize = 0,
+    warm_reads: usize = 0,
+    cold_read_bytes: usize = 0,
+    warm_read_bytes: usize = 0,
+    cold_bases: usize = 0,
+    warm_bases: usize = 0,
+
+    pub fn format(s: ChainScan, w: *Io.Writer) Io.Writer.Error!void {
+        try w.print("objects cold {d} warm {d}; object bytes cold {d} warm {d}; ", .{ s.cold_objects, s.warm_objects, s.cold_object_bytes, s.warm_object_bytes });
+        try w.print("reads cold {d} warm {d}; read bytes cold {d} warm {d}; ", .{ s.cold_reads, s.warm_reads, s.cold_read_bytes, s.warm_read_bytes });
+        try w.print("cached bases cold {d} warm {d}", .{ s.cold_bases, s.warm_bases });
+    }
+};
+
 test "cold and warm delta-chain reads scan the same objects and bytes" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
+    // The harness fixes git's dates, so every commit has the same name on
+    // every run, and the scans below meet the objects in the same order.
     var repo_git = try testgit.Repo.init(gpa, io, &.{});
     defer repo_git.deinit();
 
     // A file that grows one line per commit gives the packer a deep chain.
-    const rounds: usize = switch (builtin.mode) {
-        .Debug => 40,
-        else => 120,
-    };
+    // The pack spans many of the 8 KiB windows a random read starts with
+    // (`Pack.seekTo`), so the read counts below measure the cache rather
+    // than where the window happened to sit; a 40-commit pack fits in a
+    // few windows, and one object order in nine read more when warm.
+    const rounds: usize = 120;
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(gpa);
     for (0..rounds) |i| {
@@ -135,7 +160,9 @@ test "cold and warm delta-chain reads scan the same objects and bytes" {
         var msg: [32]u8 = undefined;
         try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{i}) });
     }
-    try repo_git.exec(io, &.{ "gc", "-q", "--aggressive" });
+    // One thread, so the deltas git picks do not depend on the machine's
+    // core count.
+    try repo_git.exec(io, &.{ "-c", "pack.threads=1", "gc", "-q", "--aggressive" });
 
     const git_dir = try repo_git.gitDir(io);
     defer git_dir.close(io);
@@ -148,38 +175,49 @@ test "cold and warm delta-chain reads scan the same objects and bytes" {
     var names = try db.listObjects(io);
     defer names.deinit(gpa);
 
+    var scan: ChainScan = .{};
     ReadWork.reset();
-    var read_count: usize = 0;
-    var bytes: usize = 0;
     var it = names.keyIterator();
     while (it.next()) |oid| {
         const found = try db.read(counted, oid.*);
         defer gpa.free(found.bytes);
-        bytes += found.bytes.len;
-        read_count += 1;
+        scan.cold_object_bytes += found.bytes.len;
+        scan.cold_objects += 1;
     }
+    scan.cold_reads = ReadWork.calls;
+    scan.cold_read_bytes = ReadWork.bytes;
+    scan.cold_bases = @import("odbstate.zig").get(db._state).cache.entries.count();
 
-    const cold_reads = ReadWork.calls;
-    const cold_bytes = ReadWork.bytes;
-    const bases = @import("odbstate.zig").get(db._state).cache.entries.count();
-    try std.testing.expect(bases > 0);
-    ReadWork.reset();
     // A second pass over the same objects, with the delta base cache warm.
-    var warm_count: usize = 0;
-    var warm_bytes: usize = 0;
+    ReadWork.reset();
     var warm_it = names.keyIterator();
     while (warm_it.next()) |oid| {
         const found = try db.read(counted, oid.*);
-        warm_bytes += found.bytes.len;
-        warm_count += 1;
-        gpa.free(found.bytes);
+        defer gpa.free(found.bytes);
+        scan.warm_object_bytes += found.bytes.len;
+        scan.warm_objects += 1;
     }
-    try std.testing.expectEqual(read_count, warm_count);
-    try std.testing.expectEqual(bytes, warm_bytes);
-    try std.testing.expect(read_count > rounds);
-    try std.testing.expect(ReadWork.calls <= cold_reads);
-    try std.testing.expect(ReadWork.bytes <= cold_bytes);
-    try std.testing.expectEqual(bases, @import("odbstate.zig").get(db._state).cache.entries.count());
+    scan.warm_reads = ReadWork.calls;
+    scan.warm_read_bytes = ReadWork.bytes;
+    scan.warm_bases = @import("odbstate.zig").get(db._state).cache.entries.count();
+
+    // Both passes read every object to the same bytes; the warm one, with
+    // the bases cached, reads no more than the cold one and caches nothing
+    // new. A failure names the bound and every count.
+    const bounds = [_]struct { holds: bool, what: []const u8 }{
+        .{ .holds = scan.cold_bases > 0, .what = "the cold pass cached a base" },
+        .{ .holds = scan.cold_objects == scan.warm_objects, .what = "both passes read the same objects" },
+        .{ .holds = scan.cold_object_bytes == scan.warm_object_bytes, .what = "both passes read the same object bytes" },
+        .{ .holds = scan.cold_objects > rounds, .what = "every round's objects were read" },
+        .{ .holds = scan.warm_reads <= scan.cold_reads, .what = "warm reads <= cold reads" },
+        .{ .holds = scan.warm_read_bytes <= scan.cold_read_bytes, .what = "warm read bytes <= cold read bytes" },
+        .{ .holds = scan.cold_bases == scan.warm_bases, .what = "the warm pass cached no new base" },
+    };
+    for (bounds) |bound| {
+        if (bound.holds) continue;
+        std.debug.print("{d} rounds: not {s}: {f}\n", .{ rounds, bound.what, scan });
+        return error.TestUnexpectedResult;
+    }
 }
 
 test "hardware and checked hashes process the same bytes as software" {

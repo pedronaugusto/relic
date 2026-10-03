@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Scan one 120-commit delta chain in every build mode, single-threaded, so the cold and warm read bounds measure the delta cache rather than where the read window sat, and name the failed bound with every count.
+
 - Fix git's author and committer dates in every test fixture, so a fixture's object names do not change from run to run.
 
 - Count the five new performance checks in Windows source-family coverage.
