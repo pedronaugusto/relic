@@ -276,7 +276,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         else if (single_tag) |tag|
             try std.fmt.allocPrint(arena, "+{s}:{s}", .{ tag, tag })
         else
-            try std.fmt.allocPrint(arena, "+refs/heads/*:refs/remotes/{s}/*", .{origin});
+            try remote_mod.defaultFetchRefspec(arena, origin);
         try repo.editConfig(&.{.{ .set = .{ .name = try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{origin}), .value = spec } }}, null);
     }
     if (filter_spec) |spec| {

@@ -208,6 +208,13 @@ pub fn rewrite(gpa: Allocator, config: *const Config, url: []const u8, which: Re
     return try std.mem.concat(gpa, u8, &.{ base, url[best_len..] });
 }
 
+/// The fetch refspec `git remote add` and `git clone` write for the remote
+/// `name`: every branch, forced, under `refs/remotes/<name>/`. The text is
+/// the caller's; `Refspec.parse` reads it.
+pub fn defaultFetchRefspec(gpa: Allocator, name: []const u8) Allocator.Error![]u8 {
+    return std.fmt.allocPrint(gpa, "+refs/heads/*:refs/remotes/{s}/*", .{name});
+}
+
 /// A branch's upstream settings.
 ///
 /// Every slice is owned by the arena.
@@ -371,6 +378,17 @@ test "a remote ref is tracked where the first fetch refspec maps it, unless excl
     var bare = try Remote.get(gpa, &config, "bare");
     defer bare.deinit();
     try testing.expect(try bare.trackingRef(gpa, "refs/heads/main") == null);
+}
+
+test "the default fetch refspec tracks every branch under the remote's name" {
+    const gpa = testing.allocator;
+    const text = try defaultFetchRefspec(gpa, "origin");
+    defer gpa.free(text);
+    try testing.expectEqualStrings("+refs/heads/*:refs/remotes/origin/*", text);
+    const spec = try Refspec.parse(text, .fetch);
+    const mapped = (try spec.mapSource(gpa, "refs/heads/topic/one")).?;
+    defer gpa.free(mapped);
+    try testing.expectEqualStrings("refs/remotes/origin/topic/one", mapped);
 }
 
 test "a name with no remote behind it is a URL" {
