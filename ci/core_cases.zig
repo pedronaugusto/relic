@@ -73,6 +73,7 @@ pub const families = [_]Family{
         "blame_test.test",
         "commit_core.test",
         "diff_core.test",
+        "describe.test",
         "diff_test.test",
         "ere.test",
         "history_test.test",

@@ -31,6 +31,9 @@ pub const Warning = union(enum) {
     /// `http.proxyAuthMethod` names a method git does not know, and anyauth
     /// is used: the name.
     proxy_auth_method_unknown: []const u8,
+    /// An annotated tag whose object gives itself another name than its
+    /// ref: `git describe` prints the object's.
+    tag_known_as: struct { path: []const u8, name: []const u8 },
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -42,6 +45,7 @@ pub const Warning = union(enum) {
             .ssh_said => |text| text,
             .shallow_update_rejected => |name| std.fmt.allocPrint(arena, "rejected {s} because shallow roots are not allowed to be updated", .{name}),
             .proxy_auth_method_unknown => |name| std.fmt.allocPrint(arena, "unsupported proxy authentication method {s}: using anyauth", .{name}),
+            .tag_known_as => |t| std.fmt.allocPrint(arena, "tag '{s}' is externally known as '{s}'", .{ t.path, t.name }),
         };
     }
 };
@@ -72,6 +76,7 @@ pub const Warnings = struct {
             .ssh_said => |t| .{ .ssh_said = try a.dupe(u8, t) },
             .shallow_update_rejected => |t| .{ .shallow_update_rejected = try a.dupe(u8, t) },
             .proxy_auth_method_unknown => |t| .{ .proxy_auth_method_unknown = try a.dupe(u8, t) },
+            .tag_known_as => |t| .{ .tag_known_as = .{ .path = try a.dupe(u8, t.path), .name = try a.dupe(u8, t.name) } },
         };
         try w.items.append(a, owned);
     }

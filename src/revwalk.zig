@@ -21,6 +21,8 @@ pub const shallow = @import("shallow.zig");
 pub const mailmap = @import("mailmap.zig");
 /// `git shortlog`: commits grouped by who made them.
 pub const shortlog = @import("shortlog.zig");
+/// `git describe`, and with `contains`, `git name-rev`'s naming.
+pub const describe = @import("describe.zig");
 /// Errors from a walk.
 pub const Error = core.Error;
 /// The order commits come out in.

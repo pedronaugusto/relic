@@ -165,6 +165,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/blame_test.zig",
         "src/commithooks.zig",
         "src/config_refresh_test.zig",
+        "src/describe.zig",
         "src/embedded_repo_test.zig",
         "src/filter_test.zig",
         "src/fixture_test.zig",
