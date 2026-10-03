@@ -16,7 +16,9 @@
 //!
 //! A step checks the commit out as `git checkout` does, `HEAD` detached
 //! with git's `checkout: moving from … to …` line in its log, or, after
-//! `--no-checkout`, moves `BISECT_HEAD`. What git prints is returned as
+//! `--no-checkout`, moves `BISECT_HEAD`; with `--reset-when-found`, the
+//! command that finds the first bad commit goes back as `reset` would. The
+//! behaviour is git 2.56's, the newest release. What git prints is returned as
 //! `Report.text`, the same lines; where git then runs `git show` on the
 //! commit it found, the commit is in `Report.step` for the caller to show,
 //! and `BISECT_RUN` holds the lines before it. Pathspecs, which limit the
@@ -88,6 +90,11 @@ pub const Error = error{
     NoLog,
     /// A `replay` line git does not know.
     InvalidReplayLine,
+    /// `--reset-when-found=` neither `original` nor `found`.
+    InvalidResetWhenFound,
+    /// `--reset-when-found` with `--no-checkout`, which git refuses
+    /// together.
+    ResetWhenFoundWithoutCheckout,
 } || Allocator.Error || refs_mod.TransactionError || refs_mod.ReadError || repo_mod.Error || revparse.Error ||
     revwalk.Error || head_mod.Error || threeway.Error || hooks.Error || program.Error || Io.Dir.ReadFileAllocError ||
     Io.Dir.DeleteFileError || Io.File.OpenError;
@@ -100,6 +107,19 @@ pub const Options = struct {
     hooks: ?*hooks.Runner = null,
     /// Where a checkout that would lose a change writes the path.
     blocked: ?*threeway.Blocked = null,
+};
+
+/// Where `--reset-when-found` goes once the first bad commit is found:
+/// back to where the bisection started, or to the commit found.
+pub const ResetWhenFound = enum {
+    original,
+    found,
+
+    pub fn parse(text: []const u8) ?ResetWhenFound {
+        if (std.mem.eql(u8, text, "original")) return .original;
+        if (std.mem.eql(u8, text, "found")) return .found;
+        return null;
+    }
 };
 
 /// The two words a bisection is in, `bad` and `good` or the caller's.
@@ -234,6 +254,20 @@ fn finish(arena: std.heap.ArenaAllocator, out: std.ArrayList(u8), step: Step) Re
     return .{ .arena = arena, .step = step, .text = out.items };
 }
 
+/// What git does after any command that found the first bad commit: with
+/// `BISECT_RESET_WHEN_FOUND`, go back where it says and end the bisection.
+fn resetWhenFound(c: *Ctx, step: Step) Error!void {
+    if (step != .first_bad) return;
+    const text = (try c.readState("BISECT_RESET_WHEN_FOUND")) orelse return;
+    if (text.len == 0) return;
+    const mode = ResetWhenFound.parse(std.mem.trim(u8, text, " \t\n\r")) orelse return error.InvalidResetWhenFound;
+    const target: ?[]const u8 = switch (mode) {
+        .original => null,
+        .found => try std.fmt.allocPrint(c.a, "refs/bisect/{s}", .{(try readTerms(c)).bad}),
+    };
+    try resetTo(c, target);
+}
+
 // ---------------------------------------------------------------------------
 // Terms.
 
@@ -270,11 +304,11 @@ fn writeTerms(c: *Ctx, bad: []const u8, good: []const u8) Error!void {
 /// no such file.
 fn getTerms(c: *Ctx) Error!?Terms {
     const text = (try c.readState("BISECT_TERMS")) orelse return null;
-    // `strbuf_getline_lf` twice; a line past the end reads as empty.
+    // `strbuf_getline_lf` twice; a line missing is no terms at all.
     var at: usize = 0;
     var lines: [2][]const u8 = .{ "", "" };
     for (&lines) |*line| {
-        if (at >= text.len) break;
+        if (at >= text.len) return error.NoTermsDefined;
         const end = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
         line.* = text[at..end];
         at = end + 1;
@@ -335,7 +369,7 @@ fn cleanState(c: *Ctx) Error!void {
     }
     try head_mod.deleteRef(c.io, c.repo, "BISECT_HEAD");
     try head_mod.deleteRef(c.io, c.repo, "BISECT_EXPECTED_REV");
-    for ([_][]const u8{ "BISECT_ANCESTORS_OK", "BISECT_LOG", "BISECT_NAMES", "BISECT_RUN", "BISECT_TERMS", "BISECT_FIRST_PARENT", "BISECT_START" }) |name| {
+    for ([_][]const u8{ "BISECT_ANCESTORS_OK", "BISECT_LOG", "BISECT_NAMES", "BISECT_RUN", "BISECT_TERMS", "BISECT_FIRST_PARENT", "BISECT_RESET_WHEN_FOUND", "BISECT_START" }) |name| {
         try c.removeState(name);
     }
 }
@@ -936,9 +970,9 @@ fn isSpace(ch: u8) bool {
 }
 
 /// `git bisect start [--term-{bad,new}=<term> --term-{good,old}=<term>]
-/// [--no-checkout] [--first-parent] [<bad> [<good>...]] [--]
-/// [<pathspec>...]`, `args` as git is given them: they are what the log
-/// records.
+/// [--no-checkout] [--first-parent] [--reset-when-found[=<where>]] [<bad>
+/// [<good>...]] [--] [<pathspec>...]`, `args` as git is given them: they
+/// are what the log records.
 pub fn start(gpa: Allocator, io: Io, repo: *Repository, args: []const []const u8, options: Options) Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
@@ -946,12 +980,14 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, args: []const []const u8
     var c = begin(gpa, io, repo, options, &arena, &out);
     var t: Terms = .{};
     const step = try startWith(&c, &t, args);
+    try resetWhenFound(&c, step);
     return finish(arena, out, step);
 }
 
 fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     var no_checkout = c.repo.isBare();
     var first_parent = false;
+    var reset_when_found: ?ResetWhenFound = null;
     var must_write_terms = false;
     var has_double_dash = false;
     for (args) |arg| {
@@ -966,6 +1002,10 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
             no_checkout = true;
         } else if (std.mem.eql(u8, arg, "--first-parent")) {
             first_parent = true;
+        } else if (std.mem.eql(u8, arg, "--reset-when-found")) {
+            reset_when_found = .original;
+        } else if (std.mem.startsWith(u8, arg, "--reset-when-found=")) {
+            reset_when_found = ResetWhenFound.parse(arg["--reset-when-found=".len..]) orelse return error.InvalidResetWhenFound;
         } else if (std.mem.eql(u8, arg, "--term-good") or std.mem.eql(u8, arg, "--term-old")) {
             i += 1;
             if (i >= args.len) return error.InvalidTerm;
@@ -994,6 +1034,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
             else => |e| return e,
         }
     }
+    if (reset_when_found != null and no_checkout) return error.ResetWhenFoundWithoutCheckout;
     const pathspec_pos = i;
     // `argc - 1`: git records the pathspec only from two arguments on.
     if (args.len > 0 and pathspec_pos < args.len - 1) return error.PathspecUnsupported;
@@ -1018,6 +1059,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     try cleanState(c);
     try c.writeState("BISECT_START", try std.mem.concat(c.a, u8, &.{ start_head, "\n" }));
     if (first_parent) try c.writeState("BISECT_FIRST_PARENT", "\n");
+    if (reset_when_found) |mode| try c.writeState("BISECT_RESET_WHEN_FOUND", try std.mem.concat(c.a, u8, &.{ @tagName(mode), "\n" }));
     if (no_checkout) {
         const oid = revparse.resolve(c.gpa, c.io, c.repo, start_head) catch return error.BadHead;
         try c.updateRef("BISECT_HEAD", oid);
@@ -1066,6 +1108,7 @@ pub fn mark(gpa: Allocator, io: Io, repo: *Repository, state: []const u8, revs: 
         }
     } else try expanded.appendSlice(c.a, revs);
     const step = try state_(&c, &t, state, expanded.items);
+    try resetWhenFound(&c, step);
     return finish(arena, out, step);
 }
 
@@ -1103,6 +1146,7 @@ pub fn nextStep(gpa: Allocator, io: Io, repo: *Repository, options: Options) Err
     var c = begin(gpa, io, repo, options, &arena, &out);
     const t = try readTerms(&c);
     const step = try next(&c, t);
+    try resetWhenFound(&c, step);
     return finish(arena, out, step);
 }
 
@@ -1117,9 +1161,9 @@ pub fn reset(gpa: Allocator, io: Io, repo: *Repository, commit: ?[]const u8, opt
     return finish(arena, out, .waiting);
 }
 
-/// `bisect_reset`, its state cleaned as git 2.55 cleans it. git says it is
-/// not bisecting only for an empty `BISECT_START`; a missing one it passes
-/// over.
+/// `bisect_reset`, then the state cleaned, as `git bisect reset` does. git
+/// says it is not bisecting only for an empty `BISECT_START`; a missing one
+/// it passes over.
 fn resetTo(c: *Ctx, commit: ?[]const u8) Error!void {
     var branch: []const u8 = "";
     if (commit) |given| {
@@ -1146,16 +1190,16 @@ pub fn log(gpa: Allocator, io: Io, repo: *Repository) Error![]u8 {
     return text;
 }
 
-/// `git bisect replay`: the bisection in progress reset, then the one a
-/// log records done again, nothing checked out but by its `start` and its
-/// end.
+/// `git bisect replay`: the state of the bisection in progress cleaned,
+/// with nothing checked out, then the one a log records done again, nothing
+/// checked out but by its `start` and its end.
 pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, options: Options) Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
     var c = begin(gpa, io, repo, options, &arena, &out);
     if (log_text.len == 0) return error.NoLog;
-    try resetTo(&c, null);
+    try cleanState(&c);
     var t: Terms = .{};
     var lines = std.mem.splitScalar(u8, log_text, '\n');
     while (lines.next()) |raw| {
@@ -1176,8 +1220,16 @@ pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, o
         try checkAndSetTerms(&c, &t, word);
         if (std.mem.eql(u8, word, "start")) {
             const argv = (try sqDequote(c.a, rev)) orelse &.{};
-            _ = try startWith(&c, &t, argv);
-            continue;
+            const step = try startWith(&c, &t, argv);
+            switch (step) {
+                .waiting, .testing => continue,
+                // git stops the replay at a start that does more than
+                // check out a commit to test, and exits with a failure.
+                else => {
+                    try resetWhenFound(&c, step);
+                    return finish(arena, out, step);
+                },
+            }
         }
         if (oneOf(word, &.{ t.good, t.bad, "skip" })) {
             try bisectWrite(&c, word, rev, t, false);
@@ -1201,6 +1253,7 @@ pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, o
         return error.InvalidReplayLine;
     }
     const step = try autoNext(&c, t);
+    try resetWhenFound(&c, step);
     return finish(arena, out, step);
 }
 
@@ -1213,13 +1266,25 @@ pub const RunOptions = struct {
 /// `git bisect run <cmd> [<arg>...]`: the command run on each commit to
 /// test, its exit status the verdict -- 0 good, 125 skip, 1 to 127 bad --
 /// until the first bad commit is found or only skipped ones are left.
-pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv: []const []const u8, options: Options, run_options: RunOptions) Error!Report {
+pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u8, options: Options, run_options: RunOptions) Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
     var c = begin(gpa, io, repo, options, &arena, &out);
     var t = try readTerms(&c);
     if (!try nextCheck(&c, t, null)) return error.NeedGoodAndBad;
+    var argv = argv_in;
+    if (argv.len != 0 and std.mem.startsWith(u8, argv[0], "--reset-when-found")) {
+        const mode: ResetWhenFound = if (std.mem.eql(u8, argv[0], "--reset-when-found"))
+            .original
+        else if (std.mem.startsWith(u8, argv[0], "--reset-when-found="))
+            ResetWhenFound.parse(argv[0]["--reset-when-found=".len..]) orelse return error.InvalidResetWhenFound
+        else
+            return error.InvalidResetWhenFound;
+        if (try c.readRef("BISECT_HEAD") != null) return error.ResetWhenFoundWithoutCheckout;
+        try c.writeState("BISECT_RESET_WHEN_FOUND", try std.mem.concat(c.a, u8, &.{ @tagName(mode), "\n" }));
+        argv = argv[1..];
+    }
     if (argv.len == 0) return error.NoCommand;
     var command: std.ArrayList(u8) = .empty;
     for (argv) |arg| {
@@ -1246,10 +1311,12 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv: []const []const u8, 
             .only_skipped => return error.RunCannotContinue,
             .merge_base => {
                 try c.print("bisect run success\n", .{});
+                try resetWhenFound(&c, step);
                 return finish(arena, out, step);
             },
             .first_bad => {
                 try c.print("bisect found first '{s}' commit\n", .{t.bad});
+                try resetWhenFound(&c, step);
                 return finish(arena, out, step);
             },
             else => {},
@@ -1494,6 +1561,8 @@ fn expectReport(t: *Twin, io: Io, git_args: []const []const u8, report: anytype)
 }
 
 test "a bisection steps through the commits git steps through, with git's state, logs and checkouts" {
+    // The builtin bisect of git 2.40, whose messages and log are these.
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const Case = struct { shape: u8, first_bad: usize, skip: []const usize = &.{}, start: []const []const u8 };
@@ -1507,6 +1576,7 @@ test "a bisection steps through the commits git steps through, with git's state,
         .{ .shape = 1, .first_bad = 14, .skip = &.{ 15, 16 }, .start = &.{ "--first-parent", "HEAD", "HEAD~12" } },
         .{ .shape = 1, .first_bad = 8, .start = &.{ "HEAD", "side", "HEAD~14" } },
     };
+    const newest = try testgit.gitAtLeast(gpa, io, 2, 56);
     for (cases, 0..) |case, n| {
         var t: Twin = undefined;
         try Twin.init(gpa, io, &t, case.shape);
@@ -1529,16 +1599,22 @@ test "a bisection steps through the commits git steps through, with git's state,
             if (renamed) word = if (std.mem.eql(u8, word, "bad")) "broken" else if (std.mem.eql(u8, word, "good")) "fine" else word;
             try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));
         }
-        // The log replays the same, and a reset puts everything back.
-        const recorded = try log(gpa, io, &t.repo);
-        defer gpa.free(recorded);
-        try t.git.writeFile(io, ".git/replay.log", recorded);
-        try expectReport(&t, io, &.{ "replay", ".git/replay.log" }, replay(gpa, io, &t.repo, recorded, .{ .who = test_who }));
+        // The log replays the same -- as git 2.56 replays it, without first
+        // going back to where the bisection started -- and a reset puts
+        // everything back.
+        if (newest) {
+            const recorded = try log(gpa, io, &t.repo);
+            defer gpa.free(recorded);
+            try t.git.writeFile(io, ".git/replay.log", recorded);
+            try expectReport(&t, io, &.{ "replay", ".git/replay.log" }, replay(gpa, io, &t.repo, recorded, .{ .who = test_who }));
+        }
         try expectReport(&t, io, &.{"reset"}, reset(gpa, io, &t.repo, null, .{ .who = test_who }));
     }
 }
 
 test "bisect run tests each commit with the command, as git's does" {
+    // The builtin bisect of git 2.40, whose messages and log are these.
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var t: Twin = undefined;
@@ -1552,6 +1628,8 @@ test "bisect run tests each commit with the command, as git's does" {
 }
 
 test "bisect refuses what git refuses, and pathspecs by name" {
+    // The builtin bisect of git 2.40, whose messages and log are these.
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var t: Twin = undefined;
@@ -1573,4 +1651,26 @@ test "bisect refuses what git refuses, and pathspecs by name" {
     try std.testing.expectError(error.TooManyBadRevisions, mark(gpa, io, &t.repo, "bad", &.{ "HEAD", "HEAD~1" }, .{ .who = test_who }));
     try expectReport(&t, io, &.{ "good", "HEAD~4", "HEAD~6" }, mark(gpa, io, &t.repo, "good", &.{ "HEAD~4", "HEAD~6" }, .{ .who = test_who }));
     try expectReport(&t, io, &.{ "skip", "HEAD~3..HEAD~1" }, mark(gpa, io, &t.repo, "skip", &.{"HEAD~3..HEAD~1"}, .{ .who = test_who }));
+}
+
+test "a bisection told to reset when it finds the commit goes back as git 2.56's does" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_][]const u8{ "--reset-when-found", "--reset-when-found=found" }) |option| {
+        var t: Twin = undefined;
+        try Twin.init(gpa, io, &t, 0);
+        defer t.deinit(io);
+        try expectReport(&t, io, &.{ "start", option, "HEAD", "HEAD~3" }, start(gpa, io, &t.repo, &.{ option, "HEAD", "HEAD~3" }, .{ .who = test_who }));
+        for (0..3) |_| {
+            if (t.git.readFile(io, ".git/BISECT_EXPECTED_REV")) |b| gpa.free(b) else |_| break;
+            const word = try t.verdict(io, 14, &.{}, false);
+            try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));
+        }
+    }
+    var t: Twin = undefined;
+    try Twin.init(gpa, io, &t, 0);
+    defer t.deinit(io);
+    try std.testing.expectError(error.ResetWhenFoundWithoutCheckout, start(gpa, io, &t.repo, &.{ "--reset-when-found", "--no-checkout", "HEAD" }, .{ .who = test_who }));
+    try std.testing.expectError(error.InvalidResetWhenFound, start(gpa, io, &t.repo, &.{"--reset-when-found=elsewhere"}, .{ .who = test_who }));
 }
