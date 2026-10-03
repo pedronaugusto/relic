@@ -490,6 +490,50 @@ pub const Odb = struct {
         return error.ObjectNotFound;
     }
 
+    /// An object read into a buffer the caller keeps: `bytes` is that
+    /// buffer's `items`.
+    pub const Borrowed = struct {
+        type: object.Type,
+        bytes: []const u8,
+    };
+
+    /// Read the object named `oid` into `buffer`, which keeps its capacity
+    /// from one call to the next, so that reading many objects one after
+    /// another reuses one allocation for their bytes.
+    ///
+    /// `buffer` is cleared, grows with `allocator()` when the object needs
+    /// more room, and is the caller's to free with that allocator. The
+    /// returned `bytes` are `buffer.items`, borrowed: valid until `buffer`
+    /// is next read into, changed or freed. On an error `buffer`'s contents
+    /// are unspecified, and it is still the caller's to reuse or free.
+    /// Looking up, re-scanning and asking a promisor are as `read` does
+    /// them. A packed whole object needs no other allocation once `buffer`
+    /// is large enough; a loose object still allocates its read buffer, and
+    /// a delta its chain.
+    pub fn readInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) Error!Borrowed {
+        if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
+        try odb.refresh(io);
+        if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
+        if (odb.lazy != null) {
+            try odb.fetchMissing(io, &.{oid});
+            if (try odb.tryReadInto(io, oid, buffer)) |found| return found;
+        }
+        return error.ObjectNotFound;
+    }
+
+    fn tryReadInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) Error!?Borrowed {
+        var base: u32 = 0;
+        for (odb.backendData().sources.items) |*source| {
+            defer base += @intCast(source.packs.items.len);
+            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
+            const p = &source.packs.items[located.at].pack;
+            const t = try p.readAtInto(io, located.offset, &odb.backendData().cache, base + @as(u32, @intCast(located.at)), buffer);
+            return .{ .type = t, .bytes = buffer.items };
+        }
+        const found = (try odb.readLooseFor(io, oid, .{ .list = buffer })) orelse return null;
+        return .{ .type = found.header.type, .bytes = buffer.items };
+    }
+
     /// The packs first, then the loose objects, as git looks: a name is its
     /// content, so where it is found does not change what is read, and in a
     /// packed repository a loose lookup first is a failed `open` for every
@@ -599,6 +643,8 @@ pub const Odb = struct {
         into: []u8,
         /// The body, allocated, when it is at most this many bytes.
         cache: usize,
+        /// The body, into this list, cleared and grown as needed.
+        list: *std.ArrayList(u8),
     };
 
     const LooseFound = struct {
@@ -612,8 +658,8 @@ pub const Odb = struct {
     ///
     /// With `.header` and `.into` this allocates nothing and touches nothing
     /// of the database but its sources' directory handles, so pack-writing
-    /// tasks call it concurrently; `.cache` allocates, and is the calling
-    /// task's.
+    /// tasks call it concurrently; `.cache` and `.list` allocate, and are
+    /// the calling task's.
     fn readLooseFor(odb: *const Odb, io: Io, oid: Oid, want: LooseWant) Error!?LooseFound {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
@@ -651,6 +697,13 @@ pub const Odb = struct {
                 .into => |buffer| blk: {
                     if (parsed.header.size != buffer.len) return error.CorruptLooseObject;
                     break :blk buffer;
+                },
+                .list => |list| blk: {
+                    const len = std.math.cast(usize, parsed.header.size) orelse return error.StreamTooLong;
+                    if (parsed.header.size > odb.backendData().options.max_object_bytes) return error.StreamTooLong;
+                    list.clearRetainingCapacity();
+                    try list.resize(odb.backendData().gpa, len);
+                    break :blk list.items;
                 },
             };
             errdefer if (want == .cache) odb.backendData().gpa.free(body);
@@ -3033,4 +3086,81 @@ test "a cached loose body fits one buffered read and an end check" {
     try std.testing.expectEqual(object.Type.blob, found.header.type);
     try std.testing.expectEqualSlices(u8, &bytes, found.bytes.?);
     try std.testing.expect(Counter.reads <= 2);
+}
+
+test "an object read into a kept buffer is the object read, and borrows the buffer" {
+    const io = std.testing.io;
+    const Counting = struct {
+        child: Allocator,
+        allocations: usize = 0,
+        fn allocator(c: *@This()) Allocator {
+            return .{ .ptr = c, .vtable = &.{ .alloc = alloc, .resize = Allocator.noResize, .remap = Allocator.noRemap, .free = free } };
+        }
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const c: *@This() = @ptrCast(@alignCast(ctx));
+            c.allocations += 1;
+            return c.child.rawAlloc(len, alignment, ret);
+        }
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const c: *@This() = @ptrCast(@alignCast(ctx));
+            c.child.rawFree(memory, alignment, ret);
+        }
+    };
+    var counting: Counting = .{ .child = std.testing.allocator };
+    const gpa = counting.allocator();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+    var odb = try Odb.openAt(gpa, io, objects, .sha1, .{ .probe_timestamp_resolution = false });
+    defer odb.deinit(io);
+
+    // Versions of one file, which pack as a whole object and deltas, and a
+    // loose object the pack does not hold.
+    var names: std.ArrayList(Oid) = .empty;
+    defer names.deinit(std.testing.allocator);
+    var entries: std.ArrayList(PackEntry) = .empty;
+    defer entries.deinit(std.testing.allocator);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(std.testing.allocator);
+    for (0..12) |v| {
+        for (0..200) |line| try body.print(std.testing.allocator, "version {d} line {d}\n", .{ v, line });
+        const oid = try odb.write(io, .blob, body.items);
+        try names.append(std.testing.allocator, oid);
+        try entries.append(std.testing.allocator, .{ .oid = oid, .hint = "file" });
+    }
+    var pack_dir = try objects.openDir(io, "pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    const written = try odb.writePack(io, pack_dir, entries.items, .{ .threads = 1 });
+    try std.testing.expect(written.deltas > 0);
+    try odb.refresh(io);
+    try names.append(std.testing.allocator, try odb.write(io, .blob, "loose only\n"));
+
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(gpa);
+    for (names.items) |oid| {
+        const expected = try odb.read(io, oid);
+        defer gpa.free(expected.bytes);
+        const got = try odb.readInto(io, oid, &buffer);
+        try std.testing.expectEqual(expected.type, got.type);
+        try std.testing.expectEqualSlices(u8, expected.bytes, got.bytes);
+        // Borrowed: the bytes are the buffer's.
+        try std.testing.expectEqual(buffer.items.ptr, got.bytes.ptr);
+        try std.testing.expectEqual(buffer.items.len, got.bytes.len);
+    }
+
+    // The pack's whole object, read again into a buffer already large
+    // enough, allocates nothing and lands where the last one did.
+    const whole = names.items[names.items.len - 2];
+    const before_ptr = buffer.items.ptr;
+    _ = try odb.readInto(io, whole, &buffer);
+    const allocations = counting.allocations;
+    const again = try odb.readInto(io, whole, &buffer);
+    try std.testing.expectEqual(allocations, counting.allocations);
+    try std.testing.expectEqual(before_ptr, again.bytes.ptr);
+
+    // A miss is the miss `read` gives, and leaves the buffer the caller's.
+    try std.testing.expectError(error.ObjectNotFound, odb.readInto(io, try Oid.parse(.sha1, "1" ** 40), &buffer));
+    _ = try odb.readInto(io, names.items[0], &buffer);
 }

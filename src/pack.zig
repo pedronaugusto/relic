@@ -769,6 +769,16 @@ pub const Pack = struct {
         return try p.gpa.realloc(out, result_len);
     }
 
+    /// `inflateAt` into `out`, which is cleared, grows as needed and then
+    /// holds exactly the entry.
+    fn inflateInto(p: *Pack, io: Io, at: u64, size: u64, out: *std.ArrayList(u8)) Error!void {
+        const result_len = try inflatedLen(size);
+        out.clearRetainingCapacity();
+        try out.ensureTotalCapacity(p.gpa, result_len +| decode_slack);
+        try p.decodeAt(io, at, size, out.allocatedSlice()[0 .. result_len + decode_slack]);
+        out.items.len = result_len;
+    }
+
     /// Leave one longest match and its word-copy slack after the result, so
     /// the fast decoder can also handle the last bytes of an entry.
     const decode_slack = 258 + 8;
@@ -811,6 +821,20 @@ pub const Pack = struct {
     /// which is what makes a walk over a pack proportional to its objects
     /// rather than to its chains.
     pub fn readAt(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32) Error!Object {
+        return p.resolve(io, offset, cache, pack_id, null);
+    }
+
+    /// `readAt`, with the object put in `out` rather than in an allocation
+    /// of its own: `out` is cleared, grows with this pack's allocator as
+    /// needed, and then holds exactly the object. A whole object is
+    /// inflated straight into it.
+    pub fn readAtInto(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32, out: *std.ArrayList(u8)) Error!object.Type {
+        return (try p.resolve(io, offset, cache, pack_id, out)).type;
+    }
+
+    /// The object at `offset`, in an allocation of its own or, given `into`,
+    /// there, when the returned bytes are `into.items`.
+    fn resolve(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32, into: ?*std.ArrayList(u8)) Error!Object {
         var chain: std.ArrayList(u64) = .empty;
         defer chain.deinit(p.gpa);
         var visited: std.ArrayList(u64) = .empty;
@@ -824,6 +848,11 @@ pub const Pack = struct {
         while (true) {
             if (cache) |c| {
                 if (c.get(pack_id, current)) |hit| {
+                    if (chain.items.len == 0) if (into) |out| {
+                        out.clearRetainingCapacity();
+                        try out.appendSlice(p.gpa, hit.bytes);
+                        return .{ .type = hit.type, .bytes = out.items };
+                    };
                     base_bytes = try p.gpa.dupe(u8, hit.bytes);
                     base_type = hit.type;
                     break;
@@ -832,6 +861,10 @@ pub const Pack = struct {
             const header = try p.entryHeaderAt(io, current);
             switch (header.kind) {
                 .object => |t| {
+                    if (chain.items.len == 0) if (into) |out| {
+                        try p.inflateInto(io, header.data_at, header.size, out);
+                        return .{ .type = t, .bytes = out.items };
+                    };
                     base_bytes = try p.inflateAt(io, header.data_at, header.size);
                     base_type = t;
                     break;
@@ -866,6 +899,13 @@ pub const Pack = struct {
             const header = try p.entryHeaderAt(io, delta_offset);
             const delta_bytes = try p.inflateAt(io, header.data_at, header.size);
             defer p.gpa.free(delta_bytes);
+            if (i == 0) if (into) |out| {
+                out.clearRetainingCapacity();
+                try delta.applyTo(p.gpa, out, base_bytes, delta_bytes);
+                p.gpa.free(base_bytes);
+                if (cache) |c| c.put(pack_id, delta_offset, base_type, out.items) catch {};
+                return .{ .type = base_type, .bytes = out.items };
+            };
             const applied = try delta.apply(p.gpa, base_bytes, delta_bytes);
             p.gpa.free(base_bytes);
             base_bytes = applied;

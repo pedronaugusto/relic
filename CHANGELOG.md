@@ -10,6 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Write packs on tasks of the caller's `std.Io` by default: `PackOptions.threads` is now zero, one task per processor. The tasks read loose objects and deflate entries into buffers the calling task allocates, bounded by the new `PackOptions.batch_bytes`; the delta search and the writing stay on the calling task in pack order, so every task count and every Io writes the bytes `threads = 1`, the unchanged serial writer, writes. A cancel or a failure on any task stops the write and leaves no temporary file.
 - `collectLoose` and `collectAll` read headers on tasks too (`CollectOptions.threads`) and pass them on in the new `PackEntry.header`, so `writePack` reads each loose object once; the body of an object found loose is always read from the loose copy.
+- Add `Odb.readInto`, which reads an object into a buffer the caller keeps, and `Pack.readAtInto`.
 - Add `pack.Deflater` and `Writer.addDeflated` for entries deflated ahead of the writer.
 
 - Read packs positionally in 8 KiB blocks aligned in the file and kept direct-mapped, 256 KiB per pack by default (`Options.pack_read_cache_bytes`, `Pack.open`'s `read_cache_bytes`), with entries of 64 KiB or more streamed apart: a pass whose delta-base cache holds at least what an earlier pass's held reads no more calls and no more bytes. Each read uses the Io of the call that makes it.
