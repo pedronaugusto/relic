@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Fix git's author and committer dates in every test fixture, so a fixture's object names do not change from run to run.
 
+- Run a program through conduit's `Child.exchange`: one deadline over input, run, reap and drain, its allocations serialized by conduit.
+
 - Ask conduit whether a lock holder's process exists, Windows included.
 
 - Add `transport.remote.defaultFetchRefspec`: the refspec `git remote add` and clone write for a remote; clone uses it.

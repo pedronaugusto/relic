@@ -46,7 +46,8 @@ pub const SpawnHook = struct {
     start: *const fn (*anyopaque, Io, Allocator, Child.SpawnOptions) Child.SpawnError!Child,
     /// Called on cleanup after normal completion too, as well as on timeout
     /// and error paths. It must reap or kill the child; when absent, relic
-    /// ends it through conduit.
+    /// ends it through conduit. In `run` the child is already reaped by then:
+    /// on a timeout conduit has killed it, and the hook ends what it left.
     terminate: ?*const fn (*anyopaque, *Child, Io) void = null,
 };
 
@@ -82,7 +83,7 @@ pub const Invocation = struct {
 pub const Error = error{
     /// The program's output passed `Limits`.
     OutputTooLong,
-} || std.process.SpawnError || Child.SpawnError || Child.OutputError || conduit.InputWriter.StartError ||
+} || std.process.SpawnError || Child.SpawnError || Child.OutputError || Child.ExchangeError || conduit.InputWriter.StartError ||
     conduit.InputWriter.QueueError || Io.Timeout.Error || Io.Dir.RealPathError || Io.File.Reader.Error;
 
 pub const Outcome = struct {
@@ -116,7 +117,10 @@ pub const Limits = struct {
 
 /// Run a program to its end: `input` on its standard input, which then
 /// closes, and its output collected. The input is written while the output
-/// is read, so neither side waits on a full pipe.
+/// is read, so neither side waits on a full pipe, and one deadline covers
+/// the input, the output, the exit status and cleanup: conduit's
+/// `Child.exchange`, which also serializes every allocation it makes on
+/// `gpa`.
 pub fn run(
     programs: Programs,
     gpa: Allocator,
@@ -125,110 +129,28 @@ pub fn run(
     input: []const u8,
     limits: Limits,
 ) Error!Outcome {
-    // Convert a duration once. The completion event is published only after
-    // feeding, collection, waiting and cleanup have all finished.
-    const deadline = limits.timeout.toDeadline(io);
-    if (deadline == .none) return exchange(programs, gpa, io, invocation, input, limits);
-    const Task = struct {
-        done: Io.Event = .unset,
-        result: Error!Outcome = undefined,
-
-        fn work(task: *@This(), p: Programs, allocator: Allocator, executor: Io, command: Invocation, bytes: []const u8, bounds: Limits) void {
-            task.result = exchange(p, allocator, executor, command, bytes, bounds);
-            task.done.set(executor);
-        }
-    };
-    var task: Task = .{};
-    var work = try io.concurrent(Task.work, .{ &task, programs, gpa, io, invocation, input, limits });
-    task.done.waitTimeout(io, deadline) catch |err| {
-        work.cancel(io);
-        // Completion can race the deadline. Its owned output still needs
-        // releasing when the caller receives the timeout or cancellation.
-        if (task.result) |value| {
-            var outcome = value;
-            outcome.deinit(gpa);
-        } else |_| {}
-        return err;
-    };
-    work.await(io);
-    return task.result;
-}
-
-fn exchange(programs: Programs, allocator: Allocator, io: Io, invocation: Invocation, input: []const u8, limits: Limits) Error!Outcome {
-    // Conduit's writer and output collectors allocate on their tasks. Relic
-    // also accepts arenas, so serialize this exchange's use of the caller's
-    // allocator. All those tasks are joined before this adapter goes away.
-    var serial: SerialAllocator = .{ .parent = allocator, .io = io };
-    const gpa = serial.allocator();
     var started = try start(programs, gpa, io, invocation);
     defer started.deinit(io);
-    var feeding = try started.child.inputWriter(io, gpa, .{ .max_backlog = input.len });
-    defer feeding.deinit(io);
-    // Stop the child before joining a writer it may never read from.
-    errdefer started.kill(io);
-    feeding.queue(io, input) catch |err| switch (err) {
-        error.OutOfMemory, error.Canceled, error.BacklogFull, error.InputClosed => return err,
-        // git accepts a program that exits without reading its input.
-        else => {},
-    };
-    feeding.end(io) catch |err| switch (err) {
-        error.Canceled => return err,
-        else => {},
-    };
-    var output = try started.child.output(io, gpa, .{
+    // A program that ends without reading all of its input is no error, as
+    // git has it: conduit does not report the closed pipe.
+    var output = try started.child.exchange(io, gpa, input, .{
         .max_bytes = limits.output.toInt() orelse std.math.maxInt(usize),
-        .grace_ms = 0,
+        .timeout_ms = timeoutMs(io, limits.timeout),
     });
     defer output.deinit(gpa);
+    if (output.timedOut()) return error.Timeout;
     if (output.stdoutTruncated() or output.stderrTruncated()) return error.OutputTooLong;
-    feeding.wait(io) catch |err| switch (err) {
-        error.Canceled => return err,
-        else => {},
-    };
     return .{ .term = gitTerm(output.term()), .stdout = output.takeStdout(), .stderr = output.takeStderr() };
 }
 
-const SerialAllocator = struct {
-    parent: Allocator,
-    io: Io,
-    mutex: Io.Mutex = .init,
-
-    fn allocator(serial: *SerialAllocator) Allocator {
-        return .{ .ptr = serial, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
-    }
-
-    fn of(raw: *anyopaque) *SerialAllocator {
-        return @ptrCast(@alignCast(raw)); // safe: allocator installs its live SerialAllocator as ptr.
-    }
-
-    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const serial = of(raw);
-        serial.mutex.lockUncancelable(serial.io);
-        defer serial.mutex.unlock(serial.io);
-        return serial.parent.rawAlloc(len, alignment, ret);
-    }
-
-    fn resize(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
-        const serial = of(raw);
-        serial.mutex.lockUncancelable(serial.io);
-        defer serial.mutex.unlock(serial.io);
-        return serial.parent.rawResize(memory, alignment, len, ret);
-    }
-
-    fn remap(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
-        const serial = of(raw);
-        serial.mutex.lockUncancelable(serial.io);
-        defer serial.mutex.unlock(serial.io);
-        return serial.parent.rawRemap(memory, alignment, len, ret);
-    }
-
-    fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const serial = of(raw);
-        serial.mutex.lockUncancelable(serial.io);
-        defer serial.mutex.unlock(serial.io);
-        serial.parent.rawFree(memory, alignment, ret);
-    }
-};
+/// What is left of `timeout` from now, in conduit's whole milliseconds,
+/// rounded up so a deadline still ahead is never spent at once; `null` for
+/// none.
+fn timeoutMs(io: Io, timeout: Io.Timeout) ?u32 {
+    const left = timeout.toDurationFromNow(io) orelse return null;
+    const ns = @max(left.raw.nanoseconds, 0);
+    return std.math.lossyCast(u32, @divFloor(ns + std.time.ns_per_ms - 1, std.time.ns_per_ms));
+}
 
 // relic's status is git's byte-sized exit status, as std's Child exposed it.
 fn gitTerm(term: Child.Term) Term {
