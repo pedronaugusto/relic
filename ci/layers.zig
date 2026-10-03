@@ -172,6 +172,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/head.zig",
         "src/indexpack.zig",
         "src/lfsapi.zig",
+        "src/notes.zig",
         "src/packwrite_test.zig",
         "src/refs_owner_test.zig",
         "src/reftablestack_test.zig",

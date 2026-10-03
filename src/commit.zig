@@ -29,6 +29,8 @@ pub const merging = @import("merging.zig");
 pub const sequencer = @import("sequencer.zig");
 pub const rebase = @import("rebase.zig");
 pub const todo = @import("todo.zig");
+/// Notes on objects, kept on `refs/notes/*` as `git notes` keeps them.
+pub const notes = @import("notes.zig");
 /// Errors from committing.
 pub const Error = core.Error;
 /// How a message is cleaned, from `commit.cleanup` or the caller.
