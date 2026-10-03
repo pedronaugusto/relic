@@ -548,9 +548,14 @@ pub const Pack = struct {
             error.EndOfStream => return 0,
             error.ReadFailed => return p.file_reader.err orelse error.TruncatedPack,
         };
-        const n = @min(out.len, have.len);
-        @memcpy(out[0..n], have[0..n]);
-        return n;
+        if (have.len >= out.len) {
+            @memcpy(out, have[0..out.len]);
+            return out.len;
+        }
+        // A short read or a header across the end of the buffer is not a
+        // truncated pack. Complete it, keeping the usual buffered path above.
+        return p.file_reader.interface.readSliceShort(out) catch
+            (p.file_reader.err orelse error.TruncatedPack);
     }
 
     /// The header of the entry at `offset`, without inflating anything.
@@ -2315,4 +2320,41 @@ test "a refused on-disk pack index releases its bytes once" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "bad.idx", .data = "x" });
     try std.testing.expectError(error.TruncatedIndex, Index.open(gpa, io, tmp.dir, "bad.idx", .sha1, 1024));
+}
+
+test "a packed entry header survives a short positional read" {
+    const Short = struct {
+        threadlocal var first: bool = true;
+        fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+            const io = std.testing.io;
+            if (first) {
+                first = false;
+                return io.vtable.fileReadPositional(userdata, file, &.{buffers[0][0..1]}, offset);
+            }
+            return io.vtable.fileReadPositional(userdata, file, buffers, offset);
+        }
+    };
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const bytes = "b" ** 1000;
+    const oid = hash.Hasher.nameObject(.sha1, .{}, "blob", bytes).oid;
+    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 1, .{});
+    defer w.deinit(io);
+    const at = try w.add(oid, .blob, bytes);
+    const report = try w.finish(io);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var name_buf: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
+    var p = try Pack.open(gpa, io, tmp.dir, name, .sha1, .{});
+    defer p.deinit(io);
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Short.read;
+    const short: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    p.file_reader.io = short;
+    Short.first = true;
+    const got = try p.readAt(short, at, null, 0);
+    defer gpa.free(got.bytes);
+    try std.testing.expectEqualSlices(u8, bytes, got.bytes);
 }
