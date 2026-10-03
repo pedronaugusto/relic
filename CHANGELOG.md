@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A merge carried into the working tree, as merge, cherry-pick, revert and rebase make one, changes the index where the merge changed it and nowhere else: what changed is the merged tree against ours by a walk past the subtrees they share, the index is checked against ours through its cache tree where that is valid, and only the `.gitattributes` above a written path are read. It flattened ours and the merged tree, twice, and built the index again from the whole merged tree for every commit. `Index.addMany` merges the entries it adds into the sorted list rather than sorting the whole list again.
+
 - A checkout writes its files on tasks of the caller's `Io`, four by default (`CheckoutOptions.workers`, as git's `checkout.workers`), in batches whose bounds depend only on the files, so the files written, the index and the error returned are the same whatever the count; each file is still written beside its place and renamed over it, so a reader sees the old bytes or the new. A path the index already has as the tree has it is no longer looked at on the disk unless `force` asks. Files are created with git's 0666 or 0777 and the umask trims them as it trims git's; they were set to 0666 or 0777 after creation whatever the umask said, which left every checked-out file writable by everyone.
 
 - A lock names the process that holds it in its own first bytes, `pid <n>`, which the new contents write over, where it wrote `<path>~pid.lock` beside every lock and removed it after: a lock now costs one file, not two, and a transaction of a thousand refs half the directory changes. `staleReport` reads the name from the lock.
