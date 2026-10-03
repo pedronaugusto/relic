@@ -101,6 +101,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/filter.zig",
         "src/pack.zig",
         "src/ref_types.zig",
+        "src/packed_cache.zig",
         "src/stack_cache.zig",
         "src/tls/root.zig",
     } },

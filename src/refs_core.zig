@@ -30,6 +30,7 @@ const testgit = @import("testgit.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
 const state_mod = @import("refstate.zig");
+const packed_cache = @import("packed_cache.zig");
 
 /// The header `packed-refs` carries, with the space before the newline that
 /// is in git's source and in no document.
@@ -207,9 +208,7 @@ pub const Store = struct {
             return reftablestack.read(store, gpa, io, name);
         }
         if (try store.readLoose(gpa, io, name)) |found| return found;
-        var listing = try store.readPacked(gpa, io);
-        defer listing.deinit();
-        if (listing.find(name)) |entry| return .{ .direct = entry.oid };
+        if (try store.readPackedOne(io, name)) |oid| return .{ .direct = oid };
         return null;
     }
 
@@ -300,16 +299,20 @@ pub const Store = struct {
 
         var entries: std.ArrayList(Named) = .empty;
 
-        var packed_listing = try store.readPacked(gpa, io);
-        defer packed_listing.deinit();
-        for (packed_listing.entries) |entry| {
-            if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
-            try entries.append(arena, .{
-                .name = try arena.dupe(u8, entry.name),
-                .target = .{ .direct = entry.oid },
-                .peeled = entry.peeled,
-                .loose = false,
-            });
+        {
+            const packed_listing = try store.acquirePacked(io);
+            defer store.releasePacked(io);
+            // Sorted, so the names under `prefix` are one run.
+            const from = std.sort.lowerBound(PackedEntry, packed_listing.entries, prefix, orderPrefix);
+            for (packed_listing.entries[from..]) |entry| {
+                if (!std.mem.startsWith(u8, entry.name, prefix)) break;
+                try entries.append(arena, .{
+                    .name = try arena.dupe(u8, entry.name),
+                    .target = .{ .direct = entry.oid },
+                    .peeled = entry.peeled,
+                    .loose = false,
+                });
+            }
         }
 
         try store.walkLoose(arena, io, &entries, prefix);
@@ -333,6 +336,10 @@ pub const Store = struct {
             .arena = arena_instance.state,
             .entries = deduped.items,
         };
+    }
+
+    fn orderPrefix(prefix: []const u8, entry: PackedEntry) std.math.Order {
+        return std.mem.order(u8, prefix, entry.name);
     }
 
     fn lessThanNamed(_: void, a: Named, b: Named) bool {
@@ -408,83 +415,42 @@ pub const Store = struct {
     }
 
     /// One line of `packed-refs`.
-    pub const PackedEntry = struct {
-        name: []const u8,
-        oid: Oid,
-        /// The object an annotated tag points at, from a `^` line.
-        peeled: ?Oid,
-    };
+    pub const PackedEntry = packed_cache.Entry;
 
-    /// Everything `packed-refs` holds.
-    pub const PackedListing = struct {
-        gpa: Allocator,
-        bytes: []u8,
-        entries: []PackedEntry,
-        /// Whether the header claimed every tag is peeled.
-        fully_peeled: bool,
+    /// Everything `packed-refs` holds, sorted by name.
+    pub const PackedListing = packed_cache.Listing;
 
-        /// Release the listing.
-        pub fn deinit(listing: *PackedListing) void {
-            listing.gpa.free(listing.entries);
-            listing.gpa.free(listing.bytes);
-            listing.* = undefined;
-        }
-
-        /// The entry named `name`, or `null`.
-        pub fn find(listing: *const PackedListing, name: []const u8) ?PackedEntry {
-            for (listing.entries) |entry| {
-                if (std.mem.eql(u8, entry.name, name)) return entry;
-            }
-            return null;
-        }
-    };
-
-    /// Read `packed-refs`. An absent file is an empty listing.
+    /// Read `packed-refs` now, into a listing the caller owns. An absent
+    /// file is an empty listing. `read` and `list` go through the store's
+    /// snapshot of the file instead, which they check with a stat.
     pub fn readPacked(store: *const Store, gpa: Allocator, io: Io) ReadError!PackedListing {
-        const bytes = (try fs.readFileAlloc(gpa, io, store.commonDir(), "packed-refs", 1 << 28)) orelse
-            return .{ .gpa = gpa, .bytes = try gpa.alloc(u8, 0), .entries = try gpa.alloc(PackedEntry, 0), .fully_peeled = false };
-        return parsePacked(gpa, store.objectFormat(), bytes);
+        return packed_cache.read(gpa, io, store.commonDir(), store.objectFormat());
     }
 
     /// Parse `packed-refs` bytes this takes ownership of, including on error.
     pub fn parsePacked(gpa: Allocator, kind: Kind, bytes: []u8) ReadError!PackedListing {
-        errdefer gpa.free(bytes);
-        var entries: std.ArrayList(PackedEntry) = .empty;
-        errdefer entries.deinit(gpa);
-        var fully_peeled = false;
+        return packed_cache.parse(gpa, kind, bytes);
+    }
 
-        const hex_len = kind.hexLen();
-        var lines = std.mem.splitScalar(u8, bytes, '\n');
-        var first = true;
-        while (lines.next()) |raw| {
-            var line = raw;
-            if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-            if (line.len == 0) continue;
-            if (line[0] == '#') {
-                if (first and std.mem.indexOf(u8, line, "fully-peeled") != null) fully_peeled = true;
-                first = false;
-                continue;
-            }
-            first = false;
-            if (line[0] == '^') {
-                if (entries.items.len == 0) return error.MalformedPackedRefs;
-                const oid = Oid.parse(kind, std.mem.trim(u8, line[1..], " \t")) catch return error.MalformedPackedRefs;
-                entries.items[entries.items.len - 1].peeled = oid;
-                continue;
-            }
-            if (line.len < hex_len + 2) return error.MalformedPackedRefs;
-            const oid = Oid.parse(kind, line[0..hex_len]) catch return error.MalformedPackedRefs;
-            if (line[hex_len] != ' ') return error.MalformedPackedRefs;
-            const name = line[hex_len + 1 ..];
-            if (!safepath.isValidRefName(name)) return error.InvalidRefName;
-            try entries.append(gpa, .{ .name = name, .oid = oid, .peeled = null });
-        }
-        return .{
-            .gpa = gpa,
-            .bytes = bytes,
-            .entries = try entries.toOwnedSlice(gpa),
-            .fully_peeled = fully_peeled,
-        };
+    /// The store's snapshot of `packed-refs`, brought up to date, with its
+    /// mutex held: give it back with `releasePacked`.
+    fn acquirePacked(store: *const Store, io: Io) ReadError!*const PackedListing {
+        const c = state_mod.get(store._state).packed_refs.?;
+        c.mutex.lock(io) catch return error.Canceled;
+        errdefer c.mutex.unlock(io);
+        return c.refresh(io, store.commonDir(), store.objectFormat());
+    }
+
+    fn releasePacked(store: *const Store, io: Io) void {
+        state_mod.get(store._state).packed_refs.?.mutex.unlock(io);
+    }
+
+    /// The object `packed-refs` names for `name`, or `null`.
+    fn readPackedOne(store: *const Store, io: Io, name: []const u8) ReadError!?Oid {
+        const listing = try store.acquirePacked(io);
+        defer store.releasePacked(io);
+        const entry = listing.find(name) orelse return null;
+        return entry.oid;
     }
 
     /// Write `packed-refs` from `entries`, which must be sorted by name.
@@ -506,6 +472,8 @@ pub const Store = struct {
             }
         }
         try lock.commit(io);
+        // The stat would tell the next lookup as much; this is cheaper.
+        if (state_mod.get(store._state).packed_refs) |c| c.forget(io);
     }
 
     /// Begin a transaction over this store.
@@ -1257,6 +1225,72 @@ test "packed refs read, shadow and write" {
     const tag = listing.find("refs/tags/v1").?;
     try std.testing.expect(!tag.loose);
     try std.testing.expect(tag.peeled.?.eql(peeled));
+}
+
+test "a store parses packed-refs once, and again when the file is replaced" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
+    defer store.deinit();
+    // Another writer: a store of its own over the same directory.
+    var other: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
+    defer other.deinit();
+    const loads = &state_mod.get(store._state).packed_refs.?.loads;
+
+    const one = try Oid.parse(.sha1, "1" ** 40);
+    const two = try Oid.parse(.sha1, "2" ** 40);
+    try std.testing.expect((try store.read(gpa, io, "refs/tags/v1")) == null);
+    try other.writePacked(io, &.{
+        .{ .name = "refs/heads/main", .oid = one, .peeled = null },
+        .{ .name = "refs/tags/v1", .oid = one, .peeled = null },
+    });
+    for (0..1000) |_| {
+        try std.testing.expect((try store.read(gpa, io, "refs/tags/v1")).?.direct.eql(one));
+        try std.testing.expect((try store.read(gpa, io, "refs/tags/v2")) == null);
+    }
+    var listing = try store.list(gpa, io, "refs/tags/");
+    listing.deinit();
+    try std.testing.expectEqual(@as(u64, 2), loads.*);
+
+    // The same size, other contents: the new file is another file.
+    try other.writePacked(io, &.{
+        .{ .name = "refs/heads/main", .oid = one, .peeled = null },
+        .{ .name = "refs/tags/v1", .oid = two, .peeled = null },
+    });
+    try std.testing.expect((try store.read(gpa, io, "refs/tags/v1")).?.direct.eql(two));
+    try std.testing.expectEqual(@as(u64, 3), loads.*);
+
+    // Gone is empty.
+    try tmp.dir.deleteFile(io, "packed-refs");
+    try std.testing.expect((try store.read(gpa, io, "refs/tags/v1")) == null);
+    var none = try store.list(gpa, io, "refs/");
+    defer none.deinit();
+    try std.testing.expectEqual(@as(usize, 0), none.entries.len);
+}
+
+test "a listing takes the packed refs under its prefix and no others" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
+    defer store.deinit();
+    // Out of order, as a hand-written file may be: the snapshot sorts it.
+    try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = "2222222222222222222222222222222222222222 refs/tags/b\n" ++
+        "1111111111111111111111111111111111111111 refs/heads/a\n" ++
+        "3333333333333333333333333333333333333333 refs/tags/a\n" ++
+        "4444444444444444444444444444444444444444 refs/tagsx\n" });
+    var tags = try store.list(gpa, io, "refs/tags/");
+    defer tags.deinit();
+    try std.testing.expectEqual(@as(usize, 2), tags.entries.len);
+    try std.testing.expectEqualStrings("refs/tags/a", tags.entries[0].name);
+    try std.testing.expectEqualStrings("refs/tags/b", tags.entries[1].name);
+    var all = try store.list(gpa, io, "");
+    defer all.deinit();
+    try std.testing.expectEqual(@as(usize, 4), all.entries.len);
+    try std.testing.expect((try store.read(gpa, io, "refs/tagsx")).?.direct.eql(try Oid.parse(.sha1, "4" ** 40)));
 }
 
 test "deleting a packed ref removes it from the packed file" {

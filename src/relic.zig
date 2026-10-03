@@ -123,4 +123,5 @@ test {
     _ = @import("reftablestack_test.zig");
     _ = @import("url_owner_test.zig");
     _ = @import("refs_owner_test.zig");
+    _ = @import("packed_cache.zig");
 }

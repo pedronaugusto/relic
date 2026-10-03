@@ -4,6 +4,7 @@ const std = @import("std");
 const hash = @import("hash.zig");
 const refs = @import("ref_types.zig");
 const stack = @import("stack_cache.zig");
+const packed_cache = @import("packed_cache.zig");
 
 pub const State = opaque {};
 
@@ -15,6 +16,8 @@ pub const Data = struct {
     format: refs.Format,
     options: @import("stack_types.zig").Options,
     cache: ?*stack.Cache,
+    /// `packed-refs` as last read, for the files format.
+    packed_refs: ?*packed_cache.Cache,
 };
 
 pub fn get(state: *State) *Data {
@@ -29,13 +32,23 @@ pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, opti
         c.* = .init(gpa);
         break :blk c;
     } else null;
-    data.* = .{ .gpa = gpa, .git_dir = git_dir, .common_dir = common_dir, .kind = kind, .format = format, .options = options, .cache = cache };
+    errdefer if (cache) |c| gpa.destroy(c);
+    const packed_refs = if (format == .files) blk: {
+        const c = try gpa.create(packed_cache.Cache);
+        c.* = .init(gpa);
+        break :blk c;
+    } else null;
+    data.* = .{ .gpa = gpa, .git_dir = git_dir, .common_dir = common_dir, .kind = kind, .format = format, .options = options, .cache = cache, .packed_refs = packed_refs };
     return @ptrCast(data); // safe: the opaque owner retains the allocated Data pointer.
 }
 
 pub fn destroy(gpa: std.mem.Allocator, state: *State) void {
     const data = get(state);
     if (data.cache) |c| {
+        c.deinit();
+        gpa.destroy(c);
+    }
+    if (data.packed_refs) |c| {
         c.deinit();
         gpa.destroy(c);
     }
