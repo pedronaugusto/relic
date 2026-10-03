@@ -289,3 +289,15 @@ pub const required = blk: {
     };
     break :blk paths;
 };
+
+/// Tokens only their owners may spell: starting and waiting on processes is
+/// conduit's, and this package's Windows declarations live in one file.
+pub const owned: []const gantry.rules.TokenRule = &.{
+    .{ .name = "process owner", .token = "waitpid" },
+    .{ .name = "process owner", .token = "wait4" },
+    .{ .name = "process owner", .token = "execve" },
+    .{ .name = "process owner", .token = "posix_spawn" },
+    .{ .name = "process owner", .token = "setsid" },
+    .{ .name = "process owner", .token = "CreateProcessW" },
+    .{ .name = "windows declarations", .kind = .string, .token = "kernel32", .owners = &.{"src/fs.zig"} },
+};
