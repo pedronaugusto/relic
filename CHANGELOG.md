@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Fix git's author and committer dates in every test fixture, so a fixture's object names do not change from run to run.
 
+- Add `Repository.ignoreSources` and `Repository.indexPath`: the files `loadIgnore` and `openIndex` read, as absolute paths, a linked worktree's own index included.
+
 - Add `ignore.Checker`, a working tree's ignore rules asked one path at a time, reading each folder's `.gitignore` once and only after it reads; checkout's obstruction check uses it.
 
 - Count the five new performance checks in Windows source-family coverage.

@@ -774,6 +774,54 @@ pub const Repository = struct {
         return rules;
     }
 
+    /// Where `loadIgnore` reads its two levels, as absolute paths on the
+    /// caller's `gpa`: what a caller watching for a rule to change watches
+    /// beside the working tree's own `.gitignore` files. Neither file need
+    /// exist.
+    pub const IgnoreSources = struct {
+        /// `core.excludesFile`, a relative one taken from the process's
+        /// current directory as `loadIgnore` reads it; `null` when unset.
+        excludes_file: ?[]u8,
+        /// `info/exclude` in the common directory.
+        info_exclude: []u8,
+
+        pub fn deinit(sources: *IgnoreSources, gpa: Allocator) void {
+            if (sources.excludes_file) |path| gpa.free(path);
+            gpa.free(sources.info_exclude);
+            sources.* = undefined;
+        }
+    };
+
+    /// Errors from naming one of the repository's files as a path.
+    pub const PathError = Allocator.Error || Io.Dir.RealPathFileAllocError ||
+        std.process.CurrentPathAllocError || error{MalformedValue};
+
+    /// The files `loadIgnore` reads, named.
+    pub fn ignoreSources(repo: *const Repository, gpa: Allocator, io: Io) PathError!IgnoreSources {
+        const common = try repo.common_dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(common);
+        const info_exclude = try std.fs.path.join(gpa, &.{ common, "info", "exclude" });
+        errdefer gpa.free(info_exclude);
+        const configured = try repo.configuration().getPath(gpa, "core.excludesfile");
+        defer if (configured) |path| gpa.free(path);
+        const excludes_file: ?[]u8 = if (configured) |path| blk: {
+            if (std.fs.path.isAbsolute(path)) break :blk try gpa.dupe(u8, path);
+            const cwd = try std.process.currentPathAlloc(io, gpa);
+            defer gpa.free(cwd);
+            break :blk try std.fs.path.join(gpa, &.{ cwd, path });
+        } else null;
+        return .{ .excludes_file = excludes_file, .info_exclude = info_exclude };
+    }
+
+    /// The index `openIndex` reads, as an absolute path on `gpa`: `index`
+    /// in the per-worktree directory, so a linked worktree's own. It need
+    /// not exist.
+    pub fn indexPath(repo: *const Repository, gpa: Allocator, io: Io) PathError![]u8 {
+        const git_dir = try repo.git_dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(git_dir);
+        return std.fs.path.join(gpa, &.{ git_dir, "index" });
+    }
+
     /// Load the attributes for the working tree's root.
     pub fn loadAttrs(repo: *Repository, io: Io) Error!attributes.Attrs {
         const case_fold = try repo.configuration().getBool("core.ignorecase", false);
