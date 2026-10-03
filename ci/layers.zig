@@ -163,6 +163,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "repository operations", .patterns = &.{
         "src/blame_test.zig",
+        "src/bisect.zig",
         "src/commithooks.zig",
         "src/config_refresh_test.zig",
         "src/describe.zig",

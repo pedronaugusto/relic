@@ -23,6 +23,8 @@ pub const mailmap = @import("mailmap.zig");
 pub const shortlog = @import("shortlog.zig");
 /// `git describe`, and with `contains`, `git name-rev`'s naming.
 pub const describe = @import("describe.zig");
+/// `git bisect`, its state files and its choice of commit included.
+pub const bisect = @import("bisect.zig");
 /// Errors from a walk.
 pub const Error = core.Error;
 /// The order commits come out in.

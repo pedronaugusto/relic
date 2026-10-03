@@ -272,6 +272,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `revwalk.revparse` | git's revision grammar. |
 | `revwalk.shallow` | A shallow repository's boundary: `.git/shallow`. |
 | `revwalk.describe` | `describe`, `head`, `Describer`: `git describe` with `--tags`, `--all`, `--long`, `--abbrev`, `--candidates`, `--match`, `--exclude`, `--first-parent`, `--always`, `--dirty`, `--broken`, a blob as `<commit>:<path>`, and `--contains` as `git name-rev` names it. |
+| `revwalk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` with git's state files, its choice of commit, skips, `--first-parent`, `--no-checkout` and terms; pathspecs refused by name. |
 | `revwalk.shortlog` | `Shortlog.init`, `add`, `addCommit`, `write`, `configured`: `git shortlog` by author, committer or trailer, with `-s`, `-n`, `-e` and `-w`. |
 | `revwalk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |
 | `merge`, `merge.blobmerge` | Content merging as xdiff does it, and the stage-only tree merge. |
