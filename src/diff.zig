@@ -10,6 +10,8 @@ pub const textdiff = @import("textdiff.zig");
 pub const rename = @import("rename.zig");
 pub const similarity = @import("similarity.zig");
 pub const patchid = @import("patchid.zig");
+/// Which commit each line of a file comes from: `git blame`.
+pub const blame = @import("blame.zig");
 /// Which algorithm produces the edit script.
 pub const Algorithm = core.Algorithm;
 /// Errors from a diff.

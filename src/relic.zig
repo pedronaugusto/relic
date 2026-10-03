@@ -15,7 +15,7 @@
 //! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex` |
 //! | `worktree` | Staging, writing a tree, checking one out, status. | `snapshot`, `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `safepath` |
 //! | `wildmatch` | Match a glob directly with git's pathname and case-fold flags. | |
-//! | `diff` | Tree against tree, blob against blob, unified text. | `textdiff`, `rename`, `similarity`, `patchid` |
+//! | `diff` | Tree against tree, blob against blob, unified text. | `textdiff`, `rename`, `similarity`, `patchid`, `blame` |
 //! | `revwalk` | Walking history, merge bases. | `revparse`, `shallow` |
 //! | `merge` | Three-way merges of contents and trees. | `blobmerge`, `ort`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
 //! | `commit` | Making a commit as `git commit` does. | `message`, `head`, `reset`, `stash`, `signing`, `commithooks`, `merging`, `sequencer`, `rebase`, `todo` |
@@ -86,6 +86,7 @@ test {
         _ = @import("workcount_test.zig");
         _ = @import("packwrite_test.zig");
         _ = @import("diff_test.zig");
+        _ = @import("blame_test.zig");
         _ = @import("submodule_test.zig");
         _ = @import("filter_test.zig");
         _ = @import("lfs_test.zig");

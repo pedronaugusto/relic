@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Add `diff.blame.file`: which commit each line of a file comes from, the line it was there and the path the file had, as `git blame` gives them. It walks history as git's blame does, newest commit first, a line passing to the first parent whose copy leaves it unchanged by git's line diff, and follows a file to the path a whole-file rename gave it unless told not to (`--no-follow`). `-M` and `-C` are off, as in git. Tested line for line against `git blame --line-porcelain` on fixtures and on random histories with merges, renames and repeated lines.
+
 - A snapshot capture writes the blobs past git's unpack limit of a hundred into one pack in the private store, and then every tree into a second, where it wrote every blob, and every tree it borrowed from the source, as a loose object: the first capture of a twenty-thousand-file tree was forty thousand filesystem calls before any reading. The store still owns every tree and blob before the capture returns. A capture that brings fewer new blobs writes them loose, so a store captured often gathers no packs. Add `NewBlobs.auto`, which `addAll` does this with, and `CacheTree.rebuildInto`.
 
 - `merge.fromOrt` stages the merged tree's clean paths in one sorted pass; it inserted them one at a time in hash-map order, a move of the rest of the index for almost every path, which on a twenty-thousand-file tree was most of each commit a rebase, cherry-pick or merge made.

@@ -26,6 +26,7 @@ pub const families = [_]Family{
         "object_core.test",
         "odb_core.test",
         "pack.test",
+        "packed_cache.test",
         "platstat.test",
         "reflog.test",
         "refs_core.test",
@@ -68,6 +69,7 @@ pub const families = [_]Family{
         "worktree_test.test",
     } },
     .{ .name = "core-history", .filters = &.{
+        "blame_test.test",
         "commit_core.test",
         "diff_core.test",
         "diff_test.test",
