@@ -61,6 +61,7 @@ pub const families = [_]Family{
         "archive_test.test",
         "attributes.test",
         "binarypatch.test",
+        "clean_test.test",
         "concurrency_test.test",
         "convert.test",
         "dirscan.test",

@@ -25,6 +25,7 @@
 //! | `patch` | Patches: read, applied, written from commits, applied from a mailbox. | `apply`, `format`, `mail`, `am` |
 //! | `grep` | `git grep` over the working tree, the index or a tree. | |
 //! | `archive` | `git archive`: a tree as a tar or zip file. | |
+//! | `clean` | `git clean`: the untracked files of the working tree removed. | |
 
 pub const repo = @import("repo.zig");
 pub const hash = @import("hash.zig");
@@ -46,6 +47,7 @@ pub const lfs = @import("lfs.zig");
 pub const patch = @import("patch.zig");
 pub const grep = @import("grep.zig");
 pub const archive = @import("archive.zig");
+pub const clean = @import("clean.zig");
 
 const builtin = @import("builtin");
 
@@ -128,6 +130,7 @@ test {
         _ = @import("am_test.zig");
         _ = @import("grep_test.zig");
         _ = @import("archive_test.zig");
+        _ = @import("clean_test.zig");
     }
 }
 
