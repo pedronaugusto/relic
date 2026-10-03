@@ -1,9 +1,13 @@
-//! Patches as git reads and writes them: a patch read into values,
-//! applied to the working tree and the index (`git apply`), and commits
-//! written as email patches (`git format-patch`).
+//! Patches as git reads and writes them: a patch read into values, applied
+//! to the working tree and the index (`git apply`), commits written as
+//! email patches (`git format-patch`), and a mailbox of them applied as
+//! commits (`git am`).
+
 const core = @import("patchparse.zig");
 pub const apply = @import("apply.zig");
 pub const format = @import("formatpatch.zig");
+pub const mail = @import("mailinfo.zig");
+pub const am = @import("am_core.zig");
 /// Errors from reading a patch.
 pub const Error = core.Error;
 /// How a patch is read.
