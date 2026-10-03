@@ -1,10 +1,11 @@
 //! gitoxide's side of the benchmark, through the `gix` hub crate.
 //!
 //! Same six workloads, same timed boundary: the clock starts at "open the
-//! repository" and stops when the work is done. Two workloads are `n/a`:
-//! gix has no staging API (workload 2), and its pack writing lives in
-//! `gix-pack` rather than in the hub crate (workload 5 is measured through
-//! that crate directly, which is noted in the README).
+//! repository" and stops when the work is done. gix has no staging API
+//! (workload 2 is unavailable), and its pack writing lives in `gix-pack`
+//! rather than in the hub crate (workload 5 is measured through that crate
+//! directly, which is noted in the README). The operation workloads are in
+//! `ops/gix.rs`, clone and fetch in `ops/gix_transport.rs`.
 
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -12,14 +13,21 @@ use std::time::Instant;
 
 use gix::prelude::*;
 
+#[path = "ops/gix.rs"]
+mod ops;
+#[path = "ops/gix_transport.rs"]
+mod transport;
+
 fn emit(workload: &str, metric: &str, value: f64, unit: &str) {
     let mut out = std::io::stdout();
     writeln!(out, "gix\t{}\t{}\t{:.3}\t{}", workload, metric, value, unit).unwrap();
 }
 
-fn na(workload: &str, metric: &str) {
+/// A metric or a whole workload the tool cannot give, with the reason.
+fn unavailable(workload: &str, metric: &str, unit: &str, reason: &str) {
     let mut out = std::io::stdout();
-    writeln!(out, "gix\t{}\t{}\tn/a\tn/a", workload, metric).unwrap();
+    writeln!(out, "gix\t{}\t{}\tunavailable\t{}", workload, metric, unit).unwrap();
+    writeln!(out, "gix\t{}\treason\t{}\ttext", workload, reason).unwrap();
 }
 
 fn main() {
@@ -28,13 +36,16 @@ fn main() {
     let repo_path = args.get(2).expect("repository path").clone();
     let extra = args.get(3).cloned();
 
+    if ops::run(command, &repo_path, extra.as_deref()) || transport::run(command, &args[2..]) {
+        return;
+    }
     match command {
         "status" => status(&repo_path),
         "addall" => {
             // gix reads a working tree and writes an index, but it has no
             // `add`: nothing stages a working tree into the index. This is a
             // gap in the rival, not a workload left out.
-            na("addall", "time");
+            unavailable("addall", "time", "ms", "gix has no staging: nothing adds a working tree to the index");
         }
         "revlist" => rev_list(&repo_path),
         "catblobs" => cat_blobs(&repo_path, &extra.expect("blob list")),
@@ -243,7 +254,9 @@ fn pack_write(path: &str, scratch: &str) {
     emit("packwrite", "time", took, "ms");
     emit("packwrite", "pack_bytes", bytes as f64, "bytes");
     emit("packwrite", "objects", num_entries as f64, "count");
-    na("packwrite", "deltas");
+    // `PackCopyAndBaseObjects` searches for no deltas: every loose object
+    // is written whole, which is what gix-pack offers for loose objects.
+    emit("packwrite", "deltas", 0.0, "count");
 }
 
 /// Workload 6: read the index and write it back out.

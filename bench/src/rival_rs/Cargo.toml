@@ -14,7 +14,7 @@ path = "src/bin/git2_bench.rs"
 [dependencies]
 # Default features: what a normal caller gets — max-performance-safe,
 # basic (blob-diff, revision, index), extras (status, dirwalk, ...), sha1.
-gix = "=0.87.1"
+gix = { version = "=0.87.1", features = ["blocking-network-client", "blocking-http-transport-curl"] }
 git2 = "=0.21.0"
 
 # Pack writing is not in the `gix` hub crate: `gix_pack::data::output` is

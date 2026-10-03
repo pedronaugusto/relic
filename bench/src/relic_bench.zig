@@ -13,11 +13,13 @@
 //!   relic_bench catblobs <repo> <blobs.txt>
 //!   relic_bench packwrite <repo>           (repo is a fresh loose-object copy)
 //!   relic_bench indexrw  <repo> <scratch-dir>
+//!   relic_bench <operation> <repo> [extra]  (the operation workloads, `ops.zig`)
 
 const std = @import("std");
 const Io = std.Io;
 const relic = @import("relic");
 const smoke = @import("bench_options").smoke;
+const ops = @import("ops.zig");
 
 const Oid = relic.hash.Oid;
 
@@ -59,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
     const extra = args.next();
 
     var cwd: Io.Dir = .cwd();
+    if (ops.isOp(command)) return ops.run(gpa, io, cwd, command, repo_path, extra);
     var dir = try cwd.openDir(io, repo_path, .{ .iterate = true });
     defer dir.close(io);
 

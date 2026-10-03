@@ -37,6 +37,11 @@ repo = sys.argv[2]
 extra = sys.argv[3] if len(sys.argv) > 3 else None
 G = ["git", "-C", repo]
 
+import git_ops
+if command in git_ops.NAMES:
+    git_ops.run(command, repo, extra)
+    sys.exit(0)
+
 if command == "status":
     best, entries = float("inf"), 0
     for _ in range(1 if os.environ.get("BENCH_SMOKE") == "1" else 5):
@@ -100,14 +105,17 @@ elif command == "packwrite":
     emit("packwrite", "time", took, "ms")
     emit("packwrite", "pack_bytes", size, "bytes")
     emit("packwrite", "objects", names.count(b"\n"), "count")
-    emit("packwrite", "deltas", "n/a", "n/a")
+    # pack-objects does not report its delta count; the harness counts the
+    # deltas of every written pack itself, outside the clock.
+    emit("packwrite", "deltas", "unavailable", "count")
+    emit("packwrite", "reason", "pack-objects does not report a delta count", "text")
 
 elif command == "indexrw":
     # There is no git plumbing that only reads the index and writes it back:
     # `update-index --refresh` stats the working tree, `read-tree` builds the
     # index from a tree. Nothing comparable to measure.
-    emit("indexrw", "time", "n/a", "n/a")
-    emit("indexrw", "entries", "n/a", "n/a")
+    emit("indexrw", "time", "unavailable", "ms")
+    emit("indexrw", "reason", "no git command only reads the index and writes it back", "text")
 
 else:
     raise SystemExit("unknown workload " + command)

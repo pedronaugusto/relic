@@ -3,6 +3,7 @@
 //!
 //!   relic_transport_bench clone <url> <dir> [check]
 //!   relic_transport_bench fetch <dir> [check]
+//!   relic_transport_bench push <dir>
 //!
 //! The environment is the process's own, handed to relic as its Programs:
 //! GIT_SSH_COMMAND names the stand-in ssh. Objects are checked as git's
@@ -49,6 +50,19 @@ pub fn main(init: std.process.Init) !void {
             .check_objects = check,
         });
         outcome.deinit();
+    } else if (std.mem.eql(u8, args[1], "push")) {
+        // main to the remote's main, as `git push origin main:main`.
+        var dir = try cwd.openDir(io, args[2], .{ .iterate = true });
+        defer dir.close(io);
+        var repo = try relic.repo.Repository.open(gpa, io, dir, .{});
+        defer repo.deinit(io);
+        var outcome = try relic.transport.push.push(gpa, io, &repo, "origin", .{
+            .refspecs = &.{"refs/heads/main:refs/heads/main"},
+            .who = who,
+            .programs = .{ .environ = env },
+        });
+        defer outcome.deinit();
+        if (outcome.anyRejected()) return error.PushRejected;
     } else return error.UnknownCommand;
     const elapsed = start.durationTo(benchmarkNow(io));
     var buf: [64]u8 = undefined;

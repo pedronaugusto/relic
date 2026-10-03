@@ -1,7 +1,8 @@
 //! libgit2's side of the benchmark, through the `git2` crate.
 //!
 //! Same six workloads, same timed boundary: the clock starts at "open the
-//! repository" and stops when the work is done.
+//! repository" and stops when the work is done. The operation workloads are
+//! in `ops/git2.rs`, clone, fetch and push in `ops/git2_transport.rs`.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -9,14 +10,21 @@ use std::time::Instant;
 
 use git2::{Oid, Repository};
 
+#[path = "ops/git2.rs"]
+mod ops;
+#[path = "ops/git2_transport.rs"]
+mod transport;
+
 fn emit(workload: &str, metric: &str, value: f64, unit: &str) {
     let mut out = std::io::stdout();
     writeln!(out, "libgit2\t{}\t{}\t{:.3}\t{}", workload, metric, value, unit).unwrap();
 }
 
-fn na(workload: &str, metric: &str) {
+/// A metric the tool cannot give, with the reason.
+fn unavailable(workload: &str, metric: &str, unit: &str, reason: &str) {
     let mut out = std::io::stdout();
-    writeln!(out, "libgit2\t{}\t{}\tn/a\tn/a", workload, metric).unwrap();
+    writeln!(out, "libgit2\t{}\t{}\tunavailable\t{}", workload, metric, unit).unwrap();
+    writeln!(out, "libgit2\t{}\treason\t{}\ttext", workload, reason).unwrap();
 }
 
 fn main() {
@@ -25,6 +33,9 @@ fn main() {
     let repo_path = args.get(2).expect("repository path").clone();
     let extra = args.get(3).cloned();
 
+    if ops::run(command, &repo_path, extra.as_deref()) || transport::run(command, &args[2..]) {
+        return;
+    }
     match command {
         "status" => status(&repo_path),
         "addall" => add_all(&repo_path),
@@ -174,7 +185,7 @@ fn pack_write(path: &str) {
     emit("packwrite", "time", took, "ms");
     emit("packwrite", "pack_bytes", bytes as f64, "bytes");
     emit("packwrite", "objects", names.len() as f64, "count");
-    na("packwrite", "deltas");
+    unavailable("packwrite", "deltas", "count", "the packbuilder streams its pack and reports no delta count");
 }
 
 /// Workload 6: read the index and write it back out.

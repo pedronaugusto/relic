@@ -5,7 +5,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from quiet import check_packwrite, reset_pack_outputs
+from quiet import check_packwrite, reset_pack_outputs, unavailable
+from ops_pass import identities
 from quiet_common import Pass, tsv
 
 HERE = Path(__file__).resolve().parent
@@ -37,7 +38,8 @@ class Scratch:
 
     def run(self, argv):
         self.calls.append([str(a) for a in argv])
-        subprocess.run([str(a) for a in argv], cwd=self.root, env=self.env, check=True, capture_output=True)
+        return subprocess.run([str(a) for a in argv], cwd=self.root, env=self.env, check=True,
+                              capture_output=True, text=True).stdout
 
     def valid_pack(self, dst):
         """A real one-blob pack written by git, at `dst`."""
@@ -130,5 +132,18 @@ class ReportNameTests(unittest.TestCase):
             bare_pass(out).save()
             self.assertTrue((out/'report.json').is_file())
             self.assertTrue((out/'report.md').is_file())
+
+class AgreementTests(unittest.TestCase):
+    def test_counts_and_object_names_are_compared_and_bytes_are_not(self):
+        out = ('relic\tcommit\ttime\t1.000\tms\nrelic\tcommit\tfiles\t30.000\tcount\n'
+               'relic\tcommit\ttree\t' + 'ab' * 20 + '\toid\nrelic\tcommit\tpatch_bytes\t9.000\tbytes\n')
+        self.assertEqual(identities(out), {'files': '30', 'tree': 'ab' * 20})
+        git = 'git\tcommit\ttime\t5.000\tms\ngit\tcommit\tfiles\t30\tcount\n'
+        self.assertEqual(identities(git)['files'], '30')
+
+    def test_an_unavailable_point_is_recognised(self):
+        self.assertTrue(unavailable('gix\tpush\ttime\tunavailable\tms\ngix\tpush\treason\tno push\ttext\n'))
+        self.assertFalse(unavailable('12.5\n'))
+        self.assertFalse(unavailable('gix\tclone\ttime\t12.500\tms\n'))
 
 if __name__ == '__main__': unittest.main()

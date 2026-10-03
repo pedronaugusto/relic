@@ -27,8 +27,10 @@ func emit(workload, metric string, value float64, unit string) {
 	fmt.Printf("go-git\t%s\t%s\t%.3f\t%s\n", workload, metric, value, unit)
 }
 
-func na(workload, metric string) {
-	fmt.Printf("go-git\t%s\t%s\tn/a\tn/a\n", workload, metric)
+// A metric go-git does not report, and why: never a bare n/a.
+func notReported(workload, metric, reason string) {
+	fmt.Printf("go-git\t%s\t%s\tunavailable\tcount\n", workload, metric)
+	fmt.Printf("go-git\t%s\treason\t%s\ttext\n", workload, reason)
 }
 
 func check(err error) {
@@ -46,6 +48,18 @@ func main() {
 		panic("usage: gogit_bench <workload> <repo> [extra]")
 	}
 	command, repo := os.Args[1], os.Args[2]
+	switch {
+	case isOp(command):
+		extra := ""
+		if len(os.Args) > 3 {
+			extra = os.Args[3]
+		}
+		runOp(command, repo, extra)
+		return
+	case command == "clone" || command == "fetch" || command == "push":
+		transport(command, os.Args[2:])
+		return
+	}
 	extra := ""
 	if len(os.Args) > 3 {
 		extra = os.Args[3]
@@ -236,7 +250,7 @@ func packWrite(path, scratch string) {
 	emit("packwrite", "time", took, "ms")
 	emit("packwrite", "pack_bytes", float64(counter.n), "bytes")
 	emit("packwrite", "objects", float64(len(hashes)), "count")
-	na("packwrite", "deltas")
+	notReported("packwrite", "deltas", "go-git's packfile encoder does not report its delta count")
 }
 
 // Workload 6: read the index and write it back out.
@@ -269,10 +283,14 @@ func indexRW(path, scratch string) {
 }
 
 func benchmarkNow() time.Time {
-    if os.Getenv("BENCH_SMOKE") == "1" { return time.Time{} }
-    return time.Now()
+	if os.Getenv("BENCH_SMOKE") == "1" {
+		return time.Time{}
+	}
+	return time.Now()
 }
 func benchmarkSince(start time.Time) time.Duration {
-    if os.Getenv("BENCH_SMOKE") == "1" { return time.Nanosecond }
-    return time.Since(start)
+	if os.Getenv("BENCH_SMOKE") == "1" {
+		return time.Nanosecond
+	}
+	return time.Since(start)
 }

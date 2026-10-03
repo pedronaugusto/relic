@@ -1,5 +1,6 @@
 """Quiet-pass plumbing. Smoke discards all elapsed values and raw output."""
 import argparse
+import ctypes
 import datetime
 import io
 import json
@@ -142,13 +143,22 @@ class Pass:
                 if Path(str(argv[0])).is_absolute(): self.prepared.require(argv[0])
             return
         # Same order on every round: A, B, comparisons, A, B, comparisons ...
+        # A side whose warm-up says it cannot do the work is recorded as
+        # unavailable in every round without being prepared or run again.
+        skipped = {}
         if not self.smoke:
             for side, argv in commands:
                 if kwargs.get('prepare'): kwargs['prepare']()
                 output = self.run(argv,cwd=kwargs.get('cwd'),env=kwargs.get('env'))
                 if kwargs.get('check'): kwargs['check'](output)
+                if unavailable(output): skipped[side] = output
         for round in range(self.runs):
-            for side, argv in commands: self.point(workload,side,argv,round,**kwargs)
+            for side, argv in commands:
+                if side in skipped:
+                    row = {'workload':workload,'side':side,'round':round+1,'status':'unavailable','output':skipped[side]}
+                    self.rows.append(row)
+                    self.save()
+                else: self.point(workload,side,argv,round,**kwargs)
     def kind(self):
         """The mode, and the name its files are saved under. Only a quiet pass
         writes `report.*`: smoke's preparation subprocess and a preparation
@@ -189,6 +199,22 @@ class Pass:
         self.complete = True
         self.save()
         print(f"{'Smoke passed; no timings recorded' if self.smoke else 'Pass complete'}: {self.out}",flush=True)
+
+def copy_repo(p, src, dst):
+    """A fresh copy of `src` at `dst`. On APFS one clonefile(2) of the
+    directory: the same cloned blocks `cp -c` makes, without a call per file,
+    which on a 20,000-file worktree is the difference between seconds and a
+    fraction of one."""
+    if dst.exists():p.run(['rm','-rf',dst])
+    if sys.platform=='darwin' and _clonefile(str(src).encode(),str(dst).encode(),0)==0:return
+    p.run(['cp','-ac' if sys.platform=='darwin' else '-a',src,dst])
+
+_clonefile = ctypes.CDLL(None,use_errno=True).clonefile if sys.platform=='darwin' else None
+
+def unavailable(output):
+    """Whether a point said it could not do the work at all: an
+    `unavailable` time row, as `tsv` reads it."""
+    return any(line.split('\t')[2:4] == ['time','unavailable'] for line in output.splitlines() if line.count('\t') == 4)
 
 def tsv(output):
     """A point's five-column rows. `unavailable` counts the metrics the tool
