@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Count the five new performance checks in Windows source-family coverage.
+
 - Copy only defined compressor state when starting each pack entry.
 
 - Keep small pack entries in the fast decode loop with bounded scratch and exact owned results.
