@@ -95,6 +95,82 @@ test "name-status agrees with git diff-tree" {
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
+/// A random tree for the walk below: up to three levels of names chosen so
+/// that a file and a subtree of one name sort apart (`a`, `a.b`, `a-b`,
+/// `a0`), with three file kinds.
+const RandomTree = struct {
+    const names = [_][]const u8{ "a", "a.b", "a-b", "a0", "b" };
+    const Kind = enum { file, exec, symlink, tree };
+
+    fn build(gpa: std.mem.Allocator, io: Io, db: *odb_mod.Odb, random: std.Random, depth: u32, same: ?Oid) !Oid {
+        // A subtree left as it was, as most of a large one is.
+        if (same) |oid| if (random.uintLessThan(u8, 3) == 0) return oid;
+        var b: @import("object_core.zig").Tree.Builder = .init(gpa, .sha1);
+        defer b.deinit();
+        for (names) |name| {
+            if (random.boolean()) continue;
+            // No subtree below the third level.
+            const kind: Kind = if (depth < 2) random.enumValue(Kind) else @enumFromInt(random.uintLessThan(u8, 3));
+            switch (kind) {
+                .tree => {
+                    const sub = try build(gpa, io, db, random, depth + 1, null);
+                    try b.add(.tree, name, sub);
+                },
+                else => {
+                    var text: [16]u8 = undefined;
+                    const blob = try db.write(io, .blob, try std.fmt.bufPrint(&text, "{d}\n", .{random.uintLessThan(u8, 3)}));
+                    try b.add(switch (kind) {
+                        .file => .file,
+                        .exec => .exec,
+                        else => .symlink,
+                    }, name, blob);
+                },
+            }
+        }
+        const bytes = try b.build();
+        defer gpa.free(bytes);
+        return db.write(io, .tree, bytes);
+    }
+};
+
+test "a walk of two random trees lists what git diff-tree lists, with and without a prefix" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    var git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+
+    var prng: std.Random.DefaultPrng = .init(0xd1ff);
+    const random = prng.random();
+    for (0..60) |round| {
+        const old = try RandomTree.build(gpa, io, &db, random, 0, null);
+        // Half the time the new tree keeps some of the old one's subtrees.
+        const new = try RandomTree.build(gpa, io, &db, random, 0, if (round % 2 == 0) old else null);
+        var old_hex: [hash.max_hex_len]u8 = undefined;
+        var new_hex: [hash.max_hex_len]u8 = undefined;
+        for ([_][]const u8{ "", "a", "a.b", "a/a" }) |prefix| {
+            var changes = try diff.tree(gpa, io, &db, old, new, .{ .prefix = prefix });
+            defer changes.deinit();
+            var args: std.ArrayList([]const u8) = .empty;
+            defer args.deinit(gpa);
+            try args.appendSlice(gpa, &.{ "diff-tree", "--name-status", "-r", old.hex(&old_hex), new.hex(&new_hex) });
+            if (prefix.len != 0) try args.appendSlice(gpa, &.{ "--", prefix });
+            const expected = try repo.run(io, args.items);
+            defer gpa.free(expected);
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            for (changes.items) |change| try out.writer.print("{c}\t{s}\n", .{ change.letter(), change.path() });
+            std.testing.expectEqualStrings(expected, out.written()) catch |err| {
+                std.debug.print("round {d}, prefix '{s}'\n", .{ round, prefix });
+                return err;
+            };
+        }
+    }
+}
+
 test "numstat agrees with git, including the binary marker" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

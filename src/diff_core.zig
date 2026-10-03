@@ -151,33 +151,14 @@ pub fn tree(
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    var old_entries: Flat = .empty;
-    if (old) |oid| try flatten(arena, io, db, oid, "", &old_entries, 0);
-    var new_entries: Flat = .empty;
-    if (new) |oid| try flatten(arena, io, db, oid, "", &new_entries, 0);
-
     var changes: std.ArrayList(Change) = .empty;
+    var walk: Walk = .{ .arena = arena, .io = io, .db = db, .prefix = options.prefix, .out = &changes };
+    try walk.trees(old, new, "", 0);
 
-    for (old_entries.keys(), old_entries.values()) |path, entry| {
-        if (!underPrefix(path, options.prefix)) continue;
-        if (new_entries.get(path)) |after| {
-            if (after.oid.eql(entry.oid) and after.mode == entry.mode) continue;
-            const status: Status = if (entry.mode.isBlob() != after.mode.isBlob() or
-                (entry.mode == .symlink) != (after.mode == .symlink) or
-                (entry.mode == .gitlink) != (after.mode == .gitlink))
-                .type_changed
-            else
-                .modified;
-            try changes.append(arena, .{ .status = status, .old = entry, .new = after });
-            continue;
-        }
-        try changes.append(arena, .{ .status = .deleted, .old = entry, .new = null });
-    }
-    for (new_entries.keys(), new_entries.values()) |path, entry| {
-        if (!underPrefix(path, options.prefix)) continue;
-        if (old_entries.contains(path)) continue;
-        try changes.append(arena, .{ .status = .added, .old = null, .new = entry });
-    }
+    // `--find-copies-harder` offers every file of the old tree as a source.
+    var old_entries: Flat = .empty;
+    const harder = if (options.renames) |r| r.detect_copies and r.find_copies_harder else false;
+    if (harder) if (old) |oid| try flatten(arena, io, db, oid, "", &old_entries, 0);
 
     std.mem.sort(Change, changes.items, {}, lessThanChange);
 
@@ -187,6 +168,111 @@ pub fn tree(
     }
 
     return .{ .gpa = gpa, .arena = arena_instance.state, .items = changes.items };
+}
+
+/// Two trees walked side by side, as git's tree diff walks them: a subtree
+/// both sides hold under the same name is passed over without being read,
+/// so the cost is the part of the trees that differs and not their size.
+const Walk = struct {
+    arena: Allocator,
+    io: Io,
+    db: *odb_mod.Odb,
+    prefix: []const u8,
+    out: *std.ArrayList(Change),
+
+    fn trees(w: *Walk, old: ?Oid, new: ?Oid, base: []const u8, depth: u32) Error!void {
+        if (depth > 64) return error.TreeTooDeep;
+        if (old != null and new != null and old.?.eql(new.?)) return;
+        const old_bytes = if (old) |oid| try w.readTree(oid) else null;
+        defer if (old_bytes) |b| w.db.allocator().free(b);
+        const new_bytes = if (new) |oid| try w.readTree(oid) else null;
+        defer if (new_bytes) |b| w.db.allocator().free(b);
+        const kind = w.db.objectFormat();
+        var old_it = object.Tree.parse(kind, old_bytes orelse "").iterate();
+        var new_it = object.Tree.parse(kind, new_bytes orelse "").iterate();
+        var a = try old_it.next();
+        var b = try new_it.next();
+        while (a != null or b != null) {
+            const order: std.math.Order = if (a == null) .gt else if (b == null) .lt else treeOrder(a.?, b.?);
+            switch (order) {
+                .lt => {
+                    try w.oneSide(a.?, base, .deleted, depth);
+                    a = try old_it.next();
+                },
+                .gt => {
+                    try w.oneSide(b.?, base, .added, depth);
+                    b = try new_it.next();
+                },
+                .eq => {
+                    try w.bothSides(a.?, b.?, base, depth);
+                    a = try old_it.next();
+                    b = try new_it.next();
+                },
+            }
+        }
+    }
+
+    fn readTree(w: *Walk, oid: Oid) Error![]u8 {
+        const found = try w.db.read(w.io, oid);
+        if (found.type != .tree) {
+            w.db.allocator().free(found.bytes);
+            return error.NotATree;
+        }
+        return found.bytes;
+    }
+
+    /// An entry on one side only: a file added or deleted, or every file
+    /// of a subtree.
+    fn oneSide(w: *Walk, e: object.Tree.Entry, base: []const u8, status: Status, depth: u32) Error!void {
+        const path = (try w.pathIfWanted(e, base)) orelse return;
+        if (e.mode.isTree()) {
+            return if (status == .deleted) w.trees(e.oid, null, path, depth + 1) else w.trees(null, e.oid, path, depth + 1);
+        }
+        const entry: Entry = .{ .path = path, .mode = e.mode, .oid = e.oid };
+        try w.out.append(w.arena, if (status == .deleted)
+            .{ .status = .deleted, .old = entry, .new = null }
+        else
+            .{ .status = .added, .old = null, .new = entry });
+    }
+
+    /// One name on both sides, both subtrees or neither.
+    fn bothSides(w: *Walk, a: object.Tree.Entry, b: object.Tree.Entry, base: []const u8, depth: u32) Error!void {
+        if (a.oid.eql(b.oid) and a.mode == b.mode) return;
+        const path = (try w.pathIfWanted(a, base)) orelse return;
+        if (a.mode.isTree()) return w.trees(a.oid, b.oid, path, depth + 1);
+        const status: Status = if (a.mode.isBlob() != b.mode.isBlob() or
+            (a.mode == .symlink) != (b.mode == .symlink) or
+            (a.mode == .gitlink) != (b.mode == .gitlink))
+            .type_changed
+        else
+            .modified;
+        try w.out.append(w.arena, .{
+            .status = status,
+            .old = .{ .path = path, .mode = a.mode, .oid = a.oid },
+            .new = .{ .path = path, .mode = b.mode, .oid = b.oid },
+        });
+    }
+
+    /// The entry's path, or `null` when the prefix leaves it out: a file
+    /// outside it, or a subtree that neither lies inside it nor holds it.
+    fn pathIfWanted(w: *Walk, e: object.Tree.Entry, base: []const u8) Allocator.Error!?[]const u8 {
+        const path = if (base.len == 0) try w.arena.dupe(u8, e.name) else try std.fmt.allocPrint(w.arena, "{s}/{s}", .{ base, e.name });
+        if (underPrefix(path, w.prefix)) return path;
+        if (e.mode.isTree() and std.mem.startsWith(u8, w.prefix, path) and w.prefix[path.len] == '/') return path;
+        return null;
+    }
+};
+
+/// git's order of tree entries: by name, a subtree's with `/` after it.
+fn treeOrder(a: object.Tree.Entry, b: object.Tree.Entry) std.math.Order {
+    const len = @min(a.name.len, b.name.len);
+    switch (std.mem.order(u8, a.name[0..len], b.name[0..len])) {
+        .eq => {},
+        else => |o| return o,
+    }
+    const ca: u8 = if (a.name.len > len) a.name[len] else if (a.mode.isTree()) '/' else 0;
+    const cb: u8 = if (b.name.len > len) b.name[len] else if (b.mode.isTree()) '/' else 0;
+    return std.math.order(ca, cb);
 }
 
 fn underPrefix(path: []const u8, prefix: []const u8) bool {

@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `diff.tree` walks the two trees side by side as git's tree diff does, and passes over a subtree both hold unchanged without reading it; it read and listed every path of both trees. A diff of two commits of a large tree costs what differs between them, and so do the patch ids `rebase` compares.
+
 - `Odb.findPrefix` finds an abbreviated name in a pack index by bisection and looks at the one name after it; it walked every name past the match to the end of the index.
 
 - A ref store keeps `packed-refs` parsed between lookups and checks it with a stat of the file before each one, as git's files backend does: the file's identity, size and times, taken from the descriptor the bytes were read through. `read`, `resolve` and `list` no longer read and parse the whole file for every lookup, which made resolving a name in a repository with a thousand packed tags cost a parse of every line, three times over for a name tried under `refs/`, `refs/tags/` and `refs/heads/`. `readPacked` still reads the file afresh, and its listing is now sorted by name, as git sorts a file that does not say it is.
