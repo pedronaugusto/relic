@@ -82,6 +82,7 @@ pub const families = [_]Family{
         "rerere.test",
         "reset.test",
         "revparse.test",
+        "threeway.test",
         "revwalk_core.test",
         "revwalk_test.test",
         "sequencer.test",
