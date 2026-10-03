@@ -1,7 +1,9 @@
-//! Patches as git reads them: a patch read into values, and applied to
-//! the working tree and the index (`git apply`).
+//! Patches as git reads and writes them: a patch read into values,
+//! applied to the working tree and the index (`git apply`), and commits
+//! written as email patches (`git format-patch`).
 const core = @import("patchparse.zig");
 pub const apply = @import("apply.zig");
+pub const format = @import("formatpatch.zig");
 /// Errors from reading a patch.
 pub const Error = core.Error;
 /// How a patch is read.

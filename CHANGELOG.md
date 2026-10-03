@@ -7,6 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 - Add `patch.apply`: `git apply` to the working tree, the index or both, with `--3way`, `--reject`, `--check`, `-R` and git's whitespace rules, and `patch.parse` for the patch itself.
+- Add `patch.format`: `git format-patch`, byte for byte, cover letter and base information included.
 
 - `collectLoose` and `collectAll` read the loose trees their hints come from on tasks too, eight megabytes at a time, and parse them in order, so every task count gives the same hints.
 

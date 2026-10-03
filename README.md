@@ -294,6 +294,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `lfs.netrc` | What the LFS client reads beside: `~/.netrc`. |
 | `patch` | `parse`, `Patch`, `FilePatch`, `Fragment`: git patches and plain unified diffs read as `git apply` reads them, from whatever surrounds them. |
 | `patch.apply` | `apply` — `git apply` to the working tree, the index or both: renames, copies, modes, binary hunks, `-R`, `--3way`, `--reject`, `--check`, whitespace checked or fixed, nothing written unless every file applies. |
+| `patch.format` | `format` — `git format-patch` byte for byte: numbering, the diffstat, binary hunks, a cover letter, base information, threading and attachments. |
 
 Every public declaration carries a doc comment stating its contract, and every
 operation has one named error set. A refusal is a named error. For a refused
@@ -640,6 +641,7 @@ refresh and re-hash the whole working tree.
 - **No `git://`, dumb HTTP or remote helpers.** Refused by name.
 - **No `hasconfig:` includes.**
 - **`apply` with the index compares content where a stat differs.** git says "does not match index" until the index is refreshed; this reads the file and agrees when its content does.
+- **A binary hunk in a written patch is this package's deflate.** It decodes to the same file; the compressed bytes are not zlib's. A cover letter's shortlog under a mailmap is refused by name.
 
 ## Ahead
 
