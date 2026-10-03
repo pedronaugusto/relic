@@ -20,6 +20,7 @@ const index_mod = @import("index_core.zig");
 const refs_mod = @import("refs_core.zig");
 const reflog = @import("reflog.zig");
 const config_mod = @import("config_core.zig");
+const commit_cache = @import("commit_cache.zig");
 const shallow = @import("shallow.zig");
 const ignore = @import("ignore.zig");
 const attributes = @import("attributes.zig");
@@ -175,6 +176,8 @@ pub const Repository = struct {
     /// What `lfsconfigText` last found, and what it was found from.
     lfsconfig_cache: ?LfsconfigCache = null,
     lfsconfig_mutex: Io.Mutex = .init,
+    /// Commits read through `commitInfo` and `commitTree`, kept.
+    _commits: commit_cache.Cache = .{},
 
     /// Open the repository at `path`, or the first one above it.
     ///
@@ -639,6 +642,7 @@ pub const Repository = struct {
     /// Close everything the repository holds.
     pub fn deinit(repo: *Repository, io: Io) void {
         if (repo.lfsconfig_cache) |c| if (c.text) |t| repo.gpa.free(t);
+        repo._commits.deinit(repo.gpa);
         repo.refStore().deinit();
         repo.gpa.destroy(repo.refStore());
         repo.odb.deinit(io);
@@ -1032,12 +1036,14 @@ pub const Repository = struct {
 
     /// The tree a commit points at.
     pub fn commitTree(repo: *Repository, io: Io, commit_oid: Oid) Error!Oid {
-        const found = try repo.odb.read(io, commit_oid);
-        defer repo.gpa.free(found.bytes);
-        if (found.type != .commit) return error.UnexpectedObjectType;
-        var commit = try object.Commit.parse(repo.gpa, repo.objectFormat(), found.bytes);
-        defer commit.deinit();
-        return commit.tree;
+        return (try repo.commitInfo(io, commit_oid, null)).tree;
+    }
+
+    /// A commit's tree and parents, as its object records them, the
+    /// parents copied with `out` (none without it). Each commit is read
+    /// once per repository handle and kept, a bounded number of them.
+    pub fn commitInfo(repo: *Repository, io: Io, commit_oid: Oid, out: ?Allocator) Error!commit_cache.Info {
+        return repo._commits.get(repo.gpa, io, &repo.odb, commit_oid, out);
     }
 
     /// Follow a tag object until it names something that is not a tag, and
