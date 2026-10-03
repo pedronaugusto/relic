@@ -662,6 +662,7 @@ refresh and re-hash the whole working tree.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
 - **No `git://`, dumb HTTP or remote helpers.** Refused by name.
 - **No `hasconfig:` includes.**
+- **No pathspec in a bisection, no `--group=format:` in a shortlog, no editor for a note, no `sparse:oid=` filter in a bundle.** Each refused by name; a shortlog by trailer is refused too where `trailer.*` is configured.
 
 ## Ahead
 
@@ -736,7 +737,12 @@ clone, fetch and push against `git http-backend`, git's own ssh transport
 through a stand-in, and relic's upload-pack, with refs, reflogs,
 `.git/shallow` and `.promisor` files compared; merges, cherry-picks, rebases
 and rerere against the git that made the fixture, state files and reflogs
-included; LFS transfers and locks against git-lfs on a local server; a pack
+included; `describe` (with `--contains`), `shortlog` and `check-mailmap`
+under each of their options; notes added, appended, copied, removed and
+merged under every strategy, commit for commit, fanout included; a bundle's
+header byte for byte and what git unbundles from it, and git's bundles read
+and fetched from; a bisection step by step, its state files, refs, logs and
+checkouts, through skips, `--first-parent`, replay and `run`; LFS transfers and locks against git-lfs on a local server; a pack
 this wrote against `git verify-pack -v` and `git index-pack --verify`, with
 and without deltas and with either delta kind; the reachable object set
 against `git rev-list --objects --all`; a repository whose loose objects have
@@ -763,14 +769,16 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Sixty-five fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Sixty-nine fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
 between them they cover every format relic reads: the object formats, packs
 and their indexes, the index file, refs, reftable and reflogs, config and
 attributes, the glob matcher, the accelerators, packet lines and the wire
 protocol's answers, credential helper answers, filter specs, LFS batch and
-lock answers, TLS handshake messages and private keys, and the merge state
-files. Five check
+lock answers, TLS handshake messages and private keys, the merge state
+files, mailmaps, bundle headers, notes trees and the bisect log's quoting.
+The notes fuzzer also edits a notes tree against a map and reads back what it
+wrote. Five check
 more than that. The diff fuzzer applies the
 edit script it produced and checks that it reproduces the other side, which is
 the property that catches an off-by-one nothing else would. The
