@@ -161,11 +161,15 @@ fn ignoredBytes(buf: []const u8, comment: []const u8) usize {
 
 /// Where `token: value` puts its colon, or `null` for a line that is not a
 /// trailer: a token of letters, digits and dashes, then optional
-/// whitespace.
+/// whitespace. A colon that begins `://` straight after the token is a URL
+/// and not a separator, as git 2.56 reads it.
 fn findSeparator(line: []const u8) ?usize {
     var whitespace_found = false;
     for (line, 0..) |c, i| {
-        if (c == ':') return i;
+        if (c == ':') {
+            if (!whitespace_found and std.mem.startsWith(u8, line[i..], "://")) return null;
+            return i;
+        }
         if (!whitespace_found and (isAlnum(c) or c == '-')) continue;
         if (i != 0 and (c == ' ' or c == '\t')) {
             whitespace_found = true;
@@ -242,6 +246,9 @@ fn trailerBlockStart(buf: []const u8, len: usize, comment: []const u8) usize {
 pub const Trailer = struct {
     key: []const u8,
     value: []const u8,
+    /// Whether the line had a separator; a line of the block without one
+    /// is handed back too, its whole text the key, as git's iterator does.
+    separated: bool,
 };
 
 /// The trailers of `msg`, in order, as `trailer_iterator_advance` reads
@@ -272,11 +279,9 @@ pub fn trailers(arena: Allocator, msg: []const u8, comment: []const u8) Allocato
     for (lines.items, out) |line, *t| {
         const text = line.items;
         if (findSeparator(text)) |sep| {
-            t.key = trim(text[0..sep]);
-            t.value = try unfold(arena, trim(text[sep + 1 ..]));
+            t.* = .{ .key = trim(text[0..sep]), .value = try unfold(arena, trim(text[sep + 1 ..])), .separated = true };
         } else {
-            t.key = trim(text);
-            t.value = "";
+            t.* = .{ .key = trim(text), .value = "", .separated = false };
         }
     }
     return out;
@@ -559,4 +564,32 @@ fn fuzzMessage(_: void, smith: *std.testing.Smith) anyerror!void {
     const subject = try onelineSubject(gpa, text);
     gpa.free(subject);
     _ = commentString("auto", text);
+}
+
+test "trailers are git interpret-trailers' trailers, a URL line not one" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    const urls = try testgit.gitAtLeast(gpa, io, 2, 56);
+    const messages = [_][]const u8{
+        "subject\n\nKey: value\nOther-Key:   spaced  \n  continued\n",
+        "subject\n\nbody\n\nSigned-off-by: A <a@b>\nnot a trailer\nMore: x\n",
+        "Fix: only a title\n",
+        "subject\n\nSee https://example.com/x\nhttps://example.com/y\nKey: v\n",
+    };
+    for (messages, 0..) |msg, i| {
+        if (i == 3 and !urls) continue;
+        const expected = try r.runInput(io, &.{ "interpret-trailers", "--parse", "--no-divider" }, msg);
+        defer gpa.free(expected);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(gpa);
+        // `--parse` shows only the lines with a separator.
+        for (try trailers(arena.allocator(), msg, "#")) |t| {
+            if (t.separated) try got.print(gpa, "{s}: {s}\n", .{ t.key, t.value });
+        }
+        try std.testing.expectEqualStrings(expected, got.items);
+    }
 }
