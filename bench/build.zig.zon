@@ -7,8 +7,8 @@
     .dependencies = .{
         .relic = .{ .path = ".." },
         .after = .{
-            .url = "https://github.com/pedronaugusto/relic/archive/95b7103e15af021ca6b5a935464852213cc0b017.tar.gz",
-            .hash = "relic-0.3.0-n6Y3YMUQUwC6OXOV-stXvmeNGF615vfJchmyT1zXQz5g",
+            .url = "https://github.com/pedronaugusto/relic/archive/f22b38aa9c2615c0e82c214114345983c725fc35.tar.gz",
+            .hash = "relic-0.3.0-n6Y3YI4fVACi4K9l5_RpgHx5qc3W5Ya_j1E_fLv0oIe5",
         },
     },
 }

@@ -3,7 +3,7 @@
 Keep the `bench` worktree in the workspace’s `.bench/relic`, outside `.zig-cache`; `bench/quiet.sh` resolves its files from its own directory.
 
 Pinned before: `86045db483496f695795ec5ee653e99ebf2dd395`.
-Pinned current fixture: `95b7103e15af021ca6b5a935464852213cc0b017`.
+Pinned current fixture: `f22b38aa9c2615c0e82c214114345983c725fc35`.
 
 `bench/quiet.sh` is the complete pass. `bench/quiet.sh --smoke` exercises
 all available workloads once on tiny fixtures, without warmups or saved timing
