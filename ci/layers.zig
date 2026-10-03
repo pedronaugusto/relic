@@ -154,6 +154,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/convert.zig",
         "src/diff_core.zig",
         "src/objectfilter.zig",
+        "src/pretty.zig",
         "src/revwalk_test.zig",
         "src/sparseindex.zig",
     } },
@@ -175,6 +176,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "repository operations", .patterns = &.{
         "src/blame_test.zig",
         "src/bisect.zig",
+
+        "src/archive.zig",
+        "src/archive_test.zig",
         "src/commithooks.zig",
         "src/config_refresh_test.zig",
         "src/describe.zig",
