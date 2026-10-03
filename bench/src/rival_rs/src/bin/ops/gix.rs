@@ -78,6 +78,12 @@ pub fn run(workload: &str, path: &str, extra: Option<&str>) -> bool {
         "lfs-add" | "lfs-checkout" => unavailable(workload, "gix has no LFS"),
         "submodule-update" => unavailable(workload, "gix has no submodule update"),
         "snapshot" => unavailable(workload, "gix has no working-tree snapshot (stash create)"),
+        "archive" => archive(workload, path, extra.expect("output")),
+        "apply" => unavailable(workload, "gix has no patch application"),
+        "format-patch" => unavailable(workload, "gix has no format-patch"),
+        "am" => unavailable(workload, "gix has no am"),
+        "grep" => unavailable(workload, "gix has no grep"),
+        "clean" => unavailable(workload, "gix has no clean: its dirwalk lists what is untracked, and removing it is gitoxide's command line"),
         _ => return false,
     }
     true
@@ -473,4 +479,19 @@ fn submodule_status(w: &str, path: &str) {
     }
     emit(w, "time", best, "ms");
     count(w, "submodules", n);
+}
+
+/// `git archive -o <file> main`: main's tree streamed with its attributes
+/// and written as a tar, every entry at the commit's time.
+fn archive(w: &str, path: &str, out: &str) {
+    let start = BenchmarkInstant::now();
+    let repo = gix::open(path).unwrap();
+    let commit = repo.rev_parse_single("refs/heads/main").unwrap().object().unwrap().into_commit();
+    let time = commit.time().unwrap().seconds;
+    let (stream, _index) = repo.worktree_stream(commit.tree_id().unwrap()).unwrap();
+    let file = std::io::BufWriter::new(std::fs::File::create(out).unwrap());
+    let options = gix_archive::Options { format: gix_archive::Format::Tar, tree_prefix: None, modification_time: time };
+    repo.worktree_archive(stream, file, gix::progress::Discard, &AtomicBool::new(false), options).unwrap();
+    let took = ms(&start);
+    emit(w, "time", took, "ms");
 }

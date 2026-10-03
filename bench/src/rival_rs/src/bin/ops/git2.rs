@@ -82,6 +82,12 @@ pub fn run(workload: &str, path: &str, extra: Option<&str>) -> bool {
         "verify" => unavailable(workload, "libgit2 has no pack or object verification"),
         "lfs-add" | "lfs-checkout" => unavailable(workload, "libgit2 has no LFS"),
         "snapshot" => unavailable(workload, "libgit2 has no stash create: its stash always resets the working tree"),
+        "apply" => apply(workload, path, extra.expect("patch")),
+        "format-patch" => format_patch(workload, path),
+        "clean" => clean(workload, path),
+        "am" => unavailable(workload, "libgit2 has no mailbox reading: no am"),
+        "grep" => unavailable(workload, "libgit2 has no grep"),
+        "archive" => unavailable(workload, "libgit2 has no archive"),
         _ => return false,
     }
     true
@@ -554,4 +560,54 @@ fn submodule_update(w: &str, path: &str) {
     let took = ms(&start);
     emit(w, "time", took, "ms");
     count(w, "submodules", n);
+}
+
+/// `git apply --index <patch>`: the patch read and applied to the index
+/// and the working tree.
+fn apply(w: &str, path: &str, patch: &str) {
+    let start = BenchmarkInstant::now();
+    let bytes = std::fs::read(patch).unwrap();
+    let repo = Repository::open(path).unwrap();
+    let diff = git2::Diff::from_buffer(&bytes).unwrap();
+    repo.apply(&diff, git2::ApplyLocation::Both, None).unwrap();
+    let took = ms(&start);
+    emit(w, "time", took, "ms");
+    count(w, "files", diff.deltas().len());
+}
+
+/// `git format-patch main~10..main`: one mail per commit, oldest first,
+/// each libgit2's own email of the commit with its diffstat.
+fn format_patch(w: &str, path: &str) {
+    let mut best = f64::MAX;
+    let mut mails = 0;
+    for _ in 0..reps() {
+        let start = BenchmarkInstant::now();
+        let repo = Repository::open(path).unwrap();
+        let mut walk = repo.revwalk().unwrap();
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE).unwrap();
+        walk.push(id(&repo, "refs/heads/main")).unwrap();
+        walk.hide(id(&repo, "refs/heads/main~10")).unwrap();
+        let mut mbox: Vec<u8> = Vec::new();
+        mails = 0;
+        for c in walk {
+            let commit = repo.find_commit(c.unwrap()).unwrap();
+            let email = git2::Email::from_commit(&commit, &mut git2::EmailCreateOptions::new()).unwrap();
+            mbox.extend_from_slice(email.as_slice());
+            mails += 1;
+        }
+        std::hint::black_box(&mbox);
+        best = best.min(ms(&start));
+    }
+    emit(w, "time", best, "ms");
+    count(w, "mails", mails);
+}
+
+/// `git clean -f -d`, as libgit2 offers it: a checkout of `HEAD` that
+/// removes untracked files.
+fn clean(w: &str, path: &str) {
+    let start = BenchmarkInstant::now();
+    let repo = Repository::open(path).unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().remove_untracked(true))).unwrap();
+    let took = ms(&start);
+    emit(w, "time", took, "ms");
 }

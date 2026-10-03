@@ -10,6 +10,7 @@ the operation left behind is checked with git afterwards.
 """
 import subprocess
 import sys
+import tarfile
 from quiet_common import copy_repo, tsv
 
 # workload: (fixture, setup). Fixtures are directories of an mkops.py
@@ -28,6 +29,8 @@ OPS = {
     'snapshot': ('ops/dirty', 'store'),
     'lfs-add': ('lfs/add', 'copy'), 'lfs-checkout': ('lfs/checkout', 'copy'),
     'submodule-status': ('submodules/super-init', None), 'submodule-update': ('submodules/super-fresh', 'copy'),
+    'apply': ('ops/repo', 'patch'), 'format-patch': ('ops/repo', None), 'am': ('ops/repo', 'mbox'),
+    'grep': ('ops/repo', None), 'archive': ('ops/repo', 'archive'), 'clean': ('ops/repo', 'untracked'),
 }
 # Sizes each fixture family is built at; submodules have one.
 SIZES = ('small', 'medium', 'large')
@@ -60,21 +63,29 @@ def ops_pass(p, binary, commands, scratch, root):
     work = scratch/'ops'
     dest = scratch/'ops-worktree'
     store = scratch/'ops-store'
+    # What the patch workloads read and archive writes, made per sample.
+    patch, mbox, tar = scratch/'ops.patch', scratch/'ops.mbox', scratch/'ops.tar'
     for size in sizes:
         fx = root/size
         for workload, (fixture, setup) in OPS.items():
             if fixture.startswith('submodules') and size not in ('smoke',) + SUBMODULE_SIZES: continue
             source = fx/fixture
-            repo = source if setup in (None, 'exprs') else work
+            repo = source if setup in (None, 'exprs', 'archive') else work
             extra = []
             if setup == 'exprs': extra = [fx/'ops/exprs.txt']
             if setup == 'worktree': extra = [dest]
             if setup == 'store': extra = [store]
+            if setup == 'patch': extra = [patch]
+            if setup == 'mbox': extra = [mbox]
+            if setup == 'archive': extra = [tar]
             prep = None
-            if setup not in (None, 'exprs'):
+            if setup == 'archive':
+                def prep():
+                    if tar.exists(): tar.unlink()
+            elif setup not in (None, 'exprs'):
                 def prep(source=source, setup=setup):
                     copy(p, source, work)
-                    for leftover in (dest, store):
+                    for leftover in (dest, store, patch, mbox):
                         if leftover.exists(): p.run(['rm', '-rf', leftover])
                     if source.name.endswith('.git'): return
                     git = ['git', '-C', str(work)]
@@ -85,6 +96,12 @@ def ops_pass(p, binary, commands, scratch, root):
                     if setup == 'side': p.run(git + ['switch', '-q', 'side'])
                     if setup in ('staged', 'modified'): p.run([sys.executable, p.here/'src/mutate.py', work, 'd*/d*/f*.txt'])
                     if setup == 'staged': p.run(git + ['add', '-A'])
+                    # main~10..main as git writes it, for the copy at main~10
+                    # to take: a patch for apply, a mailbox for am.
+                    if setup == 'patch': write(p, patch, git + ['diff', 'main~10', 'main'])
+                    if setup == 'mbox': write(p, mbox, git + ['format-patch', '--stdout', '--signature=bench', 'main~10..main'])
+                    if setup in ('patch', 'mbox'): p.run(git + ['switch', '-q', '--detach', 'main~10'])
+                    if setup == 'untracked': untracked(work)
             points = [(side, [*argv, workload, repo, *extra]) for side, argv in binary.items()]
             points += [(tool, [*argv, workload, repo, *extra]) for tool, argv in commands.items()]
             agreed = {}
@@ -101,6 +118,24 @@ def ops_pass(p, binary, commands, scratch, root):
                 evidence['agreed'] = found
                 return evidence
             p.interleave(f'{workload}/{size}', points, prepare=prep, check=check)
+
+
+def write(p, path, argv):
+    """A command's standard output, into `path`."""
+    with open(path, 'wb') as out:
+        subprocess.run(argv, env=p.env, check=True, stdout=out)
+
+
+def untracked(repo):
+    """1 % of the fixture's file count in untracked files, at least ten:
+    half in new directories, half beside tracked files."""
+    tracked = sorted(repo.glob('d*/d*/f*.txt'))
+    count = max(10, len(tracked) // 100)
+    for i in range(count):
+        if i % 2: path = repo/'untracked'/('u%02d' % (i % 7))/('n%04d.txt' % i)
+        else: path = tracked[i % len(tracked)].with_name('n%04d.txt' % i)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('untracked %d\n' % i)
 
 
 def copy(p, src, dst):
@@ -147,6 +182,17 @@ def after(p, workload, repo, extra):
         if git('status', '--porcelain'): raise ValueError('lfs-checkout left changes')
         for path in (repo/'data').iterdir():
             if path.read_bytes().startswith(b'version https://git-lfs'): raise ValueError('lfs-checkout left a pointer')
+    if workload in ('apply', 'am'):
+        if workload == 'am': found['commits'] = git('rev-list', '--count', 'main~10..HEAD')
+        tree = git('write-tree')
+        if tree != git('rev-parse', 'main^{tree}'): raise ValueError(f'{workload} left a different tree')
+        if git('diff', '--name-only'): raise ValueError(f'{workload} left the working tree unlike the index')
+        if workload == 'am' and git('rev-parse', 'HEAD^{tree}') != tree: raise ValueError('am left changes uncommitted')
+    if workload == 'archive':
+        with tarfile.open(extra[0]) as archived:
+            found['files'] = str(sum(1 for member in archived if member.isfile()))
+    if workload == 'clean':
+        if git('status', '--porcelain', '--untracked-files=all'): raise ValueError('clean left something')
     if workload == 'submodule-update':
         lines = p.run(['git', '-C', repo, 'submodule', 'status']).splitlines()
         if any(not line.startswith(' ') for line in lines): raise ValueError('submodule-update left one out')

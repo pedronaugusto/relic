@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -29,7 +30,7 @@ var opNames = []string{
 	"rebase", "cherry-pick", "revert", "commit", "switch", "stash",
 	"branch-create", "tag-create", "ref-list", "repack", "verify", "worktree-add",
 	"lfs-add", "lfs-checkout", "submodule-status", "submodule-update", "snapshot", "patch-id",
-	"blame",
+	"blame", "apply", "format-patch", "am", "grep", "archive", "clean",
 }
 
 // What go-git cannot do, and why.
@@ -48,6 +49,10 @@ var opUnavailable = map[string]string{
 	"lfs-add":             "go-git has no LFS",
 	"lfs-checkout":        "go-git has no LFS",
 	"snapshot":            "go-git has no stash create or snapshot",
+	"apply":               "go-git has no patch application",
+	"format-patch":        "go-git has no format-patch",
+	"am":                  "go-git has no am",
+	"archive":             "go-git has no archive",
 }
 
 var who = &object.Signature{Name: "Bench", Email: "bench" + "\x40" + "example.invalid", When: time.Unix(1700000000, 0).UTC()}
@@ -429,6 +434,32 @@ func runOp(w, repo, extra string) {
 		took := ms(start)
 		emit(w, "time", took, "ms")
 		emitCount(w, "submodules", len(subs))
+	case "grep":
+		// git grep -E 'zz|qq' main: go-git greps a reference's tree.
+		lines := 0
+		took := best(func() {
+			r, err := git.PlainOpen(repo)
+			check(err)
+			wt, err := r.Worktree()
+			check(err)
+			found, err := wt.Grep(&git.GrepOptions{
+				Patterns:      []*regexp.Regexp{regexp.MustCompile("zz|qq")},
+				ReferenceName: plumbing.NewBranchReferenceName("main"),
+			})
+			check(err)
+			lines = len(found)
+		})
+		emit(w, "time", took, "ms")
+		emitCount(w, "lines", lines)
+	case "clean":
+		start := benchmarkNow()
+		r, err := git.PlainOpen(repo)
+		check(err)
+		wt, err := r.Worktree()
+		check(err)
+		check(wt.Clean(&git.CleanOptions{Dir: true}))
+		took := ms(start)
+		emit(w, "time", took, "ms")
 	default:
 		panic("unknown workload " + w)
 	}

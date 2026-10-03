@@ -7,7 +7,7 @@ for the operation `ops.zig` performs in process. Outputs are read after the
 clock stops, except where git's answer arrives on its standard output, which
 is part of its work.
 """
-import os, subprocess, sys, time
+import hashlib, os, subprocess, sys, time
 
 
 def benchmark_clock():
@@ -27,7 +27,7 @@ NAMES = (
     "merge-tree-clean", "merge-tree-conflict", "merge-clean", "merge-conflict", "rebase", "cherry-pick",
     "revert", "commit", "switch", "stash", "branch-create", "tag-create", "ref-list", "repack", "verify",
     "worktree-add", "lfs-add", "lfs-checkout", "submodule-status", "submodule-update", "snapshot", "patch-id",
-    "blame",
+    "blame", "apply", "format-patch", "am", "grep", "archive", "clean",
 )
 # The identity and clock every side commits with.
 IDENT = {"GIT_AUTHOR_NAME": "Bench", "GIT_AUTHOR_EMAIL": "bench" + chr(64) + "example.invalid",
@@ -65,6 +65,11 @@ def letters(out):
     for line in lines:
         counts[line[0]] = counts.get(line[0], 0) + 1
     return len(lines), counts
+
+
+def blob_name(data):
+    """The name git gives `data` as a blob: how every side names output."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
 def head_tree(repo):
@@ -261,5 +266,33 @@ def run(command, repo, extra):
         took, out = timed(lambda: git(repo, "stash", "create"))
         emit(w, "time", took, "ms")
         emit(w, "tree", git(repo, "rev-parse", out.decode().strip() + "^{tree}").decode().strip(), "oid")
+    elif w == "apply":
+        took, _ = timed(lambda: git(repo, "apply", "--index", extra, capture=False))
+        emit(w, "time", took, "ms")
+        emit(w, "files", open(extra, "rb").read().count(b"\ndiff --git ") + 1, "count")
+    elif w == "format-patch":
+        # The signature is fixed: git's default is its own version.
+        took, out = timed(lambda: git(repo, "format-patch", "--stdout", "--signature=bench", "main~10..main"), REPS)
+        emit(w, "time", took, "ms")
+        emit(w, "mails", out.count(b"\nFrom: "), "count")
+        emit(w, "mbox", blob_name(out), "oid")
+    elif w == "am":
+        took, _ = timed(lambda: git(repo, "am", "-q", extra, capture=False))
+        emit(w, "time", took, "ms")
+        emit(w, "commits", int(git(repo, "rev-list", "--count", "main~10..HEAD")), "count")
+        emit(w, "head", git(repo, "rev-parse", "HEAD").decode().strip(), "oid")
+    elif w == "grep":
+        took, out = timed(lambda: git(repo, "grep", "-n", "-E", "zz|qq", "main"), REPS)
+        emit(w, "time", took, "ms")
+        emit(w, "lines", out.count(b"\n"), "count")
+        emit(w, "output", blob_name(out), "oid")
+    elif w == "archive":
+        took, _ = timed(lambda: git(repo, "archive", "-o", extra, "main", capture=False))
+        emit(w, "time", took, "ms")
+        emit(w, "archive", blob_name(open(extra, "rb").read()), "oid")
+    elif w == "clean":
+        took, out = timed(lambda: git(repo, "clean", "-f", "-d"))
+        emit(w, "time", took, "ms")
+        emit(w, "removed", out.count(b"\n"), "count")
     else:
         raise SystemExit("unknown workload " + w)

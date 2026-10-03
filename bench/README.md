@@ -77,6 +77,8 @@ and 16 MiB; the submodule fixture is ten local submodules, at one size.
 | submodules | `submodule-status`, `submodule-update` |
 | working-tree snapshot | `snapshot` (Git: `git stash create`) |
 | line attribution | `blame` (the hot file on main) |
+| patches | `apply` (`--index`, main~10..main's patch onto main~10), `format-patch` (`--stdout --signature=bench main~10..main`), `am` (that mailbox onto main~10) |
+| search, export, untracked files | `grep` (`-n -E 'zz\|qq' main`), `archive` (main as a tar file), `clean` (`-f -d` over untracked files, 1 % of the file count and at least ten, half in new directories) |
 
 A workload that only reads runs on the fixture, best of three repetitions
 inside the process; one that writes runs once on a fresh APFS copy with its
@@ -105,6 +107,14 @@ holds, counted by `git verify-pack` outside the clock, since git's
 pack-objects reports none; gix-pack writes every object whole. `revlist`'s
 `time_collect` builds every object's path, as `git rev-list --objects`
 prints them. The bare-repository repack writes no bitmap on any side.
+`format-patch`, `grep` and `archive` name what git and relic write by its
+bytes, which must be the same bytes; libgit2's mails are its own email
+format, gix's tar is its own tar, and go-git's grep returns matches rather
+than text, so those rows agree on counts (mails, files in the tar, matching
+lines) and not on bytes. libgit2's clean is the checkout of `HEAD` that
+removes untracked files, its documented way to do it; go-git's is
+`Worktree.Clean` with directories. git's grep reads its tree with threads,
+as relic's does on its `std.Io`.
 
 Each write starts from a fresh copy of the same fixture, with index refresh
 and mutation outside timing. Every transport output is checked against the
@@ -123,7 +133,7 @@ and 1 KiB hashed; full sizes retain the existing 3,000 files and 64 MiB.
 Speed conditions are reported in a quiet pass; deterministic result checks
 still fail on wrong counts, hashes, trees, or pack contents.
 
-Quiet-only planning estimate: **60–100 minutes**. See [QUIET-PREP.md](QUIET-PREP.md) for preparation, counts, sizes and assumptions. `run.sh` and `transport/run.sh` remain
+Quiet-only planning estimate: **70–115 minutes**. See [QUIET-PREP.md](QUIET-PREP.md) for preparation, counts, sizes and assumptions. `run.sh` and `transport/run.sh` remain
 low-level helpers; use `quiet.sh` for the complete interleaved pass.
 
 Standalone `zig build -Doptimize=Debug` compiles the pinned after harness

@@ -32,7 +32,8 @@ pub const names = [_][]const u8{
     "rebase",        "cherry-pick",  "revert",           "commit",              "switch",      "stash",
     "branch-create", "tag-create",   "ref-list",         "repack",              "verify",      "worktree-add",
     "lfs-add",       "lfs-checkout", "submodule-status", "submodule-update",    "snapshot",    "patch-id",
-    "blame",
+    "blame",         "apply",        "format-patch",     "am",                  "grep",        "archive",
+    "clean",
 };
 
 pub fn isOp(command: []const u8) bool {
@@ -105,6 +106,12 @@ pub fn run(gpa: Allocator, io: Io, cwd: Io.Dir, command: []const u8, repo_path: 
     if (eql(u8, command, "snapshot")) return c.snapshot();
     if (eql(u8, command, "patch-id")) return c.patchId();
     if (eql(u8, command, "blame")) return c.blame();
+    if (eql(u8, command, "apply")) return c.apply();
+    if (eql(u8, command, "format-patch")) return c.formatPatch();
+    if (eql(u8, command, "am")) return c.am();
+    if (eql(u8, command, "grep")) return c.grep();
+    if (eql(u8, command, "archive")) return c.archive();
+    if (eql(u8, command, "clean")) return c.clean();
     return error.UnknownCommand;
 }
 
@@ -753,6 +760,136 @@ const Ctx = struct {
         const took = ms(c.io, start);
         emit(c.io, c.name, "time", took, "ms");
         emitCount(c.io, c.name, "submodules", outcome.cloned);
+    }
+
+    // ------------------------------------------------------------- patches
+
+    /// `git apply --index <patch>`: main~10..main's patch onto a copy
+    /// checked out at main~10, the index and the working tree both.
+    fn apply(c: Ctx) !void {
+        if (!@hasDecl(relic, "patch")) return unavailable(c.io, c.name, "this revision has no patch.apply");
+        const patch_path = c.extra orelse return error.MissingPatch;
+        const start = benchmarkNow(c.io);
+        const text = try c.cwd.readFileAlloc(c.io, patch_path, c.gpa, .unlimited);
+        defer c.gpa.free(text);
+        var repo = try c.open();
+        defer repo.deinit(c.io);
+        var outcome = try relic.patch.apply.apply(c.gpa, c.io, &repo, text, .{ .target = .index });
+        defer outcome.deinit();
+        const took = ms(c.io, start);
+        if (!outcome.clean()) return error.PatchDidNotApply;
+        emit(c.io, c.name, "time", took, "ms");
+        emitCount(c.io, c.name, "files", outcome.files.len);
+    }
+
+    /// `git format-patch --stdout --signature=bench main~10..main`: the
+    /// mails in memory, named after the clock by their bytes' blob name.
+    fn formatPatch(c: Ctx) !void {
+        if (!@hasDecl(relic, "patch")) return unavailable(c.io, c.name, "this revision has no patch.format");
+        var best: f64 = std.math.floatMax(f64);
+        var mails: usize = 0;
+        var name: Oid = undefined;
+        for (0..reps) |_| {
+            var out: Io.Writer.Allocating = .init(c.gpa);
+            defer out.deinit();
+            const start = benchmarkNow(c.io);
+            var repo = try c.open();
+            defer repo.deinit(c.io);
+            const range: relic.patch.format.Range = .{ .upstream = try c.resolve(&repo, "refs/heads/main~10"), .tip = try c.resolve(&repo, "refs/heads/main") };
+            var series = try relic.patch.format.format(c.gpa, c.io, &repo, range, .{ .signature = "bench" });
+            defer series.deinit();
+            try series.writeMbox(&out.writer);
+            best = @min(best, ms(c.io, start));
+            mails = series.mails.len;
+            name = relic.hash.Hasher.object(.sha1, "blob", out.written());
+        }
+        emit(c.io, c.name, "time", best, "ms");
+        emitCount(c.io, c.name, "mails", mails);
+        emitOid(c.io, c.name, "mbox", name);
+    }
+
+    /// `git am <mbox>`: main~10..main's mails as commits onto a copy
+    /// checked out at main~10, committed as `who`.
+    fn am(c: Ctx) !void {
+        if (!@hasDecl(relic, "patch")) return unavailable(c.io, c.name, "this revision has no patch.am");
+        const mbox_path = c.extra orelse return error.MissingMailbox;
+        const start = benchmarkNow(c.io);
+        const mbox = try c.cwd.readFileAlloc(c.io, mbox_path, c.gpa, .unlimited);
+        defer c.gpa.free(mbox);
+        var repo = try c.open();
+        defer repo.deinit(c.io);
+        var outcome = try relic.patch.am.start(c.gpa, c.io, &repo, &.{mbox}, .{ .committer = who });
+        defer outcome.deinit();
+        const took = ms(c.io, start);
+        if (outcome.stopped != null) return error.AmStopped;
+        emit(c.io, c.name, "time", took, "ms");
+        emitCount(c.io, c.name, "commits", outcome.commits.len);
+        emitOid(c.io, c.name, "head", outcome.commits[outcome.commits.len - 1]);
+    }
+
+    /// `git grep -n -E 'zz|qq' main`: main's tree searched, the lines
+    /// written as git writes them, named by their bytes after the clock.
+    fn grep(c: Ctx) !void {
+        if (!@hasDecl(relic, "grep")) return unavailable(c.io, c.name, "this revision has no grep");
+        var best: f64 = std.math.floatMax(f64);
+        var lines: usize = 0;
+        var name: Oid = undefined;
+        for (0..reps) |_| {
+            var out: Io.Writer.Allocating = .init(c.gpa);
+            defer out.deinit();
+            const start = benchmarkNow(c.io);
+            var repo = try c.open();
+            defer repo.deinit(c.io);
+            const main = try c.resolve(&repo, "refs/heads/main");
+            _ = try relic.grep.grep(c.gpa, c.io, &repo, .{
+                .patterns = &.{"zz|qq"},
+                .syntax = .extended,
+                .line_number = true,
+                .source = .{ .tree = .{ .oid = main, .name = "main" } },
+            }, &out.writer);
+            best = @min(best, ms(c.io, start));
+            lines = std.mem.count(u8, out.written(), "\n");
+            name = relic.hash.Hasher.object(.sha1, "blob", out.written());
+        }
+        emit(c.io, c.name, "time", best, "ms");
+        emitCount(c.io, c.name, "lines", lines);
+        emitOid(c.io, c.name, "output", name);
+    }
+
+    /// `git archive -o <file> main`: main as a tar file.
+    fn archive(c: Ctx) !void {
+        if (!@hasDecl(relic, "archive")) return unavailable(c.io, c.name, "this revision has no archive");
+        const out_path = c.extra orelse return error.MissingOutput;
+        const start = benchmarkNow(c.io);
+        var repo = try c.open();
+        defer repo.deinit(c.io);
+        const main = try c.resolve(&repo, "refs/heads/main");
+        var file = try c.cwd.createFile(c.io, out_path, .{});
+        defer file.close(c.io);
+        var buf: [64 * 1024]u8 = undefined;
+        var w = file.writer(c.io, &buf);
+        try relic.archive.archive(c.gpa, c.io, &repo, main, .{}, &w.interface);
+        try w.interface.flush();
+        const took = ms(c.io, start);
+        const bytes = try c.cwd.readFileAlloc(c.io, out_path, c.gpa, .unlimited);
+        defer c.gpa.free(bytes);
+        emit(c.io, c.name, "time", took, "ms");
+        emitOid(c.io, c.name, "archive", relic.hash.Hasher.object(.sha1, "blob", bytes));
+    }
+
+    /// `git clean -f -d`: the untracked files and directories the harness
+    /// added, removed.
+    fn clean(c: Ctx) !void {
+        if (!@hasDecl(relic, "clean")) return unavailable(c.io, c.name, "this revision has no clean");
+        const start = benchmarkNow(c.io);
+        var repo = try c.open();
+        defer repo.deinit(c.io);
+        var outcome = try relic.clean.clean(c.gpa, c.io, &repo, .{ .force = .yes, .directories = true });
+        defer outcome.deinit();
+        const took = ms(c.io, start);
+        if (outcome.failures.len != 0) return error.CleanFailed;
+        emit(c.io, c.name, "time", took, "ms");
+        emitCount(c.io, c.name, "removed", outcome.reports.len);
     }
 
     /// A snapshot of the dirty working tree into a private store: like
