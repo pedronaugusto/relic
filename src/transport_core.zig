@@ -6,8 +6,10 @@
 //! `http://` and `https://` are git's smart HTTP protocol through
 //! `smarthttp.zig`. The last two are conversations with the remote's own
 //! `git-upload-pack` or `git-receive-pack`, and the protocol above them —
-//! the refs, the negotiation, the pack — is the same for both. A `Session`
-//! hides which of the three it is from the operations above.
+//! the refs, the negotiation, the pack — is the same for both. A path to a
+//! bundle file is fetched from as git's bundle transport fetches: its refs
+//! listed, its pack indexed whole. A `Session` hides which it is from the
+//! operations above.
 
 // The modules relic's API puts under this one, as `relic.transport.<name>`.
 
@@ -27,6 +29,7 @@ const connection = @import("connection.zig");
 const pktline = @import("pktline.zig");
 
 const uploadpack = @import("uploadpack.zig");
+const bundle = @import("bundle.zig");
 
 const progress = @import("progress.zig");
 
@@ -58,7 +61,7 @@ pub const Error = error{
     /// The transport needs to run a program — `ssh`, a credential helper —
     /// and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
-} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error || sendpack.Error;
+} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error || sendpack.Error || bundle.Error;
 
 /// How a remote is reached.
 pub const Options = struct {
@@ -107,6 +110,9 @@ pub const Session = struct {
     service: Service,
     impl: union(enum) {
         local: *local.Remote,
+        /// A bundle file named by a path, as git's bundle transport reads
+        /// one.
+        bundle: *bundle.File,
         smart: struct {
             conn: *Connection,
             advertisement: protocol.Advertisement,
@@ -128,6 +134,21 @@ pub const Session = struct {
         options: Options,
     ) Error!Session {
         const parsed = url.Url.parse(remote_url) catch |err| return err;
+        if (parsed.scheme == .local and service == .upload_pack) bundled: {
+            // `url_is_local_not_ssh && is_file && is_bundle`: a path to a
+            // bundle is fetched from as one; a `file://` URL never is.
+            var identity = url.Identity.parse(gpa, remote_url) catch break :bundled;
+            defer identity.deinit();
+            const f = bundle.File.open(gpa, io, Io.Dir.cwd(), identity.url.path) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => break :bundled,
+            };
+            if (kind) |k| if (k != f.header.object_format) {
+                f.close(gpa, io);
+                return error.ObjectFormatMismatch;
+            };
+            return .{ .gpa = gpa, .service = service, .impl = .{ .bundle = f } };
+        }
         switch (parsed.scheme) {
             .local, .file => if (service == .upload_pack and !options.local_copy) {
                 // A fetch from this machine goes through upload-pack, as
@@ -201,6 +222,7 @@ pub const Session = struct {
                 here.deinit(io);
                 s.gpa.destroy(here);
             },
+            .bundle => |f| f.close(s.gpa, io),
             .smart => |*smart| {
                 // A conversation over a pipe that the server still waits on
                 // ends with a flush, which it reads as nothing more wanted,
@@ -222,6 +244,7 @@ pub const Session = struct {
     pub fn objectFormat(s: *const Session) hash.Kind {
         return switch (s.impl) {
             .local => |here| here.repo.objectFormat(),
+            .bundle => |f| f.header.object_format,
             .smart => |smart| smart.advertisement.kind,
         };
     }
@@ -230,7 +253,7 @@ pub const Session = struct {
     /// fetch that asks for no depth takes the server's shallow lines to be.
     pub fn advertisedShallow(s: *const Session) []const Oid {
         return switch (s.impl) {
-            .local => &.{},
+            .local, .bundle => &.{},
             .smart => |smart| smart.advertisement.shallow,
         };
     }
@@ -240,7 +263,7 @@ pub const Session = struct {
     /// not: there its index-pack writes the file, empty.
     pub fn promisorNamesRefs(s: *const Session) bool {
         return switch (s.impl) {
-            .local => true,
+            .local, .bundle => true,
             .smart => |smart| !(smart.conn.stateless and smart.advertisement.version != .v2),
         };
     }
@@ -249,7 +272,7 @@ pub const Session = struct {
     /// machine, which speaks none.
     pub fn protocolVersion(s: *const Session) ?protocol.Version {
         return switch (s.impl) {
-            .local => null,
+            .local, .bundle => null,
             .smart => |smart| smart.advertisement.version,
         };
     }
@@ -259,6 +282,7 @@ pub const Session = struct {
     pub fn listRefs(s: *Session, gpa: Allocator, io: Io, prefixes: []const []const u8) Error!protocol.RefList {
         return switch (s.impl) {
             .local => |here| here.listRefs(gpa, io, prefixes),
+            .bundle => |f| bundleRefs(gpa, f),
             .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes }),
         };
     }
@@ -289,6 +313,8 @@ pub const Session = struct {
                     .atomic = request.atomic,
                 });
             },
+            // A bundle is only ever fetched from.
+            .bundle => return error.UnsupportedTransport,
             .smart => |*smart| {
                 smart.done = true;
                 // The boundary, sorted as git's list of grafts is.
@@ -348,6 +374,13 @@ pub const Session = struct {
                 const written = report orelse return .{ .pack = null, .objects = 0 };
                 return .{ .pack = written.name, .objects = written.objects };
             },
+            .bundle => |f| {
+                // git's bundle transport has no depth and no filter; it
+                // indexes the bundle's whole pack whatever is wanted.
+                if (request.deepen != null or request.filter != null) return error.UnsupportedTransport;
+                const result = try bundle.receive(gpa, io, db, pack_dir, f, options.receive);
+                return .{ .pack = result.name, .objects = result.objects };
+            },
             .smart => |*smart| {
                 // A v0 server sends its pack and is done; a v2 server
                 // waits for the next command.
@@ -360,3 +393,16 @@ pub const Session = struct {
         }
     }
 };
+
+/// A bundle's refs, as git's bundle transport lists them: last in the
+/// header first, since it puts each at the front of its list, and whatever
+/// prefixes were asked for.
+fn bundleRefs(gpa: Allocator, f: *bundle.File) Error!protocol.RefList {
+    var list: protocol.RefList = .{ .arena = .init(gpa), .refs = &.{} };
+    errdefer list.arena.deinit();
+    const a = list.arena.allocator();
+    const refs = try a.alloc(protocol.RemoteRef, f.header.references.len);
+    for (f.header.references, 0..) |ref, i| refs[refs.len - 1 - i] = .{ .name = try a.dupe(u8, ref.name), .oid = ref.oid };
+    list.refs = refs;
+    return list;
+}

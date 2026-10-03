@@ -38,6 +38,8 @@ pub const objectfilter = @import("objectfilter.zig");
 pub const partial = @import("partial.zig");
 pub const filterspec = @import("filterspec.zig");
 pub const progress = @import("progress.zig");
+/// Bundles: refs and their objects in one file, as `git bundle` writes them.
+pub const bundle = @import("bundle.zig");
 /// Which service a session talks to.
 pub const Service = core.Service;
 /// Errors from opening and using a remote.

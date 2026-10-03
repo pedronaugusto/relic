@@ -206,6 +206,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/worktree.zig",
     } },
     .{ .name = "commit and local transport", .patterns = &.{
+        "src/bundle.zig",
         "src/commit_core.zig",
         "src/fetchpack.zig",
         "src/lfshooks.zig",
