@@ -56,6 +56,7 @@ pub const families = [_]Family{
         "gitlink.test",
         "ignore.test",
         "index_core.test",
+        "packwrite_test.test",
         "relic.test",
         "repo_test.test",
         "safepath.test",

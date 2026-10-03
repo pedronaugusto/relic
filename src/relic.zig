@@ -84,6 +84,7 @@ test {
         _ = @import("repo_test.zig");
         _ = @import("concurrency_test.zig");
         _ = @import("workcount_test.zig");
+        _ = @import("packwrite_test.zig");
         _ = @import("diff_test.zig");
         _ = @import("submodule_test.zig");
         _ = @import("filter_test.zig");

@@ -205,9 +205,11 @@ running programs. Conduit carries its libc linkage on POSIX; Windows needs
 no C runtime. SHA-256 and the TLS primitives come from `std.crypto`; SHA-1,
 inflate and the TLS client are in the package. There is no build option to
 forward. Every function that allocates takes the allocator as its first argument and every function that
-touches the disk or the network takes a `std.Io`. Concurrent work — the delta
-search when `PackOptions.threads` asks, resolving a received pack's deltas —
-goes to the caller's executor, never to threads of the package's own. A
+touches the disk or the network takes a `std.Io`. Concurrent work — reading
+loose objects and deflating entries while a pack is written
+(`PackOptions.threads`, one task per processor unless asked otherwise),
+resolving a received pack's deltas — goes to the caller's executor, never to
+threads of the package's own. A
 process starts only through a `repo.program.Programs` the caller hands in; without
 one, a hook is not run and a setting that would run a program is a named
 refusal. Relic prepares git commands, scrubs the supplied environment and
@@ -504,6 +506,19 @@ loose pack inputs are read through a 16 KiB buffer.
 Starting an entry compressor copies its defined state, leaving token and chain
 bytes to be filled before use instead of copying their unused storage.
 
+The writing is spread over tasks of the caller's `std.Io` (`Io.Group.async`),
+one per processor by default. They read the loose objects and deflate the
+entries, batch by batch, into buffers the calling task sized and allocated
+beforehand, so they allocate nothing and need no thread-safe allocator; the
+delta search and the writing stay on the calling task, in pack order, so every
+task count, and every Io, writes the serial writer's bytes.
+`PackOptions.batch_bytes` bounds what a batch holds ahead of the writer. At
+most six tasks read loose files at once: beyond a few, opening files contends
+in the kernel. An Io that cannot run a task in parallel runs it inline, and
+`threads = 1` is the serial writer with no tasks at all. `collectLoose` and
+`collectAll` read the headers on tasks too, and hand them to `writePack`, which
+then reads every loose object once.
+
 The order the two files become visible in is not free to choose. A reader
 finds a pack by its `.idx`, so the pack is renamed into place first and the
 index second, which is git's order too. `Odb.packLoose` and `Odb.repack`
@@ -523,8 +538,13 @@ name — the new pack *is* the old one, and that is the one name the removal
 pass skips.
 
 **Packs are read with positional reads by default.**
-Small random reads start with 8 KiB of read-ahead and large bodies use 64 KiB,
-with I/O failures still returned to the caller.
+A read is one 8 KiB block, aligned in the file, and each pack keeps 256 KiB of
+them (`Odb.Options.pack_read_cache_bytes`), block `b` only ever in slot `b`
+modulo their count. An entry of 64 KiB or more streams through a 64 KiB buffer
+of its own instead. Where a read lands therefore depends only on what is
+wanted, never on the reads before it, and a pass whose delta-base cache holds
+at least what an earlier pass's held reads no more calls and no more bytes
+than it did. I/O failures are still returned to the caller.
 An inflate uses at most 266 bytes of temporary slack for its fast loop, then
 returns an owned result of the exact checked size.
 `Odb.Options.map_packs` asks for a memory map instead, which is faster on a
@@ -560,7 +580,9 @@ the peak is bounded by the operation and the free is one call. What outlives
 an operation is held by the object database: the pack indexes, read whole at
 open so a lookup costs no syscall; the multi-pack index, when there is one,
 for the same reason; the delta base cache, keyed by pack offset and kept in
-least-recently-used order under a byte budget named in `Odb.Options`; one
+least-recently-used order under a byte budget named in `Odb.Options`; the
+blocks positional pack reads keep, 256 KiB for each pack read, under
+`Odb.Options.pack_read_cache_bytes`; one
 deflate window, which is sixty-four kilobytes and is taken at `open` whether or
 not anything is written; and, once a database has written anything, one
 deflate state and one
@@ -569,7 +591,8 @@ a cold `addAll` writes one object per file. A database that is only read takes
 neither of those two. Writing a pack adds
 the delta window on top, which `PackOptions.window_bytes` bounds by weight as
 well as by count, its per-base delta indexes, and one index entry per object — a name, an offset and a
-CRC — which has to be sorted before it is written. There is no object cache; a returned slice's
+CRC — which has to be sorted before it is written; written on several tasks, a
+batch of at most `PackOptions.batch_bytes` and a deflate state for each task. There is no object cache; a returned slice's
 doc comment says who owns it.
 
 **The index is read and written at three versions.** Versions 2, 3 and

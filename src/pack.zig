@@ -762,13 +762,26 @@ pub const Pack = struct {
     /// Inflate `size` bytes of the zlib stream at `at`. The result is the
     /// caller's.
     fn inflateAt(p: *Pack, io: Io, at: u64, size: u64) Error![]u8 {
-        if (size > delta.max_result_bytes) return error.StreamTooLong;
-        // Leave one longest match and its word-copy slack after the result,
-        // so the fast decoder can also handle the last bytes of an entry.
-        const result_len = std.math.cast(usize, size) orelse return error.StreamTooLong;
-        const out = try p.gpa.alloc(u8, result_len +| (258 + 8));
+        const result_len = try inflatedLen(size);
+        const out = try p.gpa.alloc(u8, result_len +| decode_slack);
         errdefer p.gpa.free(out);
+        try p.decodeAt(io, at, size, out);
+        return try p.gpa.realloc(out, result_len);
+    }
 
+    /// Leave one longest match and its word-copy slack after the result, so
+    /// the fast decoder can also handle the last bytes of an entry.
+    const decode_slack = 258 + 8;
+
+    fn inflatedLen(size: u64) Error!usize {
+        if (size > delta.max_result_bytes) return error.StreamTooLong;
+        return std.math.cast(usize, size) orelse error.StreamTooLong;
+    }
+
+    /// Decode the `size`-byte entry at `at` into the front of `out`, which
+    /// has `decode_slack` bytes of room past it.
+    fn decodeAt(p: *Pack, io: Io, at: u64, size: u64, out: []u8) Error!void {
+        const result_len: usize = @intCast(size);
         var fixed_reader: Io.Reader = undefined;
         const streamed = p.memory == null and size >= stream_entry_bytes;
         const input: *Io.Reader = if (p.memory) |mem| blk: {
@@ -790,7 +803,6 @@ pub const Pack = struct {
             error.EndOfStream, error.CorruptStream, error.OutputTooLong => return error.CorruptPackEntry,
         };
         if (n != result_len) return error.CorruptPackEntry;
-        return try p.gpa.realloc(out, result_len);
     }
 
     /// The object at `offset`, with its delta chain resolved.
@@ -1477,7 +1489,8 @@ test "an offset delta pointing forwards is refused" {
 //
 // The pack is written straight to a temporary file as the entries arrive, so
 // what is held in memory is one object's bytes, the deflate state, and one
-// `WrittenEntry` per object for the index. Nothing is threaded.
+// `WrittenEntry` per object for the index. A writer is one task's; entries
+// deflated ahead of it, on other tasks, arrive through `addDeflated`.
 //=====================================================================
 
 /// Errors from writing a pack.
@@ -1555,6 +1568,61 @@ pub const IndexEntry = @import("pack_types.zig").IndexEntry;
 
 const WrittenEntry = IndexEntry;
 
+/// One deflate state, reused from entry to entry: what `Writer.add` deflates
+/// through, and what a task deflating entries ahead of the writer owns one
+/// of. The stream it makes depends only on the payload and the level, never
+/// on what it deflated before or where the stream goes.
+pub const Deflater = struct {
+    window: []u8,
+    compress: *flate.Compress,
+
+    pub fn init(gpa: Allocator) Allocator.Error!Deflater {
+        const window = try gpa.alloc(u8, flate.max_window_len);
+        errdefer gpa.free(window);
+        return .{ .window = window, .compress = try gpa.create(flate.Compress) };
+    }
+
+    pub fn deinit(d: *Deflater, gpa: Allocator) void {
+        gpa.free(d.window);
+        gpa.destroy(d.compress);
+        d.* = undefined;
+    }
+
+    /// Write `payload` to `out` as one zlib stream at `compression`. `out`
+    /// is not flushed.
+    pub fn deflate(d: *Deflater, out: *Io.Writer, payload: []const u8, compression: Compression) Io.Writer.Error!void {
+        const fresh = try flate.Compress.init(out, d.window, .zlib, compression.options());
+        // std's initial chain and token bytes are undefined: their heads
+        // and counts make them unreachable until filled. Copy only the
+        // defined state, rather than moving 224 KiB for every small entry.
+        inline for (std.meta.fields(flate.Compress)) |field| {
+            if (comptime std.mem.eql(u8, field.name, "lookup")) {
+                inline for (std.meta.fields(@TypeOf(fresh.lookup))) |part| {
+                    if (comptime !std.mem.eql(u8, part.name, "chain"))
+                        @field(d.compress.lookup, part.name) = @field(fresh.lookup, part.name);
+                }
+            } else if (comptime std.mem.eql(u8, field.name, "buffered_tokens")) {
+                inline for (std.meta.fields(@TypeOf(fresh.buffered_tokens))) |part| {
+                    if (comptime !std.mem.eql(u8, part.name, "list"))
+                        @field(d.compress.buffered_tokens, part.name) = @field(fresh.buffered_tokens, part.name);
+                }
+            } else {
+                @field(d.compress, field.name) = @field(fresh, field.name);
+            }
+        }
+        try d.compress.writer.writeAll(payload);
+        try d.compress.writer.flush();
+        try d.compress.finish();
+    }
+
+    /// The most bytes `deflate` is given room for ahead of the writer, for a
+    /// payload of `len` bytes. A stream that needs more is deflated again
+    /// straight into the pack.
+    pub fn room(len: usize) usize {
+        return len +| len / 8 +| 64;
+    }
+};
+
 /// A writer for a packfile and its index.
 ///
 /// `init` states how many objects will be added, because that number goes in
@@ -1581,8 +1649,7 @@ pub const Writer = struct {
     file_buffer: []u8,
 
     sink: Sink,
-    window: []u8,
-    compress: *flate.Compress,
+    deflater: Deflater,
 
     entries: std.ArrayList(WrittenEntry),
     deltas: u32 = 0,
@@ -1679,10 +1746,8 @@ pub const Writer = struct {
     ) WriteError!*Writer {
         const w = try gpa.create(Writer);
         errdefer gpa.destroy(w);
-        const window = try gpa.alloc(u8, flate.max_window_len);
-        errdefer gpa.free(window);
-        const compress = try gpa.create(flate.Compress);
-        errdefer gpa.destroy(compress);
+        var deflater: Deflater = try .init(gpa);
+        errdefer deflater.deinit(gpa);
         w.* = .{
             .gpa = gpa,
             .kind = kind,
@@ -1695,8 +1760,7 @@ pub const Writer = struct {
             .file_writer = undefined,
             .file_buffer = &.{},
             .sink = undefined,
-            .window = window,
-            .compress = compress,
+            .deflater = deflater,
             .entries = .empty,
             .seen = .empty,
             .streaming = true,
@@ -1742,10 +1806,8 @@ pub const Writer = struct {
 
         const file_buffer = try gpa.alloc(u8, file_buffer_len);
         errdefer gpa.free(file_buffer);
-        const window = try gpa.alloc(u8, flate.max_window_len);
-        errdefer gpa.free(window);
-        const compress = try gpa.create(flate.Compress);
-        errdefer gpa.destroy(compress);
+        var deflater: Deflater = try .init(gpa);
+        errdefer deflater.deinit(gpa);
 
         w.* = .{
             .gpa = gpa,
@@ -1759,8 +1821,7 @@ pub const Writer = struct {
             .file_writer = undefined,
             .file_buffer = file_buffer,
             .sink = undefined,
-            .window = window,
-            .compress = compress,
+            .deflater = deflater,
             .entries = .empty,
             .seen = .empty,
         };
@@ -1792,8 +1853,7 @@ pub const Writer = struct {
         w.entries.deinit(w.gpa);
         w.seen.deinit(w.gpa);
         if (w.file_buffer.len != 0) w.gpa.free(w.file_buffer);
-        w.gpa.free(w.window);
-        w.gpa.destroy(w.compress);
+        w.deflater.deinit(w.gpa);
         const gpa = w.gpa;
         gpa.destroy(w);
     }
@@ -1831,13 +1891,7 @@ pub const Writer = struct {
     /// Add a whole object. Returns the offset the entry begins at, which is
     /// what an offset delta against it needs.
     pub fn add(w: *Writer, oid: Oid, t: object.Type, bytes: []const u8) WriteError!u64 {
-        const bits: u3 = switch (t) {
-            .commit => 1,
-            .tree => 2,
-            .blob => 3,
-            .tag => 4,
-        };
-        return w.addEntry(oid, bits, bytes.len, &.{}, bytes);
+        return w.addEntry(oid, typeBits(t), bytes.len, &.{}, bytes);
     }
 
     /// Add an object stored as a delta against one already in this pack.
@@ -1862,6 +1916,41 @@ pub const Writer = struct {
         return w.addEntry(oid, 7, delta_bytes.len, base.raw(), delta_bytes);
     }
 
+    /// Add an entry whose zlib stream a `Deflater` already made, ahead of
+    /// the writer: `deflated` is `Deflater.deflate`'s output for a payload of
+    /// `payload_len` bytes at this writer's `WriteOptions.compression` — the
+    /// stream `add`, `addOfsDelta` or `addRefDelta` would have written for
+    /// those bytes, so the pack is the same pack. Anything else makes a
+    /// corrupt pack, as wrong delta bytes given to `addOfsDelta` would.
+    /// Returns the offset the entry begins at.
+    pub fn addDeflated(w: *Writer, oid: Oid, payload: Payload, payload_len: u64, deflated: []const u8) WriteError!u64 {
+        var buf: [16]u8 = undefined;
+        const at = w.sink.count;
+        const type_bits: u3, const extra: []const u8 = switch (payload) {
+            .object => |t| .{ typeBits(t), &.{} },
+            .ofs_delta => |base_offset| blk: {
+                if (base_offset >= at) return error.DeltaBaseNotWritten;
+                break :blk .{ 6, encodeBackOffset(&buf, at - base_offset) };
+            },
+            .ref_delta => |*base| .{ 7, base.raw() },
+        };
+        try w.beginEntry(oid, type_bits, payload_len, extra);
+        try w.sink.emit(deflated);
+        if (payload != .object) w.deltas += 1;
+        return w.endEntry(oid, at);
+    }
+
+    /// What an entry holds, for `addDeflated`.
+    pub const Payload = union(enum) {
+        /// A whole object of this type.
+        object: object.Type,
+        /// A delta against the entry an earlier add returned this offset
+        /// for.
+        ofs_delta: u64,
+        /// A delta against the object with this name.
+        ref_delta: Oid,
+    };
+
     fn addEntry(
         w: *Writer,
         oid: Oid,
@@ -1870,47 +1959,27 @@ pub const Writer = struct {
         extra: []const u8,
         payload: []const u8,
     ) WriteError!u64 {
+        const at = w.sink.count;
+        try w.beginEntry(oid, type_bits, payload_len, extra);
+        try w.deflater.deflate(&w.sink.writer, payload, w.options.compression);
+        try w.sink.writer.flush();
+        return w.endEntry(oid, at);
+    }
+
+    fn beginEntry(w: *Writer, oid: Oid, type_bits: u3, payload_len: u64, extra: []const u8) WriteError!void {
         if (w.expected) |expected| {
             if (w.entries.items.len >= expected) return error.ObjectCountMismatch;
         }
         if (w.seen.contains(oid)) return error.DuplicateObject;
-        const at = w.sink.count;
         w.sink.crc = .init();
 
         var head: [16]u8 = undefined;
         const head_len = encodeTypeAndSize(&head, type_bits, payload_len);
         try w.sink.emit(head[0..head_len]);
         if (extra.len != 0) try w.sink.emit(extra);
+    }
 
-        const fresh = try flate.Compress.init(
-            &w.sink.writer,
-            w.window,
-            .zlib,
-            w.options.compression.options(),
-        );
-        // std's initial chain and token bytes are undefined: their heads
-        // and counts make them unreachable until filled. Copy only the
-        // defined state, rather than moving 224 KiB for every small entry.
-        inline for (std.meta.fields(flate.Compress)) |field| {
-            if (comptime std.mem.eql(u8, field.name, "lookup")) {
-                inline for (std.meta.fields(@TypeOf(fresh.lookup))) |part| {
-                    if (comptime !std.mem.eql(u8, part.name, "chain"))
-                        @field(w.compress.lookup, part.name) = @field(fresh.lookup, part.name);
-                }
-            } else if (comptime std.mem.eql(u8, field.name, "buffered_tokens")) {
-                inline for (std.meta.fields(@TypeOf(fresh.buffered_tokens))) |part| {
-                    if (comptime !std.mem.eql(u8, part.name, "list"))
-                        @field(w.compress.buffered_tokens, part.name) = @field(fresh.buffered_tokens, part.name);
-                }
-            } else {
-                @field(w.compress, field.name) = @field(fresh, field.name);
-            }
-        }
-        try w.compress.writer.writeAll(payload);
-        try w.compress.writer.flush();
-        try w.compress.finish();
-        try w.sink.writer.flush();
-
+    fn endEntry(w: *Writer, oid: Oid, at: u64) WriteError!u64 {
         try w.entries.append(w.gpa, .{ .oid = oid, .offset = at, .crc = w.sink.crc.final() });
         try w.seen.put(w.gpa, oid, {});
         return at;
@@ -2388,6 +2457,15 @@ fn lessThanWritten(_: void, a: WrittenEntry, b: WrittenEntry) bool {
 /// The type-and-size byte string a pack entry begins with: three type bits
 /// and four size bits in the first byte, then seven size bits per byte after
 /// it. Returns how many bytes it took.
+fn typeBits(t: object.Type) u3 {
+    return switch (t) {
+        .commit => 1,
+        .tree => 2,
+        .blob => 3,
+        .tag => 4,
+    };
+}
+
 fn encodeTypeAndSize(buf: []u8, type_bits: u3, size: u64) usize {
     var value = size;
     var i: usize = 0;
@@ -2665,6 +2743,54 @@ test "a pass whose delta-base cache holds more reads no more of the pack" {
         if (passes[1].calls > passes[0].calls or passes[1].bytes > passes[0].bytes) {
             std.debug.print("pack {d}, {d}-byte cache: cold {d} reads, {d} bytes; warm {d} reads, {d} bytes\n", .{ round, cache_bytes, passes[0].calls, passes[0].bytes, passes[1].calls, passes[1].bytes });
             return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "a reused deflater makes the stream a fresh one makes, wherever it goes" {
+    const gpa = std.testing.allocator;
+    var prng: std.Random.DefaultPrng = .init(0xdef1);
+    const random = prng.random();
+    // Payloads that compress, that do not, and of every size around the
+    // compressor's block and window lengths.
+    var payloads: [12][]u8 = undefined;
+    for (&payloads, 0..) |*payload, i| {
+        const len = switch (i % 6) {
+            0 => 0,
+            1 => random.uintLessThan(usize, 300),
+            2 => random.intRangeAtMost(usize, 30_000, 70_000),
+            3 => flate.max_window_len,
+            else => random.uintLessThan(usize, 100_000),
+        };
+        payload.* = try gpa.alloc(u8, len);
+        if (i % 2 == 0) {
+            random.bytes(payload.*);
+        } else {
+            for (payload.*) |*b| b.* = 'a' + random.uintLessThan(u8, 4);
+        }
+    }
+    defer for (payloads) |payload| gpa.free(payload);
+
+    var reused: Deflater = try .init(gpa);
+    defer reused.deinit(gpa);
+    for (0..2) |_| {
+        random.shuffle([]u8, &payloads);
+        for (payloads) |payload| {
+            for ([_]Compression{ .fast, .default, .best }) |level| {
+                var fresh: Deflater = try .init(gpa);
+                defer fresh.deinit(gpa);
+                var expected: Io.Writer.Allocating = try .initCapacity(gpa, 4096);
+                defer expected.deinit();
+                try fresh.deflate(&expected.writer, payload, level);
+
+                // Into room of its own, as a task deflates ahead of the
+                // writer, after whatever this deflater did before.
+                const room = try gpa.alloc(u8, Deflater.room(payload.len));
+                defer gpa.free(room);
+                var out: Io.Writer = .fixed(room);
+                try reused.deflate(&out, payload, level);
+                try std.testing.expectEqualSlices(u8, expected.written(), out.buffered());
+            }
         }
     }
 }

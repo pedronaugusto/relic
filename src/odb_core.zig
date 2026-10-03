@@ -12,6 +12,7 @@ const inflate = @import("inflate.zig");
 const midx = @import("midx.zig");
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
@@ -560,6 +561,9 @@ pub const Odb = struct {
         /// A loose body retained while reading its header, when it fit the
         /// caller's remaining cache budget.
         bytes: ?[]u8 = null,
+        /// Whether the header came from a loose object, which is where its
+        /// body is then read from too.
+        loose: bool = false,
     };
 
     /// The pack ordering pass has already opened a loose object. When its
@@ -577,6 +581,40 @@ pub const Odb = struct {
     }
 
     fn tryReadHeaderForPack(odb: *Odb, io: Io, oid: Oid, cache_available: usize) Error!?PackHeader {
+        const want: LooseWant = if (cache_available == 0) .header else .{ .cache = cache_available };
+        if (try odb.readLooseFor(io, oid, want)) |found| return .{ .header = found.header, .bytes = found.bytes, .loose = true };
+        for (odb.backendData().sources.items) |*source| {
+            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
+            return .{ .header = try source.packs.items[located.at].pack.headerAt(io, located.offset) };
+        }
+        return null;
+    }
+
+    /// What `readLooseFor` reads besides the header.
+    const LooseWant = union(enum) {
+        /// Nothing.
+        header,
+        /// The body, into this buffer, which is exactly its size. A body
+        /// of any other size is `error.CorruptLooseObject`.
+        into: []u8,
+        /// The body, allocated, when it is at most this many bytes.
+        cache: usize,
+    };
+
+    const LooseFound = struct {
+        header: object.Header,
+        /// The allocated body, for `.cache`.
+        bytes: ?[]u8 = null,
+    };
+
+    /// The loose object `oid`'s header, and its body as `want` says, or
+    /// `null` when no source holds it loose.
+    ///
+    /// With `.header` and `.into` this allocates nothing and touches nothing
+    /// of the database but its sources' directory handles, so pack-writing
+    /// tasks call it concurrently; `.cache` allocates, and is the calling
+    /// task's.
+    fn readLooseFor(odb: *const Odb, io: Io, oid: Oid, want: LooseWant) Error!?LooseFound {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |*source| {
@@ -604,15 +642,21 @@ pub const Odb = struct {
                 if (std.mem.indexOfScalar(u8, head[0..got], 0) != null) break;
             }
             const parsed = object.parseHeader(head[0..got]) catch return error.CorruptLooseObject;
-            if (cache_available == 0 or parsed.header.size > cache_available) {
-                return .{ .header = parsed.header };
-            }
+            const body: []u8 = switch (want) {
+                .header => return .{ .header = parsed.header },
+                .cache => |available| blk: {
+                    if (available == 0 or parsed.header.size > available) return .{ .header = parsed.header };
+                    break :blk try odb.backendData().gpa.alloc(u8, @intCast(parsed.header.size));
+                },
+                .into => |buffer| blk: {
+                    if (parsed.header.size != buffer.len) return error.CorruptLooseObject;
+                    break :blk buffer;
+                },
+            };
+            errdefer if (want == .cache) odb.backendData().gpa.free(body);
 
-            const body_len: usize = @intCast(parsed.header.size);
             const initial = head[parsed.len..got];
-            if (initial.len > body_len) return error.CorruptLooseObject;
-            const body = try odb.backendData().gpa.alloc(u8, body_len);
-            errdefer odb.backendData().gpa.free(body);
+            if (initial.len > body.len) return error.CorruptLooseObject;
             @memcpy(body[0..initial.len], initial);
             var body_got = initial.len;
             while (body_got < body.len) {
@@ -624,11 +668,7 @@ pub const Odb = struct {
             if ((decompress.reader.readSliceShort(&extra) catch return looseInflateError(&decompress, &file_reader)) != 0) {
                 return error.CorruptLooseObject;
             }
-            return .{ .header = parsed.header, .bytes = body };
-        }
-        for (odb.backendData().sources.items) |*source| {
-            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
-            return .{ .header = try source.packs.items[located.at].pack.headerAt(io, located.offset) };
+            return .{ .header = parsed.header, .bytes = if (want == .cache) body else null };
         }
         return null;
     }
@@ -1221,6 +1261,7 @@ pub const Odb = struct {
         options: PackOptions,
     ) Error!pack.WriteReport {
         const gpa = odb.backendData().gpa;
+        const workers = taskCount(options.threads);
 
         // Every object's type and length, which is what the order is by. A
         // header is all this needs, and for a packed object that is no
@@ -1231,19 +1272,47 @@ pub const Odb = struct {
             for (ordered[0..ordered_filled]) |item| if (item.cached) |bytes| gpa.free(bytes);
             gpa.free(ordered);
         }
-        var cached_bytes: usize = 0;
-        for (entries, 0..) |entry, i| {
-            const available = options.loose_cache_bytes -| cached_bytes;
-            const found = try odb.readHeaderForPack(io, entry.oid, available);
-            if (found.bytes) |bytes| cached_bytes += bytes.len;
-            ordered[i] = .{
+        if (workers > 1) {
+            for (ordered, entries) |*item, entry| item.* = .{
                 .oid = entry.oid,
-                .type = found.header.type,
-                .size = found.header.size,
+                .type = if (entry.header) |h| h.type else undefined,
+                .size = if (entry.header) |h| h.size else undefined,
                 .name_hash = nameHash(entry.hint),
-                .cached = found.bytes,
+                .cached = null,
+                .known = entry.header != null,
+                .loose = entry.header != null,
             };
-            ordered_filled += 1;
+            ordered_filled = entries.len;
+            try odb.readHeadersConcurrently(io, workers, ordered);
+        } else {
+            var cached_bytes: usize = 0;
+            for (entries, 0..) |entry, i| {
+                if (entry.header) |header| {
+                    // Known already; the body is looked for loose first.
+                    ordered[i] = .{
+                        .oid = entry.oid,
+                        .type = header.type,
+                        .size = header.size,
+                        .name_hash = nameHash(entry.hint),
+                        .cached = null,
+                        .loose = true,
+                    };
+                    ordered_filled += 1;
+                    continue;
+                }
+                const available = options.loose_cache_bytes -| cached_bytes;
+                const found = try odb.readHeaderForPack(io, entry.oid, available);
+                if (found.bytes) |bytes| cached_bytes += bytes.len;
+                ordered[i] = .{
+                    .oid = entry.oid,
+                    .type = found.header.type,
+                    .size = found.header.size,
+                    .name_hash = nameHash(entry.hint),
+                    .cached = found.bytes,
+                    .loose = found.loose,
+                };
+                ordered_filled += 1;
+            }
         }
         std.mem.sort(Ordered, ordered, {}, beforeInPackOrder);
 
@@ -1258,76 +1327,69 @@ pub const Odb = struct {
         };
         defer writer.deinit(io);
 
-        var window: std.ArrayList(WindowSlot) = .empty;
-        defer {
-            for (window.items) |*slot| {
-                if (slot.encoder) |*encoder| encoder.deinit(gpa);
-                gpa.free(slot.bytes);
-            }
-            window.deinit(gpa);
+        var build: Build = .{
+            .odb = odb,
+            .gpa = gpa,
+            .options = options,
+            .ordered = ordered,
+            .offsets = try gpa.alloc(u64, ordered.len),
+            .writer = writer,
+        };
+        defer build.deinit();
+        if (workers > 1) {
+            try build.writeConcurrently(io, workers);
+        } else {
+            try build.writeSerially(io);
         }
-        var window_bytes: usize = 0;
-
-        for (ordered) |*item| {
-            const found = if (item.cached) |bytes| blk: {
-                item.cached = null;
-                break :blk Read{ .type = item.type, .bytes = bytes };
-            } else try odb.read(io, item.oid);
-            var bytes = found.bytes;
-            var keep = false;
-            defer if (!keep) gpa.free(bytes);
-
-            const deltifiable = options.delta != .none and options.window != 0 and
-                bytes.len < options.big_file_bytes;
-
-            var chosen: ?ChosenDelta = null;
-            defer if (chosen) |c| gpa.free(c.bytes);
-            if (deltifiable) {
-                // git's rule for what is worth writing: a delta must be at
-                // most half the object it stands in for, and each one after
-                // the first must beat the one before it.
-                var limit: usize = bytes.len / 2;
-                if (limit > odb.backendData().kind.rawLen()) limit -= odb.backendData().kind.rawLen() else limit = 0;
-                chosen = try findDelta(gpa, io, window.items, found.type, bytes, options, limit);
-            }
-
-            var depth: u32 = 0;
-            const offset = if (chosen) |c| blk: {
-                const slot = window.items[c.slot];
-                depth = slot.depth + 1;
-                break :blk switch (options.delta) {
-                    .offset => try writer.addOfsDelta(item.oid, slot.offset, c.bytes),
-                    .reference => try writer.addRefDelta(item.oid, slot.oid, c.bytes),
-                    .none => unreachable,
-                };
-            } else try writer.add(item.oid, found.type, bytes);
-
-            if (deltifiable) {
-                try window.append(gpa, .{
-                    .oid = item.oid,
-                    .type = found.type,
-                    .bytes = bytes,
-                    .offset = offset,
-                    .depth = depth,
-                    .encoder = null,
-                });
-                keep = true;
-                window_bytes += bytes.len;
-                // The oldest go first, by count and then by weight, so the
-                // window is a bound on memory and not only on work.
-                while (window.items.len > options.window or
-                    (window.items.len > 1 and window_bytes > options.window_bytes))
-                {
-                    var oldest = window.orderedRemove(0);
-                    window_bytes -= oldest.bytes.len;
-                    if (oldest.encoder) |*encoder| encoder.deinit(gpa);
-                    gpa.free(oldest.bytes);
-                }
-                bytes = &.{};
-            }
-        }
-
         return try writer.finish(io);
+    }
+
+    /// The headers of `ordered`'s objects, on `workers` tasks: the loose
+    /// ones read concurrently, the rest — packed, or fetched from a
+    /// promisor, which may re-scan the pack directories — on this task once
+    /// the others are done.
+    fn readHeadersConcurrently(odb: *Odb, io: Io, workers: usize, ordered: []Ordered) Error!void {
+        const gpa = odb.backendData().gpa;
+        const failures = try gpa.alloc(?Error, ordered.len);
+        defer gpa.free(failures);
+        const found = try gpa.alloc(bool, ordered.len);
+        defer gpa.free(found);
+        @memset(found, false);
+        const Context = struct {
+            odb: *const Odb,
+            ordered: []Ordered,
+            found: []bool,
+            fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
+                const item = &c.ordered[i];
+                if (item.known) {
+                    c.found[i] = true;
+                    return;
+                }
+                const loose = (try c.odb.readLooseFor(task_io, item.oid, .header)) orelse return;
+                item.type = loose.header.type;
+                item.size = loose.header.size;
+                item.loose = true;
+                c.found[i] = true;
+            }
+        };
+        try runTasks(io, readTaskCount(workers), failures, Context{ .odb = odb, .ordered = ordered, .found = found }, Context.work);
+        for (ordered, found) |*item, loose| {
+            if (loose) continue;
+            const header = try odb.readHeaderForPack(io, item.oid, 0);
+            item.type = header.header.type;
+            item.size = header.header.size;
+            item.loose = header.loose;
+        }
+    }
+
+    /// The body of an object to pack, from where its header was found: the
+    /// loose file when it was loose, so that an object stored twice is
+    /// always packed from the same copy, and `read` otherwise.
+    fn readForPack(odb: *Odb, io: Io, item: *const Ordered) Error!Read {
+        if (item.loose) {
+            if (try odb.readLoose(io, item.oid)) |found| return found;
+        }
+        return odb.read(io, item.oid);
     }
 
     /// What `collectReachable` and `collectLoose` leave out.
@@ -1339,6 +1401,10 @@ pub const Odb = struct {
         /// incremental: it names the packs it is being added to, and holds
         /// only what they do not.
         exclude_packs: []const []const u8 = &.{},
+        /// How many tasks `collectLoose` and `collectAll` read the objects'
+        /// headers with, through the caller's `std.Io`, as
+        /// `PackOptions.threads` says. The tasks allocate nothing.
+        threads: u16 = 0,
     };
 
     /// A set of objects to pack, and the hints that came with them.
@@ -1527,7 +1593,7 @@ pub const Odb = struct {
                 }
             }
         }
-        try odb.assignHints(io, arena, entries.items);
+        try odb.assignHints(io, arena, entries.items, options.threads);
         collected.entries = try arena.dupe(PackEntry, entries.items);
         return collected;
     }
@@ -1539,24 +1605,51 @@ pub const Odb = struct {
     /// of one file sort next to two versions of a different file of the same
     /// length, and the window looks at the wrong base. One read per tree
     /// buys the whole ordering.
-    fn assignHints(odb: *Odb, io: Io, arena: Allocator, entries: []PackEntry) Error!void {
-        var hints: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty;
-        defer hints.deinit(odb.backendData().gpa);
-        for (entries) |entry| {
-            const head = odb.readHeader(io, entry.oid) catch |err| {
+    fn assignHints(odb: *Odb, io: Io, arena: Allocator, entries: []PackEntry, threads: u16) Error!void {
+        const gpa = odb.backendData().gpa;
+        // Every header, which also goes with the entry to `writePack`: the
+        // loose ones on as many tasks as asked, the rest here after them. A
+        // header that does not read leaves its entry without a hint, as
+        // before; only a refusal to read stops the collection.
+        const workers = taskCount(threads);
+        if (workers > 1) {
+            const failures = try gpa.alloc(?Error, entries.len);
+            defer gpa.free(failures);
+            const Context = struct {
+                odb: *const Odb,
+                entries: []PackEntry,
+                fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
+                    const found = c.odb.readLooseFor(task_io, c.entries[i].oid, .header) catch |err| {
+                        if (opening.readRefusal(err)) return err;
+                        return;
+                    } orelse return;
+                    c.entries[i].header = found.header;
+                }
+            };
+            try runTasks(io, readTaskCount(workers), failures, Context{ .odb = odb, .entries = entries }, Context.work);
+        }
+        for (entries) |*entry| {
+            if (entry.header != null) continue;
+            entry.header = odb.readHeader(io, entry.oid) catch |err| {
                 if (opening.readRefusal(err)) return err;
                 continue;
             };
+        }
+
+        var hints: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty;
+        defer hints.deinit(gpa);
+        for (entries) |entry| {
+            const head = entry.header orelse continue;
             if (head.type != .tree) continue;
             const found = odb.read(io, entry.oid) catch |err| {
                 if (opening.readRefusal(err)) return err;
                 continue;
             };
-            defer odb.backendData().gpa.free(found.bytes);
+            defer gpa.free(found.bytes);
             var it = object.Tree.parse(odb.backendData().kind, found.bytes).iterate();
             while (it.next() catch null) |child| {
                 if (hints.contains(child.oid)) continue;
-                try hints.put(odb.backendData().gpa, child.oid, try arena.dupe(u8, child.name));
+                try hints.put(gpa, child.oid, try arena.dupe(u8, child.name));
             }
         }
         for (entries) |*entry| {
@@ -1612,7 +1705,7 @@ pub const Odb = struct {
     /// listed the packs before this ran and looked for a loose object after
     /// it finished finds the pack on its second look.
     pub fn packLoose(odb: *Odb, io: Io, options: RepackOptions) Error!RepackReport {
-        var collected = try odb.collectLoose(io, .{});
+        var collected = try odb.collectLoose(io, .{ .threads = options.pack.threads });
         defer collected.deinit();
         return odb.packCollected(io, collected.entries, options, false);
     }
@@ -1623,7 +1716,7 @@ pub const Odb = struct {
     /// The same order as `packLoose`, and the same rule: nothing is taken
     /// away until the new pack is written, durable and readable here.
     pub fn repack(odb: *Odb, io: Io, options: RepackOptions) Error!RepackReport {
-        var collected = try odb.collectAll(io, .{});
+        var collected = try odb.collectAll(io, .{ .threads = options.pack.threads });
         defer collected.deinit();
         return odb.packCollected(io, collected.entries, options, options.remove_packs);
     }
@@ -1830,6 +1923,11 @@ pub const PackEntry = struct {
     /// well against each other, which is the whole of git's ordering
     /// heuristic. A wrong hint costs compression and nothing else.
     hint: []const u8 = &.{},
+    /// The object's type and size, when the caller has already read them,
+    /// as `collectLoose` and `collectAll` have; `writePack` then does not
+    /// read them again. The pack is written from the object itself, so a
+    /// wrong header costs a second read and the order, never the pack.
+    header: ?object.Header = null,
 };
 
 /// Which delta encoding a pack is written with.
@@ -1846,11 +1944,17 @@ pub const DeltaEncoding = enum {
 
 /// How a pack is built out of a set of objects.
 pub const PackOptions = struct {
-    /// The most delta candidates searched concurrently through the caller's
-    /// `std.Io` executor. One starts no concurrent task and is exactly the
-    /// serial writer. Larger values do not change object order, delta choice,
-    /// or output bytes.
-    threads: u16 = 1,
+    /// How many tasks build the pack, through the caller's `std.Io`
+    /// (`Io.Group.async`): zero for one per processor the machine has, one
+    /// for none at all — the writer then runs on the calling task alone,
+    /// with the loose-body cache below. Above one, the tasks read loose
+    /// objects and deflate entries ahead of the writer, while the delta
+    /// search and the writing stay on the calling task in pack order. An Io
+    /// that cannot run a task in parallel runs it inline. Every value
+    /// writes the same bytes, and the tasks never allocate: the calling task
+    /// sizes and allocates everything they fill. A `-fsingle-threaded`
+    /// build always uses one.
+    threads: u16 = 0,
     /// How many objects already written each new one is tried against.
     /// git's default is ten. Zero writes no deltas.
     window: u32 = 10,
@@ -1863,10 +1967,18 @@ pub const PackOptions = struct {
     /// what building a pack costs in memory whatever the objects are.
     window_bytes: usize = 32 << 20,
     /// How many bytes of loose-object bodies the ordering pass may retain for
-    /// the write pass. A retained object is opened and inflated once instead
-    /// of twice. Objects that do not fit the remaining budget take the old
-    /// two-read path; there is no eviction. Zero disables the cache.
+    /// the write pass, when `threads` is one. A retained object is opened
+    /// and inflated once instead of twice. Objects that do not fit the
+    /// remaining budget take the old two-read path; there is no eviction.
+    /// Zero disables the cache.
     loose_cache_bytes: usize = 64 << 20,
+    /// How many bytes the tasks may hold ahead of the writer, when `threads`
+    /// is not one. Objects go through in batches; each object is charged its
+    /// size for its body and `pack.Deflater.room(size)` for its deflated
+    /// entry, and a batch takes objects while their charges fit, and always
+    /// at least one. An object whose charge alone is larger is read and
+    /// deflated straight into the pack, on the calling task.
+    batch_bytes: usize = 64 << 20,
     /// An object this large or larger is written whole and never enters the
     /// window. git's `core.bigFileThreshold`, and the same default.
     big_file_bytes: u64 = 512 << 20,
@@ -1879,12 +1991,89 @@ pub const PackOptions = struct {
     reverse_index: bool = false,
 };
 
+/// How many tasks `threads` asks for.
+fn taskCount(threads: u16) usize {
+    if (builtin.single_threaded) return 1;
+    if (threads != 0) return threads;
+    return std.Thread.getCpuCount() catch 1;
+}
+
+/// The most tasks that read loose objects at once. Each read opens and
+/// closes a file, and beyond a few at a time those contend in the kernel on
+/// the process's descriptor table. Measured on macOS: opening and reading
+/// 35,512 warm loose objects took 203 ms on four tasks, 240 on six, 425 on
+/// eight and 1,267 on sixteen, against 541 on one; the whole bench pack,
+/// from a fresh copy, took 2.3 s with four reading, 2.0 with six or eight
+/// and 3.3 with sixteen. Deflating has no such limit and uses every task.
+const read_task_limit = 6;
+
+fn readTaskCount(workers: usize) usize {
+    return @min(workers, read_task_limit);
+}
+
+/// Share `failures.len` items out among `workers` tasks of `io`, the calling
+/// task one of them, each calling `work(context, io, worker, item)` for the
+/// items it takes. Tasks go through `Io.Group.async`, so an Io that cannot
+/// run one in parallel runs it inline, and a cancel reaches every task at
+/// its next item. A failed item stops the items after it from starting;
+/// the error returned is the failure of the first item in order, whatever
+/// the order the tasks met them in.
+fn runTasks(
+    io: Io,
+    workers: usize,
+    failures: []?Error,
+    context: anytype,
+    comptime work: fn (@TypeOf(context), Io, usize, usize) Error!void,
+) Error!void {
+    @memset(failures, null);
+    const Shared = struct {
+        io: Io,
+        failures: []?Error,
+        context: @TypeOf(context),
+        next: std.atomic.Value(usize) = .init(0),
+        lowest_failed: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
+        /// Whether the calling task met its own cancelation. Meeting it
+        /// consumes the request, so the tasks are canceled explicitly.
+        caller_canceled: bool = false,
+
+        fn run(shared: *@This(), worker: usize) void {
+            while (true) {
+                const i = shared.next.fetchAdd(1, .monotonic);
+                if (i >= shared.failures.len) return;
+                if (i > shared.lowest_failed.load(.monotonic)) continue;
+                const outcome: Error!void = if (shared.io.checkCancel()) |_|
+                    work(shared.context, shared.io, worker, i)
+                else |err|
+                    err;
+                outcome catch |err| {
+                    if (worker == 0 and err == error.Canceled) shared.caller_canceled = true;
+                    shared.failures[i] = err;
+                    var lowest = shared.lowest_failed.load(.monotonic);
+                    while (i < lowest) {
+                        lowest = shared.lowest_failed.cmpxchgWeak(lowest, i, .monotonic, .monotonic) orelse break;
+                    }
+                };
+            }
+        }
+    };
+    var shared: Shared = .{ .io = io, .failures = failures, .context = context };
+    var group: Io.Group = .init;
+    for (1..workers) |worker| group.async(io, Shared.run, .{ &shared, worker });
+    shared.run(0);
+    if (shared.caller_canceled) {
+        group.cancel(io);
+        return error.Canceled;
+    }
+    try group.await(io);
+    for (failures) |failure| if (failure) |err| return err;
+}
+
 /// One object held in the delta window.
 const WindowSlot = struct {
-    oid: Oid,
+    /// Where the object is in pack order, which says where it was written.
+    pos: usize,
     type: object.Type,
     bytes: []u8,
-    offset: u64,
     depth: u32,
     /// Built on the first candidate search that survives the cheap size and
     /// depth filters, then reused for the rest of this slot's window life.
@@ -1896,35 +2085,278 @@ const WindowSlot = struct {
     }
 };
 
-const DeltaJob = struct {
+/// A pack being built: the window, the delta choice for each object in pack
+/// order, and where each object was written.
+const Build = struct {
+    odb: *Odb,
     gpa: Allocator,
-    encoder: *const delta.Encoder,
-    target: []const u8,
-    limit: usize,
-    slot: usize,
-    result: Result = .pending,
+    options: PackOptions,
+    ordered: []Ordered,
+    /// Where each object of `ordered` was written, once it was.
+    offsets: []u64,
+    writer: *pack.Writer,
+    window: std.ArrayList(WindowSlot) = .empty,
+    window_bytes: usize = 0,
+    /// Bodies the window let go of while objects of the batch that may be
+    /// written from them still wait; released once the batch is written.
+    retired: std.ArrayList([]u8) = .empty,
+    keep_retired: bool = false,
 
-    const Result = union(enum) {
-        pending,
-        failed: Allocator.Error,
-        none,
-        bytes: []u8,
+    fn deinit(b: *Build) void {
+        for (b.window.items) |*slot| {
+            if (slot.encoder) |*encoder| encoder.deinit(b.gpa);
+            b.gpa.free(slot.bytes);
+        }
+        b.window.deinit(b.gpa);
+        b.releaseRetired();
+        b.retired.deinit(b.gpa);
+        b.gpa.free(b.offsets);
+    }
+
+    fn releaseRetired(b: *Build) void {
+        for (b.retired.items) |bytes| b.gpa.free(bytes);
+        b.retired.clearRetainingCapacity();
+    }
+
+    /// How object `pos` is written, by git's rules against the window: the
+    /// delta and its base, or whole.
+    const Choice = struct {
+        /// The base's position in pack order, for a delta.
+        base: ?usize = null,
+        /// The delta's bytes, the caller's.
+        delta: ?[]u8 = null,
+        /// Whether `bytes` went into the window, which now owns them.
+        kept: bool = false,
     };
 
-    fn run(job: *DeltaJob) Io.Cancelable!void {
-        const encoded = job.encoder.encode(job.gpa, job.target, .{ .max_bytes = job.limit }) catch |err| {
-            job.result = .{ .failed = err };
-            return;
+    /// Choose how object `pos`, whose bytes are `bytes`, is written, and
+    /// put it in the window when it may be a base. On success the bytes are
+    /// the window's when `kept`, and the caller's otherwise; the window
+    /// keeps them readable until `releaseRetired` while `keep_retired`.
+    fn choose(b: *Build, pos: usize, t: object.Type, bytes: []u8) Error!Choice {
+        const options = b.options;
+        const deltifiable = options.delta != .none and options.window != 0 and
+            bytes.len < options.big_file_bytes;
+        var choice: Choice = .{};
+        var depth: u32 = 0;
+        if (deltifiable) {
+            // git's rule for what is worth writing: a delta must be at
+            // most half the object it stands in for, and each one after
+            // the first must beat the one before it.
+            const raw_len = b.odb.backendData().kind.rawLen();
+            var limit: usize = bytes.len / 2;
+            if (limit > raw_len) limit -= raw_len else limit = 0;
+            if (try findDelta(b.gpa, b.window.items, t, bytes, options, limit)) |chosen| {
+                const slot = b.window.items[chosen.slot];
+                depth = slot.depth + 1;
+                choice = .{ .base = slot.pos, .delta = chosen.bytes };
+            }
+            errdefer if (choice.delta) |d| b.gpa.free(d);
+            try b.window.ensureUnusedCapacity(b.gpa, 1);
+            if (b.keep_retired) try b.retired.ensureUnusedCapacity(b.gpa, b.window.items.len + 1);
+            b.window.appendAssumeCapacity(.{ .pos = pos, .type = t, .bytes = bytes, .depth = depth, .encoder = null });
+            choice.kept = true;
+            b.window_bytes += bytes.len;
+            // The oldest go first, by count and then by weight, so the
+            // window is a bound on memory and not only on work.
+            while (b.window.items.len > options.window or
+                (b.window.items.len > 1 and b.window_bytes > options.window_bytes))
+            {
+                var oldest = b.window.orderedRemove(0);
+                b.window_bytes -= oldest.bytes.len;
+                if (oldest.encoder) |*encoder| encoder.deinit(b.gpa);
+                if (b.keep_retired) b.retired.appendAssumeCapacity(oldest.bytes) else b.gpa.free(oldest.bytes);
+            }
+        }
+        return choice;
+    }
+
+    /// Write object `pos` the way `choice` says, deflating it here.
+    fn writeDirect(b: *Build, pos: usize, t: object.Type, bytes: []const u8, choice: Choice) Error!void {
+        const item = &b.ordered[pos];
+        b.offsets[pos] = if (choice.base) |base| switch (b.options.delta) {
+            .offset => try b.writer.addOfsDelta(item.oid, b.offsets[base], choice.delta.?),
+            .reference => try b.writer.addRefDelta(item.oid, b.ordered[base].oid, choice.delta.?),
+            .none => unreachable,
+        } else try b.writer.add(item.oid, t, bytes);
+    }
+
+    /// Every object in pack order on this task alone: the serial writer.
+    fn writeSerially(b: *Build, io: Io) Error!void {
+        for (b.ordered, 0..) |*item, pos| {
+            const found = if (item.cached) |bytes| blk: {
+                item.cached = null;
+                break :blk Odb.Read{ .type = item.type, .bytes = bytes };
+            } else try b.odb.readForPack(io, item);
+            var owned = true;
+            defer if (owned) b.gpa.free(found.bytes);
+            const choice = try b.choose(pos, found.type, found.bytes);
+            owned = !choice.kept;
+            defer if (choice.delta) |d| b.gpa.free(d);
+            try b.writeDirect(pos, found.type, found.bytes, choice);
+        }
+    }
+
+    /// One object of a batch.
+    const Pending = struct {
+        type: object.Type,
+        /// The body, once read; allocated here for a loose object, by
+        /// `read` for the rest.
+        bytes: ?[]u8 = null,
+        filled: bool = false,
+        choice: Choice = .{},
+        /// Room for the deflated entry, and how much of it was used, or
+        /// `null` when the entry overflowed or has no room and is deflated
+        /// when written.
+        room: []u8 = &.{},
+        deflated: ?usize = null,
+
+        fn payload(p: *const Pending) []const u8 {
+            return p.choice.delta orelse p.bytes.?;
+        }
+    };
+
+    /// Every object in pack order, with `workers` tasks reading loose
+    /// bodies and deflating entries ahead of this one, batch by batch.
+    fn writeConcurrently(b: *Build, io: Io, workers: usize) Error!void {
+        const gpa = b.gpa;
+        const deflaters = try gpa.alloc(pack.Deflater, workers);
+        var made: usize = 0;
+        defer {
+            for (deflaters[0..made]) |*d| d.deinit(gpa);
+            gpa.free(deflaters);
+        }
+        while (made < workers) : (made += 1) deflaters[made] = try .init(gpa);
+
+        var batch: std.ArrayList(Pending) = .empty;
+        defer batch.deinit(gpa);
+        var failures: std.ArrayList(?Error) = .empty;
+        defer failures.deinit(gpa);
+        b.keep_retired = true;
+
+        var start: usize = 0;
+        while (start < b.ordered.len) {
+            // Take objects while their charges fit, and always one.
+            var end = start;
+            var charged: usize = 0;
+            while (end < b.ordered.len) {
+                const size = std.math.cast(usize, b.ordered[end].size) orelse std.math.maxInt(usize);
+                const charge = size +| pack.Deflater.room(size);
+                if (end > start and charged +| charge > b.options.batch_bytes) break;
+                charged +|= charge;
+                end += 1;
+            }
+            const alone = end == start + 1 and charged > b.options.batch_bytes;
+            try b.writeBatch(io, workers, deflaters, start, end, alone, &batch, &failures);
+            start = end;
+        }
+    }
+
+    fn writeBatch(
+        b: *Build,
+        io: Io,
+        workers: usize,
+        deflaters: []pack.Deflater,
+        start: usize,
+        end: usize,
+        alone: bool,
+        batch: *std.ArrayList(Pending),
+        failures: *std.ArrayList(?Error),
+    ) Error!void {
+        const gpa = b.gpa;
+        const items = b.ordered[start..end];
+        batch.clearRetainingCapacity();
+        try batch.ensureTotalCapacity(gpa, items.len);
+        try failures.resize(gpa, items.len);
+        for (items) |item| batch.appendAssumeCapacity(.{ .type = item.type });
+        const pending = batch.items;
+        defer for (pending) |*p| {
+            if (!p.choice.kept) if (p.bytes) |bytes| gpa.free(bytes);
+            if (p.choice.delta) |d| gpa.free(d);
+            if (p.room.len != 0) gpa.free(p.room);
         };
-        job.result = if (encoded) |bytes| .{ .bytes = bytes } else .none;
+        defer b.releaseRetired();
+
+        // The loose bodies, read by the tasks into buffers sized here.
+        for (items, pending) |item, *p| {
+            if (!item.loose or alone) continue;
+            p.bytes = try gpa.alloc(u8, @intCast(item.size));
+        }
+        const Bodies = struct {
+            odb: *const Odb,
+            items: []const Ordered,
+            pending: []Pending,
+            fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
+                const p = &c.pending[i];
+                const into = p.bytes orelse return;
+                const found = c.odb.readLooseFor(task_io, c.items[i].oid, .{ .into = into }) catch |err| switch (err) {
+                    // Not the size its header said: read it again, whole,
+                    // on the calling task.
+                    error.CorruptLooseObject => return,
+                    else => |e| return e,
+                } orelse return;
+                p.type = found.header.type;
+                p.filled = true;
+            }
+        };
+        try runTasks(io, readTaskCount(workers), failures.items, Bodies{ .odb = b.odb, .items = items, .pending = pending }, Bodies.work);
+        // The rest, here: packed objects, a loose one that went away since
+        // its header was read, and an object too large to batch.
+        for (items, pending) |*item, *p| {
+            if (p.filled) continue;
+            if (p.bytes) |unused| gpa.free(unused);
+            p.bytes = null;
+            const found = try b.odb.readForPack(io, item);
+            p.bytes = found.bytes;
+            p.type = found.type;
+        }
+
+        // The delta search, in pack order, exactly as the serial writer
+        // makes it.
+        for (pending, start..) |*p, pos| p.choice = try b.choose(pos, p.type, p.bytes.?);
+
+        // The entries, deflated by the tasks into room sized here.
+        if (!alone) {
+            for (pending) |*p| p.room = try gpa.alloc(u8, pack.Deflater.room(p.payload().len));
+            const Deflate = struct {
+                pending: []Pending,
+                deflaters: []pack.Deflater,
+                compression: pack.Compression,
+                fn work(c: @This(), _: Io, worker: usize, i: usize) Error!void {
+                    const p = &c.pending[i];
+                    var out: Io.Writer = .fixed(p.room);
+                    c.deflaters[worker].deflate(&out, p.payload(), c.compression) catch |err| switch (err) {
+                        // No room: deflated again when it is written.
+                        error.WriteFailed => return,
+                    };
+                    p.deflated = out.end;
+                }
+            };
+            try runTasks(io, workers, failures.items, Deflate{ .pending = pending, .deflaters = deflaters, .compression = b.options.compression }, Deflate.work);
+        }
+
+        // And written, in pack order.
+        for (pending, start..) |*p, pos| {
+            const deflated_len = p.deflated orelse {
+                try b.writeDirect(pos, p.type, p.bytes.?, p.choice);
+                continue;
+            };
+            const item = &b.ordered[pos];
+            const payload: pack.Writer.Payload = if (p.choice.base) |base| switch (b.options.delta) {
+                .offset => .{ .ofs_delta = b.offsets[base] },
+                .reference => .{ .ref_delta = b.ordered[base].oid },
+                .none => unreachable,
+            } else .{ .object = p.type };
+            b.offsets[pos] = try b.writer.addDeflated(item.oid, payload, p.payload().len, p.room[0..deflated_len]);
+        }
     }
 };
 
 const ChosenDelta = struct { slot: usize, bytes: []u8 };
 
+/// git's delta search for one object against the window, newest first.
 fn findDelta(
     gpa: Allocator,
-    io: Io,
     window: []WindowSlot,
     object_type: object.Type,
     target: []const u8,
@@ -1933,103 +2365,26 @@ fn findDelta(
 ) Error!?ChosenDelta {
     var chosen: ?ChosenDelta = null;
     errdefer if (chosen) |c| gpa.free(c.bytes);
-    var limit = initial_limit;
-
-    if (options.threads <= 1) {
-        var at = window.len;
-        while (at != 0) {
-            at -= 1;
-            const slot = &window[at];
-            // Types are contiguous in pack order, so the first mismatch also
-            // means every older window entry is the wrong type.
-            if (slot.type != object_type) break;
-            limit = deltaCandidateLimit(initial_limit, options.depth, slot.depth, chosen, window);
-            if (!worthTryingDelta(slot, target.len, options.depth, limit)) continue;
-            const encoder = try slot.getEncoder(gpa);
-            const candidate = try encoder.encode(gpa, target, .{ .max_bytes = limit }) orelse continue;
-            if (chosen) |c| {
-                const chosen_depth = window[c.slot].depth + 1;
-                if (candidate.len == c.bytes.len and slot.depth + 1 >= chosen_depth) {
-                    gpa.free(candidate);
-                    continue;
-                }
-                gpa.free(c.bytes);
-            }
-            chosen = .{ .slot = at, .bytes = candidate };
-        }
-        return chosen;
-    }
-
-    const jobs = try gpa.alloc(DeltaJob, @min(@as(usize, options.threads), window.len));
-    defer gpa.free(jobs);
     var at = window.len;
     while (at != 0) {
-        var count: usize = 0;
-        while (at != 0 and count < jobs.len) {
-            at -= 1;
-            const slot = &window[at];
-            if (slot.type != object_type) {
-                at = 0;
-                break;
+        at -= 1;
+        const slot = &window[at];
+        // Types are contiguous in pack order, so the first mismatch also
+        // means every older window entry is the wrong type.
+        if (slot.type != object_type) break;
+        const limit = deltaCandidateLimit(initial_limit, options.depth, slot.depth, chosen, window);
+        if (!worthTryingDelta(slot, target.len, options.depth, limit)) continue;
+        const encoder = try slot.getEncoder(gpa);
+        const candidate = try encoder.encode(gpa, target, .{ .max_bytes = limit }) orelse continue;
+        if (chosen) |c| {
+            const chosen_depth = window[c.slot].depth + 1;
+            if (candidate.len == c.bytes.len and slot.depth + 1 >= chosen_depth) {
+                gpa.free(candidate);
+                continue;
             }
-            if (slot.depth >= options.depth or target.len < slot.bytes.len / 32) continue;
-            const encoder = try slot.getEncoder(gpa);
-            jobs[count] = .{
-                .gpa = gpa,
-                .encoder = encoder,
-                .target = target,
-                // Candidate bounds depend on earlier results in this batch.
-                // Search speculatively, then apply those bounds in window
-                // order below so every thread count makes the same choice.
-                .limit = 0,
-                .slot = at,
-            };
-            count += 1;
+            gpa.free(c.bytes);
         }
-        if (count == 0) break;
-
-        var group: Io.Group = .init;
-        for (jobs[0..count]) |*job| {
-            group.concurrent(io, DeltaJob.run, .{job}) catch try job.run();
-        }
-        group.await(io) catch |err| {
-            group.cancel(io);
-            for (jobs[0..count]) |completed| switch (completed.result) {
-                .bytes => |bytes| gpa.free(bytes),
-                else => {},
-            };
-            return err;
-        };
-
-        for (jobs[0..count]) |job| {
-            if (job.result == .failed) {
-                for (jobs[0..count]) |completed| switch (completed.result) {
-                    .bytes => |bytes| gpa.free(bytes),
-                    else => {},
-                };
-                return job.result.failed;
-            }
-        }
-        for (jobs[0..count]) |job| switch (job.result) {
-            .bytes => |candidate| {
-                const slot = &window[job.slot];
-                limit = deltaCandidateLimit(initial_limit, options.depth, slot.depth, chosen, window);
-                if (!worthTryingDelta(slot, target.len, options.depth, limit) or candidate.len > limit) {
-                    gpa.free(candidate);
-                    continue;
-                }
-                if (chosen) |c| {
-                    const chosen_depth = window[c.slot].depth + 1;
-                    if (candidate.len == c.bytes.len and slot.depth + 1 >= chosen_depth) {
-                        gpa.free(candidate);
-                        continue;
-                    }
-                    gpa.free(c.bytes);
-                }
-                chosen = .{ .slot = job.slot, .bytes = candidate };
-            },
-            else => {},
-        };
+        chosen = .{ .slot = at, .bytes = candidate };
     }
     return chosen;
 }
@@ -2072,6 +2427,12 @@ const Ordered = struct {
     size: u64,
     name_hash: u32,
     cached: ?[]u8,
+    /// Whether the header came from a loose object, which is where the body
+    /// is read from too, or was given and the body is looked for loose
+    /// first.
+    loose: bool = false,
+    /// Whether the header was given with the entry.
+    known: bool = false,
 };
 
 /// git's own name hash: the last sixteen non-blank characters of a path,
