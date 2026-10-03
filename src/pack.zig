@@ -48,9 +48,13 @@ pub const default_max_chain_bytes: u64 = 1 << 30;
 /// before it.
 pub const read_block_bytes = 8 * 1024;
 
-/// How many bytes of a pack its positional reads keep by default: thirty-two
-/// blocks, allocated on the pack's first read.
-pub const default_read_cache_bytes = 256 * 1024;
+/// How many bytes of a pack its positional reads keep by default: up to
+/// 32 MiB, never more than the pack, each block allocated when it is first
+/// read. A pack this size or smaller is read at most once whatever order
+/// its objects are read in, as a memory map would read it, without the map.
+/// Reading 24,000 blobs in name order from a 14.5 MB pack made a read call
+/// for nearly every blob with 256 KiB, which cost a fifth of the time.
+pub const default_read_cache_bytes = 32 * 1024 * 1024;
 
 /// An entry whose stated size is at least this streams through a buffer of
 /// its own rather than through the blocks.
@@ -418,10 +422,13 @@ pub const Pack = struct {
     window: []u8,
     decoder: *inflate_mod.Decoder,
     /// The blocks positional reads keep, direct-mapped: block `b` of the
-    /// file can only be in slot `b % slots`. A slot holds `block_stride`
-    /// bytes of `blocks`. Allocated on the first positional read.
+    /// file can only be in slot `b % slots`, and there are never more slots
+    /// than the file has blocks. A slot's `block_stride` bytes are allocated
+    /// when it is first filled, so a pack holds what of it was read, up to
+    /// `slots` blocks; the slot tables are allocated on the first
+    /// positional read.
     slots: usize,
-    blocks: []u8 = &.{},
+    slot_memory: []?[*]u8 = &.{},
     block_ids: []u64 = &.{},
     block_lens: []u32 = &.{},
     /// The reader an entry is inflated through: it walks the blocks.
@@ -451,7 +458,8 @@ pub const Pack = struct {
             max_chain_bytes: u64 = default_max_chain_bytes,
             max_index_bytes: usize = 1 << 30,
             /// How many bytes of the pack positional reads keep, in aligned
-            /// `read_block_bytes` blocks, at least one. A pass over objects
+            /// `read_block_bytes` blocks, at least one and never more than
+            /// the pack has, each allocated when first read. A pass over objects
             /// an earlier pass read, with the delta-base cache holding at
             /// each step at least what it held then, reads no more blocks.
             read_cache_bytes: usize = default_read_cache_bytes,
@@ -516,7 +524,7 @@ pub const Pack = struct {
             .max_chain_bytes = options.max_chain_bytes,
             .window = window,
             .decoder = decoder,
-            .slots = @max(1, options.read_cache_bytes / read_block_bytes),
+            .slots = @intCast(@max(1, @min(options.read_cache_bytes / read_block_bytes, std.math.divCeil(u64, stat.size, read_block_bytes) catch unreachable))),
         };
     }
 
@@ -527,14 +535,15 @@ pub const Pack = struct {
     /// That is what makes the cache monotone: a sequence of reads that is
     /// part of another, block for block, never costs more than it.
     fn loadBlock(p: *Pack, io: Io, id: u64) Error!usize {
-        if (p.blocks.len == 0) {
-            const blocks = try p.gpa.alloc(u8, p.slots * block_stride);
-            errdefer p.gpa.free(blocks);
+        if (p.slot_memory.len == 0) {
+            const memory = try p.gpa.alloc(?[*]u8, p.slots);
+            errdefer p.gpa.free(memory);
             const ids = try p.gpa.alloc(u64, p.slots);
             errdefer p.gpa.free(ids);
             const lens = try p.gpa.alloc(u32, p.slots);
+            @memset(memory, null);
             @memset(ids, no_block);
-            p.blocks = blocks;
+            p.slot_memory = memory;
             p.block_ids = ids;
             p.block_lens = lens;
         }
@@ -543,6 +552,7 @@ pub const Pack = struct {
         const start = id * read_block_bytes;
         if (start >= p.size) return error.TruncatedPack;
         const len: usize = @intCast(@min(read_block_bytes, p.size - start));
+        if (p.slot_memory[slot] == null) p.slot_memory[slot] = (try p.gpa.alloc(u8, block_stride)).ptr;
         // Claimed only once read whole: a failure leaves the slot empty.
         p.block_ids[slot] = no_block;
         const dest = p.slotBytes(slot)[block_prefix..][0..len];
@@ -558,7 +568,7 @@ pub const Pack = struct {
     }
 
     fn slotBytes(p: *Pack, slot: usize) []u8 {
-        return p.blocks[slot * block_stride ..][0..block_stride];
+        return p.slot_memory[slot].?[0..block_stride];
     }
 
     /// The pack's bytes from `offset` to the end of the block it is in.
@@ -654,8 +664,9 @@ pub const Pack = struct {
     pub fn deinit(p: *Pack, io: Io) void {
         p.gpa.free(p.window);
         p.gpa.destroy(p.decoder);
-        if (p.blocks.len != 0) {
-            p.gpa.free(p.blocks);
+        if (p.slot_memory.len != 0) {
+            for (p.slot_memory) |memory| if (memory) |bytes| p.gpa.free(@as([]u8, bytes[0..block_stride]));
+            p.gpa.free(p.slot_memory);
             p.gpa.free(p.block_ids);
             p.gpa.free(p.block_lens);
         }
@@ -2840,6 +2851,111 @@ test "a pass whose delta-base cache holds more reads no more of the pack" {
             std.debug.print("pack {d}, {d}-byte cache: cold {d} reads, {d} bytes; warm {d} reads, {d} bytes\n", .{ round, cache_bytes, passes[0].calls, passes[0].bytes, passes[1].calls, passes[1].bytes });
             return error.TestUnexpectedResult;
         }
+    }
+}
+
+test "a pack the default block cache holds is read once in any order, and holds only the blocks read" {
+    const Counter = struct {
+        threadlocal var calls: usize = 0;
+        fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+            calls += 1;
+            return std.testing.io.vtable.fileReadPositional(userdata, file, buffers, offset);
+        }
+    };
+    // The bytes out at once.
+    const Live = struct {
+        child: Allocator,
+        live: usize = 0,
+        fn allocator(l: *@This()) Allocator {
+            return .{ .ptr = l, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const l: *@This() = @ptrCast(@alignCast(ctx));
+            const p = l.child.rawAlloc(len, alignment, ret) orelse return null;
+            l.live += len;
+            return p;
+        }
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+            const l: *@This() = @ptrCast(@alignCast(ctx));
+            if (!l.child.rawResize(memory, alignment, new_len, ret)) return false;
+            l.live = l.live - memory.len + new_len;
+            return true;
+        }
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+            const l: *@This() = @ptrCast(@alignCast(ctx));
+            const p = l.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
+            l.live = l.live - memory.len + new_len;
+            return p;
+        }
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const l: *@This() = @ptrCast(@alignCast(ctx));
+            l.child.rawFree(memory, alignment, ret);
+            l.live -= memory.len;
+        }
+    };
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    // Four hundred blobs that do not compress: a pack of about 600 KiB,
+    // which the 256 KiB this cache used to hold could not.
+    const count = 400;
+    var prng: std.Random.DefaultPrng = .init(0xb10c);
+    const random = prng.random();
+    var contents: [count][1500]u8 = undefined;
+    var offsets: [count]u64 = undefined;
+    var w = try Writer.init(gpa, io, tmp.dir, .sha1, count, .{});
+    defer w.deinit(io);
+    for (&contents, &offsets, 0..) |*bytes, *at, i| {
+        random.bytes(bytes);
+        var name: [20]u8 = @splat(0);
+        std.mem.writeInt(u32, name[0..4], @intCast(i), .big);
+        at.* = try w.add(try Oid.fromRaw(.sha1, &name), .blob, bytes);
+    }
+    const report = try w.finish(io);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var name_buf: [64]u8 = undefined;
+    const base = try std.fmt.bufPrint(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
+
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Counter.read;
+    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var live: Live = .{ .child = gpa };
+    var p = try Pack.open(live.allocator(), counted, tmp.dir, base, .sha1, .{});
+    defer p.deinit(io);
+    const blocks = std.math.divCeil(u64, p.size, read_block_bytes) catch unreachable;
+    try std.testing.expect(blocks * read_block_bytes > 2 * 256 * 1024);
+
+    // One object read: the blocks it spans, and the slot tables.
+    const opened = live.live;
+    Counter.calls = 0;
+    {
+        const got = try p.readAt(counted, offsets[0], null, 0);
+        defer live.allocator().free(got.bytes);
+        try std.testing.expectEqualSlices(u8, &contents[0], got.bytes);
+    }
+    const held = live.live - opened;
+    const tables = blocks * (@sizeOf(?[*]u8) + @sizeOf(u64) + @sizeOf(u32));
+    if (held > Counter.calls * block_stride + tables) {
+        std.debug.print("one object read in {d} reads holds {d} bytes\n", .{ Counter.calls, held });
+        return error.TestUnexpectedResult;
+    }
+
+    // Every object, in a random order, twice: each block is read once.
+    var order: [count]usize = undefined;
+    for (&order, 0..) |*k, i| k.* = i;
+    random.shuffle(usize, &order);
+    for (0..2) |_| {
+        for (order) |k| {
+            const got = try p.readAt(counted, offsets[k], null, 0);
+            defer live.allocator().free(got.bytes);
+            try std.testing.expectEqualSlices(u8, &contents[k], got.bytes);
+        }
+    }
+    if (Counter.calls > blocks) {
+        std.debug.print("{d} blocks read in {d} calls\n", .{ blocks, Counter.calls });
+        return error.TestUnexpectedResult;
     }
 }
 

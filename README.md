@@ -542,9 +542,11 @@ name — the new pack *is* the old one, and that is the one name the removal
 pass skips.
 
 **Packs are read with positional reads by default.**
-A read is one 8 KiB block, aligned in the file, and each pack keeps 256 KiB of
-them (`Odb.Options.pack_read_cache_bytes`), block `b` only ever in slot `b`
-modulo their count. An entry of 64 KiB or more streams through a 64 KiB buffer
+A read is one 8 KiB block, aligned in the file, and each pack keeps up to
+32 MiB of them, never more than its own size, each allocated when first read
+(`Odb.Options.pack_read_cache_bytes`), block `b` only ever in slot `b`
+modulo their count. A pack that fits is read at most once, whatever order its
+objects are read in, as a map would read it. An entry of 64 KiB or more streams through a 64 KiB buffer
 of its own instead. Where a read lands therefore depends only on what is
 wanted, never on the reads before it, and a pass whose delta-base cache holds
 at least what an earlier pass's held reads no more calls and no more bytes
@@ -585,8 +587,8 @@ an operation is held by the object database: the pack indexes, read whole at
 open so a lookup costs no syscall; the multi-pack index, when there is one,
 for the same reason; the delta base cache, keyed by pack offset and kept in
 least-recently-used order under a byte budget named in `Odb.Options`; the
-blocks positional pack reads keep, 256 KiB for each pack read, under
-`Odb.Options.pack_read_cache_bytes`; one
+blocks positional pack reads keep, up to 32 MiB or the pack's size for each
+pack read, as they are read, under `Odb.Options.pack_read_cache_bytes`; one
 deflate window, which is sixty-four kilobytes and is taken at `open` whether or
 not anything is written; and, once a database has written anything, one
 deflate state and one

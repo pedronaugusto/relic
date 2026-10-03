@@ -35,8 +35,10 @@ pub const Options = struct {
     read_buffer_size: usize = 64 * 1024,
     /// How many bytes of each pack positional reads keep, in aligned blocks
     /// of `pack.read_block_bytes`: `pack.Pack.open`'s `read_cache_bytes`,
-    /// for every pack this database opens. Allocated on a pack's first read.
-    /// Not used for a mapped pack.
+    /// for every pack this database opens. A block is allocated when it is
+    /// first read, and a pack never holds more than its own size, so the
+    /// database holds at most this much, or the pack's size if smaller, per
+    /// pack it reads. Not used for a mapped pack.
     pack_read_cache_bytes: usize = default_pack_read_cache_bytes,
     /// How deep a delta chain may be before it is refused.
     max_delta_depth: u32 = pack.default_max_depth,
