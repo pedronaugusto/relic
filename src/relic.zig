@@ -22,7 +22,7 @@
 //! | `transport` | `Session`: a remote, open. | `remote`, `url`, `refspec`, `fetch`, `fetchpack`, `clone`, `push`, `sendpack`, `local`, `ssh`, `smarthttp`, `httpclient`, `tls`, `clientcert`, `httpauth`, `httpsettings`, `credential`, `auth`, `protocol`, `connection`, `pktline`, `sideband`, `uploadpack`, `objectwalk`, `objectfilter`, `partial`, `filterspec`, `progress`, `bundle` |
 //! | `submodule` | Submodules: status, init, update, sync, absorb. | `gitmodules`, `gitlink`, `submoduletransport` |
 //! | `lfs` | Git LFS in process: pointers and the store. | `lfsapi`, `lfstransfer`, `lfslocks`, `lfspush`, `lfshooks`, `lfsssh`, `netrc` |
-//! | `patch` | Patches: read, applied, written from commits. | `apply`, `format` |
+//! | `patch` | Patches: read, applied, written from commits, applied from a mailbox. | `apply`, `format`, `mail`, `am` |
 
 pub const repo = @import("repo.zig");
 pub const hash = @import("hash.zig");
@@ -121,6 +121,7 @@ test {
         _ = @import("bundle_test.zig");
         _ = @import("apply_test.zig");
         _ = @import("formatpatch_test.zig");
+        _ = @import("am_test.zig");
     }
 }
 

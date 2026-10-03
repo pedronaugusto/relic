@@ -18,11 +18,13 @@ pub const families = [_]Family{
         "filterspec.test",
         "fs.test",
         "fsck.test",
+        "gitdate.test",
         "hash.test",
         "indexpack.test",
         "inflate.test",
         "inflate_test.test",
         "mailfmt.test",
+        "mailinfo.test",
         "message.test",
         "midx.test",
         "mimesniff.test",
@@ -78,6 +80,7 @@ pub const families = [_]Family{
     .{ .name = "core-history", .filters = &.{
         "blame_test.test",
 
+        "am_test.test",
         "apply.test",
         "apply_test.test",
         "commit_core.test",

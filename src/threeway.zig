@@ -75,6 +75,9 @@ pub const Options = struct {
     /// `GIT_MERGE_VERBOSITY=5`: `ort.Options.inner_messages`. So does a
     /// `merge.verbosity` of 5 or more.
     inner_messages: bool = false,
+    /// Directory rename detection; `null` reads `merge.directoryRenames`.
+    /// `git am`'s three-way fallback turns it off.
+    directory_renames: ?ort.DirectoryRenames = null,
 };
 
 /// One conflicted path.
@@ -236,7 +239,7 @@ fn run(
         .whitespace = settings.whitespace,
         .subtree_shift = settings.subtree_shift,
         .rename_limit = configuredRenameLimit(repo),
-        .directory_renames = configuredDirectoryRenames(repo),
+        .directory_renames = options.directory_renames orelse configuredDirectoryRenames(repo),
         .attributes = &attrs,
         .attributes_dir = wt,
         .configured_drivers = try configuredDrivers(arena, repo),
