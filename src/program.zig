@@ -289,8 +289,10 @@ pub const Running = struct {
 pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation) Error!Running {
     var environ = try programs.environ.clone(gpa);
     errdefer environ.deinit();
-    for (invocation.unset) |name| _ = environ.orderedRemove(name);
-    for (invocation.set) |v| try environ.put(v.name, v.value);
+    // conduit's rule for an override: a later one wins, and a removal is
+    // not an empty value
+    for (invocation.unset) |name| try conduit.environ.apply(&environ, &.{.{ .name = name, .value = null }});
+    for (invocation.set) |v| try conduit.environ.apply(&environ, &.{.{ .name = v.name, .value = v.value }});
 
     const line: CommandLine = try .init(gpa, invocation);
     errdefer line.deinit(gpa);
