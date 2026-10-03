@@ -199,6 +199,6 @@ def tsv(output):
     if any(row[3] == 'ERROR' for row in rows): raise ValueError('workload reported ERROR')
     missing = lambda row: row[3] in ('n/a','unavailable')
     timed = [row for row in rows if row[2] == 'time'] or rows
-    return {'rows':len(rows),'unavailable':sum(map(missing, rows)),
+    return {'rows':len(rows),'reported_side':rows[0][0],'unavailable':sum(map(missing, rows)),
             'operation':'unavailable' if all(map(missing, timed)) else 'available',
             'counts':{row[2]:row[3] for row in rows if row[4] in ('count','bytes') and row[2] not in ('peak_rss','rss')}}

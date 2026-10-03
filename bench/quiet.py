@@ -28,11 +28,16 @@ def written_packs(repo,scratch):
     for pattern in WRITER_OUTPUTS:packs+=[p for p in scratch.glob(pattern) if p.suffix=='.pack']
     return sorted(packs)
 
+# libgit2's packbuilder streams its pack into a byte count and keeps no file.
+STREAMED_PACKS=('libgit2',)
+
 def check_packwrite(evidence,repo,scratch,run):
     """Validate every pack a pack-writing point wrote, strictly. Only an
     unavailable operation writes nothing; a metric the tool cannot report,
     such as `deltas`, says nothing about the pack it wrote."""
-    if evidence['operation']=='available':
+    if evidence['operation']=='available' and evidence['reported_side'] in STREAMED_PACKS:
+        evidence['pack_verification']='not kept: streamed to a byte count'
+    elif evidence['operation']=='available':
         packs=written_packs(repo,scratch)
         if not packs:raise ValueError('pack writer produced no pack')
         for pack in packs:run(['git','index-pack','--strict',pack])

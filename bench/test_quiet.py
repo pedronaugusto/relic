@@ -68,6 +68,13 @@ class PackCheckTests(unittest.TestCase):
             self.assertEqual(s.calls, [])
             self.assertNotIn('pack_verification', evidence)
 
+    def test_a_streamed_pack_is_reported_as_not_kept(self):
+        with tempfile.TemporaryDirectory() as name:
+            s = Scratch(Path(name))
+            evidence = check_packwrite(tsv(output('libgit2', 'packwrite', 'n/a')), s.repo, s.scratch, s.run)
+            self.assertEqual(s.calls, [])
+            self.assertEqual(evidence['pack_verification'], 'not kept: streamed to a byte count')
+
     def test_every_written_pack_is_validated_including_gix(self):
         with tempfile.TemporaryDirectory() as name:
             s = Scratch(Path(name))
