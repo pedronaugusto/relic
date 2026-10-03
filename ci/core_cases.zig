@@ -10,6 +10,8 @@ pub const families = [_]Family{
         "config_refresh_test.test",
         "configstate.test",
         "crc32.test",
+
+        "cquote.test",
         "delta.test",
         "ewah.test",
         "fetchpack.test",
@@ -45,10 +47,12 @@ pub const families = [_]Family{
         "userconfig.test",
         "varint.test",
         "warning.test",
+        "whitespace.test",
         "wildmatch.test",
     } },
     .{ .name = "core-worktree", .filters = &.{
         "attributes.test",
+        "binarypatch.test",
         "concurrency_test.test",
         "convert.test",
         "dirscan.test",
@@ -71,6 +75,9 @@ pub const families = [_]Family{
     } },
     .{ .name = "core-history", .filters = &.{
         "blame_test.test",
+
+        "apply.test",
+        "apply_test.test",
         "commit_core.test",
         "diff_core.test",
         "bisect.test",
@@ -85,6 +92,7 @@ pub const families = [_]Family{
         "merge_core.test",
         "ort_test.test",
         "patchid.test",
+        "patchparse.test",
         "rebase.test",
         "rerere.test",
         "reset.test",

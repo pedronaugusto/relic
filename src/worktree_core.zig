@@ -2169,6 +2169,69 @@ pub fn writeEntry(
     return written;
 }
 
+/// Write `bytes`, a blob's contents already in memory, at `path` the way
+/// `writeEntry` writes a blob of `mode`: through `conv` for a file, as a
+/// link for a symlink, as an empty directory for a gitlink. For a caller
+/// that made the contents itself and stores no object for them, which is
+/// what `git apply` without `--index` does.
+pub fn writeBytes(
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    conv: *convert.Session,
+    path: []const u8,
+    mode: object.Mode,
+    bytes: []const u8,
+    rules: Rules,
+) Error!Written {
+    if (safepath.check(path, .worktree) != null) return error.UnsafePath;
+    if (std.fs.path.dirnamePosix(path)) |parent| {
+        wt.createDirPath(io, parent) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => |e| return e,
+        };
+    }
+    if (try fs.statAt(io, wt, path)) |found| {
+        if (found.kind == .directory and mode != .gitlink) wt.deleteDir(io, path) catch return error.UntrackedWouldBeOverwritten;
+    }
+    var written: Written = .{ .stat = .none };
+    switch (mode) {
+        .gitlink => {
+            wt.createDirPath(io, path) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => |e| return e,
+            };
+        },
+        .symlink => {
+            wt.deleteFile(io, path) catch {};
+            if (rules.symlinks) {
+                wt.symLink(io, bytes, path, .{}) catch {
+                    try writeFile(io, wt, path, .{ .bytes = bytes }, false);
+                    written.symlink_as_file = true;
+                };
+            } else {
+                try writeFile(io, wt, path, .{ .bytes = bytes }, false);
+                written.symlink_as_file = true;
+            }
+        },
+        .file, .exec => {
+            var scratch: std.heap.ArenaAllocator = .init(gpa);
+            defer scratch.deinit();
+            const a = scratch.allocator();
+            const applied: attributes.Attributes = if (rules.attrs) |attrs| blk: {
+                try attrs.enter(io, wt, path);
+                break :blk try attrs.lookup(a, path, false);
+            } else .{ .items = &.{} };
+            const smudged = try conv.toWorktree(a, path, bytes, applied, .{});
+            try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
+            if (rules.attrs) |attrs| attrs.written(path);
+        },
+        .tree => return error.UnsupportedEntry,
+    }
+    if (try fs.statAt(io, wt, path)) |after| written.stat = after.stat;
+    return written;
+}
+
 /// Remove one file from the working tree, and every directory above it that
 /// it leaves empty. A file that is already gone is not an error.
 pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Error!void {
