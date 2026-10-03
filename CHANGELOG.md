@@ -36,6 +36,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Inflate builds its Huffman tables as libdeflate does: each code written once and the table doubled by copies, subtables only as large as their codes need, and the code lengths counted while they are read. Building them was a fifth of reading small packed objects; inflating every entry of a 14.5 MB pack takes 73 ms where it took 87.
 
+- Add `revwalk.mailmap`: `.mailmap`, `mailmap.blob` and `mailmap.file` parsed and looked up as git does, a long line read in `fgets`-sized pieces included.
+
 - `collectLoose` and `collectAll` read the loose trees their hints come from on tasks too, eight megabytes at a time, and parse them in order, so every task count gives the same hints.
 
 - Pack writing on tasks overlaps the batches: while the calling task searches one batch for deltas, the tasks read the next and deflate the one before, so the search no longer waits on reads and compression. Each batch takes a third of `PackOptions.batch_bytes`, three being under way at once; the bytes written are unchanged.

@@ -271,6 +271,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `revwalk` | `Walk`, `mergeBase`, `mergeBases`, `mergeBasesWith`, `isAncestor`, `isAncestorWith`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary. |
 | `revwalk.revparse` | git's revision grammar. |
 | `revwalk.shallow` | A shallow repository's boundary: `.git/shallow`. |
+| `revwalk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |
 | `merge`, `merge.blobmerge` | Content merging as xdiff does it, and the stage-only tree merge. |
 | `merge.ort` | `mergeTrees`, `mergeCommits` — git's merge-ort: renames, directory renames, directory/file and type conflicts, submodules, virtual merge bases, git's messages. |
 | `merge.strategy`, `merge.subtreeshift` | Every `-X` word git's merge takes, and git's match-trees for `subtree`. |

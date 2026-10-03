@@ -17,6 +17,8 @@
 const core = @import("revwalk_core.zig");
 pub const revparse = @import("revparse.zig");
 pub const shallow = @import("shallow.zig");
+/// Who a commit's people are, as `.mailmap` says.
+pub const mailmap = @import("mailmap.zig");
 /// Errors from a walk.
 pub const Error = core.Error;
 /// The order commits come out in.

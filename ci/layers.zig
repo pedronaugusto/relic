@@ -176,6 +176,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/repo.zig",
         "src/repo_test.zig",
         "src/revindex_test.zig",
+        "src/mailmap.zig",
         "src/revparse.zig",
         "src/snapshot.zig",
         "src/sparsecheckout.zig",
