@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A pack written from objects already in packs, as `repack` writes it, has their whole objects inflated by the pack tasks too, each task with a decoder and a read buffer of its own; deltas are still resolved on the calling task with the delta-base cache. `collectAll` marks what it found only in packs with the new `PackEntry.in_pack`, so neither it nor `writePack` looks for a loose copy of those first.
+
 - A program run over its standard streams, ssh above all, whose standard error is captured no longer holds the conversation once it has ended while something it started (an ssh ControlMaster, a credential daemon) still holds that standard error open: what it wrote is read without waiting for more, through conduit's `readAvailable`.
 
 - `Odb.readHeader` of a loose object, and the header passes of `collectLoose`, `collectAll` and `writePack`, inflate the object's header and no more, and read at most a kilobyte of the file to do it, where they filled the 64 KiB inflate window.

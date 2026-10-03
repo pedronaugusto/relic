@@ -600,6 +600,32 @@ pub const Odb = struct {
         return (try odb.readHeaderForPack(io, oid, 0)).header;
     }
 
+    /// The header of `oid` from the first pack that holds it, or `null`
+    /// when none does; no loose copy is looked for.
+    fn packedHeader(odb: *Odb, io: Io, oid: Oid) Error!?object.Header {
+        for (odb.backendData().sources.items) |*source| {
+            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
+            return try source.packs.items[located.at].pack.headerAt(io, located.offset);
+        }
+        return null;
+    }
+
+    /// Where `oid`'s whole object is in the first pack that holds it, for
+    /// `Pack.inflateWith`; `null` when no pack holds it or it is a delta
+    /// there, which `read` resolves.
+    fn locateWhole(odb: *Odb, io: Io, oid: Oid) Error!?PackedAt {
+        for (odb.backendData().sources.items) |*source| {
+            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
+            const p = &source.packs.items[located.at].pack;
+            const entry = try p.entryHeaderAt(io, located.offset);
+            return switch (entry.kind) {
+                .object => |t| .{ .pack = p, .type = t, .at = entry.data_at, .size = entry.size },
+                .ofs_delta, .ref_delta => null,
+            };
+        }
+        return null;
+    }
+
     const PackHeader = struct {
         header: object.Header,
         /// A loose body retained while reading its header, when it fit the
@@ -1363,7 +1389,7 @@ pub const Odb = struct {
                 .name_hash = nameHash(entry.hint),
                 .cached = null,
                 .known = entry.header != null,
-                .loose = entry.header != null,
+                .loose = entry.header != null and !entry.in_pack,
             };
             ordered_filled = entries.len;
             try odb.readHeadersConcurrently(io, workers, ordered);
@@ -1371,14 +1397,15 @@ pub const Odb = struct {
             var cached_bytes: usize = 0;
             for (entries, 0..) |entry, i| {
                 if (entry.header) |header| {
-                    // Known already; the body is looked for loose first.
+                    // Known already; the body is looked for loose first,
+                    // unless the header came from a pack.
                     ordered[i] = .{
                         .oid = entry.oid,
                         .type = header.type,
                         .size = header.size,
                         .name_hash = nameHash(entry.hint),
                         .cached = null,
-                        .loose = true,
+                        .loose = !entry.in_pack,
                     };
                     ordered_filled += 1;
                     continue;
@@ -1672,7 +1699,7 @@ pub const Odb = struct {
                 while (try it.next()) |found| {
                     if (skip.contains(found.oid) or seen.contains(found.oid)) continue;
                     try seen.put(odb.backendData().gpa, found.oid, {});
-                    try entries.append(odb.backendData().gpa, .{ .oid = found.oid });
+                    try entries.append(odb.backendData().gpa, .{ .oid = found.oid, .in_pack = true });
                 }
             }
         }
@@ -1702,6 +1729,7 @@ pub const Odb = struct {
                 odb: *const Odb,
                 entries: []PackEntry,
                 fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
+                    if (c.entries[i].in_pack) return;
                     const found = c.odb.readLooseFor(task_io, c.entries[i].oid, .header) catch |err| {
                         if (opening.readRefusal(err)) return err;
                         return;
@@ -1713,10 +1741,19 @@ pub const Odb = struct {
         }
         for (entries) |*entry| {
             if (entry.header != null) continue;
+            // Found in a pack, so read there, not looked for loose first.
+            if (entry.in_pack) if (odb.packedHeader(io, entry.oid) catch |err| {
+                if (opening.readRefusal(err)) return err;
+                continue;
+            }) |header| {
+                entry.header = header;
+                continue;
+            };
             entry.header = odb.readHeader(io, entry.oid) catch |err| {
                 if (opening.readRefusal(err)) return err;
                 continue;
             };
+            entry.in_pack = false;
         }
 
         var hints: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty;
@@ -2011,6 +2048,11 @@ pub const PackEntry = struct {
     /// read them again. The pack is written from the object itself, so a
     /// wrong header costs a second read and the order, never the pack.
     header: ?object.Header = null,
+    /// Whether `header` was read from a pack, and no loose copy was found,
+    /// as `collectAll` says of what it found only in packs: `writePack`
+    /// then reads the object from the packs without looking for a loose
+    /// copy first.
+    in_pack: bool = false,
 };
 
 /// Which delta encoding a pack is written with.
@@ -2031,12 +2073,14 @@ pub const PackOptions = struct {
     /// (`Io.Group.async`): zero for one per processor the machine has, one
     /// for none at all — the writer then runs on the calling task alone,
     /// with the loose-body cache below. Above one, the tasks read loose
-    /// objects and deflate entries ahead of the writer, while the delta
-    /// search and the writing stay on the calling task in pack order. An Io
-    /// that cannot run a task in parallel runs it inline. Every value
-    /// writes the same bytes, and the tasks never allocate: the calling task
-    /// sizes and allocates everything they fill. A `-fsingle-threaded`
-    /// build always uses one.
+    /// objects, inflate the whole objects of packs and deflate entries ahead
+    /// of the writer, while the delta search, the deltas packs hold and the
+    /// writing stay on the calling task in pack order. An Io that cannot run
+    /// a task in parallel runs it inline. Every value writes the same bytes,
+    /// and the tasks never allocate: the calling task sizes and allocates
+    /// everything they fill, and, when objects come from packs, a decoder
+    /// and a 64 KiB read buffer for each task. A `-fsingle-threaded` build
+    /// always uses one.
     threads: u16 = 0,
     /// How many objects already written each new one is tried against.
     /// git's default is ten. Zero writes no deltas.
@@ -2284,10 +2328,12 @@ const Build = struct {
     /// One object of a batch.
     const Pending = struct {
         type: object.Type,
-        /// The body, once read; allocated here for a loose object, by
-        /// `read` for the rest.
+        /// The body, once read; allocated here for a loose object and a
+        /// whole packed one, by `read` for the rest.
         bytes: ?[]u8 = null,
         filled: bool = false,
+        /// Where a packed whole object is, for a task to inflate it.
+        packed_at: ?PackedAt = null,
         choice: Choice = .{},
         /// Room for the deflated entry, and how much of it was used, or
         /// `null` when the entry overflowed or has no room and is deflated
@@ -2311,6 +2357,16 @@ const Build = struct {
             gpa.free(deflaters);
         }
         while (made < workers) : (made += 1) deflaters[made] = try .init(gpa);
+        // A decoder and a read buffer for each task, when some objects come
+        // from packs.
+        var readers: []pack.Pack.EntryReader = &.{};
+        defer gpa.free(readers);
+        for (b.ordered) |item| {
+            if (item.loose) continue;
+            readers = try gpa.alloc(pack.Pack.EntryReader, workers);
+            for (readers) |*r| r.* = .{};
+            break;
+        }
 
         var batch: std.ArrayList(Pending) = .empty;
         defer batch.deinit(gpa);
@@ -2325,13 +2381,14 @@ const Build = struct {
             var charged: usize = 0;
             while (end < b.ordered.len) {
                 const size = std.math.cast(usize, b.ordered[end].size) orelse std.math.maxInt(usize);
-                const charge = size +| pack.Deflater.room(size);
+                const slack: usize = if (b.ordered[end].loose) 0 else pack.Pack.inflate_slack;
+                const charge = size +| slack +| pack.Deflater.room(size);
                 if (end > start and charged +| charge > b.options.batch_bytes) break;
                 charged +|= charge;
                 end += 1;
             }
             const alone = end == start + 1 and charged > b.options.batch_bytes;
-            try b.writeBatch(io, workers, deflaters, start, end, alone, &batch, &failures);
+            try b.writeBatch(io, workers, deflaters, readers, start, end, alone, &batch, &failures);
             start = end;
         }
     }
@@ -2341,6 +2398,7 @@ const Build = struct {
         io: Io,
         workers: usize,
         deflaters: []pack.Deflater,
+        readers: []pack.Pack.EntryReader,
         start: usize,
         end: usize,
         alone: bool,
@@ -2361,18 +2419,41 @@ const Build = struct {
         };
         defer b.releaseRetired();
 
-        // The loose bodies, read by the tasks into buffers sized here.
+        // The loose bodies and the whole packed ones, read by the tasks into
+        // buffers sized here. Where each packed one is is found here first,
+        // since looking in the packs changes them.
+        var opens = false;
         for (items, pending) |item, *p| {
-            if (!item.loose or alone) continue;
-            p.bytes = try gpa.alloc(u8, @intCast(item.size));
+            if (alone) continue;
+            if (item.loose) {
+                p.bytes = try gpa.alloc(u8, @intCast(item.size));
+                opens = true;
+                continue;
+            }
+            const at = (try b.odb.locateWhole(io, item.oid)) orelse continue;
+            // A size other than the header's is read again, whole, below.
+            if (at.size != item.size) continue;
+            p.bytes = try gpa.alloc(u8, @as(usize, @intCast(item.size)) + pack.Pack.inflate_slack);
+            p.packed_at = at;
         }
         const Bodies = struct {
             odb: *const Odb,
             items: []const Ordered,
             pending: []Pending,
-            fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
+            readers: []pack.Pack.EntryReader,
+            fn work(c: @This(), task_io: Io, worker: usize, i: usize) Error!void {
                 const p = &c.pending[i];
                 const into = p.bytes orelse return;
+                if (p.packed_at) |at| {
+                    at.pack.inflateWith(task_io, &c.readers[worker], at.at, at.size, into) catch |err| switch (err) {
+                        // Read again on the calling task, which says why.
+                        error.CorruptPackEntry => return,
+                        else => |e| return e,
+                    };
+                    p.type = at.type;
+                    p.filled = true;
+                    return;
+                }
                 const found = c.odb.readLooseFor(task_io, c.items[i].oid, .{ .into = into }) catch |err| switch (err) {
                     // Not the size its header said: read it again, whole,
                     // on the calling task.
@@ -2383,11 +2464,17 @@ const Build = struct {
                 p.filled = true;
             }
         };
-        try runTasks(io, readTaskCount(workers), failures.items, Bodies{ .odb = b.odb, .items = items, .pending = pending }, Bodies.work);
-        // The rest, here: packed objects, a loose one that went away since
-        // its header was read, and an object too large to batch.
+        // Opening files contends in the kernel; inflating does not.
+        const readers_now = if (opens) readTaskCount(workers) else workers;
+        try runTasks(io, readers_now, failures.items, Bodies{ .odb = b.odb, .items = items, .pending = pending, .readers = readers }, Bodies.work);
+        // The rest, here: deltas and what else is not loose, a loose object
+        // that went away since its header was read, and an object too large
+        // to batch.
         for (items, pending) |*item, *p| {
-            if (p.filled) continue;
+            if (p.filled) {
+                if (p.packed_at != null) p.bytes = try gpa.realloc(p.bytes.?, @intCast(item.size));
+                continue;
+            }
             if (p.bytes) |unused| gpa.free(unused);
             p.bytes = null;
             const found = try b.odb.readForPack(io, item);
@@ -2503,6 +2590,15 @@ fn worthTryingDelta(slot: *const WindowSlot, target_len: usize, max_depth: u32, 
     if (target_len < slot.bytes.len / 32) return false;
     return true;
 }
+
+/// A whole object's entry in a pack, which a task may inflate.
+const PackedAt = struct {
+    pack: *const pack.Pack,
+    type: object.Type,
+    /// Where the entry's zlib stream begins.
+    at: u64,
+    size: u64,
+};
 
 /// What a sort puts the objects in order by.
 const Ordered = struct {

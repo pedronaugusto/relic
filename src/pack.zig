@@ -815,6 +815,54 @@ pub const Pack = struct {
         if (n != result_len) return error.CorruptPackEntry;
     }
 
+    /// What one task inflates pack entries with, apart from the pack's own
+    /// decoder and blocks, so that several tasks read one pack at once:
+    /// `inflateWith`.
+    pub const EntryReader = struct {
+        decoder: inflate_mod.Decoder = .{},
+        buffer: [stream_buffer_bytes]u8 = undefined,
+    };
+
+    /// The room `inflateWith` needs in `out` past the entry's stated size.
+    pub const inflate_slack = decode_slack;
+
+    /// Inflate the whole object whose entry's data begins at `at` and
+    /// states `size` bytes into the front of `out`, which holds `size +
+    /// inflate_slack`, with `reader`'s decoder and buffer.
+    ///
+    /// It reads the pack file positionally, or the mapping, and nothing of
+    /// the pack that changes — not the blocks and not the decoder the other
+    /// reads use — so tasks call it at once on one pack, each with a reader
+    /// of its own. A delta has no whole object to inflate here: its base is
+    /// `readAt`'s, with the delta-base cache.
+    pub fn inflateWith(p: *const Pack, io: Io, reader: *EntryReader, at: u64, size: u64, out: []u8) Error!void {
+        const result_len = try inflatedLen(size);
+        if (out.len < result_len +| decode_slack) return error.StreamTooLong;
+        var fixed_reader: Io.Reader = undefined;
+        var file_reader: Io.File.Reader = undefined;
+        const input: *Io.Reader = if (p.memory) |mem| blk: {
+            if (at > mem.len) return error.TruncatedPack;
+            fixed_reader = .fixed(mem[@intCast(at)..]);
+            break :blk &fixed_reader;
+        } else blk: {
+            // No more read ahead than the stream can take: a deflated entry
+            // is at most an eighth longer than what it holds.
+            const want = @min(reader.buffer.len, result_len +| result_len / 8 +| 64);
+            file_reader = p.file.reader(io, reader.buffer[0..want]);
+            file_reader.seekTo(at) catch |err| return switch (err) {
+                error.EndOfStream => error.TruncatedPack,
+                error.ReadFailed => file_reader.err orelse error.ReadFailed,
+                else => |e| e,
+            };
+            break :blk &file_reader.interface;
+        };
+        const n = reader.decoder.zlib(input, out[0 .. result_len + decode_slack]) catch |err| switch (err) {
+            error.ReadFailed => return if (p.memory == null) file_reader.err orelse error.ReadFailed else error.ReadFailed,
+            error.EndOfStream, error.CorruptStream, error.OutputTooLong => return error.CorruptPackEntry,
+        };
+        if (n != result_len) return error.CorruptPackEntry;
+    }
+
     /// The object at `offset`, with its delta chain resolved.
     ///
     /// `cache` may be `null`; when it is not, resolved bases are kept in it,

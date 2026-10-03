@@ -427,3 +427,95 @@ test "a pack of fewer objects than tasks asks for no more tasks than it has obje
         }
     }
 }
+
+/// Which threads read a file positionally: in a repository whose objects
+/// are all packed, after it is opened, the pack.
+const Readers = struct {
+    var mutex: std.atomic.Mutex = .unlocked;
+    var ids: [64]std.Thread.Id = undefined;
+    var count: usize = 0;
+    var waiting_for_other: ?std.Thread.Id = null;
+
+    fn reset(wait_from: ?std.Thread.Id) void {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        count = 0;
+        waiting_for_other = wait_from;
+    }
+
+    fn distinct() usize {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        return count;
+    }
+
+    /// Note this thread; true for its first read while the calling thread
+    /// waits for another, which then waits no more.
+    fn note() bool {
+        const me = std.Thread.getCurrentId();
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        for (ids[0..count]) |id| if (id == me) return false;
+        if (count < ids.len) {
+            ids[count] = me;
+            count += 1;
+        }
+        if (waiting_for_other != me) return false;
+        waiting_for_other = null;
+        return true;
+    }
+
+    fn read(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+        // The calling thread's first read waits, for a while, until some
+        // other thread has read too: a serial reader never gets one.
+        if (note()) {
+            var waited: usize = 0;
+            while (waited < 5000) : (waited += 1) {
+                if (distinct() > 1) break;
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch break;
+            }
+        }
+        return std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
+    }
+};
+
+test "objects repacked from packs are read by several tasks, and the pack is the serial writer's" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var corpus = try Corpus.init(gpa, io, 8, 6, 24);
+    defer corpus.deinit(gpa, io);
+    {
+        // Everything into one pack, and nothing left loose.
+        var db = try odb_mod.Odb.openAt(gpa, io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
+        defer db.deinit(io);
+        _ = try db.packLoose(io, .{});
+    }
+
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Readers.read;
+    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const Repack = struct {
+        fn write(c: *Corpus, a: std.mem.Allocator, opened: Io, read: Io, threads: u16) !@import("pack.zig").WriteReport {
+            // One block cached, so that reading is reading the file.
+            var db = try odb_mod.Odb.openAt(a, opened, c.objects, .sha1, .{ .probe_timestamp_resolution = false, .pack_read_cache_bytes = 0 });
+            defer db.deinit(opened);
+            var collected = try db.collectAll(opened, .{});
+            defer collected.deinit();
+            for (collected.entries) |entry| try std.testing.expect(entry.in_pack);
+            try c.tmp.dir.createDirPath(opened, "out");
+            var out = try c.tmp.dir.openDir(opened, "out", .{ .iterate = true });
+            defer out.close(opened);
+            Readers.reset(if (threads == 1) null else std.Thread.getCurrentId());
+            return db.writePack(read, out, collected.entries, .{ .threads = threads });
+        }
+    };
+    const serial = try Repack.write(&corpus, gpa, io, watched, 1);
+    try std.testing.expectEqual(@as(usize, 1), Readers.distinct());
+    const parallel = try Repack.write(&corpus, gpa, io, watched, 4);
+    if (Readers.distinct() < 2) {
+        std.debug.print("the packed objects were read on {d} thread\n", .{Readers.distinct()});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(parallel.name.eql(serial.name));
+    try std.testing.expect(serial.deltas > 0);
+}
