@@ -30,6 +30,9 @@ const strategy = @import("strategy.zig");
 const convert = @import("convert.zig");
 const filter = @import("filter.zig");
 const program = @import("program.zig");
+const diff = @import("diff_core.zig");
+const object = @import("object_core.zig");
+const odb_mod = @import("odb_core.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -188,24 +191,10 @@ fn run(
         .trees => |t| t.ours,
         .commits => |c| try repo.commitTree(io, c.ours),
     };
-    // The index must be exactly `ours`.
-    var our_entries = try worktree.flatten(arena, io, db, ours);
-    for (index.entries.items) |entry| {
-        const want = our_entries.get(entry.path);
-        if (want == null or want.?.mode != entry.mode or !want.?.oid.eql(entry.oid) or entry.intent_to_add) {
-            if (options.blocked) |b| b.set(entry.path);
-            return error.DirtyIndex;
-        }
-    }
-    if (index.entries.items.len != our_entries.count()) {
-        var it = our_entries.keyIterator();
-        while (it.next()) |path| {
-            if (index.find(path.*) == null) {
-                if (options.blocked) |b| b.set(path.*);
-                return error.DirtyIndex;
-            }
-        }
-    }
+    // The index must be exactly `ours`. A cache tree whose root is valid
+    // says what tree the index is, as git's `repo_index_has_changes` asks
+    // it; without one, every entry is compared.
+    try requireIndexIs(arena, io, db, index, ours, options.blocked);
 
     var rules = try repo.worktreeRules();
     rules.required_filters = try repo.requiredFilters(arena);
@@ -259,30 +248,23 @@ fn run(
         },
     };
     defer merged.deinit();
-    var result = try merge.fromOrt(gpa, io, db, &merged);
-    defer result.deinit();
-
-    // What each path the merge touches should hold in the working tree.
+    // What the merge changes: the merged tree against ours, a walk past
+    // every subtree the two share, so a pick costs what it changes.
+    var tree_changes = try diff.tree(gpa, io, db, ours, merged.tree, .{});
+    defer tree_changes.deinit();
     var desired: std.StringArrayHashMapUnmanaged(?TreeEntry) = .empty;
-    for (result.index.entries.items) |entry| {
-        if (entry.stage != 0) continue;
-        try desired.put(arena, try arena.dupe(u8, entry.path), .{ .mode = entry.mode, .oid = entry.oid });
-    }
-    for (result.conflicts) |conflict| {
-        const side = conflict.result orelse continue;
-        try desired.put(arena, try arena.dupe(u8, conflict.path), .{ .mode = side.mode, .oid = side.oid });
+    for (tree_changes.items) |change| {
+        const path = try arena.dupe(u8, change.path());
+        try desired.put(arena, path, if (change.new) |e| .{ .mode = e.mode, .oid = e.oid } else null);
     }
     const messages = try ort.dupeMessages(arena, merged.messages);
-    var our_it = our_entries.keyIterator();
-    while (our_it.next()) |path| {
-        if (!desired.contains(path.*)) try desired.put(arena, path.*, null);
-    }
+    // A conflict's stages, by path.
+    var conflicted: std.StringArrayHashMapUnmanaged(ort.Conflicted) = .empty;
+    for (merged.conflicted) |c| try conflicted.put(arena, try arena.dupe(u8, c.path), c);
 
     var changes: std.ArrayList([]const u8) = .empty;
     var updates: std.StringArrayHashMapUnmanaged(?TreeEntry) = .empty;
     for (desired.keys(), desired.values()) |path, want| {
-        const have = our_entries.get(path);
-        if (sameEntry(have, want)) continue;
         try changes.append(arena, path);
         try updates.put(arena, path, want);
     }
@@ -333,7 +315,9 @@ fn run(
     // anything is written, which `enter` reads first.
     var write_attrs = try repo.loadAttrs(io);
     defer write_attrs.deinit();
-    var merged_entries = try worktree.flatten(arena, io, db, merged.tree);
+    // Only the `.gitattributes` above a path being written can say how it
+    // is written.
+    var merged_entries = try attributesAbove(arena, io, db, merged.tree, changes.items);
     if (merged.renormalize_read_attributes) {
         _ = merged_entries.remove(".gitattributes");
         if (merged.merged_attributes_blob) |oid| {
@@ -356,8 +340,6 @@ fn run(
     });
     defer conv.deinit();
     var stats: std.StringHashMapUnmanaged(fs.Stat) = .empty;
-    var conflicted: std.StringHashMapUnmanaged(void) = .empty;
-    for (result.conflicts) |conflict| try conflicted.put(arena, conflict.path, {});
     for (changes.items) |path| {
         const want = (desired.get(path).?) orelse continue;
         if (index.find(path)) |entry| {
@@ -385,40 +367,47 @@ fn run(
         outcome_written += 1;
     }
 
-    // The new index: unchanged entries keep what the old index knew about
-    // them, changed ones take the stat of what was just written, and a
-    // conflict is its stages.
-    var fresh: std.ArrayList(index_mod.Entry) = .empty;
-    for (result.index.entries.items) |entry| {
-        var copy = entry;
-        copy.path = try arena.dupe(u8, entry.path);
-        if (entry.stage == 0) {
-            if (index.find(entry.path)) |old| {
-                if (old.oid.eql(entry.oid) and old.mode == entry.mode) {
-                    copy = old.*;
-                    copy.path = try arena.dupe(u8, entry.path);
-                } else {
-                    copy.skip_worktree = old.skip_worktree;
-                }
-            }
-            if (stats.get(entry.path)) |stat| copy.stat = stat;
-        }
-        try fresh.append(arena, copy);
-    }
-    index.clear();
-    try index.addMany(fresh.items);
+    // The index, changed where the merge changed it and nowhere else:
+    // every other entry keeps what the index knew about it, a changed one
+    // takes the stat of what was just written, and a conflict is its
+    // stages.
+    var leaving: std.ArrayList([]const u8) = .empty;
+    var coming: std.ArrayList(index_mod.Entry) = .empty;
     const cache_tree = try index.cacheTree();
-    cache_tree.invalidateAll();
+    for (changes.items) |path| {
+        cache_tree.invalidate(path);
+        const old = index.find(path);
+        if (old != null) try leaving.append(arena, path);
+        if (conflicted.contains(path)) continue;
+        const want = desired.get(path).? orelse continue;
+        var entry: index_mod.Entry = .{ .path = path, .oid = want.oid, .mode = want.mode };
+        if (old) |o| entry.skip_worktree = o.skip_worktree;
+        if (stats.get(path)) |stat| entry.stat = stat;
+        try coming.append(arena, entry);
+    }
+    for (conflicted.keys(), conflicted.values()) |path, c| {
+        cache_tree.invalidate(path);
+        if (!desired.contains(path) and index.find(path) != null) try leaving.append(arena, path);
+        for (c.stages, 0..) |stage_entry, at| {
+            const st = stage_entry orelse continue;
+            // git's index takes a mode of nothing as a regular file.
+            const mode = object.Mode.fromRaw(st.mode) catch .file;
+            try coming.append(arena, .{ .path = path, .oid = st.oid, .mode = mode, .stage = @intCast(at + 1) });
+        }
+    }
+    std.mem.sort([]const u8, leaving.items, {}, lessThanPath);
+    index.removeMany(leaving.items);
+    try index.addMany(coming.items);
 
-    const conflicts = try arena.alloc(Conflict, result.conflicts.len);
-    for (result.conflicts, conflicts) |conflict, *out| {
-        out.* = .{ .path = try arena.dupe(u8, conflict.path), .kind = conflict.kind };
+    const conflicts = try arena.alloc(Conflict, conflicted.count());
+    for (conflicted.keys(), conflicted.values(), conflicts) |path, c, *out| {
+        out.* = .{ .path = path, .kind = merge.Conflict.Kind.of(c.stages[0] != null, c.stages[1] != null, c.stages[2] != null) };
     }
     std.mem.sort(Conflict, conflicts, {}, lessThanConflict);
 
     var merged_tree: ?Oid = null;
     const auto_merge: Oid = merged.tree;
-    if (result.isClean()) {
+    if (conflicts.len == 0) {
         merged_tree = merged.tree;
         cache_tree.root.entry_count = @intCast(index.entries.items.len);
         cache_tree.root.oid = merged.tree;
@@ -530,10 +519,72 @@ fn configuredDirectoryRenames(repo: *Repository) ort.DirectoryRenames {
     return .conflict;
 }
 
-fn sameEntry(a: anytype, b: ?TreeEntry) bool {
-    if (a == null and b == null) return true;
-    if (a == null or b == null) return false;
-    return a.?.mode == b.?.mode and a.?.oid.eql(b.?.oid);
+/// `error.DirtyIndex` unless `index` is exactly the tree `ours`, nothing
+/// staged beyond it.
+fn requireIndexIs(arena: Allocator, io: Io, db: *odb_mod.Odb, index: *Index, ours: Oid, blocked: ?*Blocked) Error!void {
+    var plain = true;
+    for (index.entries.items) |entry| {
+        if (entry.intent_to_add) plain = false;
+    }
+    if (plain) {
+        const cache_tree = try index.cacheTree();
+        if (cache_tree.root.isValid() and cache_tree.root.oid != null and cache_tree.root.oid.?.eql(ours) and
+            cache_tree.root.entry_count == @as(i64, @intCast(index.entries.items.len))) return;
+    }
+    var our_entries = try worktree.flatten(arena, io, db, ours);
+    for (index.entries.items) |entry| {
+        const want = our_entries.get(entry.path);
+        if (want == null or want.?.mode != entry.mode or !want.?.oid.eql(entry.oid) or entry.intent_to_add) {
+            if (blocked) |b| b.set(entry.path);
+            return error.DirtyIndex;
+        }
+    }
+    if (index.entries.items.len != our_entries.count()) {
+        var it = our_entries.keyIterator();
+        while (it.next()) |path| {
+            if (index.find(path.*) == null) {
+                if (blocked) |b| b.set(path.*);
+                return error.DirtyIndex;
+            }
+        }
+    }
+}
+
+/// The `.gitattributes` files of `tree` in the folders above `paths`, by
+/// path, as `worktree.addTreeAttributes` takes them.
+fn attributesAbove(arena: Allocator, io: Io, db: *odb_mod.Odb, tree: Oid, paths: []const []const u8) Error!std.StringHashMapUnmanaged(TreeEntry) {
+    var out: std.StringHashMapUnmanaged(TreeEntry) = .empty;
+    var looked: std.StringHashMapUnmanaged(void) = .empty;
+    for (paths) |path| {
+        var end: usize = 0;
+        while (true) {
+            const folder = path[0..end];
+            if (!looked.contains(folder)) {
+                try looked.put(arena, folder, {});
+                const file = if (folder.len == 0) ".gitattributes" else try std.fmt.allocPrint(arena, "{s}/.gitattributes", .{folder});
+                if (try entryAt(io, db, tree, file)) |found| try out.put(arena, file, found);
+            }
+            const slash = std.mem.indexOfScalarPos(u8, path, if (end == 0) 0 else end + 1, '/') orelse break;
+            end = slash;
+        }
+    }
+    return out;
+}
+
+/// The entry at `path` under `tree`, or `null`.
+fn entryAt(io: Io, db: *odb_mod.Odb, tree: Oid, path: []const u8) Error!?TreeEntry {
+    var at = tree;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        const found = try db.read(io, at);
+        defer db.allocator().free(found.bytes);
+        if (found.type != .tree) return null;
+        const entry = (try object.Tree.parse(db.objectFormat(), found.bytes).find(part)) orelse return null;
+        if (parts.peek() == null) return .{ .mode = entry.mode, .oid = entry.oid };
+        if (!entry.mode.isTree()) return null;
+        at = entry.oid;
+    }
+    return null;
 }
 
 fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
@@ -569,3 +620,52 @@ fn configuredDrivers(arena: Allocator, repo: *Repository) Allocator.Error![]cons
 /// Whether the file at `entry.path` holds something other than what the
 /// index says: `worktree.differsFromIndex`.
 pub const differsOnDisk = worktree.differsFromIndex;
+
+test "a merge reads the trees it changes, not the whole tree" {
+    const testgit = @import("testgit.zig");
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    var name: [32]u8 = undefined;
+    var text: [32]u8 = undefined;
+    for (0..300) |i| try r.writeFile(io, try std.fmt.bufPrint(&name, "d{d:0>3}/f", .{i}), try std.fmt.bufPrint(&text, "{d}\n", .{i}));
+    try r.exec(io, &.{ "add", "-A" });
+    try r.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try r.exec(io, &.{ "checkout", "-q", "-b", "side" });
+    try r.writeFile(io, "d005/f", "theirs\n");
+    try r.exec(io, &.{ "commit", "-q", "-am", "theirs" });
+    try r.exec(io, &.{ "checkout", "-q", "main" });
+    try r.writeFile(io, "d250/f", "ours\n");
+    try r.exec(io, &.{ "commit", "-q", "-am", "ours" });
+    try r.exec(io, &.{ "repack", "-adq" });
+
+    var repo = try Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+    const ours = (try repo.head(io)).?;
+    defer gpa.free(ours.name);
+    const theirs = (try repo.refStore().resolve(gpa, io, "refs/heads/side")).?;
+    defer gpa.free(theirs.name);
+
+    // Every object is in the one pack, and every read of one asks it.
+    const before = repo.odb.stats.pack_scans;
+    var outcome = try applyCommits(gpa, io, &repo, &index, ours.oid, theirs.oid, null, .{});
+    defer outcome.deinit();
+    const reads = repo.odb.stats.pack_scans - before;
+    try std.testing.expect(outcome.isClean());
+    try std.testing.expectEqual(@as(u32, 1), outcome.written);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("theirs\n", try r.dir.readFile(io, "d005/f", &buf));
+    try std.testing.expectEqualStrings("ours\n", try r.dir.readFile(io, "d250/f", &buf));
+    // The index is the merged tree, and git says so.
+    try index.write(io, repo.git_dir, "index", .{});
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const written = try r.line(io, &.{"write-tree"});
+    defer gpa.free(written);
+    try std.testing.expectEqualStrings(outcome.tree.?.hex(&hex), written);
+    // Three hundred folders, of which two changed: a whole-tree walk reads
+    // every one of them, more than once.
+    try std.testing.expect(reads < 50);
+}

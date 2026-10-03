@@ -1054,7 +1054,7 @@ pub const Index = struct {
         try index.entries.insert(index.gpa, at, copy);
     }
 
-    /// Add many entries at once, sorting once at the end.
+    /// Add many entries at once: sorted among themselves and merged in.
     ///
     /// Inserting into a sorted list one entry at a time is quadratic in the
     /// number of entries, and a working-tree walk produces paths in tree
@@ -1063,30 +1063,60 @@ pub const Index = struct {
     /// replaced.
     pub fn addMany(index: *Index, entries: []const Entry) Allocator.Error!void {
         if (entries.len == 0) return;
-        try index.entries.ensureUnusedCapacity(index.gpa, entries.len);
-        for (entries) |entry| {
-            var copy = entry;
-            copy.path = try index.gpa.dupe(u8, entry.path);
-            index.entries.appendAssumeCapacity(copy);
+        const gpa = index.gpa;
+        // The new entries sorted among themselves, then merged with the
+        // sorted list in one pass: a few entries added to a large index
+        // cost a copy of it, not a sort.
+        const fresh = try gpa.alloc(Entry, entries.len);
+        defer gpa.free(fresh);
+        var copied: usize = 0;
+        errdefer for (fresh[0..copied]) |e| gpa.free(e.path);
+        for (entries, fresh) |entry, *slot| {
+            slot.* = entry;
+            slot.path = try gpa.dupe(u8, entry.path);
+            copied += 1;
         }
+        var merged: std.ArrayList(Entry) = try .initCapacity(gpa, index.entries.items.len + fresh.len);
+        errdefer merged.deinit(gpa);
+
         // A stable sort keeps a later duplicate after the earlier one, so
         // the last one added wins, which is what `add` does too.
-        std.mem.sort(Entry, index.entries.items, {}, lessThan);
-        var write_at: usize = 0;
-        var read_at: usize = 0;
-        while (read_at < index.entries.items.len) {
-            const current = index.entries.items[read_at];
-            var last = read_at;
-            while (last + 1 < index.entries.items.len and
-                Entry.order(index.entries.items[last + 1], current) == .eq) last += 1;
-            // Free every duplicate but the one kept.
-            var i = read_at;
-            while (i < last) : (i += 1) index.gpa.free(index.entries.items[i].path);
-            index.entries.items[write_at] = index.entries.items[last];
-            write_at += 1;
-            read_at = last + 1;
+        std.mem.sort(Entry, fresh, {}, lessThan);
+        var kept: usize = 0;
+        for (fresh, 0..) |entry, at| {
+            if (at + 1 < fresh.len and Entry.order(fresh[at + 1], entry) == .eq) {
+                gpa.free(entry.path);
+                continue;
+            }
+            fresh[kept] = entry;
+            kept += 1;
         }
-        index.entries.shrinkRetainingCapacity(write_at);
+        copied = 0;
+
+        const old = index.entries.items;
+        var i: usize = 0;
+        var j: usize = 0;
+        while (i < old.len or j < kept) {
+            const order: std.math.Order = if (j == kept) .lt else if (i == old.len) .gt else Entry.order(old[i], fresh[j]);
+            switch (order) {
+                .lt => {
+                    merged.appendAssumeCapacity(old[i]);
+                    i += 1;
+                },
+                .gt => {
+                    merged.appendAssumeCapacity(fresh[j]);
+                    j += 1;
+                },
+                .eq => {
+                    gpa.free(old[i].path);
+                    merged.appendAssumeCapacity(fresh[j]);
+                    i += 1;
+                    j += 1;
+                },
+            }
+        }
+        index.entries.deinit(gpa);
+        index.entries = merged;
     }
 
     /// Remove every entry whose path is in `paths`, which must be sorted.
