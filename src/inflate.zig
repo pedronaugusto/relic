@@ -97,10 +97,10 @@ fn symbolEntry(comptime alphabet: Alphabet, sym: usize, bits: u32) Entry {
 /// codes are taken in canonical order, shortest first, in which those that
 /// share their first bits come together, so each subtable is made whole
 /// when its first code arrives.
-fn build(comptime alphabet: Alphabet, table: []Entry, lens: []const u8, comptime table_bits: u6) Error!void {
+/// `counted` is how many of `lens` have each length, `countLengths(lens)`.
+fn build(comptime alphabet: Alphabet, table: []Entry, lens: []const u8, counted: *const [16]u16, comptime table_bits: u6) Error!void {
     const sub_bits = 15 - table_bits;
-    var count = [_]u16{0} ** 16;
-    for (lens) |l| count[l] += 1;
+    var count = counted.*;
     count[0] = 0;
     var max: usize = 0;
     for (1..16) |l| {
@@ -119,9 +119,17 @@ fn build(comptime alphabet: Alphabet, table: []Entry, lens: []const u8, comptime
         if (left < 0) return error.CorruptStream;
     }
     if (left > 0) {
-        // Incomplete: only a single one-bit code, and never the precode.
+        // Incomplete: only a single one-bit code, and never the precode. It
+        // is code 0; reading a 1 there is an error.
         if (alphabet == .precode or max != 1) return error.CorruptStream;
-        @memset(table[0..main_len], entry(.invalid, 1, 0, 0));
+        const sym = std.mem.indexOfScalar(u8, lens, 1).?;
+        const e = symbolEntry(alphabet, sym, 1);
+        var i: usize = 0;
+        while (i < main_len) : (i += 2) {
+            table[i] = e;
+            table[i + 1] = entry(.invalid, 1, 0, 0);
+        }
+        return;
     }
 
     // The symbols by length, then by value: canonical order.
@@ -134,45 +142,109 @@ fn build(comptime alphabet: Alphabet, table: []Entry, lens: []const u8, comptime
         sorted[offset[l]] = @intCast(sym);
         offset[l] += 1;
     }
-    const total = offset[15];
+    const results = comptime symbolEntries(alphabet);
 
-    var code: u32 = 0;
+    // The code is complete. Its codes are taken in canonical order, held
+    // bit-reversed, as the decoder reads them, which libdeflate's
+    // `build_decode_table` does: appending a zero to a reversed code
+    // changes nothing, so the next code is the reversed increment. A code of
+    // `len` bits is written once into a table `1 << len` long, which is
+    // doubled with a copy of itself on the way to the next length, and so
+    // fills every entry whose low `len` bits are its code.
+    var next: usize = 0;
+    var codeword: usize = 0;
     var len: usize = 1;
     var remaining: u16 = count[1];
+    while (remaining == 0) {
+        len += 1;
+        remaining = count[len];
+    }
+    var table_end: usize = @as(usize, 1) << @intCast(@min(len, table_bits));
+    while (len <= table_bits) {
+        while (remaining != 0) : (remaining -= 1) {
+            table[codeword] = results[sorted[next]] | @as(Entry, @intCast(len));
+            next += 1;
+            if (codeword == table_end - 1) {
+                // The last code, all ones: the rest is copies.
+                while (table_end < main_len) : (table_end <<= 1) {
+                    @memcpy(table[table_end..][0..table_end], table[0..table_end]);
+                }
+                return;
+            }
+            const bit = @as(usize, 1) << @intCast(std.math.log2_int(usize, codeword ^ (table_end - 1)));
+            codeword = (codeword & (bit - 1)) | bit;
+        }
+        while (true) {
+            len += 1;
+            if (len <= table_bits) {
+                @memcpy(table[table_end..][0..table_end], table[0..table_end]);
+                table_end <<= 1;
+            }
+            remaining = count[len];
+            if (remaining != 0) break;
+        }
+    }
+
+    // Longer codes, in subtables after the main table. Each is as small as
+    // the codes behind its prefix allow, as zlib's `inflate_table` and
+    // libdeflate make it: those codes come next in canonical order and fill
+    // it exactly.
+    table_end = main_len;
     var sub_prefix: usize = std.math.maxInt(usize);
-    var sub_start: usize = main_len;
-    var next_sub: usize = main_len;
-    for (sorted[0..total]) |sym| {
+    var sub_start: usize = 0;
+    while (true) {
+        const prefix = codeword & (main_len - 1);
+        if (prefix != sub_prefix) {
+            sub_prefix = prefix;
+            sub_start = table_end;
+            var bits: usize = len - table_bits;
+            var used: usize = remaining;
+            while (used < (@as(usize, 1) << @intCast(bits))) {
+                bits += 1;
+                used = (used << 1) + count[table_bits + bits];
+            }
+            std.debug.assert(bits <= sub_bits);
+            table_end = sub_start + (@as(usize, 1) << @intCast(bits));
+            table[prefix] = entry(.subtable, table_bits, @intCast(bits), @intCast(sub_start));
+        }
+        const rest = len - table_bits;
+        const e = results[sorted[next]] | @as(Entry, @intCast(rest));
+        next += 1;
+        var i = sub_start + (codeword >> table_bits);
+        while (i < table_end) : (i += @as(usize, 1) << @intCast(rest)) table[i] = e;
+        const all_ones = (@as(usize, 1) << @intCast(len)) - 1;
+        if (codeword == all_ones) return;
+        const bit = @as(usize, 1) << @intCast(std.math.log2_int(usize, codeword ^ all_ones));
+        codeword = (codeword & (bit - 1)) | bit;
+        remaining -= 1;
         while (remaining == 0) {
-            code <<= 1;
             len += 1;
             remaining = count[len];
-        }
-        remaining -= 1;
-        const rev = reverse(@intCast(code), len);
-        code += 1;
-        if (len <= table_bits) {
-            const e = symbolEntry(alphabet, sym, @intCast(len));
-            var i: usize = rev;
-            while (i < main_len) : (i += @as(usize, 1) << @intCast(len)) table[i] = e;
-        } else {
-            const prefix = rev & (main_len - 1);
-            if (prefix != sub_prefix) {
-                sub_prefix = prefix;
-                sub_start = next_sub;
-                next_sub += 1 << sub_bits;
-                table[prefix] = entry(.subtable, table_bits, sub_bits, @intCast(sub_start));
-            }
-            const rest: u6 = @intCast(len - table_bits);
-            const e = symbolEntry(alphabet, sym, rest);
-            var i: usize = rev >> table_bits;
-            while (i < (1 << sub_bits)) : (i += @as(usize, 1) << rest) table[sub_start + i] = e;
         }
     }
 }
 
-fn reverse(code: u16, len: usize) usize {
-    return @as(usize, @bitReverse(code)) >> @intCast(16 - len);
+/// How many of `lens` have each length.
+fn countLengths(lens: []const u8) [16]u16 {
+    var count = [_]u16{0} ** 16;
+    for (lens) |l| count[l] += 1;
+    return count;
+}
+
+/// Every symbol's table entry with no bits yet: `build` adds the length.
+fn symbolEntries(comptime alphabet: Alphabet) [alphabetSize(alphabet)]Entry {
+    var out: [alphabetSize(alphabet)]Entry = undefined;
+    @setEvalBranchQuota(10_000);
+    for (&out, 0..) |*e, sym| e.* = symbolEntry(alphabet, sym, 0);
+    return out;
+}
+
+fn alphabetSize(comptime alphabet: Alphabet) usize {
+    return switch (alphabet) {
+        .precode => 19,
+        .litlen => 288,
+        .dist => 32,
+    };
 }
 
 /// Decoding tables, kept between streams: about 60 KiB.
@@ -242,9 +314,9 @@ pub const Decoder = struct {
         @memset(lens[144..256], 9);
         @memset(lens[256..280], 7);
         @memset(lens[280..288], 8);
-        build(.litlen, &d.fixed_litlen, &lens, litlen_table_bits) catch unreachable;
+        build(.litlen, &d.fixed_litlen, &lens, &countLengths(&lens), litlen_table_bits) catch unreachable;
         var dlens = [_]u8{5} ** 32;
-        build(.dist, &d.fixed_dist, &dlens, dist_table_bits) catch unreachable;
+        build(.dist, &d.fixed_dist, &dlens, &countLengths(&dlens), dist_table_bits) catch unreachable;
         d.fixed_built = true;
     }
 
@@ -263,9 +335,12 @@ pub const Decoder = struct {
             pre[at] = @truncate(s.bitbuf & 7);
             s.consume(3);
         }
-        try build(.precode, &d.precode, &pre, precode_table_bits);
+        try build(.precode, &d.precode, &pre, &countLengths(&pre), precode_table_bits);
 
         var lens: [286 + 30]u8 = undefined;
+        // Counted as they are read, for `build`.
+        var lit_count = [_]u16{0} ** 16;
+        var dist_count = [_]u16{0} ** 16;
         const total = hlit + hdist;
         var i: usize = 0;
         while (i < total) {
@@ -277,6 +352,7 @@ pub const Decoder = struct {
             const sym = entryValue(e);
             if (sym < 16) {
                 lens[i] = @intCast(sym);
+                if (i < hlit) lit_count[sym] += 1 else dist_count[sym] += 1;
                 i += 1;
                 continue;
             }
@@ -304,11 +380,14 @@ pub const Decoder = struct {
             }
             if (i + repeat > total) return error.CorruptStream;
             @memset(lens[i..][0..repeat], value);
+            const in_lit: u16 = @intCast(@min(repeat, hlit -| i));
+            lit_count[value] += in_lit;
+            dist_count[value] += @as(u16, @intCast(repeat)) - in_lit;
             i += repeat;
         }
         if (lens[256] == 0) return error.CorruptStream;
-        try build(.litlen, &d.litlen, lens[0..hlit], litlen_table_bits);
-        try build(.dist, &d.dist, lens[hlit..total], dist_table_bits);
+        try build(.litlen, &d.litlen, lens[0..hlit], &lit_count, litlen_table_bits);
+        try build(.dist, &d.dist, lens[hlit..total], &dist_count, dist_table_bits);
     }
 };
 
@@ -363,16 +442,23 @@ const State = struct {
         }
     }
 
-    /// Load bytes one at a time until `n` bits are in hand, or the input
-    /// ends.
-    fn fillSome(s: *State, n: u6) Error!void {
-        if (s.bitsleft < n and s.ip + 8 <= s.in.len) {
+    /// At least `n` bits in hand, or every bit the input has left: eight
+    /// bytes at once where the input has them.
+    inline fn fillSome(s: *State, n: u6) Error!void {
+        if (s.bitsleft >= n) return;
+        if (s.ip + 8 <= s.in.len) {
             s.bitbuf |= std.mem.readInt(u64, s.in[s.ip..][0..8], .little) << s.bitsleft;
             const add = (63 - @as(u32, s.bitsleft)) >> 3;
             s.ip += add;
             s.bitsleft += @intCast(add << 3);
             return;
         }
+        return s.fillEnd(n);
+    }
+
+    /// `fillSome` near the end of the input: bytes one at a time, and more
+    /// input from the reader when they run out.
+    fn fillEnd(s: *State, n: u6) Error!void {
         while (s.bitsleft < n) {
             if (s.ip == s.in.len) {
                 if (try s.more()) continue;
@@ -393,7 +479,7 @@ const State = struct {
     }
 
     /// At least `n` bits in hand.
-    fn need(s: *State, n: u6) Error!void {
+    inline fn need(s: *State, n: u6) Error!void {
         try s.fillSome(n);
         if (s.bitsleft < n) return error.EndOfStream;
     }
