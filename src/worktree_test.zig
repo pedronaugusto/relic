@@ -1081,3 +1081,88 @@ test "status and listing refuse a directory they could not read" {
     try std.testing.expectError(error.AccessDenied, worktree.status(gpa, refused, folder.dir, &staged, &db, .{}));
     try std.testing.expectError(error.AccessDenied, worktree.list(gpa, refused, folder.dir, &staged, .{}));
 }
+
+test "checkout writes files with git's modes, trimmed by the umask as git's are" {
+    if (!Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    try h.repo.writeFile(io, "plain.txt", "one\n");
+    try h.repo.writeFile(io, "run.sh", "#!/bin/sh\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "update-index", "--chmod=+x", "run.sh" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const tree_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(tree_text);
+    try h.repo.dir.deleteFile(io, "plain.txt");
+    try h.repo.dir.deleteFile(io, "run.sh");
+    try h.repo.exec(io, &.{ "rm", "-q", "--cached", "plain.txt", "run.sh" });
+    try h.reload(gpa, io);
+
+    const mask: std.posix.mode_t = std.c.umask(0o027);
+    defer _ = std.c.umask(mask);
+    _ = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, try Oid.parse(.sha1, tree_text), .{ .rules = h.worktreeRules() });
+    const plain = try h.repo.dir.statFile(io, "plain.txt", .{});
+    const run = try h.repo.dir.statFile(io, "run.sh", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o640), @as(std.posix.mode_t, @intCast(@intFromEnum(plain.permissions))) & 0o777);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o750), @as(std.posix.mode_t, @intCast(@intFromEnum(run.permissions))) & 0o777);
+}
+
+test "checkout writes the same files, index and error whatever the number of tasks" {
+    if (!Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
+    // A folder that refuses writes refuses everyone but root.
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    // More files than one batch holds, and a folder that refuses writes.
+    var name: [64]u8 = undefined;
+    var text: [64]u8 = undefined;
+    for (0..1500) |i| {
+        const folder = if (i % 50 == 0) "locked" else "open";
+        try h.repo.writeFile(io, try std.fmt.bufPrint(&name, "{s}/d{d}/f{d}", .{ folder, i % 7, i }), try std.fmt.bufPrint(&text, "{d} first\n", .{i}));
+    }
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const first_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(first_text);
+    const first = try Oid.parse(.sha1, first_text);
+    for (0..1500) |i| {
+        const folder = if (i % 50 == 0) "locked" else "open";
+        try h.repo.writeFile(io, try std.fmt.bufPrint(&name, "{s}/d{d}/f{d}", .{ folder, i % 7, i }), try std.fmt.bufPrint(&text, "{d} second\n", .{i}));
+    }
+    try h.repo.exec(io, &.{ "commit", "-q", "-am", "two" });
+
+    var seen: ?[]u8 = null;
+    defer if (seen) |s| gpa.free(s);
+    for ([_]usize{ 1, 2, 7 }) |workers| {
+        try h.repo.exec(io, &.{ "reset", "-q", "--hard", "HEAD" });
+        try h.reload(gpa, io);
+        for (0..7) |d| {
+            try h.repo.dir.setFilePermissions(io, try std.fmt.bufPrint(&name, "locked/d{d}", .{d}), @enumFromInt(@as(std.posix.mode_t, 0o555)), .{});
+        }
+        const result = worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, first, .{ .rules = h.worktreeRules(), .workers = workers });
+        for (0..7) |d| {
+            try h.repo.dir.setFilePermissions(io, try std.fmt.bufPrint(&name, "locked/d{d}", .{d}), @enumFromInt(@as(std.posix.mode_t, 0o755)), .{});
+        }
+        // What came back, what the index holds and what the files say.
+        var record: std.Io.Writer.Allocating = .init(gpa);
+        defer record.deinit();
+        if (result) |_| try record.writer.writeAll("ok\n") else |err| try record.writer.print("{s}\n", .{@errorName(err)});
+        var hex: [hash.max_hex_len]u8 = undefined;
+        for (h.index.entries.items) |entry| try record.writer.print("{s} {s}\n", .{ entry.path, entry.oid.hex(&hex) });
+        for (0..1500) |i| {
+            const folder = if (i % 50 == 0) "locked" else "open";
+            var buf: [64]u8 = undefined;
+            try record.writer.writeAll(try h.repo.dir.readFile(io, try std.fmt.bufPrint(&name, "{s}/d{d}/f{d}", .{ folder, i % 7, i }), &buf));
+        }
+        if (seen) |s| {
+            try std.testing.expectEqualStrings(s, record.written());
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, record.written(), "AccessDenied\n") or std.mem.startsWith(u8, record.written(), "PermissionDenied\n"));
+            seen = try gpa.dupe(u8, record.written());
+        }
+    }
+}

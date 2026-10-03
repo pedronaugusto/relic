@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A checkout writes its files on tasks of the caller's `Io`, four by default (`CheckoutOptions.workers`, as git's `checkout.workers`), in batches whose bounds depend only on the files, so the files written, the index and the error returned are the same whatever the count; each file is still written beside its place and renamed over it, so a reader sees the old bytes or the new. A path the index already has as the tree has it is no longer looked at on the disk unless `force` asks. Files are created with git's 0666 or 0777 and the umask trims them as it trims git's; they were set to 0666 or 0777 after creation whatever the umask said, which left every checked-out file writable by everyone.
+
 - A lock names the process that holds it in its own first bytes, `pid <n>`, which the new contents write over, where it wrote `<path>~pid.lock` beside every lock and removed it after: a lock now costs one file, not two, and a transaction of a thousand refs half the directory changes. `staleReport` reads the name from the lock.
 
 - A repository handle keeps each commit it reads, its tree and parents, as git keeps a parsed commit: `revparse`'s `main~40` reads forty commits once rather than once per expression, and `commitTree` reads none twice. At most 8,192 are kept before the handle starts over. Add `Repository.commitInfo`.
