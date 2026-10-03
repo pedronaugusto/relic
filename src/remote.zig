@@ -135,6 +135,19 @@ pub const Remote = struct {
         return remote;
     }
 
+    /// The ref here that tracks `name`, a ref on the remote: where a fetch
+    /// of it lands by the remote's fetch refspecs, the first that maps it,
+    /// as git's `remote_find_tracking` decides; `null` when none does or a
+    /// negative refspec excludes it. The result is the caller's.
+    pub fn trackingRef(remote: *const Remote, gpa: Allocator, name: []const u8) Allocator.Error!?[]u8 {
+        if (refspec.excluded(remote.fetch, name)) return null;
+        for (remote.fetch) |spec| {
+            if (spec.negative) continue;
+            if (try spec.mapSource(gpa, name)) |tracking| return tracking;
+        }
+        return null;
+    }
+
     /// Whether `name` is a remote with a URL in `config`.
     pub fn exists(config: *const Config, name: []const u8) bool {
         for (config.entries.items) |entry| {
@@ -328,6 +341,36 @@ test "a configured remote carries its URLs, refspecs and tag rule" {
     try testing.expectEqual(TagMode.none, remote.tags);
     try testing.expectEqual(@as(?bool, true), remote.prune);
     try testing.expectEqual(@as(?bool, true), remote.prune_tags);
+}
+
+test "a remote ref is tracked where the first fetch refspec maps it, unless excluded" {
+    const gpa = testing.allocator;
+    var config = try Config.parseText(gpa,
+        \\[remote "origin"]
+        \\    url = https://example.com/repo.git
+        \\    fetch = ^refs/heads/wip
+        \\    fetch = +refs/heads/main:refs/remotes/mirror/main
+        \\    fetch = +refs/heads/*:refs/remotes/origin/*
+        \\[remote "bare"]
+        \\    url = https://example.com/bare.git
+        \\
+    , .local);
+    defer config.deinit();
+
+    var origin = try Remote.get(gpa, &config, "origin");
+    defer origin.deinit();
+    const main = (try origin.trackingRef(gpa, "refs/heads/main")).?;
+    defer gpa.free(main);
+    try testing.expectEqualStrings("refs/remotes/mirror/main", main);
+    const topic = (try origin.trackingRef(gpa, "refs/heads/topic")).?;
+    defer gpa.free(topic);
+    try testing.expectEqualStrings("refs/remotes/origin/topic", topic);
+    try testing.expect(try origin.trackingRef(gpa, "refs/heads/wip") == null);
+    try testing.expect(try origin.trackingRef(gpa, "refs/tags/v1") == null);
+
+    var bare = try Remote.get(gpa, &config, "bare");
+    defer bare.deinit();
+    try testing.expect(try bare.trackingRef(gpa, "refs/heads/main") == null);
 }
 
 test "a name with no remote behind it is a URL" {

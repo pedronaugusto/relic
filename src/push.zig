@@ -648,19 +648,8 @@ fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
     return if (header.type == .commit) peeled else null;
 }
 
-/// The remote-tracking ref for `remote_ref`, by the remote's fetch
-/// refspecs: git's `remote_find_tracking`.
-fn trackingName(gpa: Allocator, remote: *const remote_mod.Remote, remote_ref: []const u8) Allocator.Error!?[]u8 {
-    if (refspec_mod.excluded(remote.fetch, remote_ref)) return null;
-    for (remote.fetch) |spec| {
-        if (spec.negative) continue;
-        if (try spec.mapSource(gpa, remote_ref)) |dst| return dst;
-    }
-    return null;
-}
-
 fn trackingValue(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, remote_ref: []const u8) Error!?Oid {
-    const name = (try trackingName(gpa, remote, remote_ref)) orelse return null;
+    const name = (try remote.trackingRef(gpa, remote_ref)) orelse return null;
     defer gpa.free(name);
     const resolved = (try repo.refStore().resolve(gpa, io, name)) orelse return null;
     defer gpa.free(resolved.name);
@@ -668,7 +657,7 @@ fn trackingValue(gpa: Allocator, io: Io, repo: *Repository, remote: *const remot
 }
 
 fn updateTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, result: RefResult, who: object.Signature) Error!void {
-    const name = (try trackingName(gpa, remote, result.remote_ref)) orelse return;
+    const name = (try remote.trackingRef(gpa, result.remote_ref)) orelse return;
     defer gpa.free(name);
     const current = try repo.refStore().resolve(gpa, io, name);
     defer if (current) |c| gpa.free(c.name);
