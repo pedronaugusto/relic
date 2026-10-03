@@ -149,21 +149,32 @@ class Pass:
                 if kwargs.get('check'): kwargs['check'](output)
         for round in range(self.runs):
             for side, argv in commands: self.point(workload,side,argv,round,**kwargs)
+    def kind(self):
+        """The mode, and the name its files are saved under. Only a quiet pass
+        writes `report.*`: smoke's preparation subprocess and a preparation
+        check share its default date folder and must not replace one."""
+        if self.smoke: return 'smoke', 'smoke'
+        if self.args.prepare_only: return 'preparation', 'prepare'
+        if self.args.check_prepared: return 'preparation check', 'check'
+        return 'benchmark', 'report'
     def save(self, failure=None):
-        report = self.clean({'mode':'smoke' if self.smoke else 'benchmark', 'revisions':self.revisions,
+        mode, name = self.kind()
+        report = self.clean({'mode':mode, 'revisions':self.revisions,
                  'baseline_note':self.metadata.get('baseline_note','Last first-parent main commit before the midnight cutoff.'),
                  'machine':self.machine, 'harness_commit':self.git('rev-parse','HEAD'),
                  'harness_dirty':bool(self.git('status','--porcelain','--untracked-files=no')),
                  'order':'A (before), B (after), comparisons; repeated per workload',
                  'samples':self.rows, 'failure':failure,
                  'complete':self.complete, 'timings_recorded':not self.smoke and not self.plan_only})
-        name = 'smoke' if self.smoke else 'report'
         (self.out/(name+'.json')).write_text(json.dumps(report,indent=2)+'\n')
-        lines = ['# '+('Smoke correctness' if self.smoke else 'Quiet benchmark'),'',
+        title = {'smoke':'Smoke correctness','preparation':'Preparation','preparation check':'Preparation check'}.get(mode,'Quiet benchmark')
+        lines = ['# '+title,'',
                  'Before: `'+self.revisions['before']+'`; after: `'+self.revisions['after']+'`.','',
                  report['baseline_note'],'', 'Machine: '+json.dumps(report['machine']), '',
                  'Order: '+report['order']+'.','',
-                 'No timings recorded. Tiny harness checks only.' if self.smoke else 'Individual samples follow; preparation and compilation are outside measurements.', '',
+                 'No timings recorded. Tiny harness checks only.' if self.smoke else
+                 'No timings recorded. Builds and artifact checks only.' if self.plan_only else
+                 'Individual samples follow; preparation and compilation are outside measurements.', '',
                  '| Workload | Side | Round | Status |','|---|---|---:|---|']
         for row in report['samples']:
             lines.append(f"| {row['workload']} | {row['side']} | {row['round']} | {row['status']} |")

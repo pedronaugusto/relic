@@ -1,11 +1,14 @@
-"""Quiet-pass pack checks; only temporary files, no timings."""
+"""Quiet-pass checks and report names; only temporary files, no timings."""
+import argparse
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 from quiet import check_packwrite, reset_pack_outputs
-from quiet_common import tsv
+from quiet_common import Pass, tsv
+
+HERE = Path(__file__).resolve().parent
 
 def git_env(home):
     """Git with nothing of the person's: no global or system config, a scratch home."""
@@ -88,5 +91,37 @@ class PackCheckTests(unittest.TestCase):
             (root/'loose').mkdir()
             reset_pack_outputs(root)
             self.assertEqual(sorted(p.name for p in root.iterdir()), ['index.gogit', 'loose'])
+
+def bare_pass(out, smoke=False, prepare_only=False, check_prepared=False):
+    """A pass that only saves: no builds, snapshots or git calls."""
+    p = Pass.__new__(Pass)
+    p.here, p.repo, p.build, p.out = HERE, HERE.parent, out/'build', out
+    p.args = argparse.Namespace(smoke=smoke, prepare_only=prepare_only, check_prepared=check_prepared)
+    p.smoke = smoke
+    p.preparing = smoke or prepare_only
+    p.plan_only = prepare_only or check_prepared
+    p.revisions = {'before': '0' * 40, 'after': '1' * 40}
+    p.metadata, p.machine, p.rows, p.complete = {}, {}, [], False
+    p.git = lambda *args: ''
+    return p
+
+class ReportNameTests(unittest.TestCase):
+    def test_smoke_preparation_and_checks_leave_a_quiet_report_alone(self):
+        with tempfile.TemporaryDirectory() as name:
+            out = Path(name)
+            quiet = {'report.json': '{"mode": "benchmark"}\n', 'report.md': '# Quiet benchmark\n'}
+            for file, text in quiet.items(): (out/file).write_text(text)
+            # What a default smoke run does: its preparation subprocess, then
+            # the smoke itself; and a later preparation check.
+            for mode in ({'prepare_only': True}, {'smoke': True}, {'check_prepared': True}):
+                bare_pass(out, **mode).save()
+            for file, text in quiet.items(): self.assertEqual((out/file).read_text(), text)
+
+    def test_a_quiet_pass_writes_the_report(self):
+        with tempfile.TemporaryDirectory() as name:
+            out = Path(name)
+            bare_pass(out).save()
+            self.assertTrue((out/'report.json').is_file())
+            self.assertTrue((out/'report.md').is_file())
 
 if __name__ == '__main__': unittest.main()
