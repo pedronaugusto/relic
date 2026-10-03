@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Limit small random pack reads to 8 KiB of read-ahead while keeping 64 KiB for large bodies.
+
 - Complete packed entry headers across short reads and buffer boundaries.
 
 - Reduce hash collisions and long-match comparisons in delta searches, with larger buffered loose pack reads.

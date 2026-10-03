@@ -521,6 +521,8 @@ name — the new pack *is* the old one, and that is the one name the removal
 pass skips.
 
 **Packs are read with positional reads by default.**
+Small random reads start with 8 KiB of read-ahead and large bodies use 64 KiB,
+with I/O failures still returned to the caller.
 `Odb.Options.map_packs` asks for a memory map instead, which is faster on a
 cold cache and costs two things: on macOS a pack replaced underneath a mapping
 is a signal rather than an error value, and on Windows a live mapping stops

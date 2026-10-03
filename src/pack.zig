@@ -492,7 +492,13 @@ pub const Pack = struct {
             r.interface.seek = @intCast(offset - start);
             return;
         }
-        return r.seekTo(offset);
+        try r.seekTo(offset);
+        // Random reads of small entries need little read-ahead. Keep the
+        // whole buffered range on a hit; on a miss start with 8 KiB instead
+        // of copying 64 KiB from the kernel for every small object.
+        r.interface.seek = 0;
+        r.interface.end = 0;
+        r.interface.buffer = p.input_buffer[0 .. 8 * 1024];
     }
 
     fn seekError(p: *const Pack, err: Io.File.Reader.SeekError) Error {
@@ -633,6 +639,8 @@ pub const Pack = struct {
             break :blk &fixed_reader;
         } else blk: {
             p.seekTo(at) catch |err| return p.seekError(err);
+            // Large entries still read through the full 64 KiB buffer.
+            if (size >= 8 * 1024) p.file_reader.interface.buffer = p.input_buffer;
             break :blk &p.file_reader.interface;
         };
 
@@ -2320,6 +2328,57 @@ test "a refused on-disk pack index releases its bytes once" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "bad.idx", .data = "x" });
     try std.testing.expectError(error.TruncatedIndex, Index.open(gpa, io, tmp.dir, "bad.idx", .sha1, 1024));
+}
+
+test "small random packed reads keep large sequential reads buffered" {
+    const Counter = struct {
+        threadlocal var largest: usize = 0;
+        fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+            var wanted: usize = 0;
+            for (buffers) |buf| wanted += buf.len;
+            largest = @max(largest, wanted);
+            const io = std.testing.io;
+            return io.vtable.fileReadPositional(userdata, file, buffers, offset);
+        }
+    };
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const large = try gpa.alloc(u8, 200000);
+    defer gpa.free(large);
+    var prng: std.Random.DefaultPrng = .init(1951);
+    prng.random().bytes(large);
+    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 3, .{});
+    defer w.deinit(io);
+    const first = try w.add(try Oid.parse(.sha1, "1" ** 40), .blob, "first");
+    const middle = try w.add(try Oid.parse(.sha1, "2" ** 40), .blob, large);
+    const last = try w.add(try Oid.parse(.sha1, "3" ** 40), .blob, "last");
+    const report = try w.finish(io);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var name_buf: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "pack-{s}", .{report.name.hex(&hex)});
+    var p = try Pack.open(gpa, io, tmp.dir, name, .sha1, .{});
+    defer p.deinit(io);
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Counter.read;
+    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    p.file_reader.io = counted;
+    Counter.largest = 0;
+    for ([_]struct { at: u64, bytes: []const u8 }{
+        .{ .at = last, .bytes = "last" },
+        .{ .at = first, .bytes = "first" },
+    }) |want| {
+        const got = try p.readAt(counted, want.at, null, 0);
+        defer gpa.free(got.bytes);
+        try std.testing.expectEqualSlices(u8, want.bytes, got.bytes);
+    }
+    try std.testing.expect(Counter.largest <= 8 * 1024);
+    Counter.largest = 0;
+    const got = try p.readAt(counted, middle, null, 0);
+    defer gpa.free(got.bytes);
+    try std.testing.expectEqualSlices(u8, large, got.bytes);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), Counter.largest);
 }
 
 test "a packed entry header survives a short positional read" {
