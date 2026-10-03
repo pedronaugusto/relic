@@ -76,6 +76,10 @@ and 16 MiB; the submodule fixture is ten local submodules, at one size.
 | LFS staging and checkout | `lfs-add`, `lfs-checkout` |
 | submodules | `submodule-status`, `submodule-update` |
 | working-tree snapshot | `snapshot` (Git: `git stash create`) |
+| shortlog through the mailmap, describe | `shortlog` (`-sne main`), `describe` (`--tags --abbrev=12 --match 't00[0-4]*'`, main and the nine commits below it) |
+| notes | `notes-add` (100 notes, a notes commit each) |
+| bundles | `bundle-create` (`main ^oldb`), `bundle-unbundle` (git's bundle of the same, into a copy) |
+| bisect | `bisect` (`--no-checkout main oldb`, `main~3` bad and every step to it) |
 
 A workload that only reads runs on the fixture, best of three repetitions
 inside the process; one that writes runs once on a fresh APFS copy with its
@@ -104,6 +108,11 @@ holds, counted by `git verify-pack` outside the clock, since git's
 pack-objects reports none; gix-pack writes every object whole. `revlist`'s
 `time_collect` builds every object's path, as `git rev-list --objects`
 prints them. The bare-repository repack writes no bitmap on any side.
+Git's `bisect` runs `git show` on the first bad commit it finds, which
+relic leaves to its caller; that one process is part of git's row. Bundles,
+bisect and shortlog have no gix, libgit2 or go-git row: none of them has the
+operation. gix's describe takes no `--match`, so its row is unavailable too;
+libgit2's describe is git's algorithm with the same pattern and length.
 
 Each write starts from a fresh copy of the same fixture, with index refresh
 and mutation outside timing. Every transport output is checked against the
@@ -122,7 +131,7 @@ and 1 KiB hashed; full sizes retain the existing 3,000 files and 64 MiB.
 Speed conditions are reported in a quiet pass; deterministic result checks
 still fail on wrong counts, hashes, trees, or pack contents.
 
-Quiet-only planning estimate: **60–100 minutes**. See [QUIET-PREP.md](QUIET-PREP.md) for preparation, counts, sizes and assumptions. `run.sh` and `transport/run.sh` remain
+Quiet-only planning estimate: **75–125 minutes**. See [QUIET-PREP.md](QUIET-PREP.md) for preparation, counts, sizes and assumptions. `run.sh` and `transport/run.sh` remain
 low-level helpers; use `quiet.sh` for the complete interleaved pass.
 
 Standalone `zig build -Doptimize=Debug` compiles the pinned after harness

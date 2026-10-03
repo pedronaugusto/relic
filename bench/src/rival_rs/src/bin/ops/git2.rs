@@ -81,6 +81,11 @@ pub fn run(workload: &str, path: &str, extra: Option<&str>) -> bool {
         "verify" => unavailable(workload, "libgit2 has no pack or object verification"),
         "lfs-add" | "lfs-checkout" => unavailable(workload, "libgit2 has no LFS"),
         "snapshot" => unavailable(workload, "libgit2 has no stash create: its stash always resets the working tree"),
+        "describe" => describe(workload, path),
+        "notes-add" => notes_add(workload, path),
+        "shortlog" => unavailable(workload, "libgit2 has no shortlog"),
+        "bundle-create" | "bundle-unbundle" => unavailable(workload, "libgit2 has no bundles"),
+        "bisect" => unavailable(workload, "libgit2 has no bisect"),
         _ => return false,
     }
     true
@@ -532,4 +537,50 @@ fn submodule_update(w: &str, path: &str) {
     let took = ms(&start);
     emit(w, "time", took, "ms");
     count(w, "submodules", n);
+}
+
+/// `git describe --tags --abbrev=12 --match 't00[0-4]*'` of main and the
+/// nine commits below it, the names reduced to the name of a blob of them.
+fn describe(w: &str, path: &str) {
+    let mut best = f64::MAX;
+    let mut names = String::new();
+    for _ in 0..reps() {
+        let start = BenchmarkInstant::now();
+        let repo = Repository::open(path).unwrap();
+        names.clear();
+        for i in 0..10 {
+            let target = repo.revparse_single(&format!("refs/heads/main~{i}")).unwrap();
+            let mut options = git2::DescribeOptions::new();
+            options.describe_tags().pattern("t00[0-4]*");
+            let found = target.describe(&options).unwrap();
+            let mut format = git2::DescribeFormatOptions::new();
+            format.abbreviated_size(12);
+            names.push_str(&found.format(Some(&format)).unwrap());
+            names.push('\n');
+        }
+        best = best.min(ms(&start));
+    }
+    emit(w, "time", best, "ms");
+    count(w, "described", 10);
+    // The names, as the blob of git's output they make.
+    let digest = Oid::hash_object(git2::ObjectType::Blob, names.as_bytes()).unwrap();
+    oid(w, "names", digest);
+}
+
+/// `git notes add -m` on main and the commits below it, a notes commit for
+/// each.
+fn notes_add(w: &str, path: &str) {
+    let n = if smoke() { 5 } else { 100 };
+    let targets: Vec<Oid> = {
+        let repo = Repository::open(path).unwrap();
+        (0..n).map(|i| id(&repo, &format!("refs/heads/main~{i}"))).collect()
+    };
+    let start = BenchmarkInstant::now();
+    let repo = Repository::open(path).unwrap();
+    for t in &targets {
+        repo.note(&who(), &who(), None, *t, "bench note\n", false).unwrap();
+    }
+    let took = ms(&start);
+    emit(w, "time", took, "ms");
+    count(w, "notes", n);
 }

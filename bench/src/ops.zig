@@ -32,6 +32,7 @@ pub const names = [_][]const u8{
     "rebase",        "cherry-pick",  "revert",           "commit",              "switch",      "stash",
     "branch-create", "tag-create",   "ref-list",         "repack",              "verify",      "worktree-add",
     "lfs-add",       "lfs-checkout", "submodule-status", "submodule-update",    "snapshot",    "patch-id",
+    "shortlog",      "describe",     "notes-add",        "bundle-create",       "bundle-unbundle", "bisect",
 };
 
 pub fn isOp(command: []const u8) bool {
@@ -103,6 +104,12 @@ pub fn run(gpa: Allocator, io: Io, cwd: Io.Dir, command: []const u8, repo_path: 
     if (eql(u8, command, "submodule-update")) return c.submoduleUpdate();
     if (eql(u8, command, "snapshot")) return c.snapshot();
     if (eql(u8, command, "patch-id")) return c.patchId();
+    if (eql(u8, command, "shortlog")) return c.shortlog();
+    if (eql(u8, command, "describe")) return c.describe();
+    if (eql(u8, command, "notes-add")) return c.notesAdd();
+    if (eql(u8, command, "bundle-create")) return c.bundleCreate();
+    if (eql(u8, command, "bundle-unbundle")) return c.bundleUnbundle();
+    if (eql(u8, command, "bisect")) return c.bisect();
     return error.UnknownCommand;
 }
 
@@ -739,6 +746,172 @@ const Ctx = struct {
         const took = ms(c.io, start);
         emit(c.io, c.name, "time", took, "ms");
         emitOid(c.io, c.name, "tree", captured.snapshot.tree);
+    }
+
+    // --------------------------------------------------- history features
+
+    /// `git shortlog -sne main`: every commit grouped by author, through
+    /// the mailmap.
+    fn shortlog(c: Ctx) !void {
+        if (!@hasDecl(relic.revwalk, "shortlog")) return unavailable(c.io, c.name, "this revision has no revwalk.shortlog");
+        const sl = relic.revwalk.shortlog;
+        var best: f64 = std.math.floatMax(f64);
+        var groups: usize = 0;
+        var commits: usize = 0;
+        for (0..reps) |_| {
+            var text: Io.Writer.Allocating = .init(c.gpa);
+            defer text.deinit();
+            const start = benchmarkNow(c.io);
+            var repo = try c.open();
+            defer repo.deinit(c.io);
+            var mailmap = try relic.revwalk.mailmap.Mailmap.load(c.gpa, c.io, &repo);
+            defer mailmap.deinit();
+            var log_: sl.Shortlog = try .init(c.gpa, sl.configured(repo.configuration(), .{ .summary = true, .numbered = true, .email = true, .mailmap = &mailmap }));
+            defer log_.deinit();
+            var walk: relic.revwalk.Walk = .init(c.gpa, &repo.odb);
+            defer walk.deinit();
+            try walk.push(try c.resolve(&repo, "refs/heads/main"));
+            commits = 0;
+            while (try walk.next(c.io)) |walked| {
+                try log_.add(c.io, &repo.odb, walked.oid);
+                commits += 1;
+            }
+            try log_.write(&text.writer);
+            best = @min(best, ms(c.io, start));
+            groups = std.mem.count(u8, text.written(), "\n");
+        }
+        emit(c.io, c.name, "time", best, "ms");
+        emitCount(c.io, c.name, "groups", groups);
+        emitCount(c.io, c.name, "commits", commits);
+    }
+
+    /// `git describe --tags --abbrev=12 --match 't00[0-4]*'` of main and
+    /// the nine commits below it, the names reduced to the name of a blob of
+    /// them, as every side reduces them.
+    fn describe(c: Ctx) !void {
+        if (!@hasDecl(relic.revwalk, "describe")) return unavailable(c.io, c.name, "this revision has no revwalk.describe");
+        var best: f64 = std.math.floatMax(f64);
+        var digest: Oid = undefined;
+        for (0..reps) |_| {
+            var text: std.ArrayList(u8) = .empty;
+            defer text.deinit(c.gpa);
+            const start = benchmarkNow(c.io);
+            var repo = try c.open();
+            defer repo.deinit(c.io);
+            var d = try relic.revwalk.describe.Describer.init(c.gpa, c.io, &repo, .{ .tags = true, .abbrev = 12, .match = &.{"t00[0-4]*"} });
+            defer d.deinit();
+            for (0..10) |i| {
+                var spec: [32]u8 = undefined;
+                const target = try c.resolve(&repo, try std.fmt.bufPrint(&spec, "refs/heads/main~{d}", .{i}));
+                const name = try d.describe(c.io, target);
+                defer c.gpa.free(name);
+                try text.appendSlice(c.gpa, name);
+                try text.append(c.gpa, '\n');
+            }
+            best = @min(best, ms(c.io, start));
+            digest = relic.hash.Hasher.object(objectFormat(&repo), "blob", text.items);
+        }
+        emit(c.io, c.name, "time", best, "ms");
+        emitCount(c.io, c.name, "described", 10);
+        emitOid(c.io, c.name, "names", digest);
+    }
+
+    /// `git notes add -m` on main and the commits below it, a notes commit
+    /// for each.
+    fn notesAdd(c: Ctx) !void {
+        if (!@hasDecl(relic.commit, "notes")) return unavailable(c.io, c.name, "this revision has no commit.notes");
+        const notes = relic.commit.notes;
+        const count: usize = if (smoke) 5 else 100;
+        var targets: [100]Oid = undefined;
+        {
+            var repo = try c.open();
+            defer repo.deinit(c.io);
+            for (targets[0..count], 0..) |*t, i| {
+                var spec: [32]u8 = undefined;
+                t.* = try c.resolve(&repo, try std.fmt.bufPrint(&spec, "refs/heads/main~{d}", .{i}));
+            }
+        }
+        const start = benchmarkNow(c.io);
+        var repo = try c.open();
+        defer repo.deinit(c.io);
+        for (targets[0..count]) |t| {
+            _ = try notes.add(c.gpa, c.io, &repo, t, .{ .who = who, .contents = &.{.{ .text = "bench note" }} });
+        }
+        emit(c.io, c.name, "time", ms(c.io, start), "ms");
+        emitCount(c.io, c.name, "notes", count);
+    }
+
+    /// `git bundle create <file> main ^oldb`.
+    fn bundleCreate(c: Ctx) !void {
+        if (!@hasDecl(relic.transport, "bundle")) return unavailable(c.io, c.name, "this revision has no transport.bundle");
+        const path = c.extra orelse return error.MissingBundle;
+        const start = benchmarkNow(c.io);
+        var repo = try c.open();
+        defer repo.deinit(c.io);
+        try relic.transport.bundle.create(c.gpa, c.io, &repo, c.cwd, path, .{ .include = &.{"main"}, .exclude = &.{"oldb"} });
+        const took = ms(c.io, start);
+        var f = try relic.transport.bundle.File.open(c.gpa, c.io, c.cwd, path);
+        defer f.close(c.gpa, c.io);
+        emit(c.io, c.name, "time", took, "ms");
+        emitCount(c.io, c.name, "refs", f.header.references.len);
+        emitCount(c.io, c.name, "prerequisites", f.header.prerequisites.len);
+    }
+
+    /// `git bundle unbundle <file>`: verified, and its pack indexed.
+    fn bundleUnbundle(c: Ctx) !void {
+        if (!@hasDecl(relic.transport, "bundle")) return unavailable(c.io, c.name, "this revision has no transport.bundle");
+        const path = c.extra orelse return error.MissingBundle;
+        const start = benchmarkNow(c.io);
+        var repo = try c.open();
+        defer repo.deinit(c.io);
+        var f = try relic.transport.bundle.File.open(c.gpa, c.io, c.cwd, path);
+        defer f.close(c.gpa, c.io);
+        _ = try relic.transport.bundle.unbundle(c.gpa, c.io, &repo, f, .{});
+        emit(c.io, c.name, "time", ms(c.io, start), "ms");
+        emitCount(c.io, c.name, "refs", f.header.references.len);
+    }
+
+    /// `git bisect start --no-checkout main oldb`, then good or bad on
+    /// each commit offered until the first bad one, `main~3`, is found.
+    fn bisect(c: Ctx) !void {
+        if (!@hasDecl(relic.revwalk, "bisect")) return unavailable(c.io, c.name, "this revision has no revwalk.bisect");
+        const b = relic.revwalk.bisect;
+        var bad: [4]Oid = undefined;
+        {
+            var repo = try c.open();
+            defer repo.deinit(c.io);
+            for (&bad, 0..) |*o, i| {
+                var spec: [32]u8 = undefined;
+                o.* = try c.resolve(&repo, try std.fmt.bufPrint(&spec, "refs/heads/main~{d}", .{i}));
+            }
+        }
+        const start = benchmarkNow(c.io);
+        var repo = try c.open();
+        defer repo.deinit(c.io);
+        const options: b.Options = .{ .who = who };
+        var report = try b.start(c.gpa, c.io, &repo, &.{ "--no-checkout", "main", "oldb" }, options);
+        var steps: usize = 0;
+        while (true) {
+            const testing = switch (report.step) {
+                .testing, .merge_base => |o| o,
+                else => break,
+            };
+            var is_bad = false;
+            for (bad) |o| {
+                if (o.eql(testing)) is_bad = true;
+            }
+            report.deinit();
+            report = try b.mark(c.gpa, c.io, &repo, if (is_bad) "bad" else "good", &.{}, options);
+            steps += 1;
+        }
+        const found = report.step;
+        report.deinit();
+        emit(c.io, c.name, "time", ms(c.io, start), "ms");
+        emitCount(c.io, c.name, "steps", steps);
+        switch (found) {
+            .first_bad => |o| emitOid(c.io, c.name, "first_bad", o),
+            else => return error.BisectDidNotFinish,
+        }
     }
 };
 

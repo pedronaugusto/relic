@@ -29,6 +29,7 @@ var opNames = []string{
 	"rebase", "cherry-pick", "revert", "commit", "switch", "stash",
 	"branch-create", "tag-create", "ref-list", "repack", "verify", "worktree-add",
 	"lfs-add", "lfs-checkout", "submodule-status", "submodule-update", "snapshot", "patch-id",
+	"shortlog", "describe", "notes-add", "bundle-create", "bundle-unbundle", "bisect",
 }
 
 // What go-git cannot do, and why.
@@ -47,6 +48,12 @@ var opUnavailable = map[string]string{
 	"lfs-add":             "go-git has no LFS",
 	"lfs-checkout":        "go-git has no LFS",
 	"snapshot":            "go-git has no stash create or snapshot",
+	"shortlog":            "go-git has no shortlog",
+	"describe":            "go-git has no describe",
+	"notes-add":           "go-git has no notes",
+	"bundle-create":       "go-git has no bundles",
+	"bundle-unbundle":     "go-git has no bundles",
+	"bisect":              "go-git has no bisect",
 }
 
 var who = &object.Signature{Name: "Bench", Email: "bench" + "\x40" + "example.invalid", When: time.Unix(1700000000, 0).UTC()}

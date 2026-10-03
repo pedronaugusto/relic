@@ -77,6 +77,11 @@ pub fn run(workload: &str, path: &str, extra: Option<&str>) -> bool {
         "lfs-add" | "lfs-checkout" => unavailable(workload, "gix has no LFS"),
         "submodule-update" => unavailable(workload, "gix has no submodule update"),
         "snapshot" => unavailable(workload, "gix has no working-tree snapshot (stash create)"),
+        "shortlog" => unavailable(workload, "gix has no shortlog"),
+        "describe" => unavailable(workload, "gix's describe takes no --match pattern"),
+        "notes-add" => unavailable(workload, "gix has no notes"),
+        "bundle-create" | "bundle-unbundle" => unavailable(workload, "gix has no bundles"),
+        "bisect" => unavailable(workload, "gix has no bisect"),
         _ => return false,
     }
     true

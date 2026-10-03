@@ -7,7 +7,7 @@ for the operation `ops.zig` performs in process. Outputs are read after the
 clock stops, except where git's answer arrives on its standard output, which
 is part of its work.
 """
-import os, subprocess, sys, time
+import hashlib, os, subprocess, sys, time
 
 
 def benchmark_clock():
@@ -27,6 +27,7 @@ NAMES = (
     "merge-tree-clean", "merge-tree-conflict", "merge-clean", "merge-conflict", "rebase", "cherry-pick",
     "revert", "commit", "switch", "stash", "branch-create", "tag-create", "ref-list", "repack", "verify",
     "worktree-add", "lfs-add", "lfs-checkout", "submodule-status", "submodule-update", "snapshot", "patch-id",
+    "shortlog", "describe", "notes-add", "bundle-create", "bundle-unbundle", "bisect",
 )
 # The identity and clock every side commits with.
 IDENT = {"GIT_AUTHOR_NAME": "Bench", "GIT_AUTHOR_EMAIL": "bench" + chr(64) + "example.invalid",
@@ -253,5 +254,58 @@ def run(command, repo, extra):
         took, out = timed(lambda: git(repo, "stash", "create"))
         emit(w, "time", took, "ms")
         emit(w, "tree", git(repo, "rev-parse", out.decode().strip() + "^{tree}").decode().strip(), "oid")
+    elif w == "shortlog":
+        took, out = timed(lambda: git(repo, "shortlog", "-sne", "main"), REPS)
+        commits = sum(int(l.split("\t")[0]) for l in out.decode().splitlines())
+        emit(w, "time", took, "ms")
+        emit(w, "groups", out.count(b"\n"), "count")
+        emit(w, "commits", commits, "count")
+    elif w == "describe":
+        # One process for the ten: git describes every name it is given.
+        revs = ["main~%d" % i for i in range(10)]
+        took, out = timed(lambda: git(repo, "describe", "--tags", "--abbrev=12", "--match", "t00[0-4]*", *revs), REPS)
+        emit(w, "time", took, "ms")
+        emit(w, "described", out.count(b"\n"), "count")
+        emit(w, "names", hashlib.sha1(b"blob %d\0" % len(out) + out).hexdigest(), "oid")
+    elif w == "notes-add":
+        # One `git notes add` per note: each is a notes commit, as on
+        # every side.
+        count = 5 if SMOKE else 100
+        targets = git(repo, "rev-list", "-n", str(count), "main").decode().split()
+        def add():
+            for t in targets:
+                git(repo, "notes", "add", "-m", "bench note", t, capture=False)
+        took, _ = timed(add)
+        emit(w, "time", took, "ms")
+        emit(w, "notes", count, "count")
+    elif w == "bundle-create":
+        took, _ = timed(lambda: git(repo, "bundle", "create", "-q", extra, "main", "^oldb", capture=False))
+        heads = git(repo, "bundle", "list-heads", extra)
+        header = open(extra, "rb").read().split(b"\n\n", 1)[0]
+        emit(w, "time", took, "ms")
+        emit(w, "refs", heads.count(b"\n"), "count")
+        emit(w, "prerequisites", sum(1 for l in header.split(b"\n") if l.startswith(b"-")), "count")
+    elif w == "bundle-unbundle":
+        took, out = timed(lambda: git(repo, "bundle", "unbundle", extra))
+        emit(w, "time", took, "ms")
+        emit(w, "refs", out.count(b"\n"), "count")
+    elif w == "bisect":
+        # The verdicts are known before the clock: main and the three
+        # commits below it are bad. Each step is the `git bisect` command a
+        # person types; reading BISECT_HEAD is a file read.
+        bad = set(git(repo, "rev-list", "-n", "4", "main").decode().split())
+        head = os.path.join(repo, ".git", "BISECT_HEAD")
+        def bisect():
+            out = git(repo, "bisect", "start", "--no-checkout", "main", "oldb")
+            steps = 0
+            while b"is the first 'bad' commit" not in out:
+                testing = open(head).read().strip()
+                out = git(repo, "bisect", "bad" if testing in bad else "good")
+                steps += 1
+            return steps
+        took, steps = timed(bisect)
+        emit(w, "time", took, "ms")
+        emit(w, "steps", steps, "count")
+        emit(w, "first_bad", git(repo, "rev-parse", "refs/bisect/bad").decode().strip(), "oid")
     else:
         raise SystemExit("unknown workload " + w)

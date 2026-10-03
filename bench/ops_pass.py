@@ -28,6 +28,9 @@ OPS = {
     'snapshot': ('ops/dirty', 'store'),
     'lfs-add': ('lfs/add', 'copy'), 'lfs-checkout': ('lfs/checkout', 'copy'),
     'submodule-status': ('submodules/super-init', None), 'submodule-update': ('submodules/super-fresh', 'copy'),
+    'shortlog': ('ops/repo', None), 'describe': ('ops/repo', None), 'notes-add': ('ops/bare.git', 'copy'),
+    'bundle-create': ('ops/repo', 'bundle'), 'bundle-unbundle': ('ops/bare.git', 'unbundle'),
+    'bisect': ('ops/repo', 'copy'),
 }
 # Sizes each fixture family is built at; submodules have one.
 SIZES = ('small', 'medium', 'large')
@@ -60,22 +63,30 @@ def ops_pass(p, binary, commands, scratch, root):
     work = scratch/'ops'
     dest = scratch/'ops-worktree'
     store = scratch/'ops-store'
+    bundle = scratch/'ops.bundle'
     for size in sizes:
         fx = root/size
         for workload, (fixture, setup) in OPS.items():
             if fixture.startswith('submodules') and size not in ('smoke',) + SUBMODULE_SIZES: continue
             source = fx/fixture
-            repo = source if setup in (None, 'exprs') else work
+            repo = source if setup in (None, 'exprs', 'bundle') else work
             extra = []
             if setup == 'exprs': extra = [fx/'ops/exprs.txt']
             if setup == 'worktree': extra = [dest]
             if setup == 'store': extra = [store]
+            if setup in ('bundle', 'unbundle'): extra = [bundle]
             prep = None
-            if setup not in (None, 'exprs'):
+            if setup == 'bundle':
+                def prep():
+                    if bundle.exists(): bundle.unlink()
+            elif setup not in (None, 'exprs'):
                 def prep(source=source, setup=setup):
                     copy(p, source, work)
-                    for leftover in (dest, store):
+                    for leftover in (dest, store, bundle):
                         if leftover.exists(): p.run(['rm', '-rf', leftover])
+                    # The bundle git makes from the fixture, which every side
+                    # unbundles into its own copy.
+                    if setup == 'unbundle': p.run(['git', '-C', source, 'bundle', 'create', '-q', bundle, 'main', '^oldb'])
                     if source.name.endswith('.git'): return
                     git = ['git', '-C', str(work)]
                     # `cp` keeps no ctime, so without a refresh every side
@@ -147,6 +158,16 @@ def after(p, workload, repo, extra):
         if git('status', '--porcelain'): raise ValueError('lfs-checkout left changes')
         for path in (repo/'data').iterdir():
             if path.read_bytes().startswith(b'version https://git-lfs'): raise ValueError('lfs-checkout left a pointer')
+    if workload == 'notes-add':
+        found['notes'] = str(len(git('notes', 'list').splitlines()))
+    if workload == 'bundle-create':
+        p.run(['git', '-C', repo, 'bundle', 'verify', '-q', extra[0]])
+        found['refs'] = str(len(git('bundle', 'list-heads', extra[0]).splitlines()))
+    if workload == 'bundle-unbundle':
+        if git('fsck', '--connectivity-only', '--no-dangling'): raise ValueError('bundle-unbundle left a broken repository')
+    if workload == 'bisect':
+        found['first_bad'] = git('rev-parse', 'refs/bisect/bad')
+        if found['first_bad'] != git('rev-parse', 'main~3'): raise ValueError('bisect found the wrong commit')
     if workload == 'submodule-update':
         lines = p.run(['git', '-C', repo, 'submodule', 'status']).splitlines()
         if any(not line.startswith(' ') for line in lines): raise ValueError('submodule-update left one out')
