@@ -1749,12 +1749,30 @@ pub const Writer = struct {
         try w.sink.emit(head[0..head_len]);
         if (extra.len != 0) try w.sink.emit(extra);
 
-        w.compress.* = try flate.Compress.init(
+        const fresh = try flate.Compress.init(
             &w.sink.writer,
             w.window,
             .zlib,
             w.options.compression.options(),
         );
+        // std's initial chain and token bytes are undefined: their heads
+        // and counts make them unreachable until filled. Copy only the
+        // defined state, rather than moving 224 KiB for every small entry.
+        inline for (std.meta.fields(flate.Compress)) |field| {
+            if (comptime std.mem.eql(u8, field.name, "lookup")) {
+                inline for (std.meta.fields(@TypeOf(fresh.lookup))) |part| {
+                    if (comptime !std.mem.eql(u8, part.name, "chain"))
+                        @field(w.compress.lookup, part.name) = @field(fresh.lookup, part.name);
+                }
+            } else if (comptime std.mem.eql(u8, field.name, "buffered_tokens")) {
+                inline for (std.meta.fields(@TypeOf(fresh.buffered_tokens))) |part| {
+                    if (comptime !std.mem.eql(u8, part.name, "list"))
+                        @field(w.compress.buffered_tokens, part.name) = @field(fresh.buffered_tokens, part.name);
+                }
+            } else {
+                @field(w.compress, field.name) = @field(fresh, field.name);
+            }
+        }
         try w.compress.writer.writeAll(payload);
         try w.compress.writer.flush();
         try w.compress.finish();

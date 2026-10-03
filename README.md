@@ -501,6 +501,8 @@ as by count, so a few large objects cannot become the high-water mark, and an
 object past `big_file_bytes` is written whole and never enters it.
 Small delta bases use a 16 KiB hash table and matches compare whole words;
 loose pack inputs are read through a 16 KiB buffer.
+Starting an entry compressor copies its defined state, leaving token and chain
+bytes to be filled before use instead of copying their unused storage.
 
 The order the two files become visible in is not free to choose. A reader
 finds a pack by its `.idx`, so the pack is renamed into place first and the
