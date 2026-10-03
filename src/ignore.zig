@@ -529,6 +529,29 @@ test "a checker asks an unreadable folder's rules again, or skips them when told
     try std.testing.expect(!try skipping.excluded(io, "b.txt", false));
 }
 
+test "a checker marks no folder read when reading it runs out of memory" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.log\n" });
+    var failures: usize = 0;
+    for (0..6) |offset| {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var checker: Checker = .init(try .init(fa.allocator(), false), tmp.dir, .{});
+        defer checker.deinit();
+        fa.fail_index = fa.alloc_index + offset;
+        _ = checker.excluded(io, "keep.log", false) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+            try std.testing.expect(!checker.read.contains(""));
+            fa.fail_index = std.math.maxInt(usize);
+            try std.testing.expect(try checker.excluded(io, "keep.log", false));
+            continue;
+        };
+    }
+    try std.testing.expect(failures >= 2);
+}
+
 test "a checker hands back its rules with every level it read" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
