@@ -386,3 +386,44 @@ test "a pack write canceled or failed part way leaves nothing behind" {
     Interrupt.arm(std.math.maxInt(usize), null);
     _ = try corpus.write(gpa, interrupted, .{});
 }
+
+/// How many tasks a write asked its Io for.
+const Spawns = struct {
+    var count: std.atomic.Value(usize) = .init(0);
+
+    fn groupAsync(
+        userdata: ?*anyopaque,
+        group: *Io.Group,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque) void,
+    ) void {
+        _ = count.fetchAdd(1, .monotonic);
+        std.testing.io.vtable.groupAsync(userdata, group, context, context_alignment, start);
+    }
+};
+
+test "a pack of fewer objects than tasks asks for no more tasks than it has objects" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var vtable = io.vtable.*;
+    vtable.groupAsync = Spawns.groupAsync;
+    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+
+    for ([_]usize{ 1, 2, 3 }) |objects| {
+        var corpus = try Corpus.init(gpa, io, 1, objects, 0);
+        defer corpus.deinit(gpa, io);
+        const serial = try corpus.write(gpa, io, .{ .threads = 1 });
+        Spawns.count.store(0, .monotonic);
+        const report = try corpus.write(gpa, counted, .{ .threads = 8 });
+        try std.testing.expect(report.name.eql(serial.name));
+        // Each of the write's stages — headers, bodies, deflating — shares
+        // its objects among the calling task and at most one task for each
+        // other object.
+        const spawned = Spawns.count.load(.monotonic);
+        if (spawned > 3 * (objects - 1)) {
+            std.debug.print("{d} objects: {d} tasks\n", .{ objects, spawned });
+            return error.TestUnexpectedResult;
+        }
+    }
+}

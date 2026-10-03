@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A pack of fewer objects than `PackOptions.threads` asks for, and each batch of a larger one, starts no more tasks than it has objects.
+
 - A fetch or clone that copies a repository on this machine writes its pack on the tasks `pack.threads` asks for, as git's pack-objects reads it; unset, one per processor.
 
 - `indexpack.receive` canceled while it resolves deltas cancels every resolving task, so one waiting in a read no longer holds the receive until the read ends; any failure among them now does the same.

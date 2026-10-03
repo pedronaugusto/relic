@@ -1314,7 +1314,9 @@ pub const Odb = struct {
         options: PackOptions,
     ) Error!pack.WriteReport {
         const gpa = odb.backendData().gpa;
-        const workers = taskCount(options.threads);
+        // No more tasks than objects: a task with nothing to take still
+        // costs the Io one, and its deflate state.
+        const workers = @min(taskCount(options.threads), @max(entries.len, 1));
 
         // Every object's type and length, which is what the order is by. A
         // header is all this needs, and for a packed object that is no
@@ -2065,7 +2067,7 @@ fn readTaskCount(workers: usize) usize {
 }
 
 /// Share `failures.len` items out among `workers` tasks of `io`, the calling
-/// task one of them, each calling `work(context, io, worker, item)` for the
+/// task one of them, and never more tasks than items, each calling `work(context, io, worker, item)` for the
 /// items it takes. Tasks go through `Io.Group.async`, so an Io that cannot
 /// run one in parallel runs it inline, and a cancel reaches every task at
 /// its next item. A failed item stops the items after it from starting;
@@ -2112,7 +2114,7 @@ fn runTasks(
     };
     var shared: Shared = .{ .io = io, .failures = failures, .context = context };
     var group: Io.Group = .init;
-    for (1..workers) |worker| group.async(io, Shared.run, .{ &shared, worker });
+    for (1..@max(1, @min(workers, failures.len))) |worker| group.async(io, Shared.run, .{ &shared, worker });
     shared.run(0);
     if (shared.canceled.load(.monotonic)) {
         group.cancel(io);
