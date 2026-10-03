@@ -104,6 +104,7 @@ pub const families = [_]Family{
     .{ .name = "core-transport", .filters = &.{
         "auth.test",
         "bundle.test",
+        "bundle_test.test",
         "auth_test.test",
         "auth_wire.test",
         "clientcert.test",

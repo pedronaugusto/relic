@@ -246,6 +246,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "transport scenarios", .patterns = &.{
         "src/auth_test.zig",
+        "src/bundle_test.zig",
         "src/clientcert_test.zig",
         "src/cloneconfig_test.zig",
         "src/partial_test.zig",
