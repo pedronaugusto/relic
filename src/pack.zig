@@ -2379,6 +2379,10 @@ fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
 
     var w = try Writer.initCounting(gpa, io, tmp.dir, .sha1, .{});
     defer w.deinit(io);
+    // The body the newest entry holds: what an offset delta against that
+    // entry is a delta from. Not the body generated before this one, which
+    // may have gone unwritten -- a duplicate, or one refused below.
+    var newest: ?usize = null;
 
     for (0..count) |i| {
         var scratch: [256]u8 = undefined;
@@ -2396,16 +2400,18 @@ fn fuzzWriter(_: void, smith: *std.testing.Smith) anyerror!void {
 
         // Sometimes a delta against the entry before it, which is the other
         // way an object can be in a pack.
-        if (i != 0 and w.count() != 0 and smith.valueRangeAtMost(u8, 0, 1) == 0) {
-            const base = bodies[i - 1];
+        if (newest != null and smith.valueRangeAtMost(u8, 0, 1) == 0) {
+            const base = bodies[newest.?];
             const encoded = (try delta.encode(gpa, base, bodies[i], .{})) orelse continue;
             defer gpa.free(encoded);
             const base_offset = w.entries.items[w.count() - 1].offset;
-            if (kinds[i] != kinds[i - 1]) continue;
+            if (kinds[i] != kinds[newest.?]) continue;
             _ = try w.addOfsDelta(names[i], base_offset, encoded);
+            newest = i;
             continue;
         }
         _ = try w.add(names[i], kinds[i], bodies[i]);
+        newest = i;
     }
 
     const report = try w.finish(io);
