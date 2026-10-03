@@ -9,6 +9,7 @@
 //! and for a pack received by `indexpack.zig`.
 
 const std = @import("std");
+const crc32 = @import("crc32.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
@@ -1077,7 +1078,7 @@ pub const Pack = struct {
             const span = try p.gpa.alloc(u8, @intCast(end - offset));
             defer p.gpa.free(span);
             try p.readAtExact(io, offset, span);
-            if (std.hash.Crc32.hash(span) != p.index.crcAt(position)) return error.ChecksumMismatch;
+            if (crc32.Crc32.hash(span) != p.index.crcAt(position)) return error.ChecksumMismatch;
 
             const obj = try p.readAt(io, offset, cache, pack_id);
             defer p.gpa.free(obj.bytes);
@@ -1353,7 +1354,7 @@ const TestPack = struct {
     fn finishEntry(p: *TestPack, start: usize, name: Oid) !void {
         try p.names.append(p.gpa, name);
         try p.offsets.append(p.gpa, start);
-        try p.crcs.append(p.gpa, std.hash.Crc32.hash(p.body.items[start..]));
+        try p.crcs.append(p.gpa, crc32.Crc32.hash(p.body.items[start..]));
     }
 
     /// A whole object, with the name the caller chooses rather than the one
@@ -1770,7 +1771,7 @@ pub const Writer = struct {
     const Sink = struct {
         out: *Io.Writer,
         hasher: hash.Hasher,
-        crc: std.hash.Crc32,
+        crc: crc32.Crc32,
         count: u64,
         writer: Io.Writer,
         buffer: [sink_buffer_len]u8,

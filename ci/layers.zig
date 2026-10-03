@@ -3,6 +3,7 @@ const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "primitives", .patterns = &.{
+        "src/crc32.zig",
         "src/delta.zig",
         "src/dependencies.zig",
         "src/durability.zig",

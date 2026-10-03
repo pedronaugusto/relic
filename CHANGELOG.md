@@ -22,6 +22,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Index.addMany` keeps the entry added last where one names a path and stage already in the index, as it says it does; its sort was not stable, so past a few dozen entries it could keep the older one.
 
+- Pack entries' CRC-32s are computed eight bytes at a time, with the CPU's CRC instructions on AArch64 and from eight tables elsewhere, where `std.hash.Crc32` takes a byte at a time: 7 ms or 26 ms for 64 MiB instead of 159 on an M3 Max. Writing, indexing and verifying packs use it.
+
 - The delta search encodes its candidates into two buffers each window keeps, and allocates only the delta it chooses: searching tasks no longer wait on each other for the allocator's lock, which took more of a repack's search than the search did. Add `delta.Encoder.encodeInto`.
 
 - Pack writing on tasks searches for deltas on the tasks too. The objects in pack order are cut into groups of at least 512 that end where the path hint changes, and each object is tried against its own group's window only, so every task count still writes the bytes `threads = 1` writes; the serial writer cuts the same groups. Groups cost 0.04% of the pack on a repack of ghostty. A searching task allocates through the database's allocator one call at a time, under a lock, so that allocator still need not be thread-safe.

@@ -21,6 +21,7 @@
 //! itself, is a named error and leaves nothing behind.
 
 const std = @import("std");
+const crc32 = @import("crc32.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const flate = std.compress.flate;
@@ -814,7 +815,7 @@ const Indexer = struct {
     }
 
     fn crcOf(x: *Indexer, start: u64, end: u64) Error!u32 {
-        var crc: std.hash.Crc32 = .init();
+        var crc: crc32.Crc32 = .init();
         var buf: [16 * 1024]u8 = undefined;
         var at = start;
         while (at < end) {
@@ -1002,7 +1003,7 @@ const Indexer = struct {
             try compressor.writer.flush();
             try compressor.finish();
 
-            var crc: std.hash.Crc32 = .init();
+            var crc: crc32.Crc32 = .init();
             crc.update(head[0..head_len]);
             crc.update(compressed.written());
             try x.file.writePositionalAll(io, head[0..head_len], end);

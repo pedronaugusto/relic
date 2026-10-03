@@ -9,6 +9,7 @@ pub const families = [_]Family{
         "config_core.test",
         "config_refresh_test.test",
         "configstate.test",
+        "crc32.test",
         "delta.test",
         "ewah.test",
         "fetchpack.test",
