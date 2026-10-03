@@ -339,7 +339,12 @@ pub const Session = struct {
         if (request.wants.len == 0) return .{ .pack = null, .objects = 0 };
         switch (s.impl) {
             .local => |here| {
-                const report = try here.copyObjects(io, db, pack_dir, request.wants, request.tips, request.include_tag, .{ .reverse_index = options.receive.reverse_index });
+                // A local copy writes the pack the receive would index, so
+                // `pack.threads` sizes it, as git's pack-objects reads it.
+                const report = try here.copyObjects(io, db, pack_dir, request.wants, request.tips, request.include_tag, .{
+                    .reverse_index = options.receive.reverse_index,
+                    .threads = std.math.lossyCast(u16, options.receive.threads),
+                });
                 const written = report orelse return .{ .pack = null, .objects = 0 };
                 return .{ .pack = written.name, .objects = written.objects };
             },

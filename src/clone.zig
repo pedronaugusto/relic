@@ -692,6 +692,87 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
     }
 }
 
+/// Which threads opened a loose object, through `base`.
+const LooseOpeners = struct {
+    var base: Io = undefined;
+    var mutex: std.atomic.Mutex = .unlocked;
+    var ids: [64]std.Thread.Id = undefined;
+    var count: usize = 0;
+
+    fn reset() void {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        count = 0;
+    }
+
+    fn distinct() usize {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        return count;
+    }
+
+    fn open(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
+        // A loose object, `xx/` and the rest of its name.
+        if (sub_path.len == 41 and sub_path[2] == '/') {
+            const me = std.Thread.getCurrentId();
+            while (!mutex.tryLock()) {}
+            defer mutex.unlock();
+            const seen = for (ids[0..count]) |id| {
+                if (id == me) break true;
+            } else false;
+            if (!seen and count < ids.len) {
+                ids[count] = me;
+                count += 1;
+            }
+        }
+        return base.vtable.dirOpenFile(userdata, dir, sub_path, options);
+    }
+};
+
+test "a local clone writes its pack on the tasks pack.threads asks for, as git's pack-objects does" {
+    const gpa = testing.allocator;
+    // Four tasks besides the calling one, whatever the machine.
+    var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .limited(4) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    LooseOpeners.base = io;
+    var vtable = io.vtable.*;
+    vtable.dirOpenFile = LooseOpeners.open;
+    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+
+    // Enough loose objects that the other tasks take some before the
+    // calling one is through them.
+    var source = try testremote.historyRepo(gpa, io, 2);
+    defer source.deinit();
+    for (0..300) |i| {
+        var name_buf: [32]u8 = undefined;
+        var body_buf: [32]u8 = undefined;
+        try source.writeFile(io, try std.fmt.bufPrint(&name_buf, "many/{d}.txt", .{i}), try std.fmt.bufPrint(&body_buf, "file {d}\n", .{i}));
+    }
+    try source.exec(io, &.{ "add", "-A" });
+    try source.exec(io, &.{ "commit", "-q", "-m", "many" });
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+
+    const Case = struct { pairs: []const config_mod.Sources.Pair, one: bool };
+    const cases = [_]Case{
+        .{ .pairs = &.{}, .one = false },
+        .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }}, .one = true },
+    };
+    for (cases) |case| {
+        var target = try Twin.init(gpa, io);
+        defer target.deinit(gpa, io);
+        LooseOpeners.reset();
+        var repo = try clone(gpa, watched, source_path, target.dir, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = case.pairs } });
+        repo.deinit(io);
+        const threads = LooseOpeners.distinct();
+        if ((threads == 1) != case.one) {
+            std.debug.print("pack.threads {s}: the local copy opened its objects on {d} threads\n", .{ if (case.one) "1" else "unset", threads });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "a clone over ssh and over HTTP is the clone git makes" {
     const gpa = testing.allocator;
     const io = testing.io;

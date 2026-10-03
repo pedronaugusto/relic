@@ -117,7 +117,9 @@ pub const Options = struct {
     /// How many threads resolve the deltas: `pack.threads`
     /// (`configuredThreads`). Zero chooses as git's index-pack does from
     /// the processors: all of up to three, three of four or five, half of
-    /// fewer than forty, and twenty at most.
+    /// fewer than forty, and twenty at most. A fetch or clone that copies
+    /// a repository on this machine writes its pack instead, on this many
+    /// tasks (`odb.PackOptions.threads`, zero there for one per processor).
     threads: u32 = 0,
 };
 
