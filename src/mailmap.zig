@@ -28,6 +28,7 @@
 //! asks it, and so does anything else that shows a commit's people.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -248,16 +249,18 @@ pub const Mailmap = struct {
     }
 
     /// Add the file at `path`, read as git reads one; a file that is not
-    /// there, or cannot be opened, adds nothing.
+    /// there, or cannot be read, adds nothing. Without `follow_symlinks`, a
+    /// symbolic link adds nothing, as git's `open_nofollow` refuses one;
+    /// git for Windows has no such open and follows it, and so does this
+    /// there.
     pub fn addFileAt(m: *Mailmap, io: Io, dir: Io.Dir, path: []const u8, follow_symlinks: bool) (Allocator.Error || Io.File.Reader.Error)!void {
-        const file = dir.openFile(io, path, .{ .follow_symlinks = follow_symlinks }) catch return;
-        defer file.close(io);
-        var buf: [4096]u8 = undefined;
-        var reader = file.reader(io, &buf);
-        const bytes = reader.interface.allocRemaining(m.gpa, .unlimited) catch |err| switch (err) {
+        if (!follow_symlinks and builtin.os.tag != .windows) {
+            const st = dir.statFile(io, path, .{ .follow_symlinks = false }) catch return;
+            if (st.kind == .sym_link) return;
+        }
+        const bytes = dir.readFileAlloc(io, path, m.gpa, .unlimited) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.ReadFailed => return reader.err.?,
-            error.StreamTooLong => unreachable,
+            else => return,
         };
         defer m.gpa.free(bytes);
         try m.addFileBytes(bytes);
@@ -447,4 +450,22 @@ test "mailmap.blob and mailmap.file override the working tree's .mailmap in git'
         try got.writer.print("{s} <{s}>\n", .{ shown.name, shown.email });
     }
     try std.testing.expectEqualStrings(expected, got.written());
+}
+
+test "a .mailmap that is a symbolic link is not read, as git does not read one" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    try r.writeFile(io, "real", "Linked <a@x>\n");
+    try r.dir.symLink(io, "real", ".mailmap", .{});
+    const expected = try r.run(io, &.{ "check-mailmap", "n <a@x>" });
+    defer gpa.free(expected);
+    var repo = try Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    var m = try Mailmap.load(gpa, io, &repo);
+    defer m.deinit();
+    try std.testing.expectEqualStrings("n <a@x>\n", expected);
+    try std.testing.expect(m.lookup("n", "a@x") == null);
 }
