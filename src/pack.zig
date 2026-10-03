@@ -629,7 +629,10 @@ pub const Pack = struct {
     /// caller's.
     fn inflateAt(p: *Pack, at: u64, size: u64) Error![]u8 {
         if (size > delta.max_result_bytes) return error.StreamTooLong;
-        const out = try p.gpa.alloc(u8, @intCast(size));
+        // Leave one longest match and its word-copy slack after the result,
+        // so the fast decoder can also handle the last bytes of an entry.
+        const result_len = std.math.cast(usize, size) orelse return error.StreamTooLong;
+        const out = try p.gpa.alloc(u8, result_len +| (258 + 8));
         errdefer p.gpa.free(out);
 
         var fixed_reader: Io.Reader = undefined;
@@ -644,14 +647,14 @@ pub const Pack = struct {
             break :blk &p.file_reader.interface;
         };
 
-        // the whole entry in one pass into a buffer its header sized: no
-        // window, no streaming state (`inflate.zig`)
+        // The whole entry in one pass, with bounded scratch past the result:
+        // no window or streaming state (`inflate.zig`).
         const n = p.decoder.zlib(input, out) catch |err| switch (err) {
             error.ReadFailed => return p.file_reader.err orelse error.ReadFailed,
             error.EndOfStream, error.CorruptStream, error.OutputTooLong => return error.CorruptPackEntry,
         };
-        if (n != out.len) return error.CorruptPackEntry;
-        return out;
+        if (n != result_len) return error.CorruptPackEntry;
+        return try p.gpa.realloc(out, result_len);
     }
 
     /// The object at `offset`, with its delta chain resolved.
@@ -2416,4 +2419,20 @@ test "a packed entry header survives a short positional read" {
     const got = try p.readAt(short, at, null, 0);
     defer gpa.free(got.bytes);
     try std.testing.expectEqualSlices(u8, bytes, got.bytes);
+}
+
+test "pack decode scratch does not relax the stated object size" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var builder = try TestPack.init(gpa);
+    defer builder.deinit();
+    const at = try builder.addObject(testName(0), "abcdef");
+    // Only the claimed size changes. The stream and its checksum are valid.
+    builder.body.items[@intCast(at)] = 0x35;
+    try builder.write(io, tmp.dir, "short");
+    var p = try Pack.open(gpa, io, tmp.dir, "short", .sha1, .{});
+    defer p.deinit(io);
+    try std.testing.expectError(error.CorruptPackEntry, p.readAt(io, at, null, 0));
 }

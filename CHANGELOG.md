@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Keep small pack entries in the fast decode loop with bounded scratch and exact owned results.
+
 - Limit small random pack reads to 8 KiB of read-ahead while keeping 64 KiB for large bodies.
 
 - Complete packed entry headers across short reads and buffer boundaries.
