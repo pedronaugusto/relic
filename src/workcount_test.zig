@@ -137,39 +137,14 @@ const ChainScan = struct {
     }
 };
 
-test "cold and warm delta-chain reads scan the same objects and bytes" {
+/// Read every object in the database twice, in the order `listObjects`
+/// gives, counting the positional reads of each pass.
+fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Options) !ChainScan {
     const io = std.testing.io;
-    const gpa = std.testing.allocator;
-    // The harness fixes git's dates, so every commit has the same name on
-    // every run, and the scans below meet the objects in the same order.
-    var repo_git = try testgit.Repo.init(gpa, io, &.{});
-    defer repo_git.deinit();
-
-    // A file that grows one line per commit gives the packer a deep chain.
-    // The pack spans many of the 8 KiB windows a random read starts with
-    // (`Pack.seekTo`), so the read counts below measure the cache rather
-    // than where the window happened to sit; a 40-commit pack fits in a
-    // few windows, and one object order in nine read more when warm.
-    const rounds: usize = 120;
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(gpa);
-    for (0..rounds) |i| {
-        try body.print(gpa, "line {d} of a file that keeps growing\n", .{i});
-        try repo_git.writeFile(io, "grow.txt", body.items);
-        try repo_git.exec(io, &.{ "add", "-A" });
-        var msg: [32]u8 = undefined;
-        try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{i}) });
-    }
-    // One thread, so the deltas git picks do not depend on the machine's
-    // core count.
-    try repo_git.exec(io, &.{ "-c", "pack.threads=1", "gc", "-q", "--aggressive" });
-
-    const git_dir = try repo_git.gitDir(io);
-    defer git_dir.close(io);
     var vtable = io.vtable.*;
     vtable.fileReadPositional = ReadWork.read;
     const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    var db = try odb_mod.Odb.open(gpa, counted, git_dir, .sha1, .{});
+    var db = try odb_mod.Odb.open(gpa, counted, git_dir, .sha1, options);
     defer db.deinit(io);
 
     var names = try db.listObjects(io);
@@ -200,10 +175,14 @@ test "cold and warm delta-chain reads scan the same objects and bytes" {
     scan.warm_reads = ReadWork.calls;
     scan.warm_read_bytes = ReadWork.bytes;
     scan.warm_bases = @import("odbstate.zig").get(db._state).cache.entries.count();
+    return scan;
+}
 
-    // Both passes read every object to the same bytes; the warm one, with
-    // the bases cached, reads no more than the cold one and caches nothing
-    // new. A failure names the bound and every count.
+/// The first bound two passes over a chain of `rounds` commits break, or
+/// `null`. Both passes read every object to the same bytes; the warm one,
+/// with the bases cached, reads no more than the cold one and caches nothing
+/// new.
+fn brokenChainBound(scan: ChainScan, rounds: usize) ?[]const u8 {
     const bounds = [_]struct { holds: bool, what: []const u8 }{
         .{ .holds = scan.cold_bases > 0, .what = "the cold pass cached a base" },
         .{ .holds = scan.cold_objects == scan.warm_objects, .what = "both passes read the same objects" },
@@ -214,10 +193,90 @@ test "cold and warm delta-chain reads scan the same objects and bytes" {
         .{ .holds = scan.cold_bases == scan.warm_bases, .what = "the warm pass cached no new base" },
     };
     for (bounds) |bound| {
-        if (bound.holds) continue;
-        std.debug.print("{d} rounds: not {s}: {f}\n", .{ rounds, bound.what, scan });
+        if (!bound.holds) return bound.what;
+    }
+    return null;
+}
+
+test "cold and warm delta-chain reads scan the same objects and bytes" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    // The harness fixes git's dates, so every commit has the same name on
+    // every run, and the scans below meet the objects in the same order.
+    var repo_git = try testgit.Repo.init(gpa, io, &.{});
+    defer repo_git.deinit();
+
+    // A file that grows one line per commit gives the packer a deep chain,
+    // and a pack that spans many of the blocks positional reads keep.
+    const rounds: usize = 120;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    for (0..rounds) |i| {
+        try body.print(gpa, "line {d} of a file that keeps growing\n", .{i});
+        try repo_git.writeFile(io, "grow.txt", body.items);
+        try repo_git.exec(io, &.{ "add", "-A" });
+        var msg: [32]u8 = undefined;
+        try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "c{d}", .{i}) });
+    }
+    // One thread, so the deltas git picks do not depend on the machine's
+    // core count.
+    try repo_git.exec(io, &.{ "-c", "pack.threads=1", "gc", "-q", "--aggressive" });
+
+    const git_dir = try repo_git.gitDir(io);
+    defer git_dir.close(io);
+    const scan = try scanColdWarm(gpa, git_dir, .{});
+    // A failure names the bound and every count.
+    if (brokenChainBound(scan, rounds)) |what| {
+        std.debug.print("{d} rounds: not {s}: {f}\n", .{ rounds, what, scan });
         return error.TestUnexpectedResult;
     }
+}
+
+test "a warm pass over a small pack reads no more than a cold one, at every pinned date" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    // Forty commits make a pack of a few kilobytes. Where in it each object
+    // sits, and the order the scans meet the objects in, follow from the
+    // object names, so every date below is a different layout and order.
+    // Whether a warm pass reads more must not depend on either.
+    const rounds: usize = 40;
+    const dates: usize = 32;
+    var failed: usize = 0;
+    for (0..dates) |day| {
+        var repo_git = try testgit.Repo.init(gpa, io, &.{});
+        defer repo_git.deinit();
+        const when = testgit.fixture_date + @as(i64, @intCast(day)) * std.time.s_per_day;
+
+        // One fast-import of the whole history rather than a git process
+        // per commit.
+        var stream: std.ArrayList(u8) = .empty;
+        defer stream.deinit(gpa);
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(gpa);
+        for (0..rounds) |i| {
+            try body.print(gpa, "line {d} of a file that keeps growing\n", .{i});
+            var msg_buf: [16]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&msg_buf, "c{d}", .{i});
+            try stream.print(gpa, "commit refs/heads/main\ncommitter Fixture <fixture@example.com> {d} +0000\ndata {d}\n{s}\n", .{ when, msg.len, msg });
+            try stream.print(gpa, "M 100644 inline grow.txt\ndata {d}\n{s}\n", .{ body.items.len, body.items });
+        }
+        try stream.appendSlice(gpa, "done\n");
+        gpa.free(try repo_git.runInput(io, &.{ "fast-import", "--quiet", "--done" }, stream.items));
+        try repo_git.exec(io, &.{ "-c", "pack.threads=1", "gc", "-q", "--aggressive" });
+
+        const git_dir = try repo_git.gitDir(io);
+        defer git_dir.close(io);
+        // With every block of the pack kept, and with one block for all of
+        // them.
+        for ([_]usize{ odb_mod.Options.default_pack_read_cache_bytes, 0 }) |cache_bytes| {
+            const scan = try scanColdWarm(gpa, git_dir, .{ .pack_read_cache_bytes = cache_bytes });
+            if (brokenChainBound(scan, rounds)) |what| {
+                std.debug.print("date {d}, {d}-byte read cache: not {s}: {f}\n", .{ when, cache_bytes, what, scan });
+                failed += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failed);
 }
 
 test "hardware and checked hashes process the same bytes as software" {

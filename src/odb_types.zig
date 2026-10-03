@@ -10,6 +10,9 @@ const fs = @import("fs.zig");
 /// How the object database behaves. The only caches in this package are
 /// named here.
 pub const Options = struct {
+    /// `pack_read_cache_bytes`'s default.
+    pub const default_pack_read_cache_bytes = pack.default_read_cache_bytes;
+
     /// How many bytes of resolved delta bases to keep. Zero disables the
     /// cache, which makes a walk over a packed repository quadratic in its
     /// chain length and is almost never what you want.
@@ -30,6 +33,11 @@ pub const Options = struct {
     sync_directories: bool = fs.sync_directories_default,
     /// The buffer size a streaming read uses.
     read_buffer_size: usize = 64 * 1024,
+    /// How many bytes of each pack positional reads keep, in aligned blocks
+    /// of `pack.read_block_bytes`: `pack.Pack.open`'s `read_cache_bytes`,
+    /// for every pack this database opens. Allocated on a pack's first read.
+    /// Not used for a mapped pack.
+    pack_read_cache_bytes: usize = default_pack_read_cache_bytes,
     /// How deep a delta chain may be before it is refused.
     max_delta_depth: u32 = pack.default_max_depth,
     /// How many levels of `objects/info/alternates` to follow.

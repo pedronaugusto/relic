@@ -373,6 +373,7 @@ pub const Odb = struct {
             var opened = pack.Pack.open(odb.backendData().gpa, io, pack_dir, base, odb.backendData().kind, .{
                 .access = if (odb.backendData().options.map_packs) .map else .read,
                 .max_depth = odb.backendData().options.max_delta_depth,
+                .read_cache_bytes = odb.backendData().options.pack_read_cache_bytes,
             }) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => return err,
