@@ -519,3 +519,114 @@ test "objects repacked from packs are read by several tasks, and the pack is the
     try std.testing.expect(parallel.name.eql(serial.name));
     try std.testing.expect(serial.deltas > 0);
 }
+
+/// The order of three kinds of event in a pack write: a loose object
+/// opened, an allocation as large as a delta encoder's index, which only
+/// the delta search makes once the bodies are being read, and pack bytes
+/// handed to the output.
+const Phases = struct {
+    var mutex: std.atomic.Mutex = .unlocked;
+    /// 0 before the first body is opened, 1 once one is, 2 once the
+    /// search has begun, 3 once an entry is written after that.
+    var phase: u8 = 0;
+    /// Whether an object was opened in phase 2: while a batch was being
+    /// searched or before the batch before it was written.
+    var opened_while_searching: bool = false;
+
+    fn reset() void {
+        phase = 0;
+        opened_while_searching = false;
+    }
+
+    fn event(kind: enum { open, search_alloc, write }) void {
+        while (!mutex.tryLock()) {}
+        defer mutex.unlock();
+        switch (kind) {
+            .open => switch (phase) {
+                0 => phase = 1,
+                2 => opened_while_searching = true,
+                else => {},
+            },
+            .search_alloc => if (phase == 1) {
+                phase = 2;
+            },
+            .write => if (phase == 2) {
+                phase = 3;
+            },
+        }
+    }
+
+    fn open(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
+        if (sub_path.len == 41 and sub_path[2] == '/') event(.open);
+        return std.testing.io.vtable.dirOpenFile(userdata, dir, sub_path, options);
+    }
+
+    const Spy = struct {
+        child: std.mem.Allocator,
+        fn allocator(s: *Spy) std.mem.Allocator {
+            return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const s: *Spy = @ptrCast(@alignCast(ctx));
+            if (len >= 16 * 1024) event(.search_alloc);
+            return s.child.rawAlloc(len, alignment, ret);
+        }
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+            const s: *Spy = @ptrCast(@alignCast(ctx));
+            return s.child.rawResize(memory, alignment, new_len, ret);
+        }
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+            const s: *Spy = @ptrCast(@alignCast(ctx));
+            return s.child.rawRemap(memory, alignment, new_len, ret);
+        }
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const s: *Spy = @ptrCast(@alignCast(ctx));
+            s.child.rawFree(memory, alignment, ret);
+        }
+    };
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        _ = w;
+        event(.write);
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |slice| n += slice.len;
+        return n + data[data.len - 1].len * splat;
+    }
+};
+
+test "the tasks read the next batch while this task searches one, and the pack is the serial writer's" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var corpus = try Corpus.init(gpa, io, 8, 6, 24);
+    defer corpus.deinit(gpa, io);
+    // Headers given, as `collectLoose` gives them, so that the only loose
+    // opens are the bodies'.
+    {
+        var db = try odb_mod.Odb.openAt(gpa, io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
+        defer db.deinit(io);
+        for (corpus.entries.items) |*entry| entry.header = try db.readHeader(io, entry.oid);
+    }
+    const options: odb_mod.PackOptions = .{ .threads = 4, .batch_bytes = 96 * 1024 };
+    const serial = try corpus.write(gpa, io, .{ .threads = 1 });
+
+    var vtable = io.vtable.*;
+    vtable.dirOpenFile = Phases.open;
+    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var single: Io.Threaded = .init_single_threaded;
+    var single_vtable = single.io().vtable.*;
+    single_vtable.dirOpenFile = Phases.open;
+    const single_watched: Io = .{ .userdata = single.io().userdata, .vtable = &single_vtable };
+    for ([_]Io{ watched, single_watched }) |each_io| {
+        var spy: Phases.Spy = .{ .child = gpa };
+        var db = try odb_mod.Odb.openAt(spy.allocator(), io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
+        defer db.deinit(io);
+        var out: Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = Phases.drain } };
+        Phases.reset();
+        const report = try db.writePackTo(each_io, &out, corpus.entries.items, options);
+        try std.testing.expect(report.name.eql(serial.name));
+        if (!Phases.opened_while_searching) {
+            std.debug.print("no object was read between the start of the delta search and the first entry written\n", .{});
+            return error.TestUnexpectedResult;
+        }
+    }
+}

@@ -1321,10 +1321,9 @@ pub const Odb = struct {
     /// then the tail of the path hint, then size descending -- and each is
     /// tried against a sliding window of the ones already written. What is
     /// held at once is the window, which `PackOptions.window_bytes` bounds,
-    /// the loose-body cache bounded by `PackOptions.loose_cache_bytes`, and
-    /// one object being written. Delta candidate searches use the caller's
-    /// concurrency executor only when `PackOptions.threads` is greater than
-    /// one.
+    /// and, with `PackOptions.threads` one, the loose-body cache bounded by
+    /// `PackOptions.loose_cache_bytes` and one object being written, or,
+    /// with more, the batches `PackOptions.batch_bytes` bounds.
     ///
     /// `pack_dir` is where `pack-<name>.pack` and `pack-<name>.idx` land, and
     /// in a repository that is `objects/pack`. Nothing is visible under
@@ -2100,11 +2099,14 @@ pub const PackOptions = struct {
     /// Zero disables the cache.
     loose_cache_bytes: usize = 64 << 20,
     /// How many bytes the tasks may hold ahead of the writer, when `threads`
-    /// is not one. Objects go through in batches; each object is charged its
-    /// size for its body and `pack.Deflater.room(size)` for its deflated
-    /// entry, and a batch takes objects while their charges fit, and always
-    /// at least one. An object whose charge alone is larger is read and
-    /// deflated straight into the pack, on the calling task.
+    /// is not one. Objects go through in batches, three under way at once:
+    /// the tasks read one and deflate another while the calling task
+    /// searches the one between for deltas. Each object is charged its size
+    /// for its body and `pack.Deflater.room(size)` for its deflated entry,
+    /// and a batch takes objects while their charges fit a third of this,
+    /// and always at least one. An object whose charge alone is larger is
+    /// read and deflated straight into the pack, on the calling task, one
+    /// such object at a time.
     batch_bytes: usize = 64 << 20,
     /// An object this large or larger is written whole and never enters the
     /// window. git's `core.bigFileThreshold`, and the same default.
@@ -2138,13 +2140,90 @@ fn readTaskCount(workers: usize) usize {
     return @min(workers, read_task_limit);
 }
 
+/// Items shared out among tasks of `io`, each calling `work(context, io,
+/// worker, item)` for the items it takes. Tasks go through `Io.Group.async`,
+/// so an Io that cannot run one in parallel runs it inline, and a cancel
+/// reaches every task at its next item. A failed item stops the items after
+/// it from starting; `finish` returns the failure of the first item in
+/// order, whatever the order the tasks met them in.
+///
+/// The items from `limited_from` on open files, and only workers below
+/// `limited_workers` take them, those first: opening files contends in the
+/// kernel (`read_task_limit`). The others are anyone's.
+fn TaskSet(comptime Context: type, comptime work: fn (Context, Io, usize, usize) Error!void) type {
+    return struct {
+        io: Io,
+        failures: []?Error,
+        context: Context,
+        limited_from: usize,
+        limited_workers: usize,
+        next_open: std.atomic.Value(usize) = .init(0),
+        next_limited: std.atomic.Value(usize) = .init(0),
+        lowest_failed: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
+        /// Whether a task met a cancelation. Meeting one consumes the
+        /// request, and a task the Io ran inline may have met the calling
+        /// task's, so the others are then canceled explicitly.
+        canceled: std.atomic.Value(bool) = .init(false),
+        group: Io.Group = .init,
+
+        const Set = @This();
+
+        fn take(set: *Set, worker: usize) ?usize {
+            if (worker < set.limited_workers) {
+                const i = set.limited_from + set.next_limited.fetchAdd(1, .monotonic);
+                if (i < set.failures.len) return i;
+            }
+            const i = set.next_open.fetchAdd(1, .monotonic);
+            if (i < set.limited_from) return i;
+            return null;
+        }
+
+        fn run(set: *Set, worker: usize) void {
+            while (set.take(worker)) |i| {
+                if (i > set.lowest_failed.load(.monotonic)) continue;
+                const outcome: Error!void = if (set.io.checkCancel()) |_|
+                    work(set.context, set.io, worker, i)
+                else |err|
+                    err;
+                outcome catch |err| {
+                    if (err == error.Canceled) set.canceled.store(true, .monotonic);
+                    set.failures[i] = err;
+                    var lowest = set.lowest_failed.load(.monotonic);
+                    while (i < lowest) {
+                        lowest = set.lowest_failed.cmpxchgWeak(lowest, i, .monotonic, .monotonic) orelse break;
+                    }
+                };
+            }
+        }
+
+        /// Start `tasks` tasks, workers `1` to `tasks`, and never more than
+        /// there are items; the calling task is free until `finish`.
+        fn start(set: *Set, tasks: usize) void {
+            @memset(set.failures, null);
+            for (0..@min(tasks, set.failures.len)) |t| set.group.async(set.io, run, .{ set, t + 1 });
+        }
+
+        /// Take what is left as worker `0`, then wait for the others.
+        fn finish(set: *Set) Error!void {
+            set.run(0);
+            if (set.canceled.load(.monotonic)) {
+                set.group.cancel(set.io);
+                return error.Canceled;
+            }
+            try set.group.await(set.io);
+            for (set.failures) |failure| if (failure) |err| return err;
+        }
+
+        /// Stop the tasks and wait for them: the caller failed meanwhile.
+        fn abandon(set: *Set) void {
+            set.group.cancel(set.io);
+        }
+    };
+}
+
 /// Share `failures.len` items out among `workers` tasks of `io`, the calling
-/// task one of them, and never more tasks than items, each calling `work(context, io, worker, item)` for the
-/// items it takes. Tasks go through `Io.Group.async`, so an Io that cannot
-/// run one in parallel runs it inline, and a cancel reaches every task at
-/// its next item. A failed item stops the items after it from starting;
-/// the error returned is the failure of the first item in order, whatever
-/// the order the tasks met them in.
+/// task one of them, and never more tasks than items: a `TaskSet` whose
+/// items are anyone's, run to its end.
 fn runTasks(
     io: Io,
     workers: usize,
@@ -2152,48 +2231,16 @@ fn runTasks(
     context: anytype,
     comptime work: fn (@TypeOf(context), Io, usize, usize) Error!void,
 ) Error!void {
-    @memset(failures, null);
-    const Shared = struct {
-        io: Io,
-        failures: []?Error,
-        context: @TypeOf(context),
-        next: std.atomic.Value(usize) = .init(0),
-        lowest_failed: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
-        /// Whether a task met a cancelation. Meeting one consumes the
-        /// request, and a task the Io ran inline may have met the calling
-        /// task's, so the others are then canceled explicitly.
-        canceled: std.atomic.Value(bool) = .init(false),
-
-        fn run(shared: *@This(), worker: usize) void {
-            while (true) {
-                const i = shared.next.fetchAdd(1, .monotonic);
-                if (i >= shared.failures.len) return;
-                if (i > shared.lowest_failed.load(.monotonic)) continue;
-                const outcome: Error!void = if (shared.io.checkCancel()) |_|
-                    work(shared.context, shared.io, worker, i)
-                else |err|
-                    err;
-                outcome catch |err| {
-                    if (err == error.Canceled) shared.canceled.store(true, .monotonic);
-                    shared.failures[i] = err;
-                    var lowest = shared.lowest_failed.load(.monotonic);
-                    while (i < lowest) {
-                        lowest = shared.lowest_failed.cmpxchgWeak(lowest, i, .monotonic, .monotonic) orelse break;
-                    }
-                };
-            }
-        }
+    var set: TaskSet(@TypeOf(context), work) = .{
+        .io = io,
+        .failures = failures,
+        .context = context,
+        .limited_from = failures.len,
+        .limited_workers = 0,
     };
-    var shared: Shared = .{ .io = io, .failures = failures, .context = context };
-    var group: Io.Group = .init;
-    for (1..@max(1, @min(workers, failures.len))) |worker| group.async(io, Shared.run, .{ &shared, worker });
-    shared.run(0);
-    if (shared.canceled.load(.monotonic)) {
-        group.cancel(io);
-        return error.Canceled;
-    }
-    try group.await(io);
-    for (failures) |failure| if (failure) |err| return err;
+    // The calling task takes items too, so one item needs no other task.
+    set.start(@min(workers, failures.len) -| 1);
+    return set.finish();
 }
 
 /// One object held in the delta window.
@@ -2346,8 +2393,48 @@ const Build = struct {
         }
     };
 
-    /// Every object in pack order, with `workers` tasks reading loose
-    /// bodies and deflating entries ahead of this one, batch by batch.
+    /// Objects `start..end` of pack order, on their way through the tasks.
+    const Batch = struct {
+        start: usize = 0,
+        end: usize = 0,
+        /// One object too large for a batch's share of the budget: read and
+        /// deflated on the calling task, straight into the pack.
+        alone: bool = false,
+        /// Whether the tasks open files for it, which caps how many read.
+        opens: bool = false,
+        pending: std.ArrayList(Pending) = .empty,
+        /// Bodies the window let go of during this batch's search, which
+        /// this batch or the one before it may still be written from.
+        retired: std.ArrayList([]u8) = .empty,
+
+        fn items(batch: *const Batch) usize {
+            return batch.end - batch.start;
+        }
+
+        /// Free what the batch holds, keeping its lists' room.
+        fn release(batch: *Batch, gpa: Allocator) void {
+            for (batch.pending.items) |*p| {
+                if (!p.choice.kept) if (p.bytes) |bytes| gpa.free(bytes);
+                if (p.choice.delta) |d| gpa.free(d);
+                if (p.room.len != 0) gpa.free(p.room);
+            }
+            batch.pending.clearRetainingCapacity();
+            for (batch.retired.items) |bytes| gpa.free(bytes);
+            batch.retired.clearRetainingCapacity();
+        }
+
+        fn deinit(batch: *Batch, gpa: Allocator) void {
+            batch.release(gpa);
+            batch.pending.deinit(gpa);
+            batch.retired.deinit(gpa);
+        }
+    };
+
+    /// Every object in pack order, with tasks reading bodies and deflating
+    /// entries ahead of this one, batch by batch. While this task searches
+    /// one batch for deltas, the tasks deflate the batch before it and read
+    /// the batch after it, so three batches are under way at once, each
+    /// within a third of `batch_bytes`.
     fn writeConcurrently(b: *Build, io: Io, workers: usize) Error!void {
         const gpa = b.gpa;
         const deflaters = try gpa.alloc(pack.Deflater, workers);
@@ -2367,82 +2454,184 @@ const Build = struct {
             for (readers) |*r| r.* = .{};
             break;
         }
-
-        var batch: std.ArrayList(Pending) = .empty;
-        defer batch.deinit(gpa);
         var failures: std.ArrayList(?Error) = .empty;
         defer failures.deinit(gpa);
+        var slots: [3]Batch = @splat(.{});
+        defer for (&slots) |*slot| slot.deinit(gpa);
         b.keep_retired = true;
+        const stage: Stage = .{ .workers = workers, .deflaters = deflaters, .readers = readers, .failures = &failures };
 
-        var start: usize = 0;
-        while (start < b.ordered.len) {
-            // Take objects while their charges fit, and always one.
-            var end = start;
-            var charged: usize = 0;
-            while (end < b.ordered.len) {
-                const size = std.math.cast(usize, b.ordered[end].size) orelse std.math.maxInt(usize);
-                const slack: usize = if (b.ordered[end].loose) 0 else pack.Pack.inflate_slack;
-                const charge = size +| slack +| pack.Deflater.room(size);
-                if (end > start and charged +| charge > b.options.batch_bytes) break;
-                charged +|= charge;
-                end += 1;
+        // The first batch read, then each searched while the one before is
+        // deflated and the one after read, then the last deflated.
+        var turn: usize = 0;
+        var prev: ?*Batch = null;
+        var cur: ?*Batch = &slots[0];
+        b.plan(cur.?, 0);
+        try b.prepareReads(io, cur.?);
+        try b.overlap(io, stage, null, cur, null);
+        try b.finishReads(io, cur.?);
+        while (cur) |searching| {
+            turn += 1;
+            const next: ?*Batch = if (searching.end < b.ordered.len) &slots[turn % 3] else null;
+            if (next) |n| {
+                b.plan(n, searching.end);
+                try b.prepareReads(io, n);
             }
-            const alone = end == start + 1 and charged > b.options.batch_bytes;
-            try b.writeBatch(io, workers, deflaters, readers, start, end, alone, &batch, &failures);
-            start = end;
+            if (prev) |p| if (p.alone) {
+                // Nothing for the tasks to deflate: written now, so that
+                // one object too large for a batch is held at a time.
+                try b.writeBatch(p);
+                p.release(gpa);
+                prev = null;
+            };
+            if (searching.alone) try b.readAlone(io, searching);
+            if (prev) |p| try b.prepareDeflate(p);
+            try b.overlap(io, stage, prev, next, searching);
+            if (prev) |p| {
+                try b.writeBatch(p);
+                p.release(gpa);
+            }
+            if (next) |n| try b.finishReads(io, n);
+            prev = searching;
+            cur = next;
+        }
+        if (prev) |p| {
+            try b.prepareDeflate(p);
+            try b.overlap(io, stage, p, null, null);
+            try b.writeBatch(p);
+            p.release(gpa);
         }
     }
 
-    fn writeBatch(
-        b: *Build,
-        io: Io,
+    /// What every stage of `writeConcurrently` shares.
+    const Stage = struct {
         workers: usize,
         deflaters: []pack.Deflater,
         readers: []pack.Pack.EntryReader,
-        start: usize,
-        end: usize,
-        alone: bool,
-        batch: *std.ArrayList(Pending),
         failures: *std.ArrayList(?Error),
-    ) Error!void {
-        const gpa = b.gpa;
-        const items = b.ordered[start..end];
-        batch.clearRetainingCapacity();
-        try batch.ensureTotalCapacity(gpa, items.len);
-        try failures.resize(gpa, items.len);
-        for (items) |item| batch.appendAssumeCapacity(.{ .type = item.type });
-        const pending = batch.items;
-        defer for (pending) |*p| {
-            if (!p.choice.kept) if (p.bytes) |bytes| gpa.free(bytes);
-            if (p.choice.delta) |d| gpa.free(d);
-            if (p.room.len != 0) gpa.free(p.room);
-        };
-        defer b.releaseRetired();
+    };
 
-        // The loose bodies and the whole packed ones, read by the tasks into
-        // buffers sized here. Where each packed one is is found here first,
-        // since looking in the packs changes them.
-        var opens = false;
-        for (items, pending) |item, *p| {
-            if (alone) continue;
+    /// The batch from `start`: objects while their charges fit a third of
+    /// the budget, and always one. Each is charged its body, the slack a
+    /// packed one is inflated with, and its deflated entry's room.
+    fn plan(b: *Build, batch: *Batch, start: usize) void {
+        const share = b.options.batch_bytes / 3;
+        var end = start;
+        var charged: usize = 0;
+        while (end < b.ordered.len) {
+            const size = std.math.cast(usize, b.ordered[end].size) orelse std.math.maxInt(usize);
+            const slack: usize = if (b.ordered[end].loose) 0 else pack.Pack.inflate_slack;
+            const charge = size +| slack +| pack.Deflater.room(size);
+            if (end > start and charged +| charge > share) break;
+            charged +|= charge;
+            end += 1;
+        }
+        batch.* = .{
+            .start = start,
+            .end = end,
+            .alone = end == start + 1 and charged > share,
+            .pending = batch.pending,
+            .retired = batch.retired,
+        };
+    }
+
+    /// Size the bodies the tasks read: the loose ones, and the whole
+    /// packed ones, which are looked for here, since looking in the packs
+    /// changes them.
+    fn prepareReads(b: *Build, io: Io, batch: *Batch) Error!void {
+        const gpa = b.gpa;
+        const items = b.ordered[batch.start..batch.end];
+        try batch.pending.ensureTotalCapacity(gpa, items.len);
+        for (items) |item| batch.pending.appendAssumeCapacity(.{ .type = item.type });
+        if (batch.alone) return;
+        for (items, batch.pending.items) |item, *p| {
             if (item.loose) {
                 p.bytes = try gpa.alloc(u8, @intCast(item.size));
-                opens = true;
+                batch.opens = true;
                 continue;
             }
             const at = (try b.odb.locateWhole(io, item.oid)) orelse continue;
-            // A size other than the header's is read again, whole, below.
+            // A size other than the header's is read again, whole, after.
             if (at.size != item.size) continue;
             p.bytes = try gpa.alloc(u8, @as(usize, @intCast(item.size)) + pack.Pack.inflate_slack);
             p.packed_at = at;
         }
-        const Bodies = struct {
+    }
+
+    /// The bodies the tasks did not read, read here: deltas and what else
+    /// is not loose, and a loose object that went away since its header was
+    /// read. An object too large to batch is read just before it is
+    /// searched, by `readAlone`.
+    fn finishReads(b: *Build, io: Io, batch: *Batch) Error!void {
+        const gpa = b.gpa;
+        if (batch.alone) return;
+        for (b.ordered[batch.start..batch.end], batch.pending.items) |*item, *p| {
+            if (p.filled) {
+                if (p.packed_at != null) p.bytes = try gpa.realloc(p.bytes.?, @intCast(item.size));
+                continue;
+            }
+            if (p.bytes) |unused| gpa.free(unused);
+            p.bytes = null;
+            const found = try b.odb.readForPack(io, item);
+            p.bytes = found.bytes;
+            p.type = found.type;
+        }
+    }
+
+    /// The body of an object too large to batch, read here while no task
+    /// runs, since a read may re-scan the pack directories.
+    fn readAlone(b: *Build, io: Io, batch: *Batch) Error!void {
+        const p = &batch.pending.items[0];
+        const found = try b.odb.readForPack(io, &b.ordered[batch.start]);
+        p.bytes = found.bytes;
+        p.type = found.type;
+    }
+
+    /// The delta search, in pack order, exactly as the serial writer makes
+    /// it. The bodies the window lets go of meanwhile stay the batch's.
+    fn search(b: *Build, batch: *Batch) Error!void {
+        for (batch.pending.items, batch.start..) |*p, pos| p.choice = try b.choose(pos, p.type, p.bytes.?);
+        std.mem.swap(std.ArrayList([]u8), &batch.retired, &b.retired);
+    }
+
+    /// Room for each entry the tasks deflate.
+    fn prepareDeflate(b: *Build, batch: *Batch) Error!void {
+        if (batch.alone) return;
+        for (batch.pending.items) |*p| p.room = try b.gpa.alloc(u8, pack.Deflater.room(p.payload().len));
+    }
+
+    /// The tasks deflate `deflating` and read `reading`, either may be
+    /// absent, while this task searches `searching`, then takes what is
+    /// left of their work.
+    fn overlap(b: *Build, io: Io, stage: Stage, deflating: ?*Batch, reading: ?*Batch, searching: ?*Batch) Error!void {
+        const deflates: []Pending = if (deflating) |d| (if (d.alone) &.{} else d.pending.items) else &.{};
+        const reads: []Pending = if (reading) |r| (if (r.alone) &.{} else r.pending.items) else &.{};
+        try stage.failures.resize(b.gpa, deflates.len + reads.len);
+        const Work = struct {
             odb: *const Odb,
-            items: []const Ordered,
-            pending: []Pending,
+            deflates: []Pending,
+            reads: []Pending,
+            read_items: []const Ordered,
+            deflaters: []pack.Deflater,
             readers: []pack.Pack.EntryReader,
+            compression: pack.Compression,
+
             fn work(c: @This(), task_io: Io, worker: usize, i: usize) Error!void {
-                const p = &c.pending[i];
+                if (i < c.deflates.len) return c.deflate(worker, &c.deflates[i]);
+                const at = i - c.deflates.len;
+                return c.read(task_io, worker, c.read_items[at].oid, &c.reads[at]);
+            }
+
+            fn deflate(c: @This(), worker: usize, p: *Pending) Error!void {
+                var out: Io.Writer = .fixed(p.room);
+                c.deflaters[worker].deflate(&out, p.payload(), c.compression) catch |err| switch (err) {
+                    // No room: deflated again when it is written.
+                    error.WriteFailed => return,
+                };
+                p.deflated = out.end;
+            }
+
+            fn read(c: @This(), task_io: Io, worker: usize, oid: Oid, p: *Pending) Error!void {
                 const into = p.bytes orelse return;
                 if (p.packed_at) |at| {
                     at.pack.inflateWith(task_io, &c.readers[worker], at.at, at.size, into) catch |err| switch (err) {
@@ -2454,7 +2643,7 @@ const Build = struct {
                     p.filled = true;
                     return;
                 }
-                const found = c.odb.readLooseFor(task_io, c.items[i].oid, .{ .into = into }) catch |err| switch (err) {
+                const found = c.odb.readLooseFor(task_io, oid, .{ .into = into }) catch |err| switch (err) {
                     // Not the size its header said: read it again, whole,
                     // on the calling task.
                     error.CorruptLooseObject => return,
@@ -2464,50 +2653,40 @@ const Build = struct {
                 p.filled = true;
             }
         };
-        // Opening files contends in the kernel; inflating does not.
-        const readers_now = if (opens) readTaskCount(workers) else workers;
-        try runTasks(io, readers_now, failures.items, Bodies{ .odb = b.odb, .items = items, .pending = pending, .readers = readers }, Bodies.work);
-        // The rest, here: deltas and what else is not loose, a loose object
-        // that went away since its header was read, and an object too large
-        // to batch.
-        for (items, pending) |*item, *p| {
-            if (p.filled) {
-                if (p.packed_at != null) p.bytes = try gpa.realloc(p.bytes.?, @intCast(item.size));
-                continue;
-            }
-            if (p.bytes) |unused| gpa.free(unused);
-            p.bytes = null;
-            const found = try b.odb.readForPack(io, item);
-            p.bytes = found.bytes;
-            p.type = found.type;
-        }
+        const opens = if (reading) |r| r.opens else false;
+        var set: TaskSet(Work, Work.work) = .{
+            .io = io,
+            .failures = stage.failures.items,
+            .context = .{
+                .odb = b.odb,
+                .deflates = deflates,
+                .reads = reads,
+                .read_items = if (reading) |r| b.ordered[r.start..r.end] else &.{},
+                .deflaters = stage.deflaters,
+                .readers = stage.readers,
+                .compression = b.options.compression,
+            },
+            // The reads come after the deflating in item order; opening
+            // files is for a few workers only.
+            .limited_from = deflates.len,
+            .limited_workers = if (opens) readTaskCount(stage.workers) else stage.workers,
+        };
+        // The workers with something to take, and of them every one but
+        // this task, which searches meanwhile and joins them after, or
+        // joins them at once with nothing to search.
+        const busy = if (deflates.len != 0) stage.workers else @min(stage.workers, set.limited_workers);
+        const items = deflates.len + reads.len;
+        set.start(if (searching != null) @min(busy - 1, items) else @min(busy, items) -| 1);
+        if (searching) |s| b.search(s) catch |err| {
+            set.abandon();
+            return err;
+        };
+        try set.finish();
+    }
 
-        // The delta search, in pack order, exactly as the serial writer
-        // makes it.
-        for (pending, start..) |*p, pos| p.choice = try b.choose(pos, p.type, p.bytes.?);
-
-        // The entries, deflated by the tasks into room sized here.
-        if (!alone) {
-            for (pending) |*p| p.room = try gpa.alloc(u8, pack.Deflater.room(p.payload().len));
-            const Deflate = struct {
-                pending: []Pending,
-                deflaters: []pack.Deflater,
-                compression: pack.Compression,
-                fn work(c: @This(), _: Io, worker: usize, i: usize) Error!void {
-                    const p = &c.pending[i];
-                    var out: Io.Writer = .fixed(p.room);
-                    c.deflaters[worker].deflate(&out, p.payload(), c.compression) catch |err| switch (err) {
-                        // No room: deflated again when it is written.
-                        error.WriteFailed => return,
-                    };
-                    p.deflated = out.end;
-                }
-            };
-            try runTasks(io, workers, failures.items, Deflate{ .pending = pending, .deflaters = deflaters, .compression = b.options.compression }, Deflate.work);
-        }
-
-        // And written, in pack order.
-        for (pending, start..) |*p, pos| {
+    /// A batch's entries, in pack order.
+    fn writeBatch(b: *Build, batch: *Batch) Error!void {
+        for (batch.pending.items, batch.start..) |*p, pos| {
             const deflated_len = p.deflated orelse {
                 try b.writeDirect(pos, p.type, p.bytes.?, p.choice);
                 continue;
