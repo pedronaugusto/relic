@@ -1865,6 +1865,8 @@ test "the watch scopes cover every ref and HEAD move, in a linked worktree too" 
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     for ([_]Format{ .files, .reftable }) |format| {
+        // `--ref-format=reftable` arrived in 2.45.
+        if (format == .reftable and !try testgit.gitAtLeast(gpa, io, 2, 45)) continue;
         var git = try testgit.Repo.init(gpa, io, if (format == .reftable) &.{"--ref-format=reftable"} else &.{});
         defer git.deinit();
         try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "first" });

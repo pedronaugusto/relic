@@ -1106,10 +1106,13 @@ test "repository configuration edit copies keep their owners when allocation sto
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }
 
-/// `path`'s folder, symbolic links resolved, joined to its last name: two
-/// spellings of one file compare equal even when the file is not there.
-fn resolvedPath(gpa: std.mem.Allocator, io: Io, path: []const u8) ![]u8 {
-    const dir = try Io.Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(path).?, gpa);
+/// `path`, as `git -C <where> rev-parse --git-path` prints it (relative
+/// to `where` unless absolute), with its folder's symbolic links resolved:
+/// two spellings of one file compare equal even when it is not there.
+fn resolvedPath(gpa: std.mem.Allocator, io: Io, base: Io.Dir, where: []const u8, path: []const u8) ![]u8 {
+    var at = try base.openDir(io, where, .{});
+    defer at.close(io);
+    const dir = try at.realPathFileAlloc(io, std.fs.path.dirname(path) orelse ".", gpa);
     defer gpa.free(dir);
     return std.fs.path.join(gpa, &.{ dir, std.fs.path.basename(path) });
 }
@@ -1135,17 +1138,17 @@ test "the ignore sources and the index are named where git reads them, in a link
 
         const index = try repo.indexPath(gpa, io);
         defer gpa.free(index);
-        const git_index = try git.line(io, &.{ "-C", where, "rev-parse", "--path-format=absolute", "--git-path", "index" });
+        const git_index = try git.line(io, &.{ "-C", where, "rev-parse", "--git-path", "index" });
         defer gpa.free(git_index);
-        const want_index = try resolvedPath(gpa, io, git_index);
+        const want_index = try resolvedPath(gpa, io, git.dir, where, git_index);
         defer gpa.free(want_index);
         try std.testing.expectEqualStrings(want_index, index);
 
         var sources = try repo.ignoreSources(gpa, io);
         defer sources.deinit(gpa);
-        const git_exclude = try git.line(io, &.{ "-C", where, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude" });
+        const git_exclude = try git.line(io, &.{ "-C", where, "rev-parse", "--git-path", "info/exclude" });
         defer gpa.free(git_exclude);
-        const want_exclude = try resolvedPath(gpa, io, git_exclude);
+        const want_exclude = try resolvedPath(gpa, io, git.dir, where, git_exclude);
         defer gpa.free(want_exclude);
         try std.testing.expectEqualStrings(want_exclude, sources.info_exclude);
         try std.testing.expectEqualStrings(excludes_file, sources.excludes_file.?);
