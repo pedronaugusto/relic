@@ -153,6 +153,9 @@ pub const Describer = struct {
     options: Options,
     abbrev: ?u32,
     names: Oid.Map(Name) = .empty,
+    /// The names that are on commits, by commit: git's `commit_names`, made
+    /// the first time a search needs it.
+    on_commit: ?Oid.Map(*Name) = null,
 
     /// Read the refs the options allow.
     pub fn init(gpa: Allocator, io: Io, repo: *Repository, options_in: Options) Error!Describer {
@@ -174,6 +177,7 @@ pub const Describer = struct {
 
     /// Release everything.
     pub fn deinit(d: *Describer) void {
+        if (d.on_commit) |*m| m.deinit(d.gpa);
         d.names.deinit(d.gpa);
         d.arena.deinit();
         d.* = undefined;
@@ -325,16 +329,17 @@ pub const Describer = struct {
 
         var walk: Walk = .{ .gpa = d.gpa, .repo = d.repo };
         defer walk.deinit();
-        // The names that are on commits, by commit: git's `commit_names`.
-        var on_commit: Oid.Map(*Name) = .empty;
-        defer on_commit.deinit(d.gpa);
-        {
+        if (d.on_commit == null) {
+            var map: Oid.Map(*Name) = .empty;
+            errdefer map.deinit(d.gpa);
             var it = d.names.valueIterator();
             while (it.next()) |n| {
                 const c = peelToCommit(d.repo, io, n.peeled) catch continue;
-                try on_commit.put(d.gpa, c, n);
+                try map.put(d.gpa, c, n);
             }
+            d.on_commit = map;
         }
+        const on_commit = &d.on_commit.?;
 
         const Possible = struct { name: *Name, depth: u32, found_order: u32, flag_within: u32 };
         var matches: [max_candidates]Possible = undefined;
