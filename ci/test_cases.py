@@ -96,7 +96,7 @@ class Cases(unittest.TestCase):
                           if any(pattern in qualified for pattern in filters)]
                 self.assertEqual(1, len(owners), f'{qualified}: {owners}')
                 count += 1
-        self.assertEqual(1250, count)
+        self.assertEqual(1251, count)
 
     def test_filters_are_checked_by_exact_names(self):
         selection = (ROOT / 'src/test_case.zig').read_text()
