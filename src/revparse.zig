@@ -359,19 +359,12 @@ const Resolver = struct {
     }
 
     fn treeOf(r: *Resolver, commit: Oid) Error!Oid {
-        const found = r.repo.odb.read(r.io, commit) catch |err| return revisionError(err);
-        defer r.repo.odb.allocator().free(found.bytes);
-        var c = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
-        defer c.deinit();
-        return c.tree;
+        return r.repo.commitTree(r.io, commit) catch |err| revisionError(err);
     }
 
     fn parents(r: *Resolver, commit: Oid) Error![]const Oid {
-        const found = r.repo.odb.read(r.io, commit) catch |err| return revisionError(err);
-        defer r.repo.odb.allocator().free(found.bytes);
-        var c = object.Commit.parse(r.gpa, r.repo.objectFormat(), found.bytes) catch |err| return revisionError(err);
-        defer c.deinit();
-        return r.a.dupe(Oid, c.parents);
+        const info = r.repo.commitInfo(r.io, commit, r.a) catch |err| return revisionError(err);
+        return info.parents;
     }
 
     fn parent(r: *Resolver, base: Oid, n: u32) Error!Oid {
@@ -615,4 +608,31 @@ test "revision parsing preserves I/O and cancellation resource failures" {
         try std.testing.expectError(failure, resolve(gpa, failing_io, &repo, "HEAD"));
         try std.testing.expectError(failure, resolve(gpa, failing_io, &repo, "@{0}"));
     }
+}
+
+test "a walk back from a commit reads each commit once per repository handle" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    for (0..30) |i| {
+        var name: [16]u8 = undefined;
+        try r.writeFile(io, "f", try std.fmt.bufPrint(&name, "{d}\n", .{i}));
+        try r.exec(io, &.{ "commit", "-q", "-am", "c", "--allow-empty" });
+        if (i == 0) try r.exec(io, &.{ "add", "f" });
+    }
+    try r.exec(io, &.{ "repack", "-adq" });
+    const expected = try r.line(io, &.{ "rev-parse", "main~25" });
+    defer gpa.free(expected);
+    var repo = try Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    try testing.expectEqualStrings(expected, (try resolve(gpa, io, &repo, "main~25")).hex(&hex));
+    // Every object here is in the one pack, and every read of one asks it.
+    const before = repo.odb.stats.pack_scans;
+    try testing.expectEqualStrings(expected, (try resolve(gpa, io, &repo, "main~25")).hex(&hex));
+    try testing.expectEqualStrings(expected, (try resolve(gpa, io, &repo, "main~24^")).hex(&hex));
+    // Each expression asks the object it starts from, and `^` the one it
+    // starts from, for its type; no commit is read again.
+    try testing.expect(repo.odb.stats.pack_scans - before <= 3);
 }
