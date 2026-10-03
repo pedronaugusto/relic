@@ -1058,7 +1058,7 @@ pub const Index = struct {
         }
         // A stable sort keeps a later duplicate after the earlier one, so
         // the last one added wins, which is what `add` does too.
-        std.mem.sortUnstable(Entry, index.entries.items, {}, lessThan);
+        std.mem.sort(Entry, index.entries.items, {}, lessThan);
         var write_at: usize = 0;
         var read_at: usize = 0;
         while (read_at < index.entries.items.len) {
@@ -1902,4 +1902,24 @@ test "a conflict's stages leave with their resolution remembered, in path order"
     try std.testing.expectEqual(@as(usize, 2), back.resolve_undo.?.entries.items.len);
     index.dropResolveUndo();
     try std.testing.expect(index.resolve_undo == null);
+}
+
+test "an entry added many at once replaces the one already there, whatever the count" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    const old = try Oid.parse(.sha1, "1" ** 40);
+    const new = try Oid.parse(.sha1, "2" ** 40);
+    var names: [300][16]u8 = undefined;
+    var batch: [300]Entry = undefined;
+    for (&batch, &names, 0..) |*entry, *name, i| {
+        entry.* = .{ .path = try std.fmt.bufPrint(name, "f{d:0>4}", .{i}), .oid = old, .mode = .file };
+    }
+    try index.addMany(&batch);
+    for (&batch) |*entry| entry.oid = new;
+    // In reverse, so that a sort has to move every one of them.
+    std.mem.reverse(Entry, &batch);
+    try index.addMany(&batch);
+    try std.testing.expectEqual(@as(usize, 300), index.entries.items.len);
+    for (index.entries.items) |entry| try std.testing.expect(entry.oid.eql(new));
 }
