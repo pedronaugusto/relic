@@ -1560,28 +1560,52 @@ fn expectReport(t: *Twin, io: Io, git_args: []const []const u8, report: anytype)
     try t.expectSameState(io);
 }
 
+const Case = struct { shape: u8, first_bad: usize, skip: []const usize = &.{}, start: []const []const u8 };
+
 test "a bisection steps through the commits git steps through, with git's state, logs and checkouts" {
-    // The builtin bisect of git 2.40, whose messages and log are these.
-    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
+    try bisectLikeGit(.{ .shape = 0, .first_bad = 7, .start = &.{ "HEAD", "HEAD~15" } });
+}
+
+test "a bisection with skipped commits steps away from them as git does" {
+    try bisectLikeGit(.{ .shape = 0, .first_bad = 12, .skip = &.{ 8, 9, 12, 13 }, .start = &.{ "HEAD", "HEAD~15" } });
+}
+
+test "a bisection without a checkout moves BISECT_HEAD as git does" {
+    try bisectLikeGit(.{ .shape = 0, .first_bad = 3, .start = &.{ "--no-checkout", "HEAD", "HEAD~15" } });
+}
+
+test "a bisection in terms of its own speaks them as git does" {
+    try bisectLikeGit(.{ .shape = 0, .first_bad = 9, .start = &.{ "--term-new=broken", "--term-old=fine", "HEAD", "HEAD~15" } });
+}
+
+test "a bisection through merges weighs every commit as git does" {
+    try bisectLikeGit(.{ .shape = 1, .first_bad = 14, .start = &.{ "HEAD", "HEAD~12" } });
+}
+
+test "a good commit off the bad one's history has its merge base tested first, as git does" {
+    try bisectLikeGit(.{ .shape = 1, .first_bad = 5, .start = &.{ "HEAD", "side~2" } });
+}
+
+test "a first-parent bisection with skips steps as git's does" {
+    try bisectLikeGit(.{ .shape = 1, .first_bad = 14, .skip = &.{ 15, 16 }, .start = &.{ "--first-parent", "HEAD", "HEAD~12" } });
+}
+
+test "a bisection from two good commits steps as git's does" {
+    try bisectLikeGit(.{ .shape = 1, .first_bad = 8, .start = &.{ "HEAD", "side", "HEAD~14" } });
+}
+
+/// One bisection, run by git in one twin and by this in the other, every
+/// step compared, then its log replayed and the whole reset.
+fn bisectLikeGit(case: Case) !void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const Case = struct { shape: u8, first_bad: usize, skip: []const usize = &.{}, start: []const []const u8 };
-    const cases = [_]Case{
-        .{ .shape = 0, .first_bad = 7, .start = &.{ "HEAD", "HEAD~15" } },
-        .{ .shape = 0, .first_bad = 12, .skip = &.{ 8, 9, 12, 13 }, .start = &.{ "HEAD", "HEAD~15" } },
-        .{ .shape = 0, .first_bad = 3, .start = &.{ "--no-checkout", "HEAD", "HEAD~15" } },
-        .{ .shape = 0, .first_bad = 9, .start = &.{ "--term-new=broken", "--term-old=fine", "HEAD", "HEAD~15" } },
-        .{ .shape = 1, .first_bad = 14, .start = &.{ "HEAD", "HEAD~12" } },
-        .{ .shape = 1, .first_bad = 5, .start = &.{ "HEAD", "side~2" } },
-        .{ .shape = 1, .first_bad = 14, .skip = &.{ 15, 16 }, .start = &.{ "--first-parent", "HEAD", "HEAD~12" } },
-        .{ .shape = 1, .first_bad = 8, .start = &.{ "HEAD", "side", "HEAD~14" } },
-    };
+    // The builtin bisect of git 2.40, whose messages and log are these.
+    try testgit.requireGitVersion(gpa, io, 2, 40);
     const newest = try testgit.gitAtLeast(gpa, io, 2, 56);
-    for (cases, 0..) |case, n| {
+    {
         var t: Twin = undefined;
         try Twin.init(gpa, io, &t, case.shape);
         defer t.deinit(io);
-        errdefer std.debug.print("bisect case {d}\n", .{n});
         var start_args: std.ArrayList([]const u8) = .empty;
         defer start_args.deinit(gpa);
         try start_args.append(gpa, "start");
@@ -1627,7 +1651,19 @@ test "bisect run tests each commit with the command, as git's does" {
     try expectReport(&t, io, &.{ "run", "sh", "-c", script }, run(gpa, io, &t.repo, &.{ "sh", "-c", script }, .{ .who = test_who }, .{ .programs = .{ .environ = &env } }));
 }
 
-test "bisect refuses what git refuses, and pathspecs by name" {
+test "bisect refuses pathspecs by name, and what git refuses" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var u: Twin = undefined;
+    try Twin.init(gpa, io, &u, 0);
+    defer u.deinit(io);
+    try std.testing.expectError(error.NotBisecting, mark(gpa, io, &u.repo, "good", &.{}, .{ .who = test_who }));
+    try std.testing.expectError(error.PathspecUnsupported, start(gpa, io, &u.repo, &.{ "HEAD", "HEAD~3", "--", "n" }, .{ .who = test_who }));
+    try std.testing.expectError(error.UnrecognizedOption, start(gpa, io, &u.repo, &.{"--bogus"}, .{ .who = test_who }));
+    try std.testing.expectError(error.InvalidTerm, start(gpa, io, &u.repo, &.{ "--term-new=skip", "HEAD" }, .{ .who = test_who }));
+}
+
+test "bisect waits for good and bad commits, and skips a range, as git does" {
     // The builtin bisect of git 2.40, whose messages and log are these.
     try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
     const gpa = std.testing.allocator;
@@ -1635,16 +1671,6 @@ test "bisect refuses what git refuses, and pathspecs by name" {
     var t: Twin = undefined;
     try Twin.init(gpa, io, &t, 0);
     defer t.deinit(io);
-    {
-        // Refusals, in a twin of their own: git leaves state behind some.
-        var u: Twin = undefined;
-        try Twin.init(gpa, io, &u, 0);
-        defer u.deinit(io);
-        try std.testing.expectError(error.NotBisecting, mark(gpa, io, &u.repo, "good", &.{}, .{ .who = test_who }));
-        try std.testing.expectError(error.PathspecUnsupported, start(gpa, io, &u.repo, &.{ "HEAD", "HEAD~3", "--", "n" }, .{ .who = test_who }));
-        try std.testing.expectError(error.UnrecognizedOption, start(gpa, io, &u.repo, &.{"--bogus"}, .{ .who = test_who }));
-        try std.testing.expectError(error.InvalidTerm, start(gpa, io, &u.repo, &.{ "--term-new=skip", "HEAD" }, .{ .who = test_who }));
-    }
     // Waiting for both, then for a good commit.
     try expectReport(&t, io, &.{"start"}, start(gpa, io, &t.repo, &.{}, .{ .who = test_who }));
     try expectReport(&t, io, &.{ "bad", "HEAD" }, mark(gpa, io, &t.repo, "bad", &.{"HEAD"}, .{ .who = test_who }));
@@ -1654,23 +1680,34 @@ test "bisect refuses what git refuses, and pathspecs by name" {
 }
 
 test "a bisection told to reset when it finds the commit goes back as git 2.56's does" {
-    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    try resetWhenFoundLikeGit("--reset-when-found");
+}
+
+test "a bisection told to reset to what it found goes there as git 2.56's does" {
+    try resetWhenFoundLikeGit("--reset-when-found=found");
+}
+
+test "a reset when found is refused without a checkout and to nowhere" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    for ([_][]const u8{ "--reset-when-found", "--reset-when-found=found" }) |option| {
-        var t: Twin = undefined;
-        try Twin.init(gpa, io, &t, 0);
-        defer t.deinit(io);
-        try expectReport(&t, io, &.{ "start", option, "HEAD", "HEAD~3" }, start(gpa, io, &t.repo, &.{ option, "HEAD", "HEAD~3" }, .{ .who = test_who }));
-        for (0..3) |_| {
-            if (t.git.readFile(io, ".git/BISECT_EXPECTED_REV")) |b| gpa.free(b) else |_| break;
-            const word = try t.verdict(io, 14, &.{}, false);
-            try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));
-        }
-    }
     var t: Twin = undefined;
     try Twin.init(gpa, io, &t, 0);
     defer t.deinit(io);
     try std.testing.expectError(error.ResetWhenFoundWithoutCheckout, start(gpa, io, &t.repo, &.{ "--reset-when-found", "--no-checkout", "HEAD" }, .{ .who = test_who }));
     try std.testing.expectError(error.InvalidResetWhenFound, start(gpa, io, &t.repo, &.{"--reset-when-found=elsewhere"}, .{ .who = test_who }));
+}
+
+fn resetWhenFoundLikeGit(option: []const u8) !void {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var t: Twin = undefined;
+    try Twin.init(gpa, io, &t, 0);
+    defer t.deinit(io);
+    try expectReport(&t, io, &.{ "start", option, "HEAD", "HEAD~3" }, start(gpa, io, &t.repo, &.{ option, "HEAD", "HEAD~3" }, .{ .who = test_who }));
+    for (0..3) |_| {
+        if (t.git.readFile(io, ".git/BISECT_EXPECTED_REV")) |b| gpa.free(b) else |_| break;
+        const word = try t.verdict(io, 14, &.{}, false);
+        try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));
+    }
 }
