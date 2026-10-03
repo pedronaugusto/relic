@@ -677,8 +677,9 @@ fn functionLine(lines: []const textdiff.Line, from: isize, limit: isize) ?[]cons
     return null;
 }
 
-/// How much of the enclosing line git puts on the `@@` line.
-pub const function_context_max: usize = 40;
+/// How much of the enclosing line git puts on the `@@` line: the size of
+/// xdiff's buffer for it.
+pub const function_context_max: usize = 80;
 
 test "a unified body matches the shape git prints" {
     const gpa = std.testing.allocator;
@@ -695,6 +696,16 @@ test "a unified body matches the shape git prints" {
         "@@ -1,5 +1,5 @@\n one\n two\n-three\n+THREE\n four\n five\n",
         out.written(),
     );
+}
+
+test "the enclosing line on a hunk header is cut at eighty bytes, as xdiff's buffer cuts it" {
+    const gpa = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    const long = "function_with_a_very_long_name_that_goes_on(int first_argument, int second_argument, int third)";
+    try unifiedBody(gpa, &out.writer, long ++ "\n1\n2\n3\n4\n5\n6\nx\n", long ++ "\n1\n2\n3\n4\n5\n6\ny\n", .{});
+    // `git diff --no-index` prints the same header for these two files
+    try std.testing.expect(std.mem.startsWith(u8, out.written(), "@@ -5,4 +5,4 @@ " ++ long[0..80] ++ "\n"));
 }
 
 test "an empty range is printed the way a unified diff prints it" {

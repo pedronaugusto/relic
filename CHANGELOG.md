@@ -6,6 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A unified diff's hunk header carries up to 80 bytes of the enclosing line, as git's does; it was cut at 40.
 - Add `patch.apply`: `git apply` to the working tree, the index or both, with `--3way`, `--reject`, `--check`, `-R` and git's whitespace rules, and `patch.parse` for the patch itself.
 - Add `patch.format`: `git format-patch`, byte for byte, cover letter and base information included.
 - Add `patch.am` and `patch.mail`: `git am` with its `rebase-apply` state, over `git mailsplit` and `git mailinfo`.
