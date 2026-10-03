@@ -899,7 +899,23 @@ fn fuzzIdent(_: void, smith: *testing.Smith) anyerror!void {
     const a = arena.allocator();
     const in = (try identToGit(a, src)) orelse src;
     try testing.expect(in.len <= src.len);
+    // The way in is git's, and git's is not idempotent: a collapse can leave
+    // a `$Id:` the scan stepped past, which the next one takes. What the way
+    // out undoes is a file the way in leaves as it is.
+    const settled = (try identToGit(a, in)) orelse in;
+    if (!std.mem.eql(u8, settled, in)) return;
     const out = (try identToWorktree(a, .sha1, in)) orelse in;
     const back = (try identToGit(a, out)) orelse out;
     try testing.expectEqualStrings(in, back);
+}
+
+test "the way in is git's, a collapse that leaves a keyword for the next one included" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // git's ident_to_git steps past the dollar that closes a collapsed
+    // keyword, so the `Id:` right after it waits for the next pass.
+    const once = (try identToGit(a, "$Id: a $Id: b $Id: c $")).?;
+    try testing.expectEqualStrings("$Id$Id: b $Id$", once);
+    try testing.expectEqualStrings("$Id$Id$Id$", (try identToGit(a, once)).?);
 }
