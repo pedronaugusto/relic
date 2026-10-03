@@ -12,6 +12,26 @@ def copy_repo(p, src, dst):
     if dst.exists():shutil.rmtree(dst)
     p.run(['cp','-ac' if sys.platform=='darwin' else '-a',src,dst])
 
+def reset_pack_outputs(scratch):
+    """Remove the packs the comparison writers leave in the scratch directory."""
+    for old in scratch.glob('gitpack-*'):old.unlink()
+    (scratch/'gogit.pack').unlink(missing_ok=True)
+
+def written_packs(repo,scratch):
+    """Every pack a pack-writing point can have left."""
+    packs=list((repo/'.git/objects/pack').glob('*.pack'))
+    packs+=list(scratch.glob('gitpack-*.pack'))+list(scratch.glob('gogit.pack'))
+    return packs
+
+def check_packwrite(evidence,repo,scratch,run):
+    """Validate the packs a pack-writing point wrote, strictly."""
+    if evidence['unavailable']==0:
+        packs=written_packs(repo,scratch)
+        if not packs:raise ValueError('pack writer produced no pack')
+        for pack in packs:run(['git','index-pack','--strict',pack])
+        evidence['pack_verification']='passed'
+    return evidence
+
 def main():
     p=Pass(__file__)
     try:
@@ -43,8 +63,7 @@ def main():
                 repo=scratch/'loose'
                 def prep():
                     copy_repo(p,fx/'repo-loose',repo)
-                    for old in scratch.glob('gitpack-*'):old.unlink()
-                    (scratch/'gogit.pack').unlink(missing_ok=True)
+                    reset_pack_outputs(scratch)
             if workload=='catblobs':extra=[fx/'blobs.txt']
             if workload=='indexrw':extra=[scratch]
             points=[(s,[binary[s]/'relic_bench',workload,repo,*extra]) for s in source]
@@ -59,12 +78,7 @@ def main():
                     if expected_tree and tree!=expected_tree[0]:raise ValueError('staging produced a different tree')
                     if not expected_tree:expected_tree.append(tree)
                     evidence['tree']=tree
-                if workload=='packwrite' and evidence['unavailable']==0:
-                    packs=list((repo/'.git/objects/pack').glob('*.pack'))
-                    packs+=list(scratch.glob('gitpack-*.pack'))+list(scratch.glob('gogit.pack'))
-                    if not packs:raise ValueError('pack writer produced no pack')
-                    for pack in packs:p.run(['git','index-pack','--strict',pack])
-                    evidence['pack_verification']='passed'
+                if workload=='packwrite':check_packwrite(evidence,repo,scratch,p.run)
                 return evidence
             p.interleave(workload,points,prepare=prep,check=checked)
         def regression_check(out):
