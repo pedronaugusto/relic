@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Rename and copy detection cuts each blob into spans once, as git keeps its `cnt_data` on the file, and scores a pair by one pass over the two sorted span lists; it counted both blobs into hash maps again for every pair it scored. Add `similarity.spans`, `similarity.scoreSpans` and `similarity.sizesRuleOut`; `similarity.score` gives the scores it gave.
+
 - `diff.tree` walks the two trees side by side as git's tree diff does, and passes over a subtree both hold unchanged without reading it; it read and listed every path of both trees. A diff of two commits of a large tree costs what differs between them, and so do the patch ids `rebase` compares.
 
 - `Odb.findPrefix` finds an abbreviated name in a pack index by bisection and looks at the one name after it; it walked every name past the match to the end of the index.

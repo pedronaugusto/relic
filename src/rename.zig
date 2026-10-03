@@ -193,6 +193,8 @@ const Run = struct {
     idx_map: std.StringHashMapUnmanaged(i64) = .empty,
     dir_rename_guess: std.StringHashMapUnmanaged([]const u8) = .empty,
     blobs: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty,
+    /// Each blob's spans, counted the first time it is scored.
+    spans: std.AutoHashMapUnmanaged(Oid, similarity.Spans) = .empty,
     /// `dir_rename_info.setup`: whether directory renames are tracked.
     setup: bool = false,
     needed_limit: u64 = 0,
@@ -207,10 +209,22 @@ const Run = struct {
         return bytes;
     }
 
+    /// The spans of `oid`'s blob, counted once.
+    fn spansOf(r: *Run, oid: Oid) Error!similarity.Spans {
+        if (r.spans.get(oid)) |found| return found;
+        const counted = try similarity.spans(r.arena, try r.blob(oid));
+        try r.spans.put(r.arena, oid, counted);
+        return counted;
+    }
+
     /// `estimate_similarity`.
     fn estimate(r: *Run, one: *const Spec, two: *const Spec, minimum: u32) Error!u32 {
         if (!isReg(one.mode) or !isReg(two.mode)) return 0;
-        return similarity.score(r.arena, try r.blob(one.oid), try r.blob(two.oid), minimum);
+        // The sizes first: a pair they rule out is not cut into spans.
+        if (similarity.sizesRuleOut((try r.blob(one.oid)).len, (try r.blob(two.oid)).len, minimum)) return 0;
+        const src = try r.spansOf(one.oid);
+        const dst = try r.spansOf(two.oid);
+        return similarity.scoreSpans(&src, &dst, minimum);
     }
 
     fn recordRenamePair(r: *Run, dst_index: usize, src_index: usize, score: u32) void {
@@ -537,14 +551,26 @@ const Run = struct {
         }
 
         var mx: std.ArrayList(Score) = .empty;
+        // Every source's spans, counted the first time a pair needs them,
+        // as git keeps them on the file: the matrix is then comparisons.
+        const src_spans = try r.arena.alloc(?similarity.Spans, r.src.items.len);
+        @memset(src_spans, null);
         for (r.dst.items, 0..) |d, i| {
             if (d.is_rename) continue;
             var m4: [4]Score = .{ .{}, .{}, .{}, .{} };
+            var dst_spans: ?similarity.Spans = null;
             for (r.src.items, 0..) |s, j| {
                 const one = s.p.one;
                 const two = d.p.two;
+                const score: u32 = if (!isReg(one.mode) or !isReg(two.mode)) 0 else blk: {
+                    const a = src_spans[j] orelse try r.spansOf(one.oid);
+                    src_spans[j] = a;
+                    const b = dst_spans orelse try r.spansOf(two.oid);
+                    dst_spans = b;
+                    break :blk similarity.scoreSpans(&a, &b, minimum_score);
+                };
                 const this: Score = .{
-                    .score = try r.estimate(one, two, minimum_score),
+                    .score = score,
                     .name_score = if (basenameSame(one.path, two.path)) 1 else 0,
                     .dst = @intCast(i),
                     .src = @intCast(j),

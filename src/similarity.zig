@@ -30,34 +30,73 @@ const hash_base: u32 = 107927;
 /// `estimate_similarity` gives it. A pair whose sizes alone rule out
 /// `minimum` scores 0.
 pub fn score(gpa: Allocator, src: []const u8, dst: []const u8, minimum: u32) Allocator.Error!u32 {
-    const max_size: u64 = @max(src.len, dst.len);
-    const base_size: u64 = @min(src.len, dst.len);
+    if (sizesRuleOut(src.len, dst.len, minimum)) return 0;
+    var src_spans = try spans(gpa, src);
+    defer src_spans.deinit(gpa);
+    var dst_spans = try spans(gpa, dst);
+    defer dst_spans.deinit(gpa);
+    return scoreSpans(&src_spans, &dst_spans, minimum);
+}
+
+/// Whether blobs of these sizes cannot reach `minimum`, or the destination
+/// is empty: the pair scores 0 without either being read.
+pub fn sizesRuleOut(src_len: usize, dst_len: usize, minimum: u32) bool {
+    const max_size: u64 = @max(src_len, dst_len);
+    const base_size: u64 = @min(src_len, dst_len);
     const delta_size = max_size - base_size;
-    if (max_size * (max_score - minimum) < delta_size * max_score) return 0;
-    if (dst.len == 0) return 0;
+    if (max_size * (max_score - minimum) < delta_size * max_score) return true;
+    return dst_len == 0;
+}
 
-    var src_counts: Counts = .empty;
-    defer src_counts.deinit(gpa);
-    try countSpans(gpa, src, &src_counts);
-    var dst_counts: Counts = .empty;
-    defer dst_counts.deinit(gpa);
-    try countSpans(gpa, dst, &dst_counts);
+/// One bucket of a blob's spans, and how many bytes of span landed in it.
+pub const Span = struct {
+    bucket: u32,
+    bytes: u64,
+};
 
+/// A blob cut into spans and counted, once: what git keeps on a file as
+/// its `cnt_data`, so that a blob scored against a hundred others is cut
+/// up once and not a hundred times. Sorted by bucket, so two are compared
+/// in one pass over both.
+pub const Spans = struct {
+    /// The blob's size.
+    size: usize,
+    entries: []Span,
+
+    pub fn deinit(s: *Spans, gpa: Allocator) void {
+        gpa.free(s.entries);
+        s.* = undefined;
+    }
+};
+
+/// The score `score` gives, from the two blobs' spans.
+pub fn scoreSpans(src: *const Spans, dst: *const Spans, minimum: u32) u32 {
+    if (sizesRuleOut(src.size, dst.size, minimum)) return 0;
+    const max_size: u64 = @max(src.size, dst.size);
     var copied: u64 = 0;
-    var it = src_counts.iterator();
-    while (it.next()) |entry| {
-        const in_dst = dst_counts.get(entry.key_ptr.*) orelse 0;
-        copied += @min(entry.value_ptr.*, in_dst);
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < src.entries.len and j < dst.entries.len) {
+        const a = src.entries[i];
+        const b = dst.entries[j];
+        if (a.bucket < b.bucket) {
+            i += 1;
+        } else if (a.bucket > b.bucket) {
+            j += 1;
+        } else {
+            copied += @min(a.bytes, b.bytes);
+            i += 1;
+            j += 1;
+        }
     }
     return @intCast(copied * max_score / max_size);
 }
 
-/// Bytes of span per bucket.
-const Counts = std.AutoHashMapUnmanaged(u32, u64);
-
 /// git's `hash_chars`: cut `bytes` into spans and count each span's length
-/// against its bucket.
-fn countSpans(gpa: Allocator, bytes: []const u8, counts: *Counts) Allocator.Error!void {
+/// against its bucket. The result is the caller's.
+pub fn spans(gpa: Allocator, bytes: []const u8) Allocator.Error!Spans {
+    var list: std.ArrayList(Span) = .empty;
+    defer list.deinit(gpa);
     const is_text = !textdiff.isBinary(bytes);
     var n: u64 = 0;
     var accum1: u32 = 0;
@@ -73,19 +112,34 @@ fn countSpans(gpa: Allocator, bytes: []const u8, counts: *Counts) Allocator.Erro
         accum1 +%= c;
         n += 1;
         if (n < 64 and c != '\n') continue;
-        try add(gpa, counts, accum1, accum2, n);
+        try list.append(gpa, .{ .bucket = bucketOf(accum1, accum2), .bytes = n });
         n = 0;
         accum1 = 0;
         accum2 = 0;
     }
-    if (n > 0) try add(gpa, counts, accum1, accum2, n);
+    if (n > 0) try list.append(gpa, .{ .bucket = bucketOf(accum1, accum2), .bytes = n });
+
+    // One entry per bucket, in bucket order.
+    std.mem.sort(Span, list.items, {}, lessBucket);
+    var kept: usize = 0;
+    for (list.items) |span| {
+        if (kept != 0 and list.items[kept - 1].bucket == span.bucket) {
+            list.items[kept - 1].bytes += span.bytes;
+        } else {
+            list.items[kept] = span;
+            kept += 1;
+        }
+    }
+    list.shrinkRetainingCapacity(kept);
+    return .{ .size = bytes.len, .entries = try list.toOwnedSlice(gpa) };
 }
 
-fn add(gpa: Allocator, counts: *Counts, accum1: u32, accum2: u32, n: u64) Allocator.Error!void {
-    const bucket = (accum1 +% accum2 *% 0x61) % hash_base;
-    const slot = try counts.getOrPut(gpa, bucket);
-    if (!slot.found_existing) slot.value_ptr.* = 0;
-    slot.value_ptr.* += n;
+fn bucketOf(accum1: u32, accum2: u32) u32 {
+    return (accum1 +% accum2 *% 0x61) % hash_base;
+}
+
+fn lessBucket(_: void, a: Span, b: Span) bool {
+    return a.bucket < b.bucket;
 }
 
 //=========================================================================
