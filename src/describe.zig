@@ -156,6 +156,8 @@ pub const Describer = struct {
     /// The names that are on commits, by commit: git's `commit_names`, made
     /// the first time a search needs it.
     on_commit: ?Oid.Map(*Name) = null,
+    /// Every commit a search has read, for the next.
+    parsed: Oid.Map(Parsed) = .empty,
 
     /// Read the refs the options allow.
     pub fn init(gpa: Allocator, io: Io, repo: *Repository, options_in: Options) Error!Describer {
@@ -178,6 +180,7 @@ pub const Describer = struct {
     /// Release everything.
     pub fn deinit(d: *Describer) void {
         if (d.on_commit) |*m| m.deinit(d.gpa);
+        d.parsed.deinit(d.gpa);
         d.names.deinit(d.gpa);
         d.arena.deinit();
         d.* = undefined;
@@ -327,7 +330,7 @@ pub const Describer = struct {
         }
         if (d.options.candidates == 0) return error.NoExactMatch;
 
-        var walk: Walk = .{ .gpa = d.gpa, .repo = d.repo };
+        var walk: Walk = .{ .gpa = d.gpa, .repo = d.repo, .parsed = &d.parsed, .arena = d.arena.allocator() };
         defer walk.deinit();
         if (d.on_commit == null) {
             var map: Oid.Map(*Name) = .empty;
@@ -561,9 +564,16 @@ fn readTag(repo: *Repository, io: Io, a: Allocator, oid: Oid) Error!TagInfo {
 
 /// git's commit-date priority queue over the commits of one search, each
 /// with its flags.
+/// A commit's parents and date, kept for every search a describer makes, as
+/// git's parsed commits are.
+const Parsed = struct { parents: []const Oid, time: i64 };
+
 const Walk = struct {
     gpa: Allocator,
     repo: *Repository,
+    /// Commits read by earlier searches, and where new ones' parents go.
+    parsed: *Oid.Map(Parsed),
+    arena: Allocator,
     nodes: Oid.Map(*Node) = .empty,
     queue: std.PriorityQueue(Queued, void, Queued.newerFirst) = .empty,
     counter: u64 = 0,
@@ -580,10 +590,7 @@ const Walk = struct {
 
     fn deinit(w: *Walk) void {
         var it = w.nodes.valueIterator();
-        while (it.next()) |n| {
-            w.gpa.free(n.*.parents);
-            w.gpa.destroy(n.*);
-        }
+        while (it.next()) |n| w.gpa.destroy(n.*);
         w.nodes.deinit(w.gpa);
         w.queue.deinit(w.gpa);
     }
@@ -597,13 +604,21 @@ const Walk = struct {
         }
         const n = slot.value_ptr.*;
         if (!n.parsed) {
-            const found = try w.repo.odb.read(io, oid);
-            defer w.repo.odb.allocator().free(found.bytes);
-            if (found.type != .commit) return error.NotACommit;
-            var commit = try object.Commit.parse(w.gpa, w.repo.objectFormat(), found.bytes);
-            defer commit.deinit();
-            n.parents = try w.gpa.dupe(Oid, revwalk.parentsOf(&w.repo.odb, oid, commit.parents));
-            n.time = commit.committer.when_secs;
+            const known = try w.parsed.getOrPut(w.gpa, oid);
+            if (!known.found_existing) {
+                errdefer _ = w.parsed.remove(oid);
+                const found = try w.repo.odb.read(io, oid);
+                defer w.repo.odb.allocator().free(found.bytes);
+                if (found.type != .commit) return error.NotACommit;
+                var commit = try object.Commit.parse(w.gpa, w.repo.objectFormat(), found.bytes);
+                defer commit.deinit();
+                known.value_ptr.* = .{
+                    .parents = try w.arena.dupe(Oid, revwalk.parentsOf(&w.repo.odb, oid, commit.parents)),
+                    .time = commit.committer.when_secs,
+                };
+            }
+            n.parents = known.value_ptr.parents;
+            n.time = known.value_ptr.time;
             n.parsed = true;
         }
         return n;
@@ -1071,6 +1086,8 @@ fn relicSays(gpa: Allocator, io: Io, repo: *Repository, rev: []const u8, options
 }
 
 test "describe names every commit as git describe does, under every option" {
+    // git 2.48 stops the search earlier than older gits; this is its search.
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 48);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var f: Fixture = undefined;
@@ -1125,6 +1142,8 @@ test "describe names every commit as git describe does, under every option" {
 }
 
 test "describe names a blob after the first commit that holds it, and a dirty HEAD as git does" {
+    // git 2.52 reworked describing a blob; this is its answer.
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 52);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var f: Fixture = undefined;
