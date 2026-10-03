@@ -358,11 +358,16 @@ pub fn fromOrt(gpa: Allocator, io: Io, db: *odb_mod.Odb, merged: *const ort.Resu
             .result = files.get(path),
         });
     }
+    // Every clean path at once: one at a time, in the map's order, each
+    // would be an insertion into the middle of a sorted list.
+    var clean: std.ArrayList(index_mod.Entry) = .empty;
+    try clean.ensureTotalCapacity(arena, files.count());
     var it = files.iterator();
     while (it.next()) |entry| {
         if (conflicted.contains(entry.key_ptr.*)) continue;
-        try stage(&index, entry.key_ptr.*, entry.value_ptr.*, 0);
+        clean.appendAssumeCapacity(.{ .path = entry.key_ptr.*, .oid = entry.value_ptr.oid, .mode = entry.value_ptr.mode, .stage = 0 });
     }
+    try index.addMany(clean.items);
     const messages = try ort.dupeMessages(arena, merged.messages);
     return .{
         .gpa = gpa,

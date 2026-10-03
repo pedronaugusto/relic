@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `merge.fromOrt` stages the merged tree's clean paths in one sorted pass; it inserted them one at a time in hash-map order, a move of the rest of the index for almost every path, which on a twenty-thousand-file tree was most of each commit a rebase, cherry-pick or merge made.
+
 - Rename and copy detection cuts each blob into spans once, as git keeps its `cnt_data` on the file, and scores a pair by one pass over the two sorted span lists; it counted both blobs into hash maps again for every pair it scored. Add `similarity.spans`, `similarity.scoreSpans` and `similarity.sizesRuleOut`; `similarity.score` gives the scores it gave.
 
 - `diff.tree` walks the two trees side by side as git's tree diff does, and passes over a subtree both hold unchanged without reading it; it read and listed every path of both trees. A diff of two commits of a large tree costs what differs between them, and so do the patch ids `rebase` compares.
