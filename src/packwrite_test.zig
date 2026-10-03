@@ -312,6 +312,7 @@ const Interrupt = struct {
     var at: usize = std.math.maxInt(usize);
     var failure: ?Io.File.OpenError = null;
     var parked: std.atomic.Value(bool) = .init(false);
+    var base: Io = undefined;
 
     fn arm(n: usize, err: ?Io.File.OpenError) void {
         opens = 0;
@@ -332,10 +333,10 @@ const Interrupt = struct {
             parked.store(true, .release);
             // Until canceled, a short sleep at a time, since a sleep may
             // also end early; a minute is a hang, not a pass.
-            for (0..6000) |_| try std.testing.io.sleep(.fromMilliseconds(10), .awake);
+            for (0..6000) |_| try base.sleep(.fromMilliseconds(10), .awake);
             return error.Unexpected;
         }
-        return std.testing.io.vtable.dirOpenFile(userdata, dir, sub_path, options);
+        return base.vtable.dirOpenFile(userdata, dir, sub_path, options);
     }
 };
 
@@ -355,8 +356,13 @@ fn leftovers(corpus: *Corpus, io: Io) !usize {
 }
 
 test "a pack write canceled or failed part way leaves nothing behind" {
-    const io = std.testing.io;
     const gpa = std.testing.allocator;
+    // Two tasks besides the calling one, whatever the machine: the rest of
+    // the write's tasks run inline, on the task that is canceled.
+    var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .limited(2) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    Interrupt.base = io;
     var corpus = try Corpus.init(gpa, io, 6, 6, 40);
     defer corpus.deinit(gpa, io);
 
@@ -364,7 +370,7 @@ test "a pack write canceled or failed part way leaves nothing behind" {
     vtable.dirOpenFile = Interrupt.open;
     const interrupted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
 
-    for ([_]u16{ 4, 1 }) |threads| {
+    for ([_]u16{ 4, 3, 1 }) |threads| {
         // Canceled while a read waits: the write returns `Canceled`.
         Interrupt.arm(30, null);
         var future = try io.concurrent(writeWith, .{ &corpus, gpa, interrupted, .{ .threads = threads } });

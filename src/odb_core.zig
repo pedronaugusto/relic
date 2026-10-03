@@ -2085,9 +2085,10 @@ fn runTasks(
         context: @TypeOf(context),
         next: std.atomic.Value(usize) = .init(0),
         lowest_failed: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
-        /// Whether the calling task met its own cancelation. Meeting it
-        /// consumes the request, so the tasks are canceled explicitly.
-        caller_canceled: bool = false,
+        /// Whether a task met a cancelation. Meeting one consumes the
+        /// request, and a task the Io ran inline may have met the calling
+        /// task's, so the others are then canceled explicitly.
+        canceled: std.atomic.Value(bool) = .init(false),
 
         fn run(shared: *@This(), worker: usize) void {
             while (true) {
@@ -2099,7 +2100,7 @@ fn runTasks(
                 else |err|
                     err;
                 outcome catch |err| {
-                    if (worker == 0 and err == error.Canceled) shared.caller_canceled = true;
+                    if (err == error.Canceled) shared.canceled.store(true, .monotonic);
                     shared.failures[i] = err;
                     var lowest = shared.lowest_failed.load(.monotonic);
                     while (i < lowest) {
@@ -2113,7 +2114,7 @@ fn runTasks(
     var group: Io.Group = .init;
     for (1..workers) |worker| group.async(io, Shared.run, .{ &shared, worker });
     shared.run(0);
-    if (shared.caller_canceled) {
+    if (shared.canceled.load(.monotonic)) {
         group.cancel(io);
         return error.Canceled;
     }
