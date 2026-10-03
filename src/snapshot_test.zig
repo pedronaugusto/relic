@@ -656,3 +656,44 @@ test "snapshot adoption refuses file entries that name trees" {
     try testing.expectError(error.UnexpectedObjectType, store.adoptTree(io, &source.db, tree));
     try testing.expect(!store.complete.contains(tree));
 }
+
+test "a large first capture goes into packs, and a small one after it stays loose" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var folder = testing.tmpDir(.{ .iterate = true });
+    defer folder.cleanup();
+    for (0..300) |i| {
+        var path: [32]u8 = undefined;
+        var text: [32]u8 = undefined;
+        try folder.dir.createDirPath(io, try std.fmt.bufPrint(&path, "d{d}", .{i % 7}));
+        try folder.dir.writeFile(io, .{
+            .sub_path = try std.fmt.bufPrint(&path, "d{d}/f{d}", .{ i % 7, i }),
+            .data = try std.fmt.bufPrint(&text, "file {d}\n", .{i}),
+        });
+    }
+    var private = testing.tmpDir(.{ .iterate = true });
+    defer private.cleanup();
+    var store = try snapshot.Store.open(gpa, io, private.dir, .{});
+    defer store.deinit(io);
+    const first = (try store.capture(io, .{ .folder = folder.dir }, .{})).snapshot;
+    try expectClosure(&store.db, first.tree);
+    // A hundred loose blobs at most; the rest of the blobs and every tree
+    // in packs.
+    try testing.expect(store.db.stats.loose_written <= 100);
+    try testing.expect(store.db.stats.packed_written >= 200 + 8);
+    try testing.expectEqual(@as(usize, 2), store.db.packCount());
+
+    try folder.dir.writeFile(io, .{ .sub_path = "d0/f0", .data = "changed\n" });
+    const loose = store.db.stats.loose_written;
+    const second = (try store.capture(io, .{ .folder = folder.dir }, .{})).snapshot;
+    try expectClosure(&store.db, second.tree);
+    // The changed blob, its tree and the root, loose; no pack more.
+    try testing.expectEqual(loose + 3, store.db.stats.loose_written);
+    try testing.expectEqual(@as(usize, 2), store.db.packCount());
+
+    var dest = testing.tmpDir(.{ .iterate = true });
+    defer dest.cleanup();
+    _ = try store.restore(io, first, dest.dir, .{});
+    try expectFile(dest.dir, "d0/f0", "file 0\n");
+    try expectFile(dest.dir, "d5/f299", "file 299\n");
+}

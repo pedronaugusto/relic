@@ -168,6 +168,14 @@ pub const NewBlobs = enum {
     /// because a delta wants the object before it and a walk hands them over
     /// one at a time. `Odb.repack` is what deltifies.
     pack,
+    /// Loose until the call has written `unpack_limit` new blobs, and the
+    /// rest into one pack: a pass that brings a few new files leaves no
+    /// pack behind it, and one that brings thousands pays for few of them.
+    auto,
+
+    /// git's `fetch.unpackLimit`: the number of objects at which a fetch
+    /// keeps what it received as a pack rather than as loose objects.
+    pub const unpack_limit = 100;
 };
 
 /// How `addAll` behaves.
@@ -276,6 +284,7 @@ pub fn addAll(
     var filling: ?Odb.OpenPack = null;
     errdefer if (filling) |open| db.abortPack(io, open);
     if (options.new_blobs == .pack) filling = try db.beginPack(io, options.pack);
+    // `.auto` opens it on the way, once enough new blobs have gone loose.
 
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
@@ -303,7 +312,7 @@ pub fn addAll(
         .outcome = &outcome,
         .seen = &seen,
         .fresh = &fresh,
-        .filling = filling,
+        .filling = &filling,
     };
     try walker.walk(options.prefix, 0);
     if (filling) |open| {
@@ -373,7 +382,10 @@ const Walker = struct {
     /// at the end. Their paths live in `arena`.
     fresh: *std.ArrayList(index_mod.Entry),
     /// The pack the blobs go into, where the caller asked for one.
-    filling: ?Odb.OpenPack = null,
+    /// The pack new blobs go into, once there is one; `addAll` finishes it.
+    filling: *?Odb.OpenPack,
+    /// New blobs this pass has written loose, for `NewBlobs.auto`.
+    loose_new: u32 = 0,
 
     fn walk(w: *Walker, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
@@ -613,8 +625,14 @@ const Walker = struct {
 
     /// Put a blob where this pass puts them.
     fn store(w: *Walker, bytes: []const u8) Error!Oid {
-        if (w.filling) |open| return w.db.writeInto(w.io, open, .blob, bytes);
-        return w.db.write(w.io, .blob, bytes);
+        if (w.filling.*) |open| return w.db.writeInto(w.io, open, .blob, bytes);
+        const written = w.db.stats.loose_written;
+        const oid = try w.db.write(w.io, .blob, bytes);
+        if (w.db.stats.loose_written != written) w.loose_new += 1;
+        if (w.options.new_blobs == .auto and w.loose_new >= NewBlobs.unpack_limit) {
+            w.filling.* = try w.db.beginPack(w.io, w.options.pack);
+        }
+        return oid;
     }
 };
 
@@ -639,9 +657,15 @@ fn lessThanName(_: void, a: []const u8, b: []const u8) bool {
 /// under it is rebuilt and no tree object is written for it. That is the
 /// difference between a warm call and a cold one.
 pub fn writeTree(gpa: Allocator, io: Io, index: *Index, db: *Odb) Error!Oid {
+    return writeTreeInto(gpa, io, index, db, null);
+}
+
+/// `writeTree`, with the tree objects it writes going into a pack the
+/// database is filling, when one is given.
+pub fn writeTreeInto(gpa: Allocator, io: Io, index: *Index, db: *Odb, filling: ?Odb.OpenPack) Error!Oid {
     _ = gpa;
     const tree = try index.cacheTree();
-    const oid = try tree.rebuild(io, index.entries.items, db);
+    const oid = try tree.rebuildInto(io, index.entries.items, db, filling);
     try db.syncBatch(io);
     return oid;
 }

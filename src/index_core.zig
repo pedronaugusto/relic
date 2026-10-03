@@ -301,8 +301,20 @@ pub const CacheTree = struct {
         entries: []const Entry,
         db: *odb_mod.Odb,
     ) (ReadError || odb_mod.Error || object.Tree.Builder.AddError)!Oid {
+        return t.rebuildInto(io, entries, db, null);
+    }
+
+    /// `rebuild`, writing the tree objects into a pack the database is
+    /// filling, when one is given, rather than as loose objects.
+    pub fn rebuildInto(
+        t: *CacheTree,
+        io: Io,
+        entries: []const Entry,
+        db: *odb_mod.Odb,
+        filling: ?odb_mod.Odb.OpenPack,
+    ) (ReadError || odb_mod.Error || object.Tree.Builder.AddError)!Oid {
         var consumed: usize = 0;
-        const oid = try rebuildNode(t, io, &t.root, "", entries, &consumed, db);
+        const oid = try rebuildNode(t, io, &t.root, "", entries, &consumed, db, filling);
         if (consumed != entries.len) return error.CorruptCacheTree;
         return oid;
     }
@@ -315,6 +327,7 @@ pub const CacheTree = struct {
         entries: []const Entry,
         consumed: *usize,
         db: *odb_mod.Odb,
+        filling: ?odb_mod.Odb.OpenPack,
     ) (ReadError || odb_mod.Error || object.Tree.Builder.AddError)!Oid {
         // A valid node covers a known number of entries; skip over them.
         if (node.isValid()) {
@@ -389,7 +402,7 @@ pub const CacheTree = struct {
                 errdefer if (held) child_node.deinit(t.gpa);
                 const child_prefix = entry.path[0 .. prefix.len + slash + 1];
                 const child_start = consumed.*;
-                const child_oid = try t.rebuildNode(io, &child_node, child_prefix, entries, consumed, db);
+                const child_oid = try t.rebuildNode(io, &child_node, child_prefix, entries, consumed, db, filling);
                 child_node.entry_count = @intCast(consumed.* - child_start);
                 child_node.oid = child_oid;
                 // An empty directory produces no tree entry and no node.
@@ -418,7 +431,7 @@ pub const CacheTree = struct {
 
         const bytes = try builder.build();
         defer t.gpa.free(bytes);
-        const oid = try db.write(io, .tree, bytes);
+        const oid = if (filling) |open| try db.writeInto(io, open, .tree, bytes) else try db.write(io, .tree, bytes);
         node.entry_count = @intCast(consumed.* - start);
         node.oid = oid;
         return oid;

@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A snapshot capture writes the blobs past git's unpack limit of a hundred into one pack in the private store, and then every tree into a second, where it wrote every blob, and every tree it borrowed from the source, as a loose object: the first capture of a twenty-thousand-file tree was forty thousand filesystem calls before any reading. The store still owns every tree and blob before the capture returns. A capture that brings fewer new blobs writes them loose, so a store captured often gathers no packs. Add `NewBlobs.auto`, which `addAll` does this with, and `CacheTree.rebuildInto`.
+
 - `merge.fromOrt` stages the merged tree's clean paths in one sorted pass; it inserted them one at a time in hash-map order, a move of the rest of the index for almost every path, which on a twenty-thousand-file tree was most of each commit a rebase, cherry-pick or merge made.
 
 - Rename and copy detection cuts each blob into spans once, as git keeps its `cnt_data` on the file, and scores a pair by one pass over the two sorted span lists; it counted both blobs into hash maps again for every pair it scored. Add `similarity.spans`, `similarity.scoreSpans` and `similarity.sizesRuleOut`; `similarity.score` gives the scores it gave.

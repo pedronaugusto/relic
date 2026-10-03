@@ -152,15 +152,31 @@ pub const Store = struct {
             // A present one must be read, even when Git marked it skipped.
             if (entry.skip_worktree and try fs.statAt(io, wt, entry.path) != null) entry.skip_worktree = false;
         }
+        // The first capture of a large tree writes every blob in it, and
+        // as loose objects that is a create and a rename each: past git's
+        // unpack limit the rest go into one pack, and the trees after them.
         const outcome = try worktree.addAll(store.gpa, io, wt, &staged, &store.db, .{
             .rules = rules,
+            .new_blobs = .auto,
             .programs = options.programs,
             .filter_report = options.filter_report,
             .refusal = options.refusal,
         });
-        const tree = try worktree.writeTree(store.gpa, io, &staged, &store.db);
+        const tree = if (outcome.pack != null) try store.writeEveryTree(io, &staged) else try worktree.writeTree(store.gpa, io, &staged, &store.db);
         const recorded = try store.recordTree(io, tree, source_db);
         return .{ .snapshot = recorded, .staged = outcome };
+    }
+
+    /// Write every tree the index describes into one pack, rather than only
+    /// the ones its cache tree says changed: the rest would otherwise be
+    /// borrowed from the source and copied in one loose object at a time.
+    fn writeEveryTree(store: *Store, io: Io, staged: *index.Index) Error!hash.Oid {
+        (try staged.cacheTree()).invalidateAll();
+        const filling = try store.db.beginPack(io, .{ .delta = .none });
+        errdefer store.db.abortPack(io, filling);
+        const tree = try worktree.writeTreeInto(store.gpa, io, staged, &store.db, filling);
+        _ = try store.db.finishPack(io, filling);
+        return tree;
     }
 
     /// Take an existing tree and every reachable tree and blob into this
