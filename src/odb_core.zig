@@ -676,6 +676,12 @@ pub const Odb = struct {
             // A tiny input buffer made the body cache pay several syscalls
             // for the single inflate it was meant to save.
             var input_buffer: [16 * 1024]u8 = undefined;
+            if (want == .header) {
+                // The zlib header, the first block's and the object's own
+                // fit a kilobyte whatever the object's size.
+                var header_reader = file.reader(io, input_buffer[0..1024]);
+                return .{ .header = try looseHeader(&header_reader) };
+            }
             var file_reader = file.reader(io, &input_buffer);
             var window: [flate.max_window_len]u8 = undefined;
             var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &window);
@@ -689,7 +695,7 @@ pub const Odb = struct {
             }
             const parsed = object.parseHeader(head[0..got]) catch return error.CorruptLooseObject;
             const body: []u8 = switch (want) {
-                .header => return .{ .header = parsed.header },
+                .header => unreachable,
                 .cache => |available| blk: {
                     if (available == 0 or parsed.header.size > available) return .{ .header = parsed.header };
                     break :blk try odb.backendData().gpa.alloc(u8, @intCast(parsed.header.size));
@@ -724,6 +730,28 @@ pub const Odb = struct {
             return .{ .header = parsed.header, .bytes = if (want == .cache) body else null };
         }
         return null;
+    }
+
+    /// A loose object's header, with no more of it inflated than the
+    /// header's own bytes and what decodes with them: the decoder writes
+    /// straight into a buffer the size of the longest header, rather than
+    /// filling its window.
+    fn looseHeader(file_reader: *Io.File.Reader) Error!object.Header {
+        var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &.{});
+        var head: [64]u8 = undefined;
+        var out: Io.Writer = .fixed(&head);
+        while (std.mem.indexOfScalar(u8, out.buffered(), 0) == null and out.end < head.len) {
+            const n = decompress.reader.stream(&out, .limited(head.len - out.end)) catch |err| switch (err) {
+                error.EndOfStream => break,
+                error.ReadFailed => return looseInflateError(&decompress, file_reader),
+                // The limit is the room left.
+                error.WriteFailed => unreachable,
+            };
+            // A match longer than the room left: no header is that long.
+            if (n == 0) break;
+        }
+        const parsed = object.parseHeader(out.buffered()) catch return error.CorruptLooseObject;
+        return parsed.header;
     }
 
     /// Whether the database holds `oid`, without reading it.
@@ -2887,6 +2915,46 @@ test "loose reads preserve I/O and cancellation resource failures" {
         try std.testing.expectError(failure, odb.read(failing_io, oid));
         try std.testing.expectError(failure, odb.readHeader(failing_io, oid));
         try std.testing.expectError(failure, odb.readHeaderForPack(failing_io, oid, 100));
+    }
+}
+
+test "a loose object's header is read without inflating its body" {
+    // What the file reads return: a loose object is read positionally.
+    const Counting = struct {
+        threadlocal var bytes: usize = 0;
+        fn positional(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+            const n = try std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
+            bytes += n;
+            return n;
+        }
+    };
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+    var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
+    defer odb.deinit(io);
+    // Bytes that do not compress, so every byte inflated is a byte read.
+    const body = try gpa.alloc(u8, 1 << 20);
+    defer gpa.free(body);
+    var prng: std.Random.DefaultPrng = .init(0x5eed);
+    prng.random().bytes(body);
+    const oid = try odb.write(io, .blob, body);
+
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Counting.positional;
+    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    Counting.bytes = 0;
+    const header = try odb.readHeader(counted, oid);
+    try std.testing.expectEqual(object.Header{ .type = .blob, .size = body.len }, header);
+    // The zlib header, the first block's and the object's own: well under
+    // a kilobyte, against the whole inflate window a full read fills.
+    if (Counting.bytes > 1024) {
+        std.debug.print("a header read read {d} bytes of a {d}-byte object\n", .{ Counting.bytes, body.len });
+        return error.TestUnexpectedResult;
     }
 }
 

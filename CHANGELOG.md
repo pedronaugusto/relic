@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `Odb.readHeader` of a loose object, and the header passes of `collectLoose`, `collectAll` and `writePack`, inflate the object's header and no more, and read at most a kilobyte of the file to do it, where they filled the 64 KiB inflate window.
+
 - A pack of fewer objects than `PackOptions.threads` asks for, and each batch of a larger one, starts no more tasks than it has objects.
 
 - A fetch or clone that copies a repository on this machine writes its pack on the tasks `pack.threads` asks for, as git's pack-objects reads it; unset, one per processor.
