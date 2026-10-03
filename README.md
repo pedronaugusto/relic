@@ -499,6 +499,8 @@ deeper than fifty, and a delta kept only if it is at most half the object it
 stands in for. `PackOptions.window_bytes` bounds that window by weight as well
 as by count, so a few large objects cannot become the high-water mark, and an
 object past `big_file_bytes` is written whole and never enters it.
+Small delta bases use a 16 KiB hash table and matches compare whole words;
+loose pack inputs are read through a 16 KiB buffer.
 
 The order the two files become visible in is not free to choose. A reader
 finds a pack by its `.idx`, so the pack is renamed into place first and the
@@ -560,7 +562,7 @@ output buffer, the state being two hundred and twenty-four kilobytes, because
 a cold `addAll` writes one object per file. A database that is only read takes
 neither of those two. Writing a pack adds
 the delta window on top, which `PackOptions.window_bytes` bounds by weight as
-well as by count, and one index entry per object — a name, an offset and a
+well as by count, its per-base delta indexes, and one index entry per object — a name, an offset and a
 CRC — which has to be sorted before it is written. There is no object cache; a returned slice's
 doc comment says who owns it.
 

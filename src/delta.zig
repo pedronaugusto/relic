@@ -344,7 +344,9 @@ const Index = struct {
 
     fn build(gpa: Allocator, base: []const u8) Allocator.Error!Index {
         const blocks = base.len / match_len;
-        var size: u32 = 256;
+        // Small bases need enough buckets that unrelated targets seldom
+        // reach a candidate chain. Sixteen KiB avoids that hot-loop work.
+        var size: u32 = 4096;
         while (size < blocks and size < (1 << 20)) size <<= 1;
         const head = try gpa.alloc(u32, size);
         errdefer gpa.free(head);
@@ -404,6 +406,18 @@ const Index = struct {
             block = index.chain[block];
             var len: usize = 0;
             const room = @min(base.len - candidate, target.len - at);
+            if (base[candidate] != target[at]) continue;
+            // Compare whole words where both slices have room. The first
+            // differing byte still ends the match, so delta choice and its
+            // encoded bytes are unchanged, including at unaligned targets.
+            while (room - len >= 8) : (len += 8) {
+                const different = std.mem.readInt(u64, base[candidate + len ..][0..8], .little) ^
+                    std.mem.readInt(u64, target[at + len ..][0..8], .little);
+                if (different != 0) {
+                    len += @ctz(different) / 8;
+                    break;
+                }
+            }
             while (len < room and base[candidate + len] == target[at + len]) len += 1;
             if (len > best.len) best = .{ .at = candidate, .len = len };
             if (best.len == target.len - at) break;
@@ -621,4 +635,22 @@ test "a valid delta over the result limit is not a size overflow" {
     try std.testing.expectError(if (@sizeOf(usize) > 4) error.OutOfMemory else error.DeltaSizeLimitExceeded, applyTo(failing.allocator(), &empty, &base, &at_limit));
     // A size that does not fit the wire's u64 is still malformed input.
     try std.testing.expectError(error.DeltaSizeOverflow, readSize(&([_]u8{0xff} ** 9 ++ [_]u8{2})));
+}
+
+test "delta matches stop at each byte of an unaligned word and at the tail" {
+    const gpa = std.testing.allocator;
+    var base: [160]u8 = undefined;
+    for (&base, 0..) |*byte, i| byte.* = @truncate(i * 37 + 11);
+    var index = try Index.build(gpa, &base);
+    defer index.deinit(gpa);
+    var target: [170]u8 = undefined;
+    for ([_]usize{ 0, 1, 7 }) |start| {
+        for (16..base.len + 1) |end| {
+            @memcpy(target[start..][0..base.len], &base);
+            if (end < base.len) target[start + end] ^= 1;
+            const found = index.longestAt(&base, target[0 .. start + base.len], start, Index.hashWindow(target[start..][0..match_len]));
+            try std.testing.expectEqual(@as(usize, 0), found.at);
+            try std.testing.expectEqual(end, found.len);
+        }
+    }
 }

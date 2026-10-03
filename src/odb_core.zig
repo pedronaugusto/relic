@@ -587,7 +587,10 @@ pub const Odb = struct {
             // Both buffers live on the stack: a pack write asks for tens of
             // thousands of headers in a row, and an allocation for each was
             // a measurable share of it.
-            var input_buffer: [1024]u8 = undefined;
+            // Most loose blobs fit this read, including the zlib trailer.
+            // A tiny input buffer made the body cache pay several syscalls
+            // for the single inflate it was meant to save.
+            var input_buffer: [16 * 1024]u8 = undefined;
             var file_reader = file.reader(io, &input_buffer);
             var window: [flate.max_window_len]u8 = undefined;
             var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &window);
@@ -2635,4 +2638,37 @@ test "object discovery preserves optional index and hint read resources" {
     defer db.deinit(base);
     _ = try db.write(base, .tree, "");
     try std.testing.expectError(error.SystemResources, Probe.collect(&db, io));
+}
+
+test "a cached loose body fits one buffered read and an end check" {
+    const Counter = struct {
+        threadlocal var reads: usize = 0;
+        fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+            reads += 1;
+            const io = std.testing.io;
+            return io.vtable.fileReadPositional(userdata, file, buffers, offset);
+        }
+    };
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+    var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
+    defer odb.deinit(io);
+    var bytes: [12000]u8 = undefined;
+    var prng: std.Random.DefaultPrng = .init(1950);
+    prng.random().bytes(&bytes);
+    const oid = try odb.write(io, .blob, &bytes);
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Counter.read;
+    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    Counter.reads = 0;
+    const found = try odb.readHeaderForPack(counted, oid, bytes.len);
+    defer gpa.free(found.bytes.?);
+    try std.testing.expectEqual(object.Type.blob, found.header.type);
+    try std.testing.expectEqualSlices(u8, &bytes, found.bytes.?);
+    try std.testing.expect(Counter.reads <= 2);
 }

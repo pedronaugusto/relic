@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Reduce hash collisions and long-match comparisons in delta searches, with larger buffered loose pack reads.
+
 - Keep suffix-related test modules in one Windows family so substring filters do not run them twice.
 
 - Divide remaining Windows tests into five named source families without changing their assertions.
