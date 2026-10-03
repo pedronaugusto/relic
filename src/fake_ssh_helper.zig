@@ -51,7 +51,13 @@ pub fn main(init: std.process.Init) !void {
         try stderr.interface.flush();
         if (held) {
             // As an ssh ControlMaster does: something started here keeps
-            // the standard error open after this program has ended.
+            // the standard error open after this program has ended. It
+            // leaves the conversation's two pipes alone, as the master
+            // does; a Windows child would otherwise inherit them too.
+            if (builtin.os.tag == .windows) {
+                _ = SetHandleInformation(Io.File.stdin().handle, handle_flag_inherit, 0);
+                _ = SetHandleInformation(Io.File.stdout().handle, handle_flag_inherit, 0);
+            }
             _ = try std.process.spawn(io, .{
                 .argv = &.{ executable, "--hold-stderr", release },
                 .stdin = .ignore,
@@ -132,6 +138,9 @@ pub fn main(init: std.process.Init) !void {
         else => std.process.exit(255),
     }
 }
+
+const handle_flag_inherit: std.os.windows.DWORD = 1;
+extern "kernel32" fn SetHandleInformation(handle: std.os.windows.HANDLE, mask: std.os.windows.DWORD, flags: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL;
 
 /// Hold the inherited standard error until `release` exists, a minute at
 /// most, then leave `<release>.ended` behind.
