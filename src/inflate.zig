@@ -719,41 +719,36 @@ test "Adler-32 is zlib's, at every length" {
     try testing.expectEqual(std.hash.Adler32.hash(&ones), adler32(&ones));
 }
 
-test "fuzz: any input decodes as the standard library decodes it, or both refuse it" {
+test "fuzz: any input this decodes, the standard library decodes to the same bytes" {
     try testing.fuzz({}, fuzzAgainstStd, .{ .corpus = &.{
         &.{ 0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01 },
         &.{ 0x78, 0x9c, 0x4b, 0x4c, 0x04, 0x02, 0x00, 0x02, 0x87, 0x01, 0x07 },
     } });
 }
 
+/// Arbitrary bytes: nothing this decoder takes is refused by the standard
+/// library or read differently. The other direction, every stream the
+/// standard library writes is taken whole, is `fuzzRoundTrip`'s. The
+/// standard library is asked only about input this decoder took: on some
+/// truncated input its own reader overflows (Zig 0.16.0,
+/// `Decompress.peekBitsEnding`) where this decoder refuses cleanly.
 fn fuzzAgainstStd(_: void, smith: *testing.Smith) anyerror!void {
     var input_buf: [512]u8 = undefined;
     const input = input_buf[0..smith.slice(&input_buf)];
     const gpa = testing.allocator;
-    var theirs: [4096]u8 = undefined;
     var ours: [4096]u8 = undefined;
-    const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
-    defer gpa.free(window);
-    var r1: Io.Reader = .fixed(input);
-    var sd: std.compress.flate.Decompress = .init(&r1, .raw, window);
-    const their_n: ?usize = if (sd.reader.readSliceShort(&theirs)) |n| n else |_| null;
     const d = try gpa.create(Decoder);
     defer gpa.destroy(d);
     d.* = .{};
     var r2: Io.Reader = .fixed(input);
-    const our_n: ?usize = d.raw(&r2, &ours) catch null;
-    // Where the standard library decodes a whole stream that fits, so does
-    // this, to the same bytes; and nothing it refuses is taken.
-    if (their_n) |n| {
-        if (n < theirs.len) {
-            const m = our_n orelse return error.TestUnexpectedResult;
-            try testing.expectEqualSlices(u8, theirs[0..n], ours[0..m]);
-        }
-    }
-    if (our_n) |m| {
-        const n = their_n orelse return error.TestUnexpectedResult;
-        try testing.expectEqualSlices(u8, theirs[0..n], ours[0..m]);
-    }
+    const m = d.raw(&r2, &ours) catch return;
+    var theirs: [4096]u8 = undefined;
+    const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
+    defer gpa.free(window);
+    var r1: Io.Reader = .fixed(input);
+    var sd: std.compress.flate.Decompress = .init(&r1, .raw, window);
+    const n = sd.reader.readSliceShort(&theirs) catch return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(u8, theirs[0..n], ours[0..m]);
 }
 
 test "fuzz: whatever the standard library compresses, at any level, comes back whole" {
