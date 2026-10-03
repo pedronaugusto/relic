@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Fix git's author and committer dates in every test fixture, so a fixture's object names do not change from run to run.
 
+- Add `Repository.gitDirOf`: the per-worktree directory a working tree names, through a `.git` file too, without reading the repository.
+
 - Apply a program's variables and removals through conduit's environment overrides.
 
 - Add `transport.remote.Remote.trackingRef`: the ref that tracks a remote's ref by its fetch refspecs, as git's `remote_find_tracking` decides; push uses it.

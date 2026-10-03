@@ -188,6 +188,19 @@ pub const Repository = struct {
         return finish(gpa, io, discovered, options);
     }
 
+    /// The per-worktree directory at `dir`, as `open` with `discover`
+    /// off finds it, without reading the repository: its `.git` folder,
+    /// where a `.git` file points (a linked worktree, a submodule), or
+    /// `dir` itself when it is a git directory. For a file of the caller's
+    /// own kept beside the repository rather than in the working tree. The
+    /// handle is the caller's to close.
+    pub fn gitDirOf(gpa: Allocator, io: Io, dir: Io.Dir) Error!Io.Dir {
+        var discovered = try discover(gpa, io, dir, .{ .discover = false });
+        if (discovered.common_is_separate) discovered.common_dir.close(io);
+        if (discovered.work_dir) |work| work.close(io);
+        return discovered.git_dir;
+    }
+
     /// How a repository is opened.
     pub const OpenOptions = struct {
         /// Caller-owned output for a refused repository format or extension.

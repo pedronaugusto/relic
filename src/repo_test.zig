@@ -1157,3 +1157,29 @@ test "the ignore sources and the index are named where git reads them, in a link
     defer sources.deinit(gpa);
     try std.testing.expect(sources.excludes_file == null);
 }
+
+test "the git directory of a working tree is found without opening the repository, through a .git file too" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "first" });
+    try git.exec(io, &.{ "worktree", "add", "-q", "-b", "side", "linked" });
+    try git.dir.createDirPath(io, "plain");
+    for ([_][]const u8{ ".", "linked" }) |where| {
+        var dir = try git.dir.openDir(io, where, .{});
+        defer dir.close(io);
+        var found = try repo_mod.Repository.gitDirOf(gpa, io, dir);
+        defer found.close(io);
+        const got = try found.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(got);
+        const said = try git.line(io, &.{ "-C", where, "rev-parse", "--absolute-git-dir" });
+        defer gpa.free(said);
+        const want = try Io.Dir.cwd().realPathFileAlloc(io, said, gpa);
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, got);
+    }
+    var plain = try git.dir.openDir(io, "plain", .{});
+    defer plain.close(io);
+    try std.testing.expectError(error.NotARepository, repo_mod.Repository.gitDirOf(gpa, io, plain));
+}
