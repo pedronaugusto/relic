@@ -77,6 +77,8 @@ pub const families = [_]Family{
         "ere.test",
         "history_test.test",
         "mailmap.test",
+        "shortlog.test",
+        "wcwidth.test",
         "merge_core.test",
         "ort_test.test",
         "patchid.test",

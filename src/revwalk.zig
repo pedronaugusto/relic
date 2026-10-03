@@ -19,6 +19,8 @@ pub const revparse = @import("revparse.zig");
 pub const shallow = @import("shallow.zig");
 /// Who a commit's people are, as `.mailmap` says.
 pub const mailmap = @import("mailmap.zig");
+/// `git shortlog`: commits grouped by who made them.
+pub const shortlog = @import("shortlog.zig");
 /// Errors from a walk.
 pub const Error = core.Error;
 /// The order commits come out in.

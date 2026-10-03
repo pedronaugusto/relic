@@ -36,6 +36,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Inflate builds its Huffman tables as libdeflate does: each code written once and the table doubled by copies, subtables only as large as their codes need, and the code lengths counted while they are read. Building them was a fifth of reading small packed objects; inflating every entry of a 14.5 MB pack takes 73 ms where it took 87.
 
+- Add `revwalk.shortlog`: `git shortlog` grouped by author, committer or trailer, sorted, counted and folded as git does it, and `commit.message.trailers`, the trailers of a message as git iterates them.
+
 - Add `revwalk.mailmap`: `.mailmap`, `mailmap.blob` and `mailmap.file` parsed and looked up as git does, a long line read in `fgets`-sized pieces included.
 
 - `collectLoose` and `collectAll` read the loose trees their hints come from on tasks too, eight megabytes at a time, and parse them in order, so every task count gives the same hints.

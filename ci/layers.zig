@@ -32,6 +32,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/tls_fork_test.zig",
         "src/varint.zig",
         "src/warning.zig",
+        "src/wcwidth.zig",
         "src/wildmatch.zig",
     } },
     .{ .name = "binary and process inputs", .patterns = &.{
@@ -178,6 +179,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/revindex_test.zig",
         "src/mailmap.zig",
         "src/revparse.zig",
+        "src/shortlog.zig",
         "src/snapshot.zig",
         "src/sparsecheckout.zig",
         "src/sparseindex_test.zig",

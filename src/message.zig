@@ -236,6 +236,76 @@ fn trailerBlockStart(buf: []const u8, len: usize, comment: []const u8) usize {
     return len;
 }
 
+/// One trailer, as git's `trailer_iterator` hands it back: the key and the
+/// value each without whitespace at either end, and a value carried over
+/// continuation lines folded onto one line.
+pub const Trailer = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+/// The trailers of `msg`, in order, as `trailer_iterator_advance` reads
+/// them: the trailer block found as `trailerBlock` finds it, its lines with
+/// a continuation line (one beginning with whitespace, after a line that has
+/// a separator) joined to the line above, each split at its first `:`.
+/// Everything is allocated with `arena`; the configured trailer names and
+/// separators git's `trailer.*` settings add are not read.
+pub fn trailers(arena: Allocator, msg: []const u8, comment: []const u8) Allocator.Error![]Trailer {
+    const block = trailerBlock(msg, comment);
+    var lines: std.ArrayList(std.ArrayList(u8)) = .empty;
+    var last: ?usize = null;
+    var at = block.start;
+    while (at < block.end) {
+        const next = @min(nextLine(msg, at), block.end);
+        const piece = msg[at..next];
+        at = next;
+        if (last != null and isSpace(piece[0])) {
+            try lines.items[last.?].appendSlice(arena, piece);
+            continue;
+        }
+        var line: std.ArrayList(u8) = .empty;
+        try line.appendSlice(arena, piece);
+        try lines.append(arena, line);
+        last = if (findSeparator(piece)) |sep| (if (sep >= 1) lines.items.len - 1 else null) else null;
+    }
+    const out = try arena.alloc(Trailer, lines.items.len);
+    for (lines.items, out) |line, *t| {
+        const text = line.items;
+        if (findSeparator(text)) |sep| {
+            t.key = trim(text[0..sep]);
+            t.value = try unfold(arena, trim(text[sep + 1 ..]));
+        } else {
+            t.key = trim(text);
+            t.value = "";
+        }
+    }
+    return out;
+}
+
+fn trim(text: []const u8) []const u8 {
+    var start: usize = 0;
+    var end = text.len;
+    while (start < end and isSpace(text[start])) start += 1;
+    while (end > start and isSpace(text[end - 1])) end -= 1;
+    return text[start..end];
+}
+
+/// `unfold_value`: every newline, and the whitespace after it, one space.
+fn unfold(arena: Allocator, value: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < value.len) {
+        var c = value[i];
+        i += 1;
+        if (c == '\n') {
+            while (i < value.len and isSpace(value[i])) i += 1;
+            c = ' ';
+        }
+        try out.append(arena, c);
+    }
+    return trim(out.items);
+}
+
 /// Where a message's trailer block is: `start == end` when it has none.
 pub const TrailerBlock = struct {
     start: usize,
