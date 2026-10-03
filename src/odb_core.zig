@@ -12,6 +12,7 @@ const inflate = @import("inflate.zig");
 const midx = @import("midx.zig");
 
 const std = @import("std");
+const crc32 = @import("crc32.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -1440,6 +1441,8 @@ pub const Odb = struct {
         var build: Build = blk: {
             const group_starts = try groupStarts(gpa, ordered);
             errdefer gpa.free(group_starts);
+            var reuse = try odb.planReuse(io, ordered, options);
+            errdefer reuse.deinit(gpa);
             break :blk .{
                 .odb = odb,
                 .gpa = gpa,
@@ -1448,6 +1451,7 @@ pub const Odb = struct {
                 .offsets = try gpa.alloc(u64, ordered.len),
                 .writer = writer,
                 .group_starts = group_starts,
+                .reuse = reuse,
             };
         };
         defer build.deinit();
@@ -1457,6 +1461,97 @@ pub const Odb = struct {
             try build.writeSerially(io);
         }
         return try writer.finish(io);
+    }
+
+    /// What of `ordered`'s objects is written as their packs store it, as
+    /// git's pack-objects reuses it. An object a pack stores as a delta
+    /// whose base is in the pack being written, before it in pack order,
+    /// and whose chain of such deltas stays within `PackOptions.depth`, is
+    /// written as that delta: neither read, searched nor deflated. An object
+    /// a pack stores whole, and written whole, is written as stored rather
+    /// than deflated again. Stored bytes are checked against the CRC the
+    /// pack's index gives. The choices depend on the objects and the packs
+    /// alone, and are made here on the calling task, so every task count
+    /// makes the same.
+    fn planReuse(odb: *Odb, io: Io, ordered: []const Ordered, options: PackOptions) Error!Reuse {
+        const gpa = odb.backendData().gpa;
+        if (!options.reuse_packed) return .{};
+        for (ordered) |item| {
+            if (!item.loose) break;
+        } else return .{};
+
+        var positions: hash.Oid.Map(u32) = .empty;
+        defer positions.deinit(gpa);
+        if (options.delta != .none) {
+            try positions.ensureTotalCapacity(gpa, @intCast(ordered.len));
+            for (ordered, 0..) |item, pos| positions.putAssumeCapacity(item.oid, @intCast(pos));
+        }
+        var orders: std.ArrayList(PackEntryOrder) = .empty;
+        defer {
+            for (orders.items) |*order| order.deinit(gpa);
+            orders.deinit(gpa);
+        }
+
+        var reuse: Reuse = .{};
+        errdefer reuse.deinit(gpa);
+        reuse.reused = try gpa.alloc(?Reused, ordered.len);
+        @memset(reuse.reused, null);
+        reuse.whole = try gpa.alloc(?Stored, ordered.len);
+        @memset(reuse.whole, null);
+        reuse.depth_left = try gpa.alloc(u32, ordered.len);
+        // The reused deltas below each object, then how many it may take.
+        const chain = reuse.depth_left;
+        @memset(chain, 0);
+        for (ordered, 0..) |item, pos| {
+            if (item.loose) continue;
+            const at = (try odb.locatePacked(item.oid)) orelse continue;
+            const entry = try at.pack.entryHeaderAt(io, at.offset);
+            const order = try orderOf(gpa, &orders, at.pack);
+            const stored: Stored = .{
+                .pack = at.pack,
+                .entry_at = at.offset,
+                .len = std.math.cast(usize, order.endOf(at.pack, at.offset) - at.offset) orelse continue,
+                .data_from = @intCast(entry.data_at - at.offset),
+                .crc = at.crc,
+            };
+            const base_oid = switch (entry.kind) {
+                .object => {
+                    reuse.whole[pos] = stored;
+                    continue;
+                },
+                .ref_delta => |oid| oid,
+                .ofs_delta => |back| order.nameAt(at.pack, at.offset -| back) orelse continue,
+            };
+            if (options.delta == .none or item.size >= options.big_file_bytes) continue;
+            const base = positions.get(base_oid) orelse continue;
+            if (base >= pos) continue;
+            const length = (if (reuse.reused[base] != null) chain[base] else 0) + 1;
+            if (length > options.depth) continue;
+            reuse.reused[pos] = .{ .base = base, .size = entry.size, .stored = stored };
+            chain[pos] = length;
+        }
+        // How tall the reused chains resting on each object are, the last
+        // first, and so how deep a delta the search may make it.
+        @memset(chain, 0);
+        var pos = ordered.len;
+        while (pos > 0) {
+            pos -= 1;
+            const r = reuse.reused[pos] orelse continue;
+            chain[r.base] = @max(chain[r.base], chain[pos] + 1);
+        }
+        for (chain) |*left| left.* = options.depth -| left.*;
+        return reuse;
+    }
+
+    /// Where `oid` is in this database's packs, with its CRC.
+    fn locatePacked(odb: *Odb, oid: Oid) Error!?struct { pack: *pack.Pack, offset: u64, crc: u32 } {
+        for (odb.backendData().sources.items) |*source| {
+            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
+            const p = &source.packs.items[located.at].pack;
+            const found = (try p.index.find(oid)) orelse continue;
+            return .{ .pack = p, .offset = found.offset, .crc = found.crc };
+        }
+        return null;
     }
 
     /// The headers of `ordered`'s objects, on `workers` tasks: the loose
@@ -1702,11 +1797,24 @@ pub const Odb = struct {
             for (entries.items) |e| try seen.put(odb.backendData().gpa, e.oid, {});
             for (source.packs.items) |*named| {
                 const p = &named.pack;
+                // Every header of the pack at once, read forward through
+                // it, rather than one lookup and chain walk per object.
+                const headers = p.headers(io, odb.backendData().gpa) catch |err| {
+                    if (opening.readRefusal(err)) return err;
+                    var it = p.index.iterate();
+                    while (try it.next()) |found| {
+                        if (skip.contains(found.oid) or seen.contains(found.oid)) continue;
+                        try seen.put(odb.backendData().gpa, found.oid, {});
+                        try entries.append(odb.backendData().gpa, .{ .oid = found.oid, .in_pack = true });
+                    }
+                    continue;
+                };
+                defer odb.backendData().gpa.free(headers);
                 var it = p.index.iterate();
                 while (try it.next()) |found| {
                     if (skip.contains(found.oid) or seen.contains(found.oid)) continue;
                     try seen.put(odb.backendData().gpa, found.oid, {});
-                    try entries.append(odb.backendData().gpa, .{ .oid = found.oid, .in_pack = true });
+                    try entries.append(odb.backendData().gpa, .{ .oid = found.oid, .in_pack = true, .header = headers[found.located.index] });
                 }
             }
         }
@@ -1954,17 +2062,44 @@ pub const Odb = struct {
         const base = std.fmt.bufPrint(&base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch unreachable;
         const opened = odb.findPackByName(base) orelse return report;
 
-        if (options.remove_loose) for (collected.entries) |entry| {
-            // Never remove a loose object the pack does not hold. The pack
-            // was written from this list, so this is a belt on top of a
-            // brace -- and it is the one that makes a mistake here a wasted
-            // syscall rather than a lost object.
-            if ((try opened.index.find(entry.oid)) == null) continue;
-            var path_buf: [hash.max_hex_len + 2]u8 = undefined;
-            const path = odb.loosePath(entry.oid, &path_buf);
-            source.dir.deleteFile(io, path) catch continue;
-            report.loose_removed += 1;
-        };
+        if (options.remove_loose) {
+            var doomed: std.ArrayList(Oid) = .empty;
+            defer doomed.deinit(odb.backendData().gpa);
+            for (collected.entries) |entry| {
+                // Found only in packs: there is no loose file to remove.
+                if (entry.in_pack) continue;
+                // Never remove a loose object the pack does not hold. The
+                // pack was written from this list, so this is a belt on top
+                // of a brace -- and it is the one that makes a mistake here
+                // a wasted syscall rather than a lost object.
+                if ((try opened.index.find(entry.oid)) == null) continue;
+                try doomed.append(odb.backendData().gpa, entry.oid);
+            }
+            // On the reading tasks: a removal waits on the file system, and
+            // they wait together.
+            const failures = try odb.backendData().gpa.alloc(?Error, doomed.items.len);
+            defer odb.backendData().gpa.free(failures);
+            var removed: std.atomic.Value(u32) = .init(0);
+            const Remove = struct {
+                odb: *const Odb,
+                dir: Io.Dir,
+                doomed: []const Oid,
+                removed: *std.atomic.Value(u32),
+                fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
+                    var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+                    const path = c.odb.loosePath(c.doomed[i], &path_buf);
+                    c.dir.deleteFile(task_io, path) catch return;
+                    _ = c.removed.fetchAdd(1, .monotonic);
+                }
+            };
+            try runTasks(io, readTaskCount(taskCount(options.pack.threads)), failures, Remove{
+                .odb = odb,
+                .dir = source.dir,
+                .doomed = doomed.items,
+                .removed = &removed,
+            }, Remove.work);
+            report.loose_removed = removed.load(.monotonic);
+        }
 
         if (remove_packs and old_packs.items.len != 0) {
             // The old packs are closed here first, because a file this
@@ -2189,6 +2324,14 @@ pub const PackOptions = struct {
     compression: pack.Compression = .default,
     /// Write the pack's reverse index too: `pack.WriteOptions.reverse_index`.
     reverse_index: bool = false,
+    /// Write objects that come from packs as their packs store them, as git
+    /// does unless told `--no-reuse-delta` and `--no-reuse-object`: a delta
+    /// whose base is written before it is copied rather than searched for,
+    /// and an object written whole is copied rather than deflated again, at
+    /// the compression its pack has. Each copy is checked against the CRC
+    /// in its pack's index. Off, every object is read, searched and
+    /// deflated as if it were loose.
+    reuse_packed: bool = true,
 };
 
 /// How many tasks `threads` asks for.
@@ -2374,13 +2517,16 @@ const Window = struct {
     fn choose(
         w: *Window,
         gpa: Allocator,
-        options: PackOptions,
+        pack_options: PackOptions,
+        max_depth: u32,
         raw_len: usize,
         pos: usize,
         t: object.Type,
         bytes: []u8,
         keep_retired: bool,
     ) Error!Build.Choice {
+        var options = pack_options;
+        options.depth = max_depth;
         const deltifiable = options.delta != .none and options.window != 0 and
             bytes.len < options.big_file_bytes;
         var choice: Build.Choice = .{};
@@ -2509,9 +2655,12 @@ const Build = struct {
     /// The window of the group being searched, serially, or of the group a
     /// batch ended inside, carried into the next.
     window: Window = .{},
+    /// The deltas written as their packs hold them.
+    reuse: Reuse = .{},
 
     fn deinit(b: *Build) void {
         b.window.deinit(b.gpa);
+        b.reuse.deinit(b.gpa);
         b.gpa.free(b.group_starts);
         b.gpa.free(b.offsets);
     }
@@ -2530,12 +2679,50 @@ const Build = struct {
     /// Choose how object `pos`, whose bytes are `bytes`, is written: the
     /// serial writer's `Window.choose`.
     fn choose(b: *Build, pos: usize, t: object.Type, bytes: []u8) Error!Choice {
-        if (b.group_starts[pos]) b.window.clear(b.gpa);
-        return b.window.choose(b.gpa, b.options, b.odb.backendData().kind.rawLen(), pos, t, bytes, false);
+        return b.window.choose(b.gpa, b.options, b.depthFor(pos), b.odb.backendData().kind.rawLen(), pos, t, bytes, false);
+    }
+
+    /// How deep a delta the search may make object `pos`.
+    fn depthFor(b: *const Build, pos: usize) u32 {
+        return if (b.reuse.depth_left.len != 0) b.reuse.depth_left[pos] else b.options.depth;
+    }
+
+    fn reusedAt(b: *const Build, pos: usize) ?Reused {
+        return if (b.reuse.reused.len != 0) b.reuse.reused[pos] else null;
+    }
+
+    /// Where object `pos` is stored whole when it is written whole, which
+    /// is then how it is written.
+    fn storedWhole(b: *const Build, pos: usize, choice: Choice) ?Stored {
+        if (choice.base != null or b.reuse.whole.len == 0) return null;
+        return b.reuse.whole[pos];
+    }
+
+    /// Write object `pos` as the delta its pack holds, from `stored`, its
+    /// entry as the pack has it.
+    fn writeReused(b: *Build, pos: usize, r: Reused, stored: []const u8) Error!void {
+        const payload: pack.Writer.Payload = switch (b.options.delta) {
+            .offset => .{ .ofs_delta = b.offsets[r.base] },
+            .reference => .{ .ref_delta = b.ordered[r.base].oid },
+            .none => unreachable,
+        };
+        b.offsets[pos] = try b.writer.addDeflated(b.ordered[pos].oid, payload, r.size, stored[r.stored.data_from..]);
+    }
+
+    /// Write object `pos`, `len` bytes of type `t`, whole, from `stored`,
+    /// its entry as its pack has it.
+    fn writeStoredWhole(b: *Build, pos: usize, t: object.Type, len: usize, st: Stored, stored: []const u8) Error!void {
+        b.offsets[pos] = try b.writer.addDeflated(b.ordered[pos].oid, .{ .object = t }, len, stored[st.data_from..]);
     }
 
     /// Write object `pos` the way `choice` says, deflating it here.
-    fn writeDirect(b: *Build, pos: usize, t: object.Type, bytes: []const u8, choice: Choice) Error!void {
+    fn writeDirect(b: *Build, io: Io, pos: usize, t: object.Type, bytes: []const u8, choice: Choice) Error!void {
+        if (b.storedWhole(pos, choice)) |st| {
+            const stored = try b.gpa.alloc(u8, st.len);
+            defer b.gpa.free(stored);
+            try st.read(io, stored);
+            return b.writeStoredWhole(pos, t, bytes.len, st, stored);
+        }
         const item = &b.ordered[pos];
         b.offsets[pos] = if (choice.base) |base| switch (b.options.delta) {
             .offset => try b.writer.addOfsDelta(item.oid, b.offsets[base], choice.delta.?),
@@ -2547,6 +2734,16 @@ const Build = struct {
     /// Every object in pack order on this task alone: the serial writer.
     fn writeSerially(b: *Build, io: Io) Error!void {
         for (b.ordered, 0..) |*item, pos| {
+            if (b.group_starts[pos]) b.window.clear(b.gpa);
+            if (b.reusedAt(pos)) |r| {
+                if (item.cached) |bytes| b.gpa.free(bytes);
+                item.cached = null;
+                const stored = try b.gpa.alloc(u8, r.stored.len);
+                defer b.gpa.free(stored);
+                try r.stored.read(io, stored);
+                try b.writeReused(pos, r, stored);
+                continue;
+            }
             const found = if (item.cached) |bytes| blk: {
                 item.cached = null;
                 break :blk Odb.Read{ .type = item.type, .bytes = bytes };
@@ -2556,7 +2753,7 @@ const Build = struct {
             const choice = try b.choose(pos, found.type, found.bytes);
             owned = !choice.kept;
             defer if (choice.delta) |d| b.gpa.free(d);
-            try b.writeDirect(pos, found.type, found.bytes, choice);
+            try b.writeDirect(io, pos, found.type, found.bytes, choice);
         }
     }
 
@@ -2575,6 +2772,8 @@ const Build = struct {
         /// when written.
         room: []u8 = &.{},
         deflated: ?usize = null,
+        /// The stored entry of a reused delta, read by a task.
+        stored: []u8 = &.{},
 
         fn payload(p: *const Pending) []const u8 {
             return p.choice.delta orelse p.bytes.?;
@@ -2610,6 +2809,7 @@ const Build = struct {
                 if (!p.choice.kept) if (p.bytes) |bytes| gpa.free(bytes);
                 if (p.choice.delta) |d| gpa.free(d);
                 if (p.room.len != 0) gpa.free(p.room);
+                if (p.stored.len != 0) gpa.free(p.stored);
             }
             batch.pending.clearRetainingCapacity();
             for (batch.parts.items) |*part| part.window.deinit(gpa);
@@ -2683,7 +2883,7 @@ const Build = struct {
             if (prev) |p| if (p.alone) {
                 // Nothing for the tasks to deflate: written now, so that
                 // one object too large for a batch is held at a time.
-                try b.writeBatch(p);
+                try b.writeBatch(io, p);
                 p.release(gpa);
                 prev = null;
             };
@@ -2691,7 +2891,7 @@ const Build = struct {
             if (prev) |p| try b.prepareDeflate(p);
             try b.overlap(io, stage, prev, next, searching);
             if (prev) |p| {
-                try b.writeBatch(p);
+                try b.writeBatch(io, p);
                 p.release(gpa);
             }
             if (next) |n| try b.finishReads(io, n);
@@ -2701,7 +2901,7 @@ const Build = struct {
         if (prev) |p| {
             try b.prepareDeflate(p);
             try b.overlap(io, stage, p, null, null);
-            try b.writeBatch(p);
+            try b.writeBatch(io, p);
             p.release(gpa);
         }
     }
@@ -2727,7 +2927,7 @@ const Build = struct {
         while (end < b.ordered.len) {
             const size = std.math.cast(usize, b.ordered[end].size) orelse std.math.maxInt(usize);
             const slack: usize = if (b.ordered[end].loose) 0 else pack.Pack.inflate_slack;
-            const charge = size +| slack +| pack.Deflater.room(size);
+            const charge = if (b.reusedAt(end)) |r| r.stored.len else size +| slack +| pack.Deflater.room(size);
             if (end > start and charged +| charge > share) break;
             charged +|= charge;
             end += 1;
@@ -2751,7 +2951,11 @@ const Build = struct {
         try batch.pending.ensureTotalCapacity(gpa, items.len);
         for (items) |item| batch.pending.appendAssumeCapacity(.{ .type = item.type });
         if (batch.alone) return;
-        for (items, batch.pending.items) |item, *p| {
+        for (items, batch.pending.items, batch.start..) |item, *p, pos| {
+            if (b.reusedAt(pos)) |r| {
+                p.stored = try gpa.alloc(u8, r.stored.len);
+                continue;
+            }
             if (item.loose) {
                 p.bytes = try gpa.alloc(u8, @intCast(item.size));
                 batch.opens = true;
@@ -2773,6 +2977,7 @@ const Build = struct {
         const gpa = b.gpa;
         if (batch.alone) return;
         for (b.ordered[batch.start..batch.end], batch.pending.items) |*item, *p| {
+            if (p.stored.len != 0) continue;
             if (p.filled) {
                 if (p.packed_at != null) p.bytes = try gpa.realloc(p.bytes.?, @intCast(item.size));
                 continue;
@@ -2789,6 +2994,10 @@ const Build = struct {
     /// runs, since a read may re-scan the pack directories.
     fn readAlone(b: *Build, io: Io, batch: *Batch) Error!void {
         const p = &batch.pending.items[0];
+        if (b.reusedAt(batch.start)) |r| {
+            p.stored = try b.gpa.alloc(u8, r.stored.len);
+            return r.stored.read(io, p.stored);
+        }
         const found = try b.odb.readForPack(io, &b.ordered[batch.start]);
         p.bytes = found.bytes;
         p.type = found.type;
@@ -2816,8 +3025,9 @@ const Build = struct {
     fn searchPart(b: *const Build, gpa: Allocator, batch: *Batch, part: *Part) Error!void {
         const raw_len = b.odb.backendData().kind.rawLen();
         for (part.start..part.end) |pos| {
+            if (b.reusedAt(pos) != null) continue;
             const p = &batch.pending.items[pos - batch.start];
-            p.choice = try part.window.choose(gpa, b.options, raw_len, pos, p.type, p.bytes.?, true);
+            p.choice = try part.window.choose(gpa, b.options, b.depthFor(pos), raw_len, pos, p.type, p.bytes.?, true);
         }
     }
 
@@ -2849,7 +3059,14 @@ const Build = struct {
     /// Room for each entry the tasks deflate.
     fn prepareDeflate(b: *Build, batch: *Batch) Error!void {
         if (batch.alone) return;
-        for (batch.pending.items) |*p| p.room = try b.gpa.alloc(u8, pack.Deflater.room(p.payload().len));
+        for (batch.pending.items, batch.start..) |*p, pos| {
+            if (p.stored.len != 0) continue;
+            if (b.storedWhole(pos, p.choice)) |st| {
+                p.stored = try b.gpa.alloc(u8, st.len);
+                continue;
+            }
+            p.room = try b.gpa.alloc(u8, pack.Deflater.room(p.payload().len));
+        }
     }
 
     /// The tasks, this one among them, search the parts of `searching`,
@@ -2867,7 +3084,9 @@ const Build = struct {
             parts: []Part,
             odb: *const Odb,
             deflates: []Pending,
+            deflating_start: usize,
             reads: []Pending,
+            reading_start: usize,
             read_items: []const Ordered,
             deflaters: []pack.Deflater,
             readers: []pack.Pack.EntryReader,
@@ -2877,12 +3096,25 @@ const Build = struct {
                 // The parts first: they are the longest items.
                 if (i < c.parts.len) return c.build.searchPart(c.search_gpa, c.searching.?, &c.parts[i]);
                 const d = i - c.parts.len;
-                if (d < c.deflates.len) return c.deflate(worker, &c.deflates[d]);
+                if (d < c.deflates.len) {
+                    const p = &c.deflates[d];
+                    if (p.stored.len == 0) return c.deflate(worker, p);
+                    // Reused deltas were read with their batch; an object
+                    // written whole as stored is read now.
+                    const pos = c.deflating_start + d;
+                    if (c.build.reusedAt(pos) != null) return;
+                    return c.build.storedWhole(pos, p.choice).?.read(task_io, p.stored);
+                }
                 const at = d - c.deflates.len;
+                if (c.reads[at].stored.len != 0) {
+                    const r = c.build.reusedAt(c.reading_start + at).?;
+                    return r.stored.read(task_io, c.reads[at].stored);
+                }
                 return c.read(task_io, worker, c.read_items[at].oid, &c.reads[at]);
             }
 
             fn deflate(c: @This(), worker: usize, p: *Pending) Error!void {
+                if (p.stored.len != 0) return;
                 var out: Io.Writer = .fixed(p.room);
                 c.deflaters[worker].deflate(&out, p.payload(), c.compression) catch |err| switch (err) {
                     // No room: deflated again when it is written.
@@ -2925,6 +3157,8 @@ const Build = struct {
                 .odb = b.odb,
                 .deflates = deflates,
                 .reads = reads,
+                .deflating_start = if (deflating) |d| d.start else 0,
+                .reading_start = if (reading) |r| r.start else 0,
                 .read_items = if (reading) |r| b.ordered[r.start..r.end] else &.{},
                 .deflaters = stage.deflaters,
                 .readers = stage.readers,
@@ -2944,10 +3178,18 @@ const Build = struct {
     }
 
     /// A batch's entries, in pack order.
-    fn writeBatch(b: *Build, batch: *Batch) Error!void {
+    fn writeBatch(b: *Build, io: Io, batch: *Batch) Error!void {
         for (batch.pending.items, batch.start..) |*p, pos| {
+            if (p.stored.len != 0) {
+                if (b.reusedAt(pos)) |r| {
+                    try b.writeReused(pos, r, p.stored);
+                } else {
+                    try b.writeStoredWhole(pos, p.type, p.bytes.?.len, b.storedWhole(pos, p.choice).?, p.stored);
+                }
+                continue;
+            }
             const deflated_len = p.deflated orelse {
-                try b.writeDirect(pos, p.type, p.bytes.?, p.choice);
+                try b.writeDirect(io, pos, p.type, p.bytes.?, p.choice);
                 continue;
             };
             const item = &b.ordered[pos];
@@ -3029,6 +3271,109 @@ fn worthTryingDelta(slot: *const WindowSlot, target_len: usize, max_depth: u32, 
     if (size_difference >= limit) return false;
     if (target_len < slot.bytes.len / 32) return false;
     return true;
+}
+
+/// An entry as a pack stores it.
+const Stored = struct {
+    pack: *const pack.Pack,
+    /// Where the entry begins, and how long it is, header and all.
+    entry_at: u64,
+    len: usize,
+    /// Where in the entry its zlib stream begins.
+    data_from: usize,
+    /// The entry's CRC, from the pack's index.
+    crc: u32,
+
+    /// The entry, into `out`, `len` bytes, checked against its CRC.
+    fn read(st: Stored, io: Io, out: []u8) Error!void {
+        try st.pack.readStored(io, st.entry_at, out);
+        if (crc32.Crc32.hash(out) != st.crc) return error.CorruptPackEntry;
+    }
+};
+
+/// An object written as the delta its pack holds: `planReuse`.
+const Reused = struct {
+    /// The base's position in pack order, always before this one.
+    base: usize,
+    /// The delta's length, inflated.
+    size: u64,
+    stored: Stored,
+};
+
+/// What `planReuse` decided, by position in pack order: empty when nothing
+/// comes from a pack.
+const Reuse = struct {
+    reused: []?Reused = &.{},
+    /// Where an object a pack stores whole is stored.
+    whole: []?Stored = &.{},
+    /// How deep a delta the search may make each object: `depth`, less the
+    /// tallest chain of reused deltas resting on it.
+    depth_left: []u32 = &.{},
+
+    fn deinit(r: *Reuse, gpa: Allocator) void {
+        gpa.free(r.reused);
+        gpa.free(r.whole);
+        gpa.free(r.depth_left);
+        r.* = .{};
+    }
+};
+
+/// A pack's entries in file order: which object an offset is, and where
+/// the entry after it begins.
+const PackEntryOrder = struct {
+    pack: *const pack.Pack,
+    offsets: []u64,
+    positions: []u32,
+
+    fn deinit(o: *PackEntryOrder, gpa: Allocator) void {
+        gpa.free(o.offsets);
+        gpa.free(o.positions);
+    }
+
+    fn find(o: *const PackEntryOrder, offset: u64) ?usize {
+        const i = std.sort.lowerBound(u64, o.offsets, offset, orderU64);
+        return if (i < o.offsets.len and o.offsets[i] == offset) i else null;
+    }
+
+    fn nameAt(o: *const PackEntryOrder, p: *const pack.Pack, offset: u64) ?Oid {
+        const i = o.find(offset) orelse return null;
+        return p.index.nameAt(o.positions[i]);
+    }
+
+    /// Where the entry at `offset` ends: the next entry, or the trailer.
+    fn endOf(o: *const PackEntryOrder, p: *const pack.Pack, offset: u64) u64 {
+        const i = o.find(offset).?;
+        return if (i + 1 < o.offsets.len) o.offsets[i + 1] else p.bodyEnd();
+    }
+};
+
+fn orderU64(a: u64, b: u64) std.math.Order {
+    return std.math.order(a, b);
+}
+
+/// `p`'s entry order, made the first time it is asked for.
+fn orderOf(gpa: Allocator, orders: *std.ArrayList(PackEntryOrder), p: *const pack.Pack) Error!*PackEntryOrder {
+    for (orders.items) |*o| if (o.pack == p) return o;
+    const n = p.index.count;
+    const Pair = struct { offset: u64, position: u32 };
+    const pairs = try gpa.alloc(Pair, n);
+    defer gpa.free(pairs);
+    for (pairs, 0..) |*pair, i| pair.* = .{ .offset = try p.index.offsetAt(@intCast(i)), .position = @intCast(i) };
+    std.mem.sort(Pair, pairs, {}, struct {
+        fn less(_: void, a: Pair, b: Pair) bool {
+            return a.offset < b.offset;
+        }
+    }.less);
+    const offsets = try gpa.alloc(u64, n);
+    errdefer gpa.free(offsets);
+    const positions = try gpa.alloc(u32, n);
+    errdefer gpa.free(positions);
+    for (pairs, offsets, positions) |pair, *o, *q| {
+        o.* = pair.offset;
+        q.* = pair.position;
+    }
+    try orders.append(gpa, .{ .pack = p, .offsets = offsets, .positions = positions });
+    return &orders.items[orders.items.len - 1];
 }
 
 /// A whole object's entry in a pack, which a task may inflate.

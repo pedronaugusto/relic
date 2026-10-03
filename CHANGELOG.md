@@ -22,6 +22,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Index.addMany` keeps the entry added last where one names a path and stage already in the index, as it says it does; its sort was not stable, so past a few dozen entries it could keep the older one.
 
+- A pack written from objects in packs, as `repack` and a local clone or fetch write it, copies what those packs store, as git's pack-objects does (`PackOptions.reuse_packed`, on): a delta whose base is written before it, its chain of copied deltas within `depth`, is neither read, searched nor deflated, and an object written whole is not deflated again; every copy is checked against its pack index's CRC. The choice depends on the objects and their packs alone, so every task count writes the same pack. `collectAll` reads each pack's headers in file order (`Pack.headers`), and `repack` removes only the loose files it found, on tasks. Repacking the bench's large repository takes 0.67 s where it took 1.9.
+
 - Pack entries' CRC-32s are computed eight bytes at a time, with the CPU's CRC instructions on AArch64 and from eight tables elsewhere, where `std.hash.Crc32` takes a byte at a time: 7 ms or 26 ms for 64 MiB instead of 159 on an M3 Max. Writing, indexing and verifying packs use it.
 
 - The delta search encodes its candidates into two buffers each window keeps, and allocates only the delta it chooses: searching tasks no longer wait on each other for the allocator's lock, which took more of a repack's search than the search did. Add `delta.Encoder.encodeInto`.

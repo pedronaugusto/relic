@@ -697,6 +697,23 @@ pub const Pack = struct {
         }
     }
 
+    /// The `out.len` packed bytes from `offset`, as they are in the file,
+    /// read positionally or from the mapping. Nothing of the pack that
+    /// changes is touched, so tasks call it at once on one pack.
+    pub fn readStored(p: *const Pack, io: Io, offset: u64, out: []u8) Error!void {
+        if (offset > p.size or out.len > p.size - offset) return error.TruncatedPack;
+        if (p.memory) |mem| {
+            @memcpy(out, mem[@intCast(offset)..][0..out.len]);
+            return;
+        }
+        var done: usize = 0;
+        while (done < out.len) {
+            const n = try p.file.readPositional(io, &.{out[done..]}, offset + done);
+            if (n == 0) return error.TruncatedPack;
+            done += n;
+        }
+    }
+
     /// The header of the entry at `offset`, without inflating anything.
     pub fn entryHeaderAt(p: *Pack, io: Io, offset: u64) Error!EntryHeader {
         if (offset < 12 or offset >= p.bodyEnd()) return error.TruncatedPack;
@@ -975,6 +992,60 @@ pub const Pack = struct {
         }
 
         return .{ .type = base_type, .bytes = base_bytes };
+    }
+
+    /// Every object's type and length, by its position in the index, as
+    /// `headerAt` gives them: read in the order of the file, so that the
+    /// reads run forward through it, and a delta's type taken from its base
+    /// entry, which an offset delta always has before it, rather than by
+    /// walking its chain again. The result is the caller's, freed with
+    /// `gpa`.
+    pub fn headers(p: *Pack, io: Io, gpa: Allocator) Error![]object.Header {
+        const n = p.index.count;
+        const Entry = struct { offset: u64, position: u32 };
+        const order = try gpa.alloc(Entry, n);
+        defer gpa.free(order);
+        for (order, 0..) |*e, i| e.* = .{ .offset = try p.index.offsetAt(@intCast(i)), .position = @intCast(i) };
+        std.mem.sort(Entry, order, {}, struct {
+            fn less(_: void, a: Entry, b: Entry) bool {
+                return a.offset < b.offset;
+            }
+        }.less);
+        const out = try gpa.alloc(object.Header, n);
+        errdefer gpa.free(out);
+        const known = try gpa.alloc(bool, n);
+        defer gpa.free(known);
+        @memset(known, false);
+        for (order) |e| {
+            const entry = try p.entryHeaderAt(io, e.offset);
+            const base: ?u32 = switch (entry.kind) {
+                .object => |t| {
+                    out[e.position] = .{ .type = t, .size = entry.size };
+                    known[e.position] = true;
+                    continue;
+                },
+                .ofs_delta => |back| blk: {
+                    if (back == 0 or back > e.offset) break :blk null;
+                    const at = std.sort.lowerBound(Entry, order, e.offset - back, struct {
+                        fn cmp(offset: u64, x: Entry) std.math.Order {
+                            return std.math.order(offset, x.offset);
+                        }
+                    }.cmp);
+                    if (at == order.len or order[at].offset != e.offset - back) break :blk null;
+                    break :blk order[at].position;
+                },
+                .ref_delta => |oid| if (try p.index.find(oid)) |found| found.index else null,
+            };
+            if (base) |b| if (known[b]) {
+                const head = try p.inflateHead(io, entry.data_at, entry.size);
+                out[e.position] = .{ .type = out[b].type, .size = (try delta.header(&head)).target };
+                known[e.position] = true;
+                continue;
+            };
+            out[e.position] = try p.headerAt(io, e.offset);
+            known[e.position] = true;
+        }
+        return out;
     }
 
     /// The type and length of the object at `offset`, with no body inflated.

@@ -5,6 +5,7 @@ const std = @import("std");
 const Io = std.Io;
 const hash = @import("hash.zig");
 const odb_mod = @import("odb_core.zig");
+const testgit = @import("testgit.zig");
 
 const Oid = hash.Oid;
 
@@ -948,4 +949,216 @@ test "the searching tasks enter the database's allocator one at a time" {
     const report = try db.writePack(io, pack_dir, corpus.entries.items, .{ .threads = 16 });
     try std.testing.expect(report.deltas > 0);
     try std.testing.expect(!one.overlapped.load(.monotonic));
+}
+
+/// A repository git packed: versions of a few files over forty commits,
+/// in one pack with git's deltas, chains of up to `depth`.
+fn gitPacked(gpa: std.mem.Allocator, io: Io, depth: []const u8) !testgit.Repo {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    errdefer repo.deinit();
+    var script: std.ArrayList(u8) = .empty;
+    defer script.deinit(gpa);
+    var prng: std.Random.DefaultPrng = .init(0x9e05e);
+    const random = prng.random();
+    var lines: [6][60]u32 = undefined;
+    for (&lines) |*file| for (file) |*line| {
+        line.* = random.int(u32);
+    };
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    for (0..40) |c| {
+        try script.print(gpa, "commit refs/heads/main\ncommitter F <f@example.com> {d} +0000\ndata 2\nc\n", .{1700000000 + c});
+        for (&lines, 0..) |*file, f| {
+            file[random.uintLessThan(usize, file.len)] = random.int(u32);
+            body.clearRetainingCapacity();
+            for (file, 0..) |line, l| try body.print(gpa, "file {d} line {d}: {d}\n", .{ f, l, line });
+            try script.print(gpa, "M 100644 inline src/file{d}.txt\ndata {d}\n", .{ f, body.items.len });
+            try script.appendSlice(gpa, body.items);
+            try script.append(gpa, '\n');
+        }
+    }
+    gpa.free(try repo.runInput(io, &.{ "fast-import", "--quiet" }, script.items));
+    var depth_arg: [32]u8 = undefined;
+    gpa.free(try repo.run(io, &.{ "repack", "-a", "-d", "-q", "-f", "--window=10", try std.fmt.bufPrint(&depth_arg, "--depth={s}", .{depth}) }));
+    return repo;
+}
+
+/// Each entry of a pack file: whether it is a delta, its zlib stream, and,
+/// for an offset delta, how deep its chain is.
+const Entries = struct {
+    const Entry = struct { delta: bool, stream: []const u8, depth: u32 };
+    bytes: []u8,
+    map: hash.Oid.Map(Entry) = .empty,
+
+    fn read(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, base: []const u8) !Entries {
+        const pack = @import("pack.zig");
+        var p = try pack.Pack.open(gpa, io, dir, base, .sha1, .{});
+        defer p.deinit(io);
+        var name: [128]u8 = undefined;
+        var e: Entries = .{ .bytes = try dir.readFileAlloc(io, try std.fmt.bufPrint(&name, "{s}.pack", .{base}), gpa, .unlimited) };
+        errdefer e.deinit(gpa);
+        const At = struct { offset: u64, oid: Oid };
+        var all: std.ArrayList(At) = .empty;
+        defer all.deinit(gpa);
+        var it = p.index.iterate();
+        while (try it.next()) |found| try all.append(gpa, .{ .offset = found.located.offset, .oid = found.oid });
+        std.mem.sort(At, all.items, {}, struct {
+            fn less(_: void, a: At, b: At) bool {
+                return a.offset < b.offset;
+            }
+        }.less);
+        var depths: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+        defer depths.deinit(gpa);
+        for (all.items, 0..) |at, i| {
+            const header = try p.entryHeaderAt(io, at.offset);
+            const end = if (i + 1 < all.items.len) all.items[i + 1].offset else e.bytes.len - 20;
+            const depth: u32 = switch (header.kind) {
+                .object => 0,
+                .ofs_delta => |back| (depths.get(at.offset - back) orelse return error.TestUnexpectedResult) + 1,
+                .ref_delta => return error.TestUnexpectedResult,
+            };
+            try depths.put(gpa, at.offset, depth);
+            try e.map.put(gpa, at.oid, .{ .delta = header.kind != .object, .stream = e.bytes[@intCast(header.data_at)..@intCast(end)], .depth = depth });
+        }
+        return e;
+    }
+
+    fn deinit(e: *Entries, gpa: std.mem.Allocator) void {
+        e.map.deinit(gpa);
+        gpa.free(e.bytes);
+    }
+};
+
+fn onlyPack(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) ![]u8 {
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (std.mem.endsWith(u8, entry.name, ".pack")) return gpa.dupe(u8, entry.name[0 .. entry.name.len - 5]);
+    }
+    return error.FileNotFound;
+}
+
+fn repackInto(gpa: std.mem.Allocator, io: Io, repo: *testgit.Repo, out_name: []const u8, options: odb_mod.PackOptions) !@import("pack.zig").WriteReport {
+    var git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+    var db = try odb_mod.Odb.openAt(gpa, io, objects, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    var collected = try db.collectAll(io, .{});
+    defer collected.deinit();
+    try repo.dir.createDirPath(io, out_name);
+    var out = try repo.dir.openDir(io, out_name, .{ .iterate = true });
+    defer out.close(io);
+    return db.writePack(io, out, collected.entries, options);
+}
+
+test "a repack writes what git's pack stores as git stored it, deltas included, the same on 1, 2, 7 and 16 tasks" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try gitPacked(gpa, io, "50");
+    defer repo.deinit();
+
+    const serial = try repackInto(gpa, io, &repo, "out1", .{ .threads = 1 });
+    for ([_]u16{ 2, 7, 16 }) |threads| {
+        var name: [16]u8 = undefined;
+        const report = try repackInto(gpa, io, &repo, try std.fmt.bufPrint(&name, "out{d}", .{threads}), .{ .threads = threads });
+        try std.testing.expect(report.name.eql(serial.name));
+    }
+
+    var git_pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer git_pack_dir.close(io);
+    const git_base = try onlyPack(gpa, io, git_pack_dir);
+    defer gpa.free(git_base);
+    var theirs = try Entries.read(gpa, io, git_pack_dir, git_base);
+    defer theirs.deinit(gpa);
+    var out_dir = try repo.dir.openDir(io, "out1", .{ .iterate = true });
+    defer out_dir.close(io);
+    const out_base = try onlyPack(gpa, io, out_dir);
+    defer gpa.free(out_base);
+    var ours = try Entries.read(gpa, io, out_dir, out_base);
+    defer ours.deinit(gpa);
+
+    // Every entry git stored that relic wrote the same way is git's bytes.
+    var same_deltas: usize = 0;
+    var same_whole: usize = 0;
+    var it = ours.map.iterator();
+    while (it.next()) |entry| {
+        const theirs_entry = theirs.map.get(entry.key_ptr.*).?;
+        if (theirs_entry.delta != entry.value_ptr.delta) continue;
+        const same = std.mem.eql(u8, theirs_entry.stream, entry.value_ptr.stream);
+        if (entry.value_ptr.delta) {
+            if (same) same_deltas += 1;
+        } else {
+            if (!same) {
+                std.debug.print("an object git stored whole was deflated again\n", .{});
+                return error.TestUnexpectedResult;
+            }
+            same_whole += 1;
+        }
+    }
+    if (same_deltas == 0 or same_deltas * 2 < serial.deltas) {
+        std.debug.print("{d} of {d} deltas are git's\n", .{ same_deltas, serial.deltas });
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(same_whole > 0);
+}
+
+test "deltas a repack reuses keep their chains within the depth asked for" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try gitPacked(gpa, io, "50");
+    defer repo.deinit();
+    for ([_]u32{ 1, 3 }) |depth| {
+        var name: [16]u8 = undefined;
+        const dir_name = try std.fmt.bufPrint(&name, "depth{d}", .{depth});
+        const report = try repackInto(gpa, io, &repo, dir_name, .{ .depth = depth });
+        try std.testing.expect(report.deltas > 0);
+        var out_dir = try repo.dir.openDir(io, dir_name, .{ .iterate = true });
+        defer out_dir.close(io);
+        const base = try onlyPack(gpa, io, out_dir);
+        defer gpa.free(base);
+        var ours = try Entries.read(gpa, io, out_dir, base);
+        defer ours.deinit(gpa);
+        var it = ours.map.valueIterator();
+        while (it.next()) |entry| try std.testing.expect(entry.depth <= depth);
+    }
+}
+
+test "a stored delta whose bytes no longer match the pack index's CRC is refused, not copied" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try gitPacked(gpa, io, "50");
+    defer repo.deinit();
+    _ = try repackInto(gpa, io, &repo, "before", .{});
+
+    var git_pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer git_pack_dir.close(io);
+    const git_base = try onlyPack(gpa, io, git_pack_dir);
+    defer gpa.free(git_base);
+    var theirs = try Entries.read(gpa, io, git_pack_dir, git_base);
+    defer theirs.deinit(gpa);
+    var out_dir = try repo.dir.openDir(io, "before", .{ .iterate = true });
+    defer out_dir.close(io);
+    const out_base = try onlyPack(gpa, io, out_dir);
+    defer gpa.free(out_base);
+    var ours = try Entries.read(gpa, io, out_dir, out_base);
+    defer ours.deinit(gpa);
+
+    // A delta relic copied: one bit of its stream flipped in git's pack.
+    var it = ours.map.iterator();
+    const at = while (it.next()) |entry| {
+        const t = theirs.map.get(entry.key_ptr.*).?;
+        if (t.delta and entry.value_ptr.delta and std.mem.eql(u8, t.stream, entry.value_ptr.stream))
+            break @intFromPtr(t.stream.ptr) - @intFromPtr(theirs.bytes.ptr) + t.stream.len / 2;
+    } else return error.TestUnexpectedResult;
+    theirs.bytes[at] ^= 0x10;
+    var name: [128]u8 = undefined;
+    const pack_name = try std.fmt.bufPrint(&name, "{s}.pack", .{git_base});
+    try git_pack_dir.deleteFile(io, pack_name);
+    try git_pack_dir.writeFile(io, .{ .sub_path = pack_name, .data = theirs.bytes });
+
+    for ([_]u16{ 1, 4 }) |threads| {
+        var dir_name: [16]u8 = undefined;
+        try std.testing.expectError(error.CorruptPackEntry, repackInto(gpa, io, &repo, try std.fmt.bufPrint(&dir_name, "after{d}", .{threads}), .{ .threads = threads }));
+    }
 }

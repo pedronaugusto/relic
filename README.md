@@ -522,6 +522,15 @@ allocates its delta indexes through the database's allocator one call at a
 time, under a lock, so that allocator need not be thread-safe. The deltas
 packs hold and the writing stay on the calling task, in pack order. While the
 tasks search one batch, they read the next and deflate the one before.
+Objects that come from packs are written as their packs store them, as git's
+pack-objects reuses them (`PackOptions.reuse_packed`): a delta whose base is
+written before it, with its chain of such deltas within `depth`, is copied
+without being read, searched or deflated, and an object written whole is
+copied rather than deflated again. Each copy is checked against the CRC its
+pack's index gives, and an object a reused chain rests on is searched only for
+deltas shallow enough to keep that chain within `depth`. Which deltas are
+reused depends on the objects and their packs alone, so every task count
+still writes the same pack.
 `PackOptions.batch_bytes` bounds what the three batches hold ahead of the
 writer. At most six tasks read loose files at once: beyond a few, opening
 files contends in the kernel. An Io that cannot run a task in parallel runs it
