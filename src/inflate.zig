@@ -375,8 +375,16 @@ const State = struct {
         }
         while (s.bitsleft < n) {
             if (s.ip == s.in.len) {
-                if (!try s.more()) return;
-                continue;
+                if (try s.more()) continue;
+                // At the end of the input, `more` has still handed the
+                // whole bytes in the bit buffer back to the reader: they
+                // are the last bits there are, and taken again here.
+                while (s.bitsleft < n and s.ip < s.in.len) {
+                    s.bitbuf |= @as(u64, s.in[s.ip]) << s.bitsleft;
+                    s.ip += 1;
+                    s.bitsleft += 8;
+                }
+                return;
             }
             s.bitbuf |= @as(u64, s.in[s.ip]) << s.bitsleft;
             s.ip += 1;
@@ -685,6 +693,20 @@ test "a stream that decodes to more than the output holds, a wrong checksum and 
     }
     var header: Io.Reader = .fixed(&.{ 0x78, 0x9d, 0x01 });
     try testing.expectError(error.CorruptStream, d.zlib(&header, &out));
+}
+
+test "a stream whose last code ends inside the bytes asked for past it is whole" {
+    // A fixed block of three literals and its end, thirty-five bits in five
+    // bytes. Asking for fifteen bits at the third literal runs past the end;
+    // the bits that are there are the ones the rest of the block needs.
+    const input = [_]u8{ 0xb3, 0xdb, 0xab, 0x00, 0x00 };
+    const d = try testing.allocator.create(Decoder);
+    defer testing.allocator.destroy(d);
+    d.* = .{};
+    var out: [16]u8 = undefined;
+    var r: Io.Reader = .fixed(&input);
+    const n = try d.raw(&r, &out);
+    try testing.expectEqualSlices(u8, "\x3e\xbd\x20", out[0..n]);
 }
 
 test "Adler-32 is zlib's, at every length" {
