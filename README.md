@@ -304,6 +304,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `patch.format` | `format` — `git format-patch` byte for byte: numbering, the diffstat, binary hunks, a cover letter, base information, threading and attachments. |
 | `patch.mail` | `split`, `info` — `git mailsplit` and `git mailinfo`. |
 | `patch.am` | `start`, `proceed`, `skip`, `abort`, `quit` — `git am` with `--3way`, its state in `rebase-apply` as git keeps it. |
+| `grep` | `grep` — `git grep` over the working tree, the index or a tree: fixed, basic and extended patterns, `-i -w -v -n -l -c`, context, pathspecs, binary files, written as git writes it. |
 
 Every public declaration carries a doc comment stating its contract, and every
 operation has one named error set. A refusal is a named error. For a refused
@@ -671,6 +672,7 @@ refresh and re-hash the whole working tree.
 - **`apply` with the index compares content where a stat differs.** git says "does not match index" until the index is refreshed; this reads the file and agrees when its content does.
 - **A binary hunk in a written patch is this package's deflate.** It decodes to the same file; the compressed bytes are not zlib's. A cover letter's shortlog under a mailmap is refused by name.
 - **`am` reads mailboxes only.** StGit and Mercurial patches are refused by name, as is a mail in a character set other than UTF-8, US-ASCII or ISO-8859-1.
+- **`grep` without Perl expressions, back-references, function context or `--and`/`--or`/`--not`.** Each is refused by name.
 
 ## Ahead
 
@@ -779,6 +781,7 @@ a reader's feet and every one of them still reads back.
 
 Sixty-nine fuzz tests. Most of them take arbitrary bytes and hold a parser to
 Sixty-seven fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Seventy-one fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
 between them they cover every format relic reads: the object formats, packs
 and their indexes, the index file, refs, reftable and reflogs, config and
@@ -790,6 +793,8 @@ The notes fuzzer also edits a notes tree against a map and reads back what it
 wrote. Five check
 lock answers, TLS handshake messages and private keys, the merge state files,
 patches, mailboxes, binary hunks and dates. Five check
+files, patches, mailboxes, binary hunks, regular expressions, dates and
+pathspecs. Five check
 more than that. The diff fuzzer applies the
 edit script it produced and checks that it reproduces the other side, which is
 the property that catches an off-by-one nothing else would. The

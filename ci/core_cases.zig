@@ -33,6 +33,8 @@ pub const families = [_]Family{
         "odb_core.test",
         "pack.test",
         "packed_cache.test",
+
+        "pathspec.test",
         "platstat.test",
         "reflog.test",
         "refs_core.test",
@@ -90,6 +92,8 @@ pub const families = [_]Family{
         "diff_test.test",
         "ere.test",
         "formatpatch_test.test",
+        "grep.test",
+        "grep_test.test",
         "history_test.test",
         "mailmap.test",
         "notes.test",

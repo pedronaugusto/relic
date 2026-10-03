@@ -23,6 +23,7 @@
 //! | `submodule` | Submodules: status, init, update, sync, absorb. | `gitmodules`, `gitlink`, `submoduletransport` |
 //! | `lfs` | Git LFS in process: pointers and the store. | `lfsapi`, `lfstransfer`, `lfslocks`, `lfspush`, `lfshooks`, `lfsssh`, `netrc` |
 //! | `patch` | Patches: read, applied, written from commits, applied from a mailbox. | `apply`, `format`, `mail`, `am` |
+//! | `grep` | `git grep` over the working tree, the index or a tree. | |
 
 pub const repo = @import("repo.zig");
 pub const hash = @import("hash.zig");
@@ -42,6 +43,7 @@ pub const transport = @import("transport.zig");
 pub const submodule = @import("submodule.zig");
 pub const lfs = @import("lfs.zig");
 pub const patch = @import("patch.zig");
+pub const grep = @import("grep.zig");
 
 const builtin = @import("builtin");
 
@@ -122,6 +124,7 @@ test {
         _ = @import("apply_test.zig");
         _ = @import("formatpatch_test.zig");
         _ = @import("am_test.zig");
+        _ = @import("grep_test.zig");
     }
 }
 
