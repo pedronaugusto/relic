@@ -4,12 +4,10 @@ const gantry = @import("gantry");
 const declared = @import("layers.zig");
 
 pub const rules: gantry.rules.Rules = .{
-    .ordered = &.{.{ .name = "layers", .layers = declared.layers }},
     .required = &.{.{ .name = "named sources", .paths = &declared.required }},
     .nothing_imports = &entry_rules,
     .references = declared.references,
     .tokens = declared.owned,
-    .no_cycles = "cycles",
 };
 
 const entry_rules = blk: {
@@ -52,6 +50,30 @@ pub fn main(init: std.process.Init) !void {
         try out.interface.flush();
         return;
     }
+    // A namespace now holds both its implementation and public reexports.
+    // Check the implementation graph with the same layers and cycle policy;
+    // the complete graph still checks entries, names, references and tokens.
+    var implementation_edges: std.ArrayList(gantry.Edge) = .empty;
+    for (graph.edges()) |edge| {
+        var reexport = false;
+        for (declared.namespace_exports) |public| {
+            if (std.mem.eql(u8, edge.from, public.from) and std.mem.eql(u8, edge.to, public.to)) {
+                reexport = true;
+                break;
+            }
+        }
+        if (!reexport) try implementation_edges.append(a, edge);
+    }
+    var implementation = try gantry.Graph.fromEdges(a, graph.paths(), implementation_edges.items);
+    defer implementation.deinit();
+    const implementation_findings = try implementation.check(a, .{
+        .ordered = &.{.{ .name = "layers", .layers = declared.layers }},
+        .no_cycles = "cycles",
+    });
+    defer a.free(implementation_findings);
+    for (implementation_findings) |finding| {
+        if (finding.edge) |edge| std.debug.print("imports: {s}: {s} -> {s} ({s})\n", .{ finding.rule, edge.from, edge.to, @tagName(finding.reason) });
+    }
     const findings = try graph.check(a, rules);
     defer a.free(findings);
     for (graph.paths()) |path| {
@@ -78,5 +100,5 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("imports: {s}: {s}:{d}:{d}: {t} \"{f}\"\n", .{ finding.rule, token.path, token.line, token.column, token.kind, std.zig.fmtString(token.text) });
         } else if (finding.path) |path| std.debug.print("imports: {s}: {s}\n", .{ finding.rule, path });
     }
-    if (graph.unread().len != 0 or findings.len != 0) return error.ImportBoundary;
+    if (graph.unread().len != 0 or findings.len != 0 or implementation_findings.len != 0) return error.ImportBoundary;
 }

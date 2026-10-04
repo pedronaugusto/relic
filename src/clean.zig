@@ -26,15 +26,15 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const repo_mod = @import("repo_core.zig");
-const index_mod = @import("index_core.zig");
-const ignore = @import("ignore.zig");
+const repo_mod = @import("repo.zig");
+const index_mod = @import("index.zig");
+const ignore = @import("worktree/ignore.zig");
 const pathspec_mod = @import("pathspec.zig");
-const gitlink = @import("gitlink.zig");
-const dirscan = @import("dirscan.zig");
+const gitlink = @import("submodule/gitlink.zig");
+const dirscan = @import("worktree/dirscan.zig");
 const cquote = @import("cquote.zig");
-const config_core = @import("config_core.zig");
-const fs = @import("fs.zig");
+const config_core = @import("config.zig");
+const fs = @import("repo/fs.zig");
 
 const Repository = repo_mod.Repository;
 const Index = index_mod.Index;

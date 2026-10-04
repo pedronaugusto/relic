@@ -362,9 +362,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now reachable.
 - The TLS client is the standard library's with a recorded diff and nothing
   else. The code the added handshake steps call moved out of the copy into
-  `src/tls/auth_wire.zig`, and the four doc comments the copy had added to
+  `src/transport/tls/auth_wire.zig`, and the four doc comments the copy had added to
   std's own declarations are gone, so the copy differs from std only where
-  the handshake has to change. `src/tls/Client.zig.diff` is that difference,
+  the handshake has to change. `src/transport/tls/Client.zig.diff` is that difference,
   with the SHA-256 of the std file it was taken against; its header states
   the rule for bringing std's fixes across, and `ci/tls-fork.sh` takes the
   diff again.

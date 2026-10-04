@@ -12,16 +12,16 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
 
-const config_mod = @import("config_core.zig");
-const credential = @import("credential.zig");
-const repo_mod = @import("repo_core.zig");
-const fetch_mod = @import("fetch.zig");
-const transport = @import("transport_core.zig");
-const testgit = @import("testgit.zig");
-const testremote = @import("testremote.zig");
-const testlfs = @import("testlfs.zig");
+const config_mod = @import("config.zig");
+const credential = @import("transport/credential.zig");
+const repo_mod = @import("repo.zig");
+const fetch_mod = @import("transport/fetch.zig");
+const transport = @import("transport.zig");
+const testgit = @import("testing/git.zig");
+const testremote = @import("testing/remote.zig");
+const testlfs = @import("testing/lfs.zig");
 
-const test_who: @import("object_core.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 /// A bare copy of a history under a directory an HTTP server serves.
 fn servedRepo(gpa: Allocator, io: Io, root: *testing.TmpDir, commits: usize) !void {
@@ -80,7 +80,7 @@ test "a fetch over smart HTTP leaves what git fetch leaves, in v2 and in v0" {
             remote: usize = 0,
             received: u64 = 0,
             indexed: u64 = 0,
-            fn report(context: ?*anyopaque, event: @import("progress.zig").Event) void {
+            fn report(context: ?*anyopaque, event: @import("transport/progress.zig").Event) void {
                 const self_: *@This() = @ptrCast(@alignCast(context.?));
                 switch (event) {
                     .remote => self_.remote += 1,
@@ -390,7 +390,7 @@ test "ssh is handed the same arguments git hands it" {
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(gpa);
         try text.print(gpa, "[core]\nsshCommand = {s}\n[ssh]\nvariant = {s}\n", .{ fake, case.variant orelse "auto" });
-        var settings = try @import("config_core.zig").Config.parseText(gpa, text.items, .local);
+        var settings = try @import("config.zig").Config.parseText(gpa, text.items, .local);
         defer settings.deinit();
         if (transport.Session.open(gpa, io, case.url, .upload_pack, .sha1, .{
             .programs = .{ .environ = &env },
@@ -818,7 +818,7 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
         gpa.free(fetched);
         var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
         defer repo.deinit(io);
-        var warnings: @import("warning.zig").Warnings = .init(gpa);
+        var warnings: @import("repo/warning.zig").Warnings = .init(gpa);
         defer warnings.deinit();
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
         outcome.deinit();
@@ -1120,7 +1120,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
             defer gpa.free(theirs);
             var ours = testing.tmpDir(.{ .iterate = true });
             defer ours.cleanup();
-            var repo = try @import("clone.zig").clone(gpa, io, url, ours.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .config = &config });
+            var repo = try @import("transport/clone.zig").clone(gpa, io, url, ours.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .config = &config });
             defer repo.deinit(io);
             const our_log = try proxy.take(gpa);
             defer gpa.free(our_log);
@@ -1155,7 +1155,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
             defer gpa.free(relic_spec);
             const pushed_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "push", "-q", "origin", git_spec }, "", true);
             gpa.free(pushed_git);
-            var pushed = try @import("push.zig").push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{relic_spec} });
+            var pushed = try @import("transport/push.zig").push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{relic_spec} });
             defer pushed.deinit();
             const git_refs = try testremote.gitInput(gpa, io, bare, &.{ "rev-parse", git_ref, relic_ref }, "");
             defer gpa.free(git_refs);
@@ -1175,7 +1175,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
 test "SOCKS authentication failures, refused commands and unreachable hosts keep their names" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const httpclient = @import("httpclient.zig");
+    const httpclient = @import("transport/httpclient.zig");
     const target: httpclient.Target = .{ .tls = false, .host = "remote.invalid", .port = 80 };
     for ([_][]const u8{ "socks4a", "socks5h" }) |scheme| {
         const proxy = try testremote.SocksProxy.start(gpa, io, .{ .credential = .{ .user = "ada", .password = "secret" } });
@@ -1209,7 +1209,7 @@ test "SOCKS authentication failures, refused commands and unreachable hosts keep
 test "a stalled SOCKS negotiation is bounded by connect and handshake timeouts" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const httpclient = @import("httpclient.zig");
+    const httpclient = @import("transport/httpclient.zig");
     for ([_]httpclient.Timeouts{
         .{ .connect = .fromMilliseconds(20) },
         .{ .handshake = .fromMilliseconds(20) },

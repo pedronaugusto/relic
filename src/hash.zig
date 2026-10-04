@@ -6,8 +6,8 @@
 //! from another by accident, and nothing in this package assumes twenty bytes.
 
 // The modules relic's API puts under this one, as `relic.hash.<name>`.
-pub const sha1 = @import("sha1.zig");
-pub const sha1dc = @import("sha1dc.zig");
+pub const sha1 = @import("hash/sha1.zig");
+pub const sha1dc = @import("hash/sha1dc.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

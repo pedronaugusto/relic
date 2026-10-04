@@ -73,7 +73,7 @@ class Cases(unittest.TestCase):
         self.assertTrue(path.exists(), 'the remaining core suites need named source families')
         source = path.read_text()
         modules = re.findall(r'"([^" ]+)\.test"', source)
-        test_modules = [p.stem for p in (ROOT / 'src').rglob('*.zig')
+        test_modules = ['.'.join(p.relative_to(ROOT / 'src').with_suffix('').parts) for p in (ROOT / 'src').rglob('*.zig')
                         if re.search(r'^test\b', p.read_text(), re.M)]
         self.assertEqual(set(test_modules), set(modules))
         self.assertEqual(len(modules), len(set(modules)))
@@ -99,7 +99,7 @@ class Cases(unittest.TestCase):
         self.assertEqual(1286, count)
 
     def test_filters_are_checked_by_exact_names(self):
-        selection = (ROOT / 'src/test_case.zig').read_text()
+        selection = (ROOT / 'src/testing/case.zig').read_text()
         self.assertIn('std.mem.eql(u8, name, chosen)', selection)
         for path in (ROOT / 'src').rglob('*.zig'):
             text = path.read_text()

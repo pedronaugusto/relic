@@ -40,7 +40,7 @@ pub const config = @import("config.zig");
 pub const index = @import("index.zig");
 pub const worktree = @import("worktree.zig");
 /// Match a glob with git's pathname and case-fold flags.
-pub const wildmatch = @import("wildmatch.zig");
+pub const wildmatch = @import("worktree/wildmatch.zig");
 pub const diff = @import("diff.zig");
 pub const revwalk = @import("revwalk.zig");
 pub const merge = @import("merge.zig");
@@ -52,98 +52,3 @@ pub const patch = @import("patch.zig");
 pub const grep = @import("grep.zig");
 pub const archive = @import("archive.zig");
 pub const clean = @import("clean.zig");
-
-const builtin = @import("builtin");
-
-test "public wildmatch follows git pathname and case-fold cases" {
-    const std = @import("std");
-    try std.testing.expect(try wildmatch.match("a/**/b", "a/x/y/b", .{ .pathname = true }));
-    try std.testing.expect(!try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = true }));
-    try std.testing.expect(try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = false }));
-    try std.testing.expect(try wildmatch.match("*.TXT", "readme.txt", .{ .case_fold = true }));
-}
-
-test "the plumbing is relic's own: no public name reaches it" {
-    const std = @import("std");
-    try std.testing.expect(!@hasDecl(odb, "varint"));
-    try std.testing.expect(!@hasDecl(index, "ewah"));
-    try std.testing.expect(!@hasDecl(revwalk, "ere"));
-    try std.testing.expect(!@hasDecl(worktree, "platstat"));
-    try std.testing.expect(!@hasDecl(lfs, "timetext"));
-    try std.testing.expect(!@hasDecl(lfs, "mimesniff"));
-}
-
-test {
-    const std = @import("std");
-    // Every module the API reaches, one level down as well as at the top,
-    // so that every file under the root is compiled and its tests run.
-    std.testing.refAllDecls(@This());
-    inline for (@typeInfo(@This()).@"struct".decls) |decl| {
-        std.testing.refAllDecls(@field(@This(), decl.name));
-    }
-    if (builtin.is_test) {
-        // the plumbing the API keeps to itself: reached by no public name,
-        // so named here for its tests to run
-        _ = @import("varint.zig");
-        _ = @import("crc32.zig");
-        _ = @import("ewah.zig");
-        _ = @import("ere.zig");
-        _ = @import("platstat.zig");
-        _ = @import("timetext.zig");
-        _ = @import("mimesniff.zig");
-        _ = @import("testgit.zig");
-        _ = @import("fixture_test.zig");
-        _ = @import("accelerators_test.zig");
-        _ = @import("worktree_test.zig");
-        _ = @import("repo_test.zig");
-        _ = @import("concurrency_test.zig");
-        _ = @import("workcount_test.zig");
-        _ = @import("packwrite_test.zig");
-        _ = @import("diff_test.zig");
-        _ = @import("blame_test.zig");
-        _ = @import("submodule_test.zig");
-        _ = @import("filter_test.zig");
-        _ = @import("lfs_test.zig");
-        _ = @import("eol_test.zig");
-        _ = @import("testremote.zig");
-        _ = @import("transport_test.zig");
-        _ = @import("stash_test.zig");
-        _ = @import("snapshot_test.zig");
-        _ = @import("signing_test.zig");
-        _ = @import("embedded_repo_test.zig");
-        _ = @import("config_refresh_test.zig");
-        _ = @import("testlfs.zig");
-        _ = @import("lfstransfer_test.zig");
-        _ = @import("lfslocks_test.zig");
-        _ = @import("lfspush_test.zig");
-        _ = @import("lfsssh_test.zig");
-        _ = @import("auth_test.zig");
-        _ = @import("revwalk_test.zig");
-        _ = @import("shallow_test.zig");
-        _ = @import("partial_test.zig");
-        _ = @import("history_test.zig");
-        _ = @import("ort_test.zig");
-        _ = @import("uploadpack_test.zig");
-        _ = @import("cloneconfig_test.zig");
-        _ = @import("clientcert_test.zig");
-        _ = @import("inflate_test.zig");
-        _ = @import("strategy_test.zig");
-        _ = @import("tls_fork_test.zig");
-        _ = @import("bundle_test.zig");
-        _ = @import("apply_test.zig");
-        _ = @import("formatpatch_test.zig");
-        _ = @import("am_test.zig");
-        _ = @import("grep_test.zig");
-        _ = @import("archive_test.zig");
-        _ = @import("clean_test.zig");
-    }
-}
-
-test {
-    _ = @import("revindex_test.zig");
-    _ = @import("sparseindex_test.zig");
-    _ = @import("reftablestack_test.zig");
-    _ = @import("url_owner_test.zig");
-    _ = @import("refs_owner_test.zig");
-    _ = @import("packed_cache.zig");
-}

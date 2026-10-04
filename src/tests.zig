@@ -1,0 +1,115 @@
+pub const repo = @import("repo.zig");
+pub const hash = @import("hash.zig");
+pub const object = @import("object.zig");
+pub const odb = @import("odb.zig");
+pub const refs = @import("refs.zig");
+pub const config = @import("config.zig");
+pub const index = @import("index.zig");
+pub const worktree = @import("worktree.zig");
+pub const wildmatch = @import("worktree/wildmatch.zig");
+pub const diff = @import("diff.zig");
+pub const revwalk = @import("revwalk.zig");
+pub const merge = @import("merge.zig");
+pub const commit = @import("commit.zig");
+pub const transport = @import("transport.zig");
+pub const submodule = @import("submodule.zig");
+pub const lfs = @import("lfs.zig");
+pub const patch = @import("patch.zig");
+pub const grep = @import("grep.zig");
+pub const archive = @import("archive.zig");
+pub const clean = @import("clean.zig");
+
+const builtin = @import("builtin");
+
+test "public wildmatch follows git pathname and case-fold cases" {
+    const std = @import("std");
+    try std.testing.expect(try wildmatch.match("a/**/b", "a/x/y/b", .{ .pathname = true }));
+    try std.testing.expect(!try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = true }));
+    try std.testing.expect(try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = false }));
+    try std.testing.expect(try wildmatch.match("*.TXT", "readme.txt", .{ .case_fold = true }));
+}
+
+test "the plumbing is relic's own: no public name reaches it" {
+    const std = @import("std");
+    try std.testing.expect(!@hasDecl(odb, "varint"));
+    try std.testing.expect(!@hasDecl(index, "ewah"));
+    try std.testing.expect(!@hasDecl(revwalk, "ere"));
+    try std.testing.expect(!@hasDecl(worktree, "platstat"));
+    try std.testing.expect(!@hasDecl(lfs, "timetext"));
+    try std.testing.expect(!@hasDecl(lfs, "mimesniff"));
+}
+
+test {
+    const std = @import("std");
+    // Every module the API reaches, one level down as well as at the top,
+    // so that every file under the root is compiled and its tests run.
+    std.testing.refAllDecls(@import("relic.zig"));
+    inline for (@typeInfo(@import("relic.zig")).@"struct".decls) |decl| {
+        std.testing.refAllDecls(@field(@import("relic.zig"), decl.name));
+    }
+    if (builtin.is_test) {
+        // the plumbing the API keeps to itself: reached by no public name,
+        // so named here for its tests to run
+        _ = @import("varint.zig");
+        _ = @import("crc32.zig");
+        _ = @import("ewah.zig");
+        _ = @import("ere.zig");
+        _ = @import("repo/fs/stat.zig");
+        _ = @import("lfs/timetext.zig");
+        _ = @import("lfs/mimesniff.zig");
+        _ = @import("testing/git.zig");
+        _ = @import("testing/fixtures.zig");
+        _ = @import("odb/accelerators_test.zig");
+        _ = @import("worktree_test.zig");
+        _ = @import("repo_test.zig");
+        _ = @import("testing/concurrency.zig");
+        _ = @import("testing/workcount.zig");
+        _ = @import("testing/packwrite.zig");
+        _ = @import("diff_test.zig");
+        _ = @import("diff/blame_test.zig");
+        _ = @import("submodule_test.zig");
+        _ = @import("worktree/filter_test.zig");
+        _ = @import("lfs_test.zig");
+        _ = @import("testing/eol.zig");
+        _ = @import("testing/remote.zig");
+        _ = @import("transport_test.zig");
+        _ = @import("commit/stash_test.zig");
+        _ = @import("worktree/snapshot_test.zig");
+        _ = @import("commit/signing_test.zig");
+        _ = @import("testing/embedded_repo.zig");
+        _ = @import("testing/config_refresh.zig");
+        _ = @import("testing/lfs.zig");
+        _ = @import("lfs/transfer_test.zig");
+        _ = @import("lfs/locks_test.zig");
+        _ = @import("lfs/push_test.zig");
+        _ = @import("lfs/ssh_test.zig");
+        _ = @import("transport/auth_test.zig");
+        _ = @import("revwalk_test.zig");
+        _ = @import("revwalk/shallow_test.zig");
+        _ = @import("transport/partial_test.zig");
+        _ = @import("testing/history.zig");
+        _ = @import("merge/ort_test.zig");
+        _ = @import("transport/uploadpack_test.zig");
+        _ = @import("testing/cloneconfig.zig");
+        _ = @import("transport/clientcert_test.zig");
+        _ = @import("odb/inflate_test.zig");
+        _ = @import("merge/strategy_test.zig");
+        _ = @import("testing/tls_fork.zig");
+        _ = @import("transport/bundle_test.zig");
+        _ = @import("patch/apply_test.zig");
+        _ = @import("patch/format_test.zig");
+        _ = @import("patch/am_test.zig");
+        _ = @import("grep_test.zig");
+        _ = @import("archive_test.zig");
+        _ = @import("clean_test.zig");
+    }
+}
+
+test {
+    _ = @import("odb/revindex_test.zig");
+    _ = @import("index/sparseindex_test.zig");
+    _ = @import("refs/reftablestack_test.zig");
+    _ = @import("testing/url_ownership.zig");
+    _ = @import("testing/refs_ownership.zig");
+    _ = @import("refs/packed.zig");
+}

@@ -427,15 +427,15 @@ TLS client, and another checks that what crosses a proxy's tunnel is TLS.
   std's client runs the whole handshake inside `init`, takes no client
   certificate, and refuses a server's CertificateRequest, so nothing outside
   it could add one: the answer has to be written into the handshake.
-  `src/tls/Client.zig` is therefore a copy of Zig 0.16.0's file, and
-  `src/tls/Client.zig.diff` is everything the copy adds — the two options,
+  `src/transport/tls/Client.zig` is therefore a copy of Zig 0.16.0's file, and
+  `src/transport/tls/Client.zig.diff` is everything the copy adds — the two options,
   the CertificateRequest arm, the client's Certificate and CertificateVerify
-  for TLS 1.2 and 1.3 — with the code they call in `src/tls/auth_wire.zig`.
+  for TLS 1.2 and 1.3 — with the code they call in `src/transport/tls/auth_wire.zig`.
   The copy is held to std on every `zig build test`: the std file the
   compiler ships is hashed against the one the diff was taken from, and the
   diff applied to it must give the copy byte for byte. A Zig release that
   changes std's client fails the build until its fixes are brought across;
-  the header of `src/tls/Client.zig` says how, and `ci/tls-fork.sh` takes the
+  the header of `src/transport/tls/Client.zig` says how, and `ci/tls-fork.sh` takes the
   diff again.
 - **HTTP/1.1** is relic's because std's client builds its TLS inside a
   private connect path: verification cannot be turned off for

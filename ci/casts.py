@@ -25,13 +25,13 @@ CAST = re.compile(r"@(constCast|ptrCast|alignCast|intFromPtr)\s*\(")
 SAFE = re.compile(r"//\s*safe:\s*\S")
 STRING = re.compile(r'"(?:\\.|[^"\\\n])*"')
 CHAR = re.compile(r"'(?:\\.|[^'\\\n])+'")
-TEST_FILE = re.compile(r"(^|/)(\w+_test|test_\w+|tests)\.zig$")
+TEST_FILE = re.compile(r"(^src/testing/.*\.zig$)|(^|/)(\w+_test|test_\w+|tests)\.zig$")
 # Files held byte for byte to another's, where a reason on a line would be a
 # change of our own, each with why it may cast.
 VENDORED = {
-    # std's TLS client with client authentication added; tls_fork_test.zig
+    # std's TLS client with client authentication added; testing/tls_fork.zig
     # holds it to std's file and the recorded diff, so its casts are std's.
-    "src/tls/Client.zig",
+    "src/transport/tls/Client.zig",
 }
 
 

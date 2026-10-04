@@ -8,11 +8,11 @@ const Io = std.Io;
 const testing = std.testing;
 
 const hash = @import("hash.zig");
-const odb_mod = @import("odb_core.zig");
-const revwalk = @import("revwalk_core.zig");
-const commitgraph = @import("commitgraph.zig");
-const testgit = @import("testgit.zig");
-const testremote = @import("testremote.zig");
+const odb_mod = @import("odb.zig");
+const revwalk = @import("revwalk.zig");
+const commitgraph = @import("odb/commitgraph.zig");
+const testgit = @import("testing/git.zig");
+const testremote = @import("testing/remote.zig");
 
 const Oid = hash.Oid;
 

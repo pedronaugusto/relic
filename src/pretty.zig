@@ -16,10 +16,10 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object_core.zig");
-const odb_mod = @import("odb_core.zig");
-const abbrev = @import("abbrev.zig");
-const mailfmt = @import("mailfmt.zig");
+const object = @import("object.zig");
+const odb_mod = @import("odb.zig");
+const abbrev = @import("odb/abbrev.zig");
+const mailfmt = @import("patch/mail/format.zig");
 
 const Oid = hash.Oid;
 

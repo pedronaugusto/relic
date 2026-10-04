@@ -21,13 +21,13 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
-const object = @import("object_core.zig");
-const repo_mod = @import("repo_core.zig");
-const index_mod = @import("index_core.zig");
-const attributes = @import("attributes.zig");
+const object = @import("object.zig");
+const repo_mod = @import("repo.zig");
+const index_mod = @import("index.zig");
+const attributes = @import("worktree/attributes.zig");
 const ere = @import("ere.zig");
 const pathspec_mod = @import("pathspec.zig");
-const fs = @import("fs.zig");
+const fs = @import("repo/fs.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -52,7 +52,7 @@ pub const Error = error{
     /// The object to search is not a commit or a tree.
     NotATree,
 } || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || attributes.Error || Io.Writer.Error ||
-    @import("odb_core.zig").Error || object.TreeParseError;
+    @import("odb.zig").Error || object.TreeParseError;
 
 /// How patterns are read: `-G`, `-E`, `-F`, `-P`.
 pub const Syntax = enum { basic, extended, fixed, perl };

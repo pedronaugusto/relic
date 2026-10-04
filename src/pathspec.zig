@@ -11,7 +11,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const wildmatch = @import("wildmatch.zig");
+const wildmatch = @import("worktree/wildmatch.zig");
 
 /// Errors from reading a pathspec.
 pub const Error = error{

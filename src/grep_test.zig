@@ -7,8 +7,8 @@ const Io = std.Io;
 
 const grep_mod = @import("grep.zig");
 const hash = @import("hash.zig");
-const repo_mod = @import("repo_core.zig");
-const testgit = @import("testgit.zig");
+const repo_mod = @import("repo.zig");
+const testgit = @import("testing/git.zig");
 
 const Repository = repo_mod.Repository;
 

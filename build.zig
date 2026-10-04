@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
     const lock_helper = b.addExecutable(.{
         .name = "relic-lock-helper",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/lock_helper.zig"),
+            .root_source_file = b.path("src/testing/lock.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
     const filter_helper = b.addExecutable(.{
         .name = "relic-filter-helper",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/filter_helper.zig"),
+            .root_source_file = b.path("src/testing/filter.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
     const lfs_transfer_helper = b.addExecutable(.{
         .name = "relic-lfs-transfer-helper",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/lfs_transfer_helper.zig"),
+            .root_source_file = b.path("src/testing/lfs/transfer.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) void {
     const upload_pack_helper = b.addExecutable(.{
         .name = "relic-upload-pack",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/uploadpack_helper.zig"),
+            .root_source_file = b.path("src/testing/uploadpack.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -93,7 +93,7 @@ pub fn build(b: *std.Build) void {
     const hook_fixture = b.addExecutable(.{
         .name = "relic-hook-fixture",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/hook_fixture.zig"),
+            .root_source_file = b.path("src/testing/hook.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
     const fake_ssh = b.addExecutable(.{
         .name = "relic-fake-ssh",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/fake_ssh_helper.zig"),
+            .root_source_file = b.path("src/testing/fake_ssh.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) void {
     const lfs_tool = b.addExecutable(.{
         .name = "relic-lfs-test-tool",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/lfs_test_tool.zig"),
+            .root_source_file = b.path("src/testing/lfs/tool.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -123,7 +123,7 @@ pub fn build(b: *std.Build) void {
     const process_fixture = b.addExecutable(.{
         .name = "relic-process-fixture",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/process_fixture.zig"),
+            .root_source_file = b.path("src/testing/process.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -152,8 +152,8 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "fake_ssh_helper_path", b.getInstallPath(.bin, fake_ssh.out_filename));
     build_options.addOption([]const u8, "lfs_test_tool_path", b.getInstallPath(.bin, lfs_tool.out_filename));
     build_options.addOption([]const u8, "process_fixture_path", b.getInstallPath(.bin, process_fixture.out_filename));
-    // The standard library's TLS client, which `src/tls/Client.zig` is a copy
-    // of with client authentication added: `src/tls_fork_test.zig` holds the
+    // The standard library's TLS client, which `src/transport/tls/Client.zig` is a copy
+    // of with client authentication added: `src/testing/tls_fork.zig` holds the
     // copy to it, and fails when the compiler building this ships another.
     build_options.addOption([]const u8, "std_tls_client", b.graph.zig_lib_directory.join(b.allocator, &.{ "std", "crypto", "tls", "Client.zig" }) catch @panic("OOM"));
 
@@ -178,7 +178,7 @@ pub fn build(b: *std.Build) void {
     ) orelse false;
 
     const test_module = b.createModule(.{
-        .root_source_file = b.path("src/relic.zig"),
+        .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = if (thread_sanitizer) true else null,
@@ -186,6 +186,10 @@ pub fn build(b: *std.Build) void {
     });
     test_module.addImport("conduit", conduit);
     test_module.addOptions("relic_test_cases", case_options);
+    filter_helper.root_module.addImport("relic", module);
+    lfs_transfer_helper.root_module.addImport("relic", module);
+    hook_fixture.root_module.addImport("relic", module);
+    upload_pack_helper.root_module.addImport("relic", module);
     upload_pack_helper.root_module.addImport("conduit", conduit);
     hook_fixture.root_module.addImport("conduit", conduit);
     test_module.addOptions("build_options", build_options);

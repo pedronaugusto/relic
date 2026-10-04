@@ -4,11 +4,11 @@
 const std = @import("std");
 const Io = std.Io;
 
-const testgit = @import("testgit.zig");
+const testgit = @import("testing/git.zig");
 const hash = @import("hash.zig");
-const odb_mod = @import("odb_core.zig");
-const diff = @import("diff_core.zig");
-const textdiff = @import("textdiff.zig");
+const odb_mod = @import("odb.zig");
+const diff = @import("diff.zig");
+const textdiff = @import("diff/textdiff.zig");
 
 const Oid = hash.Oid;
 
@@ -105,7 +105,7 @@ const RandomTree = struct {
     fn build(gpa: std.mem.Allocator, io: Io, db: *odb_mod.Odb, random: std.Random, depth: u32, same: ?Oid) !Oid {
         // A subtree left as it was, as most of a large one is.
         if (same) |oid| if (random.uintLessThan(u8, 3) == 0) return oid;
-        var b: @import("object_core.zig").Tree.Builder = .init(gpa, .sha1);
+        var b: @import("object.zig").Tree.Builder = .init(gpa, .sha1);
         defer b.deinit();
         for (names) |name| {
             if (random.boolean()) continue;
@@ -609,7 +609,7 @@ fn parseRange(text: []const u8) !struct { start: usize, count: usize } {
 }
 
 test "the histogram, patience and minimal diffs land on the lines git's do, over a random corpus" {
-    if (!@import("test_case.zig").selected("the histogram, patience and minimal diffs land on the lines git's do, over a random corpus")) return error.SkipZigTest;
+    if (!@import("testing/case.zig").selected("the histogram, patience and minimal diffs land on the lines git's do, over a random corpus")) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var repo = try testgit.Repo.init(gpa, io, &.{});
@@ -745,7 +745,7 @@ test "diff.algorithm picks the algorithm git picks when none is asked for" {
     var pair = try buildPair(gpa, io, setupAlgorithms);
     defer pair.deinit(io, gpa);
 
-    const config_mod = @import("config_core.zig");
+    const config_mod = @import("config.zig");
     for ([_][]const u8{ "patience", "Minimal", "Myers", "default" }) |value| {
         try pair.repo.exec(io, &.{ "config", "diff.algorithm", value });
         var git_dir = try pair.repo.gitDir(io);

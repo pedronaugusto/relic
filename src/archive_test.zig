@@ -8,8 +8,8 @@ const Io = std.Io;
 
 const archive_mod = @import("archive.zig");
 const hash = @import("hash.zig");
-const repo_mod = @import("repo_core.zig");
-const testgit = @import("testgit.zig");
+const repo_mod = @import("repo.zig");
+const testgit = @import("testing/git.zig");
 
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;

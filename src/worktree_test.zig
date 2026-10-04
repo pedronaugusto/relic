@@ -4,16 +4,16 @@
 const std = @import("std");
 const Io = std.Io;
 
-const testgit = @import("testgit.zig");
+const testgit = @import("testing/git.zig");
 const hash = @import("hash.zig");
-const object = @import("object_core.zig");
-const odb_mod = @import("odb_core.zig");
-const index_mod = @import("index_core.zig");
-const worktree = @import("worktree_core.zig");
-const ignore = @import("ignore.zig");
-const attributes = @import("attributes.zig");
-const fs = @import("fs.zig");
-const sparse = @import("sparse.zig");
+const object = @import("object.zig");
+const odb_mod = @import("odb.zig");
+const index_mod = @import("index.zig");
+const worktree = @import("worktree.zig");
+const ignore = @import("worktree/ignore.zig");
+const attributes = @import("worktree/attributes.zig");
+const fs = @import("repo/fs.zig");
+const sparse = @import("worktree/sparse.zig");
 
 const Oid = hash.Oid;
 
@@ -739,7 +739,7 @@ test "resetIndex puts the index back and leaves the files alone" {
 test "checkout and writePaths apply every .gitattributes on the way down, as git does" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    const Repository = @import("repo_core.zig").Repository;
+    const Repository = @import("repo.zig").Repository;
     const files = [_]struct { path: []const u8, bytes: []const u8 }{
         .{ .path = ".gitattributes", .bytes = "*.txt text\n" },
         .{ .path = "sub/.gitattributes", .bytes = "*.txt eol=crlf\n" },

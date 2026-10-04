@@ -4,12 +4,12 @@
 const std = @import("std");
 const Io = std.Io;
 
-const testgit = @import("testgit.zig");
+const testgit = @import("testing/git.zig");
 const hash = @import("hash.zig");
-const object = @import("object_core.zig");
-const repo_mod = @import("repo_core.zig");
-const worktree = @import("worktree_core.zig");
-const worktrees = @import("worktrees.zig");
+const object = @import("object.zig");
+const repo_mod = @import("repo.zig");
+const worktree = @import("worktree.zig");
+const worktrees = @import("worktree/worktrees.zig");
 const Oid = hash.Oid;
 
 const fixture_who: object.Signature = .{
@@ -481,10 +481,10 @@ test "opening uses the format validated before worktree settings are read" {
     });
     var opened = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
     defer opened.deinit(io);
-    try std.testing.expectEqual(@import("refs_core.zig").Format.reftable, opened.refStore().refFormat());
+    try std.testing.expectEqual(@import("refs.zig").Format.reftable, opened.refStore().refFormat());
     try opened.editConfig(&.{.{ .set = .{ .level = .local, .name = "fixture.edited", .value = "shared" } }}, null);
     try std.testing.expectEqualStrings("shared", opened.configuration().get("fixture.edited").?);
-    try std.testing.expectEqual(@import("refs_core.zig").Format.reftable, opened.refStore().refFormat());
+    try std.testing.expectEqual(@import("refs.zig").Format.reftable, opened.refStore().refFormat());
     try std.testing.expectError(error.RefStorageChanged, opened.editConfig(&.{.{ .set = .{ .level = .local, .name = "extensions.refstorage", .value = "files" } }}, null));
 }
 
@@ -534,7 +534,7 @@ test "a signing write keeps only its own refused setting" {
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
     try repo.editConfig(&.{.{ .set = .{ .name = "tag.gpgSign", .value = "true" } }}, null);
-    const fields: @import("object_core.zig").Tag.Fields = .{
+    const fields: @import("object.zig").Tag.Fields = .{
         .target = @import("hash.zig").Hasher.object(.sha1, "tree", ""),
         .target_type = .tree,
         .name = "t",
@@ -570,7 +570,7 @@ test "a refusal preserves the diagnostic allocator's resource failure" {
     try std.testing.expectEqual(@as(i64, 0), try repo.configuration().getInt("core.repositoryformatversion", -1));
     try std.testing.expectError(error.UnsupportedRepositoryVersion, repo.refreshConfig(io, null));
     try repo.editConfig(&.{.{ .set = .{ .name = "tag.gpgSign", .value = "true" } }}, null);
-    const fields: @import("object_core.zig").Tag.Fields = .{
+    const fields: @import("object.zig").Tag.Fields = .{
         .target = @import("hash.zig").Hasher.object(.sha1, "tree", ""),
         .target_type = .tree,
         .name = "t",
@@ -584,14 +584,14 @@ test "a refusal preserves the diagnostic allocator's resource failure" {
 test "a refresh changing the ref backend requires reopening and keeps the old state" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    for ([_]@import("refs_core.zig").Format{ .files, .reftable }) |format| {
+    for ([_]@import("refs.zig").Format{ .files, .reftable }) |format| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = format });
         defer repo.deinit(io);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
-        const cache = @import("refstate.zig").get(repo.refStore()._state).cache;
+        const cache = @import("refs/state.zig").get(repo.refStore()._state).cache;
         const replacement = if (format == .files)
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[user]\nname = changed\n"
         else
@@ -600,7 +600,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, &diagnostic));
         try std.testing.expectEqualStrings("extensions.refStorage", diagnostic.unsupported_setting);
         try std.testing.expectEqual(format, repo.refStore().refFormat());
-        try std.testing.expectEqual(cache, @import("refstate.zig").get(repo.refStore()._state).cache);
+        try std.testing.expectEqual(cache, @import("refs/state.zig").get(repo.refStore()._state).cache);
         try std.testing.expect(repo.configuration().get("user.name") == null);
         // A refused refresh did not acknowledge the new file.
         try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, null));
@@ -612,7 +612,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         try std.testing.expect(try repo.refreshConfig(io, &diagnostic));
         try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
         try std.testing.expectEqualStrings("accepted", repo.configuration().get("user.name").?);
-        try std.testing.expectEqual(cache, @import("refstate.zig").get(repo.refStore()._state).cache);
+        try std.testing.expectEqual(cache, @import("refs/state.zig").get(repo.refStore()._state).cache);
     }
 }
 
@@ -642,7 +642,7 @@ test "a refresh updates reftable write settings together with the configuration"
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .ref_format = .reftable });
     defer repo.deinit(io);
-    const cache = @import("refstate.zig").get(repo.refStore()._state).cache;
+    const cache = @import("refs/state.zig").get(repo.refStore()._state).cache;
     const prefix = "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[reftable]\n";
     try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = prefix ++
         "blockSize = 8192\nrestartInterval = 32\nindexObjects = false\ngeometricFactor = 4\nlockTimeout = 0\n" });
@@ -652,16 +652,16 @@ test "a refresh updates reftable write settings together with the configuration"
     try std.testing.expectEqual(@as(u16, 32), options.write.restart_interval);
     try std.testing.expect(!options.write.index_objects);
     try std.testing.expectEqual(@as(u8, 4), options.geometric_factor);
-    try std.testing.expectEqual(@import("fs.zig").OnContention.fail, options.lock);
-    try std.testing.expectEqual(cache, @import("refstate.zig").get(repo.refStore()._state).cache);
+    try std.testing.expectEqual(@import("repo/fs.zig").OnContention.fail, options.lock);
+    try std.testing.expectEqual(cache, @import("refs/state.zig").get(repo.refStore()._state).cache);
     try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = prefix ++ "blockSize = invalid\n" });
     try std.testing.expectError(error.NotAnInteger, repo.refreshConfig(io, null));
     try std.testing.expectEqualDeep(options, repo.refStore().reftableOptions());
     try std.testing.expectEqualStrings("8192", repo.configuration().get("reftable.blocksize").?);
     try repo.git_dir.writeFile(io, .{ .sub_path = "config", .data = prefix ++ "lockTimeout = 200\n" });
     try std.testing.expect(try repo.refreshConfig(io, null));
-    try std.testing.expectEqualDeep(@import("reftablestack.zig").Options{ .lock = .{ .wait_ms = 200 } }, repo.refStore().reftableOptions());
-    try std.testing.expectEqual(cache, @import("refstate.zig").get(repo.refStore()._state).cache);
+    try std.testing.expectEqualDeep(@import("refs/reftablestack.zig").Options{ .lock = .{ .wait_ms = 200 } }, repo.refStore().reftableOptions());
+    try std.testing.expectEqual(cache, @import("refs/state.zig").get(repo.refStore()._state).cache);
 }
 
 test "a reftable HEAD read failure does not become a detached branch" {
@@ -744,8 +744,8 @@ test "reading a signing policy preserves allocation resource failures" {
     defer repo.deinit(io);
     try repo.editConfig(&.{.{ .set = .{ .name = "tag.gpgSign", .value = "true" } }}, null);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    @import("configstate.zig").get(repo._config).gpa = failing.allocator();
-    defer @import("configstate.zig").get(repo._config).gpa = gpa;
+    @import("config/state.zig").get(repo._config).gpa = failing.allocator();
+    defer @import("config/state.zig").get(repo._config).gpa = gpa;
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
     try std.testing.expectError(error.OutOfMemory, repo.writeTag(io, .{
@@ -840,7 +840,7 @@ test "a signer configuration refusal names its setting in caller-owned output" {
     defer environ.deinit();
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
-    const request: @import("signing.zig").Request = .{ .sign = .always, .programs = .{ .environ = &environ } };
+    const request: @import("commit/signing.zig").Request = .{ .sign = .always, .programs = .{ .environ = &environ } };
     inline for (.{
         .{ "gpg.format", "new-format", error.UnknownSignatureFormat, "openpgp" },
         .{ "gpg.minTrustLevel", "new-level", error.UnknownTrustLevel, "undefined" },
@@ -948,19 +948,19 @@ test "worktree configuration adapters refuse malformed settings and allocation f
         try std.testing.expectError(error.MalformedValue, Adapter.rules(&repo));
         try repo.editConfig(&.{.{ .set = .{ .name = setting, .value = if (comptime std.mem.eql(u8, setting, "core.eol")) "native" else "default" } }}, null);
     }
-    @import("configstate.zig").get(repo._config).deinit();
-    @import("configstate.zig").get(repo._config).* = try @import("config_core.zig").Config.parseText(gpa, "[core]\n autocrlf = \"input\"\n", .local);
+    @import("config/state.zig").get(repo._config).deinit();
+    @import("config/state.zig").get(repo._config).* = try @import("config.zig").Config.parseText(gpa, "[core]\n autocrlf = \"input\"\n", .local);
     try std.testing.expectEqual(worktree.attributes.CoreSettings.AutoCrlf.input, (try Adapter.core(&repo)).autocrlf);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    @import("configstate.zig").get(repo._config).gpa = failing.allocator();
-    defer @import("configstate.zig").get(repo._config).gpa = gpa;
+    @import("config/state.zig").get(repo._config).gpa = failing.allocator();
+    defer @import("config/state.zig").get(repo._config).gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Adapter.core(&repo));
 }
 
 test "repository format and ref cache state have no writable public fields" {
     try std.testing.expect(!@hasField(repo_mod.Repository, "kind"));
     try std.testing.expect(!@hasField(repo_mod.Repository, "refs"));
-    const Store = @import("refs_core.zig").Store;
+    const Store = @import("refs.zig").Store;
     inline for (.{ "kind", "format", "reftable_options", "reftable_cache", "git_dir", "common_dir", "gpa" }) |field| {
         try std.testing.expect(!@hasField(Store, field));
     }
@@ -988,8 +988,8 @@ test "rule loaders preserve malformed case policy and allocation failures" {
     try std.testing.expectError(error.NotABoolean, Load.attributesRules(&r, io));
     try r.editConfig(&.{.{ .set = .{ .name = "core.ignorecase", .value = "true" } }}, null);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    @import("configstate.zig").get(r._config).gpa = failing.allocator();
-    defer @import("configstate.zig").get(r._config).gpa = gpa;
+    @import("config/state.zig").get(r._config).gpa = failing.allocator();
+    defer @import("config/state.zig").get(r._config).gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Load.ignoreRules(&r, io));
     failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, Load.attributesRules(&r, io));
@@ -1017,8 +1017,8 @@ test "required filter discovery keeps full names and resource failures" {
     try std.testing.expectEqualStrings(long_name, names[0]);
     // The query's allocation and the value decoder's allocation have owners.
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    @import("configstate.zig").get(r._config).gpa = failing.allocator();
-    defer @import("configstate.zig").get(r._config).gpa = gpa;
+    @import("config/state.zig").get(r._config).gpa = failing.allocator();
+    defer @import("config/state.zig").get(r._config).gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Read.count(&r));
 }
 
@@ -1041,7 +1041,7 @@ test "required filter discovery refuses malformed required policy" {
 
 test "object backend and repository configuration have opaque owners" {
     inline for (.{ "kind", "options", "sources", "cache", "generation", "deflate_window", "deflate_state", "gpa" }) |field| {
-        try std.testing.expect(!@hasField(@import("odb_core.zig").Odb, field));
+        try std.testing.expect(!@hasField(@import("odb.zig").Odb, field));
     }
     try std.testing.expect(!@hasField(repo_mod.Repository, "config"));
 }
@@ -1067,7 +1067,7 @@ test "repository configuration edits publish policy only after validating the wh
         .{ .set = .{ .name = "core.repositoryformatversion", .value = "1" } },
         .{ .set = .{ .name = "extensions.refstorage", .value = "reftable" } },
     }, &diagnostic));
-    try std.testing.expectEqual(@import("refs_core.zig").Format.files, r.refStore().refFormat());
+    try std.testing.expectEqual(@import("refs.zig").Format.files, r.refStore().refFormat());
     try std.testing.expectError(error.WorktreeConfigChanged, r.editConfig(&.{.{ .set = .{ .name = "extensions.worktreeconfig", .value = "true" } }}, &diagnostic));
     try std.testing.expectEqualStrings("extensions.worktreeConfig", diagnostic.unsupported_setting);
     try std.testing.expect(r.configuration().sources.worktree == null);
@@ -1098,7 +1098,7 @@ test "repository configuration edit copies keep their owners when allocation sto
             try std.testing.expectEqualStrings("yes", r.configuration().get("fixture.kept").?);
             try std.testing.expect(r.configuration().get("fixture.removed") == null);
             try std.testing.expectEqual(@as(usize, 8192), r.refStore().reftableOptions().write.block_size);
-            try @import("configstate.zig").get(r._config).write(io, r.common_dir, "config");
+            try @import("config/state.zig").get(r._config).write(io, r.common_dir, "config");
             _ = try r.refreshConfig(io, null);
             try std.testing.expectEqualStrings("yes", r.configuration().get("fixture.kept").?);
         }

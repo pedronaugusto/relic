@@ -23,17 +23,17 @@ const Io = std.Io;
 const flate = std.compress.flate;
 
 const hash = @import("hash.zig");
-const object = @import("object_core.zig");
-const odb_mod = @import("odb_core.zig");
-const repo_mod = @import("repo_core.zig");
-const worktree = @import("worktree_core.zig");
-const attributes = @import("attributes.zig");
-const convert = @import("convert.zig");
+const object = @import("object.zig");
+const odb_mod = @import("odb.zig");
+const repo_mod = @import("repo.zig");
+const worktree = @import("worktree.zig");
+const attributes = @import("worktree/attributes.zig");
+const convert = @import("worktree/convert.zig");
 const pathspec_mod = @import("pathspec.zig");
 const pretty = @import("pretty.zig");
-const abbrev = @import("abbrev.zig");
-const mailfmt = @import("mailfmt.zig");
-const program = @import("program.zig");
+const abbrev = @import("odb/abbrev.zig");
+const mailfmt = @import("patch/mail/format.zig");
+const program = @import("repo/program.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
