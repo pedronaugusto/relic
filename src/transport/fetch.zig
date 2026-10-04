@@ -133,6 +133,9 @@ pub const Options = struct {
     /// What stands in for a terminal when an HTTP server asks for a
     /// credential no helper has. Without one nothing is asked, and
     /// askpass runs only when it says so.
+    /// The proxy for an HTTP remote, over the one the configuration and
+    /// the environment choose, as libgit2's proxy options set it.
+    proxy: transport.Proxy = .auto,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
@@ -313,6 +316,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .config = repo.configuration(),
         .remote_name = remote.name,
         .service_program = remote.upload_pack,
+        .proxy = options.proxy,
         .progress = options.progress,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,

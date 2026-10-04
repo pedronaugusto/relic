@@ -106,6 +106,8 @@ pub const Options = struct {
     config: ?*const config_mod.Config = null,
     /// The configured remote, for `remote.<name>.proxy`.
     remote_name: ?[]const u8 = null,
+    /// The proxy, over the one `remote_name` and the settings choose.
+    proxy: httpsettings.Proxy = .auto,
     /// The permission to run credential helpers and `askpass`; its
     /// environment is also where `http_proxy`, `https_proxy`, `all_proxy`
     /// and `GIT_ASKPASS` are read.
@@ -233,7 +235,8 @@ const Http = struct {
         h.base_path = path;
 
         const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
-        const settings = try httpsettings.resolveForRemote(arena, h.options.config, environ, url, h.options.remote_name);
+        var settings = try httpsettings.resolveForRemote(arena, h.options.config, environ, url, h.options.remote_name);
+        httpsettings.chooseProxy(&settings, h.options.proxy);
         if (url.scheme == .https) {
             if (settings.ssl_cert) |cert| {
                 h.client_auth = try h.clientCertificate(.{

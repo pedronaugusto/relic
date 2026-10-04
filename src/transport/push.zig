@@ -124,6 +124,9 @@ pub const Options = struct {
     /// before any ref is sent. A dry run does neither.
     lfs: lfspush.Options = .{},
     programs: ?program.Programs = null,
+    /// The proxy for an HTTP remote, over the one the configuration and
+    /// the environment choose, as libgit2's proxy options set it.
+    proxy: transport.Proxy = .auto,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
@@ -264,6 +267,7 @@ fn pushTo(
         .config = repo.configuration(),
         .remote_name = remote.name,
         .service_program = remote.receive_pack,
+        .proxy = options.proxy,
         .progress = options.progress,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
@@ -1018,6 +1022,46 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
         });
         defer outcome.deinit();
         for (outcome.refs) |r| try testing.expectEqual(RefResult.Status.ok, r.status);
+    }
+}
+
+test "a push goes through the proxy it is given, and past the configured one when given none" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twins = try PushTwins.init(gpa, io);
+    defer twins.deinit();
+    const server = try testremote.HttpServer.start(gpa, io, twins.root.dir, .{});
+    defer server.stop();
+    const proxy = try testremote.Proxy.start(gpa, io, null);
+    defer proxy.stop();
+    const proxy_url = try proxy.url(gpa);
+    defer gpa.free(proxy_url);
+    var remote_dir = try twins.root.dir.openDir(io, "remote-relic.git", .{});
+    defer remote_dir.close(io);
+    try twins.git(remote_dir, &.{ "config", "http.receivepack", "true" });
+    var work = try twins.root.dir.openDir(io, "work-relic", .{});
+    defer work.close(io);
+    const url = try server.url(gpa, "remote-relic.git");
+    defer gpa.free(url);
+    try twins.git(work, &.{ "remote", "set-url", "origin", url });
+    try twins.git(work, &.{ "config", "http.proxy", "http://127.0.0.1:9/" });
+    var repo = try Repository.open(gpa, io, work, .{});
+    defer repo.deinit(io);
+    {
+        var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"main"}, .proxy = .{ .url = proxy_url } });
+        defer outcome.deinit();
+        for (outcome.refs) |r| try testing.expectEqual(RefResult.Status.ok, r.status);
+        const seen = try proxy.take(gpa);
+        defer gpa.free(seen);
+        try testing.expect(seen.len != 0);
+    }
+    {
+        var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"feature"}, .proxy = .none });
+        defer outcome.deinit();
+        for (outcome.refs) |r| try testing.expectEqual(RefResult.Status.ok, r.status);
+        const seen = try proxy.take(gpa);
+        defer gpa.free(seen);
+        try testing.expectEqual(@as(usize, 0), seen.len);
     }
 }
 

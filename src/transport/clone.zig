@@ -127,6 +127,9 @@ pub const Options = struct {
     /// The home directory, for `~/` in `user_config` and its
     /// `includeIf` conditions.
     home: ?[]const u8 = null,
+    /// The proxy for an HTTP remote, over the one the configuration and
+    /// the environment choose, as libgit2's proxy options set it.
+    proxy: transport.Proxy = .auto,
     prompt: ?credential.Prompt = null,
     /// Filled in, when the operation fails for want of a credential, with
     /// what a person needs to put it right: see `auth.Failure`.
@@ -211,6 +214,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .programs = options.programs,
         .config = settings,
         .remote_name = options.origin,
+        .proxy = options.proxy,
         .progress = options.progress,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,

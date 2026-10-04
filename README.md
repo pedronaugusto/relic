@@ -463,6 +463,8 @@ resolve the origin locally; SOCKS4a and SOCKS5h send its name to the proxy.
 A URL's `user:password@` supplies SOCKS5 authentication, or the userid for
 SOCKS4. HTTPS starts TLS to the origin inside the SOCKS tunnel. A named
 remote's `remote.<name>.proxy` overrides `http.proxy`; `no_proxy` still applies.
+A fetch, clone or push given a `proxy` (`transport.Proxy`, as libgit2's proxy
+options) goes through that one, or none, whatever these say.
 
 The HTTP client's `connect`, `send` and `stream` take an optional caller-owned
 `transport.httpclient.Diagnostic` as their last argument. Initialize it with
@@ -685,7 +687,7 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 
 - **No pseudo-merge bitmap extension or incremental MIDX chains.** `UnsupportedBitmapOptions` and `ChainUnsupported` name these; ordinary pack and MIDX bitmaps are read and written. An unusable optional accelerator falls back to the object walk.
 - **`working-tree-encoding` for UTF-16 and UTF-32 only.** Any other character set is refused by name.
-- **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name.
+- **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name. **No GSS-API (Kerberos) to a SOCKS5 proxy:** it is never offered, so a proxy that takes nothing else refuses every method and the fetch stops with `ProxyAuthenticationRequired`.
 - **LFS without git-lfs's extras.** tus and custom transfer adapters are refused by name.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
 - **No `git://`, dumb HTTP or remote helpers.** Refused by name.

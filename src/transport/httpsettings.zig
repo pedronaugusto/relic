@@ -76,6 +76,28 @@ pub const Error = error{
     InvalidHttpSetting,
 } || Allocator.Error;
 
+/// Which proxy an HTTP remote is reached through, as libgit2's proxy
+/// options choose one. Other remotes do not read it.
+pub const Proxy = union(enum) {
+    /// git's choice: `remote.<name>.proxy`, then `http.proxy`, then the
+    /// environment's, short of what `no_proxy` names.
+    auto,
+    /// None, whatever the configuration and the environment name.
+    none,
+    /// This one, a URL as `http.proxy` takes one, over the configuration,
+    /// the environment and `no_proxy`; an empty one is none.
+    url: []const u8,
+};
+
+/// The caller's choice of proxy put over what the settings found.
+pub fn chooseProxy(s: *Settings, choice: Proxy) void {
+    switch (choice) {
+        .auto => {},
+        .none => s.proxy = null,
+        .url => |text| s.proxy = if (text.len == 0) null else text,
+    }
+}
+
 /// The settings for `url`, from `config` and `environ`. Every slice is in
 /// `arena`, or borrowed from `config` or `environ`.
 pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url) Error!Settings {
@@ -385,4 +407,28 @@ test "a remote's SOCKS proxy overrides http.proxy and remains subject to no_prox
     try env.put("no_proxy", ".example.com");
     const bypassed = try resolveForRemote(arena.allocator(), &config, &env, url, "origin");
     try testing.expect(bypassed.proxy == null);
+}
+
+test "a proxy the caller chooses stands over the configuration, the environment and no_proxy" {
+    var config = try config_mod.Config.parseText(testing.allocator, "[http]\nproxy = http://general:3128\n[remote \"origin\"]\nproxy = socks5h://specific\n", .local);
+    defer config.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var env: Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("no_proxy", ".example.com");
+    const url = try url_mod.Url.parse("https://git.example.com/repo.git");
+    var s = try resolveForRemote(arena.allocator(), &config, &env, url, "origin");
+    chooseProxy(&s, .auto);
+    try testing.expect(s.proxy == null);
+    chooseProxy(&s, .{ .url = "http://chosen:8080" });
+    try testing.expectEqualStrings("http://chosen:8080", s.proxy.?);
+    chooseProxy(&s, .none);
+    try testing.expect(s.proxy == null);
+    var t = try resolveForRemote(arena.allocator(), &config, null, url, "origin");
+    try testing.expectEqualStrings("socks5h://specific", t.proxy.?);
+    chooseProxy(&t, .none);
+    try testing.expect(t.proxy == null);
+    chooseProxy(&t, .{ .url = "" });
+    try testing.expect(t.proxy == null);
 }

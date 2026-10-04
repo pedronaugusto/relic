@@ -16,6 +16,7 @@ const config_mod = @import("config.zig");
 const credential = @import("transport/credential.zig");
 const repo_mod = @import("repo.zig");
 const fetch_mod = @import("transport/fetch.zig");
+const clone_mod = @import("transport/clone.zig");
 const transport = @import("transport.zig");
 const testgit = @import("testing/git.zig");
 const testremote = @import("testing/remote.zig");
@@ -624,6 +625,67 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
         const tunnels = try proxy.expectTlsInTunnels();
         try testing.expectEqual(case.through and case.url.ptr == secure.ptr, tunnels != 0);
     }
+}
+
+test "a proxy given to a fetch or a clone stands over the configuration's and no_proxy, as libgit2's proxy options do" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const proxy = try testremote.Proxy.start(gpa, io, null);
+    defer proxy.stop();
+    const proxy_url = try proxy.url(gpa);
+    defer gpa.free(proxy_url);
+    const plain = try server.url(gpa, "repo.git");
+    defer gpa.free(plain);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    try r.exec(io, &.{ "remote", "add", "origin", plain });
+    try r.exec(io, &.{ "config", "http.proxy", proxy_url });
+    var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    // none: the configured proxy is passed over
+    {
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .proxy = .none });
+        outcome.deinit();
+        const seen = try proxy.take(gpa);
+        defer gpa.free(seen);
+        try testing.expectEqual(@as(usize, 0), seen.len);
+    }
+    // left to the configuration, it is gone through
+    {
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+        outcome.deinit();
+        const seen = try proxy.take(gpa);
+        defer gpa.free(seen);
+        try testing.expect(seen.len != 0);
+    }
+    // given, it is gone through where no_proxy and the configuration
+    // would go direct
+    try env.put("no_proxy", "127.0.0.1");
+    try r.exec(io, &.{ "config", "http.proxy", "" });
+    var again = try repo_mod.Repository.open(gpa, io, r.dir, .{});
+    defer again.deinit(io);
+    {
+        var outcome = try fetch_mod.fetch(gpa, io, &again, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .proxy = .{ .url = proxy_url } });
+        outcome.deinit();
+        const seen = try proxy.take(gpa);
+        defer gpa.free(seen);
+        try testing.expect(seen.len != 0);
+    }
+    var target = testing.tmpDir(.{ .iterate = true });
+    defer target.cleanup();
+    var cloned = try clone_mod.clone(gpa, io, plain, target.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .proxy = .{ .url = proxy_url } });
+    defer cloned.deinit(io);
+    const seen = try proxy.take(gpa);
+    defer gpa.free(seen);
+    try testing.expect(seen.len != 0);
 }
 
 test "a proxy that asks is answered as curl answers for git: nothing first with anyauth, then Basic or Digest, MD5 or SHA-256" {

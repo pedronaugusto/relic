@@ -17,6 +17,8 @@ pub const objectfilter = @import("transport/objectfilter.zig");
 pub const objectwalk = @import("transport/objectwalk.zig");
 pub const sideband = @import("transport/sideband.zig");
 pub const httpsettings = @import("transport/httpsettings.zig");
+/// Which proxy an HTTP remote is reached through.
+pub const Proxy = httpsettings.Proxy;
 pub const httpauth = @import("transport/httpauth.zig");
 pub const clientcert = @import("transport/clientcert.zig");
 pub const tls = @import("transport/tls.zig");
@@ -88,6 +90,9 @@ pub const Options = struct {
     config: ?*const config_mod.Config = null,
     /// The configured remote, for `remote.<name>.proxy`.
     remote_name: ?[]const u8 = null,
+    /// The proxy for an HTTP remote, over the one the configuration and
+    /// the environment choose.
+    proxy: Proxy = .auto,
     /// The program to ask the other side to run in place of
     /// `git-upload-pack` or `git-receive-pack`: `remote.<name>.uploadpack`.
     service_program: ?[]const u8 = null,
@@ -210,6 +215,7 @@ pub const Session = struct {
                 const conn = try smarthttp.connect(gpa, io, parsed, service, .{
                     .config = options.config,
                     .remote_name = options.remote_name,
+                    .proxy = options.proxy,
                     .programs = options.programs,
                     .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
                     .prompt = options.prompt,
