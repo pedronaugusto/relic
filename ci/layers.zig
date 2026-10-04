@@ -58,6 +58,8 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/url.zig",
     } },
     .{ .name = "formats and file policy", .patterns = &.{
+        "src/accelerator_format.zig",
+        "src/bloom.zig",
         "src/attributes.zig",
         "src/auth.zig",
         "src/commitgraph.zig",
@@ -219,6 +221,8 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/lfs_test.zig",
         "src/lfslocks.zig",
         "src/objectwalk.zig",
+        "src/accelerators.zig",
+        "src/accelerators_test.zig",
         "src/odb.zig",
         "src/rerere.zig",
         "src/reset.zig",

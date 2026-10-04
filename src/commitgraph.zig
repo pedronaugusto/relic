@@ -1,4 +1,4 @@
-//! The commit-graph, read as an accelerator.
+//! The commit-graph, read and encoded as an accelerator.
 //!
 //! Correctness never depends on it: everything it answers can be answered by
 //! reading the commit objects, and a repository that has one must read the
@@ -19,6 +19,8 @@ const hash = @import("hash.zig");
 const fs = @import("fs.zig");
 
 const Oid = hash.Oid;
+const format = @import("accelerator_format.zig");
+pub const bloom = @import("bloom.zig");
 
 /// The four bytes a commit-graph begins with.
 pub const magic = "CGPH";
@@ -33,9 +35,7 @@ pub const Error = error{
     ObjectFormatMismatch,
     /// A chunk ran off the end, or a required chunk is missing.
     CorruptCommitGraph,
-    /// A split commit-graph chain. The chain file names several graphs and
-    /// this release reads one; a caller gets no accelerator rather than a
-    /// wrong answer.
+    /// A detached split layer passed to parse without its base graphs.
     SplitGraphUnsupported,
 } || Allocator.Error || Io.Dir.ReadFileAllocError;
 
@@ -67,14 +67,50 @@ pub const Graph = struct {
     edges_at: ?usize,
     generation_at: ?usize,
     generation_overflow_at: ?usize,
+    base: ?*Graph = null,
+    base_count: u32 = 0,
+    local_count: u32,
+    bloom_index: ?[]const u8 = null,
+    bloom_data: ?[]const u8 = null,
+    bloom_settings: bloom.Settings = .{},
 
     /// Read `objects/info/commit-graph`, or `null` when there is none.
     pub fn open(gpa: Allocator, io: Io, objects_dir: Io.Dir, kind: hash.Kind) Error!?Graph {
-        if (objects_dir.access(io, "info/commit-graphs/commit-graph-chain", .{})) |_| {
-            return error.SplitGraphUnsupported;
-        } else |err| switch (err) {
-            error.FileNotFound => {},
-            else => |failure| return failure,
+        if (try fs.readFileAlloc(gpa, io, objects_dir, "info/commit-graphs/commit-graph-chain", 255 * (kind.hexLen() + 1))) |chain| {
+            defer gpa.free(chain);
+            var base: ?*Graph = null;
+            errdefer if (base) |g| {
+                g.deinit();
+                gpa.destroy(g);
+            };
+            var names = std.mem.tokenizeScalar(u8, chain, '\n');
+            var depth: usize = 0;
+            while (names.next()) |name| {
+                const chain_checksum = Oid.parse(kind, name) catch return error.CorruptCommitGraph;
+                const path = try std.fmt.allocPrint(gpa, "info/commit-graphs/graph-{s}.graph", .{name});
+                defer gpa.free(path);
+                const content = (try fs.readFileAlloc(gpa, io, objects_dir, path, 1 << 30)) orelse return error.CorruptCommitGraph;
+                const next = gpa.create(Graph) catch |err| {
+                    gpa.free(content);
+                    return err;
+                };
+                next.* = parseBase(gpa, kind, content, base) catch |err| {
+                    gpa.destroy(next);
+                    return err;
+                };
+                if (content[7] != depth or !std.mem.eql(u8, next.checksum().raw(), chain_checksum.raw())) {
+                    // Ownership of the old chain has passed to next.
+                    base = next;
+                    return error.CorruptCommitGraph;
+                }
+                base = next;
+                depth += 1;
+            }
+            const top = base orelse return error.CorruptCommitGraph;
+            const result = top.*;
+            gpa.destroy(top);
+            base = null;
+            return result;
         }
         const bytes = (try fs.readFileAlloc(gpa, io, objects_dir, "info/commit-graph", 1 << 30)) orelse
             return null;
@@ -84,6 +120,10 @@ pub const Graph = struct {
 
     /// Read a commit-graph from bytes this takes ownership of.
     pub fn parse(gpa: Allocator, kind: hash.Kind, bytes: []const u8) Error!Graph {
+        return parseBase(gpa, kind, bytes, null);
+    }
+
+    fn parseBase(gpa: Allocator, kind: hash.Kind, bytes: []const u8, base: ?*Graph) Error!Graph {
         errdefer gpa.free(bytes);
         if (bytes.len < 8) return error.NotACommitGraph;
         if (!std.mem.eql(u8, bytes[0..4], magic)) return error.NotACommitGraph;
@@ -96,7 +136,9 @@ pub const Graph = struct {
         };
         if (graph_kind != kind) return error.ObjectFormatMismatch;
         const chunk_count = bytes[6];
-        if (bytes[7] != 0) return error.SplitGraphUnsupported;
+        if (bytes[7] != 0 and base == null) return error.SplitGraphUnsupported;
+        format.validate(kind, bytes, 8, chunk_count) catch return error.CorruptCommitGraph;
+        const base_count = if (base) |g| g.count else 0;
 
         const table_at: usize = 8;
         const table_len = (@as(usize, chunk_count) + 1) * 12;
@@ -154,11 +196,32 @@ pub const Graph = struct {
             if (at + @as(usize, count) * 4 > bytes.len) return error.CorruptCommitGraph;
         }
 
+        if ((format.get(bytes, 8, chunk_count, "OIDF") orelse return error.CorruptCommitGraph).len != 1024 or
+            (format.get(bytes, 8, chunk_count, "OIDL") orelse return error.CorruptCommitGraph).len != @as(usize, count) * raw_len or
+            (format.get(bytes, 8, chunk_count, "CDAT") orelse return error.CorruptCommitGraph).len != @as(usize, count) * (raw_len + 16)) return error.CorruptCommitGraph;
+        if (format.get(bytes, 8, chunk_count, "GDA2")) |chunk| if (chunk.len != @as(usize, count) * 4) return error.CorruptCommitGraph;
+        if (bytes[7] != 0) {
+            const bases = format.get(bytes, 8, chunk_count, "BASE") orelse return error.CorruptCommitGraph;
+            if (bases.len != @as(usize, bytes[7]) * raw_len) return error.CorruptCommitGraph;
+            var g = base;
+            var i_base: usize = bytes[7];
+            while (g) |parent| : (g = parent.base) {
+                if (i_base == 0) return error.CorruptCommitGraph;
+                i_base -= 1;
+                if (!std.mem.eql(u8, bases[i_base * raw_len ..][0..raw_len], parent.checksum().raw())) return error.CorruptCommitGraph;
+            }
+            if (i_base != 0) return error.CorruptCommitGraph;
+        }
         return .{
             .gpa = gpa,
             .kind = kind,
             .bytes = bytes,
-            .count = count,
+            .count = std.math.add(u32, count, base_count) catch return error.CorruptCommitGraph,
+            .local_count = count,
+            .base_count = base_count,
+            .base = base,
+            .bloom_index = format.get(bytes, 8, chunk_count, "BIDX"),
+            .bloom_data = format.get(bytes, 8, chunk_count, "BDAT"),
             .fanout_at = fanout,
             .names_at = names,
             .data_at = data,
@@ -168,21 +231,64 @@ pub const Graph = struct {
         };
     }
 
+    /// The trailing digest, checked when the graph is parsed.
+    pub fn checksum(graph: *const Graph) Oid {
+        return Oid.fromRaw(graph.kind, graph.bytes[graph.bytes.len - graph.kind.rawLen() ..]) catch unreachable;
+    }
+
+    /// The changed-path filter at a global graph position, or null.
+    pub fn changedPaths(graph: *const Graph, position: u32) Error!?struct { bytes: []const u8, settings: bloom.Settings } {
+        if (position >= graph.count) return error.CorruptCommitGraph;
+        if (position < graph.base_count) return graph.base.?.changedPaths(position);
+        const index = graph.bloom_index orelse return null;
+        const data = graph.bloom_data orelse return error.CorruptCommitGraph;
+        if (index.len != @as(usize, graph.local_count) * 4 or data.len < 12) return error.CorruptCommitGraph;
+        const local = position - graph.base_count;
+        const start = if (local == 0) 0 else std.mem.readInt(u32, index[@as(usize, local - 1) * 4 ..][0..4], .big);
+        const end = std.mem.readInt(u32, index[@as(usize, local) * 4 ..][0..4], .big);
+        if (start > end or end > data.len - 12) return error.CorruptCommitGraph;
+        return .{ .bytes = data[12 + start .. 12 + end], .settings = .{
+            .version = std.mem.readInt(u32, data[0..4], .big),
+            .hashes = std.mem.readInt(u32, data[4..8], .big),
+            .bits_per_entry = std.mem.readInt(u32, data[8..12], .big),
+        } };
+    }
+
+    /// Verify parents, generation offsets and changed-path indexes.
+    pub fn verify(graph: *const Graph) Error!void {
+        for (0..graph.count) |i| {
+            const commit_value = try graph.commitAt(@intCast(i));
+            const parents = try graph.parentsOf(graph.gpa, @intCast(i));
+            defer graph.gpa.free(parents);
+            for (parents) |oid| {
+                const parent = (try graph.commit(oid)).?;
+                if (commit_value.generation) |generation| if (parent.generation) |p| if (generation <= p) return error.CorruptCommitGraph;
+            }
+            _ = try graph.changedPaths(@intCast(i));
+        }
+    }
+
     /// Release the graph.
     pub fn deinit(graph: *Graph) void {
+        if (graph.base) |base| {
+            base.deinit();
+            graph.gpa.destroy(base);
+        }
         graph.gpa.free(graph.bytes);
         graph.* = undefined;
     }
 
     /// Whether the graph carries corrected commit dates.
     pub fn hasGenerations(graph: *const Graph) bool {
-        return graph.generation_at != null;
+        return graph.generation_at != null and (if (graph.base) |base| base.hasGenerations() else true);
     }
 
     /// The name of the commit at `position`.
     pub fn nameAt(graph: *const Graph, position: u32) Oid {
+        if (position < graph.base_count) return graph.base.?.nameAt(position);
+        const local = position - graph.base_count;
         const raw_len = graph.kind.rawLen();
-        return Oid.fromRaw(graph.kind, graph.bytes[graph.names_at + @as(usize, position) * raw_len ..][0..raw_len]) catch unreachable;
+        return Oid.fromRaw(graph.kind, graph.bytes[graph.names_at + @as(usize, local) * raw_len ..][0..raw_len]) catch unreachable;
     }
 
     /// Where `oid` is in the graph, or `null`.
@@ -196,21 +302,23 @@ pub const Graph = struct {
         var hi: u32 = std.mem.readInt(u32, graph.bytes[graph.fanout_at + @as(usize, raw[0]) * 4 ..][0..4], .big);
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
-            const name = graph.nameAt(mid);
+            const name = graph.nameAt(mid + graph.base_count);
             switch (std.mem.order(u8, name.raw(), raw)) {
                 .lt => lo = mid + 1,
                 .gt => hi = mid,
-                .eq => return mid,
+                .eq => return mid + graph.base_count,
             }
         }
-        return null;
+        return if (graph.base) |base| base.find(oid) else null;
     }
 
     /// The commit at `position`.
     pub fn commitAt(graph: *const Graph, position: u32) Error!Commit {
         if (position >= graph.count) return error.CorruptCommitGraph;
+        if (position < graph.base_count) return graph.base.?.commitAt(position);
+        const local = position - graph.base_count;
         const raw_len = graph.kind.rawLen();
-        const row = graph.bytes[graph.data_at + @as(usize, position) * (raw_len + 16) ..];
+        const row = graph.bytes[graph.data_at + @as(usize, local) * (raw_len + 16) ..];
         const tree = Oid.fromRaw(graph.kind, row[0..raw_len]) catch unreachable;
         const first = std.mem.readInt(u32, row[raw_len..][0..4], .big);
         const second = std.mem.readInt(u32, row[raw_len + 4 ..][0..4], .big);
@@ -242,15 +350,16 @@ pub const Graph = struct {
 
         var generation: ?u64 = null;
         if (graph.generation_at) |at| {
-            const offset = std.mem.readInt(u32, graph.bytes[at + @as(usize, position) * 4 ..][0..4], .big);
+            const offset = std.mem.readInt(u32, graph.bytes[at + @as(usize, local) * 4 ..][0..4], .big);
             if (offset & 0x8000_0000 == 0) {
                 generation = @as(u64, @intCast(time)) + offset;
             } else if (graph.generation_overflow_at) |overflow_at| {
                 const row_at = overflow_at + @as(usize, offset & 0x7fff_ffff) * 8;
-                if (row_at + 8 > graph.bytes.len) return error.CorruptCommitGraph;
+                const overflow = format.get(graph.bytes, 8, graph.bytes[6], "GDO2") orelse return error.CorruptCommitGraph;
+                if (row_at + 8 > overflow_at + overflow.len) return error.CorruptCommitGraph;
                 const wide = std.mem.readInt(u64, graph.bytes[row_at..][0..8], .big);
-                generation = @as(u64, @intCast(time)) + wide;
-            }
+                generation = std.math.add(u64, @intCast(time), wide) catch return error.CorruptCommitGraph;
+            } else return error.CorruptCommitGraph;
         }
 
         return .{
@@ -274,6 +383,7 @@ pub const Graph = struct {
     /// The result is the caller's. An octopus merge's third and later
     /// parents come out of the `EDGE` chunk.
     pub fn parentsOf(graph: *const Graph, gpa: Allocator, position: u32) Error![]Oid {
+        if (position < graph.base_count) return graph.base.?.parentsOf(gpa, position);
         const found = try graph.commitAt(position);
         var out: std.ArrayList(Oid) = .empty;
         errdefer out.deinit(gpa);
@@ -289,9 +399,10 @@ pub const Graph = struct {
             return out.toOwnedSlice(gpa);
         }
         const edges_at = graph.edges_at orelse return error.CorruptCommitGraph;
+        const edge_chunk = format.get(graph.bytes, 8, graph.bytes[6], "EDGE") orelse return error.CorruptCommitGraph;
         var edge = edges_at + @as(usize, found.parents[1].?) * 4;
         while (true) {
-            if (edge + 4 > graph.bytes.len) return error.CorruptCommitGraph;
+            if (edge + 4 > edges_at + edge_chunk.len) return error.CorruptCommitGraph;
             const value = std.mem.readInt(u32, graph.bytes[edge..][0..4], .big);
             const last = value & 0x8000_0000 != 0;
             const at = value & 0x7fff_ffff;
@@ -385,4 +496,97 @@ test "commit graph chain discovery preserves filesystem refusals" {
         Probe.refusal = err;
         try std.testing.expectError(err, Graph.open(std.testing.allocator, io, tmp.dir, .sha1));
     }
+}
+
+/// A commit to encode, with generations already computed from its parents.
+/// Parent positions use the whole split chain's order, bases first.
+pub const WriteCommit = struct {
+    oid: Oid,
+    tree: Oid,
+    parents: []const u32,
+    time: u64,
+    level: u32,
+    generation: u64,
+    changed_paths: []const u8 = &.{},
+};
+
+/// Options for the format writer; the repository writer gathers its own inputs.
+pub const WriteOptions = struct {
+    generations: bool = true,
+    changed_paths: ?bloom.Settings = null,
+    bases: []const Oid = &.{},
+};
+
+/// Encode one graph, byte for byte git's chunk order. Commits must be sorted by name.
+/// The returned file is the caller's. No worker count changes this order.
+pub fn encode(gpa: Allocator, kind: hash.Kind, commits: []const WriteCommit, options: WriteOptions) (Allocator.Error || error{InvalidGraphInput})![]u8 {
+    if (commits.len > 0x7000_0000 or options.bases.len > 255) return error.InvalidGraphInput;
+    var buffers: [9]format.Buffer = undefined;
+    for (&buffers) |*buffer| buffer.* = .{ .gpa = gpa };
+    defer for (&buffers) |*buffer| buffer.deinit();
+    var fanout: [256]u32 = @splat(0);
+    var edge_index: u32 = 0;
+    var overflow_index: u32 = 0;
+    var changed_index: u32 = 0;
+    if (options.changed_paths) |settings| {
+        try buffers[7].int(u32, settings.version);
+        try buffers[7].int(u32, settings.hashes);
+        try buffers[7].int(u32, settings.bits_per_entry);
+    }
+    for (commits, 0..) |commit_value, i| {
+        if (commit_value.oid.kind != kind or commit_value.tree.kind != kind or commit_value.level > 0x3fff_ffff or
+            (i != 0 and commits[i - 1].oid.order(commit_value.oid) != .lt)) return error.InvalidGraphInput;
+        fanout[commit_value.oid.raw()[0]] += 1;
+        try buffers[1].add(commit_value.oid.raw());
+        try buffers[2].add(commit_value.tree.raw());
+        try buffers[2].int(u32, if (commit_value.parents.len == 0) 0x7000_0000 else commit_value.parents[0]);
+        try buffers[2].int(u32, if (commit_value.parents.len < 2) 0x7000_0000 else if (commit_value.parents.len == 2) commit_value.parents[1] else 0x8000_0000 | edge_index);
+        try buffers[2].int(u64, (@as(u64, commit_value.level) << 34) | (commit_value.time & 0x3_ffff_ffff));
+        if (options.generations) {
+            const masked_time = commit_value.time & 0x3_ffff_ffff;
+            if (commit_value.generation < masked_time) return error.InvalidGraphInput;
+            const offset = commit_value.generation - masked_time;
+            try buffers[3].int(u32, if (offset > 0x7fff_ffff) 0x8000_0000 | overflow_index else @intCast(offset));
+            if (offset > 0x7fff_ffff) {
+                try buffers[4].int(u64, offset);
+                overflow_index += 1;
+            }
+        }
+        if (commit_value.parents.len > 2) for (commit_value.parents[1..], 1..) |parent, n| {
+            try buffers[5].int(u32, parent | (if (n == commit_value.parents.len - 1) @as(u32, 0x8000_0000) else 0));
+            edge_index += 1;
+        };
+        if (options.changed_paths != null) {
+            if (commit_value.changed_paths.len > std.math.maxInt(u32) - changed_index) return error.InvalidGraphInput;
+            changed_index += @intCast(commit_value.changed_paths.len);
+            try buffers[6].int(u32, changed_index);
+            try buffers[7].add(commit_value.changed_paths);
+        }
+    }
+    var total: u32 = 0;
+    for (fanout) |n| {
+        total += n;
+        try buffers[0].int(u32, total);
+    }
+    for (options.bases) |base| {
+        if (base.kind != kind) return error.InvalidGraphInput;
+        try buffers[8].add(base.raw());
+    }
+    var chunks: std.ArrayList(format.Chunk) = .empty;
+    defer chunks.deinit(gpa);
+    const ids = [_]*const [4]u8{ "OIDF", "OIDL", "CDAT", "GDA2", "GDO2", "EDGE", "BIDX", "BDAT", "BASE" };
+    for (&buffers, ids, 0..) |*buffer, id, i| {
+        const present = switch (i) {
+            0, 1, 2 => true,
+            3 => options.generations,
+            4 => overflow_index > 0,
+            5 => edge_index > 0,
+            6, 7 => options.changed_paths != null,
+            8 => options.bases.len != 0,
+            else => unreachable,
+        };
+        if (present) try chunks.append(gpa, .{ .id = id, .bytes = buffer.bytes.items });
+    }
+    const header = [_]u8{ 'C', 'G', 'P', 'H', 1, if (kind == .sha1) 1 else 2, @intCast(chunks.items.len), @intCast(options.bases.len) };
+    return format.encode(gpa, kind, &header, chunks.items);
 }

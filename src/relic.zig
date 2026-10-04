@@ -93,6 +93,7 @@ test {
         _ = @import("mimesniff.zig");
         _ = @import("testgit.zig");
         _ = @import("fixture_test.zig");
+        _ = @import("accelerators_test.zig");
         _ = @import("worktree_test.zig");
         _ = @import("repo_test.zig");
         _ = @import("concurrency_test.zig");

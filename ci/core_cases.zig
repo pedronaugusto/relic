@@ -5,6 +5,7 @@ pub const Family = struct { name: []const u8, filters: []const []const u8 };
 pub const families = [_]Family{
     .{ .name = "core-formats", .filters = &.{
         "abbrev.test",
+        "accelerators_test.test",
         "commitgraph.test",
         "config_core.test",
         "config_refresh_test.test",

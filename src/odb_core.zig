@@ -181,6 +181,13 @@ pub const Odb = struct {
         return db.backendData().gpa;
     }
 
+    /// The writable objects directory, borrowed until this database is closed.
+    /// Accelerator writers use it so storage paths have one owner.
+    pub fn objectsDirectory(db: *const Odb) Io.Dir {
+        for (db.backendData().sources.items) |source| if (source.writable) return source.dir;
+        unreachable;
+    }
+
     /// A fetch of missing objects, installed by the caller: `partial.zig`
     /// makes one.
     pub const Lazy = struct {
