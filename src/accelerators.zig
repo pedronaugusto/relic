@@ -465,8 +465,25 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
         words.* = try arena.alloc(u64, word_count);
         @memset(words.*, 0);
     }
+    const previous_bitmap = try db.reachabilityBitmap(io);
+    if (previous_bitmap) |previous| {
+        for (previous.reverse, 0..) |old_name_position, old_position| {
+            const pos = positions.get(previous.names[old_name_position]) orelse continue;
+            const kind_index: usize = switch (previous.typeAt(@intCast(old_position))) {
+                .commit => 0,
+                .tree => 1,
+                .blob => 2,
+                .tag => 3,
+            };
+            setBit(types[kind_index], pos);
+        }
+    }
     var candidates: std.ArrayList(BitmapCommit) = .empty;
     for (names) |oid| {
+        const pos = positions.get(oid).?;
+        var known = false;
+        for (types) |words| known = known or bitmap_mod.isSet(words, pos);
+        if (known) continue;
         const header = try db.readHeader(io, oid);
         const kind_index: usize = switch (header.type) {
             .commit => 0,
@@ -474,7 +491,6 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
             .blob => 2,
             .tag => 3,
         };
-        const pos = positions.get(oid).?;
         setBit(types[kind_index], pos);
     }
     var name_positions: Oid.Map(u32) = .empty;
@@ -506,7 +522,21 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
     for (selected) |candidate| {
         const words = try arena.alloc(u64, word_count);
         @memset(words, 0);
-        try pending.append(arena, candidate.oid);
+        var reused = false;
+        if (previous_bitmap) |previous| if (try previous.reach(gpa, candidate.oid)) |old_words| {
+            defer gpa.free(old_words);
+            for (old_words, 0..) |word, i| {
+                var remaining = word;
+                while (remaining != 0) {
+                    const old_position: u32 = @intCast(i * 64 + @ctz(remaining));
+                    const pos = positions.get(previous.nameAt(old_position)) orelse return error.BitmapNotClosed;
+                    setBit(words, pos);
+                    remaining &= remaining - 1;
+                }
+            }
+            reused = true;
+        };
+        if (!reused) try pending.append(arena, candidate.oid);
         while (pending.pop()) |oid| {
             const pos = positions.get(oid) orelse return error.BitmapNotClosed;
             if (bitmap_mod.isSet(words, pos)) continue;
