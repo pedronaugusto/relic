@@ -28,6 +28,7 @@ const pack = @import("pack.zig");
 const revwalk = @import("revwalk_core.zig");
 const objectfilter = @import("objectfilter.zig");
 const ignore = @import("ignore.zig");
+const bitmap = @import("bitmap.zig");
 const indexpack = @import("indexpack.zig");
 
 const Oid = hash.Oid;
@@ -71,6 +72,8 @@ pub const Filter = @import("walk_types.zig").Filter;
 
 /// How `missingWith` walks.
 pub const MissingOptions = struct {
+    /// Disable the optional accelerator for a traversal that supplies writer hints.
+    use_bitmaps: bool = true,
     /// Commits whose parents are not followed: a shallow clone's boundary,
     /// as the server draws it for one request.
     boundary: ?*const Oid.Set = null,
@@ -81,6 +84,27 @@ pub const MissingOptions = struct {
 
 /// `missing`, walked with `options`.
 pub fn missingWith(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid, options: MissingOptions) Error!Odb.Collected {
+    if (options.use_bitmaps and options.boundary == null and options.filter == .none) {
+        if (try bitmapDifference(gpa, io, db, include, exclude)) |result| {
+            defer gpa.free(result.words);
+            var collected: Odb.Collected = .{ .arena = .init(gpa), .entries = &.{} };
+            errdefer collected.deinit();
+            const arena = collected.arena.allocator();
+            var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
+            for (result.words, 0..) |word, i| {
+                var remaining = word;
+                while (remaining != 0) {
+                    const pos: u32 = @intCast(i * 64 + @ctz(remaining));
+                    const name_position = result.store.reverse[pos];
+                    try entries.append(arena, .{ .oid = result.store.names[name_position], .hint_hash = result.store.bitmap.nameHashAt(name_position), .in_pack = true });
+                    remaining &= remaining - 1;
+                }
+            }
+            collected.entries = entries.items;
+            db.stats.bitmap_hits += 1;
+            return collected;
+        }
+    }
     var walk: Walk = .{
         .gpa = gpa,
         .io = io,
@@ -608,4 +632,92 @@ test "a tip with an object missing below it is refused, and names the object" {
     var gone: Oid = undefined;
     try testing.expectError(error.MissingObject, checkConnected(gpa, io, &opened.odb, &.{head}, null, &gone));
     try testing.expect(gone.eql(try Oid.parse(.sha1, blob_hex)));
+}
+
+const BitmapDifference = struct { store: *const @import("bitmap_store.zig").Store, words: []u64 };
+
+fn bitmapDifference(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) Error!?BitmapDifference {
+    const store = (try db.reachabilityBitmap(io)) orelse return null;
+    const words = try gpa.alloc(u64, (@as(usize, store.bitmap.object_count) + 63) / 64);
+    errdefer gpa.free(words);
+    @memset(words, 0);
+    for (include) |oid| {
+        const found = store.reach(gpa, oid) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            gpa.free(words);
+            return null;
+        };
+        const reach = found orelse {
+            gpa.free(words);
+            return null;
+        };
+        defer gpa.free(reach);
+        for (words, reach) |*word, bits| word.* |= bits;
+    }
+    const excluded = try gpa.alloc(u64, words.len);
+    defer gpa.free(excluded);
+    @memset(excluded, 0);
+    for (exclude) |oid| {
+        if (!try db.exists(io, oid)) continue;
+        const found = store.reach(gpa, oid) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            gpa.free(words);
+            return null;
+        };
+        const reach = found orelse {
+            gpa.free(words);
+            return null;
+        };
+        defer gpa.free(reach);
+        for (excluded, reach) |*word, bits| word.* |= bits;
+    }
+    for (words, excluded) |*word, bits| word.* &= ~bits;
+    return .{ .store = store, .words = words };
+}
+
+/// Counts of objects reachable from the wanted tips and absent from the hidden tips.
+pub const Counts = struct {
+    commits: u64 = 0,
+    trees: u64 = 0,
+    blobs: u64 = 0,
+    tags: u64 = 0,
+    pub fn total(counts: Counts) u64 {
+        return counts.commits + counts.trees + counts.blobs + counts.tags;
+    }
+};
+
+/// Count objects with bitmaps when available, falling back to the ordinary walk.
+/// This is the counting stage of pack-objects and rev-list --objects --count.
+pub fn countObjects(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) Error!Counts {
+    if (try bitmapDifference(gpa, io, db, include, exclude)) |result| {
+        defer gpa.free(result.words);
+        db.stats.bitmap_hits += 1;
+        return .{ .commits = bitmap.count(result.words, result.store.bitmap.types[0]), .trees = bitmap.count(result.words, result.store.bitmap.types[1]), .blobs = bitmap.count(result.words, result.store.bitmap.types[2]), .tags = bitmap.count(result.words, result.store.bitmap.types[3]) };
+    }
+    var collected = try missingWith(gpa, io, db, include, exclude, .{ .use_bitmaps = false });
+    defer collected.deinit();
+    var counts: Counts = .{};
+    for (collected.entries) |entry| switch ((try db.readHeader(io, entry.oid)).type) {
+        .commit => counts.commits += 1,
+        .tree => counts.trees += 1,
+        .blob => counts.blobs += 1,
+        .tag => counts.tags += 1,
+    };
+    return counts;
+}
+
+/// Count commits as rev-list --count, using bitmap type intersections when possible.
+pub fn countCommits(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) (Error || revwalk.Error)!u64 {
+    if (try bitmapDifference(gpa, io, db, include, exclude)) |result| {
+        defer gpa.free(result.words);
+        db.stats.bitmap_hits += 1;
+        return bitmap.count(result.words, result.store.bitmap.types[0]);
+    }
+    var walk = revwalk.Walk.init(gpa, db);
+    defer walk.deinit();
+    for (include) |oid| try walk.push(oid);
+    for (exclude) |oid| try walk.hide(oid);
+    var total: u64 = 0;
+    while (try walk.next(io)) |_| total += 1;
+    return total;
 }

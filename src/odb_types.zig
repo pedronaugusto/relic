@@ -16,6 +16,8 @@ pub const Options = struct {
     /// How many bytes of resolved delta bases to keep. Zero disables the
     /// cache, which makes a walk over a packed repository quadratic in its
     /// chain length and is almost never what you want.
+    /// Consult reachability bitmaps for object sets and counts.
+    use_bitmaps: bool = true,
     delta_cache_bytes: usize = 16 * 1024 * 1024,
     /// Whether packs are reached through a memory map where the platform has
     /// one. Off by default: a map is faster on a cold cache, and it turns an
@@ -107,6 +109,8 @@ pub const Error = error{
 pub const Stats = struct {
     /// Lookups a multi-pack index narrowed to one pack.
     midx_hits: u64 = 0,
+    /// Object-set requests answered by a reachability bitmap.
+    bitmap_hits: u64 = 0,
     /// Lookups that asked every pack in turn, because there was no
     /// multi-pack index, or it did not name the object.
     pack_scans: u64 = 0,

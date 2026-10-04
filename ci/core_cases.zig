@@ -6,6 +6,7 @@ pub const families = [_]Family{
     .{ .name = "core-formats", .filters = &.{
         "abbrev.test",
         "accelerators_test.test",
+        "bitmap.test",
         "commitgraph.test",
         "config_core.test",
         "config_refresh_test.test",

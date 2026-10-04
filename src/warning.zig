@@ -35,6 +35,9 @@ pub const Warning = union(enum) {
     /// ref: `git describe` prints the object's.
     tag_known_as: struct { path: []const u8, name: []const u8 },
 
+    /// A successful fetch could not update its optional commit-graph.
+    commit_graph_write_failed: anyerror,
+
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
     pub fn message(w: Warning, arena: Allocator) Allocator.Error![]const u8 {
@@ -45,6 +48,7 @@ pub const Warning = union(enum) {
             .ssh_said => |text| text,
             .shallow_update_rejected => |name| std.fmt.allocPrint(arena, "rejected {s} because shallow roots are not allowed to be updated", .{name}),
             .proxy_auth_method_unknown => |name| std.fmt.allocPrint(arena, "unsupported proxy authentication method {s}: using anyauth", .{name}),
+            .commit_graph_write_failed => |err| std.fmt.allocPrint(arena, "commit-graph write failed: {s}", .{@errorName(err)}),
             .tag_known_as => |t| std.fmt.allocPrint(arena, "tag '{s}' is externally known as '{s}'", .{ t.path, t.name }),
         };
     }
@@ -76,6 +80,7 @@ pub const Warnings = struct {
             .ssh_said => |t| .{ .ssh_said = try a.dupe(u8, t) },
             .shallow_update_rejected => |t| .{ .shallow_update_rejected = try a.dupe(u8, t) },
             .proxy_auth_method_unknown => |t| .{ .proxy_auth_method_unknown = try a.dupe(u8, t) },
+            .commit_graph_write_failed => |err| .{ .commit_graph_write_failed = err },
             .tag_known_as => |t| .{ .tag_known_as = .{ .path = try a.dupe(u8, t.path), .name = try a.dupe(u8, t.name) } },
         };
         try w.items.append(a, owned);

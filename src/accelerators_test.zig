@@ -154,12 +154,122 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
 }
 
 const midx = @import("midx.zig");
+const bitmaps = @import("bitmap.zig");
+const bitmap_store = @import("bitmap_store.zig");
+const objectwalk = @import("objectwalk.zig");
+
 fn linearCommit(repo: *testgit.Repo, n: usize) !void {
     var text: [64]u8 = undefined;
     try repo.writeFile(io, "file", try std.fmt.bufPrint(&text, "contents {d}\n", .{n}));
     try repo.exec(io, &.{ "add", "file" });
     try testgit.setDate(&repo.isolated.?, 1_700_000_000 + @as(i64, @intCast(n)));
     try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&text, "commit {d}", .{n}) });
+}
+
+fn bitmapPath(repo: *testgit.Repo, prefix: []const u8) ![]u8 {
+    const dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| if (std.mem.startsWith(u8, entry.name, prefix) and std.mem.endsWith(u8, entry.name, ".bitmap")) {
+        return std.fmt.allocPrint(gpa, ".git/objects/pack/{s}", .{entry.name});
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "MIDX object selection, RIDX, BTMP and its bitmap agree byte for byte with git" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..18) |n| {
+        try linearCommit(&repo, n);
+        if (n % 6 == 5) try repo.exec(io, &.{ "repack", "-q", "-d" });
+    }
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    const head = try tip(&repo, .sha1);
+    try repo.exec(io, &.{ "multi-pack-index", "write" });
+    const plain = try repo.readFile(io, ".git/objects/pack/multi-pack-index");
+    defer gpa.free(plain);
+    try db.objectsDirectory().deleteFile(io, "pack/multi-pack-index");
+    _ = try ops.writeMidx(gpa, io, &db, .{});
+    try sameFile(&repo, ".git/objects/pack/multi-pack-index", plain);
+    try repo.exec(io, &.{ "multi-pack-index", "verify" });
+    try db.objectsDirectory().deleteFile(io, "pack/multi-pack-index");
+    for ([_]bool{ false, true }) |lookup| {
+        const config: []const u8 = if (lookup) "pack.writeBitmapLookupTable=true" else "pack.writeBitmapLookupTable=false";
+        try repo.exec(io, &.{ "-c", config, "multi-pack-index", "write", "--bitmap" });
+        const expected = try repo.readFile(io, ".git/objects/pack/multi-pack-index");
+        defer gpa.free(expected);
+        const path = try bitmapPath(&repo, "multi-pack-index-");
+        defer gpa.free(path);
+        const expected_bitmap = try repo.readFile(io, path);
+        defer gpa.free(expected_bitmap);
+        try db.objectsDirectory().deleteFile(io, "pack/multi-pack-index");
+        _ = try ops.writeMidxBitmap(gpa, io, &db, &.{head}, .{}, .{ .lookup_table = lookup });
+        try sameFile(&repo, ".git/objects/pack/multi-pack-index", expected);
+        try sameFile(&repo, path, expected_bitmap);
+        try repo.exec(io, &.{ "multi-pack-index", "verify" });
+        try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
+        const count = try objectwalk.countObjects(gpa, io, &db, &.{head}, &.{});
+        try std.testing.expectEqual(@as(u64, 18), count.commits);
+        try std.testing.expectEqual(@as(u64, 54), count.total());
+        try std.testing.expect(db.stats.bitmap_hits > 0);
+        try db.objectsDirectory().deleteFile(io, "pack/multi-pack-index");
+        try repo.dir.deleteFile(io, path);
+    }
+}
+
+test "pack bitmap bytes, XORs, hashes, lookup table and accelerated counts agree with git" {
+    for ([_]bool{ false, true }) |lookup| {
+        var repo = try testgit.Repo.init(gpa, io, &.{});
+        defer repo.deinit();
+        for (0..24) |n| try linearCommit(&repo, n);
+        const config: []const u8 = if (lookup) "pack.writeBitmapLookupTable=true" else "pack.writeBitmapLookupTable=false";
+        try repo.exec(io, &.{ "-c", config, "repack", "-q", "-a", "-d", "-b" });
+        const path = try bitmapPath(&repo, "pack-");
+        defer gpa.free(path);
+        const expected = try repo.readFile(io, path);
+        defer gpa.free(expected);
+        const git_dir = try repo.gitDir(io);
+        defer git_dir.close(io);
+        var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
+        defer db.deinit(io);
+        const head = try tip(&repo, .sha1);
+        const pack_name = std.fs.path.basename(path);
+        try repo.dir.deleteFile(io, path);
+        try ops.writePackBitmap(gpa, io, &db, pack_name[0 .. pack_name.len - 7], &.{head}, .{ .lookup_table = lookup });
+        try sameFile(&repo, path, expected);
+        try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
+        var store = (try bitmap_store.Store.open(gpa, io, db.objectsDirectory(), .sha1)).?;
+        defer store.deinit();
+        const head_words = (try store.reach(gpa, head)).?;
+        defer gpa.free(head_words);
+        try std.testing.expectEqual(@as(u64, 72), bitmaps.count(head_words, null));
+        const old_text = try repo.line(io, &.{ "rev-parse", "HEAD~7" });
+        defer gpa.free(old_text);
+        const old = try Oid.parse(.sha1, old_text);
+        try std.testing.expectEqual(@as(u64, 7), try objectwalk.countCommits(gpa, io, &db, &.{head}, &.{old}));
+        const counts = try objectwalk.countObjects(gpa, io, &db, &.{head}, &.{old});
+        try std.testing.expectEqual(@as(u64, 21), counts.total());
+        var missing = try objectwalk.missing(gpa, io, &db, &.{head}, &.{old});
+        defer missing.deinit();
+        try std.testing.expectEqual(@as(usize, 21), missing.entries.len);
+        const expected_objects = try repo.run(io, &.{ "rev-list", "--objects", "HEAD", "^HEAD~7" });
+        defer gpa.free(expected_objects);
+        var set: Oid.Set = .empty;
+        defer set.deinit(gpa);
+        var lines = std.mem.tokenizeScalar(u8, expected_objects, '\n');
+        while (lines.next()) |line| try set.put(gpa, try Oid.parse(.sha1, line[0..40]), {});
+        for (missing.entries) |entry| try std.testing.expect(set.contains(entry.oid));
+        try std.testing.expect(db.stats.bitmap_hits >= 3);
+        // A new commit outside the bitmap takes the ordinary walk.
+        try linearCommit(&repo, 24);
+        const next = try tip(&repo, .sha1);
+        const hits = db.stats.bitmap_hits;
+        try std.testing.expectEqual(@as(u64, 25), try objectwalk.countCommits(gpa, io, &db, &.{next}, &.{}));
+        try std.testing.expectEqual(hits, db.stats.bitmap_hits);
+    }
 }
 
 test "MIDX repack and expire retain kept packs and match git's two-step semantics" {
@@ -213,6 +323,46 @@ test "MIDX repack and expire retain kept packs and match git's two-step semantic
     }
 }
 
+test "configured maintenance writes full and split commit graphs and repack bitmaps" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..5) |n| try linearCommit(&repo, n);
+    var native = try @import("repo_core.zig").Repository.open(gpa, io, repo.dir, .{});
+    defer native.deinit(io);
+    try std.testing.expectEqual(@as(?Oid, null), try ops.writeConfiguredCommitGraph(gpa, io, &native, .fetch));
+    _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc);
+    try repo.exec(io, &.{ "commit-graph", "verify" });
+    try repo.exec(io, &.{ "config", "fetch.writeCommitGraph", "true" });
+    _ = try native.refreshConfig(io, null);
+    try linearCommit(&repo, 6);
+    _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .fetch);
+    try repo.exec(io, &.{ "commit-graph", "verify" });
+    _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 2, .sync = .none }, .remove_packs = true });
+    try repo.exec(io, &.{ "commit-graph", "verify" });
+    try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
+}
+
+test "bitmap commit selection past the dense region agrees byte for byte with git" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..140) |n| try linearCommit(&repo, n);
+    try repo.exec(io, &.{ "repack", "-q", "-a", "-d", "-b" });
+    const path = try bitmapPath(&repo, "pack-");
+    defer gpa.free(path);
+    const expected = try repo.readFile(io, path);
+    defer gpa.free(expected);
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    const head = try tip(&repo, .sha1);
+    const base = std.fs.path.basename(path);
+    try repo.dir.deleteFile(io, path);
+    try ops.writePackBitmap(gpa, io, &db, base[0 .. base.len - 7], &.{head}, .{});
+    try sameFile(&repo, path, expected);
+    try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
+}
+
 test "preferred pack duplicate selection agrees byte for byte with git" {
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
@@ -243,4 +393,24 @@ test "preferred pack duplicate selection agrees byte for byte with git" {
     _ = try ops.writeMidx(gpa, io, &db, .{ .preferred_pack = preferred.? });
     try sameFile(&repo, ".git/objects/pack/multi-pack-index", expected);
     try repo.exec(io, &.{ "multi-pack-index", "verify" });
+}
+
+test "accelerator files are deterministic across pack worker counts" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..16) |n| try linearCommit(&repo, n);
+    var native = try @import("repo_core.zig").Repository.open(gpa, io, repo.dir, .{});
+    defer native.deinit(io);
+    const first = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1, .sync = .none }, .remove_packs = true });
+    const graph_bytes = try repo.readFile(io, ".git/objects/info/commit-graph");
+    defer gpa.free(graph_bytes);
+    const path = try bitmapPath(&repo, "pack-");
+    defer gpa.free(path);
+    const bitmap_bytes = try repo.readFile(io, path);
+    defer gpa.free(bitmap_bytes);
+    const second = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 4, .sync = .none }, .remove_packs = true });
+    try std.testing.expect(first.written.?.name.eql(second.written.?.name));
+    try sameFile(&repo, ".git/objects/info/commit-graph", graph_bytes);
+    try sameFile(&repo, path, bitmap_bytes);
+    try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
 }

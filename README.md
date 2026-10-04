@@ -243,9 +243,8 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `odb.Alternates.deinit` | Release a `listAlternates` result after reading its paths. |
 | `odb.pack`, `odb.delta` | `Index` (`.idx` v2), `Pack`, `Cache`, `Writer`; `apply` and `encode`. Both delta kinds, the 64-bit offset table, a bounded chain, `verify`, and writing a pack and its index. |
 | `odb.indexpack`, `odb.inflate`, `odb.revindex` | Receiving a pack: indexed as it arrives, deltas resolved on the caller's executor, `.rev` files. |
-| `odb.accelerators.writeMidx`, `repackMidx`, `expireMidx` | Write and verify a multi-pack index with preferred-pack selection, RIDX and BTMP; repack and expire retain kept and cruft packs. |
-| `odb.accelerators.writeCommitGraph` | Write full and split commit-graphs, generation v2 with overflow and changed-path Bloom filters v1/v2; `odb.commitgraph.Graph` reads and verifies them. |
-| `odb.commitgraph`, `odb.midx` | The two accelerators, read. A `revwalk.Walk` takes parents and times from a commit-graph when it is given one and reads the object when it is not; a lookup asks a multi-pack index which pack to open before it asks the packs one by one. Neither changes an answer. |
+| `odb.commitgraph`, `odb.midx`, `odb.bitmap` | Read, verify and encode git's accelerators: full and split commit-graphs, generation v2 and overflow, changed-path Bloom filters v1/v2; MIDX preferred-pack selection, RIDX and BTMP; pack and MIDX bitmaps, EWAH, XORs, hash caches and lookup tables. |
+| `odb.accelerators` | `writeCommitGraph`, `writeMidx`, `repackMidx`, `expireMidx`, `writePackBitmap`, `writeMidxBitmap`, `writeConfiguredCommitGraph`, `repackRepository`. The format modules own the bytes; these operations gather through the object database, diff and revision walk. Fetch applies `fetch.writeCommitGraph`; configured maintenance applies `gc.writeCommitGraph` and the bitmap settings. |
 | `odb.abbrev` | Short object names as git prints them. |
 | `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. |
 | `refs.reflog` | `append`, `read`, `Log.at` for `HEAD@{n}`, `Policy` for `core.logAllRefUpdates`. |
@@ -270,7 +269,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `diff.rename`, `diff.similarity` | Rename and copy detection with git's score and diffcore's order: `-M`, `-C`, `--find-copies-harder`. |
 | `diff.patchid` | Patch ids: a name for what a commit changes. |
 | `diff.blame` | `file` — which commit each line of a file comes from, as `git blame` says, following renames. |
-| `revwalk` | `Walk`, `mergeBase`, `mergeBases`, `mergeBasesWith`, `mergeBasesMany`, `isAncestor`, `isAncestorWith`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary. |
+| `revwalk` | `count`, `countObjects` (bitmap-backed counts, ordinary walks on a miss), `Walk`, `mergeBase`, `mergeBases`, `mergeBasesWith`, `mergeBasesMany`, `isAncestor`, `isAncestorWith`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary. |
 | `revwalk.revparse` | git's revision grammar. |
 | `revwalk.shallow` | A shallow repository's boundary: `.git/shallow`. |
 | `revwalk.describe` | `describe`, `head`, `Describer`: `git describe` with `--tags`, `--all`, `--long`, `--abbrev`, `--candidates`, `--match`, `--exclude`, `--first-parent`, `--always`, `--dirty`, `--broken`, a blob as `<commit>:<path>`, and `--contains` as `git name-rev` names it. |
@@ -669,9 +668,19 @@ nanoseconds need opposite answers here, and guessing either way is a bug.
 zeros there is what makes the next `git status` treat every entry as needing a
 refresh and re-hash the whole working tree.
 
+Reachability bitmaps are opened on first use and kept until `Odb.refresh`.
+`objectwalk.missing` uses their wanted-minus-hidden object set for unfiltered,
+non-shallow requests, including upload-pack's enumeration; their name hashes
+remain delta hints. `revwalk.count` intersects that set with the commit type
+map. `Odb.stats.bitmap_hits` records the requests answered this way.
+`Odb.Options.use_bitmaps = false` makes the same requests walk objects instead.
+A commit outside the selected bitmap entries, a filter or a shallow boundary
+uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
+`BitmapNotClosed`; commit-graph writing refuses shallow input and cycles.
+
 ## Scope
 
-- **No pack bitmaps and no multi-pack index written.** The multi-pack index is read, a bitmap is not, and a pack without either is a pack git reads.
+- **No pseudo-merge bitmap extension or incremental MIDX chains.** `UnsupportedBitmapOptions` and `ChainUnsupported` name these; ordinary pack and MIDX bitmaps are read and written. An unusable optional accelerator falls back to the object walk.
 - **No `working-tree-encoding`.** A character-set conversion; refused by name.
 - **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name.
 - **LFS without git-lfs's extras.** tus and custom transfer adapters are refused by name.

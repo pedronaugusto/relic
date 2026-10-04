@@ -21,6 +21,8 @@ pub const Data = struct {
     sources: std.ArrayList(Source) = .empty,
     cache: pack.Cache,
     generation: u32 = 0,
+    bitmap_checked: bool = false,
+    bitmap: ?@import("bitmap_store.zig").Store = null,
     deflate_window: []u8,
     deflate_state: ?DeflateState = null,
 };

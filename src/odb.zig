@@ -11,8 +11,9 @@ pub const inflate = @import("inflate.zig");
 pub const indexpack = @import("indexpack.zig");
 pub const revindex = @import("revindex.zig");
 pub const commitgraph = @import("commitgraph.zig");
-pub const accelerators = @import("accelerators.zig");
+pub const bitmap = @import("bitmap.zig");
 pub const midx = @import("midx.zig");
+pub const accelerators = @import("accelerators.zig");
 pub const abbrev = @import("abbrev.zig");
 /// How the object database behaves. The only caches in this package are
 /// named here.

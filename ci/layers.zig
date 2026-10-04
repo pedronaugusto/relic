@@ -60,6 +60,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "formats and file policy", .patterns = &.{
         "src/accelerator_format.zig",
         "src/bloom.zig",
+        "src/bitmap.zig",
         "src/attributes.zig",
         "src/auth.zig",
         "src/commitgraph.zig",
@@ -122,6 +123,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/tls/root.zig",
     } },
     .{ .name = "storage contracts", .patterns = &.{
+        "src/bitmap_store.zig",
         "src/clientcert.zig",
         "src/httpclient.zig",
         "src/odb_types.zig",

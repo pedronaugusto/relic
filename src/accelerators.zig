@@ -387,6 +387,233 @@ fn existsFile(io: Io, dir: Io.Dir, path: []const u8) Io.Dir.AccessError!bool {
     return true;
 }
 
+const bitmap_mod = @import("bitmap.zig");
+const objectwalk = @import("objectwalk.zig");
+
+/// How the optional bitmap extensions are written, with Git's defaults.
+pub const BitmapOptions = struct {
+    hash_cache: bool = true,
+    /// Commits selected by pack.preferBitmapTips, supplied after ref-name matching.
+    preferred_tips: []const Oid = &.{},
+    lookup_table: bool = false,
+    sync: fs.Sync = .none,
+};
+pub const BitmapError = Error || MidxError || @import("revwalk_core.zig").Error || objectwalk.Error || bitmap_mod.Error || error{ InvalidBitmapInput, BitmapNotClosed };
+
+const BitmapCommit = struct {
+    oid: Oid,
+    position: u32,
+    time: i64,
+    parents: usize,
+    needed: bool,
+    fn newer(_: void, a: BitmapCommit, b: BitmapCommit) bool {
+        return a.time > b.time;
+    }
+    fn older(_: void, a: BitmapCommit, b: BitmapCommit) bool {
+        return a.time < b.time;
+    }
+};
+
+fn selectedCommits(arena: Allocator, candidates: []BitmapCommit) Allocator.Error![]BitmapCommit {
+    std.mem.sort(BitmapCommit, candidates, {}, BitmapCommit.newer);
+    var selected: std.ArrayList(BitmapCommit) = .empty;
+    if (candidates.len < 100) try selected.appendSlice(arena, candidates) else {
+        var i: usize = 0;
+        while (i < candidates.len) {
+            const next: usize = if (i <= 100) 0 else if (i <= 20000) @min(i - 100, 100) else @max(@min(i - 20000, 5000), 100);
+            if (i + next >= candidates.len) break;
+            var chosen = candidates[i + next];
+            for (candidates[i .. i + next + 1]) |candidate| {
+                if (candidate.needed) {
+                    chosen = candidate;
+                    break;
+                }
+                if (candidate.parents > 1) chosen = candidate;
+            }
+            try selected.append(arena, chosen);
+            i += next + 1;
+        }
+    }
+    std.mem.sort(BitmapCommit, selected.items, {}, BitmapCommit.older);
+    return selected.items;
+}
+
+fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []const Oid, reverse: []const u32, tips: []const Oid, options: BitmapOptions, midx_bitmap: bool) BitmapError![]u8 {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    var positions: Oid.Map(u32) = .empty;
+    for (reverse, 0..) |pos, i| try positions.put(arena, names[pos], @intCast(i));
+    var needed: Oid.Set = .empty;
+    for (options.preferred_tips) |oid| try needed.put(arena, oid, {});
+    const word_count = (names.len + 63) / 64;
+    var types: [4][]u64 = undefined;
+    for (&types) |*words| {
+        words.* = try arena.alloc(u64, word_count);
+        @memset(words.*, 0);
+    }
+    var candidates: std.ArrayList(BitmapCommit) = .empty;
+    for (names) |oid| {
+        const header = try db.readHeader(io, oid);
+        const kind_index: usize = switch (header.type) {
+            .commit => 0,
+            .tree => 1,
+            .blob => 2,
+            .tag => 3,
+        };
+        const pos = positions.get(oid).?;
+        setBit(types[kind_index], pos);
+    }
+    var name_positions: Oid.Map(u32) = .empty;
+    for (names, 0..) |oid, i| try name_positions.put(arena, oid, @intCast(i));
+    var walk = @import("revwalk_core.zig").Walk.init(gpa, db);
+    defer walk.deinit();
+    for (tips) |tip_oid| {
+        var oid = tip_oid;
+        var depth: usize = 0;
+        while ((try db.readHeader(io, oid)).type == .tag) {
+            if (depth >= 16) return error.InvalidBitmapInput;
+            const found = try db.read(io, oid);
+            defer db.allocator().free(found.bytes);
+            var tag = try object.Tag.parse(gpa, db.objectFormat(), found.bytes);
+            defer tag.deinit();
+            oid = tag.target;
+            depth += 1;
+        }
+        if ((try db.readHeader(io, oid)).type == .commit) try walk.push(oid);
+    }
+    while (try walk.next(io)) |commit| {
+        const pos = name_positions.get(commit.oid) orelse continue;
+        try candidates.append(arena, .{ .oid = commit.oid, .position = pos, .time = commit.time, .parents = commit.parents.len, .needed = needed.contains(commit.oid) });
+    }
+    const selected = try selectedCommits(arena, candidates.items);
+    var cache: Oid.Map([]const u64) = .empty;
+    var entries: std.ArrayList(bitmap_mod.WriteCommit) = .empty;
+    var pending: std.ArrayList(Oid) = .empty;
+    for (selected) |candidate| {
+        const words = try arena.alloc(u64, word_count);
+        @memset(words, 0);
+        try pending.append(arena, candidate.oid);
+        while (pending.pop()) |oid| {
+            const pos = positions.get(oid) orelse return error.BitmapNotClosed;
+            if (bitmap_mod.isSet(words, pos)) continue;
+            if (cache.get(oid)) |previous| {
+                for (words, previous) |*word, base| word.* |= base;
+                continue;
+            }
+            setBit(words, pos);
+            const header = try db.readHeader(io, oid);
+            if (header.type == .blob) continue;
+            const found = try db.read(io, oid);
+            defer db.allocator().free(found.bytes);
+            switch (header.type) {
+                .commit => {
+                    var commit = try object.Commit.parse(gpa, db.objectFormat(), found.bytes);
+                    defer commit.deinit();
+                    // Parents run before trees, so a cached ancestor can
+                    // exclude its unchanged subtrees without reading them.
+                    try pending.append(arena, commit.tree);
+                    try pending.appendSlice(arena, commit.parents);
+                },
+                .tree => {
+                    var iterator = object.Tree.parse(db.objectFormat(), found.bytes).iterate();
+                    while (try iterator.next()) |entry| if (entry.mode != .gitlink) {
+                        try pending.append(arena, entry.oid);
+                    };
+                },
+                .tag => {
+                    var tag = try object.Tag.parse(gpa, db.objectFormat(), found.bytes);
+                    defer tag.deinit();
+                    try pending.append(arena, tag.target);
+                },
+                .blob => unreachable,
+            }
+        }
+        try cache.put(arena, candidate.oid, words);
+        try entries.append(arena, .{ .position = candidate.position, .words = words });
+    }
+    var hashes: ?[]u32 = null;
+    if (options.hash_cache) {
+        hashes = try arena.alloc(u32, names.len);
+        @memset(hashes.?, 0);
+        var collected = try objectwalk.missingWith(gpa, io, db, tips, &.{}, .{ .use_bitmaps = false });
+        defer collected.deinit();
+        for (collected.entries) |entry| if (!midx_bitmap) if (name_positions.get(entry.oid)) |pos| {
+            hashes.?[pos] = bitmap_mod.nameHash(entry.hint);
+        };
+    }
+    return bitmap_mod.encode(gpa, db.objectFormat(), checksum, .{ types[0], types[1], types[2], types[3] }, entries.items, .{ .hash_cache = hashes, .lookup_table = options.lookup_table });
+}
+
+fn setBit(words: []u64, pos: u32) void {
+    words[pos / 64] |= @as(u64, 1) << @as(u6, @intCast(pos % 64));
+}
+
+/// Write a reachability bitmap for an existing pack. The pack must contain the
+/// entire history of every commit it holds, as Git's FULL_DAG flag requires.
+pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const u8, tips: []const Oid, options: BitmapOptions) BitmapError!void {
+    if (std.mem.indexOfAny(u8, pack_name, "/\\") != null or !std.mem.startsWith(u8, pack_name, "pack-")) return error.InvalidBitmapInput;
+    const base = if (std.mem.endsWith(u8, pack_name, ".pack")) pack_name[0 .. pack_name.len - 5] else if (std.mem.endsWith(u8, pack_name, ".idx")) pack_name[0 .. pack_name.len - 4] else pack_name;
+    const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    defer dir.close(io);
+    const path = try std.fmt.allocPrint(gpa, "{s}.idx", .{base});
+    defer gpa.free(path);
+    var index = try pack_mod.Index.open(gpa, io, dir, path, db.objectFormat(), 1 << 30);
+    defer index.deinit();
+    const names = try gpa.alloc(Oid, index.count);
+    defer gpa.free(names);
+    const reverse = try gpa.alloc(u32, index.count);
+    defer gpa.free(reverse);
+    const offsets = try gpa.alloc(u64, index.count);
+    defer gpa.free(offsets);
+    for (names, reverse, offsets, 0..) |*oid, *pos, *offset, i| {
+        oid.* = index.nameAt(@intCast(i));
+        pos.* = @intCast(i);
+        offset.* = try index.offsetAt(@intCast(i));
+    }
+    const Order = struct {
+        fn less(context: []const u64, a: u32, b: u32) bool {
+            return context[a] < context[b];
+        }
+    };
+    std.mem.sort(u32, reverse, offsets, Order.less);
+    const bytes = try buildBitmap(gpa, io, db, index.pack_checksum, names, reverse, tips, options, false);
+    defer gpa.free(bytes);
+    const target = try std.fmt.allocPrint(gpa, "{s}.bitmap", .{base});
+    defer gpa.free(target);
+    try publish(gpa, io, dir, target, bytes, options.sync);
+    try db.refresh(io);
+}
+
+/// Write a MIDX with RIDX and BTMP, then the bitmap named by its checksum.
+pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, midx_options: MidxOptions, options: BitmapOptions) BitmapError!?Oid {
+    var write_options = midx_options;
+    write_options.reverse_index = true;
+    write_options.keep_bitmaps = true;
+    const checksum = (try writeMidx(gpa, io, db, write_options)) orelse return null;
+    const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    defer dir.close(io);
+    var index = (try midx_mod.Index.open(gpa, io, dir, db.objectFormat())).?;
+    defer index.deinit();
+    const names = try gpa.alloc(Oid, index.count);
+    defer gpa.free(names);
+    const reverse = try gpa.alloc(u32, index.count);
+    defer gpa.free(reverse);
+    for (names, reverse, 0..) |*oid, *pos, i| {
+        oid.* = index.nameAt(@intCast(i));
+        pos.* = (try index.reverseAt(@intCast(i))).?;
+    }
+    const bytes = try buildBitmap(gpa, io, db, checksum, names, reverse, tips, options, true);
+    defer gpa.free(bytes);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const path = try std.fmt.allocPrint(gpa, "multi-pack-index-{s}.bitmap", .{checksum.hex(&hex)});
+    defer gpa.free(path);
+    try publish(gpa, io, dir, path, bytes, options.sync);
+    try clearMidxBitmaps(gpa, io, dir, path);
+    try db.refresh(io);
+    return checksum;
+}
+
 /// Git's MIDX repack selection. Zero batch size selects all eligible packs;
 /// a nonzero batch takes older packs whose estimated live size is below it.
 pub const MidxRepackOptions = struct {
@@ -459,6 +686,80 @@ pub fn repackMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxRepackOptio
     try db.refresh(io);
     _ = try writeMidx(gpa, io, db, .{ .sync = options.sync });
     return written;
+}
+
+const repo_mod = @import("repo_core.zig");
+const config_mod = @import("config_core.zig");
+
+/// Failures while applying a repository's accelerator configuration.
+pub const MaintenanceError = BitmapError || repo_mod.Error || config_mod.ValueError || error{ UnsupportedGenerationVersion, ReplacedCommitGraph };
+
+/// The purpose selects Git's writeCommitGraph key and default.
+pub const Maintenance = enum { gc, fetch };
+
+fn repositoryTips(gpa: Allocator, io: Io, repo: *repo_mod.Repository) repo_mod.Error![]Oid {
+    var listed = try repo.refStore().list(gpa, io, "refs/");
+    defer listed.deinit();
+    var tips: std.ArrayList(Oid) = .empty;
+    errdefer tips.deinit(gpa);
+    for (listed.entries) |entry| {
+        const oid = switch (entry.target) {
+            .direct => |oid| oid,
+            .symbolic => blk: {
+                const resolved = (try repo.refStore().resolve(gpa, io, entry.name)) orelse continue;
+                defer gpa.free(resolved.name);
+                break :blk resolved.oid;
+            },
+        };
+        const peeled = try repo.peel(io, oid);
+        if ((try repo.odb.readHeader(io, peeled)).type == .commit) try tips.append(gpa, peeled);
+    }
+    return tips.toOwnedSlice(gpa);
+}
+
+/// Apply gc.writeCommitGraph (default true) or fetch.writeCommitGraph (default false).
+/// Fetch uses split chains; gc publishes a full graph. A shallow repository is skipped,
+/// as Git skips it, and replace refs are refused by name.
+pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Repository, purpose: Maintenance) MaintenanceError!?Oid {
+    const config = repo.configuration();
+    if (!try config.getBool(if (purpose == .gc) "gc.writecommitgraph" else "fetch.writecommitgraph", purpose == .gc)) return null;
+    if (repo.odb.shallow.count() != 0) return null;
+    var replaced = try repo.refStore().list(gpa, io, "refs/replace/");
+    defer replaced.deinit();
+    if (replaced.entries.len != 0) return error.ReplacedCommitGraph;
+    const generation_version = try config.getInt("commitgraph.generationversion", 2);
+    if (generation_version != 1 and generation_version != 2) return error.UnsupportedGenerationVersion;
+    const tips = try repositoryTips(gpa, io, repo);
+    defer gpa.free(tips);
+    var settings: ?graph_mod.bloom.Settings = null;
+    var old = try graph_mod.Graph.open(gpa, io, repo.odb.objectsDirectory(), repo.objectFormat());
+    defer if (old) |*g| g.deinit();
+    if (old) |*g| if (g.count > 0) if (try g.changedPaths(g.count - 1)) |filter| {
+        settings = filter.settings;
+    };
+    if (settings) |*value| {
+        const version = try config.getInt("commitgraph.changedpathsversion", value.version);
+        if (version != 1 and version != 2) return error.UnsupportedBloomVersion;
+        value.version = @intCast(version);
+    }
+    return writeCommitGraph(gpa, io, &repo.odb, tips, .{ .split = if (purpose == .fetch) .merge else .none, .generations = generation_version == 2, .changed_paths = settings, .sync = repo.odb.settings().sync });
+}
+
+/// Repack the repository and apply its bitmap and gc.writeCommitGraph policies.
+/// Object retention is the caller's RepackOptions; this hook does not prune refs or reflogs.
+pub fn repackRepository(gpa: Allocator, io: Io, repo: *repo_mod.Repository, options: odb.Odb.RepackOptions) MaintenanceError!odb.Odb.RepackReport {
+    const report = try repo.odb.repack(io, options);
+    const config = repo.configuration();
+    if (report.written) |written| if (try config.getBool("repack.writebitmaps", true)) {
+        const tips = try repositoryTips(gpa, io, repo);
+        defer gpa.free(tips);
+        var hex: [hash.max_hex_len]u8 = undefined;
+        const name = try std.fmt.allocPrint(gpa, "pack-{s}", .{written.name.hex(&hex)});
+        defer gpa.free(name);
+        try writePackBitmap(gpa, io, &repo.odb, name, tips, .{ .hash_cache = try config.getBool("pack.writebitmaphashcache", true), .lookup_table = try config.getBool("pack.writebitmaplookuptable", false), .sync = repo.odb.settings().sync });
+    };
+    _ = try writeConfiguredCommitGraph(gpa, io, repo, .gc);
+    return report;
 }
 
 fn clearMidxBitmaps(gpa: Allocator, io: Io, dir: Io.Dir, keep: ?[]const u8) MidxError!void {

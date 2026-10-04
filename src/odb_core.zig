@@ -188,6 +188,28 @@ pub const Odb = struct {
         unreachable;
     }
 
+    /// The optional reachability bitmap, opened on first use and kept until refresh.
+    /// Malformed or unsupported optional data falls back to object traversal.
+    pub fn reachabilityBitmap(db: *Odb, io: Io) Error!?*const @import("bitmap_store.zig").Store {
+        const data = db.backendData();
+        if (!data.options.use_bitmaps or db.shallow.count() != 0) return null;
+        if (!data.bitmap_checked) {
+            data.bitmap = @import("bitmap_store.zig").Store.open(data.gpa, io, db.objectsDirectory(), data.kind) catch |err| blk: {
+                if (@import("odbinit.zig").readRefusal(err)) return @errorCast(err);
+                break :blk null;
+            };
+            data.bitmap_checked = true;
+        }
+        return if (data.bitmap) |*value| value else null;
+    }
+
+    fn clearBitmap(db: *Odb) void {
+        const data = db.backendData();
+        if (data.bitmap) |*value| value.deinit();
+        data.bitmap = null;
+        data.bitmap_checked = false;
+    }
+
     /// A fetch of missing objects, installed by the caller: `partial.zig`
     /// makes one.
     pub const Lazy = struct {
@@ -435,12 +457,14 @@ pub const Odb = struct {
     /// scan. `read` does this once on a miss; a caller watching a repository
     /// a `gc` runs in may call it.
     pub fn refresh(odb: *Odb, io: Io) Error!void {
+        odb.clearBitmap();
         for (0..odb.backendData().sources.items.len) |i| try odb.scanPacks(io, i);
         odb.backendData().generation += 1;
     }
 
     /// Close every pack and release everything held.
     pub fn deinit(odb: *Odb, io: Io) void {
+        odb.clearBitmap();
         for (odb.backendData().sources.items) |*source| odb.closeSource(io, source);
         odb.backendData().sources.deinit(odb.backendData().gpa);
         if (odb.backendData().deflate_window.len != 0) odb.backendData().gpa.free(odb.backendData().deflate_window);
@@ -1530,7 +1554,7 @@ pub const Odb = struct {
                 .oid = entry.oid,
                 .type = if (entry.header) |h| h.type else undefined,
                 .size = if (entry.header) |h| h.size else undefined,
-                .name_hash = nameHash(entry.hint),
+                .name_hash = entry.hint_hash orelse nameHash(entry.hint),
                 .cached = null,
                 .known = entry.header != null,
                 .loose = entry.header != null and !entry.in_pack,
@@ -1547,7 +1571,7 @@ pub const Odb = struct {
                         .oid = entry.oid,
                         .type = header.type,
                         .size = header.size,
-                        .name_hash = nameHash(entry.hint),
+                        .name_hash = entry.hint_hash orelse nameHash(entry.hint),
                         .cached = null,
                         .loose = !entry.in_pack,
                     };
@@ -1561,7 +1585,7 @@ pub const Odb = struct {
                     .oid = entry.oid,
                     .type = found.header.type,
                     .size = found.header.size,
-                    .name_hash = nameHash(entry.hint),
+                    .name_hash = entry.hint_hash orelse nameHash(entry.hint),
                     .cached = found.bytes,
                     .loose = found.loose,
                 };
@@ -2387,6 +2411,8 @@ pub const PackEntry = struct {
     /// well against each other, which is the whole of git's ordering
     /// heuristic. A wrong hint costs compression and nothing else.
     hint: []const u8 = &.{},
+    /// A bitmap hash cache supplies the same hint without its path string.
+    hint_hash: ?u32 = null,
     /// The object's type and size, when the caller has already read them,
     /// as `collectLoose` and `collectAll` have; `writePack` then does not
     /// read them again. The pack is written from the object itself, so a

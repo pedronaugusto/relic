@@ -648,6 +648,12 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 
     if (options.write_fetch_head) try writeFetchHead(gpa, io, repo, fetch_head.items, options.append);
 
+    if (try repo.configuration().getBool("fetch.writecommitgraph", false)) {
+        _ = @import("accelerators.zig").writeConfiguredCommitGraph(gpa, io, repo, .fetch) catch |err| blk: {
+            try warning.note(options.warnings, .{ .commit_graph_write_failed = err });
+            break :blk null;
+        };
+    }
     outcome.updates = updates.items;
     outcome.pruned = pruned.items;
     outcome.fetch_head = fetch_head.items;

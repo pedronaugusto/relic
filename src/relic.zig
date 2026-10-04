@@ -9,7 +9,7 @@
 //! | `repo` | `Repository`: open or create one, and reach the rest from it. | `hooks`, `program`, `warning`, `fs` |
 //! | `hash` | `Oid`, `Kind`, `Hasher`: object names, SHA-1 or SHA-256. | `sha1`, `sha1dc` |
 //! | `object` | `Commit`, `Tree`, `Tag`, `Signature`: objects as bytes. | `fsck` |
-//! | `odb` | `Odb`: loose objects, packs, alternates. | `pack`, `delta`, `inflate`, `indexpack`, `revindex`, `commitgraph`, `midx`, `abbrev` |
+//! | `odb` | `Odb`: loose objects, packs, alternates. | `pack`, `delta`, `inflate`, `indexpack`, `revindex`, `commitgraph`, `midx`, `bitmap`, `accelerators`, `abbrev` |
 //! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs`. | `reflog`, `reftable`, `reftablestack` |
 //! | `config` | `Config`: git's configuration files, lossless. | `userconfig` |
 //! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex` |

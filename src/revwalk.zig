@@ -81,3 +81,8 @@ pub const mergeBase = core.mergeBase;
 pub const isAncestor = core.isAncestor;
 /// `isAncestor`, reading commits as `options` says.
 pub const isAncestorWith = core.isAncestorWith;
+
+/// Git's rev-list --count, accelerated by reachability bitmaps.
+pub const count = @import("objectwalk.zig").countCommits;
+/// Reachable object counts by type, as rev-list --objects --count.
+pub const countObjects = @import("objectwalk.zig").countObjects;
