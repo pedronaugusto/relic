@@ -1316,7 +1316,9 @@ pub const Connection = struct {
         const c = conn.client;
         const w = conn.writer();
         var authority_buf: [300]u8 = undefined;
-        const authority = std.fmt.bufPrint(&authority_buf, "{s}:{d}", .{ target.host, target.port }) catch return error.HttpProtocolError;
+        var host_buffer: [260]u8 = undefined;
+        const host = try authorityHost(target.host, &host_buffer);
+        const authority = std.fmt.bufPrint(&authority_buf, "{s}:{d}", .{ host, target.port }) catch return error.HttpProtocolError;
         const answer = try c.proxyAuthorization("CONNECT", authority);
         defer if (answer) |a| c.gpa.free(a);
         w.print("CONNECT {s} HTTP/1.1\r\nHost: {s}\r\n", .{ authority, authority }) catch return conn.writeFailed();
@@ -1347,11 +1349,21 @@ pub const Connection = struct {
         return error.ProxyAuthenticationRequired;
     }
 
+    /// URL authorities bracket IPv6; the SOCKS wire uses its address bytes.
+    fn authorityHost(host: []const u8, buffer: []u8) Error![]const u8 {
+        if (std.mem.indexOfScalar(u8, host, ':') != null and host[0] != '[') {
+            return std.fmt.bufPrint(buffer, "[{s}]", .{host}) catch error.HttpProtocolError;
+        }
+        return host;
+    }
+
     const BodyKind = union(enum) { none, content_length: usize, chunked };
 
     fn writeHead(conn: *Connection, method: http.Method, path: []const u8, headers: []const http.Header, body: BodyKind) Error!void {
         const w = conn.writer();
         const t = conn.target;
+        var host_buffer: [260]u8 = undefined;
+        const host = try authorityHost(t.host, &host_buffer);
         // A request a proxy is handed whole is answered for with its path
         // as the Digest target, as curl answers.
         const proxy_answer: ?[]u8 = if (conn.absolute_form)
@@ -1362,10 +1374,10 @@ pub const Connection = struct {
         (write: {
             w.print("{s} ", .{@tagName(method)}) catch |e| break :write e;
             if (conn.absolute_form) {
-                w.print("http://{s}", .{t.host}) catch |e| break :write e;
+                w.print("http://{s}", .{host}) catch |e| break :write e;
                 if (t.port != 80) w.print(":{d}", .{t.port}) catch |e| break :write e;
             }
-            w.print("{s} HTTP/1.1\r\nHost: {s}", .{ path, t.host }) catch |e| break :write e;
+            w.print("{s} HTTP/1.1\r\nHost: {s}", .{ path, host }) catch |e| break :write e;
             if (t.port != (if (t.tls) @as(u16, 443) else 80)) w.print(":{d}", .{t.port}) catch |e| break :write e;
             w.writeAll("\r\n") catch |e| break :write e;
             if (proxy_answer) |a| w.print("Proxy-Authorization: {s}\r\n", .{a}) catch |e| break :write e;
@@ -1444,6 +1456,18 @@ test "a request's head is written as curl writes it, direct and through a proxy"
             "Host: git.example.com:8080\r\nProxy-Authorization: Basic YTpi\r\nGit-Protocol: version=2\r\n\r\n",
         conn.stream_writer.interface.buffered(),
     );
+    // A SOCKS5 tunnel can reach an IPv6 literal. Its HTTP authority still
+    // uses URL brackets, even though the SOCKS address itself is binary.
+    conn.target = .{ .tls = false, .host = "::1", .port = 80 };
+    conn.absolute_form = false;
+    conn.stream_writer.interface = .fixed(&out);
+    try conn.writeHead(.GET, "/", &.{}, .none);
+    try std.testing.expectEqualStrings("GET / HTTP/1.1\r\nHost: [::1]\r\n\r\n", conn.stream_writer.interface.buffered());
+    conn.target.port = 8080;
+    conn.absolute_form = true;
+    conn.stream_writer.interface = .fixed(&out);
+    try conn.writeHead(.GET, "/", &.{}, .none);
+    try std.testing.expectEqualStrings("GET http://[::1]:8080/ HTTP/1.1\r\nHost: [::1]:8080\r\nProxy-Authorization: Basic YTpi\r\n\r\n", conn.stream_writer.interface.buffered());
 }
 
 /// Test-only: a server on 127.0.0.1 that answers every request on a
