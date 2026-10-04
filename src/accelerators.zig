@@ -644,6 +644,9 @@ pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, 
     write_options.reverse_index = true;
     write_options.keep_bitmaps = true;
     const checksum = (try writeMidx(gpa, io, db, write_options)) orelse return null;
+    // Git leaves an unchanged MIDX and its valid existing bitmap alone, even
+    // when the writer's extension settings have changed since publication.
+    if (try db.reachabilityBitmap(io)) |previous| if (previous.bitmap.checksum.eql(checksum)) return checksum;
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var index = (try midx_mod.Index.open(gpa, io, dir, db.objectFormat())).?;

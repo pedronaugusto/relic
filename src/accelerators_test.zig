@@ -481,3 +481,25 @@ test "merged split layers are marked at the write time before an older expiry cu
     try repo.dir.access(io, path, .{});
     try std.testing.expect((try repo.dir.statFile(io, path, .{})).mtime.toSeconds() > 1);
 }
+
+test "an unchanged MIDX bitmap is retained even when bitmap configuration changes" {
+    try testgit.requireGitVersion(gpa, io, 2, 43);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..5) |n| try linearCommit(&repo, n);
+    try repo.exec(io, &.{ "repack", "-q", "-a", "-d" });
+    try repo.exec(io, &.{ "-c", "pack.writeBitmapLookupTable=false", "multi-pack-index", "write", "--bitmap" });
+    const path = try bitmapPath(&repo, "multi-pack-index-");
+    defer gpa.free(path);
+    const expected = try repo.readFile(io, path);
+    defer gpa.free(expected);
+    try repo.exec(io, &.{ "-c", "pack.writeBitmapLookupTable=true", "multi-pack-index", "write", "--bitmap" });
+    try sameFile(&repo, path, expected);
+    const dir = try repo.gitDir(io);
+    defer dir.close(io);
+    var db = try odb.Odb.open(gpa, io, dir, .sha1, .{});
+    defer db.deinit(io);
+    const head = try tip(&repo, .sha1);
+    _ = try ops.writeMidxBitmap(gpa, io, &db, &.{head}, .{}, .{ .lookup_table = true });
+    try sameFile(&repo, path, expected);
+}
