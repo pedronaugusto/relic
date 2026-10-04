@@ -1097,6 +1097,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
     defer proxy.stop();
     for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
         for ([_]bool{ false, true }) |secure| {
+            errdefer std.debug.print("SOCKS transfer case: {s} over {s}\n", .{ scheme, if (secure) "https" else "http" });
             var env = try testremote.environ(gpa);
             defer env.deinit();
             const proxy_url = try proxy.url(gpa, scheme, "ada:secret@");
