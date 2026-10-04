@@ -109,7 +109,11 @@ fn old(c: Context) !void {
     try std.Io.Dir.cwd().createDirPath(c.io, "/etc/apt/sources.list.d");
     try std.Io.Dir.cwd().writeFile(c.io, .{ .sub_path = "/etc/apt/preferences.d/archive", .data = "Package: *\nPin: release n=bullseye\nPin-Priority: 1001\n" });
     try c.command(&.{ "apt-get", "update" });
-    try c.command(&.{ "apt-get", "install", "-y", "--no-install-recommends", "--allow-downgrades", "git", "ca-certificates", "gnupg", "openssh-client" });
+    // Match the original minimal Debian job's oracle tools. The bootstrap
+    // image supplies xz for Zig, but also tools the Git 2.30.2 job never had.
+    // Modern native jobs keep Python and signers for the full comparisons.
+    try c.command(&.{ "apt-get", "remove", "-y", "--purge", "python3-minimal", "openssh-client", "gpg", "gpgconf" });
+    try c.command(&.{ "apt-get", "install", "-y", "--no-install-recommends", "--allow-downgrades", "git", "curl", "xz-utils", "ca-certificates" });
     const version = try c.capture(&.{ "git", "--version" });
     if (!std.mem.startsWith(u8, version, "git version 2.30.2")) return error.WrongOldestGit;
 }

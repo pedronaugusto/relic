@@ -206,9 +206,20 @@ pub fn build(b: *std.Build) void {
         if (!old_git) {
             const root = b.pathJoin(&.{ temp, "preflight-tools" });
             const separator = if (b.graph.host.result.os.tag == .windows) ";" else ":";
-            const git_bin = b.pathJoin(&.{ root, if (master_git) "master" else "git", "bin" });
+            // Git's bin launcher starts another process. Use the native
+            // executable and its Unix tools on the hosted Windows runner.
+            const git_root = b.graph.environ_map.get("ProgramFiles") orelse "C:\\Program Files";
+            const git_bin = if (b.graph.host.result.os.tag == .windows)
+                b.pathJoin(&.{ git_root, "Git", "mingw64", "bin" })
+            else
+                b.pathJoin(&.{ root, if (master_git) "master" else "git", "bin" });
             const lfs_bin = b.pathJoin(&.{ root, "lfs", "bin" });
-            run_tests.setEnvironmentVariable("PATH", b.fmt("{s}{s}{s}{s}{s}", .{ git_bin, separator, lfs_bin, separator, b.graph.environ_map.get("PATH") orelse "" }));
+            const original_path = b.graph.environ_map.get("PATH") orelse "";
+            const remaining_path = if (b.graph.host.result.os.tag == .windows)
+                b.fmt("{s};{s}", .{ b.pathJoin(&.{ git_root, "Git", "usr", "bin" }), original_path })
+            else
+                original_path;
+            run_tests.setEnvironmentVariable("PATH", b.fmt("{s}{s}{s}{s}{s}", .{ git_bin, separator, lfs_bin, separator, remaining_path }));
         }
         if (b.graph.host.result.os.tag == .linux and !old_git) run_tests.setEnvironmentVariable("RELIC_REQUIRE_SIGNERS", "1");
     }
