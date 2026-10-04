@@ -156,6 +156,8 @@ pub const families = [_]Family{
         "transport.push.test",
         "transport.refspec.test",
         "transport.remote.test",
+        "transport.remotehelper.test",
+        "transport.remotehelper_test.test",
         "transport.tls.test",
         "revwalk.shallow_test.test",
         "transport.sideband.test",

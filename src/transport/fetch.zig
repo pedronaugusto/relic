@@ -323,6 +323,8 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .warnings = options.warnings,
         // A credential's expiry is checked against the caller's time.
         .now = options.who.when_secs,
+        .repository = repo,
+        .who = options.who,
     });
     defer session.close(io);
 
@@ -480,7 +482,8 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     var links: indexpack.Links = .init(gpa);
     defer links.deinit();
     const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
-        .wants = wants,
+        .wants = wants.oids,
+        .want_names = wants.names,
         .tips = tips.items,
         .common_tips = common_tips.items,
         .include_tag = tags != .none,
@@ -495,6 +498,10 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     });
     outcome.pack = fetched.pack;
     outcome.objects = fetched.objects;
+    // A remote helper's import learns the values as it goes.
+    for (map.items) |*entry| if (session.fetchedValue(entry.name)) |oid| {
+        entry.oid = oid;
+    };
     // A fetch's promisor pack names no refs; git's names none either.
     if (promisor) if (fetched.pack) |name| try partial.writePromisor(io, pack_dir, name, &.{});
 
@@ -528,13 +535,17 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     if (tags == .auto and autotags) {
         try findNonLocalTags(arena, gpa, io, repo, remote_refs.refs, &local, &backfill, map.items);
         const missing_tags = try wantsInOrder(arena, io, repo, remote_refs.refs, backfill.items, false);
-        if (missing_tags.len != 0) {
+        if (missing_tags.oids.len != 0) {
             _ = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
-                .wants = missing_tags,
+                .wants = missing_tags.oids,
+                .want_names = missing_tags.names,
                 .tips = tips.items,
                 .common_tips = common_tips.items,
                 .include_tag = false,
             }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(repo.configuration()), .threads = indexpack.configuredThreads(repo.configuration()) } });
+            for (backfill.items) |*entry| if (session.fetchedValue(entry.name)) |oid| {
+                entry.oid = oid;
+            };
         }
     }
 
@@ -977,16 +988,21 @@ fn shallowList(arena: Allocator, set: *const Oid.Set) Allocator.Error![]const Oi
 /// The objects to ask for, as git's fetch-pack asks: each advertised ref
 /// the map fetches, in the order the server advertised them, whose object
 /// is not here — one line per ref, so two refs at one commit ask twice.
-fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const protocol.RemoteRef, entries: []const MapEntry, all: bool) Error![]const Oid {
+/// The objects a fetch asks for, and the ref each was advertised as.
+const Wants = struct { oids: []const Oid, names: []const []const u8 };
+
+fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const protocol.RemoteRef, entries: []const MapEntry, all: bool) Error!Wants {
     var names: std.StringHashMapUnmanaged(void) = .empty;
     for (entries) |entry| try names.put(arena, entry.name, {});
     var wants: std.ArrayList(Oid) = .empty;
+    var want_names: std.ArrayList([]const u8) = .empty;
     var listed: std.StringHashMapUnmanaged(void) = .empty;
     for (advertised) |ref| {
         if (ref.unborn or !names.contains(ref.name)) continue;
         if ((try listed.getOrPut(arena, ref.name)).found_existing) continue;
         if (!all and try repo.odb.exists(io, ref.oid)) continue;
         try wants.append(arena, ref.oid);
+        try want_names.append(arena, ref.name);
     }
     // A name no ref advertised — an object named on the command line — is
     // asked for after them.
@@ -995,8 +1011,9 @@ fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const
         if ((try listed.getOrPut(arena, entry.name)).found_existing) continue;
         if (!all and try repo.odb.exists(io, entry.oid)) continue;
         try wants.append(arena, entry.oid);
+        try want_names.append(arena, entry.name);
     }
-    return wants.items;
+    return .{ .oids = wants.items, .names = want_names.items };
 }
 
 /// The branches every working tree has checked out, as full ref names.

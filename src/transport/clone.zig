@@ -189,25 +189,36 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     } else null;
     const reached = rewritten orelse url;
 
-    // A path is recorded absolute, as git records it (`absolutePathAsGit`).
-    const parsed = url_mod.Url.parse(reached) catch |err| return err;
-    // A path is a local clone, copied as it is: git ignores a depth and a
-    // filter there, says so, and keeps what they decided besides — one
-    // branch, the promisor settings. `file://` goes through upload-pack.
-    const local_copy = parsed.scheme == .local and !try isShallowSource(io, parsed.path);
+    // A remote helper runs with the new repository's `GIT_DIR`, so the
+    // repository is made first for one, as git makes it: with the default
+    // hash, and `HEAD` moved once the helper says where.
+    const helper = url_mod.helperOf(reached) != null;
+    var repo: Repository = undefined;
+    var repo_made = false;
+    errdefer if (repo_made) repo.deinit(io);
+    var local_copy = false;
     var send_filter = filter_spec;
-    if (local_copy) {
-        if (options.depth != null) try warning.note(options.warnings, .{ .ignored_for_local = "--depth" });
-        if (options.shallow_since != null) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-since" });
-        if (options.shallow_exclude.len != 0) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-exclude" });
-        if (filter_spec != null) try warning.note(options.warnings, .{ .ignored_for_local = "--filter" });
-        deepen = null;
-        send_filter = null;
+    var recorded = url;
+    if (helper) {
+        repo = try initRepository(gpa, io, dir, options, null, options.default_branch);
+        repo_made = true;
+    } else {
+        // A path is recorded absolute, as git records it (`absolutePathAsGit`).
+        const parsed = url_mod.Url.parse(reached) catch |err| return err;
+        // A path is a local clone, copied as it is: git ignores a depth and a
+        // filter there, says so, and keeps what they decided besides — one
+        // branch, the promisor settings. `file://` goes through upload-pack.
+        local_copy = parsed.scheme == .local and !try isShallowSource(io, parsed.path);
+        if (local_copy) {
+            if (options.depth != null) try warning.note(options.warnings, .{ .ignored_for_local = "--depth" });
+            if (options.shallow_since != null) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-since" });
+            if (options.shallow_exclude.len != 0) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-exclude" });
+            if (filter_spec != null) try warning.note(options.warnings, .{ .ignored_for_local = "--filter" });
+            deepen = null;
+            send_filter = null;
+        }
+        if (reached.ptr == url.ptr and parsed.scheme == .local) recorded = try absolutePathAsGit(io, arena, url);
     }
-    const recorded = if (reached.ptr == url.ptr and parsed.scheme == .local)
-        try absolutePathAsGit(io, arena, url)
-    else
-        url;
 
     var session = try transport.Session.open(gpa, io, reached, .upload_pack, null, .{
         .local_copy = local_copy,
@@ -221,6 +232,9 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .warnings = options.warnings,
         // A credential's expiry is checked against the caller's time.
         .now = options.who.when_secs,
+        .repository = if (repo_made) &repo else null,
+        .who = options.who,
+        .cloning = true,
     });
     defer session.close(io);
 
@@ -251,18 +265,17 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     else
         options.default_branch;
 
-    var repo = try Repository.init(gpa, io, dir, .{
-        .object_format = session.objectFormat(),
-        .default_branch = initial,
-        .bare = options.bare or options.separate_git_dir,
-        .odb = options.odb,
-    });
-    errdefer repo.deinit(io);
-    // A git directory with its working tree elsewhere is not bare, and
-    // logs its refs as `git init` sets a repository with a working tree to.
-    if (options.separate_git_dir) {
-        try repo.editConfig(&.{.{ .set = .{ .name = "core.bare", .value = "false" } }}, null);
-        try repo.editConfig(&.{.{ .set = .{ .name = "core.logallrefupdates", .value = "true" } }}, null);
+    if (repo_made) {
+        if (session.objectFormat() != repo.objectFormat()) return error.ObjectFormatMismatch;
+        if (!std.mem.eql(u8, initial, options.default_branch)) {
+            var tx = repo.beginRefs();
+            defer tx.deinit(io);
+            try tx.update("HEAD", .{ .symbolic = try std.fmt.allocPrint(arena, "refs/heads/{s}", .{initial}) }, .any);
+            try tx.commit(io, null);
+        }
+    } else {
+        repo = try initRepository(gpa, io, dir, options, session.objectFormat(), initial);
+        repo_made = true;
     }
 
     // The remote, in the new configuration.
@@ -293,7 +306,10 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     // Every branch, and every tag unless asked not to; or, for a single
     // branch, that branch, with the tags pointing into it found after.
     var wants: std.ArrayList(Oid) = .empty;
+    var want_names: std.ArrayList([]const u8) = .empty;
     var packed_entries: std.ArrayList(refs_mod.Store.PackedEntry) = .empty;
+    // The remote ref each packed entry is, for a value a helper learns.
+    var packed_sources: std.ArrayList([]const u8) = .empty;
     for (remote_refs.refs) |ref| {
         if (ref.unborn) continue;
         const is_branch = std.mem.startsWith(u8, ref.name, "refs/heads/");
@@ -307,14 +323,19 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         // One want per ref, as git's fetch-pack asks, two refs at one
         // commit asking twice.
         try wants.append(arena, ref.oid);
+        try want_names.append(arena, ref.name);
         const local_name = if (is_branch and !options.bare)
             try std.fmt.allocPrint(arena, "refs/remotes/{s}/{s}", .{ origin, ref.name["refs/heads/".len..] })
         else
             try arena.dupe(u8, ref.name);
         if (!@import("../worktree/safepath.zig").isValidRefName(local_name)) continue;
         try packed_entries.append(arena, .{ .name = local_name, .oid = ref.oid, .peeled = ref.peeled });
+        try packed_sources.append(arena, ref.name);
     }
-    if (detached) |oid| try addUnique(arena, &wants, oid);
+    if (detached) |oid| if (!containsOid(wants.items, oid)) {
+        try wants.append(arena, oid);
+        try want_names.append(arena, "HEAD");
+    };
 
     var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
@@ -326,6 +347,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     defer links.deinit();
     const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
         .wants = wants.items,
+        .want_names = want_names.items,
         .tips = &.{},
         .include_tag = options.tags,
         .deepen = deepen,
@@ -336,6 +358,16 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .shallow_info = &shallow_info,
         .warnings = options.warnings,
     });
+    // A remote helper's import learns the values as it goes.
+    for (want_names.items, wants.items) |name, *oid| if (session.fetchedValue(name)) |value| {
+        oid.* = value;
+    };
+    for (packed_sources.items, packed_entries.items) |name, *entry| if (session.fetchedValue(name)) |value| {
+        entry.oid = value;
+    };
+    if (detached) |oid| if (oid.isZero()) if (session.fetchedValue("HEAD")) |value| {
+        detached = value;
+    };
     // A partial clone's pack is a promisor pack, and says for which refs —
     // also when the server did not filter it, as git marks it.
     if (send_filter != null) if (fetched.pack) |name| {
@@ -404,10 +436,11 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     var head_commit: ?Oid = detached;
     if (head_branch) |branch| {
         if (remote_refs.find(branch)) |ref| {
-            head_commit = ref.oid;
+            const value = session.fetchedValue(branch) orelse ref.oid;
+            head_commit = value;
             var tx = repo.beginRefs();
             defer tx.deinit(io);
-            if (!options.bare) try tx.update(branch, .{ .direct = ref.oid }, .any);
+            if (!options.bare) try tx.update(branch, .{ .direct = value }, .any);
             try tx.update("HEAD", .{ .symbolic = branch }, .any);
             try tx.commit(io, log);
             if (!options.bare) {
@@ -501,11 +534,30 @@ fn refspecNameOk(name: []const u8) bool {
     return @import("refspec.zig").checkRefFormat(probe, .{});
 }
 
-fn addUnique(arena: Allocator, list: *std.ArrayList(Oid), oid: Oid) Allocator.Error!void {
-    for (list.items) |o| {
-        if (o.eql(oid)) return;
+fn containsOid(list: []const Oid, oid: Oid) bool {
+    for (list) |o| {
+        if (o.eql(oid)) return true;
     }
-    try list.append(arena, oid);
+    return false;
+}
+
+/// The new repository, as the clone makes it: `object_format` the
+/// remote's, or the default when it is not known yet.
+fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_format: ?hash.Kind, initial: []const u8) Error!Repository {
+    var repo = try Repository.init(gpa, io, dir, .{
+        .object_format = object_format orelse .sha1,
+        .default_branch = initial,
+        .bare = options.bare or options.separate_git_dir,
+        .odb = options.odb,
+    });
+    errdefer repo.deinit(io);
+    // A git directory with its working tree elsewhere is not bare, and
+    // logs its refs as `git init` sets a repository with a working tree to.
+    if (options.separate_git_dir) {
+        try repo.editConfig(&.{.{ .set = .{ .name = "core.bare", .value = "false" } }}, null);
+        try repo.editConfig(&.{.{ .set = .{ .name = "core.logallrefupdates", .value = "true" } }}, null);
+    }
+    return repo;
 }
 
 /// Check out `commit`'s tree into the empty working tree and write the

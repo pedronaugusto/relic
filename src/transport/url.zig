@@ -4,8 +4,10 @@
 //! URL proper. `[user@]host:path`, with a colon before any slash, is the
 //! scp-like shorthand for ssh. `file://path` and a plain path are a
 //! repository on this machine. And `<helper>::<address>` hands the address to
-//! a remote helper, which relic does not run. The tests below hold each
-//! reading to git's own `url_is_local_not_ssh` and `parse_connect_url`.
+//! a remote helper, as does a `<scheme>://` URL for a scheme relic does not
+//! speak itself: `Url.parse` refuses both and `helperOf` names the helper.
+//! The tests below hold each reading to git's own `url_is_local_not_ssh`
+//! and `parse_connect_url`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -196,6 +198,46 @@ pub const Identity = struct {
 };
 
 /// A URL scheme must precede :// at the start, not inside a local path.
+/// A remote helper a URL names, and the address it is handed.
+pub const HelperUrl = struct {
+    /// The helper's name: `git-remote-<name>` is the program.
+    name: []const u8,
+    /// What follows `::`, or the whole URL for `<scheme>://`.
+    address: []const u8,
+};
+
+/// The remote helper `text` names, as git's `transport_get` decides it:
+/// `<helper>::<address>`, or a `<scheme>://` URL whose scheme is not one
+/// relic reaches itself — `ssh`, `git+ssh`, `ssh+git`, `file`, `git`,
+/// `http` and `https`. `null` for every other URL.
+pub fn helperOf(text: []const u8) ?HelperUrl {
+    var end: usize = 0;
+    while (end < text.len and (std.ascii.isAlphabetic(text[end]) or
+        (end != 0 and (std.ascii.isDigit(text[end]) or text[end] == '+' or text[end] == '-' or text[end] == '.')))) : (end += 1)
+    {}
+    if (end != 0 and std.mem.startsWith(u8, text[end..], "::")) return .{ .name = text[0..end], .address = text[end + 2 ..] };
+    const sep = schemeEnd(text) orelse return null;
+    const scheme = text[0..sep];
+    for ([_][]const u8{ "ssh", "git+ssh", "ssh+git", "file", "git", "http", "https" }) |native| {
+        if (std.ascii.eqlIgnoreCase(scheme, native)) return null;
+    }
+    return .{ .name = scheme, .address = text };
+}
+
+test "a helper is named by <helper>:: or by a scheme relic does not speak" {
+    const ext = helperOf("ext::ssh -i key host %S repo").?;
+    try testing.expectEqualStrings("ext", ext.name);
+    try testing.expectEqualStrings("ssh -i key host %S repo", ext.address);
+    const foo = helperOf("foo+bar://host/repo").?;
+    try testing.expectEqualStrings("foo+bar", foo.name);
+    try testing.expectEqualStrings("foo+bar://host/repo", foo.address);
+    try testing.expect(helperOf("https://example.com/repo") == null);
+    try testing.expect(helperOf("ssh://host/repo") == null);
+    try testing.expect(helperOf("host:a::b") == null);
+    try testing.expect(helperOf("./ext::repo") == null);
+    try testing.expect(helperOf("/srv/repo") == null);
+}
+
 fn schemeEnd(text: []const u8) ?usize {
     if (text.len == 0 or !std.ascii.isAlphabetic(text[0])) return null;
     var end: usize = 1;

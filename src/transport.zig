@@ -8,8 +8,12 @@
 //! `git-upload-pack` or `git-receive-pack`, and the protocol above them —
 //! the refs, the negotiation, the pack — is the same for both. A path to a
 //! bundle file is fetched from as git's bundle transport fetches: its refs
-//! listed, its pack indexed whole. A `Session` hides which it is from the
-//! operations above.
+//! listed, its pack indexed whole. A URL that names a remote helper —
+//! `<helper>::<address>`, a scheme relic does not speak, `remote.<name>.vcs`
+//! — runs `git-remote-<helper>` (`remotehelper.zig`): one that can
+//! `connect` becomes a conversation like the others, and one that fetches,
+//! imports, pushes or exports is spoken to in its own commands. A `Session`
+//! hides which it is from the operations above.
 
 pub const filterspec = @import("transport/filterspec.zig");
 pub const partial = @import("transport/partial.zig");
@@ -49,6 +53,7 @@ pub const uploadpack = @import("transport/uploadpack.zig");
 pub const bundle = @import("transport/bundle.zig");
 
 pub const progress = @import("transport/progress.zig");
+pub const remotehelper = @import("transport/remotehelper.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -61,6 +66,7 @@ const program = @import("repo/program.zig");
 const config_mod = @import("config.zig");
 const warning = @import("repo/warning.zig");
 const object = @import("object.zig");
+const repo_mod = @import("repo.zig");
 
 const Oid = hash.Oid;
 const Connection = connection.Connection;
@@ -78,7 +84,8 @@ pub const Error = error{
     /// The transport needs to run a program — `ssh`, a credential helper —
     /// and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
-} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error || sendpack.Error || bundle.Error;
+} || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error || sendpack.Error || bundle.Error ||
+    remotehelper.Error;
 
 /// How a remote is reached.
 pub const Options = struct {
@@ -117,6 +124,13 @@ pub const Options = struct {
     /// Where what git would print as a warning goes, as values: see
     /// `warning.Warnings`.
     warnings: ?*warning.Warnings = null,
+    /// The local repository: a remote helper's `GIT_DIR`, and where its
+    /// `fetch`, `import`, `push` and `export` read and write.
+    repository: ?*repo_mod.Repository = null,
+    /// Who the refs a remote helper's import writes are logged as.
+    who: ?object.Signature = null,
+    /// The repository is a clone's, new: a remote helper is told so.
+    cloning: bool = false,
 };
 
 /// Whether `config` leaves protocol v2 on: `protocol.version` unset or 2.
@@ -143,6 +157,13 @@ pub const Session = struct {
             /// command.
             done: bool = false,
         },
+        /// A remote helper spoken to in its own commands.
+        helper: struct {
+            h: *remotehelper.Helper,
+            repository: ?*repo_mod.Repository,
+            who: ?object.Signature,
+            cloning: bool,
+        },
     },
 
     /// Open the remote at `remote_url` for `service`. `kind` is the local
@@ -155,6 +176,7 @@ pub const Session = struct {
         kind: ?hash.Kind,
         options: Options,
     ) Error!Session {
+        if (try openHelper(gpa, io, remote_url, service, kind, options)) |session| return session;
         const parsed = url.Url.parse(remote_url) catch |err| return err;
         if (parsed.scheme == .local and service == .upload_pack) bundled: {
             // `url_is_local_not_ssh && is_file && is_bundle`: a path to a
@@ -230,6 +252,49 @@ pub const Session = struct {
         }
     }
 
+    /// A session through the remote helper `remote_url` names, or `null`
+    /// when it names none.
+    fn openHelper(
+        gpa: Allocator,
+        io: Io,
+        remote_url: []const u8,
+        service: Service,
+        kind: ?hash.Kind,
+        options: Options,
+    ) Error!?Session {
+        const vcs: ?[]const u8 = if (options.remote_name) |name| if (options.config) |c| blk: {
+            var key_buf: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "remote.{s}.vcs", .{name}) catch break :blk null;
+            break :blk c.get(key);
+        } else null else null;
+        const spec = remotehelper.Spec.of(remote_url, options.remote_name, vcs) orelse return null;
+        const programs = options.programs orelse return error.ProgramsNotGranted;
+        if (!remotehelper.allowed(options.config, programs.environ, spec.name)) return error.TransportNotAllowed;
+        const git_dir: ?[:0]u8 = if (options.repository) |r| try r.git_dir.realPathFileAlloc(io, ".", gpa) else null;
+        defer if (git_dir) |d| gpa.free(d);
+        const h = try remotehelper.Helper.start(gpa, io, spec, .{
+            .programs = programs,
+            .git_dir = git_dir,
+            .progress = options.progress != null,
+        });
+        errdefer h.close();
+        if (try h.connect(service, options.service_program)) {
+            const conn = h.takeOver();
+            errdefer conn.close(io);
+            return try fromConnection(gpa, conn, service, kind);
+        }
+        switch (service) {
+            .upload_pack => if (!h.caps.fetch and !h.caps.import) return error.HelperCannotFetch,
+            .receive_pack => if (!h.caps.push and !h.caps.@"export") return error.HelperCannotPush,
+        }
+        return .{ .gpa = gpa, .service = service, .impl = .{ .helper = .{
+            .h = h,
+            .repository = options.repository,
+            .who = options.who,
+            .cloning = options.cloning,
+        } } };
+    }
+
     /// A session over a connection already made, which it takes. The
     /// server's advertisement is read here.
     pub fn fromConnection(gpa: Allocator, conn: *Connection, service: Service, kind: ?hash.Kind) protocol.Error!Session {
@@ -247,6 +312,7 @@ pub const Session = struct {
                 s.gpa.destroy(here);
             },
             .bundle => |f| f.close(s.gpa, io),
+            .helper => |helper| helper.h.close(),
             .smart => |*smart| {
                 // A conversation over a pipe that the server still waits on
                 // ends with a flush, which it reads as nothing more wanted,
@@ -270,6 +336,7 @@ pub const Session = struct {
             .local => |here| here.repo.objectFormat(),
             .bundle => |f| f.header.object_format,
             .smart => |smart| smart.advertisement.kind,
+            .helper => |helper| helper.h.kind,
         };
     }
 
@@ -277,7 +344,7 @@ pub const Session = struct {
     /// fetch that asks for no depth takes the server's shallow lines to be.
     pub fn advertisedShallow(s: *const Session) []const Oid {
         return switch (s.impl) {
-            .local, .bundle => &.{},
+            .local, .bundle, .helper => &.{},
             .smart => |smart| smart.advertisement.shallow,
         };
     }
@@ -287,7 +354,7 @@ pub const Session = struct {
     /// not: there its index-pack writes the file, empty.
     pub fn promisorNamesRefs(s: *const Session) bool {
         return switch (s.impl) {
-            .local, .bundle => true,
+            .local, .bundle, .helper => true,
             .smart => |smart| !(smart.conn.stateless and smart.advertisement.version != .v2),
         };
     }
@@ -296,7 +363,7 @@ pub const Session = struct {
     /// machine, which speaks none.
     pub fn protocolVersion(s: *const Session) ?protocol.Version {
         return switch (s.impl) {
-            .local, .bundle => null,
+            .local, .bundle, .helper => null,
             .smart => |smart| smart.advertisement.version,
         };
     }
@@ -308,6 +375,16 @@ pub const Session = struct {
             .local => |here| here.listRefs(gpa, io, prefixes),
             .bundle => |f| bundleRefs(gpa, f),
             .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes }),
+            .helper => |helper| helper.h.list(gpa, helper.repository, s.service == .receive_pack),
+        };
+    }
+
+    /// What a remote helper's import brought the ref `name` to, which its
+    /// `list` could not say; `null` for every other transport and ref.
+    pub fn fetchedValue(s: *const Session, name: []const u8) ?Oid {
+        return switch (s.impl) {
+            .helper => |helper| helper.h.fetched.get(name),
+            else => null,
         };
     }
 
@@ -321,6 +398,11 @@ pub const Session = struct {
         /// Who a repository on this machine logs the update as.
         who: object.Signature,
         progress: ?progress.Progress = null,
+        /// For a remote helper's `push` and `export`: the local ref each
+        /// command pushes, by position, `null` where it is an object name.
+        sources: []const ?[]const u8 = &.{},
+        /// For a remote helper: each command's `+`, by position.
+        force: []const bool = &.{},
     };
 
     /// Send a push, reading the objects from `db`, and return the remote's
@@ -339,6 +421,23 @@ pub const Session = struct {
             },
             // A bundle is only ever fetched from.
             .bundle => return error.UnsupportedTransport,
+            .helper => |helper| {
+                const commands = try gpa.alloc(remotehelper.PushCommand, request.commands.len);
+                defer gpa.free(commands);
+                for (request.commands, commands, 0..) |c, *out, i| out.* = .{
+                    .src = if (i < request.sources.len) request.sources[i] else null,
+                    .dst = c.name,
+                    .old = c.old,
+                    .new = c.new,
+                    .force = i < request.force.len and request.force[i],
+                };
+                return helper.h.push(gpa, commands, .{
+                    .repo = helper.repository,
+                    .who = request.who,
+                    .atomic = request.atomic,
+                    .push_options = request.push_options,
+                });
+            },
             .smart => |*smart| {
                 smart.done = true;
                 // The boundary, sorted as git's list of grafts is.
@@ -397,6 +496,31 @@ pub const Session = struct {
                 });
                 const written = report orelse return .{ .pack = null, .objects = 0 };
                 return .{ .pack = written.name, .objects = written.objects };
+            },
+            .helper => |helper| {
+                // A helper is asked by name: the names the caller gives, or
+                // those the list gave each object.
+                var wants: std.ArrayList(remotehelper.Want) = .empty;
+                defer wants.deinit(gpa);
+                for (request.wants, 0..) |oid, i| {
+                    if (i < request.want_names.len) {
+                        try wants.append(gpa, .{ .name = request.want_names[i], .oid = oid });
+                        continue;
+                    }
+                    for (helper.h.listed) |ref| if (ref.oid.eql(oid)) {
+                        try wants.append(gpa, .{ .name = ref.name, .oid = oid });
+                        break;
+                    };
+                }
+                try helper.h.fetch(wants.items, .{
+                    .repo = helper.repository,
+                    .who = helper.who,
+                    .cloning = helper.cloning,
+                    .follow_tags = request.include_tag,
+                    .deepen = request.deepen,
+                    .filter = request.filter,
+                });
+                return .{ .pack = null, .objects = 0 };
             },
             .bundle => |f| {
                 // git's bundle transport has no depth and no filter; it

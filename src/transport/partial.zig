@@ -253,6 +253,8 @@ pub const Lazy = struct {
             .service_program = remote.upload_pack,
             .prompt = l.options.prompt,
             .auth_failure = &l.auth_failure,
+            .remote_name = remote.name,
+            .repository = repo,
         });
         defer session.close(io);
         var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{});

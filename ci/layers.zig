@@ -24,6 +24,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/pathspec.zig",
         "src/repo/fs/stat.zig",
         "src/testing/process.zig",
+        "src/testing/remotehelper.zig",
         "src/transport/progress.zig",
         "src/repo/diagnostic.zig",
         "src/worktree/safepath.zig",
@@ -250,6 +251,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/patch/am.zig",
         "src/patch/am_test.zig",
         "src/transport/clone/lfs.zig",
+        "src/transport/remotehelper.zig",
         "src/lfs/push.zig",
         "src/lfs/transfer_test.zig",
         "src/commit/sequencer.zig",
@@ -280,6 +282,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/transport/clientcert_test.zig",
         "src/testing/cloneconfig.zig",
         "src/transport/partial_test.zig",
+        "src/transport/remotehelper_test.zig",
         "src/revwalk/shallow_test.zig",
         "src/submodule/transport.zig",
         "src/transport_test.zig",
@@ -300,6 +303,7 @@ pub const entries: []const []const u8 = &.{
     "src/testing/lfs/transfer.zig",
     "src/testing/lock.zig",
     "src/testing/process.zig",
+    "src/testing/remotehelper.zig",
     "src/testing/uploadpack.zig",
 };
 

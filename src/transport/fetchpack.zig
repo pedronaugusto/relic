@@ -58,6 +58,9 @@ pub const Request = struct {
     /// The objects wanted. None of them should be ones this repository
     /// already has.
     wants: []const Oid,
+    /// The ref each want was listed as, by position, for a remote helper,
+    /// which is asked by name. Empty takes the names from its list.
+    want_names: []const []const u8 = &.{},
     /// This repository's ref tips, which is where the offer of haves starts.
     tips: []const Oid,
     /// Tips the server is known to have too — refs it advertised with a

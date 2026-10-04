@@ -119,6 +119,18 @@ pub fn build(b: *std.Build) void {
     });
     const install_lfs_tool = b.addInstallArtifact(lfs_tool, .{});
 
+    // A remote helper, for git and relic to be pointed at alike: git's
+    // own `git-remote-testgit`, and one with `fetch` and `push`.
+    const remote_helper = b.addExecutable(.{
+        .name = "relic-remote-helper",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/remotehelper.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_remote_helper = b.addInstallArtifact(remote_helper, .{});
+
     const process_fixture = b.addExecutable(.{
         .name = "relic-process-fixture",
         .root_module = b.createModule(.{
@@ -151,6 +163,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "fake_ssh_helper_path", b.getInstallPath(.bin, fake_ssh.out_filename));
     build_options.addOption([]const u8, "lfs_test_tool_path", b.getInstallPath(.bin, lfs_tool.out_filename));
     build_options.addOption([]const u8, "process_fixture_path", b.getInstallPath(.bin, process_fixture.out_filename));
+    build_options.addOption([]const u8, "remote_helper_path", b.getInstallPath(.bin, remote_helper.out_filename));
     // The standard library's TLS client, which `src/transport/tls/Client.zig` is a copy
     // of with client authentication added: `src/testing/tls_fork.zig` holds the
     // copy to it, and fails when the compiler building this ships another.
@@ -235,6 +248,7 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&install_fake_ssh.step);
     run_tests.step.dependOn(&install_lfs_tool.step);
     run_tests.step.dependOn(&install_process_fixture.step);
+    run_tests.step.dependOn(&install_remote_helper.step);
 
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);
@@ -252,6 +266,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&fake_ssh.step);
     check_step.dependOn(&lfs_tool.step);
     check_step.dependOn(&process_fixture.step);
+    check_step.dependOn(&remote_helper.step);
 
     //=====================================================================
     // Examples

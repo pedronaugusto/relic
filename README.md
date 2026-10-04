@@ -293,6 +293,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `transport.smarthttp`, `transport.ssh`, `transport.local`, `transport.httpclient`, `transport.tls`, `transport.clientcert` | The transports: HTTP(S) through relic's own HTTP/1.1 and TLS clients, HTTP(S) and SOCKS4/4a/5/5h proxies, the person's `ssh`, and `file://` and paths. |
 | `transport.credential`, `transport.auth`, `transport.httpsettings`, `transport.httpauth` | The person's own setup: credential helpers, why a remote refused, git's `http.*`, proxy authentication. |
 | `transport.protocol`, `transport.connection`, `transport.pktline`, `transport.sideband`, `transport.fetchpack`, `transport.sendpack`, `transport.progress` | The wire underneath the commands. |
+| `transport.remotehelper` | `Helper`, `Spec`, `allowed` — `git-remote-<name>` run as git runs it: capabilities, options, `list`, `connect`, `fetch`, `import` (through `fastimport`, `bidi-import` answered), `push`, `export` (through `fastexport`, with the helper's marks), private refs by its `refspec`. |
 | `transport.uploadpack` | `Server` — serving fetches, with shallow and every filter. |
 | `transport.bundle` | `create`, `write`, `File.open`, `Header.read`, `listHeads`, `writeSummary`, `verify`, `unbundle`, `isBundle`: `git bundle` v2 and v3, its header byte for byte, filtered by any filter git takes, `sparse:oid=` included; a path to a bundle is fetched and cloned from. |
 | `transport.objectwalk`, `transport.objectfilter`, `transport.partial`, `transport.filterspec` | Which objects one side lacks; partial clone, its filters and the lazy fetch. |
@@ -413,10 +414,13 @@ the server or ssh said — so it can tell the person what to fix.
 `transport.url.Url.parse` gives the scheme, user, host, port and path as
 slices of the supplied text. Bracketed IPv6 and ports work in scp syntax as
 well as `ssh://`; an at-sign in a repository path stays in the path.
-`file://` and local paths name local repositories. `<helper>::<address>`
-is recognized and refused as `UnsupportedTransport`, since relic does not
-run remote helpers. Callers decide which schemes and default ports name the
-same remote; they do not need to split the URL themselves.
+`file://` and local paths name local repositories. `<helper>::<address>`,
+a `<scheme>://` URL for a scheme relic does not speak and `remote.<name>.vcs`
+name a remote helper: `Url.parse` refuses them as `UnsupportedTransport`,
+`url.helperOf` names the helper, and a `Session` runs `git-remote-<name>`
+from `PATH` as git runs it, `protocol.<name>.allow` deciding whether it may.
+Callers decide which schemes and default ports name the same remote; they do
+not need to split the URL themselves.
 `transport.url.Identity.parse(gpa, text)` owns the raw text and decoded
 SSH/file URL fields under `identity.url`; release them with `deinit`.
 Decoding precedes splitting, including home paths and encoded delimiters.
@@ -692,7 +696,7 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 - **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name. **No GSS-API (Kerberos) to a SOCKS5 proxy:** it is never offered, so a proxy that takes nothing else refuses every method and the fetch stops with `ProxyAuthenticationRequired`.
 - **LFS without git-lfs's extras.** tus and custom transfer adapters are refused by name.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
-- **No `git://`, dumb HTTP or remote helpers.** Refused by name.
+- **No `git://` or dumb HTTP.** Refused by name. A remote helper is spoken to through `connect`, `fetch`, `import`, `push` and `export`; one with only `stateless-connect` or `get` cannot fetch here, `HelperCannotFetch`.
 - **No editor for a note.** Refused by name, as is a shortlog by trailer where `trailer.*` is configured.
 - **`apply` with the index compares content where a stat differs.** git says "does not match index" until the index is refreshed; this reads the file and agrees when its content does.
 - **A binary hunk in a written patch is this package's deflate.** It decodes to the same file; the compressed bytes are not zlib's. A cover letter's shortlog under a mailmap is refused by name.

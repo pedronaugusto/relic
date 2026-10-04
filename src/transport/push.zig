@@ -274,6 +274,8 @@ fn pushTo(
         .warnings = options.warnings,
         // A credential's expiry is checked against the caller's time.
         .now = options.who.when_secs,
+        .repository = repo,
+        .who = options.who,
     });
     defer session.close(io);
     var remote_refs = try session.listRefs(gpa, io, &.{});
@@ -311,9 +313,14 @@ fn pushTo(
     }
 
     var commands: std.ArrayList(sendpack.Command) = .empty;
-    for (results.items) |r| {
+    // What a remote helper is told beside: the local ref and the `+`.
+    var sources: std.ArrayList(?[]const u8) = .empty;
+    var forced: std.ArrayList(bool) = .empty;
+    for (results.items, updates) |r, u| {
         if (r.status != .ok) continue;
         try commands.append(arena, .{ .name = r.remote_ref, .old = r.old, .new = r.new });
+        try sources.append(arena, r.local_ref);
+        try forced.append(arena, u.force or options.force);
     }
 
     if (options.pre_push) |hook| {
@@ -374,6 +381,8 @@ fn pushTo(
             .push_options = options.push_options,
             .who = options.who,
             .progress = options.progress,
+            .sources = sources.items,
+            .force = forced.items,
         });
         defer report.deinit();
         if (!report.unpack_ok) {
