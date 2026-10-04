@@ -168,6 +168,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "worktree and merge policy", .patterns = &.{
         "src/diff_test.zig",
         "src/merge/ort.zig",
+        "src/merge/octopus.zig",
         "src/diff/blame.zig",
         "src/diff/patchid.zig",
         "src/worktree.zig",

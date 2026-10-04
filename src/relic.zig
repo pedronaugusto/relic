@@ -17,7 +17,7 @@
 //! | `wildmatch` | Match a glob directly with git's pathname and case-fold flags. | |
 //! | `diff` | Tree against tree, blob against blob, unified text. | `textdiff`, `rename`, `similarity`, `patchid`, `blame` |
 //! | `revwalk` | Walking history, merge bases. | `revparse`, `shallow`, `mailmap`, `shortlog`, `describe`, `bisect` |
-//! | `merge` | Three-way merges of contents and trees. | `blobmerge`, `ort`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
+//! | `merge` | Three-way merges of contents and trees. | `blobmerge`, `ort`, `octopus`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
 //! | `commit` | Making a commit as `git commit` does. | `message`, `head`, `reset`, `stash`, `signing`, `commithooks`, `merging`, `sequencer`, `rebase`, `todo`, `notes` |
 //! | `transport` | `Session`: a remote, open. | `remote`, `url`, `refspec`, `fetch`, `fetchpack`, `clone`, `push`, `sendpack`, `local`, `ssh`, `smarthttp`, `httpclient`, `tls`, `clientcert`, `httpauth`, `httpsettings`, `credential`, `auth`, `protocol`, `connection`, `pktline`, `sideband`, `uploadpack`, `objectwalk`, `objectfilter`, `partial`, `filterspec`, `progress`, `bundle`, `remotehelper` |
 //! | `submodule` | Submodules: status, init, update, sync, absorb. | `gitmodules`, `gitlink`, `submoduletransport` |

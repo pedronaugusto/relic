@@ -105,6 +105,7 @@ pub const families = [_]Family{
         "revwalk.shortlog.test",
         "merge.test",
         "merge.ort_test.test",
+        "merge.octopus.test",
         "diff.patchid.test",
         "patch.test",
         "pretty.test",

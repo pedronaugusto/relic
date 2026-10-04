@@ -70,6 +70,11 @@ pub const BlobOptions = struct {
     /// region keeps our side's lines, and a side whose every change is
     /// whitespace leaves the file to the other side.
     whitespace: textdiff.Whitespace = .{},
+    /// Also join two conflicts whatever the distance between them when the
+    /// lines our side has there hold no letter or digit: the level `git
+    /// merge-file` merges at, where the merge machinery stops short of it.
+    /// Only the plain style joins conflicts.
+    join_without_alnum: bool = false,
 };
 
 /// The owned bytes produced by a blob merge.
@@ -149,7 +154,7 @@ pub fn blobs(
         .zdiff3 => trimConflicts(hunks.items, our_lines, their_lines, ws),
         .merge => {
             try refineConflicts(gpa, &hunks, our_lines, their_lines, diff_options);
-            joinCloseConflicts(&hunks);
+            joinCloseConflicts(&hunks, our_lines, options.join_without_alnum);
         },
         .diff3 => {},
     }
@@ -387,14 +392,16 @@ fn refineConflicts(
 }
 
 /// `xdl_simplify_non_conflicts`: two conflicts with three lines or fewer
-/// between them read more easily as one.
-fn joinCloseConflicts(hunks: *std.ArrayList(Hunk)) void {
+/// between them read more easily as one, and so, with `without_alnum`, do
+/// two with nothing but punctuation and space between them.
+fn joinCloseConflicts(hunks: *std.ArrayList(Hunk), our_lines: []const textdiff.Line, without_alnum: bool) void {
     var at: usize = 0;
     while (at + 1 < hunks.items.len) {
         const m = &hunks.items[at];
         const next = hunks.items[at + 1];
         const begin = m.at1 + m.len1;
-        if (m.mode != .conflict or next.mode != .conflict or next.at1 - begin > 3) {
+        const far = next.at1 - begin > 3 and (!without_alnum or anyAlnum(span(our_lines, begin, next.at1 - begin)));
+        if (m.mode != .conflict or next.mode != .conflict or far) {
             at += 1;
             continue;
         }
@@ -402,6 +409,15 @@ fn joinCloseConflicts(hunks: *std.ArrayList(Hunk)) void {
         m.len2 = next.at2 + next.len2 - m.at2;
         _ = hunks.orderedRemove(at + 1);
     }
+}
+
+/// `lines_contain_alnum`: whether any of `lines` holds an ASCII letter or
+/// digit.
+fn anyAlnum(lines: []const textdiff.Line) bool {
+    for (lines) |line| {
+        for (line) |c| if (std.ascii.isAlphanumeric(c)) return true;
+    }
+    return false;
 }
 
 /// `xdl_refine_zdiff3_conflicts`: move the lines both sides agree on at the

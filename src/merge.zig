@@ -14,6 +14,7 @@ pub const strategy = @import("merge/strategy.zig");
 // The modules relic's API puts under this one, as `relic.merge.<name>`.
 pub const blobmerge = @import("merge/blobmerge.zig");
 pub const ort = @import("merge/ort.zig");
+pub const octopus = @import("merge/octopus.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -613,6 +614,23 @@ test "merge style moves a shared conflict tail outside the markers" {
     var got = try blobs(gpa, ancestor, ours, theirs, .{});
     defer got.deinit();
     try std.testing.expectEqualSlices(u8, expected, got.bytes);
+}
+
+test "conflicts with only punctuation between them join as git merge-file joins them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const ancestor = "1\n}\n}\n}\n}\n2\n";
+    const ours = "X\n}\n}\n}\n}\nY\n";
+    const theirs = "P\n}\n}\n}\n}\nQ\n";
+    const expected = try gitMergeFileFixture(gpa, io, ancestor, ours, theirs, .merge);
+    defer gpa.free(expected);
+    var got = try blobs(gpa, ancestor, ours, theirs, .{ .join_without_alnum = true });
+    defer got.deinit();
+    try std.testing.expectEqualSlices(u8, expected, got.bytes);
+    // The merge machinery keeps them apart.
+    var apart = try blobs(gpa, ancestor, ours, theirs, .{});
+    defer apart.deinit();
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, apart.bytes, "<<<<<<<"));
 }
 
 test "independent and identical blob changes match git merge-file" {

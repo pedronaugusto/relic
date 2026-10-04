@@ -801,6 +801,170 @@ test "a merge commit is picked and reverted against the mainline parent it is gi
     try expectSameState(&pair, io, &pick_state, &main_logs);
 }
 
+/// Branches off one base for an octopus: `b1` and `b2` change the same
+/// line of `f`, `b3` adds `h`, `b4` changes `k`, `ahead` is `main` and
+/// one more commit, and `main` changes `g`. `start` marks `main`.
+fn octopusScript(repo: *testgit.Repo, io: Io) anyerror!void {
+    try repo.writeFile(io, "f", "a\nb\nc\n");
+    try repo.writeFile(io, "g", "x\n");
+    try repo.writeFile(io, "k", "1\n2\n3\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    const branches = [_]struct { name: []const u8, path: []const u8, text: []const u8 }{
+        .{ .name = "b1", .path = "f", .text = "a\nB1\nc\n" },
+        .{ .name = "b2", .path = "f", .text = "a\nB2\nc\n" },
+        .{ .name = "b3", .path = "h", .text = "h\n" },
+        .{ .name = "b4", .path = "k", .text = "1\n2\nthree\n" },
+    };
+    for (branches) |b| {
+        try repo.exec(io, &.{ "checkout", "-q", "-b", b.name, "main" });
+        try repo.writeFile(io, b.path, b.text);
+        try repo.exec(io, &.{ "add", "-A" });
+        try repo.exec(io, &.{ "commit", "-q", "-m", b.name });
+    }
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "g", "z\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "main" });
+    try repo.exec(io, &.{ "tag", "start" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "ahead" });
+    try repo.writeFile(io, "i", "i\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "ahead" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+}
+
+/// Merge `names` here the way `git merge` with them does.
+fn octopusHere(pair: *Pair, io: Io, names: []const []const u8, options: merging.Options) !merging.Outcome {
+    var repo = try pair.open(io);
+    defer repo.deinit(io);
+    var targets: [8]merging.Target = undefined;
+    for (names, targets[0..names.len]) |name, *t| t.* = try merging.resolve(pair.gpa, io, &repo, name);
+    return merging.startHeads(pair.gpa, io, &repo, targets[0..names.len], options);
+}
+
+/// The names `merge-one-file`'s temporary files give the markers are
+/// random; the same name in both copies makes the rest comparable.
+fn sameTemporaryNames(pair: *Pair, io: Io, path: []const u8) !void {
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        const text = try r.readFile(io, path);
+        defer pair.gpa.free(text);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(pair.gpa);
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, text, at, ".merge_file_")) |found| {
+            try out.appendSlice(pair.gpa, text[at..found]);
+            try out.appendSlice(pair.gpa, ".merge_file_XXXXXX");
+            at = @min(text.len, found + ".merge_file_".len + 6);
+        }
+        try out.appendSlice(pair.gpa, text[at..]);
+        try r.writeFile(io, path, out.items);
+    }
+}
+
+test "an octopus merges and commits as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try requireOrtGit(io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, octopusScript);
+    defer pair.deinit();
+
+    const cases = [_]struct { names: []const []const u8, no_ff: bool = false, no_commit: bool = false, result: merging.Outcome.Result }{
+        .{ .names = &.{ "b3", "b1", "b4" }, .result = .merged },
+        // HEAD is behind `ahead`: the first head fast-forwards and HEAD is
+        // no parent, unless asked not to fast-forward.
+        .{ .names = &.{ "ahead", "b3", "b1" }, .result = .merged },
+        .{ .names = &.{ "ahead", "b3" }, .no_ff = true, .result = .merged },
+        // A head HEAD or another head already reaches is dropped, down to
+        // one, which ort merges.
+        .{ .names = &.{ "b3", "main", "start" }, .result = .merged },
+        .{ .names = &.{ "b1", "b4", "b4" }, .no_commit = true, .result = .staged },
+        .{ .names = &.{ "main", "start" }, .result = .up_to_date },
+    };
+    for (cases) |case| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "start" });
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "merge", "-q", "--no-edit" });
+        if (case.no_ff) try argv.append(gpa, "--no-ff");
+        if (case.no_commit) try argv.append(gpa, "--no-commit");
+        try argv.appendSlice(gpa, case.names);
+        try pair.git.exec(io, argv.items);
+        var outcome = try octopusHere(&pair, io, case.names, .{
+            .who = who,
+            .fast_forward = if (case.no_ff) .never else null,
+            .commit = !case.no_commit,
+        });
+        defer outcome.deinit();
+        try std.testing.expectEqual(case.result, outcome.result);
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+    }
+}
+
+test "an octopus stops at its last head's conflict as git's does, and each side commits the other's" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try requireOrtGit(io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, octopusScript);
+    defer pair.deinit();
+
+    for ([_][]const u8{ "merge", "diff3" }, [_]bool{ false, true }) |style, swap| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "reset", "-q", "--hard", "start" });
+            try r.exec(io, &.{ "config", "merge.conflictStyle", style });
+        }
+        const names: []const []const u8 = &.{ "b3", "b1", "b4", "b2" };
+        try gitMayFail(&pair.git, io, &(.{"merge"} ++ .{ "b3", "b1", "b4", "b2" }));
+        {
+            var outcome = try octopusHere(&pair, io, names, .{ .who = who });
+            defer outcome.deinit();
+            try std.testing.expectEqual(merging.Outcome.Result.conflicted, outcome.result);
+            try std.testing.expectEqual(@as(usize, 1), outcome.conflicts.len);
+        }
+        try sameTemporaryNames(&pair, io, "f");
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+
+        // Resolved, and committed by the other side.
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.writeFile(io, "f", "a\nB\nc\n");
+            try r.exec(io, &.{ "add", "f" });
+        }
+        const by_git = if (swap) &pair.ours else &pair.git;
+        const by_us = if (swap) &pair.git else &pair.ours;
+        try by_git.exec(io, &.{ "merge", "--continue" });
+        {
+            var repo = try repo_mod.Repository.open(gpa, io, by_us.dir, .{});
+            defer repo.deinit(io);
+            _ = try merging.conclude(gpa, io, &repo, .{ .who = who });
+        }
+        try expectSameState(&pair, io, &merge_state, &main_logs);
+    }
+}
+
+test "an octopus whose head before the last conflicts fails as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try requireOrtGit(io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, octopusScript);
+    defer pair.deinit();
+
+    try gitMayFail(&pair.git, io, &.{ "merge", "b1", "b2", "b3" });
+    try std.testing.expectError(error.OctopusFailed, octopusHere(&pair, io, &.{ "b1", "b2", "b3" }, .{ .who = who }));
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+    // Something staged is refused before anything is merged. git stashes
+    // it, resets and applies the stash again, which leaves an `AUTO_MERGE`
+    // and a `HEAD` reflog line behind; nothing here does.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "g", "staged\n");
+        try r.exec(io, &.{ "add", "g" });
+    }
+    try gitMayFail(&pair.git, io, &.{ "merge", "b3", "b4" });
+    try std.testing.expectError(error.DirtyIndex, octopusHere(&pair, io, &.{ "b3", "b4" }, .{ .who = who }));
+    try expectSameState(&pair, io, merge_state[0..4], &.{});
+}
+
 //=========================================================================
 // Rebase
 //=========================================================================
@@ -1265,6 +1429,60 @@ test "labels, resets and merges rebuild a merge as git's does" {
     }
     try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
     try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "for-each-ref", "refs/rewritten" });
+}
+
+test "an octopus merge line merges as git's sequencer does, and an unchanged one is reused" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try requireRebase250(io);
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, octopusScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "checkout", "-q", "-b", "side", "b3" });
+        try r.exec(io, &.{ "merge", "-q", "--no-edit", "b1", "b4" });
+        try r.exec(io, &.{ "tag", "octo" });
+    }
+    const octo = try pair.git.line(io, &.{ "rev-parse", "octo" });
+    defer gpa.free(octo);
+    const ahead = try pair.git.line(io, &.{ "rev-parse", "ahead" });
+    defer gpa.free(ahead);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const with_message = try std.fmt.allocPrint(arena.allocator(), "merge -C {s} lb1 lb4 # Merge branches 'b1' and 'b4' into side\n", .{octo});
+
+    // Rebuilt on `main`, without and then with the original's message, and
+    // then replayed where it stands, which reuses it, with a commit after.
+    const plans = [_]struct { onto: []const u8, line: []const u8 }{
+        .{ .onto = "main", .line = "merge lb1 lb4\n" },
+        .{ .onto = "main", .line = with_message },
+        .{ .onto = "b3~1", .line = try std.mem.concat(arena.allocator(), u8, &.{ with_message, "pick ", ahead, "\n" }) },
+    };
+    for (plans) |plan| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "octo" });
+        const start_lines = try sheetFor(gpa, io, &pair.git, &.{
+            "label onto",
+            "reset b1",
+            "label lb1",
+            "reset b4",
+            "label lb4",
+            "reset onto",
+            "pick b3",
+        });
+        defer gpa.free(start_lines);
+        const sheet = try std.mem.concat(gpa, u8, &.{ start_lines, plan.line });
+        defer gpa.free(sheet);
+        try gitRebaseInteractive(&pair.git, io, sheet, &.{plan.onto});
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, plan.onto), .{ .who = who, .onto_name = plan.onto, .todo = sheet });
+            defer outcome.deinit();
+            try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
+        }
+        try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/side" });
+    }
 }
 
 /// `topic` with two more branches at its first commit and a third checked
@@ -3102,8 +3320,8 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
             defer repo.deinit(io);
             var arena: std.heap.ArenaAllocator = .init(gpa);
             defer arena.deinit();
-            const target = try merging.upstream(gpa, io, &repo, arena.allocator());
-            var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+            const targets = try merging.upstreams(gpa, io, &repo, arena.allocator());
+            var outcome = try merging.startHeads(gpa, io, &repo, targets, .{ .who = who });
             defer outcome.deinit();
         }
         try expectSameState(&pair, io, &merge_state, &main_logs);
@@ -3115,7 +3333,7 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
         defer repo.deinit(io);
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        try std.testing.expectError(error.NoMergeTarget, merging.upstream(gpa, io, &repo, arena.allocator()));
+        try std.testing.expectError(error.NoMergeTarget, merging.upstreams(gpa, io, &repo, arena.allocator()));
     }
     {
         try pair.ours.exec(io, &.{ "config", "--unset", "merge.defaultToUpstream" });
@@ -3124,7 +3342,7 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
         defer repo.deinit(io);
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        try std.testing.expectError(error.NoDefaultUpstream, merging.upstream(gpa, io, &repo, arena.allocator()));
+        try std.testing.expectError(error.NoDefaultUpstream, merging.upstreams(gpa, io, &repo, arena.allocator()));
     }
 }
 

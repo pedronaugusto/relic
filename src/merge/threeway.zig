@@ -24,6 +24,7 @@ const ignore = @import("../worktree/ignore.zig");
 const fs = @import("../repo/fs.zig");
 const repo_mod = @import("../repo.zig");
 const ort = @import("ort.zig");
+const octopus = @import("octopus.zig");
 const revwalk = @import("../revwalk.zig");
 const config_mod = @import("../config.zig");
 const strategy = @import("strategy.zig");
@@ -51,7 +52,7 @@ pub const Error = error{
     BareRepository,
     /// `diff.algorithm` names no line diff git has.
     UnknownDiffAlgorithm,
-} || merge.Error || worktree.Error || repo_mod.Error || revwalk.Error || strategy.Error;
+} || merge.Error || worktree.Error || repo_mod.Error || revwalk.Error || strategy.Error || octopus.Error;
 
 /// Where a refusal writes the path that caused it, so a caller can say which
 /// file stood in the way without anything being allocated.
@@ -248,6 +249,82 @@ fn run(
         },
     };
     defer merged.deinit();
+    return carry(gpa, io, repo, index, &arena_instance, ours, rules, .{
+        .tree = merged.tree,
+        .conflicted = merged.conflicted,
+        .messages = merged.messages,
+        .renormalize_read_attributes = merged.renormalize_read_attributes,
+        .merged_attributes_blob = merged.merged_attributes_blob,
+    }, options);
+}
+
+/// Merge the commits `heads` into the commit `head` as git's octopus
+/// strategy does, `octopus.mergeCommits`, and leave the result in `index`
+/// and the working tree. Only the last head may leave conflicts; a conflict
+/// before it fails the whole merge with nothing written.
+pub fn applyOctopus(
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    index: *Index,
+    head: Oid,
+    heads: []const Oid,
+    options: Options,
+) Error!Outcome {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const db = &repo.odb;
+    if (repo.work_dir == null) return error.BareRepository;
+    for (index.entries.items) |entry| {
+        if (entry.stage != 0) {
+            if (options.blocked) |b| b.set(entry.path);
+            return error.UnmergedIndex;
+        }
+    }
+    const ours = try repo.commitTree(io, head);
+    try requireIndexIs(arena, io, db, index, ours, options.blocked);
+    var rules = try repo.worktreeRules();
+    rules.required_filters = try repo.requiredFilters(arena);
+    var attrs = try repo.loadAttrs(io);
+    defer attrs.deinit();
+    rules.attrs = &attrs;
+    rules.filters = options.filters;
+    var merged = try octopus.mergeCommits(gpa, io, db, head, heads, .{ .conflict_style = options.blob.conflict_style });
+    defer merged.deinit();
+    return carry(gpa, io, repo, index, &arena_instance, ours, rules, .{
+        .tree = merged.worktree_tree,
+        .conflicted = merged.conflicted,
+    }, options);
+}
+
+/// What a merge computed, for `carry` to put in place.
+const Merged = struct {
+    /// The working tree's merged state, markers and all.
+    tree: Oid,
+    conflicted: []const ort.Conflicted,
+    messages: []const ort.Message = &.{},
+    renormalize_read_attributes: bool = false,
+    merged_attributes_blob: ?Oid = null,
+};
+
+/// Carry a merge from `ours` to `merged` into the index and the working
+/// tree, everything it would overwrite checked first. The outcome takes
+/// over `arena_instance`.
+fn carry(
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    index: *Index,
+    arena_instance: *std.heap.ArenaAllocator,
+    ours: Oid,
+    rules: worktree.Rules,
+    merged: Merged,
+    options: Options,
+) Error!Outcome {
+    const arena = arena_instance.allocator();
+    const wt = repo.work_dir orelse return error.BareRepository;
+    const db = &repo.odb;
     // What the merge changes: the merged tree against ours, a walk past
     // every subtree the two share, so a pick costs what it changes.
     var tree_changes = try diff.tree(gpa, io, db, ours, merged.tree, .{});

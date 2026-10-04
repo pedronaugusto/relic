@@ -1,4 +1,4 @@
-//! Merging a commit into the current branch: `git merge` with one head.
+//! Merging commits into the current branch: `git merge`.
 //!
 //! What it leaves is git's in every file git reads back. A fast-forward
 //! moves the branch and logs `merge <name>: Fast-forward`; a clean merge
@@ -8,8 +8,8 @@
 //! `ORIG_HEAD` and `AUTO_MERGE` written, so `git commit` or `git merge
 //! --continue` finishes it and `git merge --abort` undoes it -- and the same
 //! is true the other way round. Several merge bases are merged into one
-//! first, as git does, nested conflict markers and all; an octopus of
-//! several heads is not done here.
+//! first, as git does, nested conflict markers and all. Two or more heads
+//! make an octopus, merged as git's `merge-octopus` merges them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -35,6 +35,7 @@ const wildmatch = @import("../worktree/wildmatch.zig");
 const worktree = @import("../worktree.zig");
 const repo_mod = @import("../repo.zig");
 const refs_mod = @import("../refs.zig");
+const index_mod = @import("../index.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -67,8 +68,6 @@ pub const Error = error{
     /// No commit was named and the current branch has no upstream:
     /// `branch.<name>.remote` and `branch.<name>.merge`.
     NoDefaultUpstream,
-    /// The upstream names more than one branch, which is an octopus merge.
-    MultipleUpstreams,
     /// The upstream's remote-tracking ref is not there: nothing has been
     /// fetched for it.
     UpstreamNotFetched,
@@ -123,12 +122,12 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Erro
     return targetOf(io, repo, oid, name, .commit);
 }
 
-/// What `git merge` with no commit merges: the upstream of the current
-/// branch, `branch.<name>.merge`, as the remote-tracking ref the remote's
-/// fetch refspecs map it to -- or the ref itself for a remote of `.` --
-/// named by its full name, as git names it in the message. The name lives
-/// in `arena`.
-pub fn upstream(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error!Target {
+/// What `git merge` with no commit merges: the upstreams of the current
+/// branch, each `branch.<name>.merge` as the remote-tracking ref the
+/// remote's fetch refspecs map it to -- or the ref itself for a remote of
+/// `.` -- named by its full name, as git names it in the message. More than
+/// one is an octopus, `startHeads`. The names live in `arena`.
+pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error![]const Target {
     if (!(repo.configuration().getBool("merge.defaulttoupstream", true) catch true)) return error.NoMergeTarget;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
@@ -138,29 +137,31 @@ pub fn upstream(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Err
     const merges = try repo.configuration().all(try std.fmt.allocPrint(arena, "branch.{s}.merge", .{branch}));
     defer repo.configuration().gpa.free(merges);
     if (merges.len == 0) return error.NoDefaultUpstream;
-    // More than one is an octopus, which this merge does not make.
-    if (merges.len > 1) return error.MultipleUpstreams;
-    var name: []const u8 = try arena.dupe(u8, merges[0]);
-    if (!std.mem.eql(u8, remote, ".")) {
-        const specs = try repo.configuration().all(try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{remote}));
-        defer repo.configuration().gpa.free(specs);
-        const tracking: ?[]const u8 = for (specs) |text| {
-            const spec = refspec.Refspec.parse(text, .fetch) catch continue;
-            if (try spec.mapSource(arena, name)) |mapped| break mapped;
-        } else null;
-        name = tracking orelse return error.UpstreamNotFetched;
+    const specs = try repo.configuration().all(try std.fmt.allocPrint(arena, "remote.{s}.fetch", .{remote}));
+    defer repo.configuration().gpa.free(specs);
+    const out = try arena.alloc(Target, merges.len);
+    for (merges, out) |merge_name, *target| {
+        var name: []const u8 = try arena.dupe(u8, merge_name);
+        if (!std.mem.eql(u8, remote, ".")) {
+            const tracking: ?[]const u8 = for (specs) |text| {
+                const spec = refspec.Refspec.parse(text, .fetch) catch continue;
+                if (try spec.mapSource(arena, name)) |mapped| break mapped;
+            } else null;
+            name = tracking orelse return error.UpstreamNotFetched;
+        }
+        const resolved = (try repo.refStore().resolve(gpa, io, name)) orelse return error.UpstreamNotFetched;
+        defer gpa.free(resolved.name);
+        const kind: Kind = if (std.mem.startsWith(u8, name, "refs/heads/"))
+            .branch
+        else if (std.mem.startsWith(u8, name, "refs/tags/"))
+            .tag
+        else if (std.mem.startsWith(u8, name, "refs/remotes/"))
+            .remote_branch
+        else
+            .commit;
+        target.* = try targetOf(io, repo, resolved.oid, name, kind);
     }
-    const resolved = (try repo.refStore().resolve(gpa, io, name)) orelse return error.UpstreamNotFetched;
-    defer gpa.free(resolved.name);
-    const kind: Kind = if (std.mem.startsWith(u8, name, "refs/heads/"))
-        .branch
-    else if (std.mem.startsWith(u8, name, "refs/tags/"))
-        .tag
-    else if (std.mem.startsWith(u8, name, "refs/remotes/"))
-        .remote_branch
-    else
-        .commit;
-    return targetOf(io, repo, resolved.oid, name, kind);
+    return out;
 }
 
 fn targetOf(io: Io, repo: *Repository, oid: Oid, name: []const u8, kind: Kind) Error!Target {
@@ -264,11 +265,21 @@ pub fn inProgress(io: Io, repo: *Repository) bool {
 
 /// Merge `target` into the current branch.
 pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options: Options) Error!Outcome {
+    return startHeads(gpa, io, repo, &.{target}, options);
+}
+
+/// Merge `targets` into the current branch, as `git merge` with them all
+/// does. A target `HEAD` or another target already reaches is dropped
+/// first. One left is merged by ort; two or more by git's octopus,
+/// `threeway.applyOctopus`, whose commit leaves `HEAD` out of its parents
+/// when a target already contains it and a fast-forward is allowed.
+pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, options: Options) Error!Outcome {
     @import("../repo/diagnostic.zig").reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
+    if (targets.len == 0) return error.NoMergeTarget;
     if (inProgress(io, repo)) return error.MergeInProgress;
     if (head_mod.stateExists(io, repo.git_dir, "CHERRY_PICK_HEAD") or
         head_mod.stateExists(io, repo.git_dir, "REVERT_HEAD")) return error.SequencerInProgress;
@@ -289,11 +300,24 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         }
     }
 
+    // One target needs no reducing: the merge bases below say whether
+    // `HEAD` reaches it or it reaches `HEAD`.
+    const reduced: Reduced = if (targets.len == 1) .{ .heads = targets, .head_subsumed = false } else try reduceParents(gpa, io, repo, arena, ours, targets);
+    // The reflog names the targets left.
+    var action: std.ArrayList(u8) = .empty;
+    try action.appendSlice(arena, "merge");
+    for (reduced.heads) |target| {
+        try action.append(arena, ' ');
+        try action.appendSlice(arena, target.name);
+    }
+    const reflog_action = action.items;
+    if (reduced.heads.len > 1) return octopus(gpa, io, repo, &arena_instance, &index, head, reduced, reflog_action, fast_forward, options);
+
+    try head_mod.writeRef(io, repo, "ORIG_HEAD", ours);
+    if (reduced.heads.len == 0) return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
+    const target = reduced.heads[0];
     const bases = try revwalk.mergeBases(gpa, io, &repo.odb, ours, target.oid);
     defer gpa.free(bases);
-
-    const reflog_action = try std.fmt.allocPrint(arena, "merge {s}", .{target.name});
-    try head_mod.writeRef(io, repo, "ORIG_HEAD", ours);
 
     if (bases.len == 0 and !options.allow_unrelated_histories) return error.UnrelatedHistories;
     if (bases.len == 1 and bases[0].eql(target.oid)) {
@@ -334,15 +358,169 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     defer outcome.deinit();
     try repo.writeIndex(io, &index);
     try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
+    return commitOrStop(gpa, io, repo, &arena_instance, &index, &outcome, .{
+        .head = head,
+        .parents = &.{ ours, target.oid },
+        .merged = &.{target.oid},
+        .title = try title(arena, repo, reduced.heads, head),
+        .reflog_action = reflog_action,
+        .strategy = "ort",
+        .fast_forward = fast_forward,
+    }, options);
+}
 
+/// The targets left once every one `HEAD` or another target reaches is
+/// dropped, in the order given, the first of any repeated kept: git's
+/// `reduce_parents`. `head_subsumed` says a target reaches `HEAD`.
+const Reduced = struct {
+    heads: []const Target,
+    head_subsumed: bool,
+};
+
+fn reduceParents(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, ours: Oid, targets: []const Target) Error!Reduced {
+    var oids: std.ArrayList(Oid) = .empty;
+    try oids.append(arena, ours);
+    for (targets) |target| try oids.append(arena, target.oid);
+    const kept_oids = try reduceHeads(gpa, io, repo, arena, oids.items);
+    var kept: std.ArrayList(Target) = .empty;
+    var head_subsumed = true;
+    for (kept_oids) |oid| {
+        if (oid.eql(ours)) {
+            head_subsumed = false;
+            continue;
+        }
+        for (targets) |target| {
+            if (target.oid.eql(oid)) break try kept.append(arena, target);
+        }
+    }
+    return .{ .heads = kept.items, .head_subsumed = head_subsumed };
+}
+
+/// git's `reduce_heads`: `oids` in order, each only once, without any one
+/// another reaches. The result lives in `arena`.
+fn reduceHeads(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, oids: []const Oid) Error![]const Oid {
+    var unique: std.ArrayList(Oid) = .empty;
+    for (oids) |oid| {
+        for (unique.items) |seen| {
+            if (seen.eql(oid)) break;
+        } else try unique.append(arena, oid);
+    }
+    var kept: std.ArrayList(Oid) = .empty;
+    for (unique.items, 0..) |one, i| {
+        const redundant = for (unique.items, 0..) |other, j| {
+            if (i != j and try revwalk.isAncestor(gpa, io, &repo.odb, one, other)) break true;
+        } else false;
+        if (!redundant) try kept.append(arena, one);
+    }
+    return kept.items;
+}
+
+/// `git merge` with two or more commits left to merge: the octopus.
+fn octopus(
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    arena_instance: *std.heap.ArenaAllocator,
+    index: *index_mod.Index,
+    head: head_mod.Head,
+    reduced: Reduced,
+    reflog_action: []const u8,
+    fast_forward: FastForward,
+    options: Options,
+) Error!Outcome {
+    const arena = arena_instance.allocator();
+    const ours = head.oid.?;
+    const heads = try arena.alloc(Oid, reduced.heads.len);
+    for (reduced.heads, heads) |target, *oid| oid.* = target.oid;
+    try head_mod.writeRef(io, repo, "ORIG_HEAD", ours);
+    if (!options.allow_unrelated_histories and !try shareHistory(gpa, io, repo, arena, ours, heads)) return error.UnrelatedHistories;
+    // Up to date when `HEAD` reaches every head.
+    for (heads) |one| {
+        const bases = try revwalk.mergeBases(gpa, io, &repo.odb, ours, one);
+        defer gpa.free(bases);
+        if (bases.len == 0 or !bases[0].eql(one)) break;
+    } else return .{ .gpa = gpa, .arena = arena_instance.state, .result = .up_to_date };
+    if (fast_forward == .only) return error.NotFastForward;
+
+    var outcome = try threeway.applyOctopus(gpa, io, repo, index, ours, heads, .{
+        .blob = .{ .conflict_style = options.conflict_style orelse configuredStyle(repo) },
+        .filters = options.filters,
+        .programs = options.programs,
+        .blocked = options.blocked,
+    });
+    defer outcome.deinit();
+    try repo.writeIndex(io, index);
+    var parents: std.ArrayList(Oid) = .empty;
+    if (!reduced.head_subsumed or fast_forward == .never) try parents.append(arena, ours);
+    try parents.appendSlice(arena, heads);
+    return commitOrStop(gpa, io, repo, arena_instance, index, &outcome, .{
+        .head = head,
+        .parents = parents.items,
+        .merged = heads,
+        .title = try title(arena, repo, reduced.heads, head),
+        .reflog_action = reflog_action,
+        .strategy = "octopus",
+        .fast_forward = fast_forward,
+    }, options);
+}
+
+/// Whether the commits have any merge base at all, folded as git's
+/// `get_octopus_merge_bases` folds them.
+fn shareHistory(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, ours: Oid, heads: []const Oid) Error!bool {
+    var bases: std.ArrayList(Oid) = .empty;
+    try bases.append(arena, ours);
+    for (heads) |one| {
+        var next: std.ArrayList(Oid) = .empty;
+        for (bases.items) |base| {
+            const found = try revwalk.mergeBases(gpa, io, &repo.odb, one, base);
+            defer gpa.free(found);
+            try next.appendSlice(arena, found);
+        }
+        bases = next;
+    }
+    return bases.items.len != 0;
+}
+
+/// How a merge was made and what it merged, for its end.
+const Made = struct {
+    head: head_mod.Head,
+    parents: []const Oid,
+    /// What `MERGE_HEAD` lists.
+    merged: []const Oid,
+    title: []const u8,
+    reflog_action: []const u8,
+    /// The strategy the reflog names.
+    strategy: []const u8,
+    fast_forward: FastForward,
+};
+
+/// Commit a clean merge the index now holds, or stop with `MERGE_HEAD`,
+/// `MERGE_MSG` and `MERGE_MODE` written for a person to finish it.
+fn commitOrStop(
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    arena_instance: *std.heap.ArenaAllocator,
+    index: *index_mod.Index,
+    outcome: *const threeway.Outcome,
+    made: Made,
+    options: Options,
+) Error!Outcome {
+    const arena = arena_instance.allocator();
     const comment = message.commentString(repo.configuration().get("core.commentchar"), "");
     var msg: std.ArrayList(u8) = .empty;
     // The message as given, byte for byte; git's own title has no newline
     // at its end.
-    try msg.appendSlice(arena, options.message orelse try title(arena, io, repo, target, head));
+    try msg.appendSlice(arena, options.message orelse made.title);
     const conflicts = try arena.dupe(threeway.Conflict, outcome.conflicts);
     for (conflicts) |*c| c.path = try arena.dupe(u8, c.path);
     const messages = try ort.dupeMessages(arena, outcome.messages);
+    var merge_heads: std.ArrayList(u8) = .empty;
+    for (made.merged) |oid| {
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try merge_heads.appendSlice(arena, oid.hex(&hex));
+        try merge_heads.append(arena, '\n');
+    }
 
     if (outcome.isClean() and options.commit) {
         // `prepare_to_commit`: `pre-merge-commit` first, then the message,
@@ -357,8 +535,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
                 .{ .name = "GIT_INDEX_FILE", .value = e.index_path },
                 .{ .name = "GIT_EDITOR", .value = ":" },
             } });
-            var hex: [hash.max_hex_len]u8 = undefined;
-            try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", try std.fmt.allocPrint(arena, "{s}\n", .{target.oid.hex(&hex)}));
+            try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", merge_heads.items);
             try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", text);
             const message_path = try h.path(arena, "MERGE_MSG");
             _ = try runner.prepareCommitMsg(io, e, message_path, .merge, null);
@@ -369,14 +546,14 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         if (cleaned.len == 0) return error.EmptyMessage;
         const commit = try repo.writeCommit(io, .{
             .tree = outcome.tree.?,
-            .parents = &.{ ours, target.oid },
+            .parents = made.parents,
             .author = options.author orelse options.who,
             .committer = options.who,
             .message = cleaned,
             .signing = options.signing,
         }, options.diagnostic);
-        const log_message = try std.fmt.allocPrint(arena, "{s}: Merge made by the 'ort' strategy.", .{reflog_action});
-        try head_mod.advance(io, repo, head, commit, .{ .who = options.who, .message = log_message });
+        const log_message = try std.fmt.allocPrint(arena, "{s}: Merge made by the '{s}' strategy.", .{ made.reflog_action, made.strategy });
+        try head_mod.advance(io, repo, made.head, commit, .{ .who = options.who, .message = log_message });
         // `post-merge` runs before the merge's files go, as in git.
         if (options.hooks) |runner| _ = try runner.postMerge(io, false);
         try removeMergeState(io, repo);
@@ -384,8 +561,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
     }
 
     // Stopped: with conflicts, or before committing as asked.
-    var hex: [hash.max_hex_len]u8 = undefined;
-    try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", try std.fmt.allocPrint(arena, "{s}\n", .{target.oid.hex(&hex)}));
+    try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", merge_heads.items);
     // `MERGE_MSG` ends the message with a newline whatever it ended with.
     try msg.append(arena, '\n');
     if (!outcome.isClean()) {
@@ -400,9 +576,9 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
         }
     }
     try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", msg.items);
-    try head_mod.writeState(io, repo.git_dir, "MERGE_MODE", if (fast_forward == .never) "no-ff" else "");
+    try head_mod.writeState(io, repo.git_dir, "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
     var reused: []const []const u8 = &.{};
-    if (!outcome.isClean()) reused = try runRerere(gpa, io, repo, &index, arena, options.rerere_autoupdate);
+    if (!outcome.isClean()) reused = try runRerere(gpa, io, repo, index, arena, options.rerere_autoupdate);
     return .{
         .gpa = gpa,
         .arena = arena_instance.state,
@@ -455,6 +631,10 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     while (lines.next()) |line| {
         try parents.append(arena, Oid.parse(repo.objectFormat(), std.mem.trim(u8, line, " \t")) catch return error.MalformedRef);
     }
+    // `git commit` drops a parent another reaches unless the merge was
+    // asked not to fast-forward: an octopus that went past `HEAD`.
+    const mode = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_MODE")) orelse "";
+    const kept: []const Oid = if (std.mem.eql(u8, mode, "no-ff")) parents.items else try reduceHeads(gpa, io, repo, arena, parents.items);
 
     var index = try repo.openIndex(io);
     defer index.deinit();
@@ -473,7 +653,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     if (cleaned.len == 0) return error.EmptyMessage;
     const commit = try repo.writeCommit(io, .{
         .tree = tree,
-        .parents = parents.items,
+        .parents = kept,
         .author = options.author orelse options.who,
         .committer = options.who,
         .message = cleaned,
@@ -544,15 +724,11 @@ fn cleanupMode(repo: *Repository, editor: bool) message.Cleanup {
 
 /// `git fmt-merge-msg`'s title: `Merge branch 'topic'`, and ` into <branch>`
 /// unless the branch is one `merge.suppressDest` names -- `main` and
-/// `master` when it names none.
-fn title(arena: Allocator, io: Io, repo: *Repository, target: Target, head: head_mod.Head) Error![]const u8 {
-    _ = io;
-    const what = switch (target.kind) {
-        .branch => "branch",
-        .remote_branch => "remote-tracking branch",
-        .tag => "tag",
-        .commit => "commit",
-    };
+/// `master` when it names none. Several targets are grouped as git groups
+/// them: the branches, remote-tracking branches and tags together, in that
+/// order, and each commit on its own, the groups in the order they first
+/// come: `Merge branches 'a' and 'b', tag 'v1'; commit 'abc1234'`.
+fn title(arena: Allocator, repo: *Repository, targets: []const Target, head: head_mod.Head) Error![]const u8 {
     const current = head.shortName() orelse "HEAD";
     var suppressed = false;
     const patterns = try repo.configuration().all("merge.suppressdest");
@@ -566,6 +742,37 @@ fn title(arena: Allocator, io: Io, repo: *Repository, target: Target, head: head
     for (effective.items) |pattern| {
         if (wildmatch.match(pattern, current, .{ .pathname = true }) catch false) suppressed = true;
     }
-    if (suppressed) return std.fmt.allocPrint(arena, "Merge {s} '{s}'", .{ what, target.name });
-    return std.fmt.allocPrint(arena, "Merge {s} '{s}' into {s}", .{ what, target.name, current });
+
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, "Merge ");
+    var local_done = false;
+    for (targets, 0..) |target, i| {
+        if (i != 0 and (target.kind == .commit or !local_done)) try out.appendSlice(arena, "; ");
+        if (target.kind == .commit) {
+            try out.print(arena, "commit '{s}'", .{target.name});
+            continue;
+        }
+        if (local_done) continue;
+        local_done = true;
+        var separator: []const u8 = "";
+        const groups = [_]struct { kind: Kind, one: []const u8, many: []const u8 }{
+            .{ .kind = .branch, .one = "branch ", .many = "branches " },
+            .{ .kind = .remote_branch, .one = "remote-tracking branch ", .many = "remote-tracking branches " },
+            .{ .kind = .tag, .one = "tag ", .many = "tags " },
+        };
+        for (groups) |group| {
+            var names: std.ArrayList([]const u8) = .empty;
+            for (targets) |t| if (t.kind == group.kind) try names.append(arena, t.name);
+            if (names.items.len == 0) continue;
+            try out.appendSlice(arena, separator);
+            separator = ", ";
+            try out.appendSlice(arena, if (names.items.len == 1) group.one else group.many);
+            for (names.items, 0..) |name, n| {
+                if (n == names.items.len - 1 and n != 0) try out.appendSlice(arena, " and ") else if (n != 0) try out.appendSlice(arena, ", ");
+                try out.print(arena, "'{s}'", .{name});
+            }
+        }
+    }
+    if (!suppressed) try out.print(arena, " into {s}", .{current});
+    return out.items;
 }

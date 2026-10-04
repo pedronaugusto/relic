@@ -82,8 +82,6 @@ pub const Error = error{
     MalformedState,
     /// A label or commit a `reset` or `merge` names does not resolve.
     UnknownLabel,
-    /// A `merge` line names more than one commit to merge.
-    OctopusMerge,
     /// The rebase names a merge strategy other than `ort` or `recursive`.
     UnsupportedStrategy,
     /// The branch given does not name a branch or a commit.
@@ -2148,13 +2146,16 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     }
     var names = std.mem.tokenizeAny(u8, arg, " \t");
     const name = names.next() orelse return error.UnknownLabel;
-    if (names.next() != null) return error.OctopusMerge;
-    const merge_head = try lookupLabel(r, name);
+    var merge_heads: std.ArrayList(Oid) = .empty;
+    try merge_heads.append(r.arena, try lookupLabel(r, name));
+    while (names.next()) |more| try merge_heads.append(r.arena, try lookupLabel(r, more));
+    const merge_head = merge_heads.items[0];
 
     // The original merge's parents are exactly these: reuse it.
     if (item.commit) |original| {
         const source = try readSource(r, original);
-        if (r.allow_ff and source.commit.parents.len == 2 and source.commit.parents[0].eql(head_oid) and source.commit.parents[1].eql(merge_head)) {
+        const parents = source.commit.parents;
+        if (r.allow_ff and parents.len == 1 + merge_heads.items.len and parents[0].eql(head_oid) and sameOids(parents[1..], merge_heads.items)) {
             var index = try repo.openIndex(io);
             defer index.deinit();
             const head_tree = try repo.commitTree(io, head_oid);
@@ -2174,12 +2175,18 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         try r.msg.appendSlice(r.arena, message.fromSubject(source.commit.message));
     } else if (oneline) |text| {
         try r.msg.appendSlice(r.arena, text);
+    } else if (merge_heads.items.len > 1) {
+        try r.msg.appendSlice(r.arena, try std.fmt.allocPrint(r.arena, "Merge branches '{s}'", .{std.mem.trim(u8, arg, " \t")}));
     } else {
         try r.msg.appendSlice(r.arena, try std.fmt.allocPrint(r.arena, "Merge branch '{s}'", .{name}));
     }
     r.have_message = true;
     try writeAuthorScript(r, author);
     try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", r.msg.items);
+
+    // An octopus is git's `git merge -s octopus --no-ff -F MERGE_MSG` of
+    // the heads, named by their object names.
+    if (merge_heads.items.len > 1) return mergeAsGitMerge(r, item, merge_heads.items, author);
 
     const bases = try revwalk.mergeBases(gpa, io, &repo.odb, head_oid, merge_head);
     defer gpa.free(bases);
@@ -2188,7 +2195,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     // With strategy options git hands the merge to `git merge -s ort -X...
     // --no-ff -F MERGE_MSG <commit>`, which names it by its object name and
     // does the rest its own way.
-    if (r.options.strategy_options.len != 0) return mergeAsGitMerge(r, item, merge_head, author);
+    if (r.options.strategy_options.len != 0) return mergeAsGitMerge(r, item, &.{merge_head}, author);
 
     try head_mod.writeState(io, repo.git_dir, "MERGE_HEAD", try r.hex(merge_head));
     try head_mod.writeState(io, repo.git_dir, "MERGE_MODE", "no-ff");
@@ -2244,13 +2251,14 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
 }
 
 /// `do_merge` with a strategy: the merge `git merge` makes of it.
-fn mergeAsGitMerge(r: *Run, item: todo.Item, merge_head: Oid, author: object.Signature) Error!?Outcome {
+fn mergeAsGitMerge(r: *Run, item: todo.Item, merge_heads: []const Oid, author: object.Signature) Error!?Outcome {
     const gpa = r.gpa;
     const io = r.io;
     const repo = r.repo;
     try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
-    const name = try r.hex(merge_head);
-    var outcome = try merging.start(gpa, io, repo, .{ .oid = merge_head, .name = name, .kind = .commit }, .{
+    const targets = try r.arena.alloc(merging.Target, merge_heads.len);
+    for (merge_heads, targets) |oid, *target| target.* = .{ .oid = oid, .name = try r.hex(oid), .kind = .commit };
+    var outcome = try merging.startHeads(gpa, io, repo, targets, .{
         .who = r.options.who,
         .author = author,
         .fast_forward = .never,
@@ -2278,6 +2286,12 @@ fn mergeAsGitMerge(r: *Run, item: todo.Item, merge_head: Oid, author: object.Sig
         return finishOutcome(r, .stopped, .conflict, item.commit);
     }
     return null;
+}
+
+fn sameOids(a: []const Oid, b: []const Oid) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!x.eql(y)) return false;
+    return true;
 }
 
 fn lookupRewritten(r: *Run, name: []const u8) bool {
