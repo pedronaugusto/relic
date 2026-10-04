@@ -76,6 +76,11 @@ pub const Graph = struct {
 
     /// Read `objects/info/commit-graph`, or `null` when there is none.
     pub fn open(gpa: Allocator, io: Io, objects_dir: Io.Dir, kind: hash.Kind) Error!?Graph {
+        // Keep discovery failures distinct from an absent optional accelerator.
+        objects_dir.access(io, "info/commit-graphs/commit-graph-chain", .{}) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
         if (try fs.readFileAlloc(gpa, io, objects_dir, "info/commit-graphs/commit-graph-chain", 255 * (kind.hexLen() + 1))) |chain| {
             defer gpa.free(chain);
             var base: ?*Graph = null;
