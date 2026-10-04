@@ -64,6 +64,9 @@ pub const ReadError = error{
     CorruptCacheTree,
     /// A `REUC` extension that ran off its own end.
     CorruptResolveUndo,
+    /// An `FSMN` extension of a version other than 1 or 2, or one that ran
+    /// off its own end.
+    CorruptFsmonitor,
 } || Allocator.Error || Io.Dir.ReadFileAllocError || ewah.Error || varint.Error;
 
 /// Errors from writing an index.
@@ -96,6 +99,11 @@ pub const Entry = struct {
     skip_worktree: bool = false,
     /// `git add -N`: the path is staged as existing with no content yet.
     intent_to_add: bool = false,
+    /// git's `CE_FSMONITOR_VALID`: the file monitor has reported no change
+    /// to the file since the index's `fsmonitor_token`, and the file was
+    /// found the same as this entry after that. An entry made here starts
+    /// without it. `worktree.fsmonitor.refresh` decides when it is believed.
+    fsmonitor_valid: bool = false,
     stat: fs.Stat = .none,
 
     /// Whether the entry needs the version 3 extended flag word.
@@ -597,6 +605,19 @@ pub const Index = struct {
     /// How many blocks the `IEOT` the file read carried was divided into, or
     /// zero where there was none.
     entry_offset_blocks: u32 = 0,
+    /// The token of the file monitor's last answer, from `FSMN`: what to ask
+    /// it for changes since. `null` when the index carries none; owned.
+    fsmonitor_token: ?[]u8 = null,
+    /// Whether `worktree.fsmonitor.refresh` has asked the monitor since the
+    /// index was read, which is what makes `Entry.fsmonitor_valid` true
+    /// now and not only when the index was written.
+    fsmonitor_refreshed: bool = false,
+    /// Whether what the monitor vouches for changed in a way git writes the
+    /// index for: a first token, more than a hundred paths named, an answer
+    /// that took back what was vouched for, a file vouched for anew. git's
+    /// status writes the index then, and only then for the monitor's sake;
+    /// the token of an answer that changed nothing else is not kept.
+    fsmonitor_changed: bool = false,
     /// Whether the index is sparse: it carries `sdir`, and may hold sparse
     /// directory entries. `sparseindex.expand` clears it and
     /// `sparseindex.collapse` sets it; it decides whether `sdir` is written.
@@ -619,6 +640,7 @@ pub const Index = struct {
         if (index.resolve_undo) |*r| r.deinit();
         for (index.unknown.items) |e| index.gpa.free(e.data);
         index.unknown.deinit(index.gpa);
+        if (index.fsmonitor_token) |t| index.gpa.free(t);
         index.* = undefined;
     }
 
@@ -773,6 +795,8 @@ pub const Index = struct {
             } else if (std.mem.eql(u8, &signature, "sdir")) {
                 // It carries nothing; being there is what it says.
                 index.sparse = true;
+            } else if (std.mem.eql(u8, &signature, "FSMN")) {
+                try index.parseFsmonitor(gpa, data);
             } else if (signature[0] >= 'A' and signature[0] <= 'Z') {
                 const copy = try gpa.dupe(u8, data);
                 index.unknown.append(gpa, .{ .signature = signature, .data = copy }) catch |err| {
@@ -805,6 +829,46 @@ pub const Index = struct {
         }
 
         return index;
+    }
+
+    /// `FSMN`: a version, the token -- a NUL-terminated string from version
+    /// 2, a time in nanoseconds in version 1 -- and a bitmap of the entries
+    /// the monitor has not vouched for. A submodule is never vouched for. The
+    /// bitmap counts the entries of the index it was written with, so a
+    /// split index's, which counts the merged ones, is not believed.
+    fn parseFsmonitor(index: *Index, gpa: Allocator, data: []const u8) ReadError!void {
+        if (data.len < 4) return error.CorruptFsmonitor;
+        var rest = data[4..];
+        const token = switch (std.mem.readInt(u32, data[0..4], .big)) {
+            1 => blk: {
+                if (rest.len < 8) return error.CorruptFsmonitor;
+                const nanoseconds = std.mem.readInt(u64, rest[0..8], .big);
+                rest = rest[8..];
+                break :blk try std.fmt.allocPrint(gpa, "{d}", .{nanoseconds});
+            },
+            2 => blk: {
+                const end = std.mem.indexOfScalar(u8, rest, 0) orelse return error.CorruptFsmonitor;
+                defer rest = rest[end + 1 ..];
+                break :blk try gpa.dupe(u8, rest[0..end]);
+            },
+            else => return error.CorruptFsmonitor,
+        };
+        if (index.fsmonitor_token) |old| gpa.free(old);
+        index.fsmonitor_token = token;
+        if (rest.len < 4) return error.CorruptFsmonitor;
+        const size = std.mem.readInt(u32, rest[0..4], .big);
+        if (rest.len - 4 < size) return error.CorruptFsmonitor;
+        var dirty = try ewah.read(gpa, rest[4..][0..size]);
+        defer dirty.bits.deinit();
+        const positions = dirty.bits.positions;
+        const fits = positions.len == 0 or positions[positions.len - 1] < index.entries.items.len;
+        if (index.was_split or !fits) return;
+        var next: usize = 0;
+        for (index.entries.items, 0..) |*entry, at| {
+            const is_dirty = next < positions.len and positions[next] == at;
+            if (is_dirty) next += 1;
+            entry.fsmonitor_valid = !is_dirty and entry.mode != .gitlink;
+        }
     }
 
     fn parseLink(index: *Index, gpa: Allocator, data: []const u8) ReadError!void {
@@ -1438,6 +1502,15 @@ pub const Index = struct {
             try writeExtension(out, &extension.signature, extension.data);
             hashExtensionHeader(&ext_hasher, &extension.signature, extension.data.len);
         }
+        // `FSMN` after the untracked cache, as git writes them: version 2,
+        // the token, and the entries not vouched for.
+        if (index.fsmonitor_token) |token| {
+            var fsmn_body: Io.Writer.Allocating = .init(index.gpa);
+            defer fsmn_body.deinit();
+            try index.writeFsmonitor(&fsmn_body.writer, token);
+            try writeExtension(out, "FSMN", fsmn_body.written());
+            hashExtensionHeader(&ext_hasher, "FSMN", fsmn_body.written().len);
+        }
         // `sdir` is empty, and last of the ones that carry the index's
         // content, which is where git writes it.
         if (index.sparse) {
@@ -1465,6 +1538,34 @@ pub const Index = struct {
             try w.writeAll(checksum.raw());
         }
         try w.flush();
+    }
+
+    fn writeFsmonitor(index: *Index, w: *Io.Writer, token: []const u8) (Allocator.Error || Io.Writer.Error)!void {
+        var version: [4]u8 = undefined;
+        std.mem.writeInt(u32, &version, 2, .big);
+        try w.writeAll(&version);
+        try w.writeAll(token);
+        try w.writeByte(0);
+        // git's bitmap ends at its last set bit.
+        var bit_count: u32 = 0;
+        for (index.entries.items, 0..) |entry, at| {
+            if (!entry.fsmonitor_valid) bit_count = @intCast(at + 1); // safe: an index holds fewer than 2^32 entries
+        }
+        const words = try index.gpa.alloc(u64, (bit_count + 63) / 64);
+        defer index.gpa.free(words);
+        @memset(words, 0);
+        for (index.entries.items[0..bit_count], 0..) |entry, at| {
+            if (!entry.fsmonitor_valid) words[at / 64] |= @as(u64, 1) << @intCast(at % 64); // safe: below 64
+        }
+        const bitmap = ewah.write(index.gpa, words, bit_count) catch |err| switch (err) {
+            error.InvalidBitmapInput => unreachable, // the words hold the bits
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        defer index.gpa.free(bitmap);
+        var size: [4]u8 = undefined;
+        std.mem.writeInt(u32, &size, @intCast(bitmap.len), .big); // safe: an index is smaller than 4 GiB
+        try w.writeAll(&size);
+        try w.writeAll(bitmap);
     }
 
     /// One block of the index entry offset table: where it starts in the

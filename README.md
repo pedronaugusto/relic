@@ -262,6 +262,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `worktree.wildmatch` | `match` — git's own glob, which is not `fnmatch`. |
 | `wildmatch.match(pattern, text, flags)` | Match a glob with git's `pathname` and `case_fold` flags. |
 | `worktree.filter`, `worktree.convert`, `worktree.encoding` | Clean and smudge filters, the long-running process protocol, `ident`, line endings, `working-tree-encoding`. |
+| `worktree.fsmonitor` | `refresh`, `configured`, `ChangeSource`: the file monitor git asks through `core.fsmonitor` (hook protocol 1 and 2), or a program's own, deciding which files `status` looks at; `FSMN` read and written. |
 | `worktree.dirscan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
 | `worktree.safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`. |
@@ -705,6 +706,7 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 - **`grep -P` only through a caller's matcher.** Without one, Perl expressions are refused by name; back-references follow glibc's matcher, which git uses on Linux and builds in for Windows, where macOS's differs.
 - **A deflated zip entry is this package's deflate,** decoding to the same file; a stored zip and every tar are git's bytes. `export-subst` leaves `%N` as it stands, as git does, and refuses `%(describe)`, relative and human dates, trailers, wrapping, padding and colour by name.
 - **No interactive `clean`.**
+- **No fsmonitor daemon.** `core.fsmonitor=true`, git's built-in daemon, is `error.FsmonitorDaemonUnsupported`; a hook and a program's own change source are asked as git asks the hook.
 - **fast-import does not check signatures, and fast-export does not anonymize.** git's `--signed-commits=*-if-invalid`, `rewrite-submodules-*` and `export-pack-edges` are refused by name; fast-export takes no path limit and no `--reencode=yes`.
 
 ## Ahead

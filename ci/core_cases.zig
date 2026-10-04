@@ -66,6 +66,8 @@ pub const families = [_]Family{
         "worktree.convert.test",
         "worktree.dirscan.test",
         "worktree.encoding.test",
+        "worktree.fsmonitor.test",
+        "worktree.fsmonitor_test.test",
         "testing.embedded_repo.test",
         "testing.eol.test",
         "testing.encoding.test",

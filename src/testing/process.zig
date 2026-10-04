@@ -87,6 +87,18 @@ pub fn main(init: std.process.Init) !void {
         if (args.len < 4) return error.MissingPath;
         const contents = try Io.Dir.cwd().readFileAlloc(io, args[2], init.arena.allocator(), .limited(1 << 20));
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = contents });
+    } else if (std.mem.eql(u8, args[1], "fsmonitor")) {
+        // A file monitor's hook, run in the working tree with a version and
+        // a token: each question is logged to `.git/fsmonitor-log`, and the
+        // answer is `.git/fsmonitor-v<version>`, or a failure without one.
+        if (args.len < 4) return error.MissingPath;
+        const arena = init.arena.allocator();
+        const cwd = Io.Dir.cwd();
+        const log = cwd.readFileAlloc(io, ".git/fsmonitor-log", arena, .limited(1 << 20)) catch "";
+        try cwd.writeFile(io, .{ .sub_path = ".git/fsmonitor-log", .data = try std.fmt.allocPrint(arena, "{s}{s} {s}\n", .{ log, args[2], args[3] }) });
+        const answer_path = try std.fmt.allocPrint(arena, ".git/fsmonitor-v{s}", .{args[2]});
+        const answer = cwd.readFileAlloc(io, answer_path, arena, .limited(1 << 20)) catch std.process.exit(1);
+        try out.interface.writeAll(answer);
     } else if (!std.mem.eql(u8, args[1], "fail") and !std.mem.eql(u8, args[1], "silent")) return error.InvalidMode;
     try out.interface.flush();
     try err.interface.flush();

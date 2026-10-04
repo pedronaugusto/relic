@@ -18,6 +18,7 @@ pub const attributes = @import("worktree/attributes.zig");
 
 pub const convert = @import("worktree/convert.zig");
 pub const encoding = @import("worktree/encoding.zig");
+pub const fsmonitor = @import("worktree/fsmonitor.zig");
 pub const filter = @import("worktree/filter.zig");
 pub const dirscan = @import("worktree/dirscan.zig");
 pub const safepath = @import("worktree/safepath.zig");
@@ -75,7 +76,7 @@ pub const Error = error{
     /// The index has conflicts, which a checkout that keeps local changes
     /// cannot start from.
     UnmergedIndex,
-} || Allocator.Error || odb_mod.Error || index_mod.ReadError ||
+} || Allocator.Error || odb_mod.Error || index_mod.ReadError || fsmonitor.Error ||
     index_mod.WriteError || fs.StatError || Io.Dir.Iterator.Error ||
     Io.Dir.OpenError || Io.Dir.DeleteFileError || Io.Dir.DeleteDirError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.SymLinkError ||
@@ -812,6 +813,13 @@ pub const StatusOptions = struct {
     programs: ?program.Programs = null,
     /// Where filters passed over are reported.
     filter_report: ?*filter.Report = null,
+    /// The file monitor to ask what changed: `fsmonitor.configured` for
+    /// git's hook, or the caller's own. A file it vouches for is taken as
+    /// the index has it and not looked at, and a file found unchanged is
+    /// vouched for from then on, in `index`, which the caller writes to
+    /// keep it -- git writes it when `Index.fsmonitor_changed` says. With `untracked = .no` only the files it does not vouch for
+    /// are looked at, and no directory is read.
+    fsmonitor: ?fsmonitor.Source = null,
 
     /// How much of an untracked directory `status` reports: nothing, the
     /// directory itself, or every file under it. These are what `git status`
@@ -941,6 +949,7 @@ pub fn status(
         .db = db,
     });
     defer conv.deinit();
+    if (options.fsmonitor) |source| try fsmonitor.refresh(gpa, io, wt, index, source);
     var scan: StatusScan = .{
         .gpa = gpa,
         .conv = &conv,
@@ -951,8 +960,9 @@ pub fn status(
         .db = db,
         .options = options,
         .entries = &entries,
+        .monitored = index.fsmonitor_token != null and index.fsmonitor_refreshed,
     };
-    try scan.walk("", 0);
+    if (scan.monitored and options.untracked == .no) try scan.checkEntries() else try scan.walk("", 0);
 
     for (index.entries.items) |entry| {
         if (entry.stage != 0 or entry.skip_worktree or entry.isSparseDirectory()) continue;
@@ -1091,6 +1101,8 @@ const StatusScan = struct {
     options: StatusOptions,
     entries: *std.StringArrayHashMapUnmanaged(StatusEntry),
     seen: std.StringHashMapUnmanaged(void) = .empty,
+    /// Whether the file monitor was asked, so `Entry.fsmonitor_valid` holds.
+    monitored: bool = false,
     /// The files of the sparse directories the walk has met on the disk,
     /// which a full index would hold with `skip-worktree` set. In `arena`.
     sparse_files: std.StringHashMapUnmanaged(TreeEntry) = .empty,
@@ -1177,10 +1189,61 @@ const StatusScan = struct {
             const entry_ptr = tracked.?;
             try s.seen.put(s.gpa, entry_ptr.path, {});
             if (entry_ptr.skip_worktree or entry_ptr.assume_valid) continue;
+            if (s.monitored and entry_ptr.fsmonitor_valid) continue;
 
             const change = try s.compare(entry_ptr, path, found);
-            if (change != .unmodified) try s.record(path, change);
+            if (change != .unmodified) try s.record(path, change) else s.vouch(entry_ptr);
         }
+    }
+
+    /// A file found as the index has it is vouched for from now on, as git's
+    /// refresh marks it.
+    fn vouch(s: *StatusScan, entry: *index_mod.Entry) void {
+        if (!s.monitored or entry.mode == .gitlink or entry.fsmonitor_valid) return;
+        entry.fsmonitor_valid = true;
+        s.index.fsmonitor_changed = true;
+    }
+
+    /// The tracked files the monitor does not vouch for, one by one, with
+    /// no directory read: what `git status -uno` does with a monitor.
+    fn checkEntries(s: *StatusScan) Error!void {
+        var not_directories: std.StringHashMapUnmanaged(void) = .empty;
+        for (s.index.entries.items) |*entry| {
+            if (entry.stage != 0 or entry.skip_worktree or entry.isSparseDirectory()) continue;
+            if (entry.assume_valid or entry.fsmonitor_valid) {
+                try s.seen.put(s.gpa, entry.path, {});
+                continue;
+            }
+            // Behind a symlink or a file is not in the working tree at all,
+            // as the walk finds it.
+            if (try s.behindNonDirectory(entry.path, &not_directories)) continue;
+            const found = (try fs.statAt(s.io, s.wt, entry.path)) orelse continue;
+            if (found.kind == .directory) {
+                if (entry.mode != .gitlink) continue;
+                try s.seen.put(s.gpa, entry.path, {});
+                try s.inspectGitlink(entry, entry.path);
+                continue;
+            }
+            try s.seen.put(s.gpa, entry.path, {});
+            if (s.options.rules.attrs) |attrs| try attrs.enter(s.io, s.wt, entry.path);
+            const change = try s.compare(entry, entry.path, found);
+            if (change != .unmodified) try s.record(entry.path, change) else s.vouch(entry);
+        }
+    }
+
+    /// Whether a directory above `path` is a symlink, a file or missing.
+    fn behindNonDirectory(s: *StatusScan, path: []const u8, known: *std.StringHashMapUnmanaged(void)) Error!bool {
+        var at: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| : (at = slash + 1) {
+            const dir = path[0..slash];
+            if (known.contains(dir)) return true;
+            const found = try fs.statAt(s.io, s.wt, dir);
+            if (found == null or found.?.kind != .directory) {
+                try known.put(s.arena, dir, {});
+                return true;
+            }
+        }
+        return false;
     }
 
     fn excluded(s: *const StatusScan, path: []const u8, is_dir: bool) bool {
@@ -1485,8 +1548,10 @@ pub fn resetIndex(
             entry.oid = want.oid;
             entry.mode = want.mode;
             // The file on the disk is untouched and no longer matches, so
-            // the cached stat must not be trusted against it.
+            // neither the cached stat nor the monitor's word for it may be
+            // trusted against it.
             entry.stat = .none;
+            entry.fsmonitor_valid = false;
             entry.intent_to_add = false;
             outcome.updated += 1;
             continue;

@@ -160,6 +160,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "object transforms", .patterns = &.{
         "src/testing/concurrency.zig",
         "src/worktree/convert.zig",
+        "src/worktree/fsmonitor.zig",
         "src/diff.zig",
         "src/transport/objectfilter.zig",
         "src/revwalk_test.zig",
@@ -221,6 +222,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/merge/threeway.zig",
         "src/testing/workcount.zig",
         "src/worktree_test.zig",
+        "src/worktree/fsmonitor_test.zig",
     } },
     .{ .name = "object transfer", .patterns = &.{
         "src/testing/eol.zig",
