@@ -270,7 +270,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `diff.patchid` | Patch ids: a name for what a commit changes. |
 | `diff.blame` | `file` — which commit each line of a file comes from, as `git blame` says, following renames. |
 | `revwalk` | `count`, `countObjects` (bitmap-backed counts, ordinary walks on a miss), `Walk`, `mergeBase`, `mergeBases`, `mergeBasesWith`, `mergeBasesMany`, `isAncestor`, `isAncestorWith`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary. |
-| `revwalk.revparse` | git's revision grammar. |
+| `revwalk.revparse` | git's revision grammar, `@{<date>}` with git's approximate dates included. |
 | `revwalk.shallow` | A shallow repository's boundary: `.git/shallow`. |
 | `revwalk.describe` | `describe`, `head`, `Describer`: `git describe` with `--tags`, `--all`, `--long`, `--abbrev`, `--candidates`, `--match`, `--exclude`, `--first-parent`, `--always`, `--dirty`, `--broken`, a blob as `<commit>:<path>`, and `--contains` as `git name-rev` names it. |
 | `revwalk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` as git 2.56 does it, with its state files, its choice of commit, skips, `--first-parent`, `--no-checkout`, `--reset-when-found` and terms; pathspecs refused by name. |
@@ -684,7 +684,6 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 - **No `working-tree-encoding`.** A character-set conversion; refused by name.
 - **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name.
 - **LFS without git-lfs's extras.** tus and custom transfer adapters are refused by name.
-- **No `@{date}`** in a revision; refused by name.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
 - **No `git://`, dumb HTTP or remote helpers.** Refused by name.
 - **No pathspec in a bisection, no `--group=format:` in a shortlog, no editor for a note, no `sparse:oid=` filter in a bundle.** Each refused by name; a shortlog by trailer is refused too where `trailer.*` is configured.
@@ -800,7 +799,7 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Seventy-seven fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Seventy-eight fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
 between them they cover every format relic reads: the object formats, packs
 and their indexes, the index file, refs, reftable and reflogs, config and

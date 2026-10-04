@@ -14,10 +14,12 @@
 //!   negate and `:/!!` for a literal `!`;
 //! - `<rev>:<path>`, and `:<path>` or `:<n>:<path>` from the index.
 //!
-//! A reflog selected by a date, `@{yesterday}`, is refused by name: reading
-//! git's approximate dates is its own undertaking. A path relative to a
-//! working directory (`:./x`) is refused too; there is none here to be
-//! relative to.
+//! `<ref>@{<date>}` and `@{<date>}` pick the reflog entry in force at a
+//! date, read as git's `approxidate` reads it: `yesterday`, `3.days.ago`,
+//! `2023-11-14 22:15`, or seconds since the epoch. `resolve` reads the
+//! time now from the `Io`'s clock and takes a date naming no zone in UTC;
+//! `resolveAt` takes both from the caller. A path relative to a working
+//! directory (`:./x`) is refused; there is none here to be relative to.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -29,6 +31,8 @@ const repo_mod = @import("../repo.zig");
 const revwalk = @import("../revwalk.zig");
 const remote_mod = @import("../transport/remote.zig");
 const ere = @import("../ere.zig");
+const gitdate = @import("../object/gitdate.zig");
+const reflog = @import("../refs/reflog.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -44,17 +48,33 @@ pub const Error = error{
     BadRevision,
     /// An abbreviation more than one object begins with.
     AmbiguousRevision,
-    /// A reflog entry chosen by a date.
-    RevisionDateUnsupported,
     /// A path relative to a working directory: `:./x`, `HEAD:../x`.
     RelativePathUnsupported,
 } || ere.Error || ResourceError;
 
 /// What `expr` names in `repo`.
 pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8) Error!Oid {
+    return resolveWith(gpa, io, repo, expr, null);
+}
+
+/// The time a reflog's `@{<date>}` is read against.
+pub const Clock = struct {
+    /// The time now, in seconds since the epoch.
+    now: i64,
+    /// Minutes east of UTC that a date naming no zone is taken in: git's
+    /// local time.
+    local_offset_minutes: i32 = 0,
+};
+
+/// What `expr` names in `repo`, with `@{<date>}` read against `clock`.
+pub fn resolveAt(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, clock: Clock) Error!Oid {
+    return resolveWith(gpa, io, repo, expr, clock);
+}
+
+fn resolveWith(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, clock: ?Clock) Error!Oid {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    var r: Resolver = .{ .gpa = gpa, .a = arena_state.allocator(), .io = io, .repo = repo };
+    var r: Resolver = .{ .gpa = gpa, .a = arena_state.allocator(), .io = io, .repo = repo, .clock = clock };
     return r.withContext(expr);
 }
 
@@ -71,6 +91,8 @@ const Resolver = struct {
     a: Allocator,
     io: Io,
     repo: *Repository,
+    /// `null` reads the `Io`'s clock when a date needs it, in UTC.
+    clock: ?Clock,
 
     fn withContext(r: *Resolver, name: []const u8) Error!Oid {
         if (name.len == 0) return error.BadRevision;
@@ -214,7 +236,19 @@ const Resolver = struct {
             const n = std.fmt.parseUnsigned(u32, what[1..], 10) catch return error.BadRevision;
             return r.previousBranch(n);
         }
-        const n = std.fmt.parseUnsigned(u32, what, 10) catch return error.RevisionDateUnsupported;
+        // All digits is an entry's place, or seconds since the epoch from
+        // 100000000 on, as git reads it; anything else is a date.
+        var n: u64 = 0;
+        const digits = what.len != 0 and for (what) |c| {
+            if (!std.ascii.isDigit(c)) break false;
+            n = n *| 10 +| (c - '0');
+        } else true;
+        const at_time: ?i64 = if (!digits)
+            (r.approximate(what) orelse return error.BadRevision)
+        else if (n >= 100_000_000)
+            @intCast(@min(n, std.math.maxInt(i64))) // safe: clamped to i64's range
+        else
+            null;
         // `@{<n>}` with nothing before it is the current branch's reflog.
         const full = if (base.len == 0)
             try r.currentBranchRef()
@@ -223,10 +257,40 @@ const Resolver = struct {
         var log = r.repo.readLog(r.io, full) catch |err| return revisionError(err);
         defer log.deinit();
         if (log.entries.len == 0) return error.BadRevision;
+        if (at_time) |time| return r.reflogAt(full, log.entries, time);
         if (n == 0) return log.entries[log.entries.len - 1].new;
         if (n > log.entries.len) return error.BadRevision;
         const entry = log.entries[log.entries.len - n];
         return entry.old;
+    }
+
+    fn approximate(r: *Resolver, text: []const u8) ?i64 {
+        const clock = r.clock orelse Clock{ .now = Io.Clock.real.now(r.io).toSeconds() };
+        return gitdate.approximate(text, .{ .now = clock.now, .local_offset_minutes = clock.local_offset_minutes });
+    }
+
+    /// git's `read_ref_at` by date: the newest entry made at or before
+    /// `time` says what the ref held then. Where that is the newest entry
+    /// of all and not made at `time` exactly, it is what the ref holds now;
+    /// where every entry is later, it is what the oldest one replaced, or
+    /// what it made where it created the ref.
+    fn reflogAt(r: *Resolver, full: []const u8, entries: []const reflog.Entry, time: i64) Error!Oid {
+        var newer_old: ?Oid = null;
+        var i = entries.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = entries[i];
+            if (entry.who.when_secs <= time) {
+                if (newer_old) |old| {
+                    if (!old.isZero()) return entry.new;
+                }
+                if (entry.who.when_secs == time) return entry.new;
+                return (try r.refMaybe(full)) orelse entry.new;
+            }
+            newer_old = entry.old;
+        }
+        const oldest = entries[0];
+        return if (oldest.old.isZero()) oldest.new else oldest.old;
     }
 
     fn currentBranchRef(r: *Resolver) Error![]const u8 {
@@ -561,7 +625,71 @@ test "every expression reads as git rev-parse reads it" {
         const refused = if (resolve(gpa, io, &repo, expr)) |_| false else |_| true;
         try testing.expect(refused);
     }
-    try testing.expectError(error.RevisionDateUnsupported, resolve(gpa, io, &repo, "main@{yesterday}"));
+}
+
+test "a reflog entry chosen by a date is the one git rev-parse chooses" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    // Two days of history an hour apart, read on the third day at 12:00.
+    const start: i64 = 1_700_000_000;
+    const now = start + 2 * 24 * 60 * 60;
+    var now_text: [32]u8 = undefined;
+    try r.isolated.?.put("GIT_TEST_DATE_NOW", try std.fmt.bufPrint(&now_text, "{d}", .{now}));
+    try r.isolated.?.put("TZ", "UTC");
+    for (0..6) |i| {
+        var date: [32]u8 = undefined;
+        try r.isolated.?.put("GIT_COMMITTER_DATE", try std.fmt.bufPrint(&date, "{d} +0000", .{start + @as(i64, @intCast(i)) * 3 * 60 * 60})); // safe: below 6
+        var name: [16]u8 = undefined;
+        const file = try std.fmt.bufPrint(&name, "f{d}", .{i});
+        try r.writeFile(io, file, file);
+        try r.exec(io, &.{ "add", "-A" });
+        try r.exec(io, &.{ "commit", "-q", "-m", file });
+        if (i == 2) try r.exec(io, &.{ "branch", "side" });
+    }
+
+    var repo = try Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    var exact: [48]u8 = undefined;
+    var stamp: [48]u8 = undefined;
+    var iso: [48]u8 = undefined;
+    const cases = [_][]const u8{
+        "main@{now}",
+        "main@{yesterday}",
+        "@{2.days.ago}",
+        "HEAD@{1.day.ago}",
+        "main@{40 hours ago}",
+        "main@{1.year.ago}",
+        "side@{1.week.ago}",
+        "side@{now}",
+        try std.fmt.bufPrint(&exact, "main@{{{d}}}", .{start + 3 * 60 * 60}),
+        try std.fmt.bufPrint(&stamp, "main@{{{d}}}", .{start + 4 * 60 * 60}),
+        try std.fmt.bufPrint(&iso, "main@{{2023-11-14 23:30:00 +0000}}", .{}),
+        "main@{last tuesday}",
+    };
+    for (cases) |expr| {
+        const theirs = r.line(io, &.{ "rev-parse", "--verify", "--quiet", expr }) catch |err| {
+            std.debug.print("git refuses {s}: {}\n", .{ expr, err });
+            return err;
+        };
+        defer gpa.free(theirs);
+        const ours = resolveAt(gpa, io, &repo, expr, .{ .now = now }) catch |err| {
+            std.debug.print("relic refuses {s}: {}\n", .{ expr, err });
+            return err;
+        };
+        var hex: [hash.max_hex_len]u8 = undefined;
+        testing.expectEqualStrings(theirs, ours.hex(&hex)) catch |err| {
+            std.debug.print("for {s}\n", .{expr});
+            return err;
+        };
+    }
+    // Words that mean nothing are no date, for git and here.
+    r.report_failures = false;
+    try testing.expectError(error.GitFailed, r.run(io, &.{ "rev-parse", "--verify", "--quiet", "main@{whenever}" }));
+    try testing.expectError(error.BadRevision, resolveAt(gpa, io, &repo, "main@{whenever}", .{ .now = now }));
+    // Without a clock the `Io`'s is read.
+    _ = try resolve(gpa, io, &repo, "main@{yesterday}");
 }
 
 test "revision parsing preserves allocation resource failures" {

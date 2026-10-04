@@ -1,5 +1,8 @@
 //! git's strict date parser, `parse_date_basic` in `date.c`: what `git am`
-//! makes of a mail's `Date:` header and what `GIT_AUTHOR_DATE` may say.
+//! makes of a mail's `Date:` header and what `GIT_AUTHOR_DATE` may say; and
+//! its approximate one, `approxidate_careful`, which reads `yesterday`,
+//! `3.days.ago`, `last Friday at noon` and whatever the strict one reads,
+//! for a reflog's `@{<date>}`.
 //!
 //! RFC 2822 and its many mail-client variants, ISO 8601, `@<secs> <zone>`,
 //! zone names, `dd.mm.yy` and `mm/dd/yy`: each read as git reads it, word
@@ -418,6 +421,380 @@ pub fn parse(text_in: []const u8, ctx: Context) ?Parsed {
         secs -= @as(i64, offset) * 60;
     }
     return .{ .secs = secs, .offset_minutes = offset };
+}
+
+// ---------------------------------------------------------------------------
+// approxidate
+// ---------------------------------------------------------------------------
+
+/// Read `text` as git's `approxidate_careful` does: a date the strict
+/// parser reads is that date, and anything else is read word by word
+/// against the time now, in the caller's zone. `null` where git reports an
+/// error, which is text in which no word meant anything.
+pub fn approximate(text_in: []const u8, ctx: Context) ?i64 {
+    if (parse(text_in, ctx)) |p| return p.secs;
+    const text = if (std.mem.indexOfScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
+    var a: Approx = .{ .off = ctx.local_offset_minutes, .now_secs = ctx.now };
+    a.localtime(ctx.now, &a.tm);
+    a.now = a.tm;
+    a.tm.year = -1;
+    a.tm.mon = -1;
+    a.tm.mday = -1;
+    var pos: usize = 0;
+    while (pos < text.len) {
+        const c = text[pos];
+        if (isDigit(c)) {
+            a.pendingNumber();
+            pos += a.digit(text[pos..], ctx);
+            a.touched = true;
+            continue;
+        }
+        if (std.ascii.isAlphabetic(c)) {
+            pos += a.alpha(text[pos..]);
+            continue;
+        }
+        pos += 1;
+    }
+    a.pendingNumber();
+    if (!a.touched) return null;
+    return a.update(0);
+}
+
+/// `approxidate_str`'s state: the date being built, the time now, a
+/// number waiting for the word that says what it counts, and whether any
+/// word meant anything.
+const Approx = struct {
+    tm: Tm = .{},
+    now: Tm = .{},
+    now_secs: i64,
+    /// Minutes east of UTC: the zone git's `mktime` and `localtime` use.
+    off: i32,
+    num: i64 = 0,
+    touched: bool = false,
+
+    fn localtime(a: *const Approx, secs: i64, tm: *Tm) void {
+        gmtime(secs + @as(i64, a.off) * 60, tm);
+    }
+
+    /// `mktime`: the fields normalized, in the caller's zone.
+    fn mktime(a: *const Approx, tm: *const Tm) i64 {
+        const year = tm.year + 1900 + @divFloor(tm.mon, 12);
+        const mon = @mod(tm.mon, 12);
+        const days = daysFromCivil(year, mon + 1, 1) + tm.mday - 1;
+        return days * 86400 + tm.hour * 3600 + tm.min * 60 + tm.sec - @as(i64, a.off) * 60;
+    }
+
+    /// git's `update_tm`: fill what is unset from now, go back `sec`
+    /// seconds, and read the fields again. A negative day is a number of
+    /// days back still to be taken, deferred until no day was named.
+    fn update(a: *Approx, sec_in: i64) i64 {
+        var sec = sec_in;
+        if (a.tm.mday < 0) {
+            const offset = a.tm.mday + 1;
+            if (sec == 0 and offset < 0) sec = -offset * 24 * 60 * 60;
+            a.tm.mday = a.now.mday;
+        }
+        if (a.tm.mon < 0) a.tm.mon = a.now.mon;
+        if (a.tm.year < 0) {
+            a.tm.year = a.now.year;
+            if (a.tm.mon > a.now.mon) a.tm.year -= 1;
+        }
+        const n = a.mktime(&a.tm) - sec;
+        a.localtime(n, &a.tm);
+        return n;
+    }
+
+    /// git's `pending_number`: a number no word claimed is a day of the
+    /// month, a month or a year, whichever is still open.
+    fn pendingNumber(a: *Approx) void {
+        const number = a.num;
+        if (number == 0) return;
+        a.num = 0;
+        if (a.tm.mday < 0 and number < 32) {
+            a.tm.mday = number;
+        } else if (a.tm.mon < 0 and number < 13) {
+            a.tm.mon = number - 1;
+        } else if (a.tm.year < 0) {
+            if (number > 1969 and number < 2100) {
+                a.tm.year = number - 1900;
+            } else if (number > 69 and number < 100) {
+                a.tm.year = number;
+            } else if (number < 38) {
+                a.tm.year = 100 + number;
+            }
+        }
+    }
+
+    /// git's `date_time`: the most recent `hour` o'clock, which may be
+    /// yesterday's.
+    fn atHour(a: *Approx, hour: i64) void {
+        if (a.tm.mday < 0 and a.tm.hour < hour) a.tm.mday = -2;
+        a.tm.hour = hour;
+        a.tm.min = 0;
+        a.tm.sec = 0;
+    }
+
+    fn meridiem(a: *Approx, pm: bool) void {
+        var hour = a.tm.hour;
+        if (a.num != 0) {
+            hour = a.num;
+            a.tm.min = 0;
+            a.tm.sec = 0;
+        }
+        a.num = 0;
+        a.tm.hour = @mod(hour, 12) + @as(i64, if (pm) 12 else 0);
+    }
+
+    /// The words git's `special` table names. Returns whether `word` is
+    /// one.
+    fn special(a: *Approx, date: []const u8) bool {
+        const names = [_][]const u8{ "yesterday", "noon", "midnight", "tea", "PM", "AM", "never", "now", "today" };
+        const which = for (names, 0..) |name, i| {
+            if (matchString(date, name) == name.len) break i;
+        } else return false;
+        switch (which) {
+            0 => {
+                a.num = 0;
+                a.tm.mday = -1;
+                _ = a.update(24 * 60 * 60);
+            },
+            1 => {
+                a.pendingNumber();
+                a.atHour(12);
+            },
+            2 => {
+                a.pendingNumber();
+                a.atHour(0);
+            },
+            3 => {
+                a.pendingNumber();
+                a.atHour(17);
+            },
+            4 => a.meridiem(true),
+            5 => a.meridiem(false),
+            6 => {
+                a.localtime(0, &a.tm);
+                a.num = 0;
+            },
+            7 => {
+                a.num = 0;
+                _ = a.update(0);
+            },
+            8 => {
+                if (a.tm.hour == a.now.hour and a.tm.min == a.now.min and a.tm.sec == a.now.sec) a.atHour(0);
+                a.num = 0;
+                a.tm.mday = -1;
+                _ = a.update(0);
+            },
+            else => unreachable,
+        }
+        return true;
+    }
+
+    /// git's `approxidate_alpha`: one word. Returns its length.
+    fn alpha(a: *Approx, date: []const u8) usize {
+        const end = skipAlpha(date);
+        for (month_names, 0..) |name, i| {
+            if (matchString(date, name) >= 3) {
+                a.tm.mon = @intCast(i); // safe: a month's index, below 12
+                a.touched = true;
+                return end;
+            }
+        }
+        if (a.special(date)) {
+            a.touched = true;
+            return end;
+        }
+        if (a.num == 0) {
+            const number_names = [_][]const u8{ "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten" };
+            for (number_names, 1..) |name, i| {
+                if (matchString(date, name) == name.len) {
+                    a.num = @intCast(i); // safe: one to ten
+                    a.touched = true;
+                    return end;
+                }
+            }
+            if (matchString(date, "last") == 4) {
+                a.num = 1;
+                a.touched = true;
+            }
+            return end;
+        }
+        const units = [_]struct { name: []const u8, secs: i64 }{
+            .{ .name = "seconds", .secs = 1 },
+            .{ .name = "minutes", .secs = 60 },
+            .{ .name = "hours", .secs = 60 * 60 },
+            .{ .name = "days", .secs = 24 * 60 * 60 },
+            .{ .name = "weeks", .secs = 7 * 24 * 60 * 60 },
+        };
+        for (units) |unit| {
+            if (matchString(date, unit.name) >= unit.name.len - 1) {
+                _ = a.update(unit.secs *% a.num);
+                a.num = 0;
+                a.touched = true;
+                return end;
+            }
+        }
+        for (weekday_names, 0..) |name, i| {
+            if (matchString(date, name) >= 3) {
+                var n = a.num - 1;
+                a.num = 0;
+                var diff = a.tm.wday - @as(i64, @intCast(i)); // safe: a weekday's index, below 7
+                if (diff <= 0) n += 1;
+                diff += 7 * n;
+                _ = a.update(diff * 24 * 60 * 60);
+                a.touched = true;
+                return end;
+            }
+        }
+        if (matchString(date, "months") >= 5) {
+            _ = a.update(0);
+            const n = a.tm.mon - a.num;
+            a.num = 0;
+            // git adds twelve and takes a year until the month is not
+            // negative.
+            a.tm.year += @divFloor(n, 12);
+            a.tm.mon = @mod(n, 12);
+            a.touched = true;
+            return end;
+        }
+        if (matchString(date, "years") >= 4) {
+            _ = a.update(0);
+            a.tm.year -= a.num;
+            a.num = 0;
+            a.touched = true;
+            return end;
+        }
+        return end;
+    }
+
+    /// git's `approxidate_digit`: a number, or a time or date written
+    /// with `:`, `.`, `/` or `-`. Returns its length.
+    fn digit(a: *Approx, date: []const u8, ctx: Context) usize {
+        var end: usize = 0;
+        var number: u64 = 0;
+        while (end < date.len and isDigit(date[end])) : (end += 1) number = number *% 10 +% (date[end] - '0');
+        switch (at(date, end)) {
+            ':', '.', '/', '-' => if (isDigit(at(date, end + 1))) {
+                // safe: git's `timestamp_t` is unsigned and read as a long.
+                const m = matchMultiNumber(@bitCast(number), date[end], date, end, &a.tm, ctx);
+                if (m != 0) return m;
+            },
+            else => {},
+        }
+        // Zero-padding only for small numbers: "Dec 02", never "Dec 0002".
+        // git keeps the number in an `int`.
+        // safe: wrapping into an `int`, as git's assignment does.
+        if (date[0] != '0' or end <= 2) a.num = @as(i32, @truncate(@as(i64, @bitCast(number))));
+        return end;
+    }
+};
+
+/// Days since the epoch of a proleptic Gregorian date, month 1 to 12.
+fn daysFromCivil(year_in: i64, month: i64, day: i64) i64 {
+    const year = if (month <= 2) year_in - 1 else year_in;
+    const era = @divFloor(year, 400);
+    const yoe = year - era * 400;
+    const mp = if (month > 2) month - 3 else month + 9;
+    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/// The date `secs` is in UTC, as `YYYY-MM-DD hh:mm:ss`.
+fn formatUtc(buf: []u8, secs: i64) []const u8 {
+    var tm: Tm = .{};
+    gmtime(secs, &tm);
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
+        tm.year + 1900, tm.mon + 1, tm.mday, tm.hour, tm.min, tm.sec,
+    }) catch unreachable;
+}
+
+test "approximate dates read as git's t0006 reads them" {
+    // git's own vectors, in UTC, against 2009-08-30 19:20:00.
+    const now: i64 = 1251660000;
+    const hour = 60 * 60;
+    const day = 24 * hour;
+    const Case = struct { text: []const u8, want: []const u8, shift: i64 = 0 };
+    const cases = [_]Case{
+        .{ .text = "now", .want = "2009-08-30 19:20:00" },
+        .{ .text = "today", .want = "2009-08-30 00:00:00" },
+        .{ .text = "5 seconds ago", .want = "2009-08-30 19:19:55" },
+        .{ .text = "5.seconds.ago", .want = "2009-08-30 19:19:55" },
+        .{ .text = "10.minutes.ago", .want = "2009-08-30 19:10:00" },
+        .{ .text = "yesterday", .want = "2009-08-29 19:20:00" },
+        .{ .text = "3.days.ago", .want = "2009-08-27 19:20:00" },
+        .{ .text = "12:34:56.3.days.ago", .want = "2009-08-27 12:34:56" },
+        .{ .text = "3.weeks.ago", .want = "2009-08-09 19:20:00" },
+        .{ .text = "3.months.ago", .want = "2009-05-30 19:20:00" },
+        .{ .text = "2.years.3.months.ago", .want = "2007-05-30 19:20:00" },
+        .{ .text = "6am yesterday", .want = "2009-08-29 06:00:00" },
+        .{ .text = "6pm yesterday", .want = "2009-08-29 18:00:00" },
+        .{ .text = "3:00", .want = "2009-08-30 03:00:00" },
+        .{ .text = "15:00", .want = "2009-08-30 15:00:00" },
+        .{ .text = "noon today", .want = "2009-08-30 12:00:00" },
+        .{ .text = "today at noon", .want = "2009-08-30 12:00:00", .shift = -12 * hour },
+        .{ .text = "noon today", .want = "2009-09-01 12:00:00", .shift = 36 * hour },
+        .{ .text = "noon yesterday", .want = "2009-08-29 12:00:00" },
+        .{ .text = "noon yesterday", .want = "2009-08-29 12:00:00", .shift = -12 * hour },
+        .{ .text = "last Friday at noon", .want = "2009-08-28 12:00:00" },
+        .{ .text = "last Friday at noon", .want = "2009-08-28 12:00:00", .shift = -12 * hour },
+        .{ .text = "tea last saturday", .want = "2009-08-29 17:00:00" },
+        .{ .text = "tea last saturday", .want = "2009-08-29 17:00:00", .shift = -12 * hour },
+        .{ .text = "January 5th noon pm", .want = "2009-01-05 12:00:00" },
+        .{ .text = "January 5th noon pm", .want = "2009-01-05 12:00:00", .shift = -12 * hour },
+        .{ .text = "January 5th today pm", .want = "2009-01-30 12:00:00" },
+        .{ .text = "10am noon", .want = "2009-08-29 12:00:00" },
+        .{ .text = "January 5th yesterday", .want = "2009-01-29 19:20:00" },
+        .{ .text = "January 5th yesterday", .want = "2008-12-31 19:20:00", .shift = 2 * day },
+        .{ .text = "last tuesday", .want = "2009-08-25 19:20:00" },
+        .{ .text = "July 5th", .want = "2009-07-05 19:20:00" },
+        .{ .text = "06/05/2009", .want = "2009-06-05 19:20:00" },
+        .{ .text = "06.05.2009", .want = "2009-05-06 19:20:00" },
+        .{ .text = "Jan 5 today", .want = "2009-01-30 00:00:00" },
+        .{ .text = "Jun 6, 5AM", .want = "2009-06-06 05:00:00" },
+        .{ .text = "5AM Jun 6", .want = "2009-06-06 05:00:00" },
+        .{ .text = "6AM, June 7, 2009", .want = "2009-06-07 06:00:00" },
+        .{ .text = "2008-12-01", .want = "2008-12-01 19:20:00" },
+        .{ .text = "2009-12-01", .want = "2009-12-01 19:20:00" },
+        .{ .text = "2000 +0000", .want = "2000-08-30 19:20:00" },
+        .{ .text = "@2000 +0000", .want = "1970-01-01 00:33:20" },
+    };
+    for (cases) |case| {
+        const got = approximate(case.text, .{ .now = now + case.shift }) orelse {
+            std.debug.print("{s}: no date\n", .{case.text});
+            return error.TestUnexpectedResult;
+        };
+        var buf: [32]u8 = undefined;
+        std.testing.expectEqualStrings(case.want, formatUtc(&buf, got)) catch |err| {
+            std.debug.print("{s} (shifted {d}s)\n", .{ case.text, case.shift });
+            return err;
+        };
+    }
+    try std.testing.expect(approximate("not one word", .{ .now = now }) == null);
+    for ([_][]const u8{ "2147483647 months ago", "99999999999999999999 years ago", "4294967295.weeks.ago", "last 2147483647 sunday", "-1 days" }) |text| {
+        _ = approximate(text, .{ .now = now });
+    }
+    try std.testing.expect(approximate("", .{ .now = now }) == null);
+}
+
+test "an approximate date is taken in the caller's zone" {
+    // 2009-08-30 19:20:00 UTC is 21:20 at +0200, so midnight there is
+    // 22:00 the day before in UTC.
+    const ctx: Context = .{ .now = 1251660000, .local_offset_minutes = 120 };
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("2009-08-29 22:00:00", formatUtc(&buf, approximate("today", ctx).?));
+    try std.testing.expectEqualStrings("2009-08-30 10:00:00", formatUtc(&buf, approximate("noon", ctx).?));
+}
+
+test "fuzz: any text is an approximate date or none, never a crash" {
+    try std.testing.fuzz({}, struct {
+        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const len = smith.slice(&buf);
+            _ = approximate(buf[0..len], .{ .now = 1_700_000_000, .local_offset_minutes = -300 });
+        }
+    }.one, .{});
 }
 
 test "mail dates read as git reads them" {

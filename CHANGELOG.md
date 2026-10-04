@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `<ref>@{<date>}` and `@{<date>}` pick the reflog entry in force at a date, as `git rev-parse` does: the date read by git's `approxidate` (`yesterday`, `3.days.ago`, `last Friday at noon`, `6am yesterday`, ISO and RFC 2822 dates, `@<secs>`; held to git's own t0006 vectors), a number from 100000000 on read as seconds, and git's answers at the log's ends. `revparse.resolveAt` takes the time now and the local zone; `resolve` reads the `Io`'s clock and takes UTC. `RevisionDateUnsupported` is gone.
+
 - `includeIf "hasconfig:remote.*.url:<glob>"` holds as git decides it: against every `remote.<name>.url` the whole read sets, at every level and through plain includes, wherever the condition stands, matched as a path glob. A file an `includeIf` brings in that sets a remote URL itself is `error.RemoteUrlInConditionalInclude`, which git refuses too. The condition never held before.
 
 - `sparsecheckout.reapply` (and `set`, `add`, `init`) takes out an excluded file a checkout brought back with `--ignore-skip-worktree-bits`, as git does: an entry marked `skip-worktree` whose file is on the disk loses the mark when the index is read (git's `clear_skip_worktree_from_present_files`, off under `sparse.expectFilesOutsideOfPatterns`), so the update removes it if it is unchanged; `Outcome.unmarked` counts them. `applySparse` keeps a file whose stat does not match the index, as git's `verify_uptodate` does, and reads the content only of a racy entry whose stat matches; it read the content of every file whose stat differed and removed it when that matched.
