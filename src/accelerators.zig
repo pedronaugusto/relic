@@ -549,11 +549,21 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
     if (options.hash_cache) {
         hashes = try arena.alloc(u32, names.len);
         @memset(hashes.?, 0);
-        var collected = try objectwalk.missingWith(gpa, io, db, tips, &.{}, .{ .use_bitmaps = false });
-        defer collected.deinit();
-        for (collected.entries) |entry| if (!midx_bitmap) if (name_positions.get(entry.oid)) |pos| {
-            hashes.?[pos] = bitmap_mod.nameHash(entry.hint);
-        };
+        if (midx_bitmap) {
+            // Git carries existing cache entries when mapping an earlier bitmap
+            // into MIDX order; otherwise the MIDX writer has no path strings.
+            if (try db.reachabilityBitmap(io)) |previous| {
+                for (previous.names, 0..) |oid, i| if (name_positions.get(oid)) |pos| {
+                    hashes.?[pos] = previous.bitmap.nameHashAt(@intCast(i)) orelse 0;
+                };
+            }
+        } else {
+            var collected = try objectwalk.missingWith(gpa, io, db, tips, &.{}, .{ .use_bitmaps = false });
+            defer collected.deinit();
+            for (collected.entries) |entry| if (name_positions.get(entry.oid)) |pos| {
+                hashes.?[pos] = bitmap_mod.nameHash(entry.hint);
+            };
+        }
     }
     return bitmap_mod.encode(gpa, db.objectFormat(), checksum, .{ types[0], types[1], types[2], types[3] }, entries.items, .{ .hash_cache = hashes, .lookup_table = options.lookup_table });
 }

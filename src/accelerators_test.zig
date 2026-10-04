@@ -425,6 +425,31 @@ test "accelerator files are deterministic across pack worker counts" {
     try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
 }
 
+test "a MIDX bitmap carries the existing pack bitmap's name hash cache" {
+    for ([_]hash.Kind{ .sha1, .sha256 }) |kind| {
+        try testgit.requireGitVersion(gpa, io, 2, 43);
+        var repo = try testgit.Repo.init(gpa, io, if (kind == .sha1) &.{} else &.{"--object-format=sha256"});
+        defer repo.deinit();
+        for (0..12) |n| try linearCommit(&repo, n);
+        try repo.exec(io, &.{ "repack", "-q", "-a", "-d", "-b" });
+        try repo.exec(io, &.{ "multi-pack-index", "write", "--bitmap" });
+        const path = try bitmapPath(&repo, "multi-pack-index-");
+        defer gpa.free(path);
+        const expected = try repo.readFile(io, path);
+        defer gpa.free(expected);
+        try repo.dir.deleteFile(io, path);
+        try repo.dir.deleteFile(io, ".git/objects/pack/multi-pack-index");
+        const dir = try repo.gitDir(io);
+        defer dir.close(io);
+        var db = try odb.Odb.open(gpa, io, dir, kind, .{});
+        defer db.deinit(io);
+        const head = try tip(&repo, kind);
+        _ = try ops.writeMidxBitmap(gpa, io, &db, &.{head}, .{}, .{});
+        try sameFile(&repo, path, expected);
+        try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
+    }
+}
+
 test "merged split layers are marked at the write time before an older expiry cutoff" {
     try testgit.requireGitVersion(gpa, io, 2, 31);
     var repo = try testgit.Repo.init(gpa, io, &.{});
