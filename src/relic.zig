@@ -22,7 +22,7 @@
 //! | `transport` | `Session`: a remote, open. | `remote`, `url`, `refspec`, `fetch`, `fetchpack`, `clone`, `push`, `sendpack`, `local`, `ssh`, `smarthttp`, `httpclient`, `tls`, `clientcert`, `httpauth`, `httpsettings`, `credential`, `auth`, `protocol`, `connection`, `pktline`, `sideband`, `uploadpack`, `objectwalk`, `objectfilter`, `partial`, `filterspec`, `progress`, `bundle`, `remotehelper` |
 //! | `submodule` | Submodules: status, init, update, sync, absorb. | `gitmodules`, `gitlink`, `submoduletransport` |
 //! | `lfs` | Git LFS in process: pointers and the store. | `lfsapi`, `lfstransfer`, `lfslocks`, `lfspush`, `lfshooks`, `lfsssh`, `lfscustom`, `netrc` |
-//! | `patch` | Patches: read, applied, written from commits, applied from a mailbox. | `apply`, `format`, `mail`, `am` |
+//! | `patch` | Patches: read, applied, written from commits, applied from a mailbox, two series compared. | `apply`, `format`, `mail`, `am`, `rangediff` |
 //! | `grep` | `git grep` over the working tree, the index or a tree. | |
 //! | `archive` | `git archive`: a tree as a tar or zip file. | |
 //! | `clean` | `git clean`: the untracked files of the working tree removed. | |

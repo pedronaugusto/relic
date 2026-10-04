@@ -109,6 +109,7 @@ test {
         _ = @import("transport/remotehelper_test.zig");
         _ = @import("lfs/custom_test.zig");
         _ = @import("worktree/fsmonitor_test.zig");
+        _ = @import("patch/rangediff_test.zig");
     }
 }
 

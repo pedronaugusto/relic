@@ -53,6 +53,10 @@ pub const Sort = enum {
     /// and a line of history kept together, the tips in the order the date
     /// walk met them.
     topological,
+    /// `git rev-list --date-order`: no parent before all of its children,
+    /// and of the commits ready to come out the newest by committer date,
+    /// ties in the order they became ready.
+    date_order,
 };
 
 /// One commit, with what the walk needed from it.
@@ -345,7 +349,7 @@ pub const Walk = struct {
             }
         }
 
-        if (walk.sort == .topological) try walk.sortTopologically(&list);
+        if (walk.sort != .date) try walk.sortTopologically(&list);
         try walk.ordered.ensureTotalCapacity(walk.gpa, list.items.len);
         for (list.items) |n| {
             if (n.uninteresting) continue;
@@ -355,9 +359,10 @@ pub const Walk = struct {
         walk.prepared = true;
     }
 
-    /// `sort_in_topological_order` in graph order: the tips, in the order
-    /// the walk found them, on a stack, and a parent pushed once its last
-    /// child is out.
+    /// `sort_in_topological_order`: a parent is ready once its last child
+    /// is out. In graph order the ready commits are a stack, the tips on it
+    /// in the order the walk found them; in date order they are a queue by
+    /// committer date, ties first in first out.
     fn sortTopologically(walk: *Walk, list: *std.ArrayList(*Node)) Error!void {
         var indegree: std.AutoHashMapUnmanaged(*Node, u32) = .empty;
         defer indegree.deinit(walk.gpa);
@@ -372,20 +377,32 @@ pub const Walk = struct {
         }
         var stack: std.ArrayList(*Node) = .empty;
         defer stack.deinit(walk.gpa);
+        var queue: std.PriorityQueue(Queued, void, byDate) = .empty;
+        defer queue.deinit(walk.gpa);
+        var seq: u64 = 0;
+        const by_date = walk.sort == .date_order;
         for (list.items) |n| {
-            if (indegree.get(n).? == 1) try stack.append(walk.gpa, n);
+            if (indegree.get(n).? != 1) continue;
+            if (by_date) {
+                try queue.push(walk.gpa, .{ .node = n, .seq = seq });
+                seq += 1;
+            } else try stack.append(walk.gpa, n);
         }
         std.mem.reverse(*Node, stack.items);
         var out: std.ArrayList(*Node) = .empty;
         errdefer out.deinit(walk.gpa);
         try out.ensureTotalCapacity(walk.gpa, list.items.len);
-        while (stack.pop()) |n| {
+        while (if (by_date) (if (queue.pop()) |q| q.node else null) else stack.pop()) |n| {
             for (n.parents) |parent| {
                 const p = walk.nodes.get(OidKey.of(parent)) orelse continue;
                 const d = indegree.getPtr(p) orelse continue;
                 if (d.* == 0) continue;
                 d.* -= 1;
-                if (d.* == 1) try stack.append(walk.gpa, p);
+                if (d.* != 1) continue;
+                if (by_date) {
+                    try queue.push(walk.gpa, .{ .node = p, .seq = seq });
+                    seq += 1;
+                } else try stack.append(walk.gpa, p);
             }
             indegree.getPtr(n).?.* = 0;
             out.appendAssumeCapacity(n);
@@ -951,6 +968,10 @@ fn expectWalkLikeRevList(gpa: Allocator, io: Io, repo: *testgit.Repo, db: *odb_m
             walk.sort = .topological;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--date-order")) {
+            walk.sort = .date_order;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--reverse")) {
             walk.reverse = true;
             continue;
@@ -1046,6 +1067,8 @@ fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
         &.{ "--topo-order", "b2", "^b1" },
         &.{ "--reverse", "b3", "^b0" },
         &.{ "--topo-order", "--reverse", "b1" },
+        &.{ "--date-order", "b0", "b1", "b2", "b3" },
+        &.{ "--date-order", "--reverse", "b3", "^b1" },
     };
     for (queries) |q| {
         // A branch this seed has no commit on is not a query.

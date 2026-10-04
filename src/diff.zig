@@ -428,6 +428,9 @@ pub const Options = struct {
     /// Whether the `@@` line carries the enclosing function's text, which
     /// git does by default.
     function_context_names: bool = true,
+    /// What starts a function, in place of git's default rule: a diff
+    /// driver's `funcname`, as a caller decides it.
+    function_line: ?FunctionLine = null,
     /// A cap on the algorithm's work before it falls back to a coarser but
     /// correct script.
     max_work: usize = 0,
@@ -435,6 +438,15 @@ pub const Options = struct {
     /// they can, which is `git diff --anchored`. Read by the patience
     /// algorithm only, as in git, where `--anchored` also selects it.
     anchors: []const []const u8 = &.{},
+};
+
+/// A caller's rule for the text after a hunk's `@@`: given a line without
+/// its newline, the part to show when the line starts a function, as a
+/// driver's `funcname` pattern gives its first group, or `null`. git cuts
+/// what it gives at eighty bytes and drops its trailing whitespace.
+pub const FunctionLine = struct {
+    context: ?*const anyopaque = null,
+    find: *const fn (context: ?*const anyopaque, line: []const u8) ?[]const u8,
 };
 
 /// Errors from reading the diff settings out of a configuration.
@@ -682,7 +694,7 @@ pub fn unifiedBody(
         try w.writeAll(" @@");
         if (options.function_context_names) {
             const from: isize = @as(isize, @intCast(hunk.old_start)) - 1;
-            if (functionLine(old_lines, from, previous_start)) |text| last_found = text;
+            if (functionLine(old_lines, from, previous_start, options.function_line)) |text| last_found = text;
             previous_start = from;
             if (last_found) |text| {
                 if (text.len != 0) {
@@ -746,17 +758,26 @@ fn writeLine(w: *Io.Writer, prefix: u8, line: []const u8) Io.Writer.Error!void {
 
 /// The text git puts after the second `@@`.
 ///
-/// It is the nearest line at or before `from` that begins with a letter, an
-/// underscore or a dollar sign, with its trailing whitespace removed and
-/// capped at forty characters — git's own default, which has no language in
-/// it at all.
-fn functionLine(lines: []const textdiff.Line, from: isize, limit: isize) ?[]const u8 {
+/// It is the nearest line at or before `from` that starts a function, cut
+/// at eighty bytes with its trailing whitespace removed. By git's own
+/// default, which has no language in it at all, that is a line beginning
+/// with a letter, an underscore or a dollar sign; `rule` is a caller's.
+fn functionLine(lines: []const textdiff.Line, from: isize, limit: isize, rule: ?FunctionLine) ?[]const u8 {
     var at = from;
     while (at > limit and at >= 0 and at < @as(isize, @intCast(lines.len))) : (at -= 1) {
         var line = lines[@intCast(at)];
-        if (line.len == 0) continue;
-        const first = line[0];
-        if (!std.ascii.isAlphabetic(first) and first != '_' and first != '$') continue;
+        if (rule) |r| {
+            var bare = line;
+            if (std.mem.endsWith(u8, bare, "\n")) {
+                bare = bare[0 .. bare.len - 1];
+                if (std.mem.endsWith(u8, bare, "\r")) bare = bare[0 .. bare.len - 1];
+            }
+            line = r.find(r.context, bare) orelse continue;
+        } else {
+            if (line.len == 0) continue;
+            const first = line[0];
+            if (!std.ascii.isAlphabetic(first) and first != '_' and first != '$') continue;
+        }
         if (line.len > function_context_max) line = line[0..function_context_max];
         var end = line.len;
         while (end > 0 and std.ascii.isWhitespace(line[end - 1])) end -= 1;

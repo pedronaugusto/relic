@@ -24,6 +24,7 @@ const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const odb_mod = @import("../odb.zig");
 const repo_mod = @import("../repo.zig");
+const config_mod = @import("../config.zig");
 const diff = @import("../diff.zig");
 const textdiff = @import("../diff/textdiff.zig");
 const patchid = @import("../diff/patchid.zig");
@@ -263,24 +264,11 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     if (options.keep_subject and options.numbered == true) return error.KeepSubjectWithNumbered;
     if (options.keep_subject and (options.rfc != null or !std.mem.eql(u8, options.subject_prefix, "PATCH"))) return error.KeepSubjectWithPrefix;
 
-    var diff_options = options.diff orelse try diff.configured(config, .{});
-    if (options.diff == null) {
-        if (config.get("diff.context")) |v| diff_options.context = @intCast(@max(0, @import("../config.zig").parseInt(v) catch 3));
-    }
+    const diff_options = options.diff orelse try configuredDiff(config);
     const renames: ?diff.RenameOptions = switch (options.renames) {
         .off => null,
         .on => |r| r,
-        .configured => blk: {
-            var r: diff.RenameOptions = .{};
-            if (config.get("diff.renamelimit")) |v| r.limit = @intCast(@max(0, @import("../config.zig").parseInt(v) catch 1000));
-            const setting = config.get("diff.renames") orelse break :blk r;
-            if (std.ascii.eqlIgnoreCase(setting, "copies") or std.ascii.eqlIgnoreCase(setting, "copy")) {
-                r.detect_copies = true;
-                break :blk r;
-            }
-            const on = @import("../config.zig").parseBool(setting) catch true;
-            break :blk if (on) r else null;
-        },
+        .configured => configuredRenames(config),
     };
 
     // the subject prefix, as git builds it
@@ -345,7 +333,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     const numbered = if (options.keep_subject) false else options.numbered orelse (total > 1 or options.cover_letter != null);
 
     var quote_path = true;
-    if (options.quote_path) |q| quote_path = q else if (config.get("core.quotepath")) |v| quote_path = @import("../config.zig").parseBool(v) catch true;
+    if (options.quote_path) |q| quote_path = q else if (config.get("core.quotepath")) |v| quote_path = config_mod.parseBool(v) catch true;
 
     var own_attrs: ?attributes.Attrs = null;
     defer if (own_attrs) |*x| x.deinit();
@@ -410,6 +398,29 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         try mails.append(a, .{ .name = try fileName(&ctx, commit, null), .text = text.items, .commit = commit });
     }
     return .{ .gpa = gpa, .arena = arena_instance.state, .mails = mails.items };
+}
+
+/// The content diff `git log -p` and `format-patch` make with nothing
+/// asked: `diff.algorithm` and `diff.context`.
+pub fn configuredDiff(config: *const config_mod.Config) diff.ConfigError!diff.Options {
+    var out = try diff.configured(config, .{});
+    if (config.get("diff.context")) |v| out.context = @intCast(@max(0, config_mod.parseInt(v) catch 3));
+    return out;
+}
+
+/// The renames `git log -p` and `format-patch` find with nothing asked:
+/// `diff.renames` (on unless it says otherwise, copies too for `copies`)
+/// and `diff.renameLimit`.
+pub fn configuredRenames(config: *const config_mod.Config) ?diff.RenameOptions {
+    var r: diff.RenameOptions = .{};
+    if (config.get("diff.renamelimit")) |v| r.limit = @intCast(@max(0, config_mod.parseInt(v) catch 1000));
+    const setting = config.get("diff.renames") orelse return r;
+    if (std.ascii.eqlIgnoreCase(setting, "copies") or std.ascii.eqlIgnoreCase(setting, "copy")) {
+        r.detect_copies = true;
+        return r;
+    }
+    const on = config_mod.parseBool(setting) catch true;
+    return if (on) r else null;
 }
 
 fn emptySeries(gpa: Allocator, arena: *std.heap.ArenaAllocator) Series {
@@ -539,18 +550,31 @@ fn readCommit(ctx: *Ctx, oid: Oid) Error!object.Commit {
 
 /// The message in UTF-8, as git reencodes it for the log.
 fn utf8Message(ctx: *Ctx, c: *const object.Commit) Error![]const u8 {
-    const enc = c.encoding orelse return c.message;
+    return logMessage(ctx.a, c);
+}
+
+/// A commit's message in UTF-8, as git reencodes it for the log: as it
+/// is when its `encoding` is UTF-8 or ASCII, converted from Latin-1, and
+/// any other encoding refused. Allocated from `a` when converted.
+pub fn logMessage(a: Allocator, c: *const object.Commit) error{ UnsupportedEncoding, OutOfMemory }![]const u8 {
+    return logText(a, c, c.message);
+}
+
+/// `text`, from commit `c`'s header or message, in UTF-8 as `logMessage`
+/// converts it.
+pub fn logText(a: Allocator, c: *const object.Commit, text: []const u8) error{ UnsupportedEncoding, OutOfMemory }![]const u8 {
+    const enc = c.encoding orelse return text;
     if (std.ascii.eqlIgnoreCase(enc, "utf-8") or std.ascii.eqlIgnoreCase(enc, "utf8") or
-        std.ascii.eqlIgnoreCase(enc, "us-ascii")) return c.message;
+        std.ascii.eqlIgnoreCase(enc, "us-ascii")) return text;
     if (std.ascii.eqlIgnoreCase(enc, "iso-8859-1") or std.ascii.eqlIgnoreCase(enc, "latin1") or
         std.ascii.eqlIgnoreCase(enc, "iso8859-1"))
     {
         var out: std.ArrayList(u8) = .empty;
-        for (c.message) |b| {
-            if (b < 0x80) try out.append(ctx.a, b) else {
+        for (text) |b| {
+            if (b < 0x80) try out.append(a, b) else {
                 var buf: [4]u8 = undefined;
                 const n = std.unicode.utf8Encode(b, &buf) catch unreachable;
-                try out.appendSlice(ctx.a, buf[0..n]);
+                try out.appendSlice(a, buf[0..n]);
             }
         }
         return out.items;

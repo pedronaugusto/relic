@@ -20,6 +20,7 @@ pub const am = @import("patch/am.zig");
 pub const mail = @import("patch/mail.zig");
 pub const format = @import("patch/format.zig");
 pub const apply = @import("patch/apply.zig");
+pub const rangediff = @import("patch/rangediff.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 

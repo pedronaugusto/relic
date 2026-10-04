@@ -306,6 +306,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `patch` | `parse`, `Patch`, `FilePatch`, `Fragment`: git patches and plain unified diffs read as `git apply` reads them, from whatever surrounds them. |
 | `patch.apply` | `apply` — `git apply` to the working tree, the index or both: renames, copies, modes, binary hunks, `-R`, `--3way`, `--reject`, `--check`, whitespace checked or fixed, nothing written unless every file applies. |
 | `patch.format` | `format` — `git format-patch` byte for byte: numbering, the diffstat, binary hunks, a cover letter, base information, threading and attachments. |
+| `patch.rangediff` | `write`, `compute` — `git range-diff` byte for byte: two series' patches as git reads them out of `git log -p`, paired by git's own solver, and the diff of each pair; `--creation-factor`, `--left-only`, `--right-only`, `--no-notes`, `--no-patch`. |
 | `patch.mail` | `split`, `info` — `git mailsplit` and `git mailinfo`. |
 | `patch.am` | `start`, `proceed`, `skip`, `abort`, `quit` — `git am` with `--3way`, its state in `rebase-apply` as git keeps it. |
 | `grep` | `grep` — `git grep` over the working tree, the index or a tree: fixed, basic and extended patterns with back-references, `--and`/`--or`/`--not` and `--all-match`, `-i -w -v -n -l -c`, context, `-p` and `-W` with git's `diff` driver function lines, pathspecs, binary files, written as git writes it; `-P` through the caller's `Matcher`. |
@@ -706,6 +707,8 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 - **`grep -P` only through a caller's matcher.** Without one, Perl expressions are refused by name; back-references follow glibc's matcher, which git uses on Linux and builds in for Windows, where macOS's differs.
 - **A deflated zip entry is this package's deflate,** decoding to the same file; a stored zip and every tar are git's bytes. `export-subst` leaves `%N` as it stands, as git does, and refuses `%(describe)`, relative and human dates, trailers, wrapping, padding and colour by name.
 - **No interactive `clean`.**
+- **A hunk's function line by git's default rule.** In `patch.format` and `patch.rangediff` a `diff` driver's `funcname` does not reach the `@@` line, and in `patch.rangediff` its `textconv` does not reach the patch.
+- **`range-diff` over commits that are not merges, without colour.** `--diff-merges`, `--remerge-diff` and dual colour are not offered; the notes compared are `core.notesRef`'s (or `refs/notes/commits`), not `--notes=<ref>` or `notes.displayRef`, and no `git log` arguments follow the ranges.
 - **No fsmonitor daemon.** `core.fsmonitor=true`, git's built-in daemon, is `error.FsmonitorDaemonUnsupported`; a hook and a program's own change source are asked as git asks the hook.
 - **fast-import does not check signatures, and fast-export does not anonymize.** git's `--signed-commits=*-if-invalid`, `rewrite-submodules-*` and `export-pack-edges` are refused by name; fast-export takes no path limit and no `--reencode=yes`.
 
