@@ -1,321 +1,67 @@
 name: CI
-
 on:
   push:
-    branches: [main, layers]
-  pull_request:
+    branches: [main]
   workflow_dispatch:
-
+    inputs:
+      full:
+        description: Run the full merge gate
+        type: boolean
+        default: false
+  pull_request:
+  merge_group:
+  schedule:
+    - cron: '17 4 * * 1'
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 permissions:
   contents: read
-
-env:
-  ZIG_VERSION: 0.16.0
-  # The git the Linux gate builds. The suite's reftable fixtures need 2.45
-  # and `git refs verify` 2.47, and the runners ship older gits; a pinned
-  # release keeps the gate's fixtures from moving under it.
-  GIT_VERSION: 2.55.0
-
+  actions: read
 jobs:
-  # Debug catches safety faults; ReleaseSafe checks optimized behavior on every host.
-  # The full test target already builds and runs the examples.
-  test:
-    name: test (${{ matrix.os }}, ${{ matrix.optimize }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 30 }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        optimize: [Debug, ReleaseSafe]
-        include:
-          # One unchecked run catches optimizer-dependent behavior.
-          - os: ubuntu-latest
-            optimize: ReleaseFast
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Cache git (Linux)
-        if: runner.os == 'Linux'
-        id: git-cache
-        uses: actions/cache@v4
-        with:
-          path: /opt/git
-          key: git-${{ env.GIT_VERSION }}-norust-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Build git (Linux)
-        if: runner.os == 'Linux' && steps.git-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev
-          curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /tmp/git.tar.xz
-          mkdir -p /tmp/git-src && tar -xJf /tmp/git.tar.xz -C /tmp/git-src --strip-components=1
-          make -C /tmp/git-src -j"$(nproc)" NO_TCLTK=1 NO_GETTEXT=1 NO_RUST=1 prefix=/opt/git all
-          sudo make -C /tmp/git-src NO_TCLTK=1 NO_GETTEXT=1 NO_RUST=1 prefix=/opt/git install
-
-      - name: Use the built git (Linux)
-        if: runner.os == 'Linux'
-        run: echo /opt/git/bin >> "$GITHUB_PATH"
-
-      - name: Install git (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install git || brew upgrade git
-          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
-
-      - name: git version, at least 2.47
-        shell: bash
-        run: |
-          git --version
-          version=$(git --version | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1 \2/')
-          set -- $version
-          if [ "$1" -lt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -lt 47 ]; }; then
-            echo "git $1.$2 is older than the 2.47 every fixture needs" >&2
-            exit 1
-          fi
-
-      # Each stalled test fails with its name before the job's outer limit.
-      - name: Test — ${{ matrix.optimize }}
-        run: zig build test -Doptimize=${{ matrix.optimize }} --test-timeout 60s
-
-  # Start the long core jobs before the comparison matrix enters the queue.
-  windows-core:
-    name: test (Windows, ${{ matrix.optimize }}, ${{ matrix.case }})
-    runs-on: windows-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        optimize: [Debug, ReleaseSafe]
-        case: [core-formats, core-worktree, core-history, core-transport, core-integrations]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - name: Install git (Windows)
-        if: runner.os == 'Windows'
-        run: choco upgrade git -y --no-progress
-
-      - name: Install Git LFS 3.8 (Windows)
-        if: runner.os == 'Windows'
-        run: choco upgrade git-lfs --version=3.8.0 -y --no-progress
-
-      - name: git version, at least 2.47
-        shell: bash
-        run: |
-          git --version
-          version=$(git --version | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1 \2/')
-          set -- $version
-          if [ "$1" -lt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -lt 47 ]; }; then
-            echo "git $1.$2 is older than the 2.47 every fixture needs" >&2
-            exit 1
-          fi
-
-      - name: Test named case
-        run: zig build test -Dtest-case=${{ matrix.case }} -Doptimize=${{ matrix.optimize }} --test-timeout 60s
-
-  windows:
-    needs: source
-    name: test (Windows, ${{ matrix.optimize }}, ${{ matrix.case }})
-    runs-on: windows-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        optimize: [Debug, ReleaseSafe]
-        case: [merge-file, diff-algorithms, revwalk, history-0, history-1, history-2, history-3, history-4, history-5, history-6, history-7, recursive-0, recursive-1, recursive-2, rename-0, rename-1, rename-2, rename-3, rename-4, rename-5]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - name: Install git (Windows)
-        if: runner.os == 'Windows'
-        run: choco upgrade git -y --no-progress
-
-      - name: Install Git LFS 3.8 (Windows)
-        if: runner.os == 'Windows'
-        run: choco upgrade git-lfs --version=3.8.0 -y --no-progress
-
-      - name: git version, at least 2.47
-        shell: bash
-        run: |
-          git --version
-          version=$(git --version | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1 \2/')
-          set -- $version
-          if [ "$1" -lt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -lt 47 ]; }; then
-            echo "git $1.$2 is older than the 2.47 every fixture needs" >&2
-            exit 1
-          fi
-
-      - name: Test named case
-        run: zig build test -Dtest-case=${{ matrix.case }} -Doptimize=${{ matrix.optimize }} --test-timeout 60s
-
-
-  # ReleaseSmall must compile; its unchecked tests add no distinct assertion to ReleaseFast.
-  small:
-    name: compile (ReleaseSmall)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - run: zig build check -Doptimize=ReleaseSmall
-
-  # Linux ThreadSanitizer checks shared repository writes and concurrent delta searches.
-  sanitizer:
-    name: ThreadSanitizer (Linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Cache git (Linux)
-        id: git-cache
-        uses: actions/cache@v4
-        with:
-          path: /opt/git
-          key: git-${{ env.GIT_VERSION }}-norust-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Build git (Linux)
-        if: steps.git-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev
-          curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /tmp/git.tar.xz
-          mkdir -p /tmp/git-src && tar -xJf /tmp/git.tar.xz -C /tmp/git-src --strip-components=1
-          make -C /tmp/git-src -j"$(nproc)" NO_TCLTK=1 NO_GETTEXT=1 NO_RUST=1 prefix=/opt/git all
-          sudo make -C /tmp/git-src NO_TCLTK=1 NO_GETTEXT=1 NO_RUST=1 prefix=/opt/git install
-
-      - name: Use the built git (Linux)
-        run: echo /opt/git/bin >> "$GITHUB_PATH"
-
-      - run: git --version
-      - run: zig build test -Dthread-sanitizer -Doptimize=Debug --test-timeout 120s
-
-  # Git 2.30 checks the oldest supported formats and version-dependent fixture skips.
+  gate:
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@9cdff538384c14e7f268cbb4942c5075caf0ed42
+    with:
+      preflight-ref: 9cdff538384c14e7f268cbb4942c5075caf0ed42
+      full: ${{ github.event_name != 'workflow_dispatch' || inputs.full }}
+      attest: ${{ github.event_name == 'push' }}
   old-git:
-    name: oldest supported git
+    if: github.event_name != 'push' && (github.event_name != 'workflow_dispatch' || inputs.full)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     container: debian:bullseye
+    timeout-minutes: 30
+    env:
+      RELIC_GIT: old
     steps:
-      - name: Install git and the toolchain
-        run: |
-          # bullseye has reached its end of life, and an end-of-life Debian
-          # moves to archive.debian.org. The mirrors the image ships with
-          # still serve its package lists and no longer serve the packages
-          # those lists name, so every fetch is a 404. The security pool is
-          # gone from every host that carries it, so that suite is dropped
-          # rather than pointed somewhere else, and the archive is what is
-          # left. It still has this job's reason for existing: git 2.30.2.
-          #
-          # The image was built with a handful of packages from the security
-          # suite that the archive does not have, and `perl-base` is one git
-          # depends on an exact version of. The pin is above 1000, which is
-          # what lets apt move a package back to the version the only
-          # remaining source has.
-          printf '%s\n' 'deb http://archive.debian.org/debian bullseye main' \
-            > /etc/apt/sources.list
-          rm -f /etc/apt/sources.list.d/*
-          printf 'Package: *\nPin: release n=bullseye\nPin-Priority: 1001\n' \
-            > /etc/apt/preferences.d/archive
-          apt-get update
-          apt-get install -y --no-install-recommends --allow-downgrades \
-            git curl xz-utils ca-certificates
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
-          mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
-          echo /opt/zig >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
-      - run: git --version
-      - run: zig build test -Doptimize=ReleaseSafe --test-timeout 60s
-
-  # Git master gives early warning of upstream format changes without gating the release.
+      - uses: actions/checkout@v4
+        with:
+          repository: pedronaugusto/preflight
+          ref: 9cdff538384c14e7f268cbb4942c5075caf0ed42
+          path: .preflight
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig build --build-file ci/bootstrap.zig setup -- old
+      - uses: ./.preflight/.github/actions/setup
+        with:
+          install-zig: 'false'
+      - run: zig build ci-setup -- old
+      - run: zig build ci -Dci-lint=false -Doptimize=ReleaseSafe --test-timeout 60s
   git-master:
-    name: git master (not a gate)
+    if: github.event_name != 'push' && (github.event_name != 'workflow_dispatch' || inputs.full)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     continue-on-error: true
+    timeout-minutes: 45
+    env:
+      RELIC_GIT: master
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      # Installed under the runner's own home, without sudo: master builds
-      # its Rust parts with the runner's cargo, which a root `make install`
-      # would not find on its path.
-      - name: Build git from master
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential gettext libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev
-          git clone --depth 1 https://github.com/git/git.git /tmp/git
-          make -C /tmp/git -j"$(nproc)" NO_TCLTK=1 NO_GETTEXT=1 prefix="$HOME/git-master" all
-          make -C /tmp/git NO_TCLTK=1 NO_GETTEXT=1 prefix="$HOME/git-master" install
-          echo "$HOME/git-master/bin" >> "$GITHUB_PATH"
-      - run: git --version
-      - run: zig build test -Doptimize=ReleaseSafe --test-timeout 60s
-
-  # Usage and Git build flags can drift without changing compiled library code.
-  source:
-    name: source checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
         with:
-          version: ${{ env.ZIG_VERSION }}
-      # Formatting and cast policy read the same sources on every host; once is enough.
-      - run: zig fmt --check src examples build.zig build.zig.zon ci
-      - run: ci/readme_usage.sh --check
-      # the git the Linux image builds is the git the Linux job builds
-      - run: ci/git-flags.sh
-      # every cast out of the type system says why it is safe
-      - run: python3 ci/casts.py
-      - name: Source import boundaries
-        run: zig build check-imports
-      - name: Import gate regression checks
-        run: python3 ci/test_imports.py
-      - name: Windows comparison coverage
-        run: python3 ci/test_cases.py
-
-  # Cross compilation checks target-specific sources and linkage beyond native execution.
-  cross-compile:
-    needs: source
-    name: cross (${{ matrix.target }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-linux-gnu
-          - aarch64-linux-gnu
-          - x86_64-linux-musl
-          - x86_64-windows-gnu
-          - aarch64-windows-gnu
-          - x86_64-macos
-          - aarch64-macos
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - run: zig build check -Dtarget=${{ matrix.target }}
+          repository: pedronaugusto/preflight
+          ref: 9cdff538384c14e7f268cbb4942c5075caf0ed42
+          path: .preflight
+      - uses: ./.preflight/.github/actions/setup
+      - run: zig build ci-setup -- master
+      - run: zig build ci -Dci-lint=false -Doptimize=ReleaseSafe --test-timeout 60s

@@ -13,7 +13,7 @@ that needs a repository can have one in process.
 The block below is a region of [`examples/usage.zig`](examples/usage.zig),
 which `zig build examples` builds and runs. CI compares the two.
 
-<!-- BEGIN GENERATED ci/readme_usage.sh -->
+<!-- BEGIN GENERATED zig build docs -- usage -->
 ```zig
 const relic = @import("relic");
 
@@ -435,7 +435,7 @@ TLS client, and another checks that what crosses a proxy's tunnel is TLS.
   compiler ships is hashed against the one the diff was taken from, and the
   diff applied to it must give the copy byte for byte. A Zig release that
   changes std's client fails the build until its fixes are brought across;
-  the header of `src/transport/tls/Client.zig` says how, and `ci/tls-fork.sh` takes the
+  the header of `src/transport/tls/Client.zig` says how, and `zig build tls-fork` takes the
   diff again.
 - **HTTP/1.1** is relic's because std's client builds its TLS inside a
   private connect path: verification cannot be turned off for
@@ -720,13 +720,13 @@ that folds case rather than having one silently overwrite the other.
 `zig build check -Dtarget=…` compiles everything, tests included, without
 running it, and CI does that for `x86_64-linux-gnu`, `aarch64-linux-gnu`,
 `x86_64-linux-musl`, `x86_64-windows-gnu`, `aarch64-windows-gnu`,
-`x86_64-macos` and `aarch64-macos`. [`ci/linux.sh`](ci/linux.sh) runs the
+`x86_64-macos` and `aarch64-macos`. [`zig build ci-linux --`](zig build ci-linux --) runs the
 suite on Linux in Docker from any machine; it is a local script and no CI job
 calls it.
 
 ## Testing
 
-Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap in `ci/cache.sh`; run `sh ci/cache.sh` before direct Zig builds (only a rebuild is lost).
+Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap through preflight; run `zig build cache` before direct Zig builds (only a rebuild is lost).
 
 ```sh
 zig build test --test-timeout 60s   # the suite, and the examples, which are run
@@ -735,8 +735,8 @@ zig build examples      # the examples on their own
 zig build check         # compile everything, including the tests, run nothing
 zig build check-imports # named source layers and dependency owners
 zig build test --fuzz   # the fuzz tests, until stopped
-ci/readme_usage.sh --check   # the Usage block against the example
-ci/tls-fork.sh --check       # the TLS client's recorded diff against std's
+zig build docs -- usage --check   # the Usage block against the example
+zig build tls-fork --check       # the TLS client's recorded diff against std's
 ```
 
 Every test runs under `std.testing.allocator` and `std.testing.io`, against

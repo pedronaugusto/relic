@@ -260,7 +260,7 @@ fn bothWays(format: signing.Format, init_args: []const []const u8) !void {
 }
 
 /// Whether a missing gpg, gpgconf or ssh-keygen fails the run rather than
-/// skipping the test: `RELIC_REQUIRE_SIGNERS` set, as ci/linux.sh sets it
+/// skipping the test: `RELIC_REQUIRE_SIGNERS` set, as zig build ci-linux -- sets it
 /// in an image that installs them, so a signing test cannot pass there by
 /// never running.
 fn signersRequired() bool {

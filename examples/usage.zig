@@ -2,7 +2,7 @@
 //! the working tree, write a tree and a commit, move a branch with a reflog
 //! entry, read the commit back, and diff two trees.
 //!
-//! `zig build examples` builds AND runs this; `ci/readme_usage.sh` extracts
+//! `zig build examples` builds AND runs this; `zig build docs -- usage` extracts
 //! the region between the usage markers into README.md, so the snippet a
 //! reader copies is code CI executes.
 

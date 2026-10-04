@@ -1,0 +1,186 @@
+{
+  "package": "relic",
+  "compile_step": "check",
+  "targets": [
+    "x86_64-linux-gnu",
+    "aarch64-linux-gnu",
+    "x86_64-linux-musl",
+    "x86_64-windows-gnu",
+    "aarch64-windows-gnu",
+    "x86_64-macos",
+    "aarch64-macos"
+  ],
+  "compile_once": false,
+  "test_timeout": "--test-timeout 60s",
+  "sanitizer": "test",
+  "setup_step": "ci-setup",
+  "test_job_timeout": 30,
+  "windows_job_timeout": 45,
+  "sanitizer_job_timeout": 30,
+  "source_job_timeout": 10,
+  "shard_jobs": 5,
+  "windows_shards": [
+    {
+      "name": "core-formats",
+      "seconds": 318.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    },
+    {
+      "name": "core-worktree",
+      "seconds": 488.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    },
+    {
+      "name": "core-history",
+      "seconds": 855.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    },
+    {
+      "name": "core-transport",
+      "seconds": 553.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    },
+    {
+      "name": "core-integrations",
+      "seconds": 738.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    },
+    {
+      "name": "merge-file",
+      "seconds": 232.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "diff-algorithms",
+      "seconds": 203.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "revwalk",
+      "seconds": 307.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "history-0",
+      "seconds": 268.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "history-1",
+      "seconds": 293.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "history-2",
+      "seconds": 253.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "history-3",
+      "seconds": 292.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "history-4",
+      "seconds": 240.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "history-5",
+      "seconds": 298.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "history-6",
+      "seconds": 306.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "history-7",
+      "seconds": 299.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "recursive-0",
+      "seconds": 319.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "recursive-1",
+      "seconds": 256.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "recursive-2",
+      "seconds": 305.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "rename-0",
+      "seconds": 311.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "rename-1",
+      "seconds": 310.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "rename-2",
+      "seconds": 274.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "rename-3",
+      "seconds": 207.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "rename-4",
+      "seconds": 287.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    },
+    {
+      "name": "rename-5",
+      "seconds": 199.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run."
+    }
+  ],
+  "fast_windows_shards": [
+    {
+      "name": "core-formats",
+      "seconds": 318.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    },
+    {
+      "name": "core-worktree",
+      "seconds": 488.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    },
+    {
+      "name": "core-history",
+      "seconds": 855.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    },
+    {
+      "name": "core-transport",
+      "seconds": 553.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    },
+    {
+      "name": "core-integrations",
+      "seconds": 738.0,
+      "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
+      "priority": 1
+    }
+  ]
+}

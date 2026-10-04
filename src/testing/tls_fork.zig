@@ -12,7 +12,7 @@
 //!   what the copy is. The diff is applied to std's file and the result
 //!   compared with the copy, byte for byte.
 //!
-//! `ci/tls-fork.sh` takes the diff again; the header of `tls/Client.zig`
+//! `zig build tls-fork` takes the diff again; the header of `tls/Client.zig`
 //! says what to do when this fails.
 
 const std = @import("std");
@@ -40,7 +40,7 @@ test "the TLS client is std's, with the recorded diff and nothing else" {
             \\  {s}
             \\  sha256 {s}, recorded {s}
             \\Bring std's changes across as the header of src/transport/tls/Client.zig says,
-            \\then run ci/tls-fork.sh.
+            \\then run zig build tls-fork.
             \\
         , .{ build_options.std_tls_client, &actual, expected });
         return error.TestUnexpectedResult;

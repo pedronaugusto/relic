@@ -1,9 +1,8 @@
 const std = @import("std");
+const preflight = @import("preflight");
 const test_cases = @import("ci/test_cases.zig");
 
 pub fn build(b: *std.Build) void {
-    importChecks(b);
-
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const selected_case = b.option([]const u8, "test-case", "Select a named Windows comparison shard");
@@ -201,6 +200,18 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_tests = b.addRunArtifact(tests);
+    if (b.graph.environ_map.get("RUNNER_TEMP")) |temp| {
+        const old_git = std.mem.eql(u8, b.graph.environ_map.get("RELIC_GIT") orelse "", "old");
+        const master_git = std.mem.eql(u8, b.graph.environ_map.get("RELIC_GIT") orelse "", "master");
+        if (!old_git) {
+            const root = b.pathJoin(&.{ temp, "preflight-tools" });
+            const separator = if (b.graph.host.result.os.tag == .windows) ";" else ":";
+            const git_bin = b.pathJoin(&.{ root, if (master_git) "master" else "git", "bin" });
+            const lfs_bin = b.pathJoin(&.{ root, "lfs", "bin" });
+            run_tests.setEnvironmentVariable("PATH", b.fmt("{s}{s}{s}{s}{s}", .{ git_bin, separator, lfs_bin, separator, b.graph.environ_map.get("PATH") orelse "" }));
+        }
+        if (b.graph.host.result.os.tag == .linux and !old_git) run_tests.setEnvironmentVariable("RELIC_REQUIRE_SIGNERS", "1");
+    }
     run_tests.step.dependOn(&install_lock_helper.step);
     run_tests.step.dependOn(&install_filter_helper.step);
     run_tests.step.dependOn(&install_lfs_transfer_helper.step);
@@ -233,7 +244,7 @@ pub fn build(b: *std.Build) void {
     // Built AND run, against the module a consumer gets. An example that is
     // only compiled proves the names still resolve; running it is what
     // proves the bytes are still the bytes. examples/usage.zig is also where
-    // README.md's Usage block comes from -- see ci/readme_usage.sh -- so the
+    // README.md's Usage block comes from -- see zig build docs -- usage -- so the
     // snippet a reader copies cannot drift from code CI executes.
     //=====================================================================
 
@@ -261,6 +272,19 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&example_tests.step);
     }
     test_step.dependOn(examples_step);
+    preflight.addCi(b, .{ .tests = test_step });
+    _ = ciCheck(b, "check-cases", "ci/cases_check.zig");
+    _ = ciCheck(b, "check-git-flags", "ci/git_checks.zig");
+    const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = b.path("ci/setup.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
+    const prepare = b.addRunArtifact(setup);
+    if (b.args) |args| prepare.addArgs(args);
+    b.step("ci-setup", "Install cached Git and LFS tools").dependOn(&prepare.step);
+    const tls_test = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/tls_fork_test.zig"), .target = b.graph.host, .optimize = .Debug }) });
+    tls_test.root_module.addOptions("build_options", build_options);
+    b.step("check-tls-fork", "Verify the TLS fork against std and its recorded patch").dependOn(&b.addRunArtifact(tls_test).step);
+    const tls_writer = b.addExecutable(.{ .name = "tls-fork", .root_module = b.createModule(.{ .root_source_file = b.path("ci/tls_fork.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
+    tls_writer.root_module.addOptions("build_options", build_options);
+    b.step("tls-fork", "Re-record the TLS client's patch against std").dependOn(&b.addRunArtifact(tls_writer).step);
 }
 
 /// Every example, listed rather than globbed: a build graph that scans a
@@ -270,21 +294,14 @@ const example_sources = [_][]const u8{
 };
 
 // Build-only tooling belongs to a root invocation, never a consumer's dependency graph.
-fn importChecks(b: *std.Build) void {
-    const step = b.step("check-imports", "Check source layers and import boundaries");
-    if (b.pkg_hash.len != 0) return;
-    const dependency = if (b.lazyDependency("gantry", .{ .target = b.graph.host, .optimize = .Debug })) |dep| dep.module("gantry") else return;
-    const checker = b.addExecutable(.{
-        .name = "check-imports",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("ci/imports.zig"),
-            .target = b.graph.host,
-            .optimize = .Debug,
-            .imports = &.{.{ .name = "gantry", .module = dependency }},
-        }),
-    });
-    const run = b.addRunArtifact(checker);
+fn ciCheck(b: *std.Build, name: []const u8, source: []const u8) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .root_source_file = b.path(source), .target = b.graph.host, .optimize = .Debug });
+    const executable = b.addExecutable(.{ .name = name, .root_module = module });
+    const tests = b.addTest(.{ .root_module = module });
+    const run = b.addRunArtifact(executable);
     run.setCwd(b.path("."));
-    if (b.args) |args| run.addArgs(args);
+    const step = b.step(name, "Run repository CI checks and their regressions");
+    step.dependOn(&b.addRunArtifact(tests).step);
     step.dependOn(&run.step);
+    return executable;
 }

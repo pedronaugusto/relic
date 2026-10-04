@@ -44,7 +44,7 @@
 +//! When a Zig release changes std's client, bring the fixes across: apply
 +//! `Client.zig.diff` to the new std file, settle any hunk that no longer
 +//! applies by keeping what it was for, write the result here, and run
-+//! `ci/tls-fork.sh`, which takes the diff again and records the new std
++//! `zig build tls-fork`, which takes the diff again and records the new std
 +//! file's hash. Then `zig build test`, where `clientcert_test.zig` proves
 +//! the handshakes against OpenSSL's servers. A change made here and not in
 +//! std goes into the diff the same way, and belongs in the list above.
@@ -66,10 +66,12 @@
  const tls = std.crypto.tls;
  const Client = @This();
  const mem = std.mem;
-@@ -135,12 +192,31 @@
+@@ -135,12 +192,31 @@ pub const Options = struct {
      allow_truncation_attacks: bool = false,
      /// Populated when `error.TlsAlert` is returned from `init`.
      alert: ?*tls.Alert = null,
+-
+-    pub const entropy_len = 240;
 +    /// The certificate and key a server that asks for one is answered
 +    /// with. Without it, a server that asks is sent an empty Certificate,
 +    /// and decides for itself whether to go on.
@@ -77,8 +79,7 @@
 +    /// Set to true when the server asks for a certificate, so a caller can
 +    /// tell a refusal of one from another failure.
 +    certificate_requested: ?*bool = null,
- 
--    pub const entropy_len = 240;
++
 +    /// How many bytes `entropy` holds: the handshake's, then 64 for a
 +    /// signature's salt or nonce.
 +    pub const entropy_len = 240 + 64;
@@ -99,7 +100,7 @@
      DiskQuota,
      LockViolation,
      NotOpenForWriting,
-@@ -333,6 +409,18 @@
+@@ -333,6 +409,18 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
      var main_cert_pub_key: CertificatePublicKey = undefined;
      var tls12_negotiated_group: ?tls.NamedGroup = null;
      const now_sec = options.realtime_now.toSeconds();
@@ -118,7 +119,7 @@
  
      var cleartext_fragment_start: usize = 0;
      var cleartext_fragment_end: usize = 0;
-@@ -520,6 +608,9 @@
+@@ -520,6 +608,9 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                                  p.transcript_hash.update(cleartext_header[tls.record_header_len..]); // Client Hello part 1
                                  p.transcript_hash.update(host); // Client Hello part 2
                                  p.transcript_hash.update(wrapped_handshake);
@@ -128,7 +129,7 @@
                              },
  
                              else => return error.TlsIllegalParameter,
-@@ -609,6 +700,7 @@
+@@ -609,6 +700,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                          switch (handshake_cipher) {
                              inline else => |*p| p.transcript_hash.update(wrapped_handshake),
                          }
@@ -136,7 +137,7 @@
  
                          switch (tls_version) {
                              .tls_1_3 => {
-@@ -713,6 +805,7 @@
+@@ -713,6 +805,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                          switch (handshake_cipher) {
                              inline else => |*p| p.transcript_hash.update(wrapped_handshake),
                          }
@@ -144,7 +145,7 @@
                          try hsd.ensure(1 + 2 + 1);
                          const curve_type = hsd.decode(u8);
                          if (curve_type != 0x03) return error.TlsIllegalParameter; // named_curve
-@@ -725,6 +818,34 @@
+@@ -725,6 +818,34 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                          try key_share.exchange(named_group, server_pub_key);
                          handshake_state = .server_hello_done;
                      },
@@ -179,7 +180,7 @@
                      .server_hello_done => {
                          if (tls_version != .tls_1_2) return error.TlsUnexpectedMessage;
                          if (cipher_state != .cleartext) return error.TlsUnexpectedMessage;
-@@ -747,12 +868,42 @@
+@@ -747,12 +868,42 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                              int(u16, @intFromEnum(tls.ProtocolVersion.tls_1_2)) ++
                              array(u16, tls.ChangeCipherSpecType, .{.change_cipher_spec});
                          const pre_master_secret = key_share.getSharedSecret().?;
@@ -222,7 +223,7 @@
                                  const master_secret = hmacExpandLabel(P.Hmac, pre_master_secret, &.{
                                      "master secret",
                                      &client_hello_rand,
-@@ -806,9 +957,11 @@
+@@ -806,9 +957,11 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                                      nonce,
                                      pv.app_cipher.client_write_key,
                                  );
@@ -237,7 +238,7 @@
                                      &client_change_cipher_spec_msg,
                                      &client_verify_msg,
                                  };
-@@ -856,8 +1009,53 @@
+@@ -856,8 +1009,53 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                                      p.transcript_hash.update(wrapped_handshake);
                                      const expected_server_verify_data = tls.hmac(P.Hmac, &finished_digest, pv.server_finished_key);
                                      if (!std.crypto.timing_safe.eql([P.Hmac.mac_length]u8, expected_server_verify_data, hsd.array(P.Hmac.mac_length).*)) return error.TlsDecryptError;
@@ -293,7 +294,7 @@
                                      const out_cleartext = .{@intFromEnum(tls.HandshakeType.finished)} ++
                                          array(u24, u8, verify_data) ++
                                          .{@intFromEnum(tls.ContentType.handshake)};
-@@ -871,14 +1069,10 @@
+@@ -871,14 +1069,10 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client
                                      const ad = finished_msg[0..tls.record_header_len];
                                      const ciphertext = finished_msg[tls.record_header_len..][0..out_cleartext.len];
                                      const auth_tag = finished_msg[finished_msg.len - P.AEAD.tag_length ..];
@@ -310,7 +311,7 @@
                                      try output.flush();
  
                                      const client_secret = hkdfExpandLabel(P.Hkdf, pv.master_secret, "c ap traffic", &handshake_hash, P.Hash.digest_length);
-@@ -1625,27 +1819,8 @@
+@@ -1625,27 +1819,8 @@ fn tryDownloadRootCert(chain: *Certificate.Chain, options: *const Options) !void
      return error.TlsCertificateNotVerified;
  }
  

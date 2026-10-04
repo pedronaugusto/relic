@@ -41,7 +41,7 @@
 //! When a Zig release changes std's client, bring the fixes across: apply
 //! `Client.zig.diff` to the new std file, settle any hunk that no longer
 //! applies by keeping what it was for, write the result here, and run
-//! `ci/tls-fork.sh`, which takes the diff again and records the new std
+//! `zig build tls-fork`, which takes the diff again and records the new std
 //! file's hash. Then `zig build test`, where `clientcert_test.zig` proves
 //! the handshakes against OpenSSL's servers. A change made here and not in
 //! std goes into the diff the same way, and belongs in the list above.

@@ -1,0 +1,333 @@
+{
+  "sources": [
+    "src"
+  ],
+  "test_roots": [
+    "src/relic.zig"
+  ],
+  "test_support": [
+    "src/testing/*",
+    "src/fake_ssh_helper.zig",
+    "src/filter_helper.zig",
+    "src/hook_fixture.zig",
+    "src/lfs_test_tool.zig",
+    "src/lfs_transfer_helper.zig",
+    "src/lock_helper.zig",
+    "src/process_fixture.zig",
+    "src/testgit.zig",
+    "src/testlfs.zig",
+    "src/testremote.zig",
+    "src/uploadpack_helper.zig"
+  ],
+  "function_exceptions": {
+    "src/clone.zig:clone": {
+      "lines": 326,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/fake_ssh_helper.zig:main": {
+      "lines": 129,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/fetch.zig:fetch": {
+      "lines": 416,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/fetchpack.zig:fetchV0": {
+      "lines": 147,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/history_test.zig:signedHistory": {
+      "lines": 140,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/hook_fixture.zig:main": {
+      "lines": 185,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/index_core.zig:writeTo": {
+      "lines": 189,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/indexpack.zig:receive": {
+      "lines": 144,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/inflate.zig:build": {
+      "lines": 125,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/lfs_test_tool.zig:main": {
+      "lines": 122,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/lfs_transfer_helper.zig:main": {
+      "lines": 180,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/lfsapi.zig:send": {
+      "lines": 149,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/lfstransfer.zig:runTransfers": {
+      "lines": 143,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/lfstransfer.zig:attemptDownload": {
+      "lines": 182,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/merging.zig:start": {
+      "lines": 149,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/odb_core.zig:verifyPack": {
+      "lines": 127,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/ort.zig:processEntry": {
+      "lines": 159,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/push.zig:pushTo": {
+      "lines": 153,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/rebase.zig:doPickCommit": {
+      "lines": 210,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/rename.zig:GitMap": {
+      "lines": 121,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/reset.zig:toTree": {
+      "lines": 136,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/sequencer.zig:pickOne": {
+      "lines": 192,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/sha1.zig:compressAarch64": {
+      "lines": 142,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/sha1.zig:compressX86": {
+      "lines": 159,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/sha1dc.zig:ubcCheck": {
+      "lines": 153,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/stash.zig:push": {
+      "lines": 140,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/stash.zig:applyStash": {
+      "lines": 127,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/testlfs.zig:handle": {
+      "lines": 159,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/testremote.zig:handle": {
+      "lines": 124,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/textdiff.zig:middleSnake": {
+      "lines": 154,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/threeway.zig:run": {
+      "lines": 276,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/tls/Client.zig:init": {
+      "lines": 889,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/tls/Client.zig:readIndirect": {
+      "lines": 179,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/worktree_core.zig:status": {
+      "lines": 164,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/worktree_core.zig:checkout": {
+      "lines": 252,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/worktree_core.zig:writePaths": {
+      "lines": 128,
+      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    }
+  },
+  "layout_exceptions": {
+    "src/object": {
+      "files": [
+        "src/object.zig",
+        "src/object_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/commit": {
+      "files": [
+        "src/commit.zig",
+        "src/commit_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/transport": {
+      "files": [
+        "src/transport.zig",
+        "src/transport_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/diff": {
+      "files": [
+        "src/diff.zig",
+        "src/diff_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/submodule": {
+      "files": [
+        "src/submodule.zig",
+        "src/submodule_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/odb": {
+      "files": [
+        "src/odb.zig",
+        "src/odb_core.zig",
+        "src/odb_types.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/lfs": {
+      "files": [
+        "src/lfs.zig",
+        "src/lfs_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/revwalk": {
+      "files": [
+        "src/revwalk.zig",
+        "src/revwalk_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/index": {
+      "files": [
+        "src/index.zig",
+        "src/index_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/stack": {
+      "files": [
+        "src/stack_cache.zig",
+        "src/stack_types.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/pack": {
+      "files": [
+        "src/pack.zig",
+        "src/pack_types.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/reftable": {
+      "files": [
+        "src/reftable.zig",
+        "src/reftable_ops.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/repo": {
+      "files": [
+        "src/repo.zig",
+        "src/repo_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/worktree": {
+      "files": [
+        "src/worktree.zig",
+        "src/worktree_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/refs": {
+      "files": [
+        "src/refs.zig",
+        "src/refs_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/merge": {
+      "files": [
+        "src/merge.zig",
+        "src/merge_core.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/config": {
+      "files": [
+        "src/config.zig",
+        "src/config_core.zig",
+        "src/config_write.zig"
+      ],
+      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
+    },
+    "src/tls": {
+      "files": [
+        "src/tls/Client.zig",
+        "src/tls/ClientAuth.zig",
+        "src/tls/auth_wire.zig",
+        "src/tls/der.zig",
+        "src/tls/key.zig",
+        "src/tls/root.zig",
+        "src/tls/rsa.zig"
+      ],
+      "reason": "Existing grouped implementation at adoption; this exact member set cannot grow before its namespace entry is introduced."
+    }
+  },
+  "docs": {
+    "zig build docs -- usage": {
+      "source": "examples/usage.zig",
+      "region": "usage",
+      "imports": [
+        "relic"
+      ]
+    }
+  },
+  "ziglint_exceptions": "ci/ziglint-exceptions.json",
+  "vendored": {
+    "src/tls/Client.zig": "Zig standard-library TLS client fork, held byte for byte to its recorded patch by src/tls_fork_test.zig and zig build check-tls-fork."
+  },
+  "extra_checks": [
+    [
+      "zig",
+      "build",
+      "check-cases"
+    ],
+    [
+      "zig",
+      "build",
+      "check-git-flags"
+    ],
+    [
+      "zig",
+      "build",
+      "check-tls-fork"
+    ]
+  ]
+}
