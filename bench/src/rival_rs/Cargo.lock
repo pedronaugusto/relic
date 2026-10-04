@@ -1728,6 +1728,7 @@ dependencies = [
  "gix-odb",
  "gix-pack",
  "gix-zlib",
+ "sha1",
 ]
 
 [[package]]

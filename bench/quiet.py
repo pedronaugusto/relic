@@ -8,6 +8,7 @@ import subprocess
 import sys
 from quiet_common import Pass, copy_repo, tsv, unavailable
 from ops_pass import ops_pass
+from coverage2_pass import coverage2_pass
 
 # What the comparison writers leave in the scratch directory: git's
 # `gitpack-<hash>.pack`, gix's `gix.pack` and go-git's `gogit.pack`, with the
@@ -53,6 +54,7 @@ def check_packwrite(evidence,repo,scratch,run):
 def main():
     p=Pass(__file__)
     try:
+        if shutil.which('git-lfs'): p.machine['tools']['git-lfs']=p.run(['git','lfs','version']).strip()
         source={s:p.snapshot(s) for s in ('before','after')}
         binary={s:p.zig(source[s]) for s in source}
         transport={s:p.zig(source[s],'bench/transport') for s in source}
@@ -105,6 +107,7 @@ def main():
         p.interleave('regressions',[(s,[binary[s]/'relic-regression-measurements']) for s in source],check=regression_check)
         ops_pass(p,{s:[binary[s]/'relic_bench'] for s in source},commands,scratch,p.build/'ops-fixtures')
         rivals={tool:argv for tool,argv in commands.items() if tool!='git'}
+        coverage2_pass(p,binary,rivals,p.build/'coverage2-fixtures',p.build/'ops-fixtures')
         transport_pass(p,source,transport,rivals)
         p.finish()
     except Exception as error:p.save(str(error));raise

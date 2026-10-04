@@ -14,6 +14,8 @@ use git2::{Oid, Repository};
 mod ops;
 #[path = "ops/git2_transport.rs"]
 mod transport;
+#[path = "ops/git2_coverage2.rs"]
+mod coverage2;
 
 fn emit(workload: &str, metric: &str, value: f64, unit: &str) {
     let mut out = std::io::stdout();
@@ -40,6 +42,7 @@ fn main() {
     if ops::run(command, &repo_path, extra.as_deref()) || transport::run(command, &args[2..]) {
         return;
     }
+    if coverage2::run(command, &args[2..]) { return; }
     match command {
         "status" => status(&repo_path),
         "addall" => add_all(&repo_path),

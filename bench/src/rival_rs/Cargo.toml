@@ -16,6 +16,8 @@ path = "src/bin/git2_bench.rs"
 # basic (blob-diff, revision, index), extras (status, dirwalk, ...), sha1.
 gix = { version = "=0.87.1", features = ["blocking-network-client", "blocking-http-transport-curl"] }
 git2 = "=0.21.0"
+# Same plain SHA-1 result digest as relic and Python; object receipt keeps SHA1DC.
+sha1 = "=0.10.7"
 
 # Pack writing is not in the `gix` hub crate: `gix_pack::data::output` is
 # gated behind a feature `gix` does not enable, so the pack-write workload

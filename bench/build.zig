@@ -17,6 +17,19 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addOptions("bench_options", options);
     b.installArtifact(exe);
+    for ([_][]const u8{ "coverage2", "uploadpack" }) |name| {
+        const program = b.addExecutable(.{
+            .name = b.fmt("relic-{s}-bench", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "relic", .module = relic.module("relic") }},
+            }),
+        });
+        program.root_module.addOptions("bench_options", options);
+        b.installArtifact(program);
+    }
     const measurements = b.addTest(.{
         .name = "relic-regression-measurements",
         .root_module = b.createModule(.{

@@ -21,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/packfile"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/storer"
+	gitfile "github.com/go-git/go-git/v5/plumbing/transport/file"
 )
 
 func emit(workload, metric string, value float64, unit string) {
@@ -44,11 +45,22 @@ func ms(start time.Time) float64 {
 }
 
 func main() {
+	// Git hands --upload-pack programs the repository path alone.
+	if len(os.Args) == 2 {
+		check(gitfile.ServeUploadPack(os.Args[1]))
+		return
+	}
 	if len(os.Args) < 3 {
 		panic("usage: gogit_bench <workload> <repo> [extra]")
 	}
 	command, repo := os.Args[1], os.Args[2]
 	switch {
+	case command == "clone-depth":
+		start := benchmarkNow()
+		_, err := git.PlainClone(os.Args[3], true, &git.CloneOptions{URL: repo, Depth: 3, SingleBranch: true, ReferenceName: plumbing.NewBranchReferenceName("main"), Tags: git.NoTags})
+		check(err)
+		emit(command, "time", ms(start), "ms")
+		return
 	case isOp(command):
 		extra := ""
 		if len(os.Args) > 3 {

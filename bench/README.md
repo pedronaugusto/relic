@@ -81,6 +81,23 @@ and 16 MiB; the submodule fixture is ten local submodules, at one size.
 | bundles | `bundle-create` (`main ^oldb`), `bundle-unbundle` (git's bundle of the same, into a copy) |
 | bisect | `bisect` (`--no-checkout main oldb`, `main~3` bad and every step to it) |
 | line attribution | `blame` (the hot file on main) |
+| reftable and multi-pack-index | `reftable-read`, `reftable-write`, `reftable-compact`, `midx-read` |
+| recorded resolutions | `rerere-record`, `rerere-replay` |
+| sparse checkout | `sparse-cone-set`, `sparse-cone-reapply`, `sparse-noncone-set`, `sparse-noncone-reapply` |
+| shallow/partial clone and lazy fetch | `clone-depth`, `clone-blob-none`, `clone-tree-zero`, `lazy-fetch` |
+| upload-pack with Git clients | `serve-full`, `serve-depth`, `serve-blob-none`, `serve-tree-zero` |
+| loopback LFS transfer and locks | `lfs-upload`, `lfs-download`, `lfs-lock`, `lfs-unlock`, `lfs-lock-list`, `lfs-lock-verify` |
+
+[Coverage 2](COVERAGE2.md) records the work each side does, unavailable APIs
+and equivalence checks. `coverage2_pass.py` adds 24 workloads at every size;
+its immutable fixtures and loopback servers are prepared outside timing.
+Both pins leave a vivified excluded file during sparse reapply, where Git
+removes it. These rows are unavailable until the preflight agrees with Git;
+cone and non-cone set still run on both pins. Depth clones also exercise gix, libgit2 and go-git; MIDX reads exercise gix
+and libgit2. go-git also serves full clones to Git v0 clients. LFS uses the installed git-lfs and records its version. Relic's
+client talks to Git's HTTP server; Git's client talks to both relic server
+revisions and Git's server. Partial checks include promised/missing objects
+without triggering a lazy fetch; lazy-fetch checks one missing blob's bytes.
 
 A workload that only reads runs on the fixture, best of three repetitions
 inside the process; one that writes runs once on a fresh APFS copy with its
@@ -132,7 +149,7 @@ and 1 KiB hashed; full sizes retain the existing 3,000 files and 64 MiB.
 Speed conditions are reported in a quiet pass; deterministic result checks
 still fail on wrong counts, hashes, trees, or pack contents.
 
-Quiet-only planning estimate: **75–125 minutes**. See [QUIET-PREP.md](QUIET-PREP.md) for preparation, counts, sizes and assumptions. `run.sh` and `transport/run.sh` remain
+Quiet-only planning estimate: **110–180 minutes**. See [QUIET-PREP.md](QUIET-PREP.md) for preparation, counts, sizes and assumptions. `run.sh` and `transport/run.sh` remain
 low-level helpers; use `quiet.sh` for the complete interleaved pass.
 
 Standalone `zig build -Doptimize=Debug` compiles the pinned after harness
