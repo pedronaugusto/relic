@@ -153,3 +153,94 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
     }
 }
 
+const midx = @import("midx.zig");
+fn linearCommit(repo: *testgit.Repo, n: usize) !void {
+    var text: [64]u8 = undefined;
+    try repo.writeFile(io, "file", try std.fmt.bufPrint(&text, "contents {d}\n", .{n}));
+    try repo.exec(io, &.{ "add", "file" });
+    try testgit.setDate(&repo.isolated.?, 1_700_000_000 + @as(i64, @intCast(n)));
+    try repo.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&text, "commit {d}", .{n}) });
+}
+
+test "MIDX repack and expire retain kept packs and match git's two-step semantics" {
+    for ([_]bool{ false, true }) |kept| {
+        var repo = try testgit.Repo.init(gpa, io, &.{});
+        defer repo.deinit();
+        for (0..12) |n| {
+            try linearCommit(&repo, n);
+            if (n % 4 == 3) try repo.exec(io, &.{ "repack", "-q", "-d" });
+        }
+        try repo.exec(io, &.{ "multi-pack-index", "write" });
+        const git_dir = try repo.gitDir(io);
+        defer git_dir.close(io);
+        var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
+        defer db.deinit(io);
+        const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+        defer dir.close(io);
+        var before = (try midx.Index.open(gpa, io, dir, .sha1)).?;
+        defer before.deinit();
+        try std.testing.expectEqual(@as(u32, 3), before.pack_count);
+        if (kept) {
+            const path = try std.fmt.allocPrint(gpa, ".git/objects/pack/{s}.keep", .{before.packName(0).?});
+            defer gpa.free(path);
+            try repo.writeFile(io, path, "");
+        }
+        try std.testing.expectEqual(@as(?@import("pack.zig").WriteReport, null), try ops.repackMidx(gpa, io, &db, .{ .batch_size = 1 }));
+        const report = (try ops.repackMidx(gpa, io, &db, .{ .pack = .{ .threads = 1 } })).?;
+        try std.testing.expect(report.objects > 0);
+        try repo.exec(io, &.{ "multi-pack-index", "verify" });
+        _ = try ops.expireMidx(gpa, io, &db, .none);
+        try repo.exec(io, &.{ "multi-pack-index", "verify" });
+        var after = (try midx.Index.open(gpa, io, dir, .sha1)).?;
+        defer after.deinit();
+        try std.testing.expectEqual(@as(u32, if (kept) 2 else 1), after.pack_count);
+        const ids = try repo.run(io, &.{ "rev-list", "--objects", "--all" });
+        defer gpa.free(ids);
+        var lines = std.mem.tokenizeScalar(u8, ids, '\n');
+        var count: usize = 0;
+        while (lines.next()) |line| {
+            try std.testing.expect((try after.find(try Oid.parse(.sha1, line[0..40]))) != null);
+            count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, after.count), count);
+        // Git sees nothing left to expire; the native expire's file set is final.
+        const listing_before = try repo.run(io, &.{ "count-objects", "-v" });
+        defer gpa.free(listing_before);
+        try repo.exec(io, &.{ "multi-pack-index", "expire" });
+        const listing_after = try repo.run(io, &.{ "count-objects", "-v" });
+        defer gpa.free(listing_after);
+        try std.testing.expectEqualStrings(listing_before, listing_after);
+    }
+}
+
+test "preferred pack duplicate selection agrees byte for byte with git" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..12) |n| {
+        try linearCommit(&repo, n);
+        if (n % 4 == 3) try repo.exec(io, &.{ "repack", "-q", "-d" });
+    }
+    try repo.exec(io, &.{ "repack", "-q", "-a" });
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    const packs = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    defer packs.close(io);
+    var iterator = packs.iterate();
+    var preferred: ?[]u8 = null;
+    defer if (preferred) |p| gpa.free(p);
+    while (try iterator.next(io)) |entry| if (std.mem.endsWith(u8, entry.name, ".idx")) {
+        preferred = try gpa.dupe(u8, entry.name);
+        break;
+    };
+    const arg = try std.fmt.allocPrint(gpa, "--preferred-pack={s}", .{preferred.?});
+    defer gpa.free(arg);
+    try repo.exec(io, &.{ "multi-pack-index", "write", arg });
+    const expected = try repo.readFile(io, ".git/objects/pack/multi-pack-index");
+    defer gpa.free(expected);
+    try packs.deleteFile(io, "multi-pack-index");
+    _ = try ops.writeMidx(gpa, io, &db, .{ .preferred_pack = preferred.? });
+    try sameFile(&repo, ".git/objects/pack/multi-pack-index", expected);
+    try repo.exec(io, &.{ "multi-pack-index", "verify" });
+}

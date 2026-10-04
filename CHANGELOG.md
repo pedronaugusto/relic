@@ -16,6 +16,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Reach HTTP(S) remotes and LFS through SOCKS4, SOCKS4a, SOCKS5 and SOCKS5h proxies, with local or proxy DNS, URL credentials and TLS inside the tunnel, as curl does for git; honor `remote.<name>.proxy` and name SOCKS refusals. closes #1.
 
+- Write multi-pack indexes with git's preferred-pack and duplicate selection, RIDX and BTMP chunks, and separate MIDX repack and expire operations that retain kept and cruft packs.
+
 - Write and verify full and split commit-graphs, with git's size and commit-count merge rules, corrected commit dates and overflow, and changed-path Bloom filters v1/v2; read split chains, and apply `gc.writeCommitGraph` and `fetch.writeCommitGraph`.
 
 - Add `diff.blame.file`: which commit each line of a file comes from, the line it was there and the path the file had, as `git blame` gives them. It walks history as git's blame does, newest commit first, a line passing to the first parent whose copy leaves it unchanged by git's line diff, and follows a file to the path a whole-file rename gave it unless told not to (`--no-follow`). `-M` and `-C` are off, as in git. Tested line for line against `git blame --line-porcelain` on fixtures and on random histories with merges, renames and repeated lines.
