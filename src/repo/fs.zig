@@ -288,6 +288,26 @@ pub fn isExecutable(p: Io.File.Permissions) bool {
     return p.toMode() & 0o100 != 0;
 }
 
+/// The process's umask, as git reads it for `tar.umask=user`: set to zero
+/// and put back at once, the only way POSIX gives to read it, so a file
+/// another thread creates in that moment is made without it. Windows has
+/// no umask, and git there reads zero.
+pub fn processUmask() u32 {
+    switch (builtin.os.tag) {
+        .windows => return 0,
+        .linux => if (!builtin.link_libc) {
+            const linux = std.os.linux;
+            const old = linux.syscall1(.umask, 0);
+            _ = linux.syscall1(.umask, old);
+            return @intCast(old & 0o7777);
+        },
+        else => {},
+    }
+    const old = std.c.umask(0);
+    _ = std.c.umask(old);
+    return @intCast(old & 0o7777);
+}
+
 /// The permissions a blob's mode asks for: 0o777 when executable, 0o666
 /// otherwise, before the process umask — which is what git creates files
 /// with. Where the platform has no executable bit this is the default and

@@ -34,6 +34,9 @@ const pretty = @import("pretty.zig");
 const abbrev = @import("odb/abbrev.zig");
 const mailfmt = @import("patch/mail/format.zig");
 const program = @import("repo/program.zig");
+const fs = @import("repo/fs.zig");
+const mailmap_mod = @import("revwalk/mailmap.zig");
+const signing = @import("commit/signing.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -47,9 +50,9 @@ pub const Error = error{
     PathspecNoMatch,
     /// A path longer than a zip can hold.
     PathTooLong,
-    /// `tar.umask` is `user`, the process's own umask, or not a number.
-    UnsupportedTarUmask,
-} || pretty.Error || pathspec_mod.Error || worktree.Error || convert.Error || attributes.Error ||
+    /// `tar.umask` is not a number.
+    InvalidTarUmask,
+} || pretty.Error || pretty.Decorations.LoadError || mailmap_mod.LoadError || pathspec_mod.Error || worktree.Error || convert.Error || attributes.Error ||
     repo_mod.Error || Io.Writer.Error || object.TreeParseError;
 
 /// The archive kinds.
@@ -77,8 +80,13 @@ pub const Options = struct {
     /// Minutes east of UTC that the zip's DOS times are written in: git
     /// writes the machine's local time.
     zip_offset_minutes: i32 = 0,
-    /// The programs filters run through.
+    /// The programs filters run through, and the signature programs
+    /// `%G?` in an `export-subst` file asks of a signed commit.
     programs: ?program.Programs = null,
+    /// The process's umask, for `tar.umask=user`. `null` reads it as git
+    /// does, setting it to zero and back, which a caller creating files on
+    /// other threads at that moment passes here instead.
+    user_umask: ?u32 = null,
 };
 
 const record_size = 512;
@@ -473,6 +481,34 @@ const Walk = struct {
     /// Directories queued, written only when something under them is.
     queued: std.ArrayList(Entry) = .empty,
     written_dirs: usize = 0,
+    /// What `export-subst` formats read, loaded the first time one asks.
+    mailmap: ?mailmap_mod.Mailmap = null,
+    decorations: ?pretty.Decorations = null,
+    signer: ?signing.Signer = null,
+
+    fn deinit(wk: *Walk) void {
+        if (wk.mailmap) |*m| m.deinit();
+        if (wk.decorations) |*d| d.deinit();
+        if (wk.signer) |*s| s.deinit();
+    }
+
+    /// What a format needs besides the commit: the mailmap, the refs and a
+    /// signer, each loaded the first time a placeholder asks for it, as
+    /// git loads them.
+    fn formatContext(wk: *Walk, format: []const u8) Error!pretty.Context {
+        if (wk.mailmap == null and hasPlaceholder(format, "ac", "NEL")) wk.mailmap = try mailmap_mod.Mailmap.load(wk.gpa, wk.io, wk.repo);
+        if (wk.decorations == null and (hasPlaceholder(format, "", "dD") or std.mem.indexOf(u8, format, "%(decorate") != null))
+            wk.decorations = try pretty.Decorations.load(wk.gpa, wk.io, wk.repo);
+        if (wk.signer == null and hasPlaceholder(format, "", "G")) if (wk.options.programs) |programs| {
+            wk.signer = try signing.Signer.init(wk.gpa, wk.repo.configuration(), programs);
+        };
+        return .{
+            .abbrev_len = wk.abbrev_len,
+            .mailmap = if (wk.mailmap) |*m| m else null,
+            .decorations = if (wk.decorations) |*d| d else null,
+            .signer = if (wk.signer) |*s| s else null,
+        };
+    }
 
     fn lookup(wk: *Walk, path: []const u8, is_dir: bool) Error!attributes.Attributes {
         if (wk.options.worktree_attributes) {
@@ -561,6 +597,24 @@ fn isBinary(bytes: []const u8) bool {
     return std.mem.indexOfScalar(u8, bytes[0..n], 0) != null;
 }
 
+/// Whether `format` has a placeholder `%<lead><letter>`, after any `+`,
+/// `-` or ` ` modifier, with `lead` one of `leads` or nothing when empty.
+fn hasPlaceholder(format: []const u8, leads: []const u8, letters: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, format, i, '%')) |pct| {
+        var j = pct + 1;
+        i = j + 1;
+        if (j < format.len and format[j] == '%') continue;
+        if (j < format.len and (format[j] == '+' or format[j] == '-' or format[j] == ' ')) j += 1;
+        if (leads.len > 0) {
+            if (j >= format.len or std.mem.indexOfScalar(u8, leads, format[j]) == null) continue;
+            j += 1;
+        }
+        if (j < format.len and std.mem.indexOfScalar(u8, letters, format[j]) != null) return true;
+    }
+    return false;
+}
+
 fn formatSubst(wk: *Walk, commit: Oid, src: []const u8) Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var rest = src;
@@ -568,7 +622,7 @@ fn formatSubst(wk: *Walk, commit: Oid, src: []const u8) Error![]const u8 {
         const b = std.mem.indexOf(u8, rest, "$Format:") orelse break;
         const c = std.mem.indexOfScalarPos(u8, rest, b + 8, '$') orelse break;
         try out.appendSlice(wk.a, rest[0..b]);
-        try pretty.formatCommit(wk.a, wk.io, &wk.repo.odb, commit, rest[b + 8 .. c], .{ .abbrev_len = wk.abbrev_len }, &out);
+        try pretty.formatCommit(wk.a, wk.io, &wk.repo.odb, commit, rest[b + 8 .. c], try wk.formatContext(rest[b + 8 .. c]), &out);
         rest = rest[c + 1 ..];
     }
     try out.appendSlice(wk.a, rest);
@@ -591,19 +645,18 @@ fn anyMatch(a: Allocator, io: Io, db: *odb_mod.Odb, tree_oid: Oid, base: []const
 }
 
 /// `tar.umask`, read as git reads an integer: `0x` for hexadecimal, a
-/// leading `0` for octal. `user`, the process's own umask, is the caller's
-/// to know and refused here.
-fn tarUmask(repo: *Repository) Error!u32 {
+/// leading `0` for octal; `user` is the process's own umask.
+fn tarUmask(repo: *Repository, user: ?u32) Error!u32 {
     const raw = repo.configuration().get("tar.umask") orelse return 0o002;
     const text = std.mem.trim(u8, raw, " \t");
-    if (std.mem.eql(u8, text, "user")) return error.UnsupportedTarUmask;
+    if (std.mem.eql(u8, text, "user")) return user orelse fs.processUmask();
     const value = if (std.mem.startsWith(u8, text, "0x") or std.mem.startsWith(u8, text, "0X"))
         std.fmt.parseInt(u32, text[2..], 16)
     else if (text.len > 1 and text[0] == '0')
         std.fmt.parseInt(u32, text[1..], 8)
     else
         std.fmt.parseInt(u32, text, 10);
-    return (value catch return error.UnsupportedTarUmask) & 0o7777;
+    return (value catch return error.InvalidTarUmask) & 0o7777;
 }
 
 /// `git archive <tree-ish> [<path>...]`: write the archive to `w`.
@@ -684,11 +737,12 @@ pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options:
         .abbrev_len = abbrev.defaultLength(repo.configuration(), db),
         .format = options.format,
     };
+    defer wk.deinit();
     var tar: Tar = undefined;
     var zip: Zip = undefined;
     switch (options.format) {
         .tar => {
-            tar = .{ .w = w, .umask = try tarUmask(repo), .time = time };
+            tar = .{ .w = w, .umask = try tarUmask(repo, options.user_umask), .time = time };
             try tarGlobalHeader(&tar, a, commit);
             wk.tar = &tar;
         },

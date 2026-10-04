@@ -24,6 +24,7 @@ const object = @import("../object.zig");
 const hash = @import("../hash.zig");
 const repo_mod = @import("../repo.zig");
 const commit_mod = @import("../commit.zig");
+const archive_mod = @import("../archive.zig");
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;
 
@@ -289,6 +290,33 @@ test "ssh signatures in a SHA-256 repository ride in gpgsig-sha256" {
     const raw = try k.repo.run(io, &.{ "cat-file", "commit", mine.hex(&hex) });
     defer gpa.free(raw);
     try testing.expect(std.mem.indexOf(u8, raw, "\ngpgsig-sha256 -----BEGIN SSH SIGNATURE-----\n") != null);
+}
+
+test "export-subst's signature placeholders check the commit as git archive does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var k = try Keyed.init(gpa, io, .ssh, &.{});
+    defer k.deinit(io);
+    try k.makeKey(io);
+    try k.repo.writeFile(io, ".gitattributes", "subst.txt export-subst\n");
+    try k.repo.writeFile(io, "subst.txt", "$Format:%G?|%GS|%GK|%GF|%GP|%GT|%GG$\n");
+    try k.repo.exec(io, &.{ "add", "-A" });
+    try k.repo.exec(io, &.{ "-c", "commit.gpgSign=true", "commit", "-q", "-m", "signed by git" });
+    const theirs = try k.repo.run(io, &.{ "archive", "HEAD" });
+    defer gpa.free(theirs);
+    var repo = try k.open(io);
+    defer repo.deinit(io);
+    const text = try k.repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(text);
+    const head = try Oid.parse(repo.objectFormat(), text);
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try archive_mod.archive(gpa, io, &repo, head, .{ .programs = k.programs() }, &out.writer);
+    try testing.expectEqualSlices(u8, theirs, out.written());
+    // without the programs, a signed commit's signature cannot be checked
+    var none: Io.Writer.Allocating = .init(gpa);
+    defer none.deinit();
+    try testing.expectError(error.SignatureNeedsSigner, archive_mod.archive(gpa, io, &repo, head, .{}, &none.writer));
 }
 
 test "openpgp signatures made here verify in git, and git's verify here" {

@@ -106,6 +106,50 @@ test "a commit is archived as git archives it: tar with every kind of entry, att
     try std.testing.expectError(error.PathspecNoMatch, archive_mod.archive(gpa, io, &repo, head, .{ .pathspecs = &.{"nowhere"} }, &out.writer));
 }
 
+test "export-subst names people by the mailmap and commits by their refs, and tar.umask=user is the process's" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, ".mailmap", "Real Name <real@example.com> <author@example.com>\n");
+    try git.writeFile(io, ".gitattributes", "subst.txt export-subst\n");
+    try git.writeFile(io, "subst.txt", "$Format:%aN <%aE> %aL|%cN <%cE> %cL|%an|%d|%D|%+d|%(decorate:prefix=[,suffix=],separator=%x3b,pointer=>,tag=T:)|%(decorate)|%(decorate:bogus)|%N|%G?|%GS|%GK|%GT$\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "first" });
+    try git.exec(io, &.{ "tag", "-a", "-m", "annotated", "v1" });
+    try git.exec(io, &.{ "tag", "light" });
+    try git.exec(io, &.{ "update-ref", "refs/remotes/origin/main", "HEAD" });
+    try git.exec(io, &.{ "update-ref", "refs/stash", "HEAD" });
+    try git.exec(io, &.{ "update-ref", "refs/other/thing", "HEAD" });
+    try git.exec(io, &.{ "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main" });
+    try git.writeFile(io, "more.txt", "more\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "second" });
+    try git.exec(io, &.{ "branch", "side" });
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const head = try oidOf(gpa, io, &git, "HEAD");
+    const first = try oidOf(gpa, io, &git, "v1");
+    try compare(gpa, io, &git, &repo, &.{"HEAD"}, head, .{});
+    try compare(gpa, io, &git, &repo, &.{"v1"}, first, .{});
+    // detached, HEAD stands alone
+    try git.exec(io, &.{ "checkout", "-q", "--detach", "HEAD" });
+    var detached = try Repository.open(gpa, io, git.dir, .{});
+    defer detached.deinit(io);
+    try compare(gpa, io, &git, &detached, &.{"HEAD"}, head, .{});
+
+    try git.exec(io, &.{ "config", "tar.umask", "user" });
+    var user = try Repository.open(gpa, io, git.dir, .{});
+    defer user.deinit(io);
+    try compare(gpa, io, &git, &user, &.{"HEAD"}, head, .{});
+    try git.exec(io, &.{ "config", "tar.umask", "nonsense" });
+    var bad = try Repository.open(gpa, io, git.dir, .{});
+    defer bad.deinit(io);
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectError(error.InvalidTarUmask, archive_mod.archive(gpa, io, &bad, head, .{}, &out.writer));
+}
+
 test "a stored zip is git's byte for byte, and a deflated one holds the same files" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

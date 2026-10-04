@@ -51,4 +51,5 @@ pub const lfs = @import("lfs.zig");
 pub const patch = @import("patch.zig");
 pub const grep = @import("grep.zig");
 pub const archive = @import("archive.zig");
+pub const pretty = @import("pretty.zig");
 pub const clean = @import("clean.zig");
