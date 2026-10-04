@@ -71,6 +71,8 @@ pub const Options = struct {
     /// The repository's configuration, for `core.sshCommand`, `ssh.variant`
     /// and the `http.*` settings.
     config: ?*const config_mod.Config = null,
+    /// The configured remote, for `remote.<name>.proxy`.
+    remote_name: ?[]const u8 = null,
     /// The program to ask the other side to run in place of
     /// `git-upload-pack` or `git-receive-pack`: `remote.<name>.uploadpack`.
     service_program: ?[]const u8 = null,
@@ -192,6 +194,7 @@ pub const Session = struct {
             .http, .https => {
                 const conn = try smarthttp.connect(gpa, io, parsed, service, .{
                     .config = options.config,
+                    .remote_name = options.remote_name,
                     .programs = options.programs,
                     .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
                     .prompt = options.prompt,

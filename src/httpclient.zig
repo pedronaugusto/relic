@@ -9,7 +9,9 @@
 //! when the proxy itself is `https`, a `CONNECT` tunnel through the proxy
 //! for an `https` target — or an absolute URL in the request line for an
 //! `http` one, as curl sends it — and TLS for the target inside whatever
-//! came before. Every layer is a `std.Io.Reader` and `std.Io.Writer` over
+//! came before. SOCKS4/4a/5/5h instead open a CONNECT tunnel for both
+//! HTTP and HTTPS, with origin TLS started inside it. Every layer is a
+//! `std.Io.Reader` and `std.Io.Writer` over
 //! the one below, so a tunnel inside TLS inside TCP is the same code as TLS
 //! alone. The parsing and the chunked framing are the standard library's.
 //!
@@ -37,6 +39,8 @@ const Io = std.Io;
 const http = std.http;
 const tls = @import("tls/root.zig");
 const httpauth = @import("httpauth.zig");
+const socks = @import("socks.zig");
+pub const SocksError = socks.Error;
 const Certificate = std.crypto.Certificate;
 
 /// Errors from making a connection or exchanging a request.
@@ -50,7 +54,7 @@ pub const Error = error{
     /// The proxy refused the tunnel. `Diagnostic.proxy_status` holds its answer.
     ProxyRefused,
     /// The proxy wants credentials it was not given, or refused the ones it
-    /// was: status 407.
+    /// was: HTTP status 407 or a SOCKS authentication refusal.
     ProxyAuthenticationRequired,
     /// A response that is not HTTP/1.1.
     HttpProtocolError,
@@ -71,7 +75,7 @@ pub const Error = error{
     /// The server asked for a client certificate in signature schemes the
     /// key does not sign with.
     ClientCertificateSchemeUnsupported,
-} || Allocator.Error || Io.Cancelable;
+} || SocksError || Allocator.Error || Io.Cancelable;
 
 /// Caller-owned failure details for one HTTP exchange. Initialize with `init`
 /// and release with `deinit`. `connect`, `send` and `stream` clear it before
@@ -84,7 +88,7 @@ pub const Diagnostic = struct {
     gpa: Allocator,
     /// Why the handshake failed, or the peer's client-certificate refusal.
     tls_error: ?anyerror = null,
-    /// The proxy's refusal status, including a 407 challenge.
+    /// The proxy's refusal status: HTTP status or SOCKS reply code.
     proxy_status: ?u16 = null,
     /// The offered schemes that could not be answered, owned here.
     proxy_offered: ?[]const u8 = null,
@@ -147,6 +151,8 @@ pub const Proxy = struct {
     port: u16,
     /// An `https://` proxy: TLS to the proxy itself, and a tunnel inside.
     tls: bool = false,
+    /// A SOCKS CONNECT tunnel, for HTTP and HTTPS alike.
+    socks_version: ?socks.Version = null,
     /// The user and password the proxy is answered with, and which of its
     /// challenges may be answered.
     credential: ?Credential = null,
@@ -175,6 +181,30 @@ pub const Proxy = struct {
         /// all that is allowed; `digest` waits and answers Digest only.
         method: httpauth.Method = .any,
     };
+
+    /// Parse HTTP(S) and SOCKS proxy URLs. Slices belong to `arena` or `raw`.
+    /// Callers retain their HTTP default port; every SOCKS scheme uses 1080.
+    pub fn parse(arena: Allocator, raw: []const u8, http_port: u16) (Allocator.Error || error{InvalidProxy})!Proxy {
+        const text = if (std.mem.indexOf(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else raw;
+        const uri = std.Uri.parse(text) catch return error.InvalidProxy;
+        const version: ?socks.Version = if (std.ascii.eqlIgnoreCase(uri.scheme, "socks4")) .socks4 else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks4a")) .socks4a else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks5")) .socks5 else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks5h")) .socks5h else null;
+        const secure = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+        if (version == null and !secure and !std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.InvalidProxy;
+        const host = if (uri.host) |h| try h.toRawMaybeAlloc(arena) else return error.InvalidProxy;
+        const unbracketed = if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host[1 .. host.len - 1] else host;
+        if (unbracketed.len == 0 or std.mem.indexOfAny(u8, unbracketed, "\x00\r\n") != null) return error.InvalidProxy;
+        var proxy: Proxy = .{
+            .host = unbracketed,
+            .port = uri.port orelse if (version != null) 1080 else if (secure) 443 else http_port,
+            .tls = secure,
+            .socks_version = version,
+        };
+        if (uri.user != null or uri.password != null) proxy.credential = .{
+            .user = if (uri.user) |u| try u.toRawMaybeAlloc(arena) else "",
+            .password = if (uri.password) |p| try p.toRawMaybeAlloc(arena) else "",
+        };
+        return proxy;
+    }
 };
 
 /// How the proxy is being answered, once it has asked.
@@ -809,6 +839,7 @@ pub const Connection = struct {
 
         const first_host = if (c.proxy) |p| p.host else target.host;
         const first_port = if (c.proxy) |p| p.port else target.port;
+        const connect_started = awakeNow(io);
         var net_stream = try dial(c, first_host, first_port);
         errdefer net_stream.close(io);
         {
@@ -841,10 +872,14 @@ pub const Connection = struct {
         errdefer conn.stopWatching();
 
         if (c.proxy) |p| {
-            if (p.tls) try conn.startTls(0, p.host);
-            if (target.tls) {
-                try conn.tunnel(p, target, proxy_retry);
-            } else conn.absolute_form = true;
+            if (p.socks_version) |version| {
+                try conn.socksTunnel(p, version, target, connect_started);
+            } else {
+                if (p.tls) try conn.startTls(0, p.host);
+                if (target.tls) {
+                    try conn.tunnel(p, target, proxy_retry);
+                } else conn.absolute_form = true;
+            }
         }
         if (target.tls) try conn.startTls(1, target.host);
         return conn;
@@ -854,17 +889,16 @@ pub const Connection = struct {
     /// one: the connect runs as its own task, raced against a sleep.
     fn dial(c: *Client, host: []const u8, port: u16) Error!Io.net.Stream {
         const io = c.io;
-        const host_name = Io.net.HostName.init(host) catch return error.ConnectionFailed;
-        const limit = c.timeouts.connect orelse return plainDial(io, host_name, port);
+        const limit = c.timeouts.connect orelse return plainDial(io, host, port);
         const Race = union(enum) {
-            connected: Io.net.HostName.ConnectError!Io.net.Stream,
+            connected: Error!Io.net.Stream,
             expired: Io.Cancelable!void,
         };
         var buffer: [2]Race = undefined;
         var race: Io.Select(Race) = .init(io, &buffer);
-        race.concurrent(.connected, Io.net.HostName.connect, .{ host_name, io, port, .{ .mode = .stream } }) catch {
+        race.concurrent(.connected, plainDial, .{ io, host, port }) catch {
             c.noteUnwatched();
-            return plainDial(io, host_name, port);
+            return plainDial(io, host, port);
         };
         race.concurrent(.expired, Io.sleep, .{ io, limit, .awake }) catch {
             while (race.cancel()) |late| switch (late) {
@@ -872,7 +906,7 @@ pub const Connection = struct {
                 .expired => {},
             };
             c.noteUnwatched();
-            return plainDial(io, host_name, port);
+            return plainDial(io, host, port);
         };
         const first = race.await() catch |err| {
             while (race.cancel()) |late| switch (late) {
@@ -895,7 +929,14 @@ pub const Connection = struct {
         };
     }
 
-    fn plainDial(io: Io, host_name: Io.net.HostName, port: u16) Error!Io.net.Stream {
+    fn plainDial(io: Io, host: []const u8, port: u16) Error!Io.net.Stream {
+        if (Io.net.IpAddress.parse(host, port)) |address| {
+            return address.connect(io, .{ .mode = .stream }) catch |err| return switch (err) {
+                error.Canceled => error.Canceled,
+                else => error.ConnectionFailed,
+            };
+        } else |_| {}
+        const host_name = Io.net.HostName.init(host) catch return error.ConnectionFailed;
         return host_name.connect(io, port, .{ .mode = .stream }) catch |err| switch (err) {
             error.Canceled => error.Canceled,
             else => error.ConnectionFailed,
@@ -1182,6 +1223,89 @@ pub const Connection = struct {
             };
         };
         conn.layers[slot] = layer;
+    }
+
+    /// Curl counts SOCKS negotiation, including local DNS, as connecting.
+    /// Race the whole negotiation so a lookup is canceled on timeout too.
+    fn socksTunnel(conn: *Connection, proxy: Proxy, version: socks.Version, target: Target, started: u64) Error!void {
+        const c = conn.client;
+        var limit = c.timeouts.handshake;
+        if (c.timeouts.connect) |connect_limit| {
+            const remaining = connect_limit.nanoseconds - @as(i96, awakeNow(c.io) - started);
+            if (remaining <= 0) return error.TimedOut;
+            if (limit == null or remaining < limit.?.nanoseconds) limit = .{ .nanoseconds = remaining };
+        }
+        const timeout = limit orelse return conn.socksHandshake(proxy, version, target);
+        const Race = union(enum) { negotiated: Error!void, expired: Io.Cancelable!void };
+        var buffer: [2]Race = undefined;
+        var race: Io.Select(Race) = .init(c.io, &buffer);
+        defer while (race.cancel()) |_| {};
+        race.concurrent(.negotiated, socksHandshake, .{ conn, proxy, version, target }) catch {
+            c.noteUnwatched();
+            return conn.socksHandshake(proxy, version, target);
+        };
+        race.concurrent(.expired, Io.sleep, .{ c.io, timeout, .awake }) catch {
+            while (race.cancel()) |late| switch (late) {
+                .negotiated => |result| return result,
+                .expired => {},
+            };
+            c.noteUnwatched();
+            return conn.socksHandshake(proxy, version, target);
+        };
+        return switch (try race.await()) {
+            .negotiated => |result| result,
+            .expired => |result| if (result) |_| error.TimedOut else |err| err,
+        };
+    }
+
+    fn socksHandshake(conn: *Connection, proxy: Proxy, version: socks.Version, target: Target) Error!void {
+        const credential: ?socks.Credential = if (proxy.credential) |c| .{ .user = c.user, .password = c.password } else null;
+        const host = if (target.host.len >= 2 and target.host[0] == '[' and target.host[target.host.len - 1] == ']') target.host[1 .. target.host.len - 1] else target.host;
+        if ((version == .socks4 or version == .socks4a) and std.mem.indexOfScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
+        if (version == .socks5 or version == .socks5h) socks.authenticate(conn.reader(), conn.writer(), credential) catch |err| return conn.socksFailed(err);
+        const literal = Io.net.IpAddress.parse(host, target.port) catch null;
+        const address: ?Io.net.IpAddress = if (version == .socks4a) null else if (literal) |a| a else if (version == .socks5h) null else try resolveSocks(conn.client.io, host, target.port, version == .socks4);
+        socks.request(conn.writer(), version, host, target.port, address, credential) catch |err| return conn.socksFailed(err);
+        var status: u16 = 0;
+        socks.reply(conn.reader(), version, &status) catch |err| {
+            if (conn.diagnostic) |d| d.proxy_status = status;
+            return conn.socksFailed(err);
+        };
+    }
+
+    fn resolveSocks(io: Io, host: []const u8, port: u16, ipv4: bool) Error!Io.net.IpAddress {
+        const name = Io.net.HostName.init(host) catch return error.ProxyHostUnreachable;
+        var buffer: [32]Io.net.HostName.LookupResult = undefined;
+        var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buffer);
+        var future = io.async(Io.net.HostName.lookup, .{ name, io, &queue, .{ .port = port, .family = if (ipv4) .ip4 else null } });
+        defer future.cancel(io) catch {};
+        var address: ?Io.net.IpAddress = null;
+        while (true) {
+            const result = queue.getOne(io) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.Closed => break,
+            };
+            switch (result) {
+                .address => |a| {
+                    // Curl prefers IPv6 for SOCKS5, IPv4 only for SOCKS4.
+                    if (address == null or (!ipv4 and a == .ip6)) address = a;
+                },
+                .canonical_name => {},
+            }
+        }
+        future.await(io) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            else => error.ProxyHostUnreachable,
+        };
+        return address orelse error.ProxyHostUnreachable;
+    }
+
+    fn socksFailed(conn: *Connection, err: socks.WireError) Error {
+        return switch (err) {
+            error.ReadFailed, error.EndOfStream => conn.readFailed(),
+            error.WriteFailed => conn.writeFailed(),
+            else => |named| named,
+        };
     }
 
     /// Ask the proxy for a tunnel to `target` with `CONNECT`, as curl asks.
@@ -2091,4 +2215,25 @@ test "streaming finish consumes its connection when the response cannot be alloc
 
 test "streaming finish consumes its connection when the body is incomplete" {
     try checkStreamingFinishFailure(.incomplete);
+}
+
+test "proxy URLs share SOCKS defaults and preserve IPv6 hosts and decoded credentials" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try Proxy.parse(a, "SOCKS5H://us%65r:p%40ss@[::1]", 80);
+    try std.testing.expectEqualStrings("::1", p.host);
+    try std.testing.expectEqual(@as(u16, 1080), p.port);
+    try std.testing.expectEqual(.socks5h, p.socks_version.?);
+    try std.testing.expectEqualStrings("user", p.credential.?.user);
+    try std.testing.expectEqualStrings("p@ss", p.credential.?.password);
+    try std.testing.expect(!p.tls);
+    for ([_][]const u8{ "unsupported://host", "socks5://", "socks5://host:bad", "socks5://h%00st" }) |text| {
+        try std.testing.expectError(error.InvalidProxy, Proxy.parse(a, text, 80));
+    }
+    const explicit = try Proxy.parse(a, "socks4://user@host:7777", 80);
+    try std.testing.expectEqual(@as(u16, 7777), explicit.port);
+    try std.testing.expectEqualStrings("", explicit.credential.?.password);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, Proxy.parse(failing.allocator(), "socks5h://us%65r@proxy", 80));
 }

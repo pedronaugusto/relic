@@ -26,6 +26,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/progress.zig",
         "src/repodiagnostic.zig",
         "src/safepath.zig",
+        "src/socks.zig",
         "src/sha1.zig",
         "src/sha1dc.zig",
         "src/test_case.zig",

@@ -1077,3 +1077,148 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     try testing.expect(state.read_canceled);
     try testing.expect(state.reaped);
 }
+
+test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS to the origin" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 48);
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 2);
+    var bare = try root.dir.openDir(io, "repo.git", .{});
+    defer bare.close(io);
+    const enabled = try testremote.gitInput(gpa, io, bare, &.{ "config", "http.receivepack", "true" }, "");
+    gpa.free(enabled);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    defer front.stop(io);
+    const proxy = try testremote.SocksProxy.start(gpa, io, .{ .credential = .{ .user = "ada", .password = "secret" } });
+    defer proxy.stop();
+    for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
+        for ([_]bool{ false, true }) |secure| {
+            var env = try testremote.environ(gpa);
+            defer env.deinit();
+            const proxy_url = try proxy.url(gpa, scheme, "ada:secret@");
+            defer gpa.free(proxy_url);
+            const url = try std.fmt.allocPrint(gpa, "{s}://localhost:{d}/repo.git", .{ if (secure) "https" else "http", if (secure) front.port else server.port });
+            defer gpa.free(url);
+            // The same explicit -c spelling works with git's curl. SSL
+            // verification is covered elsewhere; this test checks TLS on wire.
+            const setting = try std.fmt.allocPrint(gpa, "http.proxy={s}", .{proxy_url});
+            defer gpa.free(setting);
+            const config_text = try std.fmt.allocPrint(gpa, "[http]\nproxy = {s}\nsslVerify = false\n", .{proxy_url});
+            defer gpa.free(config_text);
+            var config = try config_mod.Config.parseText(gpa, config_text, .command);
+            defer config.deinit();
+            var git_work = testing.tmpDir(.{ .iterate = true });
+            defer git_work.cleanup();
+            const cloned = try testremote.gitInputEnv(gpa, io, git_work.dir, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "clone", "-q", url, "clone" }, "", true);
+            gpa.free(cloned);
+            const theirs = try proxy.take(gpa);
+            defer gpa.free(theirs);
+            var ours = testing.tmpDir(.{ .iterate = true });
+            defer ours.cleanup();
+            var repo = try @import("clone.zig").clone(gpa, io, url, ours.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .config = &config });
+            defer repo.deinit(io);
+            const our_log = try proxy.take(gpa);
+            defer gpa.free(our_log);
+            try testing.expect(theirs.len != 0 and our_log.len != 0);
+            const expected_kind = if (std.mem.eql(u8, scheme, "socks4a") or std.mem.eql(u8, scheme, "socks5h")) " name localhost:" else if (std.mem.eql(u8, scheme, "socks4")) " ipv4 127.0.0.1:" else " ipv";
+            try testing.expect(std.mem.indexOf(u8, theirs, expected_kind) != null);
+            try testing.expect(std.mem.indexOf(u8, our_log, expected_kind) != null);
+            var by_git = try git_work.dir.openDir(io, "clone", .{});
+            defer by_git.close(io);
+            try repo.editConfig(&.{ .{ .set = .{ .name = "http.proxy", .value = "http://127.0.0.1:9" } }, .{ .set = .{ .name = "remote.origin.proxy", .value = proxy_url } }, .{ .set = .{ .name = "http.sslVerify", .value = "false" } } }, null);
+            var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+            defer fetched.deinit();
+            const fetched_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "fetch", "-q", "origin" }, "", true);
+            gpa.free(fetched_git);
+            // Both clients push new objects, from identical commits.
+            const commit_text = try std.fmt.allocPrint(gpa, "{s} {s}\n", .{ scheme, if (secure) "https" else "http" });
+            defer gpa.free(commit_text);
+            for ([_]Io.Dir{ by_git, ours.dir }) |dir| {
+                try dir.writeFile(io, .{ .sub_path = "socks.txt", .data = commit_text });
+                const staged = try testremote.gitInput(gpa, io, dir, &.{ "add", "socks.txt" }, "");
+                gpa.free(staged);
+                const committed = try testremote.gitInput(gpa, io, dir, &.{ "commit", "-q", "-m", commit_text }, "");
+                gpa.free(committed);
+            }
+            const git_ref = try std.fmt.allocPrint(gpa, "refs/heads/socks-git-{s}-{s}", .{ scheme, if (secure) "https" else "http" });
+            defer gpa.free(git_ref);
+            const relic_ref = try std.fmt.allocPrint(gpa, "refs/heads/socks-relic-{s}-{s}", .{ scheme, if (secure) "https" else "http" });
+            defer gpa.free(relic_ref);
+            const git_spec = try std.fmt.allocPrint(gpa, "HEAD:{s}", .{git_ref});
+            defer gpa.free(git_spec);
+            const relic_spec = try std.fmt.allocPrint(gpa, "HEAD:{s}", .{relic_ref});
+            defer gpa.free(relic_spec);
+            const pushed_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "push", "-q", "origin", git_spec }, "", true);
+            gpa.free(pushed_git);
+            var pushed = try @import("push.zig").push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{relic_spec} });
+            defer pushed.deinit();
+            const git_refs = try testremote.gitInput(gpa, io, bare, &.{ "rev-parse", git_ref, relic_ref }, "");
+            defer gpa.free(git_refs);
+            var names = std.mem.tokenizeScalar(u8, git_refs, '\n');
+            try testing.expectEqualStrings(names.next().?, names.next().?);
+            const ours_head = try testremote.gitInput(gpa, io, ours.dir, &.{ "rev-parse", "HEAD" }, "");
+            defer gpa.free(ours_head);
+            const theirs_head = try testremote.gitInput(gpa, io, by_git, &.{ "rev-parse", "HEAD" }, "");
+            defer gpa.free(theirs_head);
+            try testing.expectEqualStrings(theirs_head, ours_head);
+        }
+    }
+    const counts = proxy.tunnelCounts();
+    try testing.expect(counts.tls > 0 and counts.plain > 0);
+}
+
+test "SOCKS authentication failures, refused commands and unreachable hosts keep their names" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const httpclient = @import("httpclient.zig");
+    const target: httpclient.Target = .{ .tls = false, .host = "remote.invalid", .port = 80 };
+    for ([_][]const u8{ "socks4a", "socks5h" }) |scheme| {
+        const proxy = try testremote.SocksProxy.start(gpa, io, .{ .credential = .{ .user = "ada", .password = "secret" } });
+        defer proxy.stop();
+        for ([_][]const u8{ "wrong:secret@", "ada:wrong@", "" }) |userinfo| {
+            // SOCKS4 authenticates the userid; its password is not sent.
+            if (std.mem.eql(u8, scheme, "socks4a") and std.mem.eql(u8, userinfo, "ada:wrong@")) continue;
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            const text = try proxy.url(arena.allocator(), scheme, userinfo);
+            var client: httpclient.Client = .init(gpa, io);
+            defer client.deinit();
+            client.proxy = try httpclient.Proxy.parse(arena.allocator(), text, 1080);
+            try testing.expectError(error.ProxyAuthenticationRequired, client.connect(target, null));
+        }
+    }
+    const errors = [_]httpclient.Error{ error.ProxyRefused, error.ProxyRefused, error.ProxyNetworkUnreachable, error.ProxyHostUnreachable, error.ProxyRefused, error.ProxyTtlExpired, error.ProxyCommandUnsupported, error.ProxyAddressUnsupported };
+    for (errors, 1..) |expected, code| {
+        const proxy = try testremote.SocksProxy.start(gpa, io, .{ .reply_code = @intCast(code) });
+        defer proxy.stop();
+        var client: httpclient.Client = .init(gpa, io);
+        defer client.deinit();
+        client.proxy = .{ .host = "127.0.0.1", .port = proxy.port, .socks_version = .socks5h };
+        var diagnostic: httpclient.Diagnostic = .init(gpa);
+        defer diagnostic.deinit();
+        try testing.expectError(expected, client.connect(target, &diagnostic));
+        try testing.expectEqual(code, diagnostic.proxy_status.?);
+    }
+}
+
+test "a stalled SOCKS negotiation is bounded by connect and handshake timeouts" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const httpclient = @import("httpclient.zig");
+    for ([_]httpclient.Timeouts{
+        .{ .connect = .fromMilliseconds(20) },
+        .{ .handshake = .fromMilliseconds(20) },
+    }) |timeouts| {
+        const proxy = try testremote.SocksProxy.start(gpa, io, .{ .stall = true });
+        defer proxy.stop();
+        var client: httpclient.Client = .init(gpa, io);
+        defer client.deinit();
+        client.proxy = .{ .host = "127.0.0.1", .port = proxy.port, .socks_version = .socks5h };
+        client.timeouts = timeouts;
+        try testing.expectError(error.TimedOut, client.connect(.{ .tls = false, .host = "remote.invalid", .port = 80 }, null));
+    }
+}

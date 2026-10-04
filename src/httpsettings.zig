@@ -79,6 +79,12 @@ pub const Error = error{
 /// The settings for `url`, from `config` and `environ`. Every slice is in
 /// `arena`, or borrowed from `config` or `environ`.
 pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url) Error!Settings {
+    return resolveForRemote(arena, config, environ, url, null);
+}
+
+/// A named remote's proxy overrides `http.proxy`, including an empty value.
+/// The environment's `no_proxy` still applies to that proxy.
+pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url, remote_name: ?[]const u8) Error!Settings {
     var s: Settings = .{};
     var headers: std.ArrayList([]const u8) = .empty;
     var proxy_set = false;
@@ -143,6 +149,16 @@ pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*c
     }
     s.extra_headers = headers.items;
 
+    if (config) |c| if (remote_name) |name| {
+        const key = try std.fmt.allocPrint(arena, "remote.{s}.proxy", .{name});
+        if (c.get(key)) |raw| {
+            s.proxy = config_mod.unquote(arena, raw) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.InvalidHttpSetting,
+            };
+            proxy_set = true;
+        }
+    };
     if (environ) |env| {
         if (env.get("GIT_SSL_NO_VERIFY") != null) {
             s.ssl_verify = false;
@@ -351,4 +367,22 @@ test "HTTP settings preserve allocation resource failures" {
         try testing.expect(!failing.has_induced_failure);
         return;
     }
+}
+
+test "a remote's SOCKS proxy overrides http.proxy and remains subject to no_proxy" {
+    var config = try config_mod.Config.parseText(testing.allocator, "[http]\nproxy = http://general:3128\n[remote \"origin\"]\nproxy = socks5h://specific\n[remote \"direct\"]\nproxy =\n", .local);
+    defer config.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var env: Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("all_proxy", "socks4a://environment");
+    const url = try url_mod.Url.parse("https://git.example.com/repo.git");
+    const named = try resolveForRemote(arena.allocator(), &config, &env, url, "origin");
+    try testing.expectEqualStrings("socks5h://specific", named.proxy.?);
+    const direct = try resolveForRemote(arena.allocator(), &config, &env, url, "direct");
+    try testing.expect(direct.proxy == null);
+    try env.put("no_proxy", ".example.com");
+    const bypassed = try resolveForRemote(arena.allocator(), &config, &env, url, "origin");
+    try testing.expect(bypassed.proxy == null);
 }

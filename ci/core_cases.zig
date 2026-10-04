@@ -154,6 +154,7 @@ pub const families = [_]Family{
         "root.test",
         "shallow_test.test",
         "sideband.test",
+        "socks.test",
         "ssh.test",
         "testremote.test",
         "tls_fork_test.test",

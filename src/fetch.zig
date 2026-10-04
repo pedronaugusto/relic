@@ -311,6 +311,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     var session = try transport.Session.open(gpa, io, url, .upload_pack, repo.objectFormat(), .{
         .programs = options.programs,
         .config = repo.configuration(),
+        .remote_name = remote.name,
         .service_program = remote.upload_pack,
         .progress = options.progress,
         .prompt = options.prompt,

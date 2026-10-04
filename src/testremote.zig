@@ -1074,3 +1074,208 @@ pub const Proxy = struct {
         }
     }
 };
+
+/// A SOCKS4/4a/5 proxy for transport tests. Names are resolved here to the
+/// fixture's loopback server; every requested address, userid and auth
+/// result is recorded independently of relic's protocol implementation.
+pub const SocksProxy = struct {
+    gpa: Allocator,
+    io: Io,
+    listener: Io.net.Server,
+    port: u16,
+    task: Io.Future(void) = undefined,
+    stopping: std.atomic.Value(bool) = .init(false),
+    mutex: Io.Mutex = .init,
+    log: std.ArrayList(u8) = .empty,
+    tls_tunnels: usize = 0,
+    plain_tunnels: usize = 0,
+    options: Options,
+
+    pub const Options = struct {
+        credential: ?struct { user: []const u8, password: []const u8 } = null,
+        /// A SOCKS5 CONNECT refusal, for named-error tests.
+        reply_code: u8 = 0,
+        /// Send no greeting reply; the client's deadline must end it.
+        stall: bool = false,
+    };
+
+    pub fn start(gpa: Allocator, io: Io, options: Options) !*SocksProxy {
+        const p = try gpa.create(SocksProxy);
+        errdefer gpa.destroy(p);
+        var listener = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+        errdefer listener.deinit(io);
+        p.* = .{ .gpa = gpa, .io = io, .listener = listener, .port = listener.socket.address.getPort(), .options = options };
+        p.task = io.concurrent(serve, .{p}) catch return error.SkipZigTest;
+        return p;
+    }
+
+    pub fn stop(p: *SocksProxy) void {
+        p.stopping.store(true, .release);
+        p.task.cancel(p.io);
+        p.listener.deinit(p.io);
+        p.log.deinit(p.gpa);
+        p.gpa.destroy(p);
+    }
+
+    pub fn url(p: *const SocksProxy, gpa: Allocator, scheme: []const u8, userinfo: []const u8) ![]u8 {
+        return std.fmt.allocPrint(gpa, "{s}://{s}127.0.0.1:{d}", .{ scheme, userinfo, p.port });
+    }
+
+    pub fn take(p: *SocksProxy, gpa: Allocator) ![]u8 {
+        p.mutex.lockUncancelable(p.io);
+        defer p.mutex.unlock(p.io);
+        defer p.log.clearRetainingCapacity();
+        return gpa.dupe(u8, p.log.items);
+    }
+
+    pub fn tunnelCounts(p: *SocksProxy) struct { tls: usize, plain: usize } {
+        p.mutex.lockUncancelable(p.io);
+        defer p.mutex.unlock(p.io);
+        return .{ .tls = p.tls_tunnels, .plain = p.plain_tunnels };
+    }
+
+    fn serve(p: *SocksProxy) void {
+        while (!p.stopping.load(.acquire)) {
+            const stream = p.listener.accept(p.io) catch return;
+            defer stream.close(p.io);
+            p.handle(stream) catch {};
+        }
+    }
+
+    fn zeroString(r: *Io.Reader, buffer: []u8) ![]const u8 {
+        for (buffer, 0..) |*b, i| {
+            b.* = try r.takeByte();
+            if (b.* == 0) return buffer[0..i];
+        }
+        return error.BadRequest;
+    }
+
+    fn handle(p: *SocksProxy, client: Io.net.Stream) !void {
+        const io = p.io;
+        var read_buf: [16 * 1024]u8 = undefined;
+        var write_buf: [16 * 1024]u8 = undefined;
+        var from = client.reader(io, &read_buf);
+        var to = client.writer(io, &write_buf);
+        const r = &from.interface;
+        const w = &to.interface;
+        const version = try r.takeByte();
+        if (p.options.stall) {
+            // Ends only when the client closes, or stop cancels the fixture.
+            while (true) _ = try r.takeByte();
+        }
+        var user_buffer: [256]u8 = undefined;
+        var password_buffer: [255]u8 = undefined;
+        var host_buffer: [256]u8 = undefined;
+        var user: []const u8 = "";
+        var host: []const u8 = "";
+        var kind: []const u8 = "";
+        var port: u16 = 0;
+        var accepted = true;
+        var four_a = false;
+        if (version == 4) {
+            if (try r.takeByte() != 1) return error.BadRequest;
+            port = try r.takeInt(u16, .big);
+            var address: [4]u8 = undefined;
+            try r.readSliceAll(&address);
+            user = try zeroString(r, &user_buffer);
+            four_a = address[0] == 0 and address[1] == 0 and address[2] == 0 and address[3] != 0;
+            if (four_a) {
+                kind = "name";
+                host = try zeroString(r, &host_buffer);
+            } else {
+                kind = "ipv4";
+                host = try std.fmt.bufPrint(&host_buffer, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
+            }
+            if (p.options.credential) |c| accepted = std.mem.eql(u8, user, c.user);
+        } else if (version == 5) {
+            const count = try r.takeByte();
+            var methods: [255]u8 = undefined;
+            try r.readSliceAll(methods[0..count]);
+            const method: u8 = if (p.options.credential != null) 2 else 0;
+            if (std.mem.indexOfScalar(u8, methods[0..count], method) == null) {
+                try w.writeAll(&.{ 5, 255 });
+                try w.flush();
+                return;
+            }
+            try w.writeAll(&.{ 5, method });
+            try w.flush();
+            if (method == 2) {
+                if (try r.takeByte() != 1) return error.BadRequest;
+                const user_len = try r.takeByte();
+                try r.readSliceAll(user_buffer[0..user_len]);
+                user = user_buffer[0..user_len];
+                const password_len = try r.takeByte();
+                try r.readSliceAll(password_buffer[0..password_len]);
+                const c = p.options.credential.?;
+                accepted = std.mem.eql(u8, user, c.user) and std.mem.eql(u8, password_buffer[0..password_len], c.password);
+                try w.writeAll(&.{ 1, if (accepted) @as(u8, 0) else 1 });
+                try w.flush();
+                if (!accepted) return;
+            }
+            if (try r.takeByte() != 5 or try r.takeByte() != 1 or try r.takeByte() != 0) return error.BadRequest;
+            switch (try r.takeByte()) {
+                1 => {
+                    kind = "ipv4";
+                    var address: [4]u8 = undefined;
+                    try r.readSliceAll(&address);
+                    host = try std.fmt.bufPrint(&host_buffer, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
+                },
+                3 => {
+                    kind = "name";
+                    const len = try r.takeByte();
+                    try r.readSliceAll(host_buffer[0..len]);
+                    host = host_buffer[0..len];
+                },
+                4 => {
+                    kind = "ipv6";
+                    var address: [16]u8 = undefined;
+                    try r.readSliceAll(&address);
+                    host = try std.fmt.bufPrint(&host_buffer, "{f}", .{Io.net.Ip6Address{ .bytes = address, .port = 0 }});
+                },
+                else => return error.BadRequest,
+            }
+            port = try r.takeInt(u16, .big);
+        } else return error.BadRequest;
+        {
+            p.mutex.lockUncancelable(io);
+            defer p.mutex.unlock(io);
+            try p.log.print(p.gpa, "socks{d}{s} {s} {s}:{d} user={s} {s}\n", .{ version, if (four_a) "a" else "", kind, host, port, user, if (accepted) "taken" else "refused" });
+        }
+        if (version == 4) {
+            try w.writeAll(&.{ 0, if (accepted) @as(u8, 90) else 93, 0, 0, 0, 0, 0, 0 });
+        } else {
+            try w.writeAll(&.{ 5, p.options.reply_code, 0, 1, 127, 0, 0, 1, 0, 0 });
+        }
+        try w.flush();
+        if (!accepted or p.options.reply_code != 0) return;
+        // All upstreams are servers the test owns, even for .invalid names.
+        const upstream = try (try Io.net.IpAddress.parse("127.0.0.1", port)).connect(io, .{ .mode = .stream });
+        defer upstream.close(io);
+        var up_read: [16 * 1024]u8 = undefined;
+        var up_write: [16 * 1024]u8 = undefined;
+        var from_up = upstream.reader(io, &up_read);
+        var to_up = upstream.writer(io, &up_write);
+        while (r.bufferedLen() < 2) try r.fillMore();
+        {
+            const bytes = r.buffered();
+            p.mutex.lockUncancelable(io);
+            defer p.mutex.unlock(io);
+            if (bytes[0] == 0x16 and bytes[1] == 0x03) p.tls_tunnels += 1 else p.plain_tunnels += 1;
+        }
+        try to_up.interface.writeAll(r.buffered());
+        r.tossBuffered();
+        try to_up.interface.flush();
+        var upward = try io.concurrent(copy, .{ r, &to_up.interface });
+        copy(&from_up.interface, w);
+        upward.cancel(io);
+    }
+
+    fn copy(from: *Io.Reader, to: *Io.Writer) void {
+        while (true) {
+            from.fillMore() catch return;
+            to.writeAll(from.buffered()) catch return;
+            from.tossBuffered();
+            to.flush() catch return;
+        }
+    }
+};
