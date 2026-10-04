@@ -98,12 +98,14 @@ pub const Error = error{
     /// `http.proxyAuthMethod` names a scheme other than basic: digest,
     /// negotiate, ntlm.
     ProxyAuthMethodUnsupported,
-} || connection.Error || credential.Error || clientcert.Error;
+} || httpclient.SocksError || connection.Error || credential.Error || clientcert.Error;
 
 /// How the conversation is made.
 pub const Options = struct {
     /// The repository's configuration, for the `http.*` settings.
     config: ?*const config_mod.Config = null,
+    /// The configured remote, for `remote.<name>.proxy`.
+    remote_name: ?[]const u8 = null,
     /// The permission to run credential helpers and `askpass`; its
     /// environment is also where `http_proxy`, `https_proxy`, `all_proxy`
     /// and `GIT_ASKPASS` are read.
@@ -231,7 +233,7 @@ const Http = struct {
         h.base_path = path;
 
         const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
-        const settings = try httpsettings.resolve(arena, h.options.config, environ, url);
+        const settings = try httpsettings.resolveForRemote(arena, h.options.config, environ, url, h.options.remote_name);
         if (url.scheme == .https) {
             if (settings.ssl_cert) |cert| {
                 h.client_auth = try h.clientCertificate(.{
@@ -371,6 +373,11 @@ const Http = struct {
     /// as git's `init_curl_proxy_auth` fills it.
     fn configureProxy(h: *Http, raw: []const u8, method_name: []const u8) Error!void {
         const arena = h.arena.allocator();
+        var proxy = try httpclient.Proxy.parse(arena, raw, 1080);
+        if (proxy.socks_version != null) {
+            h.client.proxy = proxy;
+            return;
+        }
         // git's `http.proxyAuthMethod`: anyauth, basic, digest; negotiate
         // and ntlm need the system's security library; anything else git
         // warns of and treats as anyauth.
@@ -388,13 +395,6 @@ const Http = struct {
         };
         const text = if (std.mem.indexOf(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else raw;
         const proxy_url = url_mod.Url.parse(text) catch return error.InvalidProxy;
-        if (proxy_url.scheme != .http and proxy_url.scheme != .https) return error.InvalidProxy;
-        if (proxy_url.host.len == 0) return error.InvalidProxy;
-        var proxy: httpclient.Proxy = .{
-            .host = proxy_url.host,
-            .port = proxy_url.port orelse if (proxy_url.scheme == .https) 443 else 1080,
-            .tls = proxy_url.scheme == .https,
-        };
         if (proxy_url.user != null) {
             h.proxy_credentials = .{ .gpa = h.gpa, .url = proxy_url };
             const session = &h.proxy_credentials.?;
@@ -504,6 +504,13 @@ const Http = struct {
                 var buf: [32]u8 = undefined;
                 return h.fail(error.ProxyRefused, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.diagnostic.proxy_status orelse 0}) catch "proxy refused");
             },
+            error.ProxyHostUnreachable,
+            error.ProxyNetworkUnreachable,
+            error.ProxyCommandUnsupported,
+            error.ProxyAddressUnsupported,
+            error.ProxyTtlExpired,
+            error.SocksProtocolError,
+            => |named| h.fail(named, @errorName(named)),
             error.HttpProtocolError => h.fail(error.ProtocolError, "not an HTTP response"),
             error.CertificateBundleUnreadable => h.fail(error.SslCertificateUnreadable, "the system's certificates"),
             // git sets no timeout of these kinds, so none is set here.

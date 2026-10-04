@@ -284,7 +284,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `transport` | `Session`: a remote, open — the one thing a fetch, a clone or a push talks to. |
 | `transport.fetch`, `transport.clone`, `transport.push` | The commands. Protocol v2 and v0, refspecs, `FETCH_HEAD`, atomic updates, `insteadOf`. |
 | `transport.remote`, `transport.url`, `transport.refspec` | Remotes as the configuration describes them, what a URL names, and which refs a fetch takes. |
-| `transport.smarthttp`, `transport.ssh`, `transport.local`, `transport.httpclient`, `transport.tls`, `transport.clientcert` | The transports: HTTP(S) through relic's own HTTP/1.1 and TLS clients, the person's `ssh`, and `file://` and paths. |
+| `transport.smarthttp`, `transport.ssh`, `transport.local`, `transport.httpclient`, `transport.tls`, `transport.clientcert` | The transports: HTTP(S) through relic's own HTTP/1.1 and TLS clients, HTTP(S) and SOCKS4/4a/5/5h proxies, the person's `ssh`, and `file://` and paths. |
 | `transport.credential`, `transport.auth`, `transport.httpsettings`, `transport.httpauth` | The person's own setup: credential helpers, why a remote refused, git's `http.*`, proxy authentication. |
 | `transport.protocol`, `transport.connection`, `transport.pktline`, `transport.sideband`, `transport.fetchpack`, `transport.sendpack`, `transport.progress` | The wire underneath the commands. |
 | `transport.uploadpack` | `Server` — serving fetches, with shallow and every filter. |
@@ -438,6 +438,13 @@ TLS client, and another checks that what crosses a proxy's tunnel is TLS.
   as it came; relic's checks it and refuses what zlib refuses. It decodes a
   pack entry into one buffer of known size and is fuzzed against std's
   decoder and compressor.
+
+HTTP(S) remotes and LFS accept `socks4://`, `socks4a://`, `socks5://` and
+`socks5h://` proxies, with port 1080 when none is given. SOCKS4 and SOCKS5
+resolve the origin locally; SOCKS4a and SOCKS5h send its name to the proxy.
+A URL's `user:password@` supplies SOCKS5 authentication, or the userid for
+SOCKS4. HTTPS starts TLS to the origin inside the SOCKS tunnel. A named
+remote's `remote.<name>.proxy` overrides `http.proxy`; `no_proxy` still applies.
 
 The HTTP client's `connect`, `send` and `stream` take an optional caller-owned
 `transport.httpclient.Diagnostic` as their last argument. Initialize it with
@@ -739,7 +746,7 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Sixty-five fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Sixty-six fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
 between them they cover every format relic reads: the object formats, packs
 and their indexes, the index file, refs, reftable and reflogs, config and

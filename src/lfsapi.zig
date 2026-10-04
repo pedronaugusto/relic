@@ -159,7 +159,7 @@ pub const Error = error{
     /// A header from the configuration or from the server holds a line
     /// break, or has no name.
     InvalidHttpHeader,
-    /// A proxy that does not parse, or that is not an HTTP proxy.
+    /// A proxy that does not parse, or whose scheme is unsupported.
     InvalidProxy,
     /// ssh is a program, and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
@@ -170,7 +170,7 @@ pub const Error = error{
     /// A zstd body whose frame asks for a window wider than
     /// `zstd_window_max`, which git-lfs's decoder refuses too.
     LfsZstdWindowTooLarge,
-} || credential.Error || lfsssh.Error || clientcert.Error || Allocator.Error || Io.Cancelable;
+} || httpclient.SocksError || credential.Error || lfsssh.Error || clientcert.Error || Allocator.Error || Io.Cancelable;
 
 //=====================================================================
 // Settings
@@ -1748,9 +1748,16 @@ pub const Client = struct {
             error.TimedOut => c.fail(error.ConnectionFailed, "timed out: {s}", .{where}),
             error.BodyIncomplete => c.fail(error.ConnectionFailed, "upload cut short: {s}", .{where}),
             error.TlsFailed => c.fail(error.ConnectionFailed, "TLS: {s}: {s}", .{ if (diagnostic.tls_error) |e| @errorName(e) else "handshake failed", where }),
-            error.ProxyAuthenticationRequired => c.fail(error.ConnectionFailed, "the proxy wants credentials: {s}", .{where}),
-            error.ProxyRefused => c.fail(error.ConnectionFailed, "the proxy answered {d}: {s}", .{ diagnostic.proxy_status orelse 0, where }),
-            error.ProxyAuthMethodUnsupported => c.fail(error.ConnectionFailed, "the proxy asks for {s}: {s}", .{ diagnostic.proxy_offered orelse "?", where }),
+            error.ProxyAuthenticationRequired => c.fail(error.ProxyAuthenticationRequired, "the proxy wants credentials: {s}", .{where}),
+            error.ProxyRefused => c.fail(error.ProxyRefused, "the proxy answered {d}: {s}", .{ diagnostic.proxy_status orelse 0, where }),
+            error.ProxyAuthMethodUnsupported => c.fail(error.ProxyAuthMethodUnsupported, "the proxy asks for {s}: {s}", .{ diagnostic.proxy_offered orelse "?", where }),
+            error.ProxyHostUnreachable,
+            error.ProxyNetworkUnreachable,
+            error.ProxyCommandUnsupported,
+            error.ProxyAddressUnsupported,
+            error.ProxyTtlExpired,
+            error.SocksProtocolError,
+            => |named| c.fail(named, "{s}: {s}", .{ @errorName(named), where }),
             error.HttpProtocolError => c.fail(error.MalformedResponse, "not an HTTP answer, or an encoding it cannot read: {s}", .{where}),
             error.CertificateBundleUnreadable => c.fail(error.SslCertificateUnreadable, "the system's certificates", .{}),
             error.ClientCertificateRejected => c.fail(error.ClientCertificateRejected, "the server refused the client certificate ({s}): {s}", .{ if (diagnostic.tls_error) |e| @errorName(e) else "?", where }),
@@ -1930,45 +1937,24 @@ pub const Client = struct {
     /// `https` one through a `CONNECT` tunnel asked for in Go's words, the
     /// proxy's credential from its URL.
     fn useProxy(c: *Client, client: *httpclient.Client, arena: Allocator, text: []const u8) Error!void {
-        const uri = std.Uri.parse(text) catch std.Uri.parseAfterScheme("http", text) catch return c.fail(error.InvalidProxy, "{s}", .{text});
-        const secure = if (std.ascii.eqlIgnoreCase(uri.scheme, "http"))
-            false
-        else if (std.ascii.eqlIgnoreCase(uri.scheme, "https"))
-            true
-        else
-            return c.fail(error.InvalidProxy, "{s} is not an HTTP proxy", .{text});
-        const host = uri.getHostAlloc(arena) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return c.fail(error.InvalidProxy, "{s}", .{text}),
+        var proxy = httpclient.Proxy.parse(arena, text, 80) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidProxy => c.fail(error.InvalidProxy, "unsupported proxy URL", .{}),
         };
-        // Go sends Basic from the first request, with the proxy URL's user
-        // and password percent-decoded, and nothing else.
-        var proxy_credential: ?httpclient.Proxy.Credential = null;
-        if (uri.user != null or uri.password != null) {
-            proxy_credential = .{
-                .user = if (uri.user) |u| try u.toRawMaybeAlloc(arena) else "",
-                .password = if (uri.password) |p| try p.toRawMaybeAlloc(arena) else "",
-                .method = .basic,
-            };
-        }
+        if (proxy.credential) |*cred| cred.method = .basic;
         // Go's CONNECT: its user agent, then the answer.
         const lines = try arena.dupe(http.Header, &.{
             .{ .name = "User-Agent", .value = "Go-http-client/1.1" },
             .{ .name = "Proxy-Authorization", .value = "" },
         });
-        client.proxy = .{
-            .host = host.bytes,
-            .port = uri.port orelse if (secure) 443 else 80,
-            .tls = secure,
-            .credential = proxy_credential,
-            .connect_headers = lines,
-        };
+        proxy.connect_headers = lines;
+        client.proxy = proxy;
     }
 
     /// The proxy git-lfs's rules choose for `url`, which are not curl's:
     /// `http.<url>.proxy` by git-lfs's URL match when it is not empty; else
     /// for an `https` URL `HTTPS_PROXY`, then `https_proxy`; then for any
-    /// URL `HTTP_PROXY`, then `http_proxy` — never `all_proxy`. None for a
+    /// URL `HTTP_PROXY`, then `http_proxy`, then `all_proxy` or `ALL_PROXY`. None for a
     /// host `NO_PROXY`, else `no_proxy`, names, or for `localhost` and a
     /// loopback address: `goProxyAllowed`.
     fn proxyFor(c: *Client, scratch: Allocator, request_url: []const u8, url: url_mod.Url) Error!?[]const u8 {
@@ -1977,12 +1963,17 @@ pub const Client = struct {
         if (try c.settings.urlGet(scratch, "http", request_url, "proxy")) |v| {
             if (v.len != 0) chosen = v;
         }
+        const remote_key = try std.fmt.allocPrint(scratch, "remote.{s}.proxy", .{c.remote});
+        if (try c.settings.get(scratch, remote_key)) |v| {
+            if (v.len == 0) return null;
+            chosen = v;
+        }
         if (chosen == null) {
             if (environ) |env| {
                 const names: []const []const u8 = if (url.scheme == .https)
-                    &.{ "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy" }
+                    &.{ "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "all_proxy", "ALL_PROXY" }
                 else
-                    &.{ "HTTP_PROXY", "http_proxy" };
+                    &.{ "HTTP_PROXY", "http_proxy", "all_proxy", "ALL_PROXY" };
                 for (names) |name| {
                     const value = env.get(name) orelse continue;
                     if (value.len == 0) continue;
@@ -2830,6 +2821,23 @@ test "LFS proxy parsing preserves allocation resource failures" {
     var transport: httpclient.Client = undefined;
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, client.useProxy(&transport, failing.allocator(), "http://pro%78y:3128"));
+}
+
+test "LFS accepts each SOCKS proxy scheme and decodes its credentials" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var client: Client = undefined;
+    client.io = testing.io;
+    client.message_mutex = .init;
+    client.message_len = 0;
+    var transport: httpclient.Client = undefined;
+    for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
+        const text = try std.fmt.allocPrint(arena.allocator(), "{s}://us%65r:p%40ss@127.0.0.1", .{scheme});
+        try client.useProxy(&transport, arena.allocator(), text);
+        try testing.expectEqual(@as(u16, 1080), transport.proxy.?.port);
+        try testing.expectEqualStrings("user", transport.proxy.?.credential.?.user);
+        try testing.expectEqualStrings("p@ss", transport.proxy.?.credential.?.password);
+    }
 }
 
 test "learned LFS policy writes the shared source without replacing worktree configuration" {

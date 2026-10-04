@@ -1372,7 +1372,7 @@ test "a proxy is chosen by git-lfs's rules, HTTP_PROXY included, and never for a
     try testing.expect(std.mem.indexOf(u8, logs[1], "proxied-for=127.0.0.1") == null);
 }
 
-test "an unreadable client certificate, unreadable authorities and a proxy that is not HTTP's are refused by name before anything is sent" {
+test "an unreadable client certificate, unreadable authorities and an unsupported proxy scheme are refused by name before anything is sent" {
     const gpa = testing.allocator;
     const io = testing.io;
     const fx = try Fixture.init(gpa, io, .{});
@@ -1387,7 +1387,7 @@ test "an unreadable client certificate, unreadable authorities and a proxy that 
     for ([_]Case{
         .{ .config = .{ "http.sslCert", "/nowhere/cert.pem" }, .also = .{ "http.sslKey", "/nowhere/key.pem" }, .want = error.SslClientCertificateUnreadable },
         .{ .config = .{ "http.sslCAInfo", "/nowhere/ca.pem" }, .want = error.SslCertificateUnreadable },
-        .{ .config = .{ "http.proxy", "socks5://127.0.0.1:9" }, .want = error.InvalidProxy },
+        .{ .config = .{ "http.proxy", "unsupported://127.0.0.1:9" }, .want = error.InvalidProxy },
     }) |case| {
         if (case.config) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
         defer if (case.config) |kv| fx.gitIn(d, &.{ "config", "--unset", kv[0] }) catch {};
@@ -1402,9 +1402,9 @@ test "an unreadable client certificate, unreadable authorities and a proxy that 
         defer server.close();
         try testing.expectError(case.want, lfstransfer.fetch(server, &repo, .{}));
     }
-    // A plain http URL through a proxy that is not an HTTP one.
+    // A plain http URL through a proxy with an unsupported scheme.
     try fx.gitIn(d, &.{ "config", "lfs.url", "http://lfs.example.invalid/repo.git/info/lfs" });
-    try fx.gitIn(d, &.{ "config", "http.proxy", "socks5://127.0.0.1:9" });
+    try fx.gitIn(d, &.{ "config", "http.proxy", "unsupported://127.0.0.1:9" });
     var repo = try repo_mod.Repository.open(gpa, io, d, .{});
     defer repo.deinit(io);
     const server = try openServer(fx, &repo);
@@ -1906,4 +1906,73 @@ test "a repeated .lfsconfig lookup is answered from what it was found from, and 
     const staged = (try repo.lfsconfigText(io)).?;
     defer gpa.free(staged);
     try testing.expectEqualStrings("[lfs]\n\turl = https://staged/\n", staged);
+}
+
+test "LFS uploads and downloads through each SOCKS scheme, with TLS inside secure tunnels" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const front = try testremote.TlsFront.start(gpa, io, fx.server.port);
+    defer front.stop(io);
+    const proxy = try testremote.SocksProxy.start(gpa, io, .{ .credential = .{ .user = "ada", .password = "secret" } });
+    defer proxy.stop();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
+        for ([_]bool{ false, true }) |secure| {
+            const remote_dns = std.mem.eql(u8, scheme, "socks4a") or std.mem.eql(u8, scheme, "socks5h");
+            // localhost. resolves locally and is allowed by the unchanged
+            // Go proxy rules; .invalid is reachable only by our proxy.
+            const host = if (remote_dns) "lfs.example.invalid" else "localhost.";
+            const base = try std.fmt.allocPrint(gpa, "{s}://{s}:{d}", .{ if (secure) "https" else "http", host, if (secure) front.port else fx.server.port });
+            defer gpa.free(base);
+            fx.server.options.href_base = base;
+            const endpoint = try std.fmt.allocPrint(gpa, "{s}/repo.git/info/lfs", .{base});
+            defer gpa.free(endpoint);
+            const name = try std.fmt.allocPrint(gpa, "{s}-{s}", .{ scheme, if (secure) "https" else "http" });
+            defer gpa.free(name);
+            const content = try std.fmt.allocPrint(gpa, "LFS through {s}\n", .{name});
+            defer gpa.free(content);
+            var d = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
+            defer d.close(io);
+            const proxy_url = try proxy.url(gpa, scheme, "ada:secret@");
+            defer gpa.free(proxy_url);
+            try fx.gitIn(d, &.{ "config", "lfs.url", endpoint });
+            try fx.gitIn(d, &.{ "config", "http.proxy", "http://127.0.0.1:9" });
+            try fx.gitIn(d, &.{ "config", "remote.origin.proxy", proxy_url });
+            try fx.gitIn(d, &.{ "config", "http.sslVerify", "false" });
+            const object: lfstransfer.Object = .{ .oid = testlfs.sha256Hex(content), .size = content.len, .name = "a.bin" };
+            {
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try openServer(fx, &repo);
+                defer server.close();
+                var uploaded = try lfstransfer.upload(server, &.{object}, .{});
+                defer uploaded.deinit();
+                try expectNoFailures(&uploaded);
+            }
+            try emptyStore(fx, d);
+            {
+                var repo = try repo_mod.Repository.open(gpa, io, d, .{});
+                defer repo.deinit(io);
+                const server = try openServer(fx, &repo);
+                defer server.close();
+                var fetched = try lfstransfer.fetch(server, &repo, .{});
+                defer fetched.deinit();
+                try expectNoFailures(&fetched);
+                const file = (try server.store().open(io, &.{ .oid = object.oid, .size = object.size })).?;
+                defer file.close(io);
+                const bytes = try gpa.alloc(u8, content.len);
+                defer gpa.free(bytes);
+                try testing.expectEqual(content.len, try file.readPositionalAll(io, bytes, 0));
+                try testing.expectEqualStrings(content, bytes);
+            }
+            const log = try proxy.take(gpa);
+            defer gpa.free(log);
+            try testing.expect(std.mem.indexOf(u8, log, if (remote_dns) " name lfs.example.invalid:" else " ipv") != null);
+        }
+    }
+    const counts = proxy.tunnelCounts();
+    try testing.expect(counts.tls > 0 and counts.plain > 0);
 }

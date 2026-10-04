@@ -262,6 +262,7 @@ fn pushTo(
     var session = try transport.Session.open(gpa, io, url, .receive_pack, repo.objectFormat(), .{
         .programs = options.programs,
         .config = repo.configuration(),
+        .remote_name = remote.name,
         .service_program = remote.receive_pack,
         .progress = options.progress,
         .prompt = options.prompt,

@@ -210,6 +210,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .local_copy = local_copy,
         .programs = options.programs,
         .config = settings,
+        .remote_name = options.origin,
         .progress = options.progress,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
