@@ -638,6 +638,57 @@ pub const Odb = struct {
         return (try odb.readHeaderForPack(io, oid, 0)).header;
     }
 
+    /// Where an object is kept, beyond its header: what git's
+    /// `%(objectsize:disk)` and `%(deltabase)` report.
+    pub const Placement = struct {
+        /// The bytes it takes where it is kept: the loose file, or its pack
+        /// entry from its header to the next entry.
+        disk_size: u64,
+        /// The object a packed delta is made against, `null` for a whole
+        /// object or a loose one.
+        delta_base: ?Oid,
+    };
+
+    /// Where `oid` is kept, looking in the packs first, as git does.
+    pub fn placement(odb: *Odb, io: Io, oid: Oid) Error!Placement {
+        for (odb.backendData().sources.items) |*source| {
+            const located = (try source.findPack(oid, &odb.stats)) orelse continue;
+            const p = &source.packs.items[located.at].pack;
+            const entry = try p.entryHeaderAt(io, located.offset);
+            // the entry ends where the next one starts
+            var end = p.bodyEnd();
+            const count = p.index.count;
+            var base: ?Oid = null;
+            const base_offset: ?u64 = switch (entry.kind) {
+                .object => null,
+                .ofs_delta => |back| located.offset - back,
+                .ref_delta => |name| blk: {
+                    base = name;
+                    break :blk null;
+                },
+            };
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                const at = try p.index.offsetAt(i);
+                if (at > located.offset and at < end) end = at;
+                if (base_offset) |want| if (at == want) {
+                    base = p.index.nameAt(i);
+                };
+            }
+            return .{ .disk_size = end - located.offset, .delta_base = base };
+        }
+        var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+        const path = odb.loosePath(oid, &path_buf);
+        for (odb.backendData().sources.items) |*source| {
+            const stat = source.dir.statFile(io, path, .{}) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => continue,
+                else => |e| return e,
+            };
+            return .{ .disk_size = stat.size, .delta_base = null };
+        }
+        return error.ObjectNotFound;
+    }
+
     /// The header of `oid` from the first pack that holds it, or `null`
     /// when none does; no loose copy is looked for.
     fn packedHeader(odb: *Odb, io: Io, oid: Oid) Error!?object.Header {

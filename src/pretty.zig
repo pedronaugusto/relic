@@ -327,7 +327,10 @@ fn person(a: Allocator, ctx: Context, out: *std.ArrayList(u8), sig: object.Signa
     return 2;
 }
 
-fn sanitizedSubject(a: Allocator, out: *std.ArrayList(u8), msg: []const u8) Allocator.Error!void {
+/// git's `format_sanitized_subject`, what `%f` writes: the letters, digits,
+/// dots and underscores of `msg`, every other run one `-`, none at either
+/// end, and no run of dots.
+pub fn sanitizedSubject(a: Allocator, out: *std.ArrayList(u8), msg: []const u8) Allocator.Error!void {
     const start = out.items.len;
     var space: u2 = 2;
     var i: usize = 0;

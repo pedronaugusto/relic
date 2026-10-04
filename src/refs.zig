@@ -15,6 +15,7 @@ pub const reftablestack = @import("refs/reftablestack.zig");
 // The modules relic's API puts under this one, as `relic.refs.<name>`.
 pub const reflog = @import("refs/reflog.zig");
 pub const reftable = @import("refs/reftable.zig");
+pub const filter = @import("refs/filter.zig");
 const stack_engine = @import("refs/reftablestack/transaction.zig");
 
 const std = @import("std");

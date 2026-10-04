@@ -29,7 +29,9 @@ pub const Context = struct {
     local_offset_minutes: i32 = 0,
 };
 
-const Tm = struct {
+/// A date's calendar fields, as C's `struct tm` holds them: the year less
+/// 1900, the month from zero.
+pub const Tm = struct {
     year: i64 = -1,
     mon: i64 = -1,
     mday: i64 = -1,
@@ -710,6 +712,339 @@ fn formatUtc(buf: []u8, secs: i64) []const u8 {
         @as(u32, @intCast(tm.mday)),        @as(u32, @intCast(tm.hour)),
         @as(u32, @intCast(tm.min)),         @as(u32, @intCast(tm.sec)),
     }) catch unreachable;
+}
+
+// ---------------------------------------------------------------------------
+// show_date
+// ---------------------------------------------------------------------------
+
+/// How a date is shown: git's `date_mode`, as `--date=<mode>` and a
+/// format's `:<mode>` name it.
+pub const Mode = struct {
+    kind: Kind = .normal,
+    /// `-local`: in the machine's zone rather than the date's own.
+    local: bool = false,
+    /// The `strftime` format after `format:`, borrowed from the text the
+    /// mode was parsed from.
+    strftime: []const u8 = "",
+
+    pub const Kind = enum { normal, relative, human, short, iso8601, iso8601_strict, rfc2822, strftime, raw, unix };
+
+    /// git's `parse_date_format`, except `auto:`, which asks whether the
+    /// output is a terminal: here it is never one. `null` where git says
+    /// "unknown date format".
+    pub fn parse(text_in: []const u8) ?Mode {
+        var text = text_in;
+        if (std.mem.startsWith(u8, text, "auto:")) text = "default";
+        if (std.mem.eql(u8, text, "local")) text = "default-local";
+        const kinds = [_]struct { []const u8, Kind }{
+            .{ "relative", .relative },
+            .{ "iso8601-strict", .iso8601_strict },
+            .{ "iso-strict", .iso8601_strict },
+            .{ "iso8601", .iso8601 },
+            .{ "iso", .iso8601 },
+            .{ "rfc2822", .rfc2822 },
+            .{ "rfc", .rfc2822 },
+            .{ "short", .short },
+            .{ "default", .normal },
+            .{ "human", .human },
+            .{ "raw", .raw },
+            .{ "unix", .unix },
+            .{ "format", .strftime },
+        };
+        var mode: Mode = .{};
+        var rest: []const u8 = undefined;
+        for (kinds) |k| {
+            if (std.mem.startsWith(u8, text, k[0])) {
+                mode.kind = k[1];
+                rest = text[k[0].len..];
+                break;
+            }
+        } else return null;
+        if (std.mem.startsWith(u8, rest, "-local")) {
+            mode.local = true;
+            rest = rest["-local".len..];
+        }
+        if (mode.kind == .strftime) {
+            if (rest.len == 0 or rest[0] != ':') return null;
+            mode.strftime = rest[1..];
+        } else if (rest.len != 0) return null;
+        return mode;
+    }
+};
+
+/// The machine's zone at one moment: what git asks `localtime_r` for.
+pub const LocalTime = struct {
+    /// Minutes east of UTC.
+    offset_minutes: i32,
+    /// The zone's abbreviation, for `%Z`. Borrowed.
+    name: []const u8 = "",
+};
+
+/// The machine's zone, which the caller knows and this does not.
+pub const LocalZone = struct {
+    context: *anyopaque,
+    at: *const fn (context: *anyopaque, secs: i64) LocalTime,
+};
+
+/// What showing a date may need from the machine: the time now for
+/// `relative` and `human`, and the local zone for `human` and `-local`.
+pub const Clock = struct {
+    now: ?i64 = null,
+    local: ?LocalZone = null,
+};
+
+/// Errors from showing a date.
+pub const ShowError = error{
+    /// A mode that needs the time now or the local zone, and a `Clock`
+    /// without it.
+    DateNeedsClock,
+} || std.mem.Allocator.Error;
+
+const short_weekdays = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+const short_months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+const long_weekdays = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+
+/// git's `tz` integer, `+0130` as 130, in minutes east of UTC.
+pub fn tzMinutes(tz: i32) i32 {
+    const abs: i32 = @intCast(@abs(tz));
+    const minutes = @divTrunc(abs, 100) * 60 + @rem(abs, 100);
+    return if (tz < 0) -minutes else minutes;
+}
+
+/// Minutes east of UTC as git's `tz` integer.
+pub fn tzInt(offset_minutes: i32) i32 {
+    const abs: i32 = @intCast(@abs(offset_minutes));
+    const v = @divTrunc(abs, 60) * 100 + @rem(abs, 60);
+    return if (offset_minutes < 0) -v else v;
+}
+
+fn printTz(gpa: std.mem.Allocator, out: *std.ArrayList(u8), tz: i32) std.mem.Allocator.Error!void {
+    // C's `%+05d`
+    const sign: u8 = if (tz < 0) '-' else '+';
+    try out.print(gpa, "{c}{d:0>4}", .{ sign, @abs(tz) });
+}
+
+/// git's `show_date_relative`.
+pub fn showRelative(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, now: i64) std.mem.Allocator.Error!void {
+    if (now < secs) return out.appendSlice(gpa, "in the future");
+    var diff: i64 = now - secs;
+    if (diff < 90) return plural(gpa, out, diff, "second", " ago");
+    diff = @divTrunc(diff + 30, 60);
+    if (diff < 90) return plural(gpa, out, diff, "minute", " ago");
+    diff = @divTrunc(diff + 30, 60);
+    if (diff < 36) return plural(gpa, out, diff, "hour", " ago");
+    diff = @divTrunc(diff + 12, 24);
+    if (diff < 14) return plural(gpa, out, diff, "day", " ago");
+    if (diff < 70) return plural(gpa, out, @divTrunc(diff + 3, 7), "week", " ago");
+    if (diff < 365) return plural(gpa, out, @divTrunc(diff + 15, 30), "month", " ago");
+    if (diff < 1825) {
+        const total_months = @divTrunc(diff * 12 * 2 + 365, 365 * 2);
+        const years = @divTrunc(total_months, 12);
+        const months = @rem(total_months, 12);
+        if (months != 0) {
+            try plural(gpa, out, years, "year", ", ");
+            return plural(gpa, out, months, "month", " ago");
+        }
+        return plural(gpa, out, years, "year", " ago");
+    }
+    return plural(gpa, out, @divTrunc(diff + 183, 365), "year", " ago");
+}
+
+fn plural(gpa: std.mem.Allocator, out: *std.ArrayList(u8), n: i64, unit: []const u8, after: []const u8) std.mem.Allocator.Error!void {
+    try out.print(gpa, "{d} {s}{s}{s}", .{ n, unit, if (n == 1) "" else "s", after });
+}
+
+/// The calendar fields of `secs` shown in zone `tz`, as git's `time_to_tm`.
+fn tmIn(secs: i64, tz: i32) Tm {
+    var tm: Tm = .{};
+    gmtime(secs + @as(i64, tzMinutes(tz)) * 60, &tm);
+    return tm;
+}
+
+/// `secs`, in the zone `tz` (git's `+0100` as 100), as `mode` shows it:
+/// git's `show_date`, appended to `out`.
+pub fn show(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tz_in: i32, mode: Mode, clock: Clock) ShowError!void {
+    var tz = tz_in;
+    if (mode.kind == .unix) return out.print(gpa, "{d}", .{secs});
+    var human_tm: Tm = .{ .year = 0, .mon = 0, .mday = 0, .hour = 0, .min = 0, .sec = 0 };
+    var human_tz: i32 = -1;
+    if (mode.kind == .human) {
+        const now = clock.now orelse return error.DateNeedsClock;
+        const zone = clock.local orelse return error.DateNeedsClock;
+        human_tz = tzInt(zone.at(zone.context, now).offset_minutes);
+        human_tm = tmIn(now, human_tz);
+    }
+    var zone_name: []const u8 = "";
+    if (mode.local) {
+        const zone = clock.local orelse return error.DateNeedsClock;
+        const local = zone.at(zone.context, secs);
+        tz = tzInt(local.offset_minutes);
+        zone_name = local.name;
+    }
+    if (mode.kind == .raw) {
+        try out.print(gpa, "{d} ", .{secs});
+        return printTz(gpa, out, tz);
+    }
+    if (mode.kind == .relative) return showRelative(gpa, out, secs, clock.now orelse return error.DateNeedsClock);
+    const tm = tmIn(secs, tz);
+    const year: i64 = tm.year + 1900;
+    switch (mode.kind) {
+        .short => try out.print(gpa, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) }),
+        .iso8601 => {
+            try out.print(gpa, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} ", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
+            try printTz(gpa, out, tz);
+        },
+        .iso8601_strict => {
+            try out.print(gpa, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
+            if (tz == 0) {
+                try out.append(gpa, 'Z');
+            } else {
+                const abs: u32 = @abs(tz);
+                try out.print(gpa, "{c}{d:0>2}:{d:0>2}", .{ @as(u8, if (tz >= 0) '+' else '-'), abs / 100, abs % 100 });
+            }
+        },
+        .rfc2822 => {
+            try out.print(gpa, "{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} ", .{ short_weekdays[@intCast(tm.wday)], tm.mday, short_months[@intCast(tm.mon)], year, @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
+            try printTz(gpa, out, tz);
+        },
+        .strftime => try strftime(gpa, out, mode.strftime, secs, tm, tz, if (mode.local) zone_name else null),
+        else => try showNormal(gpa, out, secs, tm, tz, human_tm, human_tz, mode.local, clock),
+    }
+}
+
+/// git's `show_date_normal`, which `human` shares.
+fn showNormal(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tm: Tm, tz: i32, human_tm: Tm, human_tz: i32, local: bool, clock: Clock) ShowError!void {
+    var hide_year = false;
+    var hide_date = false;
+    var hide_wday = false;
+    var hide_time = false;
+    var hide_seconds = false;
+    var hide_tz = local or tz == human_tz;
+    hide_year = tm.year == human_tm.year;
+    if (hide_year) {
+        if (tm.mon == human_tm.mon) {
+            if (tm.mday > human_tm.mday) {
+                // a future date: think time zones
+            } else if (tm.mday == human_tm.mday) {
+                hide_date = true;
+                hide_wday = true;
+            } else if (tm.mday + 5 > human_tm.mday) {
+                hide_date = true;
+            }
+        }
+    }
+    if (hide_wday) return showRelative(gpa, out, secs, clock.now orelse return error.DateNeedsClock);
+    if (human_tm.year != 0) {
+        hide_seconds = true;
+        hide_tz = hide_tz or !hide_date;
+        hide_wday = !hide_year;
+        hide_time = !hide_year;
+    }
+    if (!hide_wday) try out.print(gpa, "{s} ", .{short_weekdays[@intCast(tm.wday)]});
+    if (!hide_date) try out.print(gpa, "{s} {d} ", .{ short_months[@intCast(tm.mon)], tm.mday });
+    if (!hide_time) {
+        try out.print(gpa, "{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)) });
+        if (!hide_seconds) try out.print(gpa, ":{d:0>2}", .{@as(u64, @intCast(tm.sec))});
+    } else {
+        while (out.items.len > 0 and std.ascii.isWhitespace(out.items[out.items.len - 1])) _ = out.pop();
+    }
+    if (!hide_year) try out.print(gpa, " {d}", .{tm.year + 1900});
+    if (!hide_tz) {
+        try out.append(gpa, ' ');
+        try printTz(gpa, out, tz);
+    }
+}
+
+fn yearDay(tm: Tm) i64 {
+    const year = tm.year + 1900;
+    return daysFromCivil(year, tm.mon + 1, tm.mday) - daysFromCivil(year, 1, 1);
+}
+
+fn isLeap(year: i64) bool {
+    return (@mod(year, 4) == 0 and @mod(year, 100) != 0) or @mod(year, 400) == 0;
+}
+
+/// The ISO 8601 week-based year and week of `tm`.
+fn isoWeek(tm: Tm) struct { year: i64, week: i64 } {
+    const year = tm.year + 1900;
+    const yday = yearDay(tm);
+    const wday_mon = @mod(tm.wday + 6, 7); // Monday is 0
+    var week = @divFloor(yday - wday_mon + 10, 7);
+    if (week < 1) {
+        const prev = year - 1;
+        const prev_days: i64 = if (isLeap(prev)) 366 else 365;
+        week = @divFloor(yday + prev_days - wday_mon + 10, 7);
+        return .{ .year = prev, .week = week };
+    }
+    const days: i64 = if (isLeap(year)) 366 else 365;
+    if (week == 53 and yday - wday_mon + 3 >= days) return .{ .year = year + 1, .week = 1 };
+    return .{ .year = year, .week = week };
+}
+
+/// git's `strbuf_addftime` over the C library's `strftime` in the C
+/// locale: `%z`, `%Z` and `%s` as git rewrites them, every other
+/// conversion the C library's. `zone_name` is `%Z`'s text for a local
+/// date; `null` writes nothing for it, as git does for a date in its own
+/// zone.
+pub fn strftime(gpa: std.mem.Allocator, out: *std.ArrayList(u8), fmt: []const u8, secs: i64, tm: Tm, tz: i32, zone_name: ?[]const u8) std.mem.Allocator.Error!void {
+    var i: usize = 0;
+    while (i < fmt.len) {
+        const c = fmt[i];
+        if (c != '%' or i + 1 >= fmt.len) {
+            try out.append(gpa, c);
+            i += 1;
+            continue;
+        }
+        var j = i + 1;
+        // the E and O modifiers change nothing in the C locale
+        if ((fmt[j] == 'E' or fmt[j] == 'O') and j + 1 < fmt.len) j += 1;
+        const conv = fmt[j];
+        i = j + 1;
+        const year = tm.year + 1900;
+        const hour12: i64 = if (@mod(tm.hour, 12) == 0) 12 else @mod(tm.hour, 12);
+        switch (conv) {
+            '%' => try out.append(gpa, '%'),
+            'a' => try out.appendSlice(gpa, short_weekdays[@intCast(tm.wday)]),
+            'A' => try out.appendSlice(gpa, long_weekdays[@intCast(tm.wday)]),
+            'b', 'h' => try out.appendSlice(gpa, short_months[@intCast(tm.mon)]),
+            'B' => try out.appendSlice(gpa, month_names[@intCast(tm.mon)]),
+            'c' => try out.print(gpa, "{s} {s} {d: >2} {d:0>2}:{d:0>2}:{d:0>2} {d}", .{ short_weekdays[@intCast(tm.wday)], short_months[@intCast(tm.mon)], @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)), year }),
+            'C' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@divFloor(year, 100)))}),
+            'd' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.mday))}),
+            'D' => try out.print(gpa, "{d:0>2}/{d:0>2}/{d:0>2}", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(@mod(year, 100))) }),
+            'e' => try out.print(gpa, "{d: >2}", .{@as(u64, @intCast(tm.mday))}),
+            'F' => try out.print(gpa, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) }),
+            'g' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(isoWeek(tm).year, 100)))}),
+            'G' => try out.print(gpa, "{d}", .{isoWeek(tm).year}),
+            'H' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.hour))}),
+            'I' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(hour12))}),
+            'j' => try out.print(gpa, "{d:0>3}", .{@as(u64, @intCast(yearDay(tm) + 1))}),
+            'k' => try out.print(gpa, "{d: >2}", .{@as(u64, @intCast(tm.hour))}),
+            'l' => try out.print(gpa, "{d: >2}", .{@as(u64, @intCast(hour12))}),
+            'm' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.mon + 1))}),
+            'M' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.min))}),
+            'n' => try out.append(gpa, '\n'),
+            'p' => try out.appendSlice(gpa, if (tm.hour < 12) "AM" else "PM"),
+            'r' => try out.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2} {s}", .{ @as(u64, @intCast(hour12)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)), if (tm.hour < 12) "AM" else "PM" }),
+            'R' => try out.print(gpa, "{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)) }),
+            's' => try out.print(gpa, "{d}", .{secs}),
+            'S' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.sec))}),
+            't' => try out.append(gpa, '\t'),
+            'T', 'X' => try out.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) }),
+            'u' => try out.print(gpa, "{d}", .{if (tm.wday == 0) 7 else tm.wday}),
+            'U' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - tm.wday, 7)))}),
+            'V' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(isoWeek(tm).week))}),
+            'w' => try out.print(gpa, "{d}", .{tm.wday}),
+            'W' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - @mod(tm.wday + 6, 7), 7)))}),
+            'x' => try out.print(gpa, "{d:0>2}/{d:0>2}/{d:0>2}", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(@mod(year, 100))) }),
+            'y' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))}),
+            'Y' => try out.print(gpa, "{d}", .{year}),
+            'z' => try printTz(gpa, out, tz),
+            'Z' => if (zone_name) |name| try out.appendSlice(gpa, name),
+            else => try out.appendSlice(gpa, fmt[i - 2 .. i]),
+        }
+    }
 }
 
 test "approximate dates read as git's t0006 reads them" {

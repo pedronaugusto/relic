@@ -579,3 +579,29 @@ test "a history refusal before writing clears an earlier diagnostic" {
         try testing.expectEqualStrings("", diagnostic.signing_stderr);
     }
 }
+
+test "for-each-ref's signature atoms check each commit as git's do" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    if (!try testgit.gitAtLeast(gpa, io, 2, 42)) return error.SkipZigTest;
+    var k = try Keyed.init(gpa, io, .ssh, &.{});
+    defer k.deinit(io);
+    try k.makeKey(io);
+    try k.repo.writeFile(io, "a.txt", "a\n");
+    try k.repo.exec(io, &.{ "add", "a.txt" });
+    try k.repo.exec(io, &.{ "commit", "-q", "-m", "signed" });
+    try k.repo.exec(io, &.{ "branch", "signed" });
+    try k.repo.exec(io, &.{ "commit", "-q", "--no-gpg-sign", "--allow-empty", "-m", "not signed" });
+    const format = "%(refname) %(signature:grade) %(signature:signer) %(signature:key) %(signature:fingerprint) %(signature:primarykeyfingerprint) %(signature:trustlevel)|%(signature)|";
+    const theirs = try k.repo.run(io, &.{ "for-each-ref", "--format=" ++ format });
+    defer gpa.free(theirs);
+    var repo = try k.open(io);
+    defer repo.deinit(io);
+    var signer = try signing.Signer.init(gpa, repo.configuration(), k.programs());
+    defer signer.deinit();
+    var ours: Io.Writer.Allocating = .init(gpa);
+    defer ours.deinit();
+    const refs_filter = @import("../refs/filter.zig");
+    try refs_filter.listRefs(gpa, io, &repo, .{ .format = format, .context = .{ .signer = &signer } }, &ours.writer);
+    try testing.expectEqualStrings(theirs, ours.written());
+}

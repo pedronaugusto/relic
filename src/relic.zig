@@ -10,7 +10,7 @@
 //! | `hash` | `Oid`, `Kind`, `Hasher`: object names, SHA-1 or SHA-256. | `sha1`, `sha1dc` |
 //! | `object` | `Commit`, `Tree`, `Tag`, `Signature`: objects as bytes. | `fsck` |
 //! | `odb` | `Odb`: loose objects, packs, alternates. | `pack`, `delta`, `inflate`, `indexpack`, `revindex`, `commitgraph`, `midx`, `bitmap`, `accelerators`, `abbrev` |
-//! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs`. | `reflog`, `reftable`, `reftablestack` |
+//! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs`, listed, sorted and formatted. | `reflog`, `reftable`, `reftablestack`, `filter` |
 //! | `config` | `Config`: git's configuration files, lossless. | `userconfig` |
 //! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex` |
 //! | `worktree` | Staging, writing a tree, checking one out, status. | `snapshot`, `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `safepath` |
