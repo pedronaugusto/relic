@@ -30,6 +30,8 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const commitgraph = @import("odb/commitgraph.zig");
+const pathspec = @import("pathspec.zig");
+const simplify = @import("revwalk/simplify.zig");
 
 const Oid = hash.Oid;
 
@@ -40,7 +42,7 @@ pub const Error = error{
     /// The walk went deeper than `max_commits`, which a caller sets to
     /// bound a history it does not trust.
     WalkTooLong,
-} || Allocator.Error || odb_mod.Error || object.ParseError;
+} || Allocator.Error || odb_mod.Error || object.ParseError || object.TreeParseError;
 
 /// The order commits come out in.
 pub const Sort = enum {
@@ -60,6 +62,10 @@ pub const Commit = struct {
     parents: []const Oid,
     /// Committer time in seconds, which is what the date order uses.
     time: i64,
+    /// With `Walk.paths`: the commit changes nothing the paths name
+    /// against the parents that matter, git's `TREESAME`. `git rev-list --
+    /// <paths>` leaves such a commit out; it stays here, marked.
+    treesame: bool = false,
 };
 
 /// A history walk: `git rev-list`'s own, from the commits pushed, less
@@ -92,6 +98,12 @@ pub const Walk = struct {
     /// is followed. What the hidden commits reach is still marked through
     /// every parent, as git marks it.
     first_parent: bool = false,
+    /// `-- <paths>`: history simplified to the paths as git simplifies it
+    /// by default. A commit the same as a parent wherever the paths reach
+    /// is marked `treesame`, and a merge the same as one of the parents
+    /// that matter -- one not reached from a hidden commit, or one given
+    /// hidden -- has that parent alone, so the others are not walked.
+    paths: ?*const pathspec.Pathspec = null,
 
     /// The commits given, in the order given: git's pending list.
     pending: std.ArrayList(Pending) = .empty,
@@ -107,10 +119,15 @@ pub const Walk = struct {
         oid: Oid,
         parents: []const Oid = &.{},
         time: i64 = 0,
+        /// The root tree, read only with `paths`.
+        tree: ?Oid = null,
         parsed: bool = false,
         seen: bool = false,
         added: bool = false,
         uninteresting: bool = false,
+        /// Given hidden: git's `BOTTOM`.
+        bottom: bool = false,
+        treesame: bool = false,
     };
 
     const Queued = struct { node: *Node, seq: u64 };
@@ -178,6 +195,7 @@ pub const Walk = struct {
                     if (graph.parentsOf(walk.gpa, position)) |parents| {
                         n.parents = parents;
                         n.time = entry.time;
+                        n.tree = entry.tree;
                         n.parsed = true;
                         return;
                     } else |_| {}
@@ -191,6 +209,7 @@ pub const Walk = struct {
         defer commit.deinit();
         n.parents = try walk.gpa.dupe(Oid, parentsOf(walk.db, n.oid, commit.parents));
         n.time = commit.committer.when_secs;
+        n.tree = commit.tree;
         n.parsed = true;
     }
 
@@ -210,6 +229,7 @@ pub const Walk = struct {
     fn processParents(walk: *Walk, io: Io, n: *Node, queue: anytype, seq: *u64) Error!void {
         if (n.added) return;
         n.added = true;
+        if (!n.uninteresting) try walk.simplifyCommit(io, n);
         for (n.parents) |parent_oid| {
             const p = try walk.nodeOf(parent_oid);
             if (n.uninteresting) p.uninteresting = true;
@@ -222,6 +242,41 @@ pub const Walk = struct {
             }
             if (walk.first_parent and !n.uninteresting) break;
         }
+    }
+
+    /// `try_to_simplify_commit` with git's default simplification, for
+    /// `paths`.
+    fn simplifyCommit(walk: *Walk, io: Io, n: *Node) Error!void {
+        const paths = walk.paths orelse return;
+        if (n.parents.len == 0) {
+            n.treesame = try simplify.sameWithin(walk.gpa, io, walk.db, null, n.tree, paths);
+            return;
+        }
+        var relevant_parents: usize = 0;
+        var relevant_change = false;
+        var irrelevant_change = false;
+        for (n.parents, 0..) |parent_oid, i| {
+            const p = try walk.nodeOf(parent_oid);
+            // `relevant_commit`: not reached from a hidden commit, or
+            // given hidden.
+            const relevant = !p.uninteresting or p.bottom;
+            if (relevant) relevant_parents += 1;
+            // With `--first-parent` a merge is compared with its first
+            // parent alone.
+            if (i == 1 and walk.first_parent) break;
+            try walk.parse(io, p);
+            if (try simplify.sameWithin(walk.gpa, io, walk.db, p.tree, n.tree, paths)) {
+                if (!relevant) continue;
+                const only = try walk.gpa.alloc(Oid, 1);
+                only[0] = parent_oid;
+                walk.gpa.free(n.parents);
+                n.parents = only;
+                n.treesame = true;
+                return;
+            }
+            if (relevant) relevant_change = true else irrelevant_change = true;
+        }
+        if (if (relevant_parents != 0) !relevant_change else !irrelevant_change) n.treesame = true;
     }
 
     fn everybodyUninteresting(queue: anytype) bool {
@@ -247,6 +302,7 @@ pub const Walk = struct {
             try walk.parse(io, n);
             if (given.hidden) {
                 n.uninteresting = true;
+                n.bottom = true;
                 try walk.markParentsUninteresting(n);
                 limited = true;
             }
@@ -293,7 +349,7 @@ pub const Walk = struct {
         try walk.ordered.ensureTotalCapacity(walk.gpa, list.items.len);
         for (list.items) |n| {
             if (n.uninteresting) continue;
-            walk.ordered.appendAssumeCapacity(.{ .oid = n.oid, .parents = n.parents, .time = n.time });
+            walk.ordered.appendAssumeCapacity(.{ .oid = n.oid, .parents = n.parents, .time = n.time, .treesame = n.treesame });
         }
         if (walk.reverse) std.mem.reverse(Commit, walk.ordered.items);
         walk.prepared = true;

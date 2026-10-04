@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `git bisect` takes pathspecs as git does: `BISECT_NAMES` holds them as git writes them (what follows the revisions, a `--` included, from two arguments on), the walk is simplified to the commits that change them, and a commit that does not is neither counted nor tested. Add `revwalk.Walk.paths` and `Commit.treesame`: history simplified by paths as git's default `try_to_simplify_commit` does it, a merge the same as a parent that matters following that parent alone.
+
+- `shortlog` groups by `--group=format:<format>` (or a group given with `%`) through `pretty`, the formats before the author's and committer's groups as git orders them, for commits added by name; `addCommit` with a format group is `error.FormatGroupNeedsName`. `FormatGroupUnsupported` is gone.
+
+- `bundle.create` takes a `sparse:oid=` filter, its blob named by any revision expression, the patterns deciding which blobs go in as git's sparse filter decides; a name that is no blob is `error.SparseBlobMissing`, where git cannot access the sparse blob. `SparseFilterUnsupported` is gone.
+
 - `working-tree-encoding` converts UTF-16, UTF-16LE, UTF-16BE, UTF-32, UTF-32LE, UTF-32BE and git's UTF-16LE-BOM and UTF-16BE-BOM files to UTF-8 when they are stored and back when they are checked out, between the filter and the line endings both ways, as git's `convert.c` does. git's byte order mark rules hold: UTF-16 and UTF-32 need one on the way in, the names that state an order may not have one, and a file that breaks them, or does not decode, is `error.WorkingTreeEncodingFailed` when it is stored and taken as it is by a status; UTF-16 and UTF-32 are written with a mark in the byte order the platform's git writes (little-endian on Linux, big-endian elsewhere); an empty file is not converted. A value of true or false is `error.InvalidWorkingTreeEncoding`, which git refuses too. Any other character set is still refused by name. Add `worktree.encoding`.
 
 - `<ref>@{<date>}` and `@{<date>}` pick the reflog entry in force at a date, as `git rev-parse` does: the date read by git's `approxidate` (`yesterday`, `3.days.ago`, `last Friday at noon`, `6am yesterday`, ISO and RFC 2822 dates, `@<secs>`; held to git's own t0006 vectors), a number from 100000000 on read as seconds, and git's answers at the log's ends. `revparse.resolveAt` takes the time now and the local zone; `resolve` reads the `Io`'s clock and takes UTC. `RevisionDateUnsupported` is gone.

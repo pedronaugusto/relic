@@ -269,12 +269,12 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `diff.rename`, `diff.similarity` | Rename and copy detection with git's score and diffcore's order: `-M`, `-C`, `--find-copies-harder`. |
 | `diff.patchid` | Patch ids: a name for what a commit changes. |
 | `diff.blame` | `file` — which commit each line of a file comes from, as `git blame` says, following renames. |
-| `revwalk` | `count`, `countObjects` (bitmap-backed counts, ordinary walks on a miss), `Walk`, `mergeBase`, `mergeBases`, `mergeBasesWith`, `mergeBasesMany`, `isAncestor`, `isAncestorWith`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary. |
+| `revwalk` | `count`, `countObjects` (bitmap-backed counts, ordinary walks on a miss), `Walk`, `mergeBase`, `mergeBases`, `mergeBasesWith`, `mergeBasesMany`, `isAncestor`, `isAncestorWith`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary, and history simplified by paths (`Walk.paths`) as git simplifies it by default. |
 | `revwalk.revparse` | git's revision grammar, `@{<date>}` with git's approximate dates included. |
 | `revwalk.shallow` | A shallow repository's boundary: `.git/shallow`. |
 | `revwalk.describe` | `describe`, `head`, `Describer`: `git describe` with `--tags`, `--all`, `--long`, `--abbrev`, `--candidates`, `--match`, `--exclude`, `--first-parent`, `--always`, `--dirty`, `--broken`, a blob as `<commit>:<path>`, and `--contains` as `git name-rev` names it. |
-| `revwalk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` as git 2.56 does it, with its state files, its choice of commit, skips, `--first-parent`, `--no-checkout`, `--reset-when-found` and terms; pathspecs refused by name. |
-| `revwalk.shortlog` | `Shortlog.init`, `add`, `addCommit`, `write`, `configured`: `git shortlog` by author, committer or trailer, with `-s`, `-n`, `-e` and `-w`. |
+| `revwalk.bisect` | `start`, `mark`, `nextStep`, `reset`, `log`, `replay`, `run`, `terms`: `git bisect` as git 2.56 does it, with its state files, its choice of commit, skips, `--first-parent`, `--no-checkout`, `--reset-when-found`, terms and pathspecs. |
+| `revwalk.shortlog` | `Shortlog.init`, `add`, `addCommit`, `write`, `configured`: `git shortlog` by author, committer, trailer or format, with `-s`, `-n`, `-e` and `-w`. |
 | `revwalk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |
 | `merge`, `merge.blobmerge` | Content merging as xdiff does it, and the stage-only tree merge. |
 | `merge.ort` | `mergeTrees`, `mergeCommits` — git's merge-ort: renames, directory renames, directory/file and type conflicts, submodules, virtual merge bases, git's messages. |
@@ -294,7 +294,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `transport.credential`, `transport.auth`, `transport.httpsettings`, `transport.httpauth` | The person's own setup: credential helpers, why a remote refused, git's `http.*`, proxy authentication. |
 | `transport.protocol`, `transport.connection`, `transport.pktline`, `transport.sideband`, `transport.fetchpack`, `transport.sendpack`, `transport.progress` | The wire underneath the commands. |
 | `transport.uploadpack` | `Server` — serving fetches, with shallow and every filter. |
-| `transport.bundle` | `create`, `write`, `File.open`, `Header.read`, `listHeads`, `writeSummary`, `verify`, `unbundle`, `isBundle`: `git bundle` v2 and v3, its header byte for byte; a path to a bundle is fetched and cloned from. |
+| `transport.bundle` | `create`, `write`, `File.open`, `Header.read`, `listHeads`, `writeSummary`, `verify`, `unbundle`, `isBundle`: `git bundle` v2 and v3, its header byte for byte, filtered by any filter git takes, `sparse:oid=` included; a path to a bundle is fetched and cloned from. |
 | `transport.objectwalk`, `transport.objectfilter`, `transport.partial`, `transport.filterspec` | Which objects one side lacks; partial clone, its filters and the lazy fetch. |
 | `submodule`, `submodule.gitmodules`, `submodule.gitlink`, `submodule.submoduletransport` | `.gitmodules`, status, init, update, sync, absorbed git directories, and fetching them. |
 | `lfs` | LFS without git-lfs: pointers and the store. |
@@ -688,7 +688,7 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 - **LFS without git-lfs's extras.** tus and custom transfer adapters are refused by name.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
 - **No `git://`, dumb HTTP or remote helpers.** Refused by name.
-- **No pathspec in a bisection, no `--group=format:` in a shortlog, no editor for a note, no `sparse:oid=` filter in a bundle.** Each refused by name; a shortlog by trailer is refused too where `trailer.*` is configured.
+- **No editor for a note.** Refused by name, as is a shortlog by trailer where `trailer.*` is configured.
 - **`apply` with the index compares content where a stat differs.** git says "does not match index" until the index is refreshed; this reads the file and agrees when its content does.
 - **A binary hunk in a written patch is this package's deflate.** It decodes to the same file; the compressed bytes are not zlib's. A cover letter's shortlog under a mailmap is refused by name.
 - **`am` reads mailboxes only.** StGit and Mercurial patches are refused by name, as is a mail in a character set other than UTF-8, US-ASCII or ISO-8859-1.
@@ -774,7 +774,7 @@ under each of their options; notes added, appended, copied, removed and
 merged under every strategy, commit for commit, fanout included; a bundle's
 header byte for byte and what git unbundles from it, and git's bundles read
 and fetched from; a bisection step by step, its state files, refs, logs and
-checkouts, through skips, `--first-parent`, replay and `run`; LFS transfers and locks against git-lfs on a local server; a pack
+checkouts, through skips, `--first-parent`, pathspecs, replay and `run`; LFS transfers and locks against git-lfs on a local server; a pack
 this wrote against `git verify-pack -v` and `git index-pack --verify`, with
 and without deltas and with either delta kind; the reachable object set
 against `git rev-list --objects --all`; a repository whose loose objects have

@@ -35,6 +35,7 @@ const indexpack = @import("../odb/indexpack.zig");
 const filterspec = @import("filterspec.zig");
 const message = @import("../commit/message.zig");
 const fs = @import("../repo/fs.zig");
+const ignore = @import("../worktree/ignore.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -415,8 +416,8 @@ pub const CreateRequest = struct {
     /// `--version`; `null` is the least the bundle needs: 3 for a SHA-256
     /// repository or a filter, 2 otherwise.
     version: ?Version = null,
-    /// `--filter=<spec>`, which makes a version 3 bundle. `sparse:oid=` is
-    /// refused by name.
+    /// `--filter=<spec>`, which makes a version 3 bundle. A `sparse:oid=`
+    /// names its blob by any revision expression.
     filter: ?[]const u8 = null,
     /// How the pack is written.
     pack: odb_mod.PackOptions = .{},
@@ -428,8 +429,9 @@ pub const CreateError = error{
     EmptyBundle,
     /// `version` 2 for a SHA-256 repository or a filter.
     VersionTooLow,
-    /// A `sparse:oid=` filter, which bundles here do not take.
-    SparseFilterUnsupported,
+    /// A `sparse:oid=` filter whose name is no blob here: git's "unable
+    /// to access sparse blob".
+    SparseBlobMissing,
     /// Not a filter git reads.
     InvalidFilter,
     NotACommit,
@@ -461,7 +463,8 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidFilter => return error.InvalidFilter,
         };
-        filter = try walkFilter(a, spec);
+        var sparse_seen = false;
+        filter = try walkFilter(a, io, repo, spec, &sparse_seen);
         filter_text = try filterspec.sendForm(a, text);
     }
     const min: Version = if (kind != .sha1 or request.filter != null) .v3 else .v2;
@@ -555,19 +558,45 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     try w.flush();
 }
 
-fn walkFilter(a: Allocator, spec: filterspec.Spec) CreateError!objectwalk.Filter {
+fn walkFilter(a: Allocator, io: Io, repo: *Repository, spec: filterspec.Spec, sparse_seen: *bool) CreateError!objectwalk.Filter {
     return switch (spec) {
         .blob_none => .blob_none,
         .blob_limit => |v| .{ .blob_limit = v },
         .tree_depth => |v| .{ .tree_depth = v },
         .object_type => |v| .{ .object_type = v },
-        .sparse_oid => error.SparseFilterUnsupported,
+        .sparse_oid => |name| blk: {
+            // One set of patterns to a walk.
+            if (sparse_seen.*) return error.InvalidFilter;
+            sparse_seen.* = true;
+            break :blk .{ .sparse = try sparseRules(a, io, repo, name) };
+        },
         .combine => |parts| blk: {
             const out = try a.alloc(objectwalk.Filter, parts.len);
-            for (parts, out) |part, *f| f.* = try walkFilter(a, part);
+            for (parts, out) |part, *f| f.* = try walkFilter(a, io, repo, part, sparse_seen);
             break :blk .{ .combine = out };
         },
     };
+}
+
+/// The sparse-checkout patterns in the blob `name` names, by any revision
+/// expression.
+fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateError!*const ignore.Rules {
+    const oid = revparse.resolve(a, io, repo, name) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
+        else => return error.SparseBlobMissing,
+    };
+    const found = repo.odb.read(io, oid) catch |err| switch (err) {
+        error.ObjectNotFound => return error.SparseBlobMissing,
+        else => |e| return e,
+    };
+    defer repo.odb.allocator().free(found.bytes);
+    if (found.type != .blob) return error.SparseBlobMissing;
+    const rules = try a.create(ignore.Rules);
+    rules.* = try .init(a, false);
+    // The rules keep slices of the text.
+    try rules.addText(try a.dupe(u8, found.bytes), "", "sparse:oid", 0);
+    return rules;
 }
 
 /// The commit `oid` is or peels to, or `null`.

@@ -12,10 +12,11 @@
 //!
 //! A subject is the commit's `%s` with any `[PATCH...]` prefix taken off;
 //! `wrap` folds it as `-w` does, counting columns as git's own table does.
-//! `--group=format:` and a format given with `%` are refused by name, as is
-//! a message in an encoding other than UTF-8, which git would convert first,
-//! and a trailer group in a repository that configures `trailer.*`, which
-//! changes what git reads as one.
+//! `--group=format:<format>` groups by what `pretty` makes of the format,
+//! for commits added by name. A message in an encoding other than UTF-8,
+//! which git would convert first, is refused by name, as is a trailer group
+//! in a repository that configures `trailer.*`, which changes what git
+//! reads as one.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -28,6 +29,7 @@ const message = @import("../commit/message.zig");
 const mailmap_mod = @import("mailmap.zig");
 const unicodewidth = @import("../unicodewidth.zig");
 const config_mod = @import("../config.zig");
+const pretty = @import("../pretty.zig");
 
 const Oid = hash.Oid;
 
@@ -39,7 +41,8 @@ pub const Group = union(enum) {
     committer,
     /// `--group=trailer:<key>`; the key is matched without case.
     trailer: []const u8,
-    /// `--group=format:<format>`: refused by name.
+    /// `--group=format:<format>`, or a group given with a `%`: what the
+    /// format makes of each commit, through `pretty`.
     format: []const u8,
 };
 
@@ -70,12 +73,15 @@ pub const Options = struct {
     /// Whether the repository configures `trailer.*`; a trailer group is
     /// then refused, since git would read trailers as configured.
     trailer_config: bool = false,
+    /// What a format group's placeholders need besides the commit.
+    format_context: pretty.Context = .{},
 };
 
 /// Errors from a shortlog.
 pub const Error = error{
-    /// `--group=format:`, which needs git's pretty formats.
-    FormatGroupUnsupported,
+    /// A format group with a commit given to `addCommit`, which has no
+    /// name to format; such commits come through `add`.
+    FormatGroupNeedsName,
     /// A commit whose `encoding` header names something other than UTF-8.
     EncodingUnsupported,
     /// A trailer group in a repository whose `trailer.*` settings change
@@ -83,7 +89,7 @@ pub const Error = error{
     TrailerConfigUnsupported,
     /// A `-w` whose width is no wider than an indent: git's usage error.
     InvalidWrap,
-} || Allocator.Error || odb_mod.Error || object.ParseError;
+} || pretty.Error;
 
 const Record = struct {
     count: usize = 0,
@@ -96,6 +102,8 @@ pub const Shortlog = struct {
     arena: std.heap.ArenaAllocator,
     options: Options,
     trailer_keys: []const []const u8,
+    /// The format groups' formats, in the order given.
+    formats: []const []const u8,
     author: bool,
     committer: bool,
     dedup: bool,
@@ -107,11 +115,13 @@ pub const Shortlog = struct {
         var committer = false;
         var keys: std.ArrayList([]const u8) = .empty;
         defer keys.deinit(gpa);
+        var formats: std.ArrayList([]const u8) = .empty;
+        defer formats.deinit(gpa);
         for (options.groups) |group| switch (group) {
             .author => author = true,
             .committer => committer = true,
             .trailer => |key| try keys.append(gpa, key),
-            .format => return error.FormatGroupUnsupported,
+            .format => |format| try formats.append(gpa, format),
         };
         if (options.groups.len == 0) author = true;
         if (keys.items.len != 0 and options.trailer_config) return error.TrailerConfigUnsupported;
@@ -122,17 +132,23 @@ pub const Shortlog = struct {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
         const owned_keys = try arena.allocator().dupe([]const u8, keys.items);
-        const kinds = @as(usize, @intFromBool(author)) + @intFromBool(committer) + @intFromBool(owned_keys.len != 0);
+        const owned_formats = try arena.allocator().dupe([]const u8, formats.items);
+        const kinds = @as(usize, @intFromBool(author)) + @intFromBool(committer) +
+            @intFromBool(owned_keys.len != 0) + @intFromBool(owned_formats.len != 0);
+        // git keeps the author's and committer's groups as formats after
+        // the ones given.
+        const format_count = owned_formats.len + @intFromBool(author) + @intFromBool(committer);
         return .{
             .gpa = gpa,
             .arena = arena,
             .options = options,
             .trailer_keys = owned_keys,
+            .formats = owned_formats,
             .author = author,
             .committer = committer,
-            // `shortlog_needs_dedup`: more than one kind of group, or any
-            // trailer.
-            .dedup = kinds > 1 or owned_keys.len != 0,
+            // `shortlog_needs_dedup`: more than one kind of group, more
+            // than one format, or any trailer.
+            .dedup = kinds > 1 or format_count > 1 or owned_keys.len != 0,
         };
     }
 
@@ -151,11 +167,19 @@ pub const Shortlog = struct {
         if (found.type != .commit) return error.UnexpectedObjectType;
         var commit = try object.Commit.parse(s.gpa, db.objectFormat(), found.bytes);
         defer commit.deinit();
-        try s.addCommit(&commit);
+        try s.addParsed(&commit, .{ .io = io, .db = db, .oid = oid });
     }
 
-    /// `shortlog_add_commit`: add a commit already read.
+    /// `shortlog_add_commit`: add a commit already read. A format group
+    /// needs the commit's name, and is `error.FormatGroupNeedsName` here.
     pub fn addCommit(s: *Shortlog, commit: *const object.Commit) Error!void {
+        if (s.formats.len != 0) return error.FormatGroupNeedsName;
+        try s.addParsed(commit, null);
+    }
+
+    const Named = struct { io: Io, db: *odb_mod.Odb, oid: Oid };
+
+    fn addParsed(s: *Shortlog, commit: *const object.Commit, named: ?Named) Error!void {
         if (commit.encoding) |enc| {
             if (!std.ascii.eqlIgnoreCase(enc, "utf-8") and !std.ascii.eqlIgnoreCase(enc, "utf8"))
                 return error.EncodingUnsupported;
@@ -181,6 +205,14 @@ pub const Shortlog = struct {
                 if ((try seen.getOrPut(a, value)).found_existing) continue;
                 try s.insert(value, oneline);
             }
+        }
+        // `insert_records_from_format`, the formats given first.
+        for (s.formats) |format| {
+            const n = named.?;
+            var text: std.ArrayList(u8) = .empty;
+            try pretty.formatCommit(a, n.io, n.db, n.oid, format, s.options.format_context, &text);
+            if (s.dedup and (try seen.getOrPut(a, text.items)).found_existing) continue;
+            try s.insert(text.items, oneline);
         }
         if (s.author) try s.insertPerson(a, &seen, commit.author, oneline);
         if (s.committer) try s.insertPerson(a, &seen, commit.committer, oneline);
@@ -498,6 +530,10 @@ test "shortlog groups, sorts, counts and folds as git shortlog does" {
         .{ .args = &.{"-w"}, .options = .{ .wrap = .{} } },
         .{ .args = &.{"-w20,2,4"}, .options = .{ .wrap = .{ .width = 20, .indent1 = 2, .indent2 = 4 } } },
         .{ .args = &.{"-w0,3,1"}, .options = .{ .wrap = .{ .width = 0, .indent1 = 3, .indent2 = 1 } } },
+        .{ .args = &.{"--group=format:%cn <%ce>"}, .options = .{ .groups = &.{.{ .format = "%cn <%ce>" }} } },
+        .{ .args = &.{ "--group=%ae", "-n" }, .options = .{ .groups = &.{.{ .format = "%ae" }}, .numbered = true } },
+        .{ .args = &.{ "--group=author", "--group=format:%an", "-s" }, .options = .{ .groups = &.{ .author, .{ .format = "%an" } }, .summary = true } },
+        .{ .args = &.{ "--group=format:%ad", "--group=format:%cs", "--group=trailer:co-authored-by", "-s" }, .options = .{ .groups = &.{ .{ .format = "%ad" }, .{ .format = "%cs" }, .{ .trailer = "co-authored-by" } }, .summary = true } },
     };
     for (cases) |case| {
         var args: std.ArrayList([]const u8) = .empty;
@@ -520,7 +556,11 @@ test "shortlog groups, sorts, counts and folds as git shortlog does" {
 
 test "shortlog refuses what it does not do by name" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.FormatGroupUnsupported, Shortlog.init(gpa, .{ .groups = &.{.{ .format = "%an" }} }));
     try std.testing.expectError(error.InvalidWrap, Shortlog.init(gpa, .{ .wrap = .{ .width = 6 } }));
+    var formatted = try Shortlog.init(gpa, .{ .groups = &.{.{ .format = "%an" }} });
+    defer formatted.deinit();
+    var commit = try object.Commit.parse(gpa, .sha1, "tree " ++ "0" ** 40 ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\ns\n");
+    defer commit.deinit();
+    try std.testing.expectError(error.FormatGroupNeedsName, formatted.addCommit(&commit));
     try std.testing.expectError(error.TrailerConfigUnsupported, Shortlog.init(gpa, .{ .groups = &.{.{ .trailer = "a" }}, .trailer_config = true }));
 }

@@ -148,6 +148,89 @@ test "a bundle's header is git's byte for byte, and its pack unbundles in git to
     try std.testing.expectError(error.VersionTooLow, create(gpa, io, &repo, tmp.dir, "x.bundle", .{ .include = &.{"main"}, .filter = "blob:none", .version = .v2 }));
 }
 
+/// The names of the objects in the pack after a bundle's header, sorted,
+/// as git's `index-pack` and `verify-pack` read them.
+fn packObjects(gpa: Allocator, io: Io, r: *testgit.Repo, dir: Io.Dir, dir_path: []const u8, name: []const u8) ![]u8 {
+    const bytes = try dir.readFileAlloc(io, name, gpa, .unlimited);
+    defer gpa.free(bytes);
+    const pack_name = try std.fmt.allocPrint(gpa, "{s}.pack", .{name});
+    defer gpa.free(pack_name);
+    try dir.writeFile(io, .{ .sub_path = pack_name, .data = bytes[headerOf(bytes).len..] });
+    const pack_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir_path, pack_name });
+    defer gpa.free(pack_path);
+    try r.exec(io, &.{ "index-pack", pack_path });
+    const idx_path = try std.fmt.allocPrint(gpa, "{s}/{s}.idx", .{ dir_path, name });
+    defer gpa.free(idx_path);
+    const listing = try r.run(io, &.{ "verify-pack", "-v", idx_path });
+    defer gpa.free(listing);
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, listing, '\n');
+    while (lines.next()) |line| {
+        if (line.len < 41 or line[40] != ' ') continue;
+        try names.append(gpa, line[0..40]);
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.order(u8, x, y) == .lt;
+        }
+    }.lessThan);
+    return std.mem.join(gpa, "\n", names.items);
+}
+
+test "a bundle filtered by sparse:oid= holds the objects git's holds" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    if (!try testgit.gitAtLeast(gpa, io, 2, 36)) return error.SkipZigTest;
+    var env = try testgit.datedEnv(gpa, 1_700_000_000);
+    defer env.deinit();
+    var src = try history(gpa, io, &env);
+    defer src.deinit();
+    try src.writeFile(io, "spec", "/f1\n/t*\n!/t1\n");
+    const blob = try src.line(io, &.{ "hash-object", "-w", "spec" });
+    defer gpa.free(blob);
+    var repo = try Repository.open(gpa, io, src.dir, .{});
+    defer repo.deinit(io);
+
+    const by_hex = try std.fmt.allocPrint(gpa, "sparse:oid={s}", .{blob});
+    defer gpa.free(by_hex);
+    const combined = try std.fmt.allocPrint(gpa, "combine:sparse:oid={s}+blob:limit=1", .{blob});
+    defer gpa.free(combined);
+    for ([_][]const u8{ by_hex, combined }) |spec| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(tmp_path);
+        const theirs = try std.fmt.allocPrint(gpa, "{s}/git.bundle", .{tmp_path});
+        defer gpa.free(theirs);
+        const filter_arg = try std.fmt.allocPrint(gpa, "--filter={s}", .{spec});
+        defer gpa.free(filter_arg);
+        try src.exec(io, &.{ "bundle", "create", "-q", theirs, filter_arg, "main", "topic" });
+        try create(gpa, io, &repo, tmp.dir, "relic.bundle", .{ .include = &.{ "main", "topic" }, .filter = spec });
+
+        const a = try tmp.dir.readFileAlloc(io, "git.bundle", gpa, .unlimited);
+        defer gpa.free(a);
+        const b = try tmp.dir.readFileAlloc(io, "relic.bundle", gpa, .unlimited);
+        defer gpa.free(b);
+        try std.testing.expectEqualStrings(headerOf(a), headerOf(b));
+        const want = try packObjects(gpa, io, &src, tmp.dir, tmp_path, "git.bundle");
+        defer gpa.free(want);
+        const got = try packObjects(gpa, io, &src, tmp.dir, tmp_path, "relic.bundle");
+        defer gpa.free(got);
+        std.testing.expectEqualStrings(want, got) catch |err| {
+            std.debug.print("with --filter={s}\n", .{spec});
+            return err;
+        };
+    }
+
+    // A name that is no blob is refused, where git refuses it.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    src.report_failures = false;
+    try std.testing.expectError(error.GitFailed, src.run(io, &.{ "bundle", "create", "-q", "x.bundle", "--filter=sparse:oid=main:nothing", "main" }));
+    try std.testing.expectError(error.SparseBlobMissing, create(gpa, io, &repo, tmp.dir, "x.bundle", .{ .include = &.{"main"}, .filter = "sparse:oid=main:nothing" }));
+}
+
 test "git's bundles are read, verified, listed, unbundled and fetched from as git does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

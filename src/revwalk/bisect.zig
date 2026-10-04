@@ -21,8 +21,10 @@
 //! behaviour is git 2.56's, the newest release. What git prints is returned as
 //! `Report.text`, the same lines; where git then runs `git show` on the
 //! commit it found, the commit is in `Report.step` for the caller to show,
-//! and `BISECT_RUN` holds the lines before it. Pathspecs, which limit the
-//! walk to commits that touch them, are refused by name.
+//! and `BISECT_RUN` holds the lines before it. Pathspecs limit the walk
+//! as git's do: `BISECT_NAMES` holds them as git writes them, the walk is
+//! simplified to the commits that change them, and a commit that does not
+//! is neither counted nor tested.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -40,6 +42,7 @@ const threeway = @import("../merge/threeway.zig");
 const hooks = @import("../repo/hooks.zig");
 const program = @import("../repo/program.zig");
 const safepath = @import("../worktree/safepath.zig");
+const pathspec = @import("../pathspec.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -62,8 +65,9 @@ pub const Error = error{
     InvalidCommand,
     /// No terms are recorded.
     NoTermsDefined,
-    /// Pathspecs, which git's bisection limits its walk with; refused.
-    PathspecUnsupported,
+    /// `BISECT_NAMES` holds a line that does not unquote: git's "Badly
+    /// quoted content".
+    MalformedNames,
     /// `HEAD` names no commit to start from.
     BadHead,
     /// No bad commit is known.
@@ -95,7 +99,7 @@ pub const Error = error{
     /// `--reset-when-found` with `--no-checkout`, which git refuses
     /// together.
     ResetWhenFoundWithoutCheckout,
-} || Allocator.Error || refs_mod.TransactionError || refs_mod.ReadError || repo_mod.Error || revparse.Error ||
+} || Allocator.Error || pathspec.Error || refs_mod.TransactionError || refs_mod.ReadError || repo_mod.Error || revparse.Error ||
     revwalk.Error || head_mod.Error || threeway.Error || hooks.Error || program.Error || Io.Dir.ReadFileAllocError ||
     Io.Dir.DeleteFileError || Io.File.OpenError;
 
@@ -533,18 +537,39 @@ const Listed = struct {
     commits: []const Oid,
     parents: Oid.Map([]const Oid),
     hidden: Oid.Set,
+    /// With pathspecs, the commits that change none of the paths.
+    treesame: Oid.Set,
 };
+
+/// `read_bisect_paths`: the pathspecs in `BISECT_NAMES`, each line
+/// unquoted as git unquotes it.
+fn readPaths(c: *Ctx) Error![]const []const u8 {
+    const text = (try c.readState("BISECT_NAMES")) orelse return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (lines.peek() == null and line.len == 0) break;
+        const words = (try sqDequote(c.a, std.mem.trim(u8, line, " \t\r\x0b\x0c"))) orelse return error.MalformedNames;
+        try out.appendSlice(c.a, words);
+    }
+    return out.items;
+}
 
 fn listCommits(c: *Ctx, revs: *const Revs, first_parent: bool) Error!Listed {
     var walk: revwalk.Walk = .init(c.gpa, &c.repo.odb);
     defer walk.deinit();
     walk.first_parent = first_parent;
+    const specs = try readPaths(c);
+    var paths = try pathspec.parse(c.gpa, specs);
+    defer paths.deinit();
+    if (specs.len != 0) walk.paths = &paths;
     try walk.push(revs.bad.?);
     for (revs.good.items) |g| try walk.hide(g);
-    var listed: Listed = .{ .commits = &.{}, .parents = .empty, .hidden = .empty };
+    var listed: Listed = .{ .commits = &.{}, .parents = .empty, .hidden = .empty, .treesame = .empty };
     var commits: std.ArrayList(Oid) = .empty;
     while (try walk.next(c.io)) |commit| {
         try commits.append(c.a, commit.oid);
+        if (commit.treesame) try listed.treesame.put(c.a, commit.oid, {});
         try listed.parents.put(c.a, commit.oid, try c.a.dupe(Oid, commit.parents));
     }
     // What the walk marked as reached from a good commit, among the
@@ -564,13 +589,18 @@ const Bisection = struct {
     all: i64,
 };
 
-/// `find_bisection`, without pathspecs, so no commit is TREESAME.
+/// `find_bisection`. A TREESAME commit, one that changes none of the
+/// pathspecs, is on the list but not counted, and is never the answer
+/// unless nothing else is on it.
 fn findBisection(c: *Ctx, listed: *const Listed, first_parent: bool, find_all: bool) Error!Bisection {
     // The list reversed, oldest first.
     const n = listed.commits.len;
     const list = try c.a.alloc(Oid, n);
     for (listed.commits, 0..) |oid, i| list[n - 1 - i] = oid;
-    const nr: i64 = @intCast(n);
+    var nr: i64 = 0;
+    for (list) |oid| {
+        if (!listed.treesame.contains(oid)) nr += 1;
+    }
     if (n == 0) return .{ .list = &.{}, .reaches = 0, .all = 0 };
 
     var weight: Oid.Map(i64) = .empty;
@@ -587,9 +617,12 @@ fn findBisection(c: *Ctx, listed: *const Listed, first_parent: bool, find_all: b
             if (first_parent) break;
         }
         switch (count) {
-            0 => {
+            0 => if (!listed.treesame.contains(oid)) {
                 try weight.put(c.a, oid, 1);
                 counted += 1;
+            } else {
+                // It reaches no commit that changes the paths.
+                try weight.put(c.a, oid, 0);
             },
             1 => try weight.put(c.a, oid, -1),
             else => try weight.put(c.a, oid, -2),
@@ -597,7 +630,8 @@ fn findBisection(c: *Ctx, listed: *const Listed, first_parent: bool, find_all: b
     }
 
     const halfway = struct {
-        fn f(w: i64, all: i64) bool {
+        fn f(l: *const Listed, oid: Oid, w: i64, all: i64) bool {
+            if (l.treesame.contains(oid)) return false;
             const diff = 2 * w - all;
             if (diff >= -1 and diff <= 1) return true;
             return @abs(diff) < @divTrunc(all, 1024);
@@ -609,7 +643,7 @@ fn findBisection(c: *Ctx, listed: *const Listed, first_parent: bool, find_all: b
         if (weight.get(oid).? != -2) continue;
         const w = try countDistance(c, listed, oid);
         try weight.put(c.a, oid, w);
-        if (!find_all and halfway(w, nr)) return single(c, oid, w, nr);
+        if (!find_all and halfway(listed, oid, w, nr)) return single(c, oid, w, nr);
         counted += 1;
     }
     // Then a strand of pearls one more than the commit below it.
@@ -630,9 +664,12 @@ fn findBisection(c: *Ctx, listed: *const Listed, first_parent: bool, find_all: b
                 if (first_parent) break;
             }
             const wq = below orelse continue;
-            try weight.put(c.a, oid, wq + 1);
-            counted += 1;
-            if (!find_all and halfway(wq + 1, nr)) return single(c, oid, wq + 1, nr);
+            // One for the commit itself when it is counted; a TREESAME one
+            // reaches what its parent reaches.
+            const w = if (listed.treesame.contains(oid)) wq else wq + 1;
+            try weight.put(c.a, oid, w);
+            if (w != wq) counted += 1;
+            if (!find_all and halfway(listed, oid, w, nr)) return single(c, oid, w, nr);
         }
     }
 
@@ -641,6 +678,7 @@ fn findBisection(c: *Ctx, listed: *const Listed, first_parent: bool, find_all: b
         var best = list[0];
         var best_distance: i64 = -1;
         for (list) |oid| {
+            if (listed.treesame.contains(oid)) continue;
             var distance = weight.get(oid).?;
             if (nr - distance < distance) distance = nr - distance;
             if (distance > best_distance) {
@@ -652,19 +690,23 @@ fn findBisection(c: *Ctx, listed: *const Listed, first_parent: bool, find_all: b
     }
     // `best_bisection_sorted`.
     const Dist = struct { oid: Oid, distance: i64 };
-    const sorted = try c.a.alloc(Dist, n);
-    for (list, sorted) |oid, *d| {
+    var dists: std.ArrayList(Dist) = .empty;
+    for (list) |oid| {
+        if (listed.treesame.contains(oid)) continue;
         var distance = weight.get(oid).?;
         if (nr - distance < distance) distance = nr - distance;
-        d.* = .{ .oid = oid, .distance = distance };
+        try dists.append(c.a, .{ .oid = oid, .distance = distance });
     }
+    const sorted = dists.items;
     std.mem.sort(Dist, sorted, {}, struct {
         fn lessThan(_: void, x: Dist, y: Dist) bool {
             if (x.distance != y.distance) return x.distance > y.distance;
             return x.oid.order(y.oid) == .lt;
         }
     }.lessThan);
-    const out = try c.a.alloc(Oid, n);
+    // With nothing counted git keeps the head of the list.
+    if (sorted.len == 0) return single(c, list[0], weight.get(list[0]).?, nr);
+    const out = try c.a.alloc(Oid, sorted.len);
     for (sorted, out) |d, *o| o.* = d.oid;
     return .{ .list = out, .reaches = weight.get(out[0]).?, .all = nr };
 }
@@ -688,7 +730,7 @@ fn countDistance(c: *Ctx, listed: *const Listed, from: Oid) Error!i64 {
         if (listed.hidden.contains(oid)) continue;
         if ((try seen.getOrPut(c.gpa, oid)).found_existing) continue;
         const parents = listed.parents.get(oid) orelse continue;
-        count += 1;
+        if (!listed.treesame.contains(oid)) count += 1;
         for (parents) |p| try stack.append(c.gpa, p);
     }
     return count;
@@ -1036,8 +1078,15 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     }
     if (reset_when_found != null and no_checkout) return error.ResetWhenFoundWithoutCheckout;
     const pathspec_pos = i;
-    // `argc - 1`: git records the pathspec only from two arguments on.
-    if (args.len > 0 and pathspec_pos < args.len - 1) return error.PathspecUnsupported;
+    // git's `sq_quote_argv` of what follows the revisions, the `--` among
+    // it, and only from two arguments on (`argc - 1`).
+    var names: std.ArrayList(u8) = .empty;
+    if (args.len > 0 and pathspec_pos < args.len - 1) {
+        for (args[pathspec_pos..]) |arg| {
+            try names.append(c.a, ' ');
+            try sqQuote(c.a, &names, arg);
+        }
+    }
 
     if (revs.items.len != 0) must_write_terms = true;
 
@@ -1064,7 +1113,8 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
         const oid = revparse.resolve(c.gpa, c.io, c.repo, start_head) catch return error.BadHead;
         try c.updateRef("BISECT_HEAD", oid);
     }
-    try c.writeState("BISECT_NAMES", "\n");
+    try names.append(c.a, '\n');
+    try c.writeState("BISECT_NAMES", names.items);
 
     for (revs.items, 0..) |rev, k| {
         try bisectWrite(c, if (k == 0) t.bad else t.good, rev, t.*, true);
@@ -1403,7 +1453,8 @@ const Twin = struct {
     ours: testgit.Repo,
     repo: Repository,
 
-    /// `shape` 0 is a line of commits; 1 has merges.
+    /// `shape` 0 is a line of commits; 1 has merges; 2 is a line in which
+    /// every third commit also changes `p/x`.
     fn init(gpa: Allocator, io: Io, t: *Twin, shape: u8) !void {
         t.env = try testgit.datedEnv(gpa, 1_700_000_000);
         errdefer t.env.deinit();
@@ -1429,6 +1480,15 @@ const Twin = struct {
                 }
             }.f;
             for (0..6) |_| try commit(r, io, &t.env, &when, &n, "");
+            if (shape == 2) {
+                for (0..12) |k| {
+                    if (k % 3 == 0) {
+                        var buf: [16]u8 = undefined;
+                        try r.writeFile(io, "p/x", try std.fmt.bufPrint(&buf, "{d}\n", .{k}));
+                    }
+                    try commit(r, io, &t.env, &when, &n, "");
+                }
+            }
             if (shape == 1) {
                 // The side branch leaves `n` as it found it, so the merge
                 // is clean and each commit there tests as its fork point.
@@ -1636,6 +1696,20 @@ fn bisectLikeGit(case: Case) !void {
     }
 }
 
+test "a bisection limited by a pathspec tests only the commits that change it, as git's does" {
+    try bisectLikeGit(.{ .shape = 2, .first_bad = 14, .start = &.{ "HEAD", "HEAD~25", "--", "p" } });
+}
+
+test "pathspecs without a double dash are recorded from two on, as git records them" {
+    try bisectLikeGit(.{ .shape = 2, .first_bad = 11, .start = &.{ "HEAD", "HEAD~25", "p", "n" } });
+    try bisectLikeGit(.{ .shape = 2, .first_bad = 11, .start = &.{ "HEAD", "HEAD~25", "p" } });
+}
+
+test "a pathspec bisection through a merge follows the side that changed the path, as git's does" {
+    try bisectLikeGit(.{ .shape = 1, .first_bad = 1, .start = &.{ "HEAD", "HEAD~14", "--", "side" } });
+    try bisectLikeGit(.{ .shape = 1, .first_bad = 14, .skip = &.{15}, .start = &.{ "--first-parent", "HEAD", "HEAD~14", "--", "n" } });
+}
+
 test "bisect run tests each commit with the command, as git's does" {
     // The builtin bisect of git 2.40, whose messages and log are these.
     try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
@@ -1651,14 +1725,13 @@ test "bisect run tests each commit with the command, as git's does" {
     try expectReport(&t, io, &.{ "run", "sh", "-c", script }, run(gpa, io, &t.repo, &.{ "sh", "-c", script }, .{ .who = test_who }, .{ .programs = .{ .environ = &env } }));
 }
 
-test "bisect refuses pathspecs by name, and what git refuses" {
+test "bisect refuses what git refuses" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var u: Twin = undefined;
     try Twin.init(gpa, io, &u, 0);
     defer u.deinit(io);
     try std.testing.expectError(error.NotBisecting, mark(gpa, io, &u.repo, "good", &.{}, .{ .who = test_who }));
-    try std.testing.expectError(error.PathspecUnsupported, start(gpa, io, &u.repo, &.{ "HEAD", "HEAD~3", "--", "n" }, .{ .who = test_who }));
     try std.testing.expectError(error.UnrecognizedOption, start(gpa, io, &u.repo, &.{"--bogus"}, .{ .who = test_who }));
     try std.testing.expectError(error.InvalidTerm, start(gpa, io, &u.repo, &.{ "--term-new=skip", "HEAD" }, .{ .who = test_who }));
 }
