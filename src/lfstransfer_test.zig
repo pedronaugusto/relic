@@ -1921,6 +1921,7 @@ test "LFS uploads and downloads through each SOCKS scheme, with TLS inside secur
     defer gpa.free(nobody);
     for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
         for ([_]bool{ false, true }) |secure| {
+            errdefer std.debug.print("SOCKS transfer case: {s} over {s}\n", .{ scheme, if (secure) "https" else "http" });
             const remote_dns = std.mem.eql(u8, scheme, "socks4a") or std.mem.eql(u8, scheme, "socks5h");
             // localhost. resolves locally and is allowed by the unchanged
             // Go proxy rules; .invalid is reachable only by our proxy.

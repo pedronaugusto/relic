@@ -1287,8 +1287,11 @@ pub const Connection = struct {
             };
             switch (result) {
                 .address => |a| {
-                    // Curl prefers IPv6 for SOCKS5, IPv4 only for SOCKS4.
-                    if (address == null or (!ipv4 and a == .ip6)) address = a;
+                    // Zig's libc lookup may ignore LookupOptions.family.
+                    // Enforce SOCKS4's IPv4 requirement here, and keep the
+                    // first address in curl's preferred family for SOCKS5.
+                    if (ipv4 and a != .ip4) continue;
+                    if (address == null or (!ipv4 and address.? == .ip4 and a == .ip6)) address = a;
                 },
                 .canonical_name => {},
             }
@@ -2236,4 +2239,36 @@ test "proxy URLs share SOCKS defaults and preserve IPv6 hosts and decoded creden
     try std.testing.expectEqualStrings("", explicit.credential.?.password);
     var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, Proxy.parse(failing.allocator(), "socks5h://us%65r@proxy", 80));
+}
+
+test "SOCKS local DNS enforces IPv4 and keeps the first address of the preferred family" {
+    const testing = std.testing;
+    const Mock = struct {
+        fn lookup(_: ?*anyopaque, name: Io.net.HostName, results: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
+            const io = testing.io;
+            defer results.close(io);
+            const addresses: []const Io.net.HostName.LookupResult = &.{
+                .{ .address = .{ .ip6 = .{ .bytes = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = options.port } } },
+                .{ .address = .{ .ip6 = .{ .bytes = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, .port = options.port } } },
+                .{ .address = .{ .ip4 = .loopback(options.port) } },
+            };
+            // The libc resolver in Zig 0.16 may return both families even
+            // when LookupOptions.family asks for IPv4.
+            const count: usize = if (std.mem.eql(u8, name.bytes, "ipv6-only")) 2 else 3;
+            results.putAll(io, addresses[0..count]) catch |err| return switch (err) {
+                error.Canceled => error.Canceled,
+                error.Closed => unreachable,
+            };
+        }
+    };
+    var vtable = testing.io.vtable.*;
+    vtable.netLookup = Mock.lookup;
+    const io: Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    const four = try Connection.resolveSocks(io, "localhost", 80, true);
+    try testing.expectEqual(Io.net.IpAddress.Family.ip4, std.meta.activeTag(four));
+    try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &four.ip4.bytes);
+    const five = try Connection.resolveSocks(io, "localhost", 80, false);
+    try testing.expectEqual(Io.net.IpAddress.Family.ip6, std.meta.activeTag(five));
+    try testing.expectEqual(@as(u8, 1), five.ip6.bytes[15]);
+    try testing.expectError(error.ProxyHostUnreachable, Connection.resolveSocks(io, "ipv6-only", 80, true));
 }
