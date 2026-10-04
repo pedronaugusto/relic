@@ -29,6 +29,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/sha1.zig",
         "src/sha1dc.zig",
         "src/test_case.zig",
+        "src/test_io.zig",
         "src/testgit.zig",
         "src/testprogram.zig",
         "src/textdiff.zig",

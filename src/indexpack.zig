@@ -1522,6 +1522,60 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         const found = try repo.odb.read(io, try Oid.parse(.sha1, head));
         gpa.free(found.bytes);
     }
+
+    // git chooses the shape of the fixture above. Four independent bases
+    // with one delta each give this test control over the task count.
+    const Tasks = @import("test_io.zig");
+    var single: Io.Threaded = .init_single_threaded;
+    const bases = [_][]const u8{ "base 0", "base 1", "base 2", "base 3" };
+    const patch = try appendDelta(gpa, bases[0].len, "more\n");
+    defer gpa.free(patch);
+    for ([_]bool{ false, true }) |references| {
+        var entries: [8]TestEntry = undefined;
+        for (bases, 0..) |base_bytes, i| {
+            entries[2 * i] = .{ .whole = .{ .t = .blob, .bytes = base_bytes } };
+            entries[2 * i + 1] = if (references)
+                .{ .ref_delta = .{ .base = hash.Hasher.object(.sha1, "blob", base_bytes), .patch = patch } }
+            else
+                .{ .ofs_delta = .{ .back = 1, .patch = patch } };
+        }
+        const bytes = try buildPack(gpa, .sha1, &entries);
+        defer gpa.free(bytes);
+        var serial_index: ?[]u8 = null;
+        defer if (serial_index) |index| gpa.free(index);
+        var serial_result: Result = undefined;
+        for ([_]Io{ io, single.io() }, 0..) |each_io, executor| {
+            for ([_]u32{ 1, 2, 4, 8 }) |threads| {
+                var tmp = testing.tmpDir(.{ .iterate = true });
+                defer tmp.cleanup();
+                var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+                defer repo.deinit(io);
+                var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
+                defer pack_dir.close(io);
+                var in: Io.Reader = .fixed(bytes);
+                const counted = if (executor == 0) Tasks.wrap(each_io) else Tasks.wrapInline(each_io);
+                const result = try receive(gpa, counted, &repo.odb, pack_dir, &in, .{ .threads = threads });
+                // The caller resolves too, and there are only four roots.
+                try Tasks.expect(0, @min(threads, 4) - 1);
+                try testing.expectEqual(@as(u32, 8), result.objects);
+                try testing.expectEqual(@as(u32, 4), result.deltas);
+                try testing.expectEqual(@as(u32, 0), result.appended);
+                const base = try onlyPack(gpa, io, pack_dir);
+                defer gpa.free(base);
+                const idx_name = try std.fmt.allocPrint(gpa, "{s}.idx", .{base});
+                defer gpa.free(idx_name);
+                const index = try pack_dir.readFileAlloc(io, idx_name, gpa, .unlimited);
+                if (serial_index) |want| {
+                    defer gpa.free(index);
+                    try testing.expectEqualDeep(serial_result, result);
+                    try testing.expectEqualSlices(u8, want, index);
+                } else {
+                    serial_index = index;
+                    serial_result = result;
+                }
+            }
+        }
+    }
 }
 
 test "a thin pack is completed from the database, and git indexes the result identically" {

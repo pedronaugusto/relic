@@ -692,59 +692,16 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
     }
 }
 
-/// Which threads opened a loose object, through `base`.
-const LooseOpeners = struct {
-    var base: Io = undefined;
-    var mutex: std.atomic.Mutex = .unlocked;
-    var ids: [64]std.Thread.Id = undefined;
-    var count: usize = 0;
-
-    fn reset() void {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        count = 0;
-    }
-
-    fn distinct() usize {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        return count;
-    }
-
-    fn open(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-        // A loose object, `xx/` and the rest of its name.
-        if (sub_path.len == 41 and sub_path[2] == '/') {
-            const me = std.Thread.getCurrentId();
-            while (!mutex.tryLock()) {}
-            defer mutex.unlock();
-            const seen = for (ids[0..count]) |id| {
-                if (id == me) break true;
-            } else false;
-            if (!seen and count < ids.len) {
-                ids[count] = me;
-                count += 1;
-            }
-        }
-        return base.vtable.dirOpenFile(userdata, dir, sub_path, options);
-    }
-};
-
 test "a local clone writes its pack on the tasks pack.threads asks for, as git's pack-objects does" {
     const gpa = testing.allocator;
-    // Four tasks besides the calling one, whatever the machine.
-    var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .limited(4) });
-    defer threaded.deinit();
-    const io = threaded.io();
-    LooseOpeners.base = io;
-    var vtable = io.vtable.*;
-    vtable.dirOpenFile = LooseOpeners.open;
-    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const Tasks = @import("test_io.zig");
+    const io = testing.io;
+    var single: Io.Threaded = .init_single_threaded;
 
-    // Enough loose objects that the other tasks take some before the
-    // calling one is through them.
+    // One batch with enough objects for every requested task.
     var source = try testremote.historyRepo(gpa, io, 2);
     defer source.deinit();
-    for (0..300) |i| {
+    for (0..32) |i| {
         var name_buf: [32]u8 = undefined;
         var body_buf: [32]u8 = undefined;
         try source.writeFile(io, try std.fmt.bufPrint(&name_buf, "many/{d}.txt", .{i}), try std.fmt.bufPrint(&body_buf, "file {d}\n", .{i}));
@@ -754,21 +711,61 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
     const source_path = try testremote.absolutePath(gpa, io, source.dir);
     defer gpa.free(source_path);
 
-    const Case = struct { pairs: []const config_mod.Sources.Pair, one: bool };
-    const cases = [_]Case{
-        .{ .pairs = &.{}, .one = false },
-        .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }}, .one = true },
+    const PackFile = struct {
+        fn only(g: Allocator, task_io: Io, dir: Io.Dir) ![]u8 {
+            var found: ?[]u8 = null;
+            errdefer if (found) |name| g.free(name);
+            var it = dir.iterate();
+            while (try it.next(task_io)) |entry| {
+                if (!std.mem.endsWith(u8, entry.name, ".pack")) continue;
+                if (found != null) return error.TestUnexpectedResult;
+                found = try g.dupe(u8, entry.name);
+            }
+            return found orelse error.TestUnexpectedResult;
+        }
     };
-    for (cases) |case| {
-        var target = try Twin.init(gpa, io);
-        defer target.deinit(gpa, io);
-        LooseOpeners.reset();
-        var repo = try clone(gpa, watched, source_path, target.dir, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = case.pairs } });
-        repo.deinit(io);
-        const threads = LooseOpeners.distinct();
-        if ((threads == 1) != case.one) {
-            std.debug.print("pack.threads {s}: the local copy opened its objects on {d} threads\n", .{ if (case.one) "1" else "unset", threads });
-            return error.TestUnexpectedResult;
+    var serial_target = try Twin.init(gpa, io);
+    defer serial_target.deinit(gpa, io);
+    var serial = try clone(gpa, Tasks.wrap(io), source_path, serial_target.dir, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }} } });
+    defer serial.deinit(io);
+    try Tasks.expect(0, 0);
+    var serial_packs = try serial.git_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer serial_packs.close(io);
+    const serial_name = try PackFile.only(gpa, io, serial_packs);
+    defer gpa.free(serial_name);
+    const serial_bytes = try serial_packs.readFileAlloc(io, serial_name, gpa, .unlimited);
+    defer gpa.free(serial_bytes);
+
+    const Case = struct { pairs: []const config_mod.Sources.Pair, workers: usize };
+    const cpus = std.Thread.getCpuCount() catch 1;
+    // An unset count reaches the pack writer as zero: its CPU default.
+    const objects = std.mem.readInt(u32, serial_bytes[8..12], .big);
+    try testing.expect(objects <= @import("odb_core.zig").search_group_objects);
+    const default_workers = @min(cpus, objects);
+    const cases = [_]Case{
+        .{ .pairs = &.{}, .workers = default_workers },
+        .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }}, .workers = 1 },
+        .{ .pairs = &.{.{ .name = "pack.threads", .value = "4" }}, .workers = 4 },
+    };
+    for ([_]Io{ io, single.io() }) |each_io| {
+        for (cases) |case| {
+            var target = try Twin.init(gpa, io);
+            defer target.deinit(gpa, io);
+            var repo = try clone(gpa, Tasks.wrap(each_io), source_path, target.dir, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = case.pairs } });
+            defer repo.deinit(io);
+            // Headers and bodies on at most six tasks, one search group,
+            // then deflation on all tasks, each including the caller.
+            const readers: usize = @min(case.workers, 6);
+            const spawned = if (case.workers == 1) 0 else 2 * (readers - 1) + case.workers - 1;
+            try Tasks.expect(spawned, 0);
+            var packs = try repo.git_dir.openDir(io, "objects/pack", .{ .iterate = true });
+            defer packs.close(io);
+            const name = try PackFile.only(gpa, io, packs);
+            defer gpa.free(name);
+            try testing.expectEqualStrings(serial_name, name);
+            const bytes = try packs.readFileAlloc(io, name, gpa, .unlimited);
+            defer gpa.free(bytes);
+            try testing.expectEqualSlices(u8, serial_bytes, bytes);
         }
     }
 }

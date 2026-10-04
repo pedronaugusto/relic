@@ -6,6 +6,7 @@ const Io = std.Io;
 const hash = @import("hash.zig");
 const odb_mod = @import("odb_core.zig");
 const testgit = @import("testgit.zig");
+const Tasks = @import("test_io.zig");
 
 const Oid = hash.Oid;
 
@@ -69,108 +70,27 @@ const Corpus = struct {
     }
 };
 
-/// Which threads opened a loose object.
-const Openers = struct {
-    var mutex: std.atomic.Mutex = .unlocked;
-    var ids: [64]std.Thread.Id = undefined;
-    var count: usize = 0;
-    /// While set, the first open on the thread that set it waits, for a
-    /// while, until some other thread has opened one too: a serial writer
-    /// never gets one, and a parallel writer has its other tasks take the
-    /// next objects meanwhile.
-    var waiting_for_other: ?std.Thread.Id = null;
-
-    fn reset(wait_from: ?std.Thread.Id) void {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        count = 0;
-        waiting_for_other = wait_from;
-    }
-
-    fn distinct() usize {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        return count;
-    }
-
-    /// Whether this is the first open on the waiting thread, which then
-    /// waits no more.
-    fn takeWait() bool {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        if (waiting_for_other != std.Thread.getCurrentId()) return false;
-        waiting_for_other = null;
-        return true;
-    }
-
-    fn note() bool {
-        const me = std.Thread.getCurrentId();
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        for (ids[0..count]) |id| if (id == me) return false;
-        if (count < ids.len) {
-            ids[count] = me;
-            count += 1;
-        }
-        return true;
-    }
-
-    fn open(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-        // Only loose objects, `xx/` and the rest of the name: opening the
-        // database reads other files first, on the calling thread.
-        const loose = sub_path.len == 41 and sub_path[2] == '/';
-        if (!loose) return std.testing.io.vtable.dirOpenFile(userdata, dir, sub_path, options);
-        if (note() and takeWait()) {
-            var waited: usize = 0;
-            while (waited < 5000) : (waited += 1) {
-                {
-                    while (!mutex.tryLock()) {}
-                    defer mutex.unlock();
-                    if (count > 1) break;
-                }
-                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch break;
-            }
-        }
-        return std.testing.io.vtable.dirOpenFile(userdata, dir, sub_path, options);
-    }
-};
-
-test "a pack is built by several tasks of a threaded Io by default, by one when asked, and is the same pack" {
+test "a pack submits several tasks to the caller's Io by default, none when asked for one, and is the same pack" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var corpus = try Corpus.init(gpa, io, 8, 6, 24);
+    var corpus = try Corpus.init(gpa, io, 8, 6, 8);
     defer corpus.deinit(gpa, io);
-
-    var vtable = io.vtable.*;
-    vtable.dirOpenFile = Openers.open;
-    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-
-    // The default: the caller's threaded Io carries the work, on more than
-    // the calling thread.
-    Openers.reset(std.Thread.getCurrentId());
-    const parallel = try corpus.write(gpa, watched, .{});
-    if (Openers.distinct() < 2) {
-        std.debug.print("the default pack write opened its objects on {d} thread\n", .{Openers.distinct()});
-        return error.TestUnexpectedResult;
-    }
-
-    // One task: the serial writer, on the calling thread alone.
-    Openers.reset(null);
-    const serial = try corpus.write(gpa, watched, .{ .threads = 1 });
-    try std.testing.expectEqual(@as(usize, 1), Openers.distinct());
-
-    // An Io that runs every task inline runs them one after another.
     var single: Io.Threaded = .init_single_threaded;
-    var single_vtable = single.io().vtable.*;
-    single_vtable.dirOpenFile = Openers.open;
-    const single_watched: Io = .{ .userdata = single.io().userdata, .vtable = &single_vtable };
-    Openers.reset(null);
-    const inline_tasks = try corpus.write(gpa, single_watched, .{});
-    try std.testing.expectEqual(@as(usize, 1), Openers.distinct());
 
-    try std.testing.expect(parallel.name.eql(serial.name));
-    try std.testing.expect(inline_tasks.name.eql(serial.name));
+    const serial = try corpus.write(gpa, Tasks.wrap(io), .{ .threads = 1 });
+    try Tasks.expect(0, 0);
     try std.testing.expect(serial.deltas > 0);
+    const workers = @min(std.Thread.getCpuCount() catch 1, corpus.entries.items.len);
+    // One batch: headers and bodies on at most six tasks, one search group
+    // on the caller, then deflation on all tasks. The caller is a worker.
+    const readers: usize = @min(workers, 6);
+    const spawned = if (workers == 1) 0 else 2 * (readers - 1) + workers - 1;
+    for ([_]Io{ io, single.io() }) |each_io| {
+        const parallel = try corpus.write(gpa, Tasks.wrap(each_io), .{});
+        try Tasks.expect(spawned, 0);
+        try std.testing.expect(parallel.name.eql(serial.name));
+        try std.testing.expectEqual(serial.deltas, parallel.deltas);
+    }
 }
 
 test "every worker count, Io and delta encoding writes the serial writer's bytes" {
@@ -388,97 +308,26 @@ test "a pack write canceled or failed part way leaves nothing behind" {
     _ = try corpus.write(gpa, interrupted, .{});
 }
 
-/// How many tasks a write asked its Io for.
-const Spawns = struct {
-    var count: std.atomic.Value(usize) = .init(0);
-
-    fn groupAsync(
-        userdata: ?*anyopaque,
-        group: *Io.Group,
-        context: []const u8,
-        context_alignment: std.mem.Alignment,
-        start: *const fn (context: *const anyopaque) void,
-    ) void {
-        _ = count.fetchAdd(1, .monotonic);
-        std.testing.io.vtable.groupAsync(userdata, group, context, context_alignment, start);
-    }
-};
-
 test "a pack of fewer objects than tasks asks for no more tasks than it has objects" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var vtable = io.vtable.*;
-    vtable.groupAsync = Spawns.groupAsync;
-    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
 
     for ([_]usize{ 1, 2, 3 }) |objects| {
         var corpus = try Corpus.init(gpa, io, 1, objects, 0);
         defer corpus.deinit(gpa, io);
         const serial = try corpus.write(gpa, io, .{ .threads = 1 });
-        Spawns.count.store(0, .monotonic);
-        const report = try corpus.write(gpa, counted, .{ .threads = 8 });
+        const report = try corpus.write(gpa, Tasks.wrap(io), .{ .threads = 8 });
         try std.testing.expect(report.name.eql(serial.name));
         // Each of the write's stages — headers, bodies, deflating — shares
         // its objects among the calling task and at most one task for each
         // other object.
-        const spawned = Spawns.count.load(.monotonic);
+        const spawned = Tasks.group_async.load(.monotonic);
         if (spawned > 3 * (objects - 1)) {
             std.debug.print("{d} objects: {d} tasks\n", .{ objects, spawned });
             return error.TestUnexpectedResult;
         }
     }
 }
-
-/// Which threads read a file positionally: in a repository whose objects
-/// are all packed, after it is opened, the pack.
-const Readers = struct {
-    var mutex: std.atomic.Mutex = .unlocked;
-    var ids: [64]std.Thread.Id = undefined;
-    var count: usize = 0;
-    var waiting_for_other: ?std.Thread.Id = null;
-
-    fn reset(wait_from: ?std.Thread.Id) void {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        count = 0;
-        waiting_for_other = wait_from;
-    }
-
-    fn distinct() usize {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        return count;
-    }
-
-    /// Note this thread; true for its first read while the calling thread
-    /// waits for another, which then waits no more.
-    fn note() bool {
-        const me = std.Thread.getCurrentId();
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        for (ids[0..count]) |id| if (id == me) return false;
-        if (count < ids.len) {
-            ids[count] = me;
-            count += 1;
-        }
-        if (waiting_for_other != me) return false;
-        waiting_for_other = null;
-        return true;
-    }
-
-    fn read(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-        // The calling thread's first read waits, for a while, until some
-        // other thread has read too: a serial reader never gets one.
-        if (note()) {
-            var waited: usize = 0;
-            while (waited < 5000) : (waited += 1) {
-                if (distinct() > 1) break;
-                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch break;
-            }
-        }
-        return std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
-    }
-};
 
 test "objects repacked from packs are read by several tasks, and the pack is the serial writer's" {
     const io = std.testing.io;
@@ -492,9 +341,7 @@ test "objects repacked from packs are read by several tasks, and the pack is the
         _ = try db.packLoose(io, .{});
     }
 
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Readers.read;
-    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var single: Io.Threaded = .init_single_threaded;
     const Repack = struct {
         fn write(c: *Corpus, a: std.mem.Allocator, opened: Io, read: Io, threads: u16) !@import("pack.zig").WriteReport {
             // One block cached, so that reading is reading the file.
@@ -506,19 +353,20 @@ test "objects repacked from packs are read by several tasks, and the pack is the
             try c.tmp.dir.createDirPath(opened, "out");
             var out = try c.tmp.dir.openDir(opened, "out", .{ .iterate = true });
             defer out.close(opened);
-            Readers.reset(if (threads == 1) null else std.Thread.getCurrentId());
             return db.writePack(read, out, collected.entries, .{ .threads = threads });
         }
     };
-    const serial = try Repack.write(&corpus, gpa, io, watched, 1);
-    try std.testing.expectEqual(@as(usize, 1), Readers.distinct());
-    const parallel = try Repack.write(&corpus, gpa, io, watched, 4);
-    if (Readers.distinct() < 2) {
-        std.debug.print("the packed objects were read on {d} thread\n", .{Readers.distinct()});
-        return error.TestUnexpectedResult;
-    }
-    try std.testing.expect(parallel.name.eql(serial.name));
+    const serial = try Repack.write(&corpus, gpa, io, Tasks.wrap(io), 1);
+    try Tasks.expect(0, 0);
     try std.testing.expect(serial.deltas > 0);
+    for ([_]Io{ io, single.io() }) |each_io| {
+        const parallel = try Repack.write(&corpus, gpa, io, Tasks.wrap(each_io), 4);
+        // Headers, packed bodies and deflation, three submissions each,
+        // plus one submission for the second search group.
+        try Tasks.expect(10, 0);
+        try std.testing.expect(parallel.name.eql(serial.name));
+        try std.testing.expectEqual(serial.deltas, parallel.deltas);
+    }
 }
 
 /// The order of three kinds of event in a pack write: a loose object
@@ -632,64 +480,6 @@ test "the tasks read the next batch while one is searched, and the pack is the s
     }
 }
 
-/// Which threads opened a tree a second time, after its header: the reads
-/// `collectLoose` gives its hints from.
-const TreeOpeners = struct {
-    var mutex: std.atomic.Mutex = .unlocked;
-    var trees: [64][41]u8 = undefined;
-    var opened: [64]u8 = @splat(0);
-    var tree_count: usize = 0;
-    var ids: [64]std.Thread.Id = undefined;
-    var count: usize = 0;
-    var waiting_for_other: ?std.Thread.Id = null;
-
-    fn reset(wait_from: ?std.Thread.Id) void {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        count = 0;
-        opened = @splat(0);
-        waiting_for_other = wait_from;
-    }
-
-    fn distinct() usize {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        return count;
-    }
-
-    /// Whether this is a tree's second open on this thread, the first such
-    /// on the thread that waits for another.
-    fn note(path: []const u8) bool {
-        const me = std.Thread.getCurrentId();
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        const at = for (trees[0..tree_count], 0..) |name, i| {
-            if (std.mem.eql(u8, &name, path)) break i;
-        } else return false;
-        opened[at] += 1;
-        if (opened[at] < 2) return false;
-        for (ids[0..count]) |id| if (id == me) return false;
-        if (count < ids.len) {
-            ids[count] = me;
-            count += 1;
-        }
-        if (waiting_for_other != me) return false;
-        waiting_for_other = null;
-        return true;
-    }
-
-    fn open(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-        if (sub_path.len == 41 and note(sub_path)) {
-            var waited: usize = 0;
-            while (waited < 5000) : (waited += 1) {
-                if (distinct() > 1) break;
-                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch break;
-            }
-        }
-        return std.testing.io.vtable.dirOpenFile(userdata, dir, sub_path, options);
-    }
-};
-
 test "collecting loose objects reads their trees on several tasks and hints as one task does" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -708,122 +498,32 @@ test "collecting loose objects reads their trees on several tasks and hints as o
                 try body.print(gpa, "100644 file{d}.txt\x00", .{f});
                 try body.appendSlice(gpa, blob.raw());
             }
-            const tree = try db.write(io, .tree, body.items);
-            var path: [41]u8 = undefined;
-            var hex_buf: [40]u8 = undefined;
-            const hex = tree.hex(&hex_buf);
-            @memcpy(path[0..2], hex[0..2]);
-            path[2] = '/';
-            @memcpy(path[3..], hex[2..40]);
-            TreeOpeners.trees[TreeOpeners.tree_count] = path;
-            TreeOpeners.tree_count += 1;
+            _ = try db.write(io, .tree, body.items);
         }
     }
 
-    var vtable = io.vtable.*;
-    vtable.dirOpenFile = TreeOpeners.open;
-    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var single: Io.Threaded = .init_single_threaded;
     var db = try odb_mod.Odb.openAt(gpa, io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
     defer db.deinit(io);
-
-    TreeOpeners.reset(null);
-    var serial = try db.collectLoose(watched, .{ .threads = 1 });
+    var serial = try db.collectLoose(Tasks.wrap(io), .{ .threads = 1 });
     defer serial.deinit();
-    try std.testing.expectEqual(@as(usize, 1), TreeOpeners.distinct());
-    TreeOpeners.reset(std.Thread.getCurrentId());
-    var parallel = try db.collectLoose(watched, .{ .threads = 4 });
-    defer parallel.deinit();
-    if (TreeOpeners.distinct() < 2) {
-        std.debug.print("the trees were read on {d} thread\n", .{TreeOpeners.distinct()});
-        return error.TestUnexpectedResult;
+    try Tasks.expect(0, 0);
+    for ([_]Io{ io, single.io() }) |each_io| {
+        var parallel = try db.collectLoose(Tasks.wrap(each_io), .{ .threads = 4 });
+        defer parallel.deinit();
+        // Headers and the six tree bodies, each on four tasks including
+        // the caller, even when the executor runs every submission inline.
+        try Tasks.expect(6, 0);
+        try std.testing.expectEqual(serial.entries.len, parallel.entries.len);
+        var hinted: usize = 0;
+        for (serial.entries, parallel.entries) |a, b| {
+            try std.testing.expect(a.oid.eql(b.oid));
+            try std.testing.expectEqualStrings(a.hint, b.hint);
+            if (a.hint.len != 0) hinted += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 48), hinted);
     }
-    try std.testing.expectEqual(serial.entries.len, parallel.entries.len);
-    var hinted: usize = 0;
-    for (serial.entries, parallel.entries) |a, b| {
-        try std.testing.expect(a.oid.eql(b.oid));
-        try std.testing.expectEqualStrings(a.hint, b.hint);
-        if (a.hint.len != 0) hinted += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 48), hinted);
 }
-
-/// Which threads made an allocation the size of a delta encoder's smallest
-/// index, which only the delta search makes, and a cancelation check that
-/// holds the calling thread, once the search has begun, until another
-/// thread has searched too: a serial search never lets it go.
-const Searchers = struct {
-    var mutex: std.atomic.Mutex = .unlocked;
-    var caller: ?std.Thread.Id = null;
-    var on_caller: bool = false;
-    var elsewhere: bool = false;
-    var held: bool = false;
-
-    fn reset(calling: ?std.Thread.Id) void {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        caller = calling;
-        on_caller = false;
-        elsewhere = false;
-        held = false;
-    }
-
-    fn searchedElsewhere() bool {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        return elsewhere;
-    }
-
-    fn note() void {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        if (std.Thread.getCurrentId() == caller) on_caller = true else elsewhere = true;
-    }
-
-    /// Whether to hold the calling thread here: once, after a search
-    /// allocation, and never inside an allocation, where it would hold the
-    /// lock the tasks allocate under.
-    fn takeHold() bool {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        if (held or caller != std.Thread.getCurrentId() or !(on_caller or elsewhere)) return false;
-        held = true;
-        return true;
-    }
-
-    fn checkCancel(userdata: ?*anyopaque) Io.Cancelable!void {
-        if (takeHold()) {
-            var waited: usize = 0;
-            while (waited < 5000 and !searchedElsewhere()) : (waited += 1) {
-                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch break;
-            }
-        }
-        return std.testing.io.vtable.checkCancel(userdata);
-    }
-
-    const Spy = struct {
-        child: std.mem.Allocator,
-        fn allocator(s: *Spy) std.mem.Allocator {
-            return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
-        }
-        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-            const s: *Spy = @ptrCast(@alignCast(ctx));
-            if (len == 4096 * @sizeOf(u32)) note();
-            return s.child.rawAlloc(len, alignment, ret);
-        }
-        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-            const s: *Spy = @ptrCast(@alignCast(ctx));
-            return s.child.rawResize(memory, alignment, new_len, ret);
-        }
-        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-            const s: *Spy = @ptrCast(@alignCast(ctx));
-            return s.child.rawRemap(memory, alignment, new_len, ret);
-        }
-        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-            const s: *Spy = @ptrCast(@alignCast(ctx));
-            s.child.rawFree(memory, alignment, ret);
-        }
-    };
-};
 
 /// Versions of enough files for several search groups.
 fn groupedCorpus(gpa: std.mem.Allocator, io: Io) !Corpus {
@@ -837,24 +537,19 @@ test "the delta search runs on several tasks, a group on each, and the pack is t
     const gpa = std.testing.allocator;
     var corpus = try groupedCorpus(gpa, io);
     defer corpus.deinit(gpa, io);
-    const serial = try corpus.write(gpa, io, .{ .threads = 1 });
+    const serial = try corpus.write(gpa, Tasks.wrap(io), .{ .threads = 1 });
+    try Tasks.expect(0, 0);
     try std.testing.expect(serial.deltas > 0);
 
-    var vtable = io.vtable.*;
-    vtable.checkCancel = Searchers.checkCancel;
-    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    var spy: Searchers.Spy = .{ .child = gpa };
-    var db = try odb_mod.Odb.openAt(spy.allocator(), io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
-    defer db.deinit(io);
-    var pack_dir = try corpus.objects.openDir(io, "pack", .{ .iterate = true });
-    defer pack_dir.close(io);
-    Searchers.reset(std.Thread.getCurrentId());
-    const parallel = try db.writePack(watched, pack_dir, corpus.entries.items, .{ .threads = 4 });
-    if (!Searchers.searchedElsewhere()) {
-        std.debug.print("the delta search ran on the calling thread alone\n", .{});
-        return error.TestUnexpectedResult;
+    var single: Io.Threaded = .init_single_threaded;
+    for ([_]Io{ io, single.io() }) |each_io| {
+        const parallel = try corpus.write(gpa, Tasks.wrap(each_io), .{ .threads = 4 });
+        // Headers, bodies, four search groups and deflation: four stages
+        // with three submissions each, in addition to the calling task.
+        try Tasks.expect(12, 0);
+        try std.testing.expect(parallel.name.eql(serial.name));
+        try std.testing.expectEqual(serial.deltas, parallel.deltas);
     }
-    try std.testing.expect(parallel.name.eql(serial.name));
 }
 
 test "a pack with several search groups is the same on 1, 2, 7 and 16 tasks, any Io, and any batch budget" {
@@ -1163,53 +858,6 @@ test "a stored delta whose bytes no longer match the pack index's CRC is refused
     }
 }
 
-/// Which threads took an item of work through the Io: a task checks for
-/// cancelation before each. The calling thread's first check waits, for a
-/// while, until another thread has made one.
-const Checkers = struct {
-    var mutex: std.atomic.Mutex = .unlocked;
-    var ids: [64]std.Thread.Id = undefined;
-    var count: usize = 0;
-    var waiting_for_other: ?std.Thread.Id = null;
-
-    fn reset(wait_from: ?std.Thread.Id) void {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        count = 0;
-        waiting_for_other = wait_from;
-    }
-
-    fn distinct() usize {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        return count;
-    }
-
-    fn note() bool {
-        const me = std.Thread.getCurrentId();
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
-        for (ids[0..count]) |id| if (id == me) return false;
-        if (count < ids.len) {
-            ids[count] = me;
-            count += 1;
-        }
-        if (waiting_for_other != me) return false;
-        waiting_for_other = null;
-        return true;
-    }
-
-    fn checkCancel(userdata: ?*anyopaque) Io.Cancelable!void {
-        if (note()) {
-            var waited: usize = 0;
-            while (waited < 5000 and distinct() < 2) : (waited += 1) {
-                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch break;
-            }
-        }
-        return std.testing.io.vtable.checkCancel(userdata);
-    }
-};
-
 test "verifying a database checks its packs' entries on several tasks" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -1220,16 +868,25 @@ test "verifying a database checks its packs' entries on several tasks" {
     var objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
     defer objects.close(io);
 
-    var vtable = io.vtable.*;
-    vtable.checkCancel = Checkers.checkCancel;
-    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    var db = try odb_mod.Odb.openAt(gpa, watched, objects, .sha1, .{ .probe_timestamp_resolution = false });
-    defer db.deinit(watched);
-    Checkers.reset(std.Thread.getCurrentId());
-    const report = try db.verify(watched);
-    try std.testing.expect(report.packed_objects > 100);
-    if (Checkers.distinct() < 2) {
-        std.debug.print("the packs were verified on {d} thread\n", .{Checkers.distinct()});
-        return error.TestUnexpectedResult;
+    var db = try odb_mod.Odb.openAt(gpa, io, objects, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    var pack_dir = try objects.openDir(io, "pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    const base = try onlyPack(gpa, io, pack_dir);
+    defer gpa.free(base);
+    var p = try @import("pack.zig").Pack.open(gpa, io, pack_dir, base, .sha1, .{});
+    defer p.deinit(io);
+    const serial = try p.verify(Tasks.wrap(io), null, 0);
+    try Tasks.expect(0, 0);
+    var single: Io.Threaded = .init_single_threaded;
+    for ([_]Io{ io, single.io() }) |each_io| {
+        const report = try db.verify(Tasks.wrap(each_io));
+        try std.testing.expect(report.packed_objects > 100);
+        try std.testing.expectEqual(@as(u32, 1), report.packs);
+        try std.testing.expectEqual(@as(u32, 0), report.loose);
+        try std.testing.expectEqual(serial.objects, report.packed_objects);
+        try std.testing.expectEqual(serial.bytes, report.bytes);
+        // One batch's entries and checksum, shared with the caller.
+        try Tasks.expect(@min(std.Thread.getCpuCount() catch 1, report.packed_objects + 1) - 1, 0);
     }
 }
