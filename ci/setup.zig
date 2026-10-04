@@ -114,6 +114,26 @@ fn old(c: Context) !void {
     if (!std.mem.startsWith(u8, version, "git version 2.30.2")) return error.WrongOldestGit;
 }
 
+fn selectLfs(c: Context, root: []const u8, git: []const u8) !void {
+    const bin = try std.fs.path.join(c.a, &.{ root, "lfs", "bin" });
+    if (builtin.os.tag == .windows) {
+        // Git searches its own exec directory before PATH. Replace its
+        // bundled LFS with the verified cached version on this hosted runner.
+        const exec_path = std.mem.trim(u8, try c.capture(&.{ git, "--exec-path" }), "\r\n");
+        const source = try std.fs.path.join(c.a, &.{ bin, "git-lfs.exe" });
+        const destination = try std.fs.path.join(c.a, &.{ exec_path, "git-lfs.exe" });
+        try std.Io.Dir.cwd().copyFile(source, std.Io.Dir.cwd(), destination, c.io, .{});
+    }
+    var env = try c.env.clone(c.a);
+    defer env.deinit();
+    const separator = if (builtin.os.tag == .windows) ";" else ":";
+    try env.put("PATH", try std.fmt.allocPrint(c.a, "{s}{s}{s}", .{ bin, separator, c.env.get("PATH") orelse "" }));
+    const selected: Context = .{ .a = c.a, .io = c.io, .env = &env };
+    const version = try selected.capture(&.{ git, "lfs", "version" });
+    if (!std.mem.startsWith(u8, version, "git-lfs/" ++ pins.lfs_version ++ " ")) return error.WrongLfsVersion;
+    std.debug.print("{s}", .{version});
+}
+
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
@@ -137,6 +157,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (!master) try lfs(c, root);
     const git = if (builtin.os.tag == .linux) try std.fs.path.join(a, &.{ root, if (master) "master" else "git", "bin", "git" }) else "git";
+    if (!master) try selectLfs(c, root, git);
     const version = try c.capture(&.{ git, "--version" });
     if (!pins.recent(version)) return error.GitTooOld;
     std.debug.print("{s}", .{version});
