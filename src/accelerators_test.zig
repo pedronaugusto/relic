@@ -503,3 +503,42 @@ test "an unchanged MIDX bitmap is retained even when bitmap configuration change
     _ = try ops.writeMidxBitmap(gpa, io, &db, &.{head}, .{}, .{ .lookup_table = true });
     try sameFile(&repo, path, expected);
 }
+
+test "a bitmap whose pack has disappeared is refused instead of answering phantom objects" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..3) |n| try linearCommit(&repo, n);
+    try repo.exec(io, &.{ "repack", "-q", "-a", "-d", "-b" });
+    const bitmap_path = try bitmapPath(&repo, "pack-");
+    defer gpa.free(bitmap_path);
+    const pack_path = try std.fmt.allocPrint(gpa, "{s}.pack", .{bitmap_path[0 .. bitmap_path.len - 7]});
+    defer gpa.free(pack_path);
+    try repo.dir.deleteFile(io, pack_path);
+    const objects = try repo.dir.openDir(io, ".git/objects", .{ .iterate = true });
+    defer objects.close(io);
+    try std.testing.expectError(error.CorruptReachabilityBitmap, bitmap_store.Store.open(gpa, io, objects, .sha1));
+}
+
+test "MIDX bitmap discovery preserves filesystem refusals for its packs" {
+    try testgit.requireGitVersion(gpa, io, 2, 43);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..3) |n| try linearCommit(&repo, n);
+    try repo.exec(io, &.{ "repack", "-q", "-a", "-d" });
+    try repo.exec(io, &.{ "multi-pack-index", "write", "--bitmap" });
+    const objects = try repo.dir.openDir(io, ".git/objects", .{ .iterate = true });
+    defer objects.close(io);
+    const Probe = struct {
+        var refusal: std.Io.Dir.AccessError = error.AccessDenied;
+        fn access(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+            return refusal;
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.dirAccess = Probe.access;
+    const refused_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    for ([_]std.Io.Dir.AccessError{ error.AccessDenied, error.InputOutput, error.Canceled }) |err| {
+        Probe.refusal = err;
+        try std.testing.expectError(err, bitmap_store.Store.open(gpa, refused_io, objects, .sha1));
+    }
+}

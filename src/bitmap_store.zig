@@ -9,7 +9,7 @@ const midx = @import("midx.zig");
 const bitmap = @import("bitmap.zig");
 const Oid = hash.Oid;
 
-pub const Error = bitmap.Error || midx.Error || pack.IndexError || Io.Dir.OpenError || Io.Dir.Iterator.Error || Io.Dir.ReadFileAllocError;
+pub const Error = bitmap.Error || midx.Error || pack.IndexError || Io.Dir.AccessError || Io.Dir.OpenError || Io.Dir.Iterator.Error || Io.Dir.ReadFileAllocError;
 
 /// The two orders a bitmap uses: selected commits are in name order, bits in pack order.
 pub const Store = struct {
@@ -55,7 +55,10 @@ pub const Store = struct {
                     const base = index.packName(@intCast(i)) orelse return error.CorruptMultiPackIndex;
                     const pack_path = try std.fmt.allocPrint(gpa, "{s}.pack", .{base});
                     defer gpa.free(pack_path);
-                    dir.access(io, pack_path, .{}) catch return error.CorruptMultiPackIndex;
+                    dir.access(io, pack_path, .{}) catch |err| switch (err) {
+                        error.FileNotFound => return error.CorruptMultiPackIndex,
+                        else => return err,
+                    };
                 }
                 return .{ .gpa = gpa, .names = names, .reverse = reverse, .bitmap = parsed };
             }
@@ -68,6 +71,12 @@ pub const Store = struct {
             defer gpa.free(index_path);
             var index = try pack.Index.open(gpa, io, dir, index_path, kind, 1 << 30);
             defer index.deinit();
+            const pack_path = try std.fmt.allocPrint(gpa, "{s}.pack", .{base});
+            defer gpa.free(pack_path);
+            dir.access(io, pack_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => return error.CorruptReachabilityBitmap,
+                else => return err,
+            };
             const bytes = (try fs.readFileAlloc(gpa, io, dir, entry.name, 1 << 30)) orelse continue;
             var parsed = try bitmap.Index.parse(gpa, kind, bytes, index.pack_checksum, index.count);
             errdefer parsed.deinit();
