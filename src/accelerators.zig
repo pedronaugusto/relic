@@ -466,9 +466,15 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
         @memset(words.*, 0);
     }
     const previous_bitmap = try db.reachabilityBitmap(io);
+    var previous_positions: ?[]u32 = null;
     if (previous_bitmap) |previous| {
+        previous_positions = try arena.alloc(u32, previous.reverse.len);
+        // Resolve names once, as Git's bitmap mapping does. Every selected
+        // bitmap can then translate a bit with one array lookup.
         for (previous.reverse, 0..) |old_name_position, old_position| {
-            const pos = positions.get(previous.names[old_name_position]) orelse continue;
+            const pos = positions.get(previous.names[old_name_position]) orelse std.math.maxInt(u32);
+            previous_positions.?[old_position] = pos;
+            if (pos == std.math.maxInt(u32)) continue;
             const kind_index: usize = switch (previous.typeAt(@intCast(old_position))) {
                 .commit => 0,
                 .tree => 1,
@@ -529,7 +535,8 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
                 var remaining = word;
                 while (remaining != 0) {
                     const old_position: u32 = @intCast(i * 64 + @ctz(remaining));
-                    const pos = positions.get(previous.nameAt(old_position)) orelse return error.BitmapNotClosed;
+                    const pos = previous_positions.?[old_position];
+                    if (pos == std.math.maxInt(u32)) return error.BitmapNotClosed;
                     setBit(words, pos);
                     remaining &= remaining - 1;
                 }
