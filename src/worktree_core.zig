@@ -1743,6 +1743,9 @@ pub fn checkout(
     // else, and everything a batch needs first, here and in order.
     var batch: WriteBatch = .{ .gpa = gpa, .workers = checkoutWorkers(options.workers) };
     defer batch.deinit();
+    // A path that fails here leaves every path before it written, as a
+    // checkout one file at a time leaves them.
+    errdefer batch.flush(io, wt, index, &outcome) catch {};
     var made_parent: []const u8 = "";
     for (paths) |path| {
         const want = wanted.get(path).?;
@@ -1943,6 +1946,8 @@ const WriteBatch = struct {
 
     const max_bytes = 16 << 20;
     const max_files = 1024;
+    /// git's `checkout.thresholdForParallelism`.
+    const parallel_threshold = 100;
 
     const Job = struct {
         path: []const u8,
@@ -1978,7 +1983,9 @@ const WriteBatch = struct {
             b.arena = arena.state;
         }
         var next: std.atomic.Value(usize) = .init(0);
-        const tasks = @min(b.workers, b.jobs.items.len);
+        // A batch of a few files is written here, as git writes fewer than
+        // its `checkout.thresholdForParallelism` of them.
+        const tasks = if (b.jobs.items.len < parallel_threshold) 1 else @min(b.workers, b.jobs.items.len);
         var group: Io.Group = .init;
         var spawned: usize = 1;
         while (spawned < tasks) : (spawned += 1) {
