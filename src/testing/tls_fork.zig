@@ -23,12 +23,7 @@ const recorded = @embedFile("../transport/tls/Client.zig.diff");
 
 test "the TLS client is std's, with the recorded diff and nothing else" {
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const std_client = std.Io.Dir.cwd().readFileAlloc(io, build_options.std_tls_client, gpa, .limited(1 << 20)) catch |err| {
-        std.debug.print("cannot read std's TLS client at {s}: {s}\n", .{ build_options.std_tls_client, @errorName(err) });
-        return err;
-    };
-    defer gpa.free(std_client);
+    const std_client = build_options.std_tls_client_source;
 
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(std_client, &digest, .{});
@@ -42,7 +37,7 @@ test "the TLS client is std's, with the recorded diff and nothing else" {
             \\Bring std's changes across as the header of src/transport/tls/Client.zig says,
             \\then run zig build tls-fork.
             \\
-        , .{ build_options.std_tls_client, &actual, expected });
+        , .{ "std/crypto/tls/Client.zig", &actual, expected });
         return error.TestUnexpectedResult;
     }
 

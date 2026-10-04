@@ -154,7 +154,11 @@ pub fn build(b: *std.Build) void {
     // The standard library's TLS client, which `src/transport/tls/Client.zig` is a copy
     // of with client authentication added: `src/testing/tls_fork.zig` holds the
     // copy to it, and fails when the compiler building this ships another.
-    build_options.addOption([]const u8, "std_tls_client", b.graph.zig_lib_directory.join(b.allocator, &.{ "std", "crypto", "tls", "Client.zig" }) catch @panic("OOM"));
+    // Hosted Zig installations use a fresh temporary path on every job. The
+    // compiler's bytes belong in the test options so that path cannot invalidate
+    // every native and cross-target test binary on each CI run.
+    const std_client = b.graph.zig_lib_directory.handle.readFileAlloc(b.graph.io, "std/crypto/tls/Client.zig", b.allocator, .limited(1 << 20)) catch @panic("cannot read std's TLS client");
+    build_options.addOption([]const u8, "std_tls_client_source", std_client);
 
     // Error return traces are off for the test binary, and the reason is
     // `zig build test --fuzz`. Building the suite with fuzzing instrumented
@@ -294,7 +298,9 @@ pub fn build(b: *std.Build) void {
     tls_test.root_module.addOptions("build_options", build_options);
     b.step("check-tls-fork", "Verify the TLS fork against std and its recorded patch").dependOn(&b.addRunArtifact(tls_test).step);
     const tls_writer = b.addExecutable(.{ .name = "tls-fork", .root_module = b.createModule(.{ .root_source_file = b.path("ci/tls_fork.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
-    tls_writer.root_module.addOptions("build_options", build_options);
+    const tls_writer_options = b.addOptions();
+    tls_writer_options.addOption([]const u8, "std_tls_client", b.graph.zig_lib_directory.join(b.allocator, &.{ "std", "crypto", "tls", "Client.zig" }) catch @panic("OOM"));
+    tls_writer.root_module.addOptions("build_options", tls_writer_options);
     b.step("tls-fork", "Re-record the TLS client's patch against std").dependOn(&b.addRunArtifact(tls_writer).step);
 }
 
