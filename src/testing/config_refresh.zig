@@ -141,6 +141,65 @@ test "a configuration the repository can no longer be opened with is refused, an
     try expectValue(&repo, "user.name", "Grace");
 }
 
+test "includeIf hasconfig:remote.*.url: holds for the URLs of every file, as it holds for git" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGit(gpa, io);
+    var home_tmp = testing.tmpDir(.{});
+    defer home_tmp.cleanup();
+    var home_buf: [4096]u8 = undefined;
+    const home = home_buf[0..try home_tmp.dir.realPath(io, &home_buf)];
+
+    try home_tmp.dir.createDirPath(io, "proj");
+    var proj = try home_tmp.dir.openDir(io, "proj", .{ .iterate = true });
+    defer proj.close(io);
+    const inited = try gitWithHome(gpa, io, proj, home, &.{ "init", "-q", "-b", "main" });
+    gpa.free(inited.?);
+
+    // The global file decides on URLs only the repository's own file and
+    // a plain include of it set; `*` stops at a slash and `**` does not.
+    try home_tmp.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = "[includeIf \"hasconfig:remote.*.url:https://example.com/**\"]\n\tpath = ~/.gitconfig-work\n" ++
+        "[includeIf \"hasconfig:remote.*.url:https://example.com/*\"]\n\tpath = ~/.gitconfig-feature\n" ++
+        "[includeIf \"hasconfig:remote.*.url:https://elsewhere.org/**\"]\n\tpath = ~/.gitconfig-never\n" ++
+        "[includeIf \"hasconfig:remote.*.url:ssh://host/*\"]\n\tpath = ~/.gitconfig-main\n" });
+    try home_tmp.dir.writeFile(io, .{ .sub_path = ".gitconfig-work", .data = "[test]\n\twork = yes\n" });
+    try home_tmp.dir.writeFile(io, .{ .sub_path = ".gitconfig-feature", .data = "[test]\n\tfeature = yes\n" });
+    try home_tmp.dir.writeFile(io, .{ .sub_path = ".gitconfig-never", .data = "[test]\n\tnever = yes\n" });
+    try home_tmp.dir.writeFile(io, .{ .sub_path = ".gitconfig-main", .data = "[test]\n\tmain = yes\n" });
+    try proj.writeFile(io, .{ .sub_path = ".git/remotes.config", .data = "[Remote \"mirror\"]\n\tURL = \"ssh://host/x\"\n" });
+    for ([_][]const []const u8{
+        &.{ "config", "remote.origin.url", "https://example.com/org/repo.git" },
+        &.{ "config", "include.path", "remotes.config" },
+    }) |args| {
+        const out = try gitWithHome(gpa, io, proj, home, args);
+        gpa.free(out.?);
+    }
+
+    var repo = try Repository.open(gpa, io, proj, .{
+        .discover = false,
+        .global_config = .{ .dir = home_tmp.dir, .sub_path = ".gitconfig" },
+        .home = home,
+    });
+    defer repo.deinit(io);
+    try expectValue(&repo, "test.work", "yes");
+    try expectValue(&repo, "test.feature", null);
+    try expectValue(&repo, "test.main", "yes");
+    try expectIncludesAgree(gpa, io, proj, home, &repo);
+
+    // Another URL, and the conditions follow it at the refresh.
+    const changed = try gitWithHome(gpa, io, proj, home, &.{ "config", "remote.origin.url", "https://example.com/top" });
+    gpa.free(changed.?);
+    try testing.expect(try repo.refreshConfig(io, null));
+    try expectValue(&repo, "test.feature", "yes");
+    try expectIncludesAgree(gpa, io, proj, home, &repo);
+
+    // A file an includeIf brings in may not set a URL itself: git refuses
+    // the whole read, and so does this.
+    try home_tmp.dir.writeFile(io, .{ .sub_path = ".gitconfig-main", .data = "[remote \"sneaky\"]\n\turl = https://elsewhere.org/x\n" });
+    try testing.expect(try gitWithHome(gpa, io, proj, home, &.{ "config", "--get", "test.work" }) == null);
+    try testing.expectError(error.RemoteUrlInConditionalInclude, repo.refreshConfig(io, null));
+}
+
 /// `git` run in `cwd` with `home` as its `HOME` and no system file, so the
 /// `~/.gitconfig` it reads is the test's own. Its output, trimmed, or
 /// `null` when it exits non-zero, which is what `git config --get` does

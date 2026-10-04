@@ -249,7 +249,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. |
 | `refs.reflog` | `append`, `read`, `Log.at` for `HEAD@{n}`, `Policy` for `core.logAllRefUpdates`. |
 | `refs.reftable`, `refs.reftablestack` | The reftable ref backend, read and written. |
-| `config` | `Config.open`, `get`, `all`, `getBool`, `getInt`, `getPath`, `subsections`, `origin`, `set`, `unset`, `write`. Lossless: setting a value rewrites one line. |
+| `config` | `Config.open`, `get`, `all`, `getBool`, `getInt`, `getPath`, `subsections`, `origin`, `set`, `unset`, `write`. Lossless: setting a value rewrites one line. `include.path` and `includeIf` with `gitdir:`, `gitdir/i:`, `onbranch:` and `hasconfig:remote.*.url:`. |
 | `config.userconfig` | Where the person's git reads its configuration from. |
 | `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
 | `index.sparseindex` | The sparse index. |
@@ -687,7 +687,6 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 - **No `@{date}`** in a revision; refused by name.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
 - **No `git://`, dumb HTTP or remote helpers.** Refused by name.
-- **No `hasconfig:` includes.**
 - **No pathspec in a bisection, no `--group=format:` in a shortlog, no editor for a note, no `sparse:oid=` filter in a bundle.** Each refused by name; a shortlog by trailer is refused too where `trailer.*` is configured.
 - **`apply` with the index compares content where a stat differs.** git says "does not match index" until the index is refreshed; this reads the file and agrees when its content does.
 - **A binary hunk in a written patch is this package's deflate.** It decodes to the same file; the compressed bytes are not zlib's. A cover letter's shortlog under a mailmap is refused by name.

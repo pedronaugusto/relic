@@ -2717,7 +2717,8 @@ pub const SparseOutcome = struct {
     /// Entries that came back into it.
     restored: u32 = 0,
     /// Entries left alone because the file on the disk does not match the
-    /// index, so removing it would lose work.
+    /// index's stat, or its content where that stat is racy, so removing it
+    /// might lose work.
     kept_dirty: u32 = 0,
     /// Entries that came back where something was already on the disk at
     /// their path. What is there is not overwritten; the entry comes back
@@ -2729,8 +2730,9 @@ pub const SparseOutcome = struct {
 /// include.
 ///
 /// A path that leaves gets `skip-worktree` and its file is removed; a path
-/// that returns loses the flag and its file is written. A file whose
-/// content differs from the index is left where it is and counted, because
+/// that returns loses the flag and its file is written. A file that does
+/// not match the index -- by its stat, or by its content where the stat
+/// matches but is racy -- is left where it is and counted, because
 /// removing it would throw away work nobody asked to throw away; and a
 /// returning path where something is already on the disk is not written
 /// over, for the same reason, which is git's rule for both.
@@ -2770,9 +2772,14 @@ pub fn applySparse(
         const included = patterns.includes(entry.path, false);
         if (!included and !entry.skip_worktree) {
             if (try fs.statAt(io, wt, entry.path)) |found| {
-                const must_check_content = index.isRacy(entry.*) or
-                    !entry.stat.matches(found.stat, options.rules.check_stat, options.rules.timestamp_resolution);
-                if (must_check_content) {
+                // git's `verify_uptodate`: a stat that does not match is a
+                // change, without reading the file, and only a racy entry
+                // whose stat does match has its content compared.
+                if (!entry.stat.matches(found.stat, options.rules.check_stat, options.rules.timestamp_resolution)) {
+                    outcome.kept_dirty += 1;
+                    continue;
+                }
+                if (index.isRacy(entry.*)) {
                     _ = scratch.reset(.retain_capacity);
                     const a = scratch.allocator();
                     const raw = if (found.kind == .sym_link) blk: {

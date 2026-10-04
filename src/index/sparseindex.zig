@@ -105,6 +105,52 @@ pub fn expandPresent(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, db: *Odb
     return expandSelected(gpa, io, index, db, null, &present);
 }
 
+/// git's `clear_skip_worktree_from_present_files`, which runs on every
+/// index read in a sparse worktree: an entry marked `skip-worktree` whose
+/// path is on the disk anyway -- a checkout with
+/// `--ignore-skip-worktree-bits` brought it back -- loses the mark, so the
+/// update that follows takes the file out again if it is unchanged. A
+/// sparse directory that is on the disk expands the index and the pass
+/// runs over every file. Returns how many entries lost the mark.
+pub fn clearSkipFromPresent(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, db: *Odb) (Error || fs.StatError)!u32 {
+    var cleared: u32 = 0;
+    if (try clearSkipPass(io, wt, index, &cleared)) {
+        try expand(gpa, io, index, db, null);
+        _ = try clearSkipPass(io, wt, index, &cleared);
+    }
+    return cleared;
+}
+
+/// One pass of `clearSkipFromPresent`. A directory found missing is
+/// remembered, and the paths under it are not looked up one by one, as
+/// git's `path_found` does. Returns whether a sparse directory was found on
+/// the disk, which stops the pass.
+fn clearSkipPass(io: Io, wt: Io.Dir, index: *Index, cleared: *u32) fs.StatError!bool {
+    var missing: []const u8 = "";
+    for (index.entries.items) |*entry| {
+        if (!entry.skip_worktree) continue;
+        if (missing.len > 0 and std.mem.startsWith(u8, entry.path, missing) and
+            entry.path.len > missing.len and entry.path[missing.len] == '/') continue;
+        const sparse_dir = entry.isSparseDirectory();
+        const path = if (sparse_dir) entry.path[0 .. entry.path.len - 1] else entry.path;
+        if (try fs.statAt(io, wt, path)) |_| {
+            if (sparse_dir) return true;
+            entry.skip_worktree = false;
+            cleared.* += 1;
+            continue;
+        }
+        missing = path;
+        var end: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {
+            if (try fs.statAt(io, wt, path[0..slash]) == null) {
+                missing = path[0..slash];
+                break;
+            }
+        }
+    }
+    return false;
+}
+
 /// Expand the sparse directories named in `only`, or every one the cone
 /// reaches into when `only` is `null`.
 fn expandSelected(

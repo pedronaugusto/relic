@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `includeIf "hasconfig:remote.*.url:<glob>"` holds as git decides it: against every `remote.<name>.url` the whole read sets, at every level and through plain includes, wherever the condition stands, matched as a path glob. A file an `includeIf` brings in that sets a remote URL itself is `error.RemoteUrlInConditionalInclude`, which git refuses too. The condition never held before.
+
+- `sparsecheckout.reapply` (and `set`, `add`, `init`) takes out an excluded file a checkout brought back with `--ignore-skip-worktree-bits`, as git does: an entry marked `skip-worktree` whose file is on the disk loses the mark when the index is read (git's `clear_skip_worktree_from_present_files`, off under `sparse.expectFilesOutsideOfPatterns`), so the update removes it if it is unchanged; `Outcome.unmarked` counts them. `applySparse` keeps a file whose stat does not match the index, as git's `verify_uptodate` does, and reads the content only of a racy entry whose stat matches; it read the content of every file whose stat differed and removed it when that matched.
+
 - Share the Zig CI gate through preflight, with requested fast runs and full merge checks.
 
 - A merge carried into the working tree, as merge, cherry-pick, revert and rebase make one, changes the index where the merge changed it and nowhere else: what changed is the merged tree against ours by a walk past the subtrees they share, the index is checked against ours through its cache tree where that is valid, and only the `.gitattributes` above a written path are read. It flattened ours and the merged tree, twice, and built the index again from the whole merged tree for every commit. `Index.addMany` merges the entries it adds into the sorted list rather than sorting the whole list again.

@@ -81,6 +81,11 @@ pub const Settings = struct {
 pub const Outcome = struct {
     /// The working-tree update, or zeros when there was none to make.
     update: worktree.SparseOutcome = .{},
+    /// Entries marked `skip-worktree` whose paths were on the disk anyway,
+    /// which lose the mark before the update as they do at every index
+    /// read git makes in a sparse worktree; the update then takes out the
+    /// ones the patterns exclude and leaves the rest.
+    unmarked: u32 = 0,
     /// Whether the index was written, which it is not in a repository
     /// whose index has never been written: there is nothing checked out to
     /// make sparse.
@@ -487,6 +492,10 @@ const Op = struct {
 
         var index = try repo.openIndex(io);
         defer index.deinit();
+        var unmarked: u32 = 0;
+        if (op.state.enabled and !try op.files.getBool(repo, "sparse.expectfilesoutsideofpatterns")) {
+            unmarked = try sparseindex.clearSkipFromPresent(repo.gpa, io, repo.work_dir.?, &index, &repo.odb);
+        }
 
         var rules = try repo.worktreeRules();
         var attrs = try repo.loadAttrs(io);
@@ -507,7 +516,7 @@ const Op = struct {
             else => |e| return e,
         };
         try lock.commit(io);
-        return .{ .update = update, .index_written = true };
+        return .{ .update = update, .index_written = true, .unmarked = unmarked };
     }
 };
 
@@ -880,6 +889,46 @@ test "set, add, reapply and disable leave what git's own commands leave" {
     try twin.expectSame(io);
 }
 
+test "reapply takes out an excluded file a checkout brought back, as git does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const Case = struct { cone: bool, sparse_index: bool };
+    for ([_]Case{
+        .{ .cone = true, .sparse_index = false },
+        .{ .cone = false, .sparse_index = false },
+        .{ .cone = true, .sparse_index = true },
+    }) |case| {
+        var twin = try Twin.init(gpa, io, &.{}, setupTree);
+        defer twin.deinit();
+        const mode: []const u8 = if (case.cone) "--cone" else "--no-cone";
+        const index_flag: []const u8 = if (case.sparse_index) "--sparse-index" else "--no-sparse-index";
+        const patterns: []const []const u8 = if (case.cone) &.{"A"} else &.{ "/A/", "/E/", "!/E/e.txt" };
+        for ([_]*testgit.Repo{ &twin.theirs, &twin.ours }) |side| {
+            var argv: std.ArrayList([]const u8) = .empty;
+            defer argv.deinit(gpa);
+            try argv.appendSlice(gpa, &.{ "sparse-checkout", "set", mode, index_flag, "--" });
+            try argv.appendSlice(gpa, patterns);
+            try side.exec(io, argv.items);
+            // A sparse index holds `D/` and `E/` rather than their files,
+            // which a checkout's pathspec does not reach, so the files are
+            // put back as they were committed.
+            if (case.sparse_index) {
+                for ([_][]const u8{ "D/d.txt", "E/e.txt" }) |path| try side.writeFile(io, path, path);
+            } else {
+                try side.exec(io, &.{ "checkout", "--ignore-skip-worktree-bits", "HEAD", "--", "D/d.txt", "E/e.txt" });
+            }
+        }
+        try twin.git(io, &.{ "reapply", mode, index_flag });
+        {
+            var repo = try twin.open(io);
+            defer repo.deinit(io);
+            const out = try reapply(&repo, io, .{ .cone = case.cone, .sparse_index = case.sparse_index });
+            try std.testing.expectEqual(@as(u32, 2), out.unmarked);
+        }
+        try twin.expectSame(io);
+    }
+}
+
 test "a list is git's list, in both modes" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -943,7 +992,8 @@ test "a dirty file stays, and a file in the way is not written over" {
         var repo = try twin.open(io);
         defer repo.deinit(io);
         const out = try add(&repo, io, &.{"E"}, .{});
-        try std.testing.expectEqual(@as(u32, 1), out.update.already_present);
+        try std.testing.expectEqual(@as(u32, 1), out.unmarked);
+        try std.testing.expectEqual(@as(u32, 0), out.update.already_present);
     }
     try twin.expectSame(io);
 }

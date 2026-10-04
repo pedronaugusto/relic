@@ -31,10 +31,21 @@ pub const ParseError = error{
     MalformedValue,
     /// `include.path` or an `includeIf` nested deeper than the cap.
     IncludeTooDeep,
+    /// A file an `includeIf` brings in sets `remote.<name>.url` while a
+    /// `hasconfig:remote.*.url:` condition is being decided, which git
+    /// refuses: the URLs would decide the very include that sets them.
+    RemoteUrlInConditionalInclude,
     /// A value given as `Sources.command` under a name git refuses; see
     /// `checkKey`.
     InvalidKey,
 } || Allocator.Error || Io.Dir.ReadFileAllocError;
+
+/// Whether an entry is `remote.<name>.url` with a value: what git's
+/// `hasconfig:remote.*.url:` gathers.
+fn isRemoteUrl(entry: Entry) bool {
+    return entry.has_subsection and entry.value != null and
+        std.ascii.eqlIgnoreCase(entry.section, "remote") and std.ascii.eqlIgnoreCase(entry.name, "url");
+}
 
 /// Errors from asking for a value in a particular shape.
 pub const ValueError = error{
@@ -139,6 +150,9 @@ pub const SourceFile = struct {
     lines: std.ArrayList(Line),
     /// Whether this file is one `set` may write to.
     writable: bool,
+    /// Whether an `includeIf`, directly or through further includes,
+    /// brought this file in.
+    conditional: bool = false,
     /// Section and subsection names that are not a slice of a line as
     /// written: a lower-cased section, a subsection with its escapes undone.
     names: std.heap.ArenaAllocator.State = .{},
@@ -281,6 +295,23 @@ pub const Config = struct {
     /// Every file a read tried, includes among them and the ones that were
     /// not there, with the bytes each held.
     read: std.ArrayList(Read) = .empty,
+    /// While `open` or `openFile` reads: what it was asked to read, so a
+    /// `hasconfig:` condition can read the same files for their URLs.
+    plan: ?Plan = null,
+    /// The remote URLs every file of the read sets, gathered the first
+    /// time a `hasconfig:` condition is decided and dropped when the read
+    /// ends. Owned.
+    remote_urls: ?[][]u8 = null,
+    /// Whether this is the read that gathers `remote_urls`: there every
+    /// `hasconfig:` condition holds, and a file an `includeIf` brings in
+    /// may not set a remote URL.
+    gathering_urls: bool = false,
+
+    /// What one read covers.
+    const Plan = union(enum) {
+        sources: Sources,
+        file: struct { path: Sources.Path, level: Level },
+    };
 
     /// One file a read tried.
     pub const Read = struct {
@@ -304,14 +335,36 @@ pub const Config = struct {
         errdefer config.deinit();
         try config.keepContext(context);
         try config.keepSources(sources);
-
-        if (sources.system) |p| try config.addFile(io, p, .system, false, 0);
-        if (sources.xdg) |p| try config.addFile(io, p, .global, false, 0);
-        if (sources.global) |p| try config.addFile(io, p, .global, false, 0);
-        if (sources.local) |p| try config.addFile(io, p, .local, true, 0);
-        if (sources.worktree) |p| try config.addFile(io, p, .worktree, true, 0);
-        if (sources.command.len != 0 or sources.pairs.len != 0) try config.addCommandValues(sources.command, sources.pairs);
+        try config.readPlan(io, .{ .sources = sources });
         return config;
+    }
+
+    /// Read what `plan` names, with `plan` and the URLs a `hasconfig:`
+    /// condition gathers kept only for the read.
+    fn readPlan(config: *Config, io: Io, plan: Plan) ParseError!void {
+        config.plan = plan;
+        defer {
+            config.plan = null;
+            config.freeRemoteUrls();
+        }
+        switch (plan) {
+            .sources => |sources| {
+                if (sources.system) |p| try config.addFile(io, p, .system, false, 0, false);
+                if (sources.xdg) |p| try config.addFile(io, p, .global, false, 0, false);
+                if (sources.global) |p| try config.addFile(io, p, .global, false, 0, false);
+                if (sources.local) |p| try config.addFile(io, p, .local, true, 0, false);
+                if (sources.worktree) |p| try config.addFile(io, p, .worktree, true, 0, false);
+                if (sources.command.len != 0 or sources.pairs.len != 0) try config.addCommandValues(sources.command, sources.pairs);
+            },
+            .file => |f| try config.addFile(io, f.path, f.level, true, 0, false),
+        }
+    }
+
+    fn freeRemoteUrls(config: *Config) void {
+        const urls = config.remote_urls orelse return;
+        for (urls) |url| config.gpa.free(url);
+        config.gpa.free(urls);
+        config.remote_urls = null;
     }
 
     /// Read one file as the whole configuration. What a tool inspecting a
@@ -320,7 +373,7 @@ pub const Config = struct {
         var config: Config = .{ .gpa = gpa };
         errdefer config.deinit();
         try config.keepContext(context);
-        try config.addFile(io, path, level, true, 0);
+        try config.readPlan(io, .{ .file = .{ .path = path, .level = level } });
         return config;
     }
 
@@ -359,6 +412,7 @@ pub const Config = struct {
         }
         config.gpa.free(config.sources.pairs);
         config.gpa.free(config.context_storage);
+        config.freeRemoteUrls();
         config.* = undefined;
     }
 
@@ -451,7 +505,7 @@ pub const Config = struct {
         return false;
     }
 
-    fn addFile(config: *Config, io: Io, path: Sources.Path, level: Level, writable: bool, depth: u8) ParseError!void {
+    fn addFile(config: *Config, io: Io, path: Sources.Path, level: Level, writable: bool, depth: u8, conditional: bool) ParseError!void {
         if (depth > max_include_depth) return error.IncludeTooDeep;
         const read = try fs.readFileAlloc(config.gpa, io, path.dir, path.sub_path, 1 << 24);
         try config.remember(path, read);
@@ -463,6 +517,12 @@ pub const Config = struct {
         // `addParsedFile` takes both, and its own errdefer frees them.
         const first_entry = config.entries.items.len;
         try config.addParsedFile(owned_path, text, level, writable);
+        config.files.items[config.files.items.len - 1].conditional = conditional;
+        if (conditional and config.gathering_urls) {
+            for (config.entries.items[first_entry..]) |entry| {
+                if (isRemoteUrl(entry)) return error.RemoteUrlInConditionalInclude;
+            }
+        }
         try config.followIncludes(io, path.dir, level, first_entry, depth);
     }
 
@@ -562,12 +622,14 @@ pub const Config = struct {
     fn followIncludes(config: *Config, io: Io, dir: Io.Dir, level: Level, from: usize, depth: u8) ParseError!void {
         if (from == config.entries.items.len) return;
         const source_file_index = config.entries.items[from].file_index;
+        const source_conditional = config.files.items[source_file_index].conditional;
         var i = from;
         while (i < config.entries.items.len) : (i += 1) {
             const entry = config.entries.items[i];
             if (entry.file_index != source_file_index) break;
             const value = entry.value orelse continue;
             var include_path: ?[]const u8 = null;
+            var conditional = source_conditional;
             if (std.ascii.eqlIgnoreCase(entry.section, "include") and
                 std.ascii.eqlIgnoreCase(entry.name, "path"))
             {
@@ -575,15 +637,16 @@ pub const Config = struct {
             } else if (std.ascii.eqlIgnoreCase(entry.section, "includeif") and
                 std.ascii.eqlIgnoreCase(entry.name, "path"))
             {
-                if (try config.conditionHolds(entry.subsection)) include_path = value;
+                if (try config.includeHolds(io, entry.subsection)) include_path = value;
+                conditional = true;
             }
             const path = include_path orelse continue;
 
             var buf: [4096]u8 = undefined;
             const including_path = config.files.items[entry.file_index].path;
             const resolved = config.resolveIncludePath(path, including_path, &buf) orelse continue;
-            config.addFile(io, .{ .dir = dir, .sub_path = resolved }, level, false, depth + 1) catch |err| switch (err) {
-                error.IncludeTooDeep => return err,
+            config.addFile(io, .{ .dir = dir, .sub_path = resolved }, level, false, depth + 1, conditional) catch |err| switch (err) {
+                error.IncludeTooDeep, error.RemoteUrlInConditionalInclude => return err,
                 // git treats an unreadable or malformed include as absent.
                 else => continue,
             };
@@ -608,6 +671,10 @@ pub const Config = struct {
     /// with git's own rules: a pattern ending `/` gains `**`, a pattern that
     /// is neither absolute nor `~/` nor `./` gains a leading `**/`.
     /// `onbranch:` matches the branch `HEAD` is on.
+    /// `hasconfig:remote.*.url:` matches every `remote.<name>.url` this
+    /// configuration sets, outside the files an `includeIf` brought in, as
+    /// a path glob; `open` decides it against the URLs of every file it
+    /// reads, as git does, wherever in the read the condition stands.
     pub fn conditionHolds(config: *const Config, condition: []const u8) ParseError!bool {
         const wildmatch = @import("worktree/wildmatch.zig");
         if (std.mem.startsWith(u8, condition, "gitdir:") or std.mem.startsWith(u8, condition, "gitdir/i:")) {
@@ -637,10 +704,71 @@ pub const Config = struct {
                 pattern_raw;
             return wildmatch.match(pattern, branch, .{ .pathname = true }) catch false;
         }
-        // `hasconfig:` and anything else this release does not implement
-        // never holds, which is the safe direction: a condition that is
-        // wrongly true reads settings that do not apply.
+        if (std.mem.startsWith(u8, condition, hasconfig_url)) {
+            const pattern = condition[hasconfig_url.len..];
+            for (config.entries.items) |entry| {
+                if (!isRemoteUrl(entry) or config.files.items[entry.file_index].conditional) continue;
+                const url = decodeValue(config.gpa, entry.value.?) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.MalformedValue => continue,
+                };
+                defer config.gpa.free(url);
+                if (urlMatches(pattern, url)) return true;
+            }
+            return false;
+        }
+        // Any other condition never holds, which is git's rule for one it
+        // does not know.
         return false;
+    }
+
+    const hasconfig_url = "hasconfig:remote.*.url:";
+
+    /// `conditionHolds` during a read, where `hasconfig:` is decided
+    /// against the URLs every file of the read sets: git's
+    /// `include_by_remote_url`. The first such condition reads the same
+    /// files again to gather them, with every `hasconfig:` holding.
+    fn includeHolds(config: *Config, io: Io, condition: []const u8) ParseError!bool {
+        if (!std.mem.startsWith(u8, condition, hasconfig_url)) return config.conditionHolds(condition);
+        if (config.gathering_urls) return true;
+        const plan = config.plan orelse return config.conditionHolds(condition);
+        if (config.remote_urls == null) config.remote_urls = try config.gatherRemoteUrls(io, plan);
+        const pattern = condition[hasconfig_url.len..];
+        for (config.remote_urls.?) |url| {
+            if (urlMatches(pattern, url)) return true;
+        }
+        return false;
+    }
+
+    fn gatherRemoteUrls(config: *const Config, io: Io, plan: Plan) ParseError![][]u8 {
+        var gathering: Config = .{ .gpa = config.gpa, .context = config.context, .gathering_urls = true };
+        defer {
+            gathering.context = .{};
+            gathering.deinit();
+        }
+        try gathering.readPlan(io, plan);
+        var urls: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (urls.items) |url| config.gpa.free(url);
+            urls.deinit(config.gpa);
+        }
+        for (gathering.entries.items) |entry| {
+            if (!isRemoteUrl(entry) or gathering.files.items[entry.file_index].conditional) continue;
+            const url = decodeValue(config.gpa, entry.value.?) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.MalformedValue => return error.MalformedValue,
+            };
+            urls.append(config.gpa, url) catch |err| {
+                config.gpa.free(url);
+                return err;
+            };
+        }
+        return urls.toOwnedSlice(config.gpa);
+    }
+
+    fn urlMatches(pattern: []const u8, url: []const u8) bool {
+        const wildmatch = @import("worktree/wildmatch.zig");
+        return wildmatch.match(pattern, url, .{ .pathname = true }) catch false;
     }
 
     fn expandCondition(config: *const Config, pattern: []const u8, buf: []u8) ?[]const u8 {
