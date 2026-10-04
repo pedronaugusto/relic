@@ -17,6 +17,7 @@ pub const ignore = @import("worktree/ignore.zig");
 pub const attributes = @import("worktree/attributes.zig");
 
 pub const convert = @import("worktree/convert.zig");
+pub const encoding = @import("worktree/encoding.zig");
 pub const filter = @import("worktree/filter.zig");
 pub const dirscan = @import("worktree/dirscan.zig");
 pub const safepath = @import("worktree/safepath.zig");

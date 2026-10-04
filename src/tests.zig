@@ -71,6 +71,7 @@ test {
         _ = @import("worktree/filter_test.zig");
         _ = @import("lfs_test.zig");
         _ = @import("testing/eol.zig");
+        _ = @import("testing/encoding.zig");
         _ = @import("testing/remote.zig");
         _ = @import("transport_test.zig");
         _ = @import("commit/stash_test.zig");

@@ -261,7 +261,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `worktree.attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
 | `worktree.wildmatch` | `match` — git's own glob, which is not `fnmatch`. |
 | `wildmatch.match(pattern, text, flags)` | Match a glob with git's `pathname` and `case_fold` flags. |
-| `worktree.filter`, `worktree.convert` | Clean and smudge filters, the long-running process protocol, `ident`, line endings. |
+| `worktree.filter`, `worktree.convert`, `worktree.encoding` | Clean and smudge filters, the long-running process protocol, `ident`, line endings, `working-tree-encoding`. |
 | `worktree.dirscan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
 | `worktree.safepath` | What a path from a tree is allowed to be, and what a ref may be named. |
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`. |
@@ -347,7 +347,9 @@ NUL, or more than one non-printable byte per 128 printable ones decides
 whether a file is *normalised on check-in*. The second is the one conversion
 asks. A `filter` runs the program its configuration names, through the
 caller's `Programs`; without them, a required filter is a named refusal
-carrying its name. `working-tree-encoding` is refused the same way.
+carrying its name. `working-tree-encoding` converts UTF-16 and UTF-32 files
+to UTF-8 on the way in and back on the way out, with git's byte order mark
+rules; another character set is refused by name.
 
 **Every replacement goes through the file git would lock.**
 `O_CREAT|O_EXCL` on `<file>.lock`, write, make durable, rename. No advisory
@@ -681,7 +683,7 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 ## Scope
 
 - **No pseudo-merge bitmap extension or incremental MIDX chains.** `UnsupportedBitmapOptions` and `ChainUnsupported` name these; ordinary pack and MIDX bitmaps are read and written. An unusable optional accelerator falls back to the object walk.
-- **No `working-tree-encoding`.** A character-set conversion; refused by name.
+- **`working-tree-encoding` for UTF-16 and UTF-32 only.** Any other character set is refused by name.
 - **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name.
 - **LFS without git-lfs's extras.** tus and custom transfer adapters are refused by name.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
@@ -799,7 +801,7 @@ that lock, and this refusing it by name and leaving it alone. A stale lock is
 reported with its process id and never removed. A `gc` packs the objects under
 a reader's feet and every one of them still reads back.
 
-Seventy-eight fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Seventy-nine fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
 between them they cover every format relic reads: the object formats, packs
 and their indexes, the index file, refs, reftable and reflogs, config and

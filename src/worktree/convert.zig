@@ -3,8 +3,9 @@
 //!
 //! On the way in: the clean filter, then line endings, then `ident`. On the
 //! way out: `ident`, then line endings, then the smudge filter.
-//! `working-tree-encoding` would sit between the filter and the line endings
-//! both ways, and is a named refusal. The order is the one git's
+//! `working-tree-encoding` sits between the filter and the line endings both
+//! ways, for UTF-16 and UTF-32; any other character set is a named refusal.
+//! The order is the one git's
 //! `convert.c` runs, which is not quite the one its documentation gives for
 //! the way in; the suite holds it to what git does. It matters: a lone
 //! carriage return inside a `$Id: … $` makes `text=auto` call a file binary
@@ -29,13 +30,24 @@ const filter = @import("filter.zig");
 const lfs = @import("../lfs.zig");
 const index_mod = @import("../index.zig");
 const odb_mod = @import("../odb.zig");
+const encoding = @import("encoding.zig");
 
 /// Errors from converting.
 pub const Error = error{
-    /// `working-tree-encoding`, or a required filter with no `Programs` to
-    /// run it. `filter.Report.failure` names the path and the driver for
-    /// the second.
+    /// `working-tree-encoding` for a character set other than UTF-8,
+    /// UTF-16 or UTF-32, or a required filter with no `Programs` to run
+    /// it. `filter.Report.failure` names the path and the driver for the
+    /// second.
     UnsupportedAttribute,
+    /// `working-tree-encoding` set or unset with no value, which git
+    /// refuses: it names no encoding.
+    InvalidWorkingTreeEncoding,
+    /// A file to be stored is not text in its `working-tree-encoding`: a
+    /// UTF-16 or UTF-32 file without a byte order mark, a `UTF-16LE` or
+    /// similar one with one, or bytes that do not decode. git refuses to
+    /// store it; where nothing is stored, as for a status, the bytes are
+    /// taken as they are, as git takes them.
+    WorkingTreeEncodingFailed,
     /// A required filter failed, or a filter delayed a file and never handed
     /// it over. `filter.Report.failure` says which and why.
     FilterFailed,
@@ -219,7 +231,7 @@ pub const Session = struct {
         const resolved = try s.resolve(path, applied);
         if (resolved == .native_lfs) {
             const pointer_bytes = try s.lfsCleanFile(a, path, storing);
-            return s.afterFilter(a, path, pointer_bytes, applied);
+            return s.afterFilter(a, path, pointer_bytes, applied, storing);
         }
         const bytes = try fs.readFileSized(a, s.io, s.options.wt, path, size, 1 << 31);
         return s.convertToGit(a, path, bytes, applied, resolved, storing);
@@ -256,10 +268,19 @@ pub const Session = struct {
                 if (try s.clean(a, path, driver, bytes)) |out| cleaned = out;
             },
         }
-        return s.afterFilter(a, path, cleaned, applied);
+        return s.afterFilter(a, path, cleaned, applied, storing);
     }
 
-    fn afterFilter(s: *Session, a: Allocator, path: []const u8, bytes: []const u8, applied: attributes.Attributes) Error!ToGit {
+    fn afterFilter(s: *Session, a: Allocator, path: []const u8, filtered: []const u8, applied: attributes.Attributes, storing: Storing) Error!ToGit {
+        var bytes = filtered;
+        if (try encodingOf(applied)) |e| {
+            bytes = encoding.toUtf8(a, e, filtered) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // git's `encode_to_git` dies only where it writes the
+                // object, and otherwise goes on with the bytes as they are.
+                else => if (storing == .store) return error.WorkingTreeEncodingFailed else filtered,
+            };
+        }
         var stored: attributes.Stored = .{};
         if (attributes.crlfAction(applied, s.options.core).isAuto() and std.mem.indexOf(u8, bytes, "\r\n") != null) {
             stored.has_crlf = try s.storedHasCrlf(path);
@@ -296,7 +317,7 @@ pub const Session = struct {
         const resolved = try s.resolve(path, applied);
         const ident = if (identOn(applied)) try identToWorktree(a, s.options.kind, blob) else null;
         const crlf = try attributes.toWorktree(a, ident orelse blob, applied, s.options.core);
-        const bytes = crlf.bytes;
+        const bytes = try encodeForWorktree(a, crlf.bytes, applied);
         switch (resolved) {
             .none => return .{ .bytes = bytes },
             .native_lfs => return s.lfsSmudge(a, path, bytes, meta.can_delay),
@@ -320,6 +341,8 @@ pub const Session = struct {
         if (identOn(applied)) {
             if (try identToWorktree(a, s.options.kind, out)) |expanded| out = expanded;
         }
+        if (resolved == .program) out = (try attributes.toWorktree(a, out, applied, s.options.core)).bytes;
+        if (resolved != .native_lfs) out = try encodeForWorktree(a, out, applied);
         switch (resolved) {
             .none => {},
             .native_lfs => {
@@ -330,7 +353,6 @@ pub const Session = struct {
                 } else |_| {}
             },
             .program => |driver| {
-                out = (try attributes.toWorktree(a, out, applied, s.options.core)).bytes;
                 switch (try s.smudge(a, path, driver, out, .{})) {
                     .bytes => |smudged| out = smudged,
                     .file => |file| {
@@ -349,6 +371,30 @@ pub const Session = struct {
         s.options.index = null;
         defer s.options.index = index;
         return (try s.convertToGit(a, path, out, applied, resolved, .hash_only)).bytes;
+    }
+
+    /// The encoding `working-tree-encoding` names, or `null` for none or
+    /// UTF-8: git's `git_path_check_encoding`. A name this does not convert
+    /// was refused before.
+    fn encodingOf(applied: attributes.Attributes) Error!?encoding.Encoding {
+        const state = applied.get("working-tree-encoding") orelse return null;
+        const name = switch (state) {
+            .unspecified => return null,
+            .set, .unset => return error.InvalidWorkingTreeEncoding,
+            .value => |v| v,
+        };
+        if (name.len == 0 or encoding.isUtf8(name)) return null;
+        return encoding.Encoding.fromName(name) orelse error.UnsupportedAttribute;
+    }
+
+    /// git's `encode_to_worktree`: UTF-8 out in the file's encoding, and
+    /// left as it is where it is not UTF-8.
+    fn encodeForWorktree(a: Allocator, bytes: []const u8, applied: attributes.Attributes) Error![]const u8 {
+        const e = (try encodingOf(applied)) orelse return bytes;
+        return encoding.fromUtf8(a, e, bytes) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => bytes,
+        };
     }
 
     fn identOn(applied: attributes.Attributes) bool {

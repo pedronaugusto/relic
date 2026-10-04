@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const wildmatch = @import("wildmatch.zig");
+const encoding = @import("encoding.zig");
 const fs = @import("../repo/fs.zig");
 
 /// Errors from loading attributes.
@@ -533,8 +534,8 @@ pub const CoreSettings = struct {
 /// A setting this release does not implement, named so the caller is refused
 /// rather than handed a blob git would not write.
 pub const Unsupported = union(enum) {
-    /// `working-tree-encoding=<name>`. Converting to and from it is a
-    /// character-set conversion this package does not do.
+    /// `working-tree-encoding=<name>` for a character set other than
+    /// UTF-8, UTF-16 and UTF-32, which this package does not convert.
     working_tree_encoding: []const u8,
     /// `filter=<name>` where `filter.<name>.required` is true. Running a
     /// filter means running a program, which this package never does.
@@ -563,8 +564,10 @@ pub const Unsupported = union(enum) {
 /// is true; a filter that is not required is not a refusal, because git
 /// itself uses the bytes unfiltered when a non-required filter is missing.
 pub fn unsupported(a: Attributes, required_filters: []const []const u8) ?Unsupported {
-    if (a.value("working-tree-encoding")) |encoding| {
-        return .{ .working_tree_encoding = encoding };
+    if (a.value("working-tree-encoding")) |name| {
+        if (name.len != 0 and !encoding.isUtf8(name) and encoding.Encoding.fromName(name) == null) {
+            return .{ .working_tree_encoding = name };
+        }
     }
     if (a.value("filter")) |name| {
         for (required_filters) |required| {
@@ -983,14 +986,15 @@ test "an unimplemented setting is named" {
     const gpa = std.testing.allocator;
     var attrs: Attrs = try .init(gpa, false);
     defer attrs.deinit();
-    try attrs.addText("*.po working-tree-encoding=UTF-16\n*.lfs filter=lfs\n", "", ".gitattributes", 1);
+    try attrs.addText("*.po working-tree-encoding=SHIFT-JIS\n*.txt working-tree-encoding=UTF-16\n*.lfs filter=lfs\n", "", ".gitattributes", 1);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
     const po = try attrs.lookup(arena.allocator(), "a.po", false);
     const refused = unsupported(po, &.{}).?;
     try std.testing.expectEqualStrings("working-tree-encoding", refused.settingName());
-    try std.testing.expectEqualStrings("UTF-16", refused.settingValue());
+    try std.testing.expectEqualStrings("SHIFT-JIS", refused.settingValue());
+    try std.testing.expect(unsupported(try attrs.lookup(arena.allocator(), "a.txt", false), &.{}) == null);
 
     const lfs = try attrs.lookup(arena.allocator(), "a.lfs", false);
     try std.testing.expect(unsupported(lfs, &.{}) == null);

@@ -12,6 +12,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/ere.zig",
         "src/ewah.zig",
         "src/object/gitdate.zig",
+        "src/worktree/encoding.zig",
         "src/transport/httpauth.zig",
         "src/odb/inflate.zig",
         "src/testing/lfs/tool.zig",
@@ -214,6 +215,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "object transfer", .patterns = &.{
         "src/testing/eol.zig",
+        "src/testing/encoding.zig",
         "src/lfs_test.zig",
         "src/lfs/locks.zig",
         "src/transport/objectwalk.zig",
