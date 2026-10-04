@@ -123,6 +123,10 @@ pub const families = [_]Family{
         "merge.subtreeshift.test",
         "diff.textdiff.test",
         "commit.todo.test",
+        "fastexport.test",
+        "fastexport_test.test",
+        "fastimport.test",
+        "fastimport_test.test",
         "transport_test.test",
     } },
     .{ .name = "core-transport", .filters = &.{

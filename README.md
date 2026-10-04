@@ -309,6 +309,8 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `archive` | `archive` — `git archive` as tar or zip, git's bytes: the pax comment, `--prefix`, `export-ignore`, `export-subst`, `tar.umask`. |
 | `pretty` | `formatCommit`, `Context`, `Decorations` — git's `--format` placeholders for one commit, the mailmap's names, decorations, notes and signatures among them. |
 | `clean` | `clean` — `git clean`: `-n`, `-f`, `-ff`, `-d`, `-x`, `-X`, `-e`, pathspecs, repositories inside the tree left alone, git's lines. |
+| `fastimport` | `import`, `Marks` — `git fast-import`: every command, its dates, marks files and notes fanout, branches updated as git updates them. |
+| `fastexport` | `write` — `git fast-export` byte for byte: marks, renames, tags, signatures, refspecs. |
 
 Every public declaration carries a doc comment stating its contract, and every
 operation has one named error set. A refusal is a named error. For a refused
@@ -698,6 +700,7 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 - **`grep -P` only through a caller's matcher.** Without one, Perl expressions are refused by name; back-references follow glibc's matcher, which git uses on Linux and builds in for Windows, where macOS's differs.
 - **A deflated zip entry is this package's deflate,** decoding to the same file; a stored zip and every tar are git's bytes. `export-subst` leaves `%N` as it stands, as git does, and refuses `%(describe)`, relative and human dates, trailers, wrapping, padding and colour by name.
 - **No interactive `clean`.**
+- **fast-import does not check signatures, and fast-export does not anonymize.** git's `--signed-commits=*-if-invalid`, `rewrite-submodules-*` and `export-pack-edges` are refused by name; fast-export takes no path limit and no `--reencode=yes`.
 
 ## Ahead
 

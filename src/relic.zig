@@ -26,6 +26,8 @@
 //! | `grep` | `git grep` over the working tree, the index or a tree. | |
 //! | `archive` | `git archive`: a tree as a tar or zip file. | |
 //! | `clean` | `git clean`: the untracked files of the working tree removed. | |
+//! | `fastimport` | `git fast-import`: a fast-import stream read into a repository. | |
+//! | `fastexport` | `git fast-export`: history written as a fast-import stream. | |
 //!
 //! | Shared plumbing | Used by |
 //! |---|---|
@@ -53,3 +55,5 @@ pub const grep = @import("grep.zig");
 pub const archive = @import("archive.zig");
 pub const pretty = @import("pretty.zig");
 pub const clean = @import("clean.zig");
+pub const fastimport = @import("fastimport.zig");
+pub const fastexport = @import("fastexport.zig");
