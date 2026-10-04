@@ -49,12 +49,14 @@ pub fn murmur(seed_value: u32, path: []const u8, version: u32) u32 {
 pub fn build(gpa: Allocator, paths: []const []const u8, settings: Settings) (Allocator.Error || error{ UnsupportedBloomVersion, InvalidBloomSettings })![]u8 {
     if (settings.version != 1 and settings.version != 2) return error.UnsupportedBloomVersion;
     if (settings.hashes == 0 or settings.bits_per_entry == 0 or settings.bits_per_entry > 64 or settings.hashes > 64) return error.InvalidBloomSettings;
+    if (paths.len > settings.max_changed_paths) return gpa.dupe(u8, &.{255});
     var unique: std.StringHashMapUnmanaged(void) = .empty;
     defer unique.deinit(gpa);
     for (paths) |path| {
         var end = path.len;
         while (end != 0) {
             try unique.put(gpa, path[0..end], {});
+            if (unique.count() > settings.max_changed_paths) return gpa.dupe(u8, &.{255});
             end = std.mem.lastIndexOfScalar(u8, path[0..end], '/') orelse 0;
         }
     }
