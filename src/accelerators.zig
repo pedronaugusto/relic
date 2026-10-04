@@ -13,7 +13,7 @@ const Oid = hash.Oid;
 
 /// Failures leave the old accelerator published and release this writer's locks.
 pub const Error = odb.Error || graph_mod.Error || diff.Error || fs.LockError || fs.CommitError ||
-    Io.Dir.CreateDirPathError || Io.Dir.DeleteFileError || Io.Dir.Iterator.Error || Io.Dir.StatFileError || error{ InvalidGraphInput, UnsupportedBloomVersion, InvalidBloomSettings, ShallowCommitGraph, CommitGraphCycle };
+    Io.Dir.SetTimestampsError || Io.Dir.CreateDirPathError || Io.Dir.DeleteFileError || Io.Dir.Iterator.Error || Io.Dir.StatFileError || error{ InvalidGraphInput, UnsupportedBloomVersion, InvalidBloomSettings, ShallowCommitGraph, CommitGraphCycle };
 
 /// Git's split-chain merge modes.
 pub const Split = enum { none, merge, no_merge, replace };
@@ -60,10 +60,7 @@ fn publish(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, bytes: []const
 pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, options: CommitGraphOptions) Error!?Oid {
     if (db.shallow.count() != 0) return error.ShallowCommitGraph;
     const dir = db.objectsDirectory();
-    var old = graph_mod.Graph.open(gpa, io, dir, db.objectFormat()) catch |err| {
-        std.debug.print("open old graph: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    var old = try graph_mod.Graph.open(gpa, io, dir, db.objectFormat());
     defer if (old) |*g| g.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -210,8 +207,24 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
         else => return err,
     };
     defer graph_dir.close(io);
-    var iterator = graph_dir.iterate();
     var hex: [hash.max_hex_len]u8 = undefined;
+    if (options.split != .none) {
+        var previous = if (old) |*value| value else null;
+        while (previous) |layer| : (previous = layer.base) {
+            var kept = false;
+            for (bases.items) |base| if (base.eql(layer.checksum())) {
+                kept = true;
+                break;
+            };
+            if (kept) continue;
+            const filename = try std.fmt.allocPrint(arena, "graph-{s}.graph", .{layer.checksum().hex(&hex)});
+            fs.setTimestamps(io, graph_dir, filename, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now) * std.time.ns_per_s } } }) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
+        }
+    }
+    var iterator = graph_dir.iterate();
     while (try iterator.next(io)) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "graph-") or !std.mem.endsWith(u8, entry.name, ".graph")) continue;
         const name = entry.name[6 .. entry.name.len - 6];

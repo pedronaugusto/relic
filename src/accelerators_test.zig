@@ -424,3 +424,33 @@ test "accelerator files are deterministic across pack worker counts" {
     try sameFile(&repo, path, bitmap_bytes);
     try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
 }
+
+test "merged split layers are marked at the write time before an older expiry cutoff" {
+    try testgit.requireGitVersion(gpa, io, 2, 31);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..3) |n| try linearCommit(&repo, n);
+    try repo.exec(io, &.{ "commit-graph", "write", "--reachable", "--split" });
+    const chain = try repo.readFile(io, ".git/objects/info/commit-graphs/commit-graph-chain");
+    defer gpa.free(chain);
+    const path = try std.fmt.allocPrint(gpa, ".git/objects/info/commit-graphs/graph-{s}.graph", .{std.mem.trim(u8, chain, "\n")});
+    defer gpa.free(path);
+    const fs = @import("fs.zig");
+    try fs.setTimestamps(io, repo.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } } });
+    try linearCommit(&repo, 3);
+    const dir = try repo.gitDir(io);
+    defer dir.close(io);
+    var db = try odb.Odb.open(gpa, io, dir, .sha1, .{});
+    defer db.deinit(io);
+    const head = try tip(&repo, .sha1);
+    _ = try ops.writeCommitGraph(gpa, io, &db, &.{head}, .{ .split = .replace, .expire_time = 1 });
+    try repo.dir.access(io, path, .{});
+    const native_time = (try repo.dir.statFile(io, path, .{})).mtime.toSeconds();
+    try std.testing.expect(native_time > 1);
+    // Git marks the layer too, so an older cutoff preserves it.
+    try fs.setTimestamps(io, repo.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } } });
+    try repo.writeFile(io, ".git/objects/info/commit-graphs/commit-graph-chain", chain);
+    try repo.exec(io, &.{ "commit-graph", "write", "--reachable", "--split=replace", "--expire-time=@1" });
+    try repo.dir.access(io, path, .{});
+    try std.testing.expect((try repo.dir.statFile(io, path, .{})).mtime.toSeconds() > 1);
+}
