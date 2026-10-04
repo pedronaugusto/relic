@@ -267,7 +267,9 @@ test "odd paths, binary files, type changes, wide diffstats and odd authors come
     var big: std.ArrayList(u8) = .empty;
     defer big.deinit(gpa);
     for (0..200) |i| try big.print(gpa, "line {d}\n", .{i});
-    try git.writeFile(io, "odd\tname caf\xc3\xa9.txt", "odd\n");
+    // Windows takes no tab in a file name
+    const odd_name = if (builtin.os.tag == .windows) "odd name caf\xc3\xa9.txt" else "odd\tname caf\xc3\xa9.txt";
+    try git.writeFile(io, odd_name, "odd\n");
     try git.writeFile(io, "a/very/long/directory/path/that/needs/to/be/shortened/in/the/diffstat/file.txt", "deep\n");
     try git.writeFile(io, "plain.txt", big.items);
     try git.writeFile(io, "pic.bin", "\x00\x01image" ** 9 ++ "\x00changed");
