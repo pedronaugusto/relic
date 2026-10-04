@@ -443,7 +443,7 @@ test "a MIDX bitmap carries the existing pack bitmap's name hash cache" {
         try repo.dir.deleteFile(io, ".git/objects/pack/multi-pack-index");
         const dir = try repo.gitDir(io);
         defer dir.close(io);
-        var db = try odb.Odb.open(gpa, io, dir, kind, .{});
+        var db = try odb.Odb.open(gpa, io, dir, kind, .{ .use_bitmaps = false });
         defer db.deinit(io);
         const head = try tip(&repo, kind);
         _ = try ops.writeMidxBitmap(gpa, io, &db, &.{head}, .{}, .{});
@@ -497,7 +497,7 @@ test "an unchanged MIDX bitmap is retained even when bitmap configuration change
     try sameFile(&repo, path, expected);
     const dir = try repo.gitDir(io);
     defer dir.close(io);
-    var db = try odb.Odb.open(gpa, io, dir, .sha1, .{});
+    var db = try odb.Odb.open(gpa, io, dir, .sha1, .{ .use_bitmaps = false });
     defer db.deinit(io);
     const head = try tip(&repo, .sha1);
     _ = try ops.writeMidxBitmap(gpa, io, &db, &.{head}, .{}, .{ .lookup_table = true });

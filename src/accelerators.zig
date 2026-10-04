@@ -401,6 +401,7 @@ fn existsFile(io: Io, dir: Io.Dir, path: []const u8) Io.Dir.AccessError!bool {
 }
 
 const bitmap_mod = @import("bitmap.zig");
+const bitmap_store = @import("bitmap_store.zig");
 const objectwalk = @import("objectwalk.zig");
 
 /// How the optional bitmap extensions are written, with Git's defaults.
@@ -411,7 +412,14 @@ pub const BitmapOptions = struct {
     lookup_table: bool = false,
     sync: fs.Sync = .none,
 };
-pub const BitmapError = Error || MidxError || @import("revwalk_core.zig").Error || objectwalk.Error || bitmap_mod.Error || error{ InvalidBitmapInput, BitmapNotClosed };
+pub const BitmapError = Error || MidxError || @import("revwalk_core.zig").Error || objectwalk.Error || bitmap_mod.Error || bitmap_store.Error || error{ InvalidBitmapInput, BitmapNotClosed };
+
+fn storedBitmap(gpa: Allocator, io: Io, db: *odb.Odb) BitmapError!?bitmap_store.Store {
+    return bitmap_store.Store.open(gpa, io, db.objectsDirectory(), db.objectFormat()) catch |err| {
+        if (@import("odbinit.zig").readRefusal(err)) return err;
+        return null;
+    };
+}
 
 const BitmapCommit = struct {
     oid: Oid,
@@ -451,7 +459,7 @@ fn selectedCommits(arena: Allocator, candidates: []BitmapCommit) Allocator.Error
     return selected.items;
 }
 
-fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []const Oid, reverse: []const u32, tips: []const Oid, options: BitmapOptions, midx_bitmap: bool) BitmapError![]u8 {
+fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []const Oid, reverse: []const u32, tips: []const Oid, options: BitmapOptions, midx_bitmap: bool, previous_bitmap: ?*const bitmap_store.Store) BitmapError![]u8 {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -465,7 +473,6 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
         words.* = try arena.alloc(u64, word_count);
         @memset(words.*, 0);
     }
-    const previous_bitmap = try db.reachabilityBitmap(io);
     var previous_positions: ?[]u32 = null;
     if (previous_bitmap) |previous| {
         previous_positions = try arena.alloc(u32, previous.reverse.len);
@@ -589,7 +596,7 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
         if (midx_bitmap) {
             // Git carries existing cache entries when mapping an earlier bitmap
             // into MIDX order; otherwise the MIDX writer has no path strings.
-            if (try db.reachabilityBitmap(io)) |previous| {
+            if (previous_bitmap) |previous| {
                 for (previous.names, 0..) |oid, i| if (name_positions.get(oid)) |pos| {
                     hashes.?[pos] = previous.bitmap.nameHashAt(@intCast(i)) orelse 0;
                 };
@@ -637,7 +644,10 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const 
         }
     };
     std.mem.sort(u32, reverse, offsets, Order.less);
-    const bytes = try buildBitmap(gpa, io, db, index.pack_checksum, names, reverse, tips, options, false);
+    // The writer owns this data across any implicit database refresh.
+    var previous = try storedBitmap(gpa, io, db);
+    defer if (previous) |*value| value.deinit();
+    const bytes = try buildBitmap(gpa, io, db, index.pack_checksum, names, reverse, tips, options, false, if (previous) |*value| value else null);
     defer gpa.free(bytes);
     const target = try std.fmt.allocPrint(gpa, "{s}.bitmap", .{base});
     defer gpa.free(target);
@@ -653,7 +663,9 @@ pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, 
     const checksum = (try writeMidx(gpa, io, db, write_options)) orelse return null;
     // Git leaves an unchanged MIDX and its valid existing bitmap alone, even
     // when the writer's extension settings have changed since publication.
-    if (try db.reachabilityBitmap(io)) |previous| if (previous.bitmap.checksum.eql(checksum)) return checksum;
+    var previous = try storedBitmap(gpa, io, db);
+    defer if (previous) |*value| value.deinit();
+    if (previous) |value| if (value.bitmap.checksum.eql(checksum)) return checksum;
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var index = (try midx_mod.Index.open(gpa, io, dir, db.objectFormat())).?;
@@ -666,7 +678,7 @@ pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, 
         oid.* = index.nameAt(@intCast(i));
         pos.* = (try index.reverseAt(@intCast(i))).?;
     }
-    const bytes = try buildBitmap(gpa, io, db, checksum, names, reverse, tips, options, true);
+    const bytes = try buildBitmap(gpa, io, db, checksum, names, reverse, tips, options, true, if (previous) |*value| value else null);
     defer gpa.free(bytes);
     var hex: [hash.max_hex_len]u8 = undefined;
     const path = try std.fmt.allocPrint(gpa, "multi-pack-index-{s}.bitmap", .{checksum.hex(&hex)});
