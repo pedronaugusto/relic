@@ -101,7 +101,6 @@ pub const families = [_]Family{
         "mailmap.test",
         "notes.test",
         "shortlog.test",
-        "wcwidth.test",
         "merge_core.test",
         "ort_test.test",
         "patchid.test",

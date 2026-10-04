@@ -32,6 +32,7 @@ const abbrev = @import("abbrev.zig");
 const cquote = @import("cquote.zig");
 const binarypatch = @import("binarypatch.zig");
 const mailfmt = @import("mailfmt.zig");
+const unicodewidth = @import("unicodewidth.zig");
 const message = @import("message.zig");
 const attributes = @import("attributes.zig");
 
@@ -1198,7 +1199,7 @@ fn showStats(ctx: *Ctx, out: *std.ArrayList(u8), files: []StatFile) Allocator.Er
     var bin_width: usize = 0;
     for (files) |*f| {
         f.print_name = if (f.from_name) |from| try pprintRename(ctx, from, f.name) else try quoted(ctx, f.name);
-        const len = mailfmt.strWidth(f.print_name);
+        const len = unicodewidth.strWidth(f.print_name);
         if (max_len < len) max_len = len;
         if (f.binary) {
             const w = 14 + decimalWidth(f.added) + decimalWidth(f.deleted);
@@ -1227,25 +1228,21 @@ fn showStats(ctx: *Ctx, out: *std.ArrayList(u8), files: []StatFile) Allocator.Er
         var prefix: []const u8 = "";
         var name = f.print_name;
         var len: isize = @intCast(name_width);
-        var name_len = mailfmt.strWidth(name);
+        var name_len = unicodewidth.strWidth(name);
         if (name_width < name_len) {
             prefix = "...";
             len -= 3;
             if (len < 0) len = 0;
             while (name_len > len and name.len > 0) {
-                const step = mailfmt.utf8Len(name) orelse 1;
-                const cp_width: usize = blk: {
-                    if (mailfmt.utf8Len(name) == null) break :blk 1;
-                    const cp = std.unicode.utf8Decode(name[0..step]) catch break :blk 1;
-                    const w = mailfmt.charWidth(cp);
-                    break :blk if (w < 0) 0 else @intCast(w);
-                };
+                const decoded = unicodewidth.decode(name);
+                const step: usize = if (decoded) |cp| cp.len else 1;
+                const cp_width: usize = if (decoded) |cp| @intCast(@max(unicodewidth.width(cp.char), 0)) else 1;
                 name_len -= cp_width;
                 name = name[step..];
             }
             if (std.mem.indexOfScalar(u8, name, '/')) |slash| name = name[slash..];
         }
-        const name_w: isize = @intCast(mailfmt.strWidth(name));
+        const name_w: isize = @intCast(unicodewidth.strWidth(name));
         const padding: usize = if (len - name_w < 0) 0 else @intCast(len - name_w);
         if (f.binary) {
             try out.print(a, " {s}{s}", .{ prefix, name });

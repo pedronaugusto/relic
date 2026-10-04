@@ -39,7 +39,6 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/unicodewidth.zig",
         "src/varint.zig",
         "src/warning.zig",
-        "src/wcwidth.zig",
 
         "src/whitespace.zig",
         "src/wildmatch.zig",

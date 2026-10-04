@@ -26,7 +26,7 @@ const object = @import("object_core.zig");
 const odb_mod = @import("odb_core.zig");
 const message = @import("message.zig");
 const mailmap_mod = @import("mailmap.zig");
-const wcwidth = @import("wcwidth.zig");
+const unicodewidth = @import("unicodewidth.zig");
 const config_mod = @import("config_core.zig");
 
 const Oid = hash.Oid;
@@ -389,12 +389,12 @@ pub fn addWrappedText(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8,
                 continue;
             }
             if (assume_utf8) {
-                const decoded = wcwidth.decode(text[i..]) orelse {
+                const decoded = unicodewidth.decode(text[i..]) orelse {
                     assume_utf8 = false;
                     out.shrinkRetainingCapacity(orig_len);
                     continue :retry;
                 };
-                w += wcwidth.width(decoded.char);
+                w += unicodewidth.width(decoded.char);
                 i += decoded.len;
             } else {
                 w += 1;

@@ -5,11 +5,11 @@
 const std = @import("std");
 
 /// A closed range of code points.
-pub const Interval = struct { first: u21, last: u21 };
+const Interval = struct { first: u21, last: u21 };
 
 /// Non-spacing and enclosing marks, format characters and the like:
 /// no columns.
-pub const zero_width = [_]Interval{
+const zero_width = [_]Interval{
     .{ .first = 0x0300, .last = 0x036F },
     .{ .first = 0x0483, .last = 0x0489 },
     .{ .first = 0x0591, .last = 0x05BD },
@@ -389,7 +389,7 @@ pub const zero_width = [_]Interval{
 };
 
 /// East Asian wide and fullwidth characters: two columns.
-pub const double_width = [_]Interval{
+const double_width = [_]Interval{
     .{ .first = 0x1100, .last = 0x115F },
     .{ .first = 0x231A, .last = 0x231B },
     .{ .first = 0x2329, .last = 0x232A },
@@ -517,7 +517,7 @@ pub const double_width = [_]Interval{
 
 /// Whether `c` lies in one of `table`'s ranges, which are sorted and do not
 /// overlap: git's `bisearch`.
-pub fn contains(table: []const Interval, c: u21) bool {
+fn contains(table: []const Interval, c: u21) bool {
     if (table.len == 0 or c < table[0].first or c > table[table.len - 1].last) return false;
     var lo: usize = 0;
     var hi: usize = table.len;
@@ -532,6 +532,58 @@ pub fn contains(table: []const Interval, c: u21) bool {
     return false;
 }
 
+/// `git_wcwidth`: NUL takes no column, C0/C1 controls and DEL return -1,
+/// combining characters take zero columns, wide characters two, the rest one.
+pub fn width(c: u21) i8 {
+    if (c == 0) return 0;
+    if (c < 32 or (c >= 0x7f and c < 0xa0)) return -1;
+    if (contains(&zero_width, c)) return 0;
+    if (contains(&double_width, c)) return 2;
+    return 1;
+}
+
+/// `pick_one_utf8_char`: the character at the start of `s` and how many
+/// bytes it takes, or `null` where git calls the bytes invalid UTF-8 --
+/// which includes an overlong form, a surrogate, U+FFFE and U+FFFF, and
+/// anything past U+10FFFF.
+pub fn decode(s: []const u8) ?struct { char: u21, len: u3 } {
+    if (s.len < 1) return null;
+    const b0 = s[0];
+    if (b0 < 0x80) return .{ .char = b0, .len = 1 };
+    if (b0 & 0xe0 == 0xc0) {
+        if (s.len < 2 or s[1] & 0xc0 != 0x80 or b0 & 0xfe == 0xc0) return null;
+        return .{ .char = (@as(u21, b0 & 0x1f) << 6) | (s[1] & 0x3f), .len = 2 };
+    }
+    if (b0 & 0xf0 == 0xe0) {
+        if (s.len < 3 or s[1] & 0xc0 != 0x80 or s[2] & 0xc0 != 0x80) return null;
+        if (b0 == 0xe0 and s[1] & 0xe0 == 0x80) return null;
+        if (b0 == 0xed and s[1] & 0xe0 == 0xa0) return null;
+        if (b0 == 0xef and s[1] == 0xbf and s[2] & 0xfe == 0xbe) return null;
+        return .{ .char = (@as(u21, b0 & 0x0f) << 12) | (@as(u21, s[1] & 0x3f) << 6) | (s[2] & 0x3f), .len = 3 };
+    }
+    if (b0 & 0xf8 == 0xf0) {
+        if (s.len < 4 or s[1] & 0xc0 != 0x80 or s[2] & 0xc0 != 0x80 or s[3] & 0xc0 != 0x80) return null;
+        if (b0 == 0xf0 and s[1] & 0xf0 == 0x80) return null;
+        if ((b0 == 0xf4 and s[1] > 0x8f) or b0 > 0xf4) return null;
+        return .{ .char = (@as(u21, b0 & 0x07) << 18) | (@as(u21, s[1] & 0x3f) << 12) | (@as(u21, s[2] & 0x3f) << 6) | (s[3] & 0x3f), .len = 4 };
+    }
+    return null;
+}
+
+/// The display width of `s`, or its length in bytes when it is not
+/// UTF-8: git's `utf8_strnwidth`, without skipping ANSI escapes.
+pub fn strWidth(s: []const u8) usize {
+    var columns: usize = 0;
+    var at: usize = 0;
+    while (at < s.len) {
+        const decoded = decode(s[at..]) orelse return s.len;
+        const w = width(decoded.char);
+        if (w > 0) columns += @intCast(w);
+        at += decoded.len;
+    }
+    return columns;
+}
+
 test "the tables are sorted and a lookup finds both ends of a range" {
     for ([_][]const Interval{ &zero_width, &double_width }) |table| {
         for (table, 0..) |range, i| {
@@ -544,4 +596,33 @@ test "the tables are sorted and a lookup finds both ends of a range" {
     try std.testing.expect(contains(&double_width, 0x4E00));
     try std.testing.expect(!contains(&double_width, 'a'));
     try std.testing.expect(contains(&zero_width, 0x0301));
+}
+
+test "wide, combining and control characters take git's columns" {
+    try std.testing.expectEqual(@as(i8, 1), width('a'));
+    try std.testing.expectEqual(@as(i8, -1), width('\t'));
+    try std.testing.expectEqual(@as(i8, 0), width(0));
+    try std.testing.expectEqual(@as(i8, -1), width(0x7f));
+    try std.testing.expectEqual(@as(i8, -1), width(0x9f));
+    try std.testing.expectEqual(@as(i8, 1), width(0xa0));
+    try std.testing.expectEqual(@as(i8, 0), width(0x0301));
+    try std.testing.expectEqual(@as(i8, 2), width(0x4e2d));
+    try std.testing.expect(decode("\xed\xa0\x80") == null);
+    try std.testing.expectEqual(@as(u21, 0x4e2d), decode("\xe4\xb8\xad").?.char);
+}
+
+test "string columns ignore controls and fall back to bytes for invalid UTF-8" {
+    try std.testing.expectEqual(@as(usize, 0), strWidth(""));
+    try std.testing.expectEqual(@as(usize, 4), strWidth("a中e\u{0301}\u{200b}\t\x7f\u{0085}"));
+    // Git 2.55's tables include recent combining marks and wide symbols.
+    try std.testing.expectEqual(@as(usize, 2), strWidth("\u{1ae0}\u{1faea}"));
+    for ([_][]const u8{
+        "\x80",         "\xc0\xaf",     "\xe4\xb8",         "\xed\xa0\x80",
+        "\xef\xbf\xbe", "\xef\xbf\xbf", "\xf4\x90\x80\x80",
+    }) |invalid| {
+        try std.testing.expect(decode(invalid) == null);
+        var buf: [16]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buf, "中{s}", .{invalid});
+        try std.testing.expectEqual(text.len, strWidth(text));
+    }
 }

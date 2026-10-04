@@ -270,6 +270,8 @@ test "odd paths, binary files, type changes, wide diffstats and odd authors come
     // Windows takes no tab in a file name
     const odd_name = if (builtin.os.tag == .windows) "odd name caf\xc3\xa9.txt" else "odd\tname caf\xc3\xa9.txt";
     try git.writeFile(io, odd_name, "odd\n");
+    try git.writeFile(io, "中文e\u{0301}.txt", "wide and combining\n");
+    try git.writeFile(io, "wide/" ++ "目录" ** 40 ++ "e\u{0301}.txt", "a shortened wide name\n");
     try git.writeFile(io, "a/very/long/directory/path/that/needs/to/be/shortened/in/the/diffstat/file.txt", "deep\n");
     try git.writeFile(io, "plain.txt", big.items);
     try git.writeFile(io, "pic.bin", "\x00\x01image" ** 9 ++ "\x00changed");

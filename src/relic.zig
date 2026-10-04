@@ -26,6 +26,10 @@
 //! | `grep` | `git grep` over the working tree, the index or a tree. | |
 //! | `archive` | `git archive`: a tree as a tar or zip file. | |
 //! | `clean` | `git clean`: the untracked files of the working tree removed. | |
+//!
+//! | Shared plumbing | Used by |
+//! |---|---|
+//! | `unicodewidth` | `revwalk.shortlog` and `patch.format`: git's character and string columns. |
 
 pub const repo = @import("repo.zig");
 pub const hash = @import("hash.zig");

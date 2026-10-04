@@ -133,33 +133,6 @@ fn lastLineLength(buf: []const u8) usize {
     return buf.len - (nl + 1);
 }
 
-/// The length in bytes of the UTF-8 character at the start of `s`, or
-/// `null` where `s` does not start with a valid one: git's
-/// `pick_one_utf8_char`.
-pub fn utf8Len(s: []const u8) ?usize {
-    if (s.len == 0) return null;
-    const c0 = s[0];
-    if (c0 < 0x80) return 1;
-    if (c0 & 0xe0 == 0xc0) {
-        if (s.len < 2 or s[1] & 0xc0 != 0x80 or c0 & 0xfe == 0xc0) return null;
-        return 2;
-    }
-    if (c0 & 0xf0 == 0xe0) {
-        if (s.len < 3 or s[1] & 0xc0 != 0x80 or s[2] & 0xc0 != 0x80) return null;
-        if (c0 == 0xe0 and s[1] & 0xe0 == 0x80) return null;
-        if (c0 == 0xed and s[1] & 0xe0 == 0xa0) return null;
-        if (c0 == 0xef and s[1] == 0xbf and s[2] & 0xfe == 0xbe) return null;
-        return 3;
-    }
-    if (c0 & 0xf8 == 0xf0) {
-        if (s.len < 4 or s[1] & 0xc0 != 0x80 or s[2] & 0xc0 != 0x80 or s[3] & 0xc0 != 0x80) return null;
-        if (c0 == 0xf0 and s[1] & 0xf0 == 0x80) return null;
-        if ((c0 == 0xf4 and s[1] > 0x8f) or c0 > 0xf4) return null;
-        return 4;
-    }
-    return null;
-}
-
 /// Append `line` as RFC 2047 `Q`-encoded words in UTF-8, breaking before
 /// 76 columns as git's `add_rfc2047` does, never inside a character.
 pub fn appendRfc2047(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8, kind: Rfc2047Kind) Allocator.Error!void {
@@ -170,7 +143,7 @@ pub fn appendRfc2047(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8, 
     line_len += encoding.len + 5;
     var at: usize = 0;
     while (at < line.len) {
-        const chrlen = utf8Len(line[at..]) orelse 1;
+        const chrlen: usize = if (unicodewidth.decode(line[at..])) |decoded| decoded.len else 1;
         const p = line[at .. at + chrlen];
         const special = chrlen > 1 or isRfc2047Special(p[0], kind);
         const encoded_len: usize = if (special) 3 * chrlen else 1;
@@ -185,31 +158,6 @@ pub fn appendRfc2047(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8, 
         at += chrlen;
     }
     try out.appendSlice(gpa, "?=");
-}
-
-/// The columns one character takes, as git's `git_wcwidth` counts them:
-/// -1 for a control character.
-pub fn charWidth(c: u21) i32 {
-    if (c == 0) return 0;
-    if (c < 32 or (c >= 0x7f and c < 0xa0)) return -1;
-    if (unicodewidth.contains(&unicodewidth.zero_width, c)) return 0;
-    if (unicodewidth.contains(&unicodewidth.double_width, c)) return 2;
-    return 1;
-}
-
-/// The display width of `s`, or its length in bytes when it is not
-/// UTF-8: git's `utf8_strwidth`.
-pub fn strWidth(s: []const u8) usize {
-    var width: usize = 0;
-    var at: usize = 0;
-    while (at < s.len) {
-        const len = utf8Len(s[at..]) orelse return s.len;
-        const cp = std.unicode.utf8Decode(s[at .. at + len]) catch return s.len;
-        const w = charWidth(cp);
-        if (w > 0) width += @intCast(w);
-        at += len;
-    }
-    return width;
 }
 
 /// git's `strbuf_add_wrapped_text`: `text` wrapped at `width` columns, the
@@ -290,18 +238,13 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                 continue;
             }
             if (assume_utf8) {
-                const len = utf8Len(text[pos..]) orelse {
+                const decoded = unicodewidth.decode(text[pos..]) orelse {
                     assume_utf8 = false;
                     out.shrinkRetainingCapacity(orig_len);
                     continue :retry;
                 };
-                const cp = std.unicode.utf8Decode(text[pos .. pos + len]) catch {
-                    assume_utf8 = false;
-                    out.shrinkRetainingCapacity(orig_len);
-                    continue :retry;
-                };
-                w += charWidth(cp);
-                pos += len;
+                w += unicodewidth.width(decoded.char);
+                pos += decoded.len;
             } else {
                 w += 1;
                 pos += 1;
