@@ -351,6 +351,8 @@ test "configured maintenance writes full and split commit graphs and repack bitm
 }
 
 test "bitmap commit selection past the dense region agrees byte for byte with git" {
+    // Git 2.30 serializes selected entries in a different order than the modern builder.
+    try testgit.requireGitVersion(gpa, io, 2, 34);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     for (0..140) |n| try linearCommit(&repo, n);
