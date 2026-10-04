@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `grep` matches back-references (`\1` to `\9`, in basic and extended expressions) as glibc's matcher does, the furthest end of any way the groups can be taken; a search past the budget of work is `error.PatternTooComplex`. `Options.expression` takes `--and`, `--or`, `--not` and parentheses as git's command line gives them, combined by git's grammar, `error.InvalidExpression` where git dies; `all_match` keeps the files where each term of the top-level either-or matched. `show_function` (`-p`) and `function_context` (`-W`) show the function lines git finds: the `diff` driver's `funcname` or `xfuncname`, git's built-in drivers by name, else its default; a pattern that does not compile is `error.InvalidFunctionPattern`. `Options.perl` takes a caller's `Matcher` for `-P`, which without one is still `error.UnsupportedPerlRegex`. `UnsupportedBackreference` is gone; `patterns` defaults to none.
+
 - `git bisect` takes pathspecs as git does: `BISECT_NAMES` holds them as git writes them (what follows the revisions, a `--` included, from two arguments on), the walk is simplified to the commits that change them, and a commit that does not is neither counted nor tested. Add `revwalk.Walk.paths` and `Commit.treesame`: history simplified by paths as git's default `try_to_simplify_commit` does it, a merge the same as a parent that matters following that parent alone.
 
 - `shortlog` groups by `--group=format:<format>` (or a group given with `%`) through `pretty`, the formats before the author's and committer's groups as git orders them, for commits added by name; `addCommit` with a format group is `error.FormatGroupNeedsName`. `FormatGroupUnsupported` is gone.

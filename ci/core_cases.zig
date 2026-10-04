@@ -91,6 +91,7 @@ pub const families = [_]Family{
         "patch.apply_test.test",
         "commit.test",
         "diff.test",
+        "diff.userdiff.test",
         "revwalk.bisect.test",
         "revwalk.describe.test",
         "diff_test.test",

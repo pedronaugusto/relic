@@ -2,6 +2,7 @@
 //! same bytes and the same exit status.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -120,7 +121,28 @@ test "git grep's output for patterns, options and sources comes out byte for byt
     try compare(gpa, io, &git, &repo, &.{ "-n", "-C2", "a" }, .{ .patterns = &.{"a"}, .line_number = true, .before = 2, .after = 2, .threads = 4 });
 }
 
-test "perl expressions and back-references are refused by name" {
+test "back-references match where git grep's matcher matches" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "words.txt", "foo foo bar\nabab\nxyzzy\nAbAB\nthe the end\nnone here\nabcabc abc\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "words" });
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    try compare(gpa, io, &git, &repo, &.{ "-n", "-o", "\\(ab\\)\\1" }, .{ .patterns = &.{"\\(ab\\)\\1"}, .line_number = true, .only_matching = true });
+    try compare(gpa, io, &git, &repo, &.{ "-w", "-o", "\\([a-z]*\\) \\1" }, .{ .patterns = &.{"\\([a-z]*\\) \\1"}, .word = true, .only_matching = true });
+    try compare(gpa, io, &git, &repo, &.{ "-c", "\\(.\\)\\1" }, .{ .patterns = &.{"\\(.\\)\\1"}, .show = .count });
+    try compare(gpa, io, &git, &repo, &.{ "-v", "\\(...\\)\\1" }, .{ .patterns = &.{"\\(...\\)\\1"}, .invert = true });
+    // macOS's regcomp, which git uses there, takes no back-reference in an
+    // extended expression and compares one with case; glibc's does both
+    if (builtin.os.tag == .macos) return;
+    try compare(gpa, io, &git, &repo, &.{ "-E", "-o", "(z)\\1" }, .{ .patterns = &.{"(z)\\1"}, .syntax = .extended, .only_matching = true });
+    try compare(gpa, io, &git, &repo, &.{ "-i", "-n", "\\(ab\\)\\1" }, .{ .patterns = &.{"\\(ab\\)\\1"}, .ignore_case = true, .line_number = true });
+}
+
+test "--and, --or, --not, parentheses and --all-match select lines and files as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var git = try testgit.Repo.init(gpa, io, &.{});
@@ -128,10 +150,135 @@ test "perl expressions and back-references are refused by name" {
     try fixture(io, &git);
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
+    try compare(gpa, io, &git, &repo, &.{ "-n", "-e", "count", "--and", "-e", "int" }, .{ .expression = &.{ .{ .pattern = "count" }, .@"and", .{ .pattern = "int" } }, .line_number = true });
+    try compare(gpa, io, &git, &repo, &.{ "-e", "int", "--and", "--not", "-e", "main" }, .{ .expression = &.{ .{ .pattern = "int" }, .@"and", .not, .{ .pattern = "main" } } });
+    try compare(gpa, io, &git, &repo, &.{ "-e", "alpha", "--or", "-e", "zeta" }, .{ .expression = &.{ .{ .pattern = "alpha" }, .@"or", .{ .pattern = "zeta" } } });
+    try compare(gpa, io, &git, &repo, &.{ "(", "-e", "alpha", "-e", "count", ")", "--and", "--not", "-e", "notes" }, .{ .expression = &.{ .open, .{ .pattern = "alpha" }, .{ .pattern = "count" }, .close, .@"and", .not, .{ .pattern = "notes" } } });
+    try compare(gpa, io, &git, &repo, &.{ "-e", "a", "--and", "(", "-e", "b", "-e", "c", ")" }, .{ .expression = &.{ .{ .pattern = "a" }, .@"and", .open, .{ .pattern = "b" }, .{ .pattern = "c" }, .close } });
+    try compare(gpa, io, &git, &repo, &.{ "--not", "--not", "-e", "count" }, .{ .expression = &.{ .not, .not, .{ .pattern = "count" } } });
+    // columns: an earlier match under a `--not` counts for `-v`
+    try compare(gpa, io, &git, &repo, &.{ "-n", "--column", "-e", "count", "--and", "--not", "-e", "int" }, .{ .expression = &.{ .{ .pattern = "count" }, .@"and", .not, .{ .pattern = "int" } }, .line_number = true, .column = true });
+    try compare(gpa, io, &git, &repo, &.{ "-v", "-n", "--column", "--not", "-e", "count" }, .{ .expression = &.{ .not, .{ .pattern = "count" } }, .invert = true, .line_number = true, .column = true });
+    try compare(gpa, io, &git, &repo, &.{ "-n", "--column", "-C1", "--not", "-e", "a" }, .{ .expression = &.{ .not, .{ .pattern = "a" } }, .line_number = true, .column = true, .before = 1, .after = 1 });
+    // files where every term of the either-or hit
+    try compare(gpa, io, &git, &repo, &.{ "--all-match", "-e", "count", "-e", "return" }, .{ .patterns = &.{ "count", "return" }, .all_match = true });
+    try compare(gpa, io, &git, &repo, &.{ "--all-match", "-l", "-e", "count", "-e", "alpha" }, .{ .patterns = &.{ "count", "alpha" }, .all_match = true, .show = .files_with_matches });
+    try compare(gpa, io, &git, &repo, &.{ "--all-match", "-e", "count", "--and", "-e", "int", "-e", "doubled" }, .{ .expression = &.{ .{ .pattern = "count" }, .@"and", .{ .pattern = "int" }, .{ .pattern = "doubled" } }, .all_match = true });
+    try compare(gpa, io, &git, &repo, &.{ "--all-match", "-e", "count" }, .{ .patterns = &.{"count"}, .all_match = true });
+
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &repo, .{ .expression = &.{ .@"and", .{ .pattern = "a" } } }, &out.writer));
+    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &repo, .{ .expression = &.{ .open, .{ .pattern = "a" } } }, &out.writer));
+    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &repo, .{ .expression = &.{ .{ .pattern = "a" }, .close } }, &out.writer));
+    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &repo, .{ .expression = &.{ .{ .pattern = "a" }, .not } }, &out.writer));
+}
+
+const functions_c =
+    \\#include <stdio.h>
+    \\
+    \\/* adds them up */
+    \\static int sum(int a, int b)
+    \\{
+    \\    int total = a + b;
+    \\    return total;
+    \\}
+    \\
+    \\
+    \\label:
+    \\int main(void)
+    \\{
+    \\    int total = sum(1, 2);
+    \\    printf("%d\n", total);
+    \\
+    \\    return 0;
+    \\}
+    \\
+;
+
+const functions_py =
+    \\import os
+    \\
+    \\class Thing:
+    \\    def count(self):
+    \\        total = 0
+    \\        return total
+    \\
+    \\    def name(self):
+    \\        return "thing"
+    \\
+    \\def helper():
+    \\    return Thing().count()
+    \\
+;
+
+const functions_custom =
+    \\SECTION one
+    \\  value 1
+    \\  other 2
+    \\SECTION two
+    \\  value 3
+    \\  skip this SECTION
+    \\  last 4
+;
+
+test "-p and -W show the function lines git's diff drivers find" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, ".gitattributes", "*.py diff=python\n*.cfg diff=sections\n*.txt diff=nosuchdriver\n");
+    try git.exec(io, &.{ "config", "diff.sections.xfuncname", "!skip\n^SECTION .*" });
+    try git.writeFile(io, "a.c", functions_c);
+    try git.writeFile(io, "b.py", functions_py);
+    try git.writeFile(io, "c.cfg", functions_custom);
+    try git.writeFile(io, "d.txt", "head\n  value 9\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "functions" });
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+
+    try compare(gpa, io, &git, &repo, &.{ "-p", "total" }, .{ .patterns = &.{"total"}, .show_function = true });
+    try compare(gpa, io, &git, &repo, &.{ "-p", "-n", "return" }, .{ .patterns = &.{"return"}, .show_function = true, .line_number = true });
+    try compare(gpa, io, &git, &repo, &.{ "-p", "-C1", "value" }, .{ .patterns = &.{"value"}, .show_function = true, .before = 1, .after = 1 });
+    try compare(gpa, io, &git, &repo, &.{ "-W", "printf" }, .{ .patterns = &.{"printf"}, .function_context = true });
+    try compare(gpa, io, &git, &repo, &.{ "-W", "-n", "a + b" }, .{ .patterns = &.{"a + b"}, .function_context = true, .line_number = true });
+    try compare(gpa, io, &git, &repo, &.{ "-W", "static int sum" }, .{ .patterns = &.{"static int sum"}, .function_context = true });
+    try compare(gpa, io, &git, &repo, &.{ "-W", "-n", "total = 0" }, .{ .patterns = &.{"total = 0"}, .function_context = true, .line_number = true });
+    try compare(gpa, io, &git, &repo, &.{ "-W", "value 3" }, .{ .patterns = &.{"value 3"}, .function_context = true });
+    try compare(gpa, io, &git, &repo, &.{ "-W", "-p", "-A1", "thing" }, .{ .patterns = &.{"thing"}, .function_context = true, .show_function = true, .after = 1 });
+    try compare(gpa, io, &git, &repo, &.{ "-W", "value" }, .{ .patterns = &.{"value"}, .function_context = true });
+    try compare(gpa, io, &git, &repo, &.{ "-W", "-c", "total" }, .{ .patterns = &.{"total"}, .function_context = true, .show = .count });
+    try compare(gpa, io, &git, &repo, &.{ "--threads=1", "-W", "-n", "total" }, .{ .patterns = &.{"total"}, .function_context = true, .line_number = true, .threads = 1 });
+}
+
+/// A `-P` stand-in that finds its patterns as fixed text.
+const FixedMatcher = struct {
+    patterns: []const []const u8,
+
+    fn find(context: *anyopaque, index: usize, line: []const u8, not_bol: bool) error{MatchFailed}!?grep_mod.Match {
+        _ = not_bol;
+        const m: *FixedMatcher = @ptrCast(@alignCast(context)); // safe: the context is always a FixedMatcher
+        const at = std.mem.indexOf(u8, line, m.patterns[index]) orelse return null;
+        return .{ .start = at, .end = at + m.patterns[index].len };
+    }
+};
+
+test "-P matches through the caller's matcher, and without one is refused by name" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try fixture(io, &git);
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var matcher: FixedMatcher = .{ .patterns = &.{ "count", "x *" } };
+    const perl: grep_mod.Matcher = .{ .context = &matcher, .find = FixedMatcher.find };
+    try compare(gpa, io, &git, &repo, &.{ "-F", "-n", "-o", "-e", "count", "-e", "x *" }, .{ .patterns = matcher.patterns, .syntax = .perl, .perl = perl, .line_number = true, .only_matching = true });
+    try compare(gpa, io, &git, &repo, &.{ "-F", "-w", "-c", "-e", "count", "--and", "--not", "-e", "x *" }, .{ .expression = &.{ .{ .pattern = "count" }, .@"and", .not, .{ .pattern = "x *" } }, .syntax = .perl, .perl = perl, .word = true, .show = .count });
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try std.testing.expectError(error.UnsupportedPerlRegex, grep_mod.grep(gpa, io, &repo, .{ .patterns = &.{"a"}, .syntax = .perl }, &out.writer));
-    try std.testing.expectError(error.UnsupportedBackreference, grep_mod.grep(gpa, io, &repo, .{ .patterns = &.{"\\(a\\)\\1"} }, &out.writer));
 }
 
 fn randomAtom(a: Allocator, random: std.Random, out: *std.ArrayList(u8), depth: u32, extended: bool) !void {

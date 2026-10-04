@@ -2,18 +2,21 @@
 //! tree, in the index, or in a tree or commit, written as git writes them.
 //!
 //! Patterns are fixed strings, POSIX basic expressions (git's default) or
-//! extended ones (`ere.zig`), any of several matching, with `-i`, `-w` and
-//! `-v` as git applies them: `-w` retries past a match that is not a whole
-//! word, exactly where git's does. A file is binary by its `diff` and
-//! `binary` attributes, else by a NUL in its first 8000 bytes, and is then
-//! reported as `Binary file <name> matches`. Output is git's to the byte:
-//! names, `-n` and `--column` numbers, `-A`/`-B`/`-C` context with `--`
-//! between hunks, `-o`, `-c`, `-l`, `-L`, `-z`. The files are searched on
-//! tasks of the caller's `std.Io`, and written in path order.
+//! extended ones (`ere.zig`), back-references included, with `-i`, `-w`
+//! and `-v` as git applies them: `-w` retries past a match that is not a
+//! whole word, exactly where git's does. Several patterns match when any
+//! does, or as `--and`, `--not` and parentheses combine them, and
+//! `--all-match` keeps the files where every one of them matched. A file
+//! is binary by its `diff` and `binary` attributes, else by a NUL in its
+//! first 8000 bytes, and is then reported as `Binary file <name> matches`.
+//! Output is git's to the byte: names, `-n` and `--column` numbers,
+//! `-A`/`-B`/`-C` context with `--` between hunks, `-p` and `-W` with the
+//! function lines git's `diff` drivers find, `-o`, `-c`, `-l`, `-L`, `-z`.
+//! The files are searched on tasks of the caller's `std.Io`, and written
+//! in path order.
 //!
-//! What git does that this refuses by name: `-P` (PCRE),
-//! back-references, `-p`/`-W` (function context), `--and`/`--or`/`--not`
-//! expressions, submodule recursion and `--no-index`.
+//! `-P` (PCRE) is the caller's to bring, as a `Matcher`; without one it is
+//! refused by name, as are submodule recursion and `--no-index`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -28,21 +31,28 @@ const attributes = @import("worktree/attributes.zig");
 const ere = @import("ere.zig");
 const pathspec_mod = @import("pathspec.zig");
 const fs = @import("repo/fs.zig");
+const userdiff = @import("diff/userdiff.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 
 /// Errors from a grep.
 pub const Error = error{
-    /// `-P`: Perl-compatible expressions, which git builds with PCRE and
-    /// this does not have.
+    /// `-P` with no `Matcher`: Perl-compatible expressions, which git
+    /// builds with PCRE and this does not have.
     UnsupportedPerlRegex,
     /// A pattern that does not compile.
     InvalidPattern,
-    /// A pattern whose program would be too large.
+    /// A pattern whose program would be too large, or whose search took
+    /// more work than the budget allows.
     PatternTooComplex,
-    /// A back-reference, `\1`, which this matcher does not support.
-    UnsupportedBackreference,
+    /// The `Matcher` failed.
+    PerlMatchFailed,
+    /// `--and`, `--not` or a parenthesis where git's expression grammar
+    /// has no place for it.
+    InvalidExpression,
+    /// A `diff` driver's `funcname` or `xfuncname` that does not compile.
+    InvalidFunctionPattern,
     /// No pattern was given.
     NoPattern,
     /// A pattern with a NUL in it, which git takes only under `-P`.
@@ -56,6 +66,38 @@ pub const Error = error{
 
 /// How patterns are read: `-G`, `-E`, `-F`, `-P`.
 pub const Syntax = enum { basic, extended, fixed, perl };
+
+/// Where a match is in a line: `line[start..end]`.
+pub const Match = struct { start: usize, end: usize };
+
+/// The matcher a caller brings for `-P`. `find` answers the leftmost
+/// match of one pattern — `index` counts the patterns in the order they
+/// are given — in `line`, which holds no newline; `not_bol` says the
+/// start of `line` is not the start of a line, as when a search resumes
+/// after a match. `-i` is the matcher's to apply. It is called from
+/// several tasks at once.
+pub const Matcher = struct {
+    context: *anyopaque,
+    find: *const fn (context: *anyopaque, index: usize, line: []const u8, not_bol: bool) error{MatchFailed}!?Match,
+};
+
+/// One word of a pattern expression, as git's command line has them.
+pub const Term = union(enum) {
+    /// `-e <pattern>`.
+    pattern: []const u8,
+    /// `--and`, which binds tighter than the either-or of terms side by
+    /// side.
+    @"and",
+    /// `--or`, which git takes and ignores: terms side by side already
+    /// match when either does.
+    @"or",
+    /// `--not`.
+    not,
+    /// `(`.
+    open,
+    /// `)`.
+    close,
+};
 
 /// Where the files come from.
 pub const Source = union(enum) {
@@ -89,10 +131,18 @@ pub const Show = enum {
 /// How a grep runs.
 pub const Options = struct {
     /// `-e`: a line matches when any of these does.
-    patterns: []const []const u8,
+    patterns: []const []const u8 = &.{},
+    /// The patterns with `--and`, `--or`, `--not` and parentheses, read
+    /// instead of `patterns` when given.
+    expression: ?[]const Term = null,
+    /// `--all-match`: only files where each pattern of the top-level
+    /// either-or matched some line.
+    all_match: bool = false,
     /// `null` reads `grep.patternType` and `grep.extendedRegexp`, and is
     /// basic without them.
     syntax: ?Syntax = null,
+    /// What matches under `-P`.
+    perl: ?Matcher = null,
     ignore_case: bool = false,
     /// `-w`.
     word: bool = false,
@@ -110,6 +160,10 @@ pub const Options = struct {
     /// `-B` and `-A`; `-C` is both.
     before: usize = 0,
     after: usize = 0,
+    /// `-p`: the function line above each match.
+    show_function: bool = false,
+    /// `-W`: the whole function around each match.
+    function_context: bool = false,
     /// `-m`.
     max_count: ?usize = null,
     /// `-z`.
@@ -134,19 +188,40 @@ pub const Outcome = struct {
 //=========================================================================
 
 const Pat = struct {
-    kind: union(enum) { fixed: []const u8, regex: ere.Regex },
+    kind: union(enum) { fixed: []const u8, regex: ere.Regex, perl: usize },
 };
+
+/// git's pattern expression: a flat either-or of the patterns when no
+/// operator was given.
+const Expr = union(enum) {
+    atom: usize,
+    not: *const Expr,
+    @"and": [2]*const Expr,
+    @"or": [2]*const Expr,
+};
+
+const MatchError = error{ PatternTooComplex, PerlMatchFailed };
+const SearchError = Io.Writer.Error || MatchError;
 
 const Searcher = struct {
     pats: []Pat,
+    expr: *const Expr,
+    /// The terms of the top-level either-or, which `--all-match` asks to
+    /// have each matched somewhere in a file.
+    top: []const *const Expr,
+    all_match: bool,
     icase: bool,
     word: bool,
     invert: bool,
+    /// `--column`, under which git evaluates every term, for the earliest
+    /// column.
+    column: bool,
+    perl: ?Matcher,
 
     fn deinit(s: *Searcher) void {
         for (s.pats) |*p| switch (p.kind) {
             .regex => |*r| r.deinit(),
-            .fixed => {},
+            .fixed, .perl => {},
         };
     }
 };
@@ -158,11 +233,120 @@ fn isRegexSpecial(c: u8) bool {
     };
 }
 
-fn compile(a: Allocator, gpa: Allocator, options: Options, syntax: Syntax) Error!Searcher {
-    if (options.patterns.len == 0) return error.NoPattern;
-    if (syntax == .perl) return error.UnsupportedPerlRegex;
+/// git's `compile_pattern_or` and the rules under it, over the terms with
+/// `--or` dropped.
+const ExprParser = struct {
+    a: Allocator,
+    terms: []const Term,
+    at: usize = 0,
+    atoms: usize = 0,
+
+    fn new(p: *ExprParser, e: Expr) Allocator.Error!*const Expr {
+        const out = try p.a.create(Expr);
+        out.* = e;
+        return out;
+    }
+
+    fn orExpr(p: *ExprParser) Error!?*const Expr {
+        const x = try p.andExpr() orelse return null;
+        if (p.at < p.terms.len and p.terms[p.at] != .close) {
+            const y = try p.orExpr() orelse return error.InvalidExpression;
+            return try p.new(.{ .@"or" = .{ x, y } });
+        }
+        return x;
+    }
+
+    fn andExpr(p: *ExprParser) Error!?*const Expr {
+        const x = try p.notExpr();
+        if (p.at < p.terms.len and p.terms[p.at] == .@"and") {
+            const left = x orelse return error.InvalidExpression;
+            p.at += 1;
+            if (p.at >= p.terms.len) return error.InvalidExpression;
+            const y = try p.andExpr() orelse return error.InvalidExpression;
+            return try p.new(.{ .@"and" = .{ left, y } });
+        }
+        return x;
+    }
+
+    fn notExpr(p: *ExprParser) Error!?*const Expr {
+        if (p.at < p.terms.len and p.terms[p.at] == .not) {
+            p.at += 1;
+            if (p.at >= p.terms.len) return error.InvalidExpression;
+            const x = try p.notExpr() orelse return error.InvalidExpression;
+            return try p.new(.{ .not = x });
+        }
+        return p.atom();
+    }
+
+    fn atom(p: *ExprParser) Error!?*const Expr {
+        if (p.at >= p.terms.len) return null;
+        switch (p.terms[p.at]) {
+            .pattern => {
+                p.at += 1;
+                p.atoms += 1;
+                return try p.new(.{ .atom = p.atoms - 1 });
+            },
+            .open => {
+                p.at += 1;
+                const x = try p.orExpr();
+                if (p.at >= p.terms.len or p.terms[p.at] != .close) return error.InvalidExpression;
+                p.at += 1;
+                return x;
+            },
+            else => return null,
+        }
+    }
+};
+
+/// The expression and its patterns' texts, in order.
+fn parseExpression(a: Allocator, options: Options) Error!struct { expr: *const Expr, texts: []const []const u8 } {
+    var texts: std.ArrayList([]const u8) = .empty;
+    const given = options.expression orelse {
+        if (options.patterns.len == 0) return error.NoPattern;
+        // right-nested, as git's grammar nests them
+        var expr = try a.create(Expr);
+        expr.* = .{ .atom = options.patterns.len - 1 };
+        var i = options.patterns.len - 1;
+        while (i > 0) {
+            i -= 1;
+            const left = try a.create(Expr);
+            left.* = .{ .atom = i };
+            const both = try a.create(Expr);
+            both.* = .{ .@"or" = .{ left, expr } };
+            expr = both;
+        }
+        return .{ .expr = expr, .texts = options.patterns };
+    };
+    var terms: std.ArrayList(Term) = .empty;
+    for (given) |t| switch (t) {
+        .@"or" => {},
+        .pattern => |text| {
+            try texts.append(a, text);
+            try terms.append(a, t);
+        },
+        else => try terms.append(a, t),
+    };
+    if (texts.items.len == 0) return error.NoPattern;
+    var p: ExprParser = .{ .a = a, .terms = terms.items };
+    const expr = try p.orExpr() orelse return error.InvalidExpression;
+    if (p.at != terms.items.len) return error.InvalidExpression;
+    return .{ .expr = expr, .texts = texts.items };
+}
+
+fn compile(a: Allocator, gpa: Allocator, options: Options, syntax: Syntax, column: bool) Error!Searcher {
+    const parsed = try parseExpression(a, options);
+    if (syntax == .perl and options.perl == null) return error.UnsupportedPerlRegex;
     var pats: std.ArrayList(Pat) = .empty;
-    for (options.patterns) |text| {
+    errdefer for (pats.items) |*p| switch (p.kind) {
+        .regex => |*r| r.deinit(),
+        .fixed, .perl => {},
+    };
+    for (parsed.texts, 0..) |text, index| {
+        if (syntax == .perl) {
+            // everything under `-P` is the matcher's, fixed text included
+            try pats.append(a, .{ .kind = .{ .perl = index } });
+            continue;
+        }
         if (std.mem.indexOfScalar(u8, text, 0) != null) return error.NulInPattern;
         var fixed = syntax == .fixed;
         if (!fixed) {
@@ -177,16 +361,32 @@ fn compile(a: Allocator, gpa: Allocator, options: Options, syntax: Syntax) Error
             const re = ere.Regex.compile(gpa, text, .{ .syntax = if (syntax == .extended) .extended else .basic, .icase = options.ignore_case }) catch |err| switch (err) {
                 error.InvalidPattern => return error.InvalidPattern,
                 error.PatternTooComplex => return error.PatternTooComplex,
-                error.UnsupportedBackreference => return error.UnsupportedBackreference,
                 error.OutOfMemory => return error.OutOfMemory,
             };
             try pats.append(a, .{ .kind = .{ .regex = re } });
         }
     }
-    return .{ .pats = pats.items, .icase = options.ignore_case, .word = options.word, .invert = options.invert };
+    var top: std.ArrayList(*const Expr) = .empty;
+    var x = parsed.expr;
+    while (x.* == .@"or") {
+        try top.append(a, x.@"or"[0]);
+        x = x.@"or"[1];
+    }
+    try top.append(a, x);
+    return .{
+        .pats = pats.items,
+        .expr = parsed.expr,
+        .top = top.items,
+        .all_match = options.all_match,
+        .icase = options.ignore_case,
+        .word = options.word,
+        .invert = options.invert,
+        .column = column,
+        .perl = options.perl,
+    };
 }
 
-fn findFixed(needle: []const u8, hay: []const u8, icase: bool) ?ere.Match {
+fn findFixed(needle: []const u8, hay: []const u8, icase: bool) ?Match {
     if (needle.len == 0) return .{ .start = 0, .end = 0 };
     if (!icase) {
         const at = std.mem.indexOf(u8, hay, needle) orelse return null;
@@ -196,30 +396,47 @@ fn findFixed(needle: []const u8, hay: []const u8, icase: bool) ?ere.Match {
     return .{ .start = at, .end = at + needle.len };
 }
 
-/// Scratch a task matches with: one regex machine per pattern.
+/// Scratch a task matches with: one regex machine per pattern, one for
+/// the function lines, and `--all-match`'s hits.
 const Scratch = struct {
     vms: []?ere.Vm,
+    func_vm: ?ere.Vm,
+    hits: []bool,
 
-    fn init(gpa: Allocator, s: *const Searcher) Allocator.Error!Scratch {
+    fn init(gpa: Allocator, s: *const Searcher, func_program: usize) Allocator.Error!Scratch {
         const vms = try gpa.alloc(?ere.Vm, s.pats.len);
+        for (vms) |*vm| vm.* = null;
+        var sc: Scratch = .{ .vms = vms, .func_vm = null, .hits = &.{} };
+        errdefer sc.deinit(gpa);
         for (s.pats, vms) |p, *vm| vm.* = switch (p.kind) {
             .regex => |r| try ere.Vm.init(gpa, r.program.len),
-            .fixed => null,
+            .fixed, .perl => null,
         };
-        return .{ .vms = vms };
+        if (func_program != 0) sc.func_vm = try ere.Vm.init(gpa, func_program);
+        sc.hits = try gpa.alloc(bool, s.top.len);
+        return sc;
     }
 
     fn deinit(sc: *Scratch, gpa: Allocator) void {
         for (sc.vms) |*vm| if (vm.*) |*v| v.deinit(gpa);
         gpa.free(sc.vms);
+        if (sc.func_vm) |*v| v.deinit(gpa);
+        gpa.free(sc.hits);
     }
 };
 
-fn patmatch(p: *const Pat, vm: ?*ere.Vm, icase: bool, line: []const u8, not_bol: bool) ?ere.Match {
-    return switch (p.kind) {
-        .fixed => |text| findFixed(text, line, icase),
-        .regex => |*r| r.findWith(vm.?, line, not_bol),
-    };
+fn patmatch(s: *const Searcher, p: *const Pat, vm: ?*ere.Vm, line: []const u8, not_bol: bool) MatchError!?Match {
+    switch (p.kind) {
+        .fixed => |text| return findFixed(text, line, s.icase),
+        .regex => |*r| {
+            const m = try r.findWith(vm.?, line, not_bol) orelse return null;
+            return .{ .start = m.start, .end = m.end };
+        },
+        .perl => |index| {
+            const m = s.perl.?.find(s.perl.?.context, index, line, not_bol) catch return error.PerlMatchFailed;
+            return m;
+        },
+    }
 }
 
 fn wordChar(c: u8) bool {
@@ -228,13 +445,13 @@ fn wordChar(c: u8) bool {
 
 /// git's `headerless_match_one_pattern`: a match, with `-w` retried until
 /// it is a whole word.
-fn matchOne(s: *const Searcher, i: usize, sc: *Scratch, line: []const u8, not_bol_in: bool) ?ere.Match {
+fn matchOne(s: *const Searcher, i: usize, sc: *Scratch, line: []const u8, not_bol_in: bool) MatchError!?Match {
     const p = &s.pats[i];
     const vm: ?*ere.Vm = if (sc.vms[i]) |*v| v else null;
     var bol: usize = 0;
     var not_bol = not_bol_in;
     while (true) {
-        const m = patmatch(p, vm, s.icase, line[bol..], not_bol) orelse return null;
+        const m = try patmatch(s, p, vm, line[bol..], not_bol) orelse return null;
         if (!s.word) return .{ .start = m.start + bol, .end = m.end + bol };
         const so = bol + m.start;
         const eo = bol + m.end;
@@ -249,27 +466,58 @@ fn matchOne(s: *const Searcher, i: usize, sc: *Scratch, line: []const u8, not_bo
     }
 }
 
-/// Whether the line matches any pattern, and with `col` where the earliest
-/// match starts.
-fn matchLine(s: *const Searcher, sc: *Scratch, line: []const u8, col: ?*?usize) bool {
-    var hit = false;
-    for (s.pats, 0..) |_, i| {
-        if (matchOne(s, i, sc, line, false)) |m| {
-            hit = true;
-            const c = col orelse break;
-            if (c.* == null or m.start < c.*.?) c.* = m.start;
-        }
+/// git's `match_expr_eval`: whether the line satisfies `x`, with `col`
+/// the earliest column a pattern matched at and `icol` the same under an
+/// odd number of `--not`s.
+fn evalExpr(s: *const Searcher, sc: *Scratch, x: *const Expr, line: []const u8, col: *?usize, icol: *?usize) MatchError!bool {
+    switch (x.*) {
+        .atom => |i| {
+            const m = try matchOne(s, i, sc, line, false) orelse return false;
+            if (col.* == null or m.start < col.*.?) col.* = m.start;
+            return true;
+        },
+        .not => |inner| return !try evalExpr(s, sc, inner, line, icol, col),
+        .@"and" => |pair| {
+            const left = try evalExpr(s, sc, pair[0], line, col, icol);
+            // a `--not` above may make this an either-or, so `--column`
+            // asks both sides
+            if (!left and !s.column) return false;
+            const right = try evalExpr(s, sc, pair[1], line, col, icol);
+            return left and right;
+        },
+        .@"or" => |pair| {
+            const left = try evalExpr(s, sc, pair[0], line, col, icol);
+            if (left and !s.column) return true;
+            const right = try evalExpr(s, sc, pair[1], line, col, icol);
+            return left or right;
+        },
     }
-    return hit;
+}
+
+/// `--all-match`'s first pass: which top-level terms some line matched.
+fn collectHits(s: *const Searcher, sc: *Scratch, content: []const u8) MatchError!bool {
+    @memset(sc.hits, false);
+    var bol: usize = 0;
+    while (bol < content.len) {
+        const eol = std.mem.indexOfScalarPos(u8, content, bol, '\n') orelse content.len;
+        for (s.top, sc.hits) |term, *hit| {
+            var col: ?usize = null;
+            var icol: ?usize = null;
+            if (try evalExpr(s, sc, term, content[bol..eol], &col, &icol)) hit.* = true;
+        }
+        bol = eol + 1;
+    }
+    for (sc.hits) |hit| if (!hit) return false;
+    return true;
 }
 
 /// git's `grep_next_match`: the earliest match of any pattern, the longest
 /// of those.
-fn nextMatch(s: *const Searcher, sc: *Scratch, line: []const u8, not_bol: bool) ?ere.Match {
+fn nextMatch(s: *const Searcher, sc: *Scratch, line: []const u8, not_bol: bool) MatchError!?Match {
     if (line.len == 0) return null;
-    var best: ?ere.Match = null;
+    var best: ?Match = null;
     for (s.pats, 0..) |_, i| {
-        const m = matchOne(s, i, sc, line, not_bol) orelse continue;
+        const m = try matchOne(s, i, sc, line, not_bol) orelse continue;
         if (best) |b| {
             if (m.start > b.start) continue;
             if (m.start == b.start and m.end < b.end) continue;
@@ -291,6 +539,8 @@ const Format = struct {
     pathname: bool,
     before: usize,
     after: usize,
+    funcname: bool,
+    funcbody: bool,
     max_count: ?usize,
     null_sep: bool,
     binary: Binary,
@@ -299,9 +549,47 @@ const Format = struct {
 const FileState = struct {
     w: *Io.Writer,
     fmt: *const Format,
+    s: *const Searcher,
+    sc: *Scratch,
     name: []const u8,
+    content: []const u8,
+    /// How function lines are found, under `-p` or `-W`.
+    rule: ?*const userdiff.Rule,
     last_shown: usize = 0,
+
+    /// The line from `bol` to `eol`, which ends it or the content.
+    fn line(st: *const FileState, bol: usize, eol: usize) []const u8 {
+        return st.content[bol..eol];
+    }
+
+    /// git's `match_funcname`.
+    fn isFunction(st: *FileState, text: []const u8) MatchError!bool {
+        const rule = st.rule orelse return false;
+        return rule.matches(&st.sc.func_vm.?, text);
+    }
 };
+
+/// The end of the line starting at `bol`: its newline, or the end.
+fn endOfLine(content: []const u8, bol: usize) usize {
+    return std.mem.indexOfScalarPos(u8, content, bol, '\n') orelse content.len;
+}
+
+/// The start of the line before the one starting at `bol`, which is not
+/// the first.
+fn startOfLineBefore(content: []const u8, bol: usize) usize {
+    var b = bol - 1;
+    while (b > 0 and content[b - 1] != '\n') b -= 1;
+    return b;
+}
+
+/// git's `is_empty_line`, with git's own `isspace`.
+fn isEmptyLine(text: []const u8) bool {
+    for (text) |c| switch (c) {
+        ' ', '\t', '\n', '\r' => {},
+        else => return false,
+    };
+    return true;
+}
 
 fn outputSep(st: *FileState, sign: u8) Io.Writer.Error!void {
     if (st.fmt.null_sep) try st.w.writeByte(0) else try st.w.writeByte(sign);
@@ -323,8 +611,8 @@ fn showLineHeader(st: *FileState, lno: usize, cno: usize, sign: u8) Io.Writer.Er
     }
 }
 
-fn showLine(st: *FileState, s: *const Searcher, sc: *Scratch, line: []const u8, lno: usize, cno_in: usize, sign: u8) Io.Writer.Error!void {
-    const context = st.fmt.before != 0 or st.fmt.after != 0;
+fn showLine(st: *FileState, line: []const u8, lno: usize, cno_in: usize, sign: u8) SearchError!void {
+    const context = st.fmt.before != 0 or st.fmt.after != 0 or st.fmt.funcbody;
     if (context) {
         if (st.last_shown == 0) {
             // every file's first hunk is marked; the writer drops the very
@@ -339,7 +627,7 @@ fn showLine(st: *FileState, s: *const Searcher, sc: *Scratch, line: []const u8, 
     if (st.fmt.only_matching) {
         var bol: usize = 0;
         var not_bol = false;
-        while (nextMatch(s, sc, line[bol..], not_bol)) |m| {
+        while (try nextMatch(st.s, st.sc, line[bol..], not_bol)) |m| {
             if (m.start == m.end) break;
             cno = bol + m.start + 1;
             try showLineHeader(st, lno, cno, sign);
@@ -359,9 +647,90 @@ fn showName(st: *FileState) Io.Writer.Error!void {
     try st.w.writeByte(if (st.fmt.null_sep) 0 else '\n');
 }
 
+/// git's `show_funcname_line`: the nearest function line above the one
+/// starting at `bol`, unless it was shown already.
+fn showFuncnameLine(st: *FileState, bol_in: usize, lno_in: usize) SearchError!void {
+    var bol = bol_in;
+    var lno = lno_in;
+    while (bol > 0) {
+        const eol = bol - 1;
+        bol = startOfLineBefore(st.content, bol);
+        lno -= 1;
+        if (lno <= st.last_shown) break;
+        if (try st.isFunction(st.line(bol, eol))) {
+            try showLine(st, st.line(bol, eol), lno, 0, '=');
+            break;
+        }
+    }
+}
+
+/// git's `show_pre_context`: the lines before a hit at `lno`, back to the
+/// context asked for, the function line for `-p`, or for `-W` the start
+/// of the function with the comment above it.
+fn showPreContext(st: *FileState, bol_in: usize, eol_in: usize, lno: usize) SearchError!void {
+    const fmt = st.fmt;
+    var bol = bol_in;
+    var cur = lno;
+    var from: usize = 1;
+    var funcname_lno: usize = 0;
+    var funcname_needed = fmt.funcname;
+    var comment_needed = false;
+    if (fmt.before < lno) from = lno - fmt.before;
+    if (from <= st.last_shown) from = st.last_shown + 1;
+    const orig_from = from;
+    if (fmt.funcbody) {
+        if (try st.isFunction(st.line(bol, eol_in))) comment_needed = true else funcname_needed = true;
+        from = st.last_shown + 1;
+    }
+    // rewind
+    while (bol > 0 and cur > from) {
+        const next_bol = bol;
+        const eol = bol - 1;
+        bol = startOfLineBefore(st.content, bol);
+        cur -= 1;
+        if (comment_needed and (isEmptyLine(st.line(bol, eol)) or try st.isFunction(st.line(bol, eol)))) {
+            comment_needed = false;
+            from = orig_from;
+            if (cur < from) {
+                cur += 1;
+                bol = next_bol;
+                break;
+            }
+        }
+        if (funcname_needed and try st.isFunction(st.line(bol, eol))) {
+            funcname_lno = cur;
+            funcname_needed = false;
+            if (fmt.funcbody) comment_needed = true else from = orig_from;
+        }
+    }
+    // the function line may be further back still
+    if (fmt.funcname and funcname_needed) try showFuncnameLine(st, bol, cur);
+    // and forward again
+    while (cur < lno) {
+        const eol = endOfLine(st.content, bol);
+        try showLine(st, st.line(bol, eol), cur, 0, if (cur == funcname_lno) '=' else '-');
+        bol = eol + 1;
+        cur += 1;
+    }
+}
+
+/// Whether the function a `-W` hit is in ends before the line from `bol`
+/// to `eol`: trailing empty lines belong to it only when no function line
+/// follows them. `at` is the first line that is not empty.
+fn peekFunction(st: *FileState, bol: usize, eol: usize) MatchError!struct { ends: bool, at: usize } {
+    var pb = bol;
+    var pe = eol;
+    while (isEmptyLine(st.line(pb, pe))) {
+        if (pe >= st.content.len) return .{ .ends = true, .at = st.content.len };
+        pb = pe + 1;
+        pe = endOfLine(st.content, pb);
+    }
+    return .{ .ends = pb >= st.content.len or try st.isFunction(st.line(pb, pe)), .at = pb };
+}
+
 /// git's `grep_source_1` over one file's bytes. Returns whether it hit.
-fn searchFile(s: *const Searcher, sc: *Scratch, fmt: *const Format, name: []const u8, content: []const u8, is_binary: bool, w: *Io.Writer) Io.Writer.Error!bool {
-    var st: FileState = .{ .w = w, .fmt = fmt, .name = name };
+fn searchFile(s: *const Searcher, sc: *Scratch, fmt: *const Format, item: *const Item, content: []const u8, is_binary: bool, w: *Io.Writer) SearchError!bool {
+    var st: FileState = .{ .w = w, .fmt = fmt, .s = s, .sc = sc, .name = item.name, .content = content, .rule = item.rule };
     var binary_match_only = false;
     switch (fmt.binary) {
         .match => if (is_binary) {
@@ -370,16 +739,20 @@ fn searchFile(s: *const Searcher, sc: *Scratch, fmt: *const Format, name: []cons
         .skip => if (is_binary) return false,
         .text => {},
     }
+    if (s.all_match and !try collectHits(s, sc, content)) return false;
     var lno: usize = 1;
     var last_hit: usize = 0;
     var count: usize = 0;
     var bol: usize = 0;
-    // the line starts, for pre-context
+    var show_function = false;
+    // where the look past a function's trailing empty lines got to
+    var peek_bol: ?usize = null;
     while (bol < content.len) {
-        const eol = std.mem.indexOfScalarPos(u8, content, bol, '\n') orelse content.len;
+        const eol = endOfLine(content, bol);
         const line = content[bol..eol];
         var col: ?usize = null;
-        var hit = matchLine(s, sc, line, if (fmt.column) &col else null);
+        var icol: ?usize = null;
+        var hit = try evalExpr(s, sc, s.expr, line, &col, &icol);
         if (s.invert) hit = !hit;
         if (fmt.show == .files_without_match) {
             if (hit) return false;
@@ -392,16 +765,26 @@ fn searchFile(s: *const Searcher, sc: *Scratch, fmt: *const Format, name: []cons
             }
             if (fmt.show != .count) {
                 if (binary_match_only) {
-                    try w.print("Binary file {s} matches\n", .{name});
+                    try w.print("Binary file {s} matches\n", .{item.name});
                     return true;
                 }
-                if (fmt.before > 0) try showPreContext(&st, s, sc, content, bol, lno);
-                const cno: usize = if (col) |c| c + 1 else 1;
-                try showLine(&st, s, sc, line, lno, if (s.invert) 1 else cno, ':');
+                if (fmt.before > 0 or fmt.funcbody) {
+                    try showPreContext(&st, bol, eol, lno);
+                } else if (fmt.funcname) try showFuncnameLine(&st, bol, lno);
+                const cno = if (s.invert) icol else col;
+                try showLine(&st, line, lno, if (cno) |c| c + 1 else 1, ':');
                 last_hit = lno;
+                if (fmt.funcbody) show_function = true;
             }
-        } else if (last_hit != 0 and lno <= last_hit + fmt.after and fmt.show == .lines) {
-            try showLine(&st, s, sc, line, lno, if (col) |c| c + 1 else 0, '-');
+        } else if (fmt.show == .lines) {
+            if (show_function and (peek_bol == null or peek_bol.? < bol)) {
+                const peek = try peekFunction(&st, bol, eol);
+                peek_bol = peek.at;
+                if (peek.ends) show_function = false;
+            }
+            if (show_function or (last_hit != 0 and lno <= last_hit + fmt.after)) {
+                try showLine(&st, line, lno, if (col) |c| c + 1 else 0, '-');
+            }
         }
         if (eol >= content.len) break;
         bol = eol + 1;
@@ -414,33 +797,13 @@ fn searchFile(s: *const Searcher, sc: *Scratch, fmt: *const Format, name: []cons
     }
     if (fmt.show == .count and count > 0) {
         if (fmt.pathname) {
-            try w.writeAll(name);
+            try w.writeAll(item.name);
             try outputSep(&st, ':');
         }
         try w.print("{d}\n", .{count});
         return true;
     }
     return last_hit != 0;
-}
-
-fn showPreContext(st: *FileState, s: *const Searcher, sc: *Scratch, content: []const u8, bol_in: usize, lno: usize) Io.Writer.Error!void {
-    var from: usize = 1;
-    if (st.fmt.before < lno) from = lno - st.fmt.before;
-    if (from <= st.last_shown) from = st.last_shown + 1;
-    var bol = bol_in;
-    var cur = lno;
-    while (bol > 0 and cur > from) {
-        var b = bol - 1; // the newline ending the line before
-        while (b > 0 and content[b - 1] != '\n') b -= 1;
-        bol = b;
-        cur -= 1;
-    }
-    while (cur < lno) {
-        const eol = std.mem.indexOfScalarPos(u8, content, bol, '\n') orelse content.len;
-        try showLine(st, s, sc, content[bol..eol], cur, 0, '-');
-        bol = eol + 1;
-        cur += 1;
-    }
 }
 
 //=========================================================================
@@ -453,6 +816,10 @@ const Item = struct {
     /// The path in the repository, for attributes.
     path: []const u8,
     source: union(enum) { file, blob: Oid },
+    /// What the `diff` attribute says of it being binary, if anything.
+    binary: ?bool = null,
+    /// How its function lines are found, under `-p` or `-W`.
+    rule: ?*const userdiff.Rule = null,
 };
 
 fn collectIndex(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, cached: bool, items: *std.ArrayList(Item)) Error!void {
@@ -521,19 +888,35 @@ fn isBinaryContent(bytes: []const u8) bool {
     return std.mem.indexOfScalar(u8, bytes[0..n], 0) != null;
 }
 
-/// The `diff` attribute's say on whether `path` is binary, or `null`.
-fn binaryByAttributes(a: Allocator, io: Io, attrs: ?*attributes.Attrs, wt: ?Io.Dir, path: []const u8) Error!?bool {
-    const at = attrs orelse return null;
-    if (wt) |w| try at.enter(io, w, path);
-    const applied = try at.lookup(a, path, false);
-    if (applied.get("diff")) |state| switch (state) {
-        .unset => return true,
-        .set => return false,
-        else => {},
-    };
-    return null;
+/// What the attributes say of each item: binary or not by `diff`, and
+/// under `-p` or `-W` the driver `diff` names, whose rules are compiled
+/// once each into `rules`.
+fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs, items: []Item, functions: bool, rules: *std.StringArrayHashMapUnmanaged(*userdiff.Rule)) Error!void {
+    const config = repo.configuration();
+    for (items) |*item| {
+        var driver: ?[]const u8 = null;
+        if (attrs) |at| {
+            if (repo.work_dir) |w| try at.enter(io, w, item.path);
+            const applied = try at.lookup(a, item.path, false);
+            if (applied.get("diff")) |state| switch (state) {
+                .unset => item.binary = true,
+                .set => item.binary = false,
+                .value => |v| driver = v,
+                .unspecified => {},
+            };
+        }
+        if (!functions) continue;
+        // a name no driver has, and none at all, are git's default
+        const key = driver orelse "";
+        item.rule = rules.get(key) orelse blk: {
+            const rule = try a.create(userdiff.Rule);
+            rule.* = try userdiff.Rule.init(gpa, config, driver);
+            errdefer rule.deinit();
+            try rules.put(a, try a.dupe(u8, key), rule);
+            break :blk rule;
+        };
+    }
 }
-
 //=========================================================================
 // Running
 //=========================================================================
@@ -561,7 +944,7 @@ fn runWorker(work: *Work, worker: usize) void {
         const content = work.contents[i] orelse continue;
         const buf = work.buffers[worker];
         var w: Io.Writer = .fixed(buf[work.used[worker]..]);
-        const hit = searchFile(work.searcher, &work.scratch[worker], work.fmt, work.items[i].name, content, work.binaries[i], &w) catch {
+        const hit = searchFile(work.searcher, &work.scratch[worker], work.fmt, &work.items[i], content, work.binaries[i], &w) catch {
             work.outputs[i] = null;
             continue;
         };
@@ -597,16 +980,19 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
             if (std.mem.eql(u8, v, "basic")) syntax = .basic else if (std.mem.eql(u8, v, "extended")) syntax = .extended else if (std.mem.eql(u8, v, "fixed")) syntax = .fixed else if (std.mem.eql(u8, v, "perl")) syntax = .perl;
         }
     }
-    var searcher = try compile(a, gpa, options, syntax);
+    const column = options.column orelse (config.getBool("grep.column", false) catch false);
+    var searcher = try compile(a, gpa, options, syntax, column);
     defer searcher.deinit();
     const fmt: Format = .{
         .show = options.show,
         .line_number = options.line_number orelse (config.getBool("grep.linenumber", false) catch false),
-        .column = options.column orelse (config.getBool("grep.column", false) catch false),
+        .column = column,
         .only_matching = options.only_matching,
         .pathname = options.with_filename,
         .before = options.before,
         .after = options.after,
+        .funcname = options.show_function,
+        .funcbody = options.function_context,
         .max_count = options.max_count,
         .null_sep = options.null_separator,
         .binary = options.binary,
@@ -632,20 +1018,26 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     defer if (attrs) |*x| x.deinit();
     if (repo.work_dir != null) attrs = try repo.loadAttrs(io);
     defer if (attrs) |*x| x.leave();
+    var rules: std.StringArrayHashMapUnmanaged(*userdiff.Rule) = .empty;
+    defer for (rules.values()) |rule| rule.deinit();
+    const functions = fmt.funcname or fmt.funcbody;
+    try applyAttributes(a, gpa, io, repo, if (attrs) |*x| x else null, items.items, functions, &rules);
+    var func_program: usize = 0;
+    for (rules.values()) |rule| func_program = @max(func_program, rule.programLen());
 
     const workers = @max(1, @min(taskCount(options.threads), items.items.len));
     const scratch = try a.alloc(Scratch, workers);
     var made: usize = 0;
     defer for (scratch[0..made]) |*sc| sc.deinit(gpa);
     for (scratch) |*sc| {
-        sc.* = try Scratch.init(gpa, &searcher);
+        sc.* = try Scratch.init(gpa, &searcher, func_program);
         made += 1;
     }
     const buffers = try a.alloc([]u8, workers);
     for (buffers) |*b| b.* = try a.alloc(u8, task_output_bytes);
 
     var matched = false;
-    var first_mark = fmt.before != 0 or fmt.after != 0;
+    var first_mark = fmt.before != 0 or fmt.after != 0 or fmt.funcbody;
     var start: usize = 0;
     while (start < items.items.len) {
         // a batch: as many files as fit the byte budget
@@ -674,7 +1066,7 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
             try contents.append(a, content);
             var bin = false;
             if (content) |c| {
-                bin = (try binaryByAttributes(a, io, if (attrs) |*x| x else null, repo.work_dir, item.path)) orelse isBinaryContent(c);
+                bin = item.binary orelse isBinaryContent(c);
             }
             try binaries.append(a, bin);
         }
@@ -711,7 +1103,7 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
             if (work.outputs[i]) |o| {
                 out = o;
             } else {
-                work.hits[i] = try searchFile(&searcher, &scratch[0], &fmt, work.items[i].name, content, work.binaries[i], &redo.writer);
+                work.hits[i] = try searchFile(&searcher, &scratch[0], &fmt, &work.items[i], content, work.binaries[i], &redo.writer);
                 out = redo.written();
             }
             if (work.hits[i]) matched = true;
@@ -732,10 +1124,12 @@ test "the leftmost match decides a word match as git's retry does" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var s = try compile(arena.allocator(), gpa, .{ .patterns = &.{"foo"}, .word = true }, .basic);
+    var s = try compile(arena.allocator(), gpa, .{ .patterns = &.{"foo"}, .word = true }, .basic, false);
     defer s.deinit();
-    var sc = try Scratch.init(gpa, &s);
+    var sc = try Scratch.init(gpa, &s, 0);
     defer sc.deinit(gpa);
-    try std.testing.expect(matchLine(&s, &sc, "foobar foo", null));
-    try std.testing.expect(!matchLine(&s, &sc, "foobar xfoo", null));
+    var col: ?usize = null;
+    var icol: ?usize = null;
+    try std.testing.expect(try evalExpr(&s, &sc, s.expr, "foobar foo", &col, &icol));
+    try std.testing.expect(!try evalExpr(&s, &sc, s.expr, "foobar xfoo", &col, &icol));
 }

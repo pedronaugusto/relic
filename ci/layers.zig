@@ -99,6 +99,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/transport/tls/auth_wire.zig",
     } },
     .{ .name = "repository policy", .patterns = &.{
+        "src/diff/userdiff.zig",
         "src/config/state.zig",
         "src/transport/credential.zig",
         "src/submodule/gitmodules.zig",

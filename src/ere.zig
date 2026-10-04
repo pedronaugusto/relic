@@ -424,13 +424,21 @@ const max_program = 1 << 16;
 
 /// A compiled pattern, matched one line at a time as `regexec` with
 /// `REG_NEWLINE` matches: the leftmost match, and of those the longest.
-/// GNU's `\w`, `\W`, `\s`, `\S`, `\b`, `\B`, `\<` and `\>` are understood;
-/// back-references are refused as `error.UnsupportedBackreference`.
+/// GNU's `\w`, `\W`, `\s`, `\S`, `\b`, `\B`, `\<` and `\>` are understood.
+/// A pattern with a back-reference, `\1` to `\9`, is matched as glibc
+/// matches it: of every way through the pattern whose references repeat
+/// what their groups took, the one ending furthest; a search past a budget
+/// of work is refused as `error.PatternTooComplex`.
 pub const Regex = struct {
     arena: std.heap.ArenaAllocator,
     program: []const Inst,
+    /// The pattern itself, for one with a back-reference, which the
+    /// program cannot match; `null` for the rest.
+    tree: ?*const RNode = null,
+    icase: bool = false,
 
-    pub const CompileError = Error || error{UnsupportedBackreference};
+    pub const CompileError = Error;
+    pub const FindError = error{PatternTooComplex};
 
     /// Compile `text` under `flags`.
     pub fn compile(gpa: Allocator, text: []const u8, flags: Flags) CompileError!Regex {
@@ -440,6 +448,10 @@ pub const Regex = struct {
         var p: RParser = .{ .a = a, .text = text, .flags = flags };
         const tree = try p.parseAlt(0);
         if (p.at != text.len) return error.InvalidPattern;
+        if (p.backrefs) {
+            const program = try a.dupe(Inst, &.{.match});
+            return .{ .arena = arena, .program = program, .tree = tree, .icase = flags.icase };
+        }
         var c: Compiler = .{ .a = a, .icase = flags.icase };
         try c.emit(tree);
         try c.push(.match);
@@ -454,15 +466,139 @@ pub const Regex = struct {
     /// The leftmost-longest match in `line`, or `null`. `not_bol` is
     /// `REG_NOTBOL`: the start of `line` is not the start of a line, as
     /// when a search resumes after an earlier match.
-    pub fn find(r: *const Regex, gpa: Allocator, line: []const u8, not_bol: bool) Allocator.Error!?Match {
+    pub fn find(r: *const Regex, gpa: Allocator, line: []const u8, not_bol: bool) (Allocator.Error || FindError)!?Match {
         var vm: Vm = try .init(gpa, r.program.len);
         defer vm.deinit(gpa);
-        return vm.run(r.program, line, not_bol);
+        return r.findWith(&vm, line, not_bol);
     }
 
     /// `find` with scratch space the caller keeps between calls.
-    pub fn findWith(r: *const Regex, vm: *Vm, line: []const u8, not_bol: bool) ?Match {
+    pub fn findWith(r: *const Regex, vm: *Vm, line: []const u8, not_bol: bool) FindError!?Match {
+        if (r.tree) |tree| return Backtrack.find(tree, line, not_bol, r.icase);
         return vm.run(r.program, line, not_bol);
+    }
+};
+
+/// Every way through a pattern with back-references, one start at a time:
+/// glibc's answer, the leftmost start and of its ways the furthest end.
+const Backtrack = struct {
+    line: []const u8,
+    not_bol: bool,
+    icase: bool,
+    /// What groups one to nine last took on the way being tried.
+    caps: [10]?Match = @splat(null),
+    end: ?usize = null,
+    steps: usize = 0,
+    depth: usize = 0,
+    over: bool = false,
+
+    /// The work one start may take, and how deep the way may nest, so a
+    /// pattern cannot run away or run the stack out.
+    const max_steps = 1 << 18;
+    const max_depth = 1 << 13;
+
+    /// What is left to match after the node in hand.
+    const Cont = struct {
+        item: union(enum) {
+            seq: []const *const RNode,
+            close: struct { index: u32, start: usize },
+            rep: struct { node: *const RNode, min: u32, max: ?u32, count: u32, start: usize },
+        },
+        next: ?*const Cont,
+    };
+
+    fn find(tree: *const RNode, line: []const u8, not_bol: bool, icase: bool) Regex.FindError!?Match {
+        var b: Backtrack = .{ .line = line, .not_bol = not_bol, .icase = icase };
+        var start: usize = 0;
+        while (start <= line.len) : (start += 1) {
+            b.end = null;
+            b.steps = 0;
+            b.caps = @splat(null);
+            b.step(tree, start, null);
+            if (b.over) return error.PatternTooComplex;
+            if (b.end) |end| return .{ .start = start, .end = end };
+        }
+        return null;
+    }
+
+    fn step(b: *Backtrack, n: *const RNode, at: usize, k: ?*const Cont) void {
+        if (b.over) return;
+        b.steps += 1;
+        b.depth += 1;
+        defer b.depth -= 1;
+        if (b.steps > max_steps or b.depth > max_depth) {
+            b.over = true;
+            return;
+        }
+        const line = b.line;
+        const pw = at > 0 and Vm.isWord(line[at - 1]);
+        const nw = at < line.len and Vm.isWord(line[at]);
+        switch (n.*) {
+            .empty => b.cont(at, k),
+            .byte => |c| if (at < line.len and line[at] == c) b.cont(at + 1, k),
+            .set => |s| if (at < line.len and s[line[at]]) b.cont(at + 1, k),
+            .any => if (at < line.len and line[at] != '\n') b.cont(at + 1, k),
+            .bol => if (at == 0 and !b.not_bol) b.cont(at, k),
+            .eol => if (at == line.len) b.cont(at, k),
+            .word_boundary => if (pw != nw) b.cont(at, k),
+            .not_word_boundary => if (pw == nw) b.cont(at, k),
+            .word_start => if (!pw and nw) b.cont(at, k),
+            .word_end => if (pw and !nw) b.cont(at, k),
+            .concat => |items| {
+                const rest: Cont = .{ .item = .{ .seq = items[1..] }, .next = k };
+                b.step(items[0], at, &rest);
+            },
+            .alt => |branches| for (branches) |branch| b.step(branch, at, k),
+            .group => |g| {
+                const close: Cont = .{ .item = .{ .close = .{ .index = g.index, .start = at } }, .next = k };
+                b.step(g.node, at, &close);
+            },
+            .backref => |i| {
+                // a group that took nothing on this way matches nothing
+                const cap = b.caps[i] orelse return;
+                const text = line[cap.start..cap.end];
+                if (line.len - at < text.len) return;
+                const here = line[at..][0..text.len];
+                const same = if (b.icase) std.ascii.eqlIgnoreCase(here, text) else std.mem.eql(u8, here, text);
+                if (same) b.cont(at + text.len, k);
+            },
+            .repeat => |r| b.rep(r.node, r.min, r.max, 0, at, k),
+        }
+    }
+
+    fn rep(b: *Backtrack, node: *const RNode, min: u32, max: ?u32, count: u32, at: usize, k: ?*const Cont) void {
+        if (max == null or count < max.?) {
+            const again: Cont = .{ .item = .{ .rep = .{ .node = node, .min = min, .max = max, .count = count + 1, .start = at } }, .next = k };
+            b.step(node, at, &again);
+        }
+        if (count >= min) b.cont(at, k);
+    }
+
+    fn cont(b: *Backtrack, at: usize, k: ?*const Cont) void {
+        const c = k orelse {
+            if (b.end == null or at > b.end.?) b.end = at;
+            return;
+        };
+        switch (c.item) {
+            .seq => |items| {
+                if (items.len == 1) return b.step(items[0], at, c.next);
+                const rest: Cont = .{ .item = .{ .seq = items[1..] }, .next = c.next };
+                b.step(items[0], at, &rest);
+            },
+            .close => |cl| {
+                if (cl.index >= b.caps.len) return b.cont(at, c.next);
+                const old = b.caps[cl.index];
+                b.caps[cl.index] = .{ .start = cl.start, .end = at };
+                b.cont(at, c.next);
+                b.caps[cl.index] = old;
+            },
+            .rep => |r| {
+                // a pass that took nothing may set its groups, but another
+                // after it would take nothing again
+                if (at == r.start and r.count >= r.min) return b.cont(at, c.next);
+                b.rep(r.node, r.min, r.max, r.count, at, c.next);
+            },
+        }
     }
 };
 
@@ -625,6 +761,10 @@ const RNode = union(enum) {
     concat: []const *const RNode,
     alt: []const *const RNode,
     repeat: struct { node: *const RNode, min: u32, max: ?u32 },
+    /// A group, numbered from one in the order it opens.
+    group: struct { node: *const RNode, index: u32 },
+    /// `\1` to `\9`: what that group took.
+    backref: u32,
 };
 
 const RParser = struct {
@@ -632,11 +772,25 @@ const RParser = struct {
     text: []const u8,
     flags: Flags,
     at: usize = 0,
+    /// Groups opened so far, and which of one to nine have closed.
+    groups: u32 = 0,
+    closed: u16 = 0,
+    backrefs: bool = false,
 
     fn node(p: *RParser, n: RNode) Allocator.Error!*const RNode {
         const out = try p.a.create(RNode);
         out.* = n;
         return out;
+    }
+
+    fn openGroup(p: *RParser) u32 {
+        p.groups += 1;
+        return p.groups;
+    }
+
+    fn closeGroup(p: *RParser, inner: *const RNode, index: u32) Allocator.Error!*const RNode {
+        if (index <= 9) p.closed |= @as(u16, 1) << @intCast(index); // safe: index is at most nine
+        return p.node(.{ .group = .{ .node = inner, .index = index } });
     }
 
     fn isBasic(p: *const RParser) bool {
@@ -803,10 +957,11 @@ const RParser = struct {
             },
             '(' => if (!basic) {
                 p.at += 1;
+                const index = p.openGroup();
                 const inner = try p.parseAlt(depth + 1);
                 if (p.peek(0) != ')') return error.InvalidPattern;
                 p.at += 1;
-                return inner;
+                return p.closeGroup(inner, index);
             } else {
                 p.at += 1;
                 return p.literal('(');
@@ -842,14 +997,21 @@ const RParser = struct {
                 p.at += 2;
                 switch (e) {
                     '(' => if (basic) {
+                        const index = p.openGroup();
                         const inner = try p.parseAlt(depth + 1);
                         if (!(p.peek(0) == '\\' and p.peek(1) == ')')) return error.InvalidPattern;
                         p.at += 2;
-                        return inner;
+                        return p.closeGroup(inner, index);
                     },
                     ')' => if (basic) return error.InvalidPattern,
                     '{' => if (basic) return error.InvalidPattern,
-                    '1'...'9' => return error.UnsupportedBackreference,
+                    '1'...'9' => {
+                        // only a group already closed may be referred to
+                        const index = e - '0';
+                        if (p.closed & (@as(u16, 1) << @intCast(index)) == 0) return error.InvalidPattern; // safe: index is one to nine
+                        p.backrefs = true;
+                        return p.node(.{ .backref = index });
+                    },
                     'w' => return p.classOf(wordChar, false),
                     'W' => return p.classOf(wordChar, true),
                     's' => return p.classOf(spaceChar, false),
@@ -959,6 +1121,9 @@ const Compiler = struct {
             .word_start => try c.push(.word_start),
             .word_end => try c.push(.word_end),
             .concat => |items| for (items) |item| try c.emit(item),
+            .group => |g| try c.emit(g.node),
+            // a pattern with one is matched by `Backtrack`, never compiled
+            .backref => unreachable,
             .alt => |branches| {
                 // split L1, next; L1: branch; jmp end; ...
                 var jumps: std.ArrayList(u32) = .empty;
@@ -1027,7 +1192,34 @@ test "a regex finds the leftmost, longest match, in basic and extended syntax" {
             return err;
         };
     }
-    try testing.expectError(error.UnsupportedBackreference, Regex.compile(testing.allocator, "\\(a\\)\\1", .{ .syntax = .basic }));
+}
+
+test "a back-reference takes the way glibc takes: the furthest end any assignment of the groups reaches" {
+    // each answer is glibc's regexec, the matcher git uses on Linux and
+    // builds in for Windows
+    const Case = struct { pattern: []const u8, syntax: Syntax = .basic, icase: bool = false, text: []const u8, want: ?Match };
+    for ([_]Case{
+        .{ .pattern = "\\(ab\\)\\1", .text = "xabab", .want = .{ .start = 1, .end = 5 } },
+        .{ .pattern = "(z)\\1", .syntax = .extended, .text = "xyzzy", .want = .{ .start = 2, .end = 4 } },
+        .{ .pattern = "\\(ab\\)\\1", .icase = true, .text = "AbAB", .want = .{ .start = 0, .end = 4 } },
+        .{ .pattern = "(a|ab)(c|bcd)?\\1", .syntax = .extended, .text = "abcda", .want = .{ .start = 0, .end = 5 } },
+        .{ .pattern = "(a|ab)(c|bcd)?\\1", .syntax = .extended, .text = "abab", .want = .{ .start = 0, .end = 4 } },
+        .{ .pattern = "\\(a\\)*\\1", .text = "a", .want = null },
+        .{ .pattern = "\\(a\\)*\\1", .text = "aa", .want = .{ .start = 0, .end = 2 } },
+        .{ .pattern = "\\(a\\)\\|\\1b", .text = "b", .want = null },
+        .{ .pattern = "x\\(a*\\)*y\\1", .text = "xaay", .want = .{ .start = 0, .end = 4 } },
+        .{ .pattern = "x\\(a*\\)*y\\1", .text = "xy", .want = .{ .start = 0, .end = 2 } },
+    }) |case| {
+        var r = try Regex.compile(testing.allocator, case.pattern, .{ .syntax = case.syntax, .icase = case.icase });
+        defer r.deinit();
+        const got = try r.find(testing.allocator, case.text, false);
+        testing.expectEqual(case.want, got) catch |err| {
+            std.debug.print("{s} on {s}\n", .{ case.pattern, case.text });
+            return err;
+        };
+    }
+    try testing.expectError(error.InvalidPattern, Regex.compile(testing.allocator, "\\1(a)", .{}));
+    try testing.expectError(error.InvalidPattern, Regex.compile(testing.allocator, "\\(a\\1\\)", .{ .syntax = .basic }));
 }
 
 test "fuzz: any regex compiles or is refused, and any match is within the line" {
@@ -1038,11 +1230,15 @@ test "fuzz: any regex compiles or is refused, and any match is within the line" 
             const cut = all.len / 2;
             for ([_]Syntax{ .basic, .extended }) |syntax| {
                 var r = Regex.compile(testing.allocator, all[0..cut], .{ .syntax = syntax }) catch |err| switch (err) {
-                    error.InvalidPattern, error.PatternTooComplex, error.UnsupportedBackreference => continue,
+                    error.InvalidPattern, error.PatternTooComplex => continue,
                     else => return err,
                 };
                 defer r.deinit();
-                if (try r.find(testing.allocator, all[cut..], false)) |m| {
+                const found = r.find(testing.allocator, all[cut..], false) catch |err| switch (err) {
+                    error.PatternTooComplex => continue,
+                    else => return err,
+                };
+                if (found) |m| {
                     try testing.expect(m.start <= m.end and m.end <= all.len - cut);
                 }
             }
