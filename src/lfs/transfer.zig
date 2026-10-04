@@ -23,6 +23,12 @@
 //! as git-lfs fails them. What failed is in the outcome, object by object;
 //! the operation itself fails only when it cannot go on at all.
 //!
+//! A custom transfer adapter (`custom.zig`) moves the objects when the
+//! batch answer names one the configuration has, the adapters being
+//! offered in the request, or with no batch at all when
+//! `lfs.<url>.standalonetransferagent` names one: its processes are
+//! started before the transfers and handed them one at a time.
+//!
 //! A remote whose server speaks git-lfs's pure-ssh protocol gets the same
 //! batches and transfers over it instead, one connection per worker, as
 //! git-lfs's `ssh` adapter moves them (`lfsssh.zig`).
@@ -56,6 +62,7 @@ const objectwalk = @import("../transport/objectwalk.zig");
 const progress_mod = @import("../transport/progress.zig");
 const timetext = @import("timetext.zig");
 const lfsssh = @import("ssh.zig");
+const custom = @import("custom.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -71,10 +78,10 @@ pub const Error = error{
     LfsBatchFailed,
     /// A remote on this machine whose repository does not open.
     LfsLocalRemoteUnreadable,
-    /// The server chose a transfer adapter other than `basic`, which is
-    /// the only one relic offers.
+    /// The server chose a transfer adapter relic does not have: `tus`, or a
+    /// name the configuration does not define for the direction.
     LfsTransferUnsupported,
-} || lfsapi.Error || lfs.Store.InstallError || lfs.Store.OpenError || Io.ConcurrentError ||
+} || custom.Error || lfsapi.Error || lfs.Store.InstallError || lfs.Store.OpenError || Io.ConcurrentError ||
     Io.File.ReadPositionalError || Io.File.WritePositionalError || Io.File.SetLengthError;
 
 /// An object to move.
@@ -184,6 +191,8 @@ const Limits = struct {
     max_verifies: u32,
     concurrency: u32,
     allow_incomplete_push: bool,
+    /// The adapters the batch request offers beside `basic`.
+    transfers: []const []const u8 = &.{},
 
     fn read(settings: *const lfsapi.Settings, options: Options) Limits {
         const retries = settings.getInt("lfs.transfer.maxretries", 8);
@@ -338,6 +347,13 @@ fn isOid(text: []const u8) bool {
 /// objects, the ref, and the hash algorithm; the transfer adapters are left
 /// out, which means `basic`.
 pub fn writeBatchRequest(w: *Io.Writer, operation: lfsapi.Operation, objects: []const Object, ref: ?[]const u8) Io.Writer.Error!void {
+    return writeBatchRequestOffering(w, operation, objects, ref, &.{});
+}
+
+/// A batch request offering the custom adapters `transfers` beside
+/// `basic`, as git-lfs offers the adapters it has; with none, as
+/// `writeBatchRequest` writes it.
+pub fn writeBatchRequestOffering(w: *Io.Writer, operation: lfsapi.Operation, objects: []const Object, ref: ?[]const u8, transfers: []const []const u8) Io.Writer.Error!void {
     var s: std.json.Stringify = .{ .writer = w };
     try s.beginObject();
     try s.objectField("operation");
@@ -353,6 +369,13 @@ pub fn writeBatchRequest(w: *Io.Writer, operation: lfsapi.Operation, objects: []
         try s.endObject();
     }
     try s.endArray();
+    if (transfers.len != 0) {
+        try s.objectField("transfers");
+        try s.beginArray();
+        try s.write("basic");
+        for (transfers) |t| try s.write(t);
+        try s.endArray();
+    }
     try s.objectField("ref");
     try s.beginObject();
     if (ref) |name| {
@@ -387,6 +410,10 @@ const Job = struct {
     action: Action,
     verify: ?Action,
     authenticated: bool,
+    /// Moved by the custom adapter's processes.
+    custom: bool = false,
+    /// With no action: a standalone agent's.
+    standalone: bool = false,
 };
 
 /// What a worker says to the task that started it.
@@ -403,6 +430,10 @@ const Run = struct {
     operation: lfsapi.Operation,
     /// git-lfs's pure-ssh protocol, when the remote speaks it.
     ssh: ?*lfsssh.Transfer = null,
+    /// A custom adapter's processes, one per worker.
+    agents: []const *custom.Agent = &.{},
+    /// The store's directory, absolute: where an upload's file is named.
+    store_base: []const u8 = "",
     options: Options,
     limits: Limits,
     arena: Allocator,
@@ -639,8 +670,22 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
     }
     if (pending.items.len == 0) return outcome;
 
-    const limits = Limits.read(&server.settings, options);
+    var limits = Limits.read(&server.settings, options);
     const endpoint = try server.client.endpoint(operation);
+    const adapters = try custom.configured(arena, server.settings.config);
+    // A standalone agent moves everything with no API at all; git-lfs's own
+    // for a remote on this machine is the store-to-store copy below.
+    if (try standaloneAgent(server, arena, endpoint)) |name| {
+        if (custom.find(adapters, name, operation)) |adapter| {
+            try runStandalone(server, operation, adapter, &outcome, pending.items, missing_here.items, limits, options);
+            return outcome;
+        }
+    }
+    {
+        var offered: std.ArrayList([]const u8) = .empty;
+        for (adapters) |a| if (a.moves(operation)) try offered.append(arena, a.name);
+        limits.transfers = offered.items;
+    }
     if (endpoint.isLocal()) {
         try copyLocal(server, endpoint, operation, &outcome, pending.items, missing_here.items, limits, options);
         return outcome;
@@ -656,6 +701,8 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
         .jobs = &.{},
     };
     var jobs: std.ArrayList(Job) = .empty;
+    // The custom adapter the answers chose, if one did.
+    var chosen: ?custom.Adapter = null;
     var start: usize = 0;
     while (start < pending.items.len) : (start += limits.batch_size) {
         const chunk = pending.items[start..@min(pending.items.len, start + limits.batch_size)];
@@ -676,8 +723,14 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
             },
             else => |e| return e,
         };
+        var by_custom = false;
         if (answer.transfer) |t| {
-            if (state.ssh == null and t.len != 0 and !std.mem.eql(u8, t, "basic")) return error.LfsTransferUnsupported;
+            if (state.ssh == null and t.len != 0 and !std.mem.eql(u8, t, "basic")) {
+                const adapter = custom.find(adapters, t, operation) orelse return error.LfsTransferUnsupported;
+                if (chosen) |c| if (!std.mem.eql(u8, c.name, adapter.name)) return error.LfsTransferUnsupported;
+                chosen = adapter;
+                by_custom = true;
+            }
         }
         // The transfers go in the order of the server's answer, as
         // git-lfs's queue takes them; an object it left out fails.
@@ -713,7 +766,7 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
                         r.message = "the server has no download for the object";
                         continue;
                     };
-                    try jobs.append(arena, .{ .result = r, .action = a, .verify = null, .authenticated = o.authenticated });
+                    try jobs.append(arena, .{ .result = r, .action = a, .verify = null, .authenticated = o.authenticated, .custom = by_custom });
                 },
                 .upload => {
                     const a = o.action(.upload) orelse {
@@ -725,7 +778,7 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
                         r.message = "the object is not in the store, and the server does not have it";
                         continue;
                     }
-                    try jobs.append(arena, .{ .result = r, .action = a, .verify = o.action(.verify), .authenticated = o.authenticated });
+                    try jobs.append(arena, .{ .result = r, .action = a, .verify = o.action(.verify), .authenticated = o.authenticated, .custom = by_custom });
                 },
             }
         }
@@ -735,9 +788,154 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
     state.total_objects = jobs.items.len;
     for (jobs.items) |j| state.total_bytes += j.result.size;
 
+    if (chosen) |adapter| try startAgents(&state, adapter);
+    defer stopAgents(&state);
     try runJobs(&state);
     if (state.failure()) |err| return err;
     return outcome;
+}
+
+/// The standalone agent `lfs.<url>.standalonetransferagent` names for the
+/// endpoint, else git-lfs's own for a remote on this machine.
+fn standaloneAgent(server: *lfsapi.Server, arena: Allocator, endpoint: lfsapi.Endpoint) Error!?[]const u8 {
+    if (try server.settings.urlGet(arena, "lfs", endpoint.url, "standalonetransferagent")) |name| {
+        if (name.len != 0) return name;
+    }
+    return if (endpoint.isLocal()) "lfs-standalone-file" else null;
+}
+
+/// Every object through a standalone agent, which asks no server: a
+/// download of each the store lacks, an upload of each it has.
+fn runStandalone(
+    server: *lfsapi.Server,
+    operation: lfsapi.Operation,
+    adapter: custom.Adapter,
+    outcome: *Outcome,
+    pending: []const usize,
+    missing_here: []const bool,
+    limits: Limits,
+    options: Options,
+) Error!void {
+    const arena = outcome.arena.allocator();
+    var state: Run = .{
+        .server = server,
+        .operation = operation,
+        .options = options,
+        .limits = limits,
+        .arena = arena,
+        .jobs = &.{},
+    };
+    var jobs: std.ArrayList(Job) = .empty;
+    for (pending) |i| {
+        const r = &outcome.results[i];
+        if (operation == .upload and missing_here[i]) {
+            r.status = if (limits.allow_incomplete_push) .present else .missing;
+            r.message = "the object is not in the store";
+            continue;
+        }
+        try jobs.append(arena, .{ .result = r, .action = .{ .href = "" }, .verify = null, .authenticated = false, .custom = true, .standalone = true });
+    }
+    if (jobs.items.len == 0) return;
+    state.jobs = jobs.items;
+    state.total_objects = jobs.items.len;
+    for (jobs.items) |j| state.total_bytes += j.result.size;
+    try startAgents(&state, adapter);
+    defer stopAgents(&state);
+    try runJobs(&state);
+    if (state.failure()) |err| return err;
+}
+
+/// Start the adapter's processes, `lfs.concurrenttransfers` of them or
+/// one, as git-lfs starts them, each told `init`.
+fn startAgents(state: *Run, adapter: custom.Adapter) Error!void {
+    const server = state.server;
+    const programs = server.client.options.programs orelse return error.ProgramsNotGranted;
+    const count: u32 = if (adapter.concurrent) state.limits.concurrency else 1;
+    const agents = try state.arena.alloc(*custom.Agent, count);
+    var started: usize = 0;
+    errdefer for (agents[0..started]) |a| a.stop();
+    while (started < count) : (started += 1) {
+        agents[started] = try custom.Agent.start(server.gpa, server.io, programs, server.base_path, adapter, .{
+            .operation = state.operation,
+            .remote = server.remote,
+            .concurrent = adapter.concurrent,
+            .concurrent_transfers = state.limits.concurrency,
+        });
+    }
+    state.agents = agents;
+    state.limits.concurrency = count;
+    const base = try server.store().base.realPathFileAlloc(server.io, ".", server.gpa);
+    defer server.gpa.free(base);
+    state.store_base = try state.arena.dupe(u8, base);
+}
+
+fn stopAgents(state: *Run) void {
+    for (state.agents) |a| a.stop();
+    state.agents = &.{};
+}
+
+/// One transfer through the worker's own process.
+fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify: ?Action, authenticated: bool) Error!Attempt {
+    const server = state.server;
+    const io = server.io;
+    const store = server.store();
+    var scratch_state: std.heap.ArenaAllocator = .init(server.gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    var path_buf: [lfs.Store.max_path]u8 = undefined;
+    const upload_path: ?[]const u8 = if (state.operation == .upload)
+        try std.fs.path.join(scratch, &.{ state.store_base, try store.objectPath(&path_buf, &r.oid) })
+    else
+        null;
+    var request_action: ?custom.Action = null;
+    if (action) |a| {
+        var headers: std.ArrayList(custom.Action.Header) = .empty;
+        if (a.header) |map| {
+            var it = map.map.iterator();
+            while (it.next()) |kv| try headers.append(scratch, .{ .name = kv.key_ptr.*, .value = kv.value_ptr.* });
+        }
+        request_action = .{ .href = a.href, .header = headers.items, .expires_at = a.expires_at, .expires_in = a.expires_in orelse 0 };
+    }
+    const Progress = struct {
+        state: *Run,
+        pub fn bytes(p: @This(), n: u64) void {
+            p.state.say(.{ .bytes = n });
+        }
+    };
+    const ended = try state.agents[worker].transfer(.{
+        .operation = state.operation,
+        .oid = &r.oid,
+        .size = r.size,
+        .path = upload_path,
+        .action = request_action,
+    }, Progress{ .state = state });
+    switch (ended) {
+        .failed => |f| return .{ .fail = try std.fmt.allocPrint(state.arena, "[{d}] {s}", .{ f.code, f.message }) },
+        .done => |path| {
+            if (state.operation == .upload) {
+                const v = verify orelse return .ok;
+                return verifyUpload(state, r, v, authenticated);
+            }
+            // The agent's file, checked against the object's name on its
+            // way into the store, then given up as git-lfs gives it up.
+            const named = path orelse return .{ .fail = "the custom transfer named no file" };
+            const full = if (std.fs.path.isAbsolute(named)) named else try std.fs.path.join(scratch, &.{ server.base_path, named });
+            const file = Io.Dir.cwd().openFile(io, full, .{}) catch return .{ .fail = "the custom transfer's file cannot be read" };
+            defer {
+                file.close(io);
+                Io.Dir.cwd().deleteFile(io, full) catch {};
+            }
+            var buf: [64 * 1024]u8 = undefined;
+            var fr = file.reader(io, &buf);
+            const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
+            _ = store.install(io, &fr.interface, &pointer) catch |err| switch (err) {
+                error.LfsObjectMismatch => return .{ .fail = "the custom transfer's file is not the object" },
+                error.ReadFailed => return fr.err.?,
+                else => |e| return e,
+            };
+            return .ok;
+        },
+    }
 }
 
 /// Run the jobs `concurrency` at a time. Workers run on the caller's `Io`;
@@ -853,7 +1051,7 @@ fn runJob(state: *Run, job: *Job, worker: usize) Error!void {
     var verify = job.verify;
     var authenticated = job.authenticated;
     while (true) {
-        const expired: ?Rel = if (state.server.client.options.now) |now|
+        const expired: ?Rel = if (job.standalone) null else if (state.server.client.options.now) |now|
             (if (action.expiredAt(now)) (if (state.operation == .download) Rel.download else Rel.upload) else if (verify != null and verify.?.expiredAt(now)) Rel.verify else null)
         else
             null;
@@ -863,6 +1061,8 @@ fn runJob(state: *Run, job: *Job, worker: usize) Error!void {
                 .upload => "the upload action has expired",
                 .verify => "the verify action has expired",
             } } }
+        else if (job.custom)
+            try attemptCustom(state, worker, r, if (job.standalone) null else action, verify, authenticated)
         else if (state.ssh) |t| switch (state.operation) {
             // One connection per worker, as git-lfs runs them.
             .download => try attemptDownloadSsh(state, t, worker, r, action),
@@ -1314,7 +1514,7 @@ fn batchRequest(
 
     var body: Io.Writer.Allocating = .init(server.gpa);
     defer body.deinit();
-    writeBatchRequest(&body.writer, operation, objects, ref) catch return error.OutOfMemory;
+    writeBatchRequestOffering(&body.writer, operation, objects, ref, limits.transfers) catch return error.OutOfMemory;
 
     var retries: u32 = 0;
     while (true) {

@@ -1977,3 +1977,85 @@ test "LFS uploads and downloads through each SOCKS scheme, with TLS inside secur
     const counts = proxy.tunnelCounts();
     try testing.expect(counts.tls > 0 and counts.plain > 0);
 }
+
+/// Every line the agents logging to `logs` were sent, sorted.
+fn agentLines(fx: *Fixture, logs: []const u8) ![]u8 {
+    const gpa = fx.gpa;
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(gpa);
+    var texts: std.ArrayList([]u8) = .empty;
+    defer {
+        for (texts.items) |t| gpa.free(t);
+        texts.deinit(gpa);
+    }
+    var dir = try fx.tmp.dir.openDir(fx.io, logs, .{ .iterate = true });
+    defer dir.close(fx.io);
+    var it = dir.iterate();
+    while (try it.next(fx.io)) |entry| {
+        const text = try dir.readFileAlloc(fx.io, entry.name, gpa, .unlimited);
+        try texts.append(gpa, text);
+        var split = std.mem.splitScalar(u8, text, '\n');
+        while (split.next()) |l| if (l.len != 0) try lines.append(gpa, l);
+    }
+    std.mem.sort([]const u8, lines.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+    return std.mem.join(gpa, "\n", lines.items);
+}
+
+test "a custom adapter the batch answer names moves the objects, handed the actions as git-lfs hands them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{ .transfer = "agent" });
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const content = try noise(gpa, 24 * 1024, 11);
+    defer gpa.free(content);
+    const oid = testlfs.sha256Hex(content);
+    try fx.server.putObject(&oid, content);
+    try fx.tmp.dir.createDirPath(io, "agent-objects");
+    {
+        var name_buf: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "agent-objects/{s}", .{&oid});
+        try fx.tmp.dir.writeFile(io, .{ .sub_path = name, .data = content });
+    }
+    const objects = try fx.path("agent-objects");
+    defer gpa.free(objects);
+    var dirs: [2]Io.Dir = undefined;
+    for ([_][]const u8{ "theirs", "ours" }, 0..) |name, i| {
+        dirs[i] = try committed(fx, name, nobody, &.{.{ "a.bin", content }});
+        try emptyStore(fx, dirs[i]);
+        const logs = try std.fmt.allocPrint(gpa, "logs-{s}", .{name});
+        defer gpa.free(logs);
+        try fx.tmp.dir.createDirPath(io, logs);
+        const log_dir = try fx.path(logs);
+        defer gpa.free(log_dir);
+        const args = try std.fmt.allocPrint(gpa, "{s} {s}", .{ objects, log_dir });
+        defer gpa.free(args);
+        try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.path", @import("build_options").lfs_agent_path });
+        try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.args", args });
+        try fx.gitIn(dirs[i], &.{ "config", "lfs.concurrenttransfers", "1" });
+    }
+    defer for (dirs) |d| d.close(io);
+
+    try fx.gitIn(dirs[0], &.{ "lfs", "fetch", "origin", "main" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, dirs[1], .{});
+        defer repo.deinit(io);
+        const server = try openServer(fx, &repo);
+        defer server.close();
+        var fetched = try lfstransfer.fetch(server, &repo, .{});
+        defer fetched.deinit();
+        try expectNoFailures(&fetched);
+        try testing.expectEqual(lfstransfer.Result.Status.transferred, fetched.results[0].status);
+    }
+    const theirs = try agentLines(fx, "logs-theirs");
+    defer gpa.free(theirs);
+    const ours = try agentLines(fx, "logs-ours");
+    defer gpa.free(ours);
+    try testing.expectEqualStrings(theirs, ours);
+    try testing.expect(std.mem.indexOf(u8, ours, "\"action\":{\"href\":\"http://") != null);
+}

@@ -107,6 +107,7 @@ test {
         _ = @import("fastimport_test.zig");
         _ = @import("fastexport_test.zig");
         _ = @import("transport/remotehelper_test.zig");
+        _ = @import("lfs/custom_test.zig");
     }
 }
 

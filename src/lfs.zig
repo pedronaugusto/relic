@@ -36,6 +36,7 @@ pub const lfshooks = @import("lfs/hooks.zig");
 pub const lfspush = @import("lfs/push.zig");
 pub const lfslocks = @import("lfs/locks.zig");
 pub const lfstransfer = @import("lfs/transfer.zig");
+pub const lfscustom = @import("lfs/custom.zig");
 pub const lfsapi = @import("lfs/api.zig");
 // The modules relic's API puts under this one, as `relic.lfs.<name>`.
 

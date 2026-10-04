@@ -178,6 +178,8 @@ pub const families = [_]Family{
         "lfs.test",
         "lfs_test.test",
         "lfs.api.test",
+        "lfs.custom.test",
+        "lfs.custom_test.test",
         "lfs.locks.test",
         "lfs.locks_test.test",
         "lfs.push_test.test",

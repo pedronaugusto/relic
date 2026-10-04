@@ -299,7 +299,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `transport.objectwalk`, `transport.objectfilter`, `transport.partial`, `transport.filterspec` | Which objects one side lacks; partial clone, its filters and the lazy fetch. |
 | `submodule`, `submodule.gitmodules`, `submodule.gitlink`, `submodule.submoduletransport` | `.gitmodules`, status, init, update, sync, absorbed git directories, and fetching them. |
 | `lfs` | LFS without git-lfs: pointers and the store. |
-| `lfs.lfsapi`, `lfs.lfstransfer`, `lfs.lfsssh`, `lfs.lfslocks`, `lfs.lfspush`, `lfs.lfshooks` | The batch API over https or ssh, locks, pre-push, git-lfs's hooks. |
+| `lfs.lfsapi`, `lfs.lfstransfer`, `lfs.lfsssh`, `lfs.lfslocks`, `lfs.lfspush`, `lfs.lfshooks`, `lfs.lfscustom` | The batch API over https or ssh, locks, pre-push, git-lfs's hooks, custom transfer adapters (`lfs.customtransfer.*`, standalone or chosen by the batch answer). |
 | `lfs.netrc` | What the LFS client reads beside: `~/.netrc`. |
 | `patch` | `parse`, `Patch`, `FilePatch`, `Fragment`: git patches and plain unified diffs read as `git apply` reads them, from whatever surrounds them. |
 | `patch.apply` | `apply` — `git apply` to the working tree, the index or both: renames, copies, modes, binary hunks, `-R`, `--3way`, `--reject`, `--check`, whitespace checked or fixed, nothing written unless every file applies. |
@@ -694,7 +694,7 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 - **No pseudo-merge bitmap extension or incremental MIDX chains.** `UnsupportedBitmapOptions` and `ChainUnsupported` name these; ordinary pack and MIDX bitmaps are read and written. An unusable optional accelerator falls back to the object walk.
 - **`working-tree-encoding` for UTF-16 and UTF-32 only.** Any other character set is refused by name.
 - **No Negotiate or NTLM** authentication, to a server or a proxy; refused by name. **No GSS-API (Kerberos) to a SOCKS5 proxy:** it is never offered, so a proxy that takes nothing else refuses every method and the fetch stops with `ProxyAuthenticationRequired`.
-- **LFS without git-lfs's extras.** tus and custom transfer adapters are refused by name.
+- **LFS without tus.** The tus adapter is refused by name; custom transfer adapters run as git-lfs runs them.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
 - **No `git://` or dumb HTTP.** Refused by name. A remote helper is spoken to through `connect`, `fetch`, `import`, `push` and `export`; one with only `stateless-connect` or `get` cannot fetch here, `HelperCannotFetch`.
 - **No editor for a note.** Refused by name, as is a shortlog by trailer where `trailer.*` is configured.
