@@ -182,5 +182,133 @@
       "measurement": "Previous successful native case job; replaced by per-test totals after the first full preflight run.",
       "priority": 1
     }
+  ],
+  "fast_linux_jobs": 6,
+  "fast_linux_shards": [
+    {
+      "name": "core-formats",
+      "seconds": 59.443567400000084,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "core-worktree",
+      "seconds": 123.78492699999998,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "core-history",
+      "seconds": 343.3046785000019,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "core-transport",
+      "seconds": 160.95241120000006,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "core-integrations",
+      "seconds": 345.1895683999998,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "merge-file",
+      "seconds": 5.602851800000001,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "diff-algorithms",
+      "seconds": 2.5971333999999997,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "revwalk",
+      "seconds": 34.2129498,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "history-0",
+      "seconds": 12.4711631,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "history-1",
+      "seconds": 14.443046299999997,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "history-2",
+      "seconds": 14.0471367,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "history-3",
+      "seconds": 11.522504600000001,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "history-4",
+      "seconds": 14.8591461,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "history-5",
+      "seconds": 11.9929554,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "history-6",
+      "seconds": 11.08634,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "history-7",
+      "seconds": 14.4424314,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "recursive-0",
+      "seconds": 19.3031037,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "recursive-1",
+      "seconds": 15.565858500000001,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "recursive-2",
+      "seconds": 17.1823203,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "rename-0",
+      "seconds": 9.851621500000002,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "rename-1",
+      "seconds": 10.6850777,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "rename-2",
+      "seconds": 11.6701234,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "rename-3",
+      "seconds": 14.052538999999998,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "rename-4",
+      "seconds": 8.5375296,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    },
+    {
+      "name": "rename-5",
+      "seconds": 9.642690599999998,
+      "measurement": "Bootstrap from measured native Debug family durations in the previous full profile; replace with Linux Debug timings from the fast proof."
+    }
   ]
 }

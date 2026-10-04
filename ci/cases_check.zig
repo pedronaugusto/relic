@@ -97,6 +97,15 @@ pub fn main(init: std.process.Init) !void {
     const config = (try std.json.parseFromSlice(std.json.Value, a, json, .{})).value;
     const full = config.object.get("windows_shards") orelse return error.MissingWindowsShards;
     const fast = config.object.get("fast_windows_shards") orelse return error.MissingFastShards;
+    const linux = config.object.get("fast_linux_shards") orelse return error.MissingLinuxFastShards;
+    if (linux != .array or linux.array.items.len != full.array.items.len) return error.WrongLinuxFastShardCount;
+    for (cases.cases[1..]) |name| if (named(linux, name) != 1) return error.MissingOrDuplicateLinuxFastShard;
+    for (linux.array.items) |shard| {
+        const measurement = shard.object.get("measurement") orelse return error.MissingLinuxFastMeasurement;
+        const seconds = shard.object.get("seconds") orelse return error.MissingLinuxFastWeight;
+        if (measurement != .string or measurement.string.len == 0) return error.MissingLinuxFastMeasurement;
+        if (!((seconds == .float and seconds.float > 0) or (seconds == .integer and seconds.integer > 0))) return error.InvalidLinuxFastWeight;
+    }
     if (full.array.items.len + 1 != cases.cases.len or fast.array.items.len != core.families.len) return error.WrongShardCount;
     for (cases.cases[1..]) |name| if (named(full, name) != 1) return error.MissingOrDuplicateShard;
     for (core.families) |family| {
