@@ -132,7 +132,7 @@ const OneThread = struct {
         return false;
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const o: *OneThread = @ptrCast(@alignCast(ctx));
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
         if (!o.mine()) return null;
         const p = o.child.rawAlloc(len, alignment, ret) orelse return null;
         o.live += len;
@@ -140,7 +140,7 @@ const OneThread = struct {
         return p;
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const o: *OneThread = @ptrCast(@alignCast(ctx));
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
         if (!o.mine()) return false;
         if (!o.child.rawResize(memory, alignment, new_len, ret)) return false;
         o.live = o.live - memory.len + new_len;
@@ -148,7 +148,7 @@ const OneThread = struct {
         return true;
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const o: *OneThread = @ptrCast(@alignCast(ctx));
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
         if (!o.mine()) return null;
         const p = o.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
         o.live = o.live - memory.len + new_len;
@@ -156,7 +156,7 @@ const OneThread = struct {
         return p;
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const o: *OneThread = @ptrCast(@alignCast(ctx));
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
         _ = o.mine();
         o.child.rawFree(memory, alignment, ret);
         o.live -= memory.len;
@@ -416,20 +416,20 @@ const Phases = struct {
             return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
         }
         fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-            const s: *Spy = @ptrCast(@alignCast(ctx));
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
             if (len >= 16 * 1024) event(.search_alloc);
             return s.child.rawAlloc(len, alignment, ret);
         }
         fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-            const s: *Spy = @ptrCast(@alignCast(ctx));
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
             return s.child.rawResize(memory, alignment, new_len, ret);
         }
         fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-            const s: *Spy = @ptrCast(@alignCast(ctx));
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
             return s.child.rawRemap(memory, alignment, new_len, ret);
         }
         fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-            const s: *Spy = @ptrCast(@alignCast(ctx));
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
             s.child.rawFree(memory, alignment, ret);
         }
     };
@@ -606,25 +606,25 @@ const OneAtATime = struct {
         _ = o.inside.fetchSub(1, .release);
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx));
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
         o.enter();
         defer o.leave();
         return o.child.rawAlloc(len, alignment, ret);
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx));
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
         o.enter();
         defer o.leave();
         return o.child.rawResize(memory, alignment, new_len, ret);
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx));
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
         o.enter();
         defer o.leave();
         return o.child.rawRemap(memory, alignment, new_len, ret);
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx));
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
         o.enter();
         defer o.leave();
         o.child.rawFree(memory, alignment, ret);

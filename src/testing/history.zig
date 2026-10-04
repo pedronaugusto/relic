@@ -922,7 +922,7 @@ test "a clean rebase, an up-to-date one, and one onto another base land where gi
 /// Run `git rebase -i` with `sheet` as the edited todo list.
 fn gitRebaseInteractive(repo: *testgit.Repo, io: Io, sheet: []const u8, args: []const []const u8) !void {
     try repo.writeFile(io, ".git/relic-todo", sheet);
-    const env = @constCast(repo.environ.?);
+    const env = @constCast(repo.environ.?); // safe: the fixture owns a mutable environment map, borrowed for this synchronous git command.
     const editor = try testgit.fixtureCommand(repo.gpa, @import("build_options").process_fixture_path, "copy-file .git/relic-todo");
     defer repo.gpa.free(editor);
     try env.put("GIT_SEQUENCE_EDITOR", editor);

@@ -3,303 +3,186 @@
     "src"
   ],
   "test_roots": [
-    "src/relic.zig"
+    "src/tests.zig"
   ],
   "test_support": [
-    "src/testing/*",
-    "src/fake_ssh_helper.zig",
-    "src/filter_helper.zig",
-    "src/hook_fixture.zig",
-    "src/lfs_test_tool.zig",
-    "src/lfs_transfer_helper.zig",
-    "src/lock_helper.zig",
-    "src/process_fixture.zig",
-    "src/testgit.zig",
-    "src/testlfs.zig",
-    "src/testremote.zig",
-    "src/uploadpack_helper.zig"
+    "src/testing/*"
   ],
   "function_exceptions": {
-    "src/clone.zig:clone": {
-      "lines": 326,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    "src/transport/clone.zig:clone": {
+      "lines": 327,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
     },
-    "src/fake_ssh_helper.zig:main": {
+    "src/testing/fake_ssh.zig:main": {
       "lines": 129,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/fetch.zig:fetch": {
-      "lines": 416,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    "src/transport/fetch.zig:fetch": {
+      "lines": 423,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
     },
-    "src/fetchpack.zig:fetchV0": {
+    "src/transport/fetchpack.zig:fetchV0": {
       "lines": 147,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/history_test.zig:signedHistory": {
+    "src/testing/history.zig:signedHistory": {
       "lines": 140,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/hook_fixture.zig:main": {
+    "src/testing/hook.zig:main": {
       "lines": 185,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/index_core.zig:writeTo": {
+    "src/index.zig:writeTo": {
       "lines": 189,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/indexpack.zig:receive": {
+    "src/odb/indexpack.zig:receive": {
       "lines": 144,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/inflate.zig:build": {
+    "src/odb/inflate.zig:build": {
       "lines": 125,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/lfs_test_tool.zig:main": {
+    "src/testing/lfs/tool.zig:main": {
       "lines": 122,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/lfs_transfer_helper.zig:main": {
+    "src/testing/lfs/transfer.zig:main": {
       "lines": 180,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/lfsapi.zig:send": {
+    "src/lfs/api.zig:send": {
       "lines": 149,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/lfstransfer.zig:runTransfers": {
+    "src/lfs/transfer.zig:runTransfers": {
       "lines": 143,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/lfstransfer.zig:attemptDownload": {
+    "src/lfs/transfer.zig:attemptDownload": {
       "lines": 182,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/merging.zig:start": {
+    "src/commit/merging.zig:start": {
       "lines": 149,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/odb_core.zig:verifyPack": {
+    "src/odb.zig:verifyPack": {
       "lines": 127,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/ort.zig:processEntry": {
+    "src/merge/ort.zig:processEntry": {
       "lines": 159,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/push.zig:pushTo": {
-      "lines": 153,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    "src/transport/push.zig:pushTo": {
+      "lines": 154,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
     },
-    "src/rebase.zig:doPickCommit": {
+    "src/commit/rebase.zig:doPickCommit": {
       "lines": 210,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/rename.zig:GitMap": {
+    "src/diff/rename.zig:GitMap": {
       "lines": 121,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/reset.zig:toTree": {
+    "src/commit/reset.zig:toTree": {
       "lines": 136,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/sequencer.zig:pickOne": {
+    "src/commit/sequencer.zig:pickOne": {
       "lines": 192,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/sha1.zig:compressAarch64": {
+    "src/hash/sha1.zig:compressAarch64": {
       "lines": 142,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/sha1.zig:compressX86": {
+    "src/hash/sha1.zig:compressX86": {
       "lines": 159,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/sha1dc.zig:ubcCheck": {
+    "src/hash/sha1dc.zig:ubcCheck": {
       "lines": 153,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/stash.zig:push": {
+    "src/commit/stash.zig:push": {
       "lines": 140,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/stash.zig:applyStash": {
+    "src/commit/stash.zig:applyStash": {
       "lines": 127,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/testlfs.zig:handle": {
+    "src/testing/lfs.zig:handle": {
       "lines": 159,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/testremote.zig:handle": {
+    "src/testing/remote.zig:handle": {
       "lines": 124,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/textdiff.zig:middleSnake": {
+    "src/diff/textdiff.zig:middleSnake": {
       "lines": 154,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/threeway.zig:run": {
+    "src/merge/threeway.zig:run": {
       "lines": 276,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/tls/Client.zig:init": {
+    "src/transport/tls/Client.zig:init": {
       "lines": 889,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/tls/Client.zig:readIndirect": {
+    "src/transport/tls/Client.zig:readIndirect": {
       "lines": 179,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/worktree_core.zig:status": {
+    "src/worktree.zig:status": {
       "lines": 164,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/worktree_core.zig:checkout": {
-      "lines": 252,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    "src/worktree.zig:checkout": {
+      "lines": 269,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
     },
-    "src/worktree_core.zig:writePaths": {
+    "src/worktree.zig:writePaths": {
       "lines": 128,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+    },
+    "src/grep.zig:grep": {
+      "lines": 143,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
+    },
+    "src/odb/accelerators.zig:writeCommitGraph": {
+      "lines": 183,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
+    },
+    "src/odb/accelerators.zig:buildBitmap": {
+      "lines": 152,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
+    },
+    "src/patch/apply.zig:apply": {
+      "lines": 202,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
+    },
+    "src/patch/apply.zig:applyOneFragment": {
+      "lines": 128,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
+    },
+    "src/patch/format.zig:format": {
+      "lines": 158,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
+    },
+    "src/transport/httpsettings.zig:resolveForRemote": {
+      "lines": 123,
+      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
     }
   },
-  "layout_exceptions": {
-    "src/object": {
-      "files": [
-        "src/object.zig",
-        "src/object_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/commit": {
-      "files": [
-        "src/commit.zig",
-        "src/commit_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/transport": {
-      "files": [
-        "src/transport.zig",
-        "src/transport_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/diff": {
-      "files": [
-        "src/diff.zig",
-        "src/diff_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/submodule": {
-      "files": [
-        "src/submodule.zig",
-        "src/submodule_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/odb": {
-      "files": [
-        "src/odb.zig",
-        "src/odb_core.zig",
-        "src/odb_types.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/lfs": {
-      "files": [
-        "src/lfs.zig",
-        "src/lfs_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/revwalk": {
-      "files": [
-        "src/revwalk.zig",
-        "src/revwalk_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/index": {
-      "files": [
-        "src/index.zig",
-        "src/index_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/stack": {
-      "files": [
-        "src/stack_cache.zig",
-        "src/stack_types.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/pack": {
-      "files": [
-        "src/pack.zig",
-        "src/pack_types.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/reftable": {
-      "files": [
-        "src/reftable.zig",
-        "src/reftable_ops.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/repo": {
-      "files": [
-        "src/repo.zig",
-        "src/repo_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/worktree": {
-      "files": [
-        "src/worktree.zig",
-        "src/worktree_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/refs": {
-      "files": [
-        "src/refs.zig",
-        "src/refs_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/merge": {
-      "files": [
-        "src/merge.zig",
-        "src/merge_core.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/config": {
-      "files": [
-        "src/config.zig",
-        "src/config_core.zig",
-        "src/config_write.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/tls": {
-      "files": [
-        "src/tls/Client.zig",
-        "src/tls/ClientAuth.zig",
-        "src/tls/auth_wire.zig",
-        "src/tls/der.zig",
-        "src/tls/key.zig",
-        "src/tls/root.zig",
-        "src/tls/rsa.zig"
-      ],
-      "reason": "Existing grouped implementation at adoption; this exact member set cannot grow before its namespace entry is introduced."
-    }
-  },
+  "layout_exceptions": {},
   "docs": {
     "zig build docs -- usage": {
       "source": "examples/usage.zig",
@@ -311,7 +194,7 @@
   },
   "ziglint_exceptions": "ci/ziglint-exceptions.json",
   "vendored": {
-    "src/tls/Client.zig": "Zig standard-library TLS client fork, held byte for byte to its recorded patch by src/tls_fork_test.zig and zig build check-tls-fork."
+    "src/transport/tls/Client.zig": "Zig standard-library TLS client fork, held byte for byte to its recorded patch by src/testing/tls_fork.zig and zig build check-tls-fork."
   },
   "extra_checks": [
     [

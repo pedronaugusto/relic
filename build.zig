@@ -288,14 +288,15 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(examples_step);
     preflight.addCi(b, .{ .tests = test_step });
+    namespaceImportChecker(b);
     _ = ciCheck(b, "check-cases", "ci/cases_check.zig");
     _ = ciCheck(b, "check-git-flags", "ci/git_checks.zig");
     const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = b.path("ci/setup.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
     const prepare = b.addRunArtifact(setup);
     if (b.args) |args| prepare.addArgs(args);
     b.step("ci-setup", "Install cached Git and LFS tools").dependOn(&prepare.step);
-    const tls_test = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/tls_fork_test.zig"), .target = b.graph.host, .optimize = .Debug }) });
-    tls_test.root_module.addOptions("build_options", build_options);
+    // Keep the package root at src so the moved check can embed its TLS sibling.
+    const tls_test = b.addTest(.{ .root_module = test_module, .filters = &.{"the TLS client is std's, with the recorded diff and nothing else"} });
     b.step("check-tls-fork", "Verify the TLS fork against std and its recorded patch").dependOn(&b.addRunArtifact(tls_test).step);
     const tls_writer = b.addExecutable(.{ .name = "tls-fork", .root_module = b.createModule(.{ .root_source_file = b.path("ci/tls_fork.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }) });
     const tls_writer_options = b.addOptions();
@@ -321,4 +322,15 @@ fn ciCheck(b: *std.Build, name: []const u8, source: []const u8) *std.Build.Step.
     step.dependOn(&b.addRunArtifact(tests).step);
     step.dependOn(&run.step);
     return executable;
+}
+
+// Main keeps namespace reexports outside implementation layer and cycle checks.
+// Both shared structure invocations use this same compile step, so retain
+// main's checker while the pinned preflight provides the rest of the gate.
+fn namespaceImportChecker(b: *std.Build) void {
+    if (b.pkg_hash.len != 0) return;
+    const structure = b.top_level_steps.get("check-imports") orelse return;
+    const runner = structure.step.dependencies.items[0].cast(std.Build.Step.Run) orelse @panic("expected import-check run");
+    const checker = runner.producer orelse @panic("expected import-check compiler");
+    checker.root_module.root_source_file = b.path("ci/imports.zig");
 }

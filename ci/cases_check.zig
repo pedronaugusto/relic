@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
         std.mem.replaceScalar(u8, module, '\\', '.');
         for (tree.nodes.items(.tag), 0..) |tag, index| {
             if (tag != .test_decl) continue;
-            try modules.put(try a.dupe(u8, std.fs.path.stem(entry.basename)), {});
+            try modules.put(try a.dupe(u8, module), {});
             const node: std.zig.Ast.Node.Index = @enumFromInt(index);
             const token = tree.nodeMainToken(node) + 1;
             if (tree.tokenTag(token) != .string_literal) continue;
@@ -77,8 +77,8 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.indexOf(u8, text, selection) == null) return error.MissingExactSelection;
         }
     }
-    if (count != 1192 or comparisons.count() != 180) {
-        std.debug.print("Windows coverage: {d} source tests, {d} comparisons; expected 1192 and 180\n", .{ count, comparisons.count() });
+    if (count != 1286 or comparisons.count() != 180) {
+        std.debug.print("Windows coverage: {d} source tests, {d} comparisons; expected 1286 and 180\n", .{ count, comparisons.count() });
         return error.ChangedTestCount;
     }
     var filters = std.StringHashMap(void).init(a);
@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
         if ((try filters.getOrPut(module)).found_existing) return error.DuplicateCoreModule;
     };
     if (filters.count() != modules.count() or core.families.len != 5) return error.MissingCoreModule;
-    const selection = try dir.readFileAlloc(io, "test_case.zig", a, .limited(1024 * 1024));
+    const selection = try dir.readFileAlloc(io, "testing/case.zig", a, .limited(1024 * 1024));
     if (std.mem.indexOf(u8, selection, "std.mem.eql(u8, name, chosen)") == null) return error.NonExactSelection;
     const json = try std.Io.Dir.cwd().readFileAlloc(io, "ci/workflow.json", a, .limited(1024 * 1024));
     const config = (try std.json.parseFromSlice(std.json.Value, a, json, .{})).value;
@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
     while (iterator.next()) |name| if (named(full, name.*) != 1) return error.MissingComparisonOwner;
     const timeout = config.object.get("test_timeout") orelse return error.MissingTimeout;
     if (timeout != .string or !std.mem.eql(u8, timeout.string, "--test-timeout 60s")) return error.ChangedTestBudget;
-    std.debug.print("Windows cases: 1192 source tests and 180 comparisons each have one owner\n", .{});
+    std.debug.print("Windows cases: 1286 source tests and 180 comparisons each have one owner\n", .{});
 }
 
 test "comparison assignment uses complete seeds rather than substring matches" {

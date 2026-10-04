@@ -113,3 +113,58 @@ test {
     _ = @import("testing/refs_ownership.zig");
     _ = @import("refs/packed.zig");
 }
+
+// Keep every moved source-test family explicit for the shared reachability gate.
+test {
+    _ = @import("commit/notes.zig");
+    _ = @import("commit/reset.zig");
+    _ = @import("commit/todo.zig");
+    _ = @import("cquote.zig");
+    _ = @import("diff/patchid.zig");
+    _ = @import("diff/similarity.zig");
+    _ = @import("diff/textdiff.zig");
+    _ = @import("lfs/netrc.zig");
+    _ = @import("lfs/ssh.zig");
+    _ = @import("merge/strategy.zig");
+    _ = @import("merge/subtreeshift.zig");
+    _ = @import("object/fsck.zig");
+    _ = @import("object/gitdate.zig");
+    _ = @import("odb/abbrev.zig");
+    _ = @import("odb/indexpack.zig");
+    _ = @import("patch/binary.zig");
+    _ = @import("patch/mail.zig");
+    _ = @import("patch/mail/format.zig");
+    _ = @import("patch/whitespace.zig");
+    _ = @import("pathspec.zig");
+    _ = @import("pretty.zig");
+    _ = @import("revwalk/bisect.zig");
+    _ = @import("revwalk/describe.zig");
+    _ = @import("revwalk/mailmap.zig");
+    _ = @import("revwalk/revparse.zig");
+    _ = @import("revwalk/shallow.zig");
+    _ = @import("revwalk/shortlog.zig");
+    _ = @import("submodule/gitlink.zig");
+    _ = @import("submodule/gitmodules.zig");
+    _ = @import("submodule/transport.zig");
+    _ = @import("transport/bundle.zig");
+    _ = @import("transport/connection.zig");
+    _ = @import("transport/fetchpack.zig");
+    _ = @import("transport/filterspec.zig");
+    _ = @import("transport/httpauth.zig");
+    _ = @import("transport/httpsettings.zig");
+    _ = @import("transport/pktline.zig");
+    _ = @import("transport/protocol.zig");
+    _ = @import("transport/refspec.zig");
+    _ = @import("transport/remote.zig");
+    _ = @import("transport/sendpack.zig");
+    _ = @import("transport/sideband.zig");
+    _ = @import("transport/socks.zig");
+    _ = @import("transport/ssh.zig");
+    _ = @import("transport/tls/auth_wire.zig");
+    _ = @import("transport/uploadpack.zig");
+    _ = @import("unicodewidth.zig");
+    _ = @import("worktree/convert.zig");
+    _ = @import("worktree/dirscan.zig");
+    _ = @import("worktree/safepath.zig");
+    _ = @import("worktree/sparsecheckout.zig");
+}
