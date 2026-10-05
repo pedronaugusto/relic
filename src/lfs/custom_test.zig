@@ -196,7 +196,7 @@ test "a standalone agent is sent what git-lfs sends it, an upload and a download
     }
 
     // Both stores emptied, each fetches its objects back through the agent.
-    for ([_]Io.Dir{ theirs, ours }) |d| d.deleteTree(io, ".git/lfs/objects") catch {};
+    for ([_]Io.Dir{ theirs, ours }) |d| try d.deleteTree(io, ".git/lfs/objects");
     try fx.tmp.dir.createDirPath(io, "logs-theirs-down");
     try fx.tmp.dir.createDirPath(io, "logs-ours-down");
     for ([_][2][]const u8{ .{ "theirs", "logs-theirs-down" }, .{ "ours", "logs-ours-down" } }) |pair| {

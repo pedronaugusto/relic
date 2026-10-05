@@ -306,6 +306,7 @@ const Http = struct {
             // place on a local key parse error; its curl backend does not
             // classify that error as a rejected credential.
             if (@import("builtin").os.tag != .windows) {
+                // ziglint-ignore: Z026 git fails nothing over a helper that cannot forget; the load error, returned below, is the outcome
                 if (session_slot.*) |*session| session.reject(h.io, h.credentialOptions()) catch {};
             }
             return switch (err) {
@@ -444,6 +445,7 @@ const Http = struct {
     /// The proxy refused it: the helpers are told to forget it.
     fn rejectProxy(h: *Http) Error {
         if (h.proxy_credentials) |*session| {
+            // ziglint-ignore: Z026 git fails nothing over a helper that cannot forget; the refusal, returned below, is the outcome
             session.reject(h.io, h.credentialOptions()) catch {};
         }
         var buf: [32]u8 = undefined;
@@ -454,6 +456,7 @@ const Http = struct {
     /// so its connection can carry the next one.
     fn endRequest(h: *Http) void {
         if (h.in_flight) |*res| {
+            // ziglint-ignore: Z026 a body left unread costs only the connection: deinit keeps it only when the response is complete
             _ = res.reader().discardRemaining() catch {};
             res.deinit();
             h.in_flight = null;
@@ -625,6 +628,7 @@ const Http = struct {
             error.EndOfStream => {},
             else => return out.written(),
         };
+        // ziglint-ignore: Z026 what was read is the text; the rest is read only so the connection can carry the next request
         _ = reader.streamRemaining(&out.writer) catch {};
         const text = out.written();
         return text[0..@min(text.len, 4096)];
@@ -638,7 +642,9 @@ const Http = struct {
         if (h.options.auth_failure) |described| describe: {
             described.begin(h.gpa, reason, h.credentials.url.scheme, h.credentials.url.raw) catch break :describe;
             described.status = status;
+            // ziglint-ignore: Z026 the description is a courtesy to the caller; the error, returned below, is the outcome
             described.setServerMessage(said) catch {};
+            // ziglint-ignore: Z026 as above
             h.credentials.describeFailure(described, h.options.prompt != null) catch {};
         }
         return switch (err) {

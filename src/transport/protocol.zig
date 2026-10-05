@@ -445,7 +445,10 @@ fn fuzzAdvertisement(_: void, smith: *testing.Smith) anyerror!void {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     var lines = std.mem.splitScalar(u8, input, '\n');
-    while (lines.next()) |line| _ = parseLsRefsLine(arena_state.allocator(), adv.kind, line) catch {};
+    while (lines.next()) |line| {
+        // ziglint-ignore: Z026 a refusal is one of the two outcomes the fuzzer allows; only a crash or a leak fails it
+        _ = parseLsRefsLine(arena_state.allocator(), adv.kind, line) catch {};
+    }
 }
 
 /// A connection whose server said `bytes` and hears nothing, for the tests

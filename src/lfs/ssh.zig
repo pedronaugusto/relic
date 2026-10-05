@@ -232,6 +232,11 @@ pub const Connection = struct {
         while (try c.nextData()) |_| {}
     }
 
+    fn sayQuit(c: *Connection, arena: Allocator) Error!void {
+        try c.send("quit", &.{});
+        _ = try c.readStatus(arena);
+    }
+
     /// Say `quit`, read its answer, and close the connection. A connection
     /// that already failed is only closed.
     pub fn end(c: *Connection) void {
@@ -239,9 +244,8 @@ pub const Connection = struct {
             c.ended = true;
             var scratch: std.heap.ArenaAllocator = .init(c.gpa);
             defer scratch.deinit();
-            if (c.send("quit", &.{})) {
-                _ = c.readStatus(scratch.allocator()) catch {};
-            } else |_| {}
+            // ziglint-ignore: Z026 quit is a courtesy; the connection is closed next whether or not the server answered
+            c.sayQuit(scratch.allocator()) catch {};
         }
         c.conn.close(c.io);
         c.gpa.destroy(c);
@@ -331,6 +335,7 @@ pub const Transfer = struct {
 
     fn removeControlDir(t: *Transfer) void {
         const dir = t.control_dir orelse return;
+        // ziglint-ignore: Z026 a control directory left behind holds only a dead socket, in the system's temporary space
         Io.Dir.cwd().deleteTree(t.io, dir) catch {};
         t.control_dir = null;
     }

@@ -1199,8 +1199,10 @@ pub const Client = struct {
         const scheme: url_mod.Scheme = if (url_mod.Url.parse(url)) |u| u.scheme else |_| .https;
         described.begin(c.gpa, reason, scheme, url) catch return;
         described.status = status;
+        // ziglint-ignore: Z026 the description is a courtesy to the caller; the refusal is reported whether or not it is complete
         described.setServerMessage(said) catch {};
         described.prompt_available = c.options.prompt != null;
+        // ziglint-ignore: Z026 as above
         if (cred) |cr| cr.session.describeFailure(described, c.options.prompt != null) catch {};
     }
 
@@ -1333,6 +1335,7 @@ pub const Client = struct {
             else => {
                 // Not there, or not speaking it: git-lfs-authenticate and
                 // HTTP, as git-lfs falls back.
+                // ziglint-ignore: Z026 a control directory left behind holds only a dead socket, in the system's temporary space
                 if (control_dir) |d| Io.Dir.cwd().deleteTree(c.io, d) catch {};
                 return null;
             },

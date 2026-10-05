@@ -1925,41 +1925,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/transport/httpclient.zig",
-    "source": "_ = response.reader().discardRemaining() catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/httpclient.zig",
-    "source": "conn.stream.shutdown(io, .both) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/httpclient.zig",
-    "source": "layer.client.end() catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/httpclient.zig",
-    "source": "conn.flushFrom(i) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/httpclient.zig",
-    "source": "_ = layer.client.reader.peekByte() catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/credential.zig",
     "source": "pub fn fill(s: *Session, io: Io, opts: Options) Error!bool {",
@@ -2041,13 +2006,6 @@
     "path": "src/transport/uploadpack.zig",
     "source": "var repo = try @import(\"../repo.zig\").Repository.init(gpa, io, tmp.dir, .{ .bare = true });",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/uploadpack.zig",
-    "source": "server.serveRequest(&limited.interface, &out.writer) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2139,34 +2097,6 @@
     "path": "src/transport/auth_test.zig",
     "source": "try testing.expectEqual(@import(\"url.zig\").Scheme.ssh, failure.scheme);",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/auth_test.zig",
-    "source": "shadow.deleteFile(io, installed) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/auth_test.zig",
-    "source": "p.tools.dir.deleteFile(io, std.fmt.bufPrint(&buf, \"{s}.log\", .{name}) catch unreachable) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/auth_test.zig",
-    "source": "person.tools.dir.deleteFile(io, \"ssh.log\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/auth_test.zig",
-    "source": "person.tools.dir.deleteFile(io, \"ssh.log\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2359,34 +2289,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/transport/connection.zig",
-    "source": "p.writer.interface.flush() catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/connection.zig",
-    "source": "} else _ = p.running.wait(io) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/connection.zig",
-    "source": "if (said.len != 0) sink.add(.{ .ssh_said = said }) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/connection.zig",
-    "source": "p.writer.interface.flush() catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z023",
     "path": "src/transport/objectfilter.zig",
     "source": "out_arena: Allocator,",
@@ -2426,13 +2328,6 @@
     "path": "src/transport/protocol.zig",
     "source": "fn close(_: *anyopaque, _: Io) void {}",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/protocol.zig",
-    "source": "while (lines.next()) |line| _ = parseLsRefsLine(arena_state.allocator(), adv.kind, line) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2639,13 +2534,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/transport/ssh.zig",
-    "source": "f.setServerMessage(said) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z030",
     "path": "src/transport/partial_test.zig",
     "source": "fn deinit(t: *Twins, gpa: Allocator, io: Io) void {",
@@ -2814,48 +2702,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/transport/smarthttp.zig",
-    "source": "if (session_slot.*) |*session| session.reject(h.io, h.credentialOptions()) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/smarthttp.zig",
-    "source": "session.reject(h.io, h.credentialOptions()) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/smarthttp.zig",
-    "source": "_ = res.reader().discardRemaining() catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/smarthttp.zig",
-    "source": "_ = reader.streamRemaining(&out.writer) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/smarthttp.zig",
-    "source": "described.setServerMessage(said) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/smarthttp.zig",
-    "source": "h.credentials.describeFailure(described, h.options.prompt != null) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/push.zig",
     "source": "pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {",
@@ -2898,24 +2744,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/transport/push.zig",
-    "source": "repo.refStore().dirFor(name).deleteFile(io, path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z028",
     "path": "src/transport/uploadpack_test.zig",
     "source": "var config = try @import(\"../config.zig\").Config.parseText(gpa, if (std.mem.eql(u8, version, \"0\")) \"[protocol]\\nversion = 0\\n\" else \"\", .command);",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/sideband.zig",
-    "source": "list.appendSlice(testing.allocator, event.remote) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -5969,34 +5801,6 @@
     "source": "var pushed = try @import(\"transport/push.zig\").push(gpa, io, &repo, \"origin\", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{relic_spec} });",
     "detail": "inline @import; assign to a top-level const",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport_test.zig",
-    "source": "tools.dir.deleteFile(io, \"fake-ssh.log\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport_test.zig",
-    "source": "tools.dir.deleteFile(io, \"fake-ssh.log\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport_test.zig",
-    "source": "tools.dir.deleteFile(io, \"helper.log\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport_test.zig",
-    "source": "tools.dir.deleteFile(io, \"sent\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
     "rule": "Z023",
@@ -9695,13 +9499,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/lfs/transfer.zig",
-    "source": "q.putOneUncancelable(r.io(), event) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z030",
     "path": "src/lfs/transfer_test.zig",
     "source": "pub fn deinit(fx: *Fixture) void {",
@@ -9741,27 +9538,6 @@
     "path": "src/lfs/transfer_test.zig",
     "source": "if (@import(\"builtin\").os.tag == .windows) std.mem.replaceScalar(u8, path, '\\\\', '/');",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/lfs/transfer_test.zig",
-    "source": "d.deleteTree(fx.io, \".git/lfs\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/lfs/transfer_test.zig",
-    "source": "fx.tools.deleteFile(io, \"fake-ssh.log\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/lfs/transfer_test.zig",
-    "source": "fx.tools.deleteFile(io, \"git-lfs-authenticate.log\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -9916,13 +9692,6 @@
     "path": "src/lfs/locks.zig",
     "source": "Io.Dir.SetFilePermissionsError || repo_mod.Error || @import(\"../index.zig\").ReadError ||",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/lfs/locks.zig",
-    "source": "_ = sshFailed(server, status, \"unlock\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -10164,27 +9933,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/lfs/api.zig",
-    "source": "described.setServerMessage(said) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/lfs/api.zig",
-    "source": "if (cred) |cr| cr.session.describeFailure(described, c.options.prompt != null) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/lfs/api.zig",
-    "source": "if (control_dir) |d| Io.Dir.cwd().deleteTree(c.io, d) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z017",
     "path": "src/lfs/netrc.zig",
     "source": "return try a.dupe(u8, w.text[start..w.at]);",
@@ -10304,20 +10052,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/lfs/ssh.zig",
-    "source": "_ = c.readStatus(scratch.allocator()) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/lfs/ssh.zig",
-    "source": "Io.Dir.cwd().deleteTree(t.io, dir) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/lfs/push.zig",
     "source": "pub fn beforePush(",
@@ -10364,13 +10098,6 @@
     "path": "src/lfs/ssh_test.zig",
     "source": "const url = try std.fmt.allocPrint(gpa, \"ssh://git@example.invalid:2222{s}{s}\", .{ if (@import(\"builtin\").os.tag == .windows) \"/\" else \"\", remote_path });",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/lfs/ssh_test.zig",
-    "source": "s.fx.tools.deleteFile(io, \"fake-ssh.log\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -11354,31 +11081,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z028",
-    "path": "src/transport.zig",
-    "source": "@import(\"transport/pktline.zig\").flush(w) catch {};",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z025",
     "path": "src/transport.zig",
     "source": "const parsed = url.Url.parse(remote_url) catch |err| return err;",
     "detail": "redundant catch: `catch |err| return err` -> use try",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport.zig",
-    "source": "@import(\"transport/pktline.zig\").flush(w) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport.zig",
-    "source": "w.flush() catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -11575,34 +11281,6 @@
     "path": "src/transport/remotehelper.zig",
     "source": "const refs_mod = @import(\"../refs.zig\");",
     "detail": "unused import 'refs_mod'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/remotehelper.zig",
-    "source": "w.writeByte('\\n') catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/remotehelper.zig",
-    "source": "w.flush() catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/remotehelper.zig",
-    "source": "for (h.locks.items) |path| Io.Dir.cwd().deleteFile(io, path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/transport/remotehelper.zig",
-    "source": "if (export_tmp) |tmp| Io.Dir.rename(Io.Dir.cwd(), tmp, Io.Dir.cwd(), h.export_marks.?, h.io) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {
@@ -11893,13 +11571,6 @@
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {
-    "rule": "Z026",
-    "path": "src/lfs/custom_test.zig",
-    "source": "for ([_]Io.Dir{ theirs, ours }) |d| d.deleteTree(io, \".git/lfs/objects\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
     "rule": "Z015",
     "path": "src/lfs/custom.zig",
     "source": "pub fn start(gpa: Allocator, io: Io, programs: program.Programs, cwd: ?[]const u8, adapter: Adapter, init: Init) Error!*Agent {",
@@ -11911,13 +11582,6 @@
     "path": "src/lfs/custom.zig",
     "source": "pub fn transfer(a: *Agent, request: Request, progress: anytype) Error!Completion {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/lfs/custom.zig",
-    "source": "a.send(\"{\\\"event\\\":\\\"terminate\\\"}\\n\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {

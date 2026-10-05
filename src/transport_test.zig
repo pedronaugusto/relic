@@ -375,7 +375,7 @@ test "ssh is handed the same arguments git hands it" {
         .{ .url = url_plain, .variant = "ssh" },
     };
     for (cases) |case| {
-        tools.dir.deleteFile(io, "fake-ssh.log") catch {};
+        tools.dir.deleteFile(io, "fake-ssh.log") catch |err| if (err != error.FileNotFound) return err;
         var variant_buf: [64]u8 = undefined;
         const variant_setting = if (case.variant) |v| try std.fmt.bufPrint(&variant_buf, "ssh.variant={s}", .{v}) else "ssh.variant=auto";
         here.report_failures = case.variant == null;
@@ -387,7 +387,7 @@ test "ssh is handed the same arguments git hands it" {
         } else |err| if (case.variant == null) return err;
         const theirs = try tools.dir.readFileAlloc(io, "fake-ssh.log", gpa, .unlimited);
         defer gpa.free(theirs);
-        tools.dir.deleteFile(io, "fake-ssh.log") catch {};
+        try tools.dir.deleteFile(io, "fake-ssh.log");
 
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(gpa);
@@ -827,7 +827,7 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
                 defer gpa.free(helper);
                 try r.exec(io, &.{ "config", "credential.helper", helper });
             }
-            tools.dir.deleteFile(io, "helper.log") catch {};
+            tools.dir.deleteFile(io, "helper.log") catch |err| if (err != error.FileNotFound) return err;
             if (who == 0) {
                 results[0] = if (testremote.gitInputEnv(gpa, io, r.dir, &env, &.{ "fetch", "-q", "origin" }, "", case.ok)) |out| blk: {
                     gpa.free(out);
@@ -1026,7 +1026,7 @@ test "the negotiation git's fetch-pack makes is made byte for byte, over a pipe 
             gpa.free(cloned);
             const added = try testremote.gitInputEnv(gpa, io, twin.dir, &env, &.{ "remote", "add", "far", url }, "", true);
             gpa.free(added);
-            tools.dir.deleteFile(io, "sent") catch {};
+            tools.dir.deleteFile(io, "sent") catch |err| if (err != error.FileNotFound) return err;
             const before = try server.requests(gpa);
             defer gpa.free(before);
             if (who == 0) {

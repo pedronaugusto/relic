@@ -241,6 +241,7 @@ pub const Agent = struct {
 
     /// `terminate`, and the process waited for.
     pub fn stop(a: *Agent) void {
+        // ziglint-ignore: Z026 terminate is a courtesy; abort, next, ends the agent whether or not it heard it
         a.send("{\"event\":\"terminate\"}\n") catch {};
         a.abort();
     }

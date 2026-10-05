@@ -493,6 +493,7 @@ pub const Client = struct {
         if (response.head.status == .proxy_auth_required and c.proxy != null and !target.tls) {
             if (diagnostic) |d| d.proxy_status = 407;
             if (try c.proxyChallenged(&response.head, diagnostic)) {
+                // ziglint-ignore: Z026 a body left unread costs only the connection: deinit keeps it only when the response is complete
                 _ = response.reader().discardRemaining() catch {};
                 response.deinit();
                 response = try c.sendKept(method, target, path, headers, body, diagnostic);
@@ -1022,6 +1023,7 @@ pub const Connection = struct {
             if (until != 0 and now >= until) expired = true;
             if (expired) {
                 conn.timed_out.store(true, .release);
+                // ziglint-ignore: Z026 the timeout is recorded above; a stream that cannot be shut down is already closed or will fail on its own
                 conn.stream.shutdown(io, .both) catch {};
                 return;
             }
@@ -1043,6 +1045,11 @@ pub const Connection = struct {
         };
     }
 
+    fn endTls(conn: *Connection, layer: *TlsLayer, i: usize) !void {
+        try layer.client.end();
+        try conn.flushFrom(i);
+    }
+
     /// End the TLS sessions politely, close the stream, release everything.
     pub fn close(conn: *Connection) void {
         const gpa = conn.client.gpa;
@@ -1051,8 +1058,8 @@ pub const Connection = struct {
         while (i > 0) {
             i -= 1;
             if (conn.layers[i]) |layer| {
-                layer.client.end() catch {};
-                conn.flushFrom(i) catch {};
+                // ziglint-ignore: Z026 the close_notify is a courtesy; the stream is closed below whether or not the peer heard it
+                endTls(conn, layer, i) catch {};
             }
         }
         conn.stopWatching();
@@ -1128,6 +1135,7 @@ pub const Connection = struct {
         // there to be read.
         for (conn.layers) |slot| if (slot) |layer| {
             if (!layer.certificate_requested) continue;
+            // ziglint-ignore: Z026 the read is only to take in the alert; its failure lands in read_err, checked next
             _ = layer.client.reader.peekByte() catch {};
             if (layer.client.read_err != null) return conn.readFailed();
         };

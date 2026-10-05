@@ -118,7 +118,7 @@ const Person = struct {
             const dashed = try std.fmt.bufPrint(&dashed_buf, "git-credential-{s}", .{name});
             const installed = if (builtin.os.tag == .windows) try std.fmt.allocPrint(p.gpa, "{s}.exe", .{dashed}) else try p.gpa.dupe(u8, dashed);
             defer p.gpa.free(installed);
-            shadow.deleteFile(io, installed) catch {};
+            shadow.deleteFile(io, installed) catch |err| if (err != error.FileNotFound) return err;
             if (builtin.os.tag == .windows) try Io.Dir.cwd().copyFile(path, shadow, installed, io, .{}) else try shadow.symLink(io, path, installed, .{});
             const fixture = try std.fmt.allocPrint(p.gpa, "{s}.fixture", .{installed});
             defer p.gpa.free(fixture);
@@ -154,10 +154,10 @@ const Person = struct {
         };
     }
 
-    fn clearLogs(p: *Person, io: Io, names: []const []const u8) void {
+    fn clearLogs(p: *Person, io: Io, names: []const []const u8) !void {
         for (names) |name| {
             var buf: [64]u8 = undefined;
-            p.tools.dir.deleteFile(io, std.fmt.bufPrint(&buf, "{s}.log", .{name}) catch unreachable) catch {};
+            p.tools.dir.deleteFile(io, try std.fmt.bufPrint(&buf, "{s}.log", .{name})) catch |err| if (err != error.FileNotFound) return err;
         }
     }
 
@@ -270,14 +270,14 @@ test "with only the person's environment, relic asks the helpers git asks: gh's 
         defer by_relic.deinit();
         for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
 
-        person.clearLogs(io, &names);
+        try person.clearLogs(io, &names);
         var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
         defer theirs_outcome.deinit(gpa);
         var theirs: [names.len][]u8 = undefined;
         for (names, 0..) |n, i| theirs[i] = try person.log(io, n);
         defer for (theirs) |t| gpa.free(t);
 
-        person.clearLogs(io, &names);
+        try person.clearLogs(io, &names);
         var locations: userconfig.Locations = undefined;
         var repo = try person.open(io, by_relic.dir, &locations);
         defer repo.deinit(io);
@@ -346,13 +346,13 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         var by_relic = try testgit.Repo.init(gpa, io, &.{});
         defer by_relic.deinit();
         for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
-        person.clearLogs(io, &.{"manager"});
+        try person.clearLogs(io, &.{"manager"});
         var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
         defer theirs_outcome.deinit(gpa);
         try testing.expect(theirs_outcome.succeeded());
         const theirs = try person.log(io, "manager");
         defer gpa.free(theirs);
-        person.clearLogs(io, &.{"manager"});
+        try person.clearLogs(io, &.{"manager"});
         var locations: userconfig.Locations = undefined;
         var repo = try person.open(io, by_relic.dir, &locations);
         defer repo.deinit(io);
@@ -572,13 +572,13 @@ test "a helper's bearer token is sent as git sends it, and handed back with its 
     var by_relic = try testgit.Repo.init(gpa, io, &.{});
     defer by_relic.deinit();
     for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
-    person.clearLogs(io, &.{"helper"});
+    try person.clearLogs(io, &.{"helper"});
     var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
     defer theirs_outcome.deinit(gpa);
     try testing.expect(theirs_outcome.succeeded());
     const theirs = try person.log(io, "helper");
     defer gpa.free(theirs);
-    person.clearLogs(io, &.{"helper"});
+    try person.clearLogs(io, &.{"helper"});
     var locations: userconfig.Locations = undefined;
     var repo = try person.open(io, by_relic.dir, &locations);
     defer repo.deinit(io);
@@ -621,14 +621,14 @@ test "a helper's password past its password_expiry_utc is passed over for the ne
     defer by_relic.deinit();
     for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
     const names: []const []const u8 = &.{ "stale", "fresh" };
-    person.clearLogs(io, names);
+    try person.clearLogs(io, names);
     var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
     defer theirs_outcome.deinit(gpa);
     try testing.expect(theirs_outcome.succeeded());
     var theirs: [2][]u8 = undefined;
     for (names, &theirs) |name, *out| out.* = try person.log(io, name);
     defer for (theirs) |t| gpa.free(t);
-    person.clearLogs(io, names);
+    try person.clearLogs(io, names);
 
     var locations: userconfig.Locations = undefined;
     var repo = try person.open(io, by_relic.dir, &locations);
@@ -821,13 +821,13 @@ test "ssh gets the person's host alias, agent and command line untouched, as git
         defer by_relic.deinit();
         for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", case.url });
 
-        person.tools.dir.deleteFile(io, "ssh.log") catch {};
+        person.tools.dir.deleteFile(io, "ssh.log") catch |err| if (err != error.FileNotFound) return err;
         var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
         defer theirs_outcome.deinit(gpa);
         try testing.expect(theirs_outcome.succeeded());
         const theirs = try person.tools.dir.readFileAlloc(io, "ssh.log", gpa, .unlimited);
         defer gpa.free(theirs);
-        person.tools.dir.deleteFile(io, "ssh.log") catch {};
+        try person.tools.dir.deleteFile(io, "ssh.log");
 
         var locations: userconfig.Locations = undefined;
         var repo = try person.open(io, by_relic.dir, &locations);

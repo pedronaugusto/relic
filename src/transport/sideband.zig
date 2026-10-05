@@ -137,7 +137,7 @@ test "data comes through, progress goes to the caller, a flush ends it" {
     const Ctx = struct {
         fn report(context: ?*anyopaque, event: progress_mod.Event) void {
             const list: *std.ArrayList(u8) = @ptrCast(@alignCast(context.?));
-            list.appendSlice(testing.allocator, event.remote) catch {};
+            list.appendSlice(testing.allocator, event.remote) catch @panic("OOM");
         }
     };
     var buffer: [pktline.max_line]u8 = undefined;

@@ -474,6 +474,7 @@ const Run = struct {
     /// or straight to the caller's `Progress` when this is the calling task.
     fn say(r: *Run, event: Event) void {
         if (r.events) |q| {
+            // ziglint-ignore: Z026 a closed queue means the calling task has stopped listening; there is no one left to tell
             q.putOneUncancelable(r.io(), event) catch {};
             return;
         }

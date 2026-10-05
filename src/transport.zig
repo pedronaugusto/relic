@@ -376,16 +376,20 @@ pub const Session = struct {
                 // ends with a flush, which it reads as nothing more wanted,
                 // as git's disconnect writes it.
                 if (!smart.conn.stateless and !smart.done) {
-                    if (smart.conn.request()) |w| {
-                        @import("transport/pktline.zig").flush(w) catch {};
-                        w.flush() catch {};
-                    } else |_| {}
+                    // ziglint-ignore: Z026 the farewell is a courtesy; the session closes either way, and a server that has gone cannot read it
+                    sayGoodbye(smart.conn) catch {};
                 }
                 smart.advertisement.deinit();
                 smart.conn.close(io);
             },
         }
         s.* = undefined;
+    }
+
+    fn sayGoodbye(conn: *Connection) !void {
+        const w = try conn.request();
+        try pktline.flush(w);
+        try w.flush();
     }
 
     /// The hash the remote's object names are written with.

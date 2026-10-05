@@ -95,7 +95,7 @@ const Ssh = struct {
             else => |e| return e,
         };
         defer gpa.free(raw);
-        s.fx.tools.deleteFile(io, "fake-ssh.log") catch {};
+        s.fx.tools.deleteFile(io, "fake-ssh.log") catch |err| if (err != error.FileNotFound) return err;
         // Only git-lfs's own conversations: `git lfs push` also asks git
         // for the remote's refs, which relic's push already knows.
         var lfs_only: std.ArrayList(u8) = .empty;

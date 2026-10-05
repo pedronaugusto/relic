@@ -289,7 +289,7 @@ pub fn committed(fx: *Fixture, name: []const u8, helper: []const u8, files: []co
 /// Delete the LFS store of the repository at `d`, so every object has to
 /// come from somewhere else.
 pub fn emptyStore(fx: *Fixture, d: Io.Dir) !void {
-    d.deleteTree(fx.io, ".git/lfs") catch {};
+    try d.deleteTree(fx.io, ".git/lfs");
 }
 
 pub fn openServer(fx: *Fixture, repo: *repo_mod.Repository) !*lfsapi.Server {
@@ -342,7 +342,7 @@ test "ssh is started for git-lfs-authenticate as git-lfs starts it, and its toke
         try fx.gitIn(d, &.{ "remote", "set-url", "origin", ssh_url });
         try fx.gitIn(d, &.{ "config", "core.sshCommand", fake_ssh });
         try fx.gitIn(d, &.{ "config", "lfs.sshtransfer", "never" });
-        fx.tools.deleteFile(io, "fake-ssh.log") catch {};
+        fx.tools.deleteFile(io, "fake-ssh.log") catch |err| if (err != error.FileNotFound) return err;
         if (i == 0) {
             try fx.gitIn(d, &.{ "lfs", "pull" });
         } else {
@@ -1767,7 +1767,7 @@ test "a git-lfs-authenticate token is asked for again when it expires, lfs.defau
             try fx.gitIn(d, &.{ "config", "lfs.transfer.batchSize", "1" });
             try fx.gitIn(d, &.{ "config", "lfs.concurrenttransfers", "1" });
             if (case.ttl) |ttl| try fx.gitIn(d, &.{ "config", "lfs.defaulttokenttl", ttl });
-            fx.tools.deleteFile(io, "git-lfs-authenticate.log") catch {};
+            fx.tools.deleteFile(io, "git-lfs-authenticate.log") catch |err| if (err != error.FileNotFound) return err;
             if (i == 0) {
                 try fx.gitIn(d, &.{ "lfs", "fetch" });
             } else {

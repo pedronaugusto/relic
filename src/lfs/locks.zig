@@ -523,6 +523,16 @@ pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Error
 
 /// The status of a lock answer over ssh, as the HTTP API's would be.
 fn sshFailed(server: *lfsapi.Server, status: lfsssh.Status, what: []const u8) Error {
+    sshSay(server, status, what);
+    return switch (status.code) {
+        404, 501 => error.LockingUnsupported,
+        401 => error.AuthenticationFailed,
+        else => error.LockRefused,
+    };
+}
+
+/// Leave what the server said about a refused `what` as the client's message.
+fn sshSay(server: *lfsapi.Server, status: lfsssh.Status, what: []const u8) void {
     var buf: [512]u8 = undefined;
     server.client.setMessage(std.fmt.bufPrint(&buf, "{s}: status {d}{s}{s}", .{
         what,
@@ -530,11 +540,6 @@ fn sshFailed(server: *lfsapi.Server, status: lfsssh.Status, what: []const u8) Er
         if (status.lines.len != 0) ": " else "",
         if (status.lines.len != 0) status.lines[0] else "",
     }) catch what);
-    return switch (status.code) {
-        404, 501 => error.LockingUnsupported,
-        401 => error.AuthenticationFailed,
-        else => error.LockRefused,
-    };
 }
 
 /// The lock an answer's `id`, `path`, `locked-at` and `ownername`
@@ -580,7 +585,7 @@ fn sshUnlock(server: *lfsapi.Server, t: *lfsssh.Transfer, id: []const u8, ref: ?
     try conn.send(try std.fmt.allocPrint(arena, "unlock {s}", .{id}), args.items);
     const status = try conn.readStatus(arena);
     if (!status.ok()) {
-        _ = sshFailed(server, status, "unlock") catch {};
+        sshSay(server, status, "unlock");
         return switch (status.code) {
             404 => error.LockNotFound,
             403 => error.LockOwnedByOther,

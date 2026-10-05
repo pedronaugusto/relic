@@ -1196,6 +1196,7 @@ fn fuzzServe(remote: *local.Remote, smith: *std.testing.Smith) anyerror!void {
         var limited = fixed.limited(.unlimited, &buffer);
         var out: Io.Writer.Allocating = .init(std.testing.allocator);
         defer out.deinit();
+        // ziglint-ignore: Z026 refusing a malformed request is the expected outcome; only a crash or a leak fails the fuzzer
         server.serveRequest(&limited.interface, &out.writer) catch {};
     }
 }

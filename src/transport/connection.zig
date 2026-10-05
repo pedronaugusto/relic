@@ -339,6 +339,7 @@ pub const Process = struct {
             // does this side's interest in its output, so a program still
             // writing — after a refusal half way through a pack — stops at
             // a closed pipe rather than waiting on one nobody reads.
+            // ziglint-ignore: Z026 a program that stopped reading has nothing more to hear; the pipe closes either way
             p.writer.interface.flush() catch {};
             if (p.running.child.takeStdout()) |stdout| stdout.close(io);
             p.exited = true;
@@ -347,13 +348,17 @@ pub const Process = struct {
                 // one that never ends — an ssh whose remote never answers —
                 // would hold whoever cancelled until it did
                 p.running.kill(io);
-            } else _ = p.running.wait(io) catch {};
+            } else {
+                // ziglint-ignore: Z026 closing has no one to tell how the program ended; finish is where that is asked
+                _ = p.running.wait(io) catch {};
+            }
         }
         if (p.stderr) |tail| {
             tail.finish(io);
             if (tail.file) |file| file.close(io);
             if (p.said_to) |sink| {
                 const said = std.mem.trim(u8, tail.buffer[0..tail.len], " \t\r\n");
+                // ziglint-ignore: Z026 the program's words are a courtesy to the caller; losing them to a full allocator loses nothing else
                 if (said.len != 0) sink.add(.{ .ssh_said = said }) catch {};
             }
             p.gpa.destroy(tail);
@@ -384,6 +389,7 @@ pub const Process = struct {
     pub fn finish(c: *Connection, io: Io) Error!void {
         const p = of(c) orelse return;
         if (p.exited) return;
+        // ziglint-ignore: Z026 a program that stopped reading has ended or will; its exit status, waited for next, is the answer
         p.writer.interface.flush() catch {};
         p.exited = true;
         const term = p.running.wait(io) catch |err| switch (err) {

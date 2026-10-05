@@ -683,6 +683,7 @@ fn updateTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remo
         try tx.commit(io, null);
         const path = try @import("../refs/reflog.zig").pathFor(gpa, name);
         defer gpa.free(path);
+        // ziglint-ignore: Z026 the ref is gone; a reflog that cannot be removed stays, as git leaves one it cannot unlink
         repo.refStore().dirFor(name).deleteFile(io, path) catch {};
         return;
     }
