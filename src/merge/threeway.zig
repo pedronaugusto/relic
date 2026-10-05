@@ -34,6 +34,7 @@ const program = @import("../repo/program.zig");
 const diff = @import("../diff.zig");
 const object = @import("../object.zig");
 const odb_mod = @import("../odb.zig");
+const abbrev = @import("../odb/abbrev.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -235,7 +236,7 @@ fn run(
         .configured_drivers = try configuredDrivers(arena, repo),
         .default_driver = repo.configuration().get("merge.default"),
         .submodules = .{ .context = &submodules, .openFn = SubmoduleOpener.open },
-        .abbrev_len = @import("../odb/abbrev.zig").defaultLength(repo.configuration(), db),
+        .abbrev_len = abbrev.defaultLength(repo.configuration(), db),
         .blocked = options.blocked,
         .renormalize = if (settings.renormalize) &normalizer else null,
         .attributes_from_merge = if (wt.access(io, ".gitattributes", .{})) |_| false else |_| true,

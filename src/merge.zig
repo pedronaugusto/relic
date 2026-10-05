@@ -490,6 +490,7 @@ pub fn conflictedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, result: *const R
 //=========================================================================
 
 const testgit = @import("testing/git.zig");
+const test_case = @import("testing/case.zig");
 
 fn gitMergeFileFixture(
     gpa: Allocator,
@@ -677,7 +678,7 @@ test "binary blob content is refused like git merge-file" {
 }
 
 test "a random corpus of three-way merges matches git merge-file in every style and every algorithm" {
-    if (!@import("testing/case.zig").selected("a random corpus of three-way merges matches git merge-file in every style and every algorithm")) return error.SkipZigTest;
+    if (!test_case.selected("a random corpus of three-way merges matches git merge-file in every style and every algorithm")) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // `--diff-algorithm` reached merge-file in 2.44, and git before 2.54

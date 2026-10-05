@@ -16,6 +16,8 @@ const testgit = @import("../testing/git.zig");
 const stash = @import("stash.zig");
 const object = @import("../object.zig");
 const Repository = @import("../repo.zig").Repository;
+const build_options = @import("build_options");
+const program = @import("../repo/program.zig");
 
 const who: object.Signature = .{
     .name = "Fixture",
@@ -383,9 +385,9 @@ test "dropping and clearing leave git's list" {
 test "a stash goes through the clean and smudge filters as git's does" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const clean = try testgit.fixtureCommand(gpa, @import("build_options").process_fixture_path, "upper");
+    const clean = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "upper");
     defer gpa.free(clean);
-    const smudge = try testgit.fixtureCommand(gpa, @import("build_options").process_fixture_path, "lower");
+    const smudge = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "lower");
     defer gpa.free(smudge);
     var twin = try Twin.init(gpa, io);
     defer twin.deinit(gpa);
@@ -406,7 +408,7 @@ test "a stash goes through the clean and smudge filters as git's does" {
     defer repo.deinit(io);
     var drivers = try repo.loadFilters(io, .{});
     defer drivers.deinit();
-    const programs: @import("../repo/program.zig").Programs = .{ .environ = &twin.environ };
+    const programs: program.Programs = .{ .environ = &twin.environ };
     // Without the permission to run the required filter, nothing is stashed.
     try testing.expectError(error.UnsupportedAttribute, stash.push(&repo, io, .{ .who = who, .untracked = .include }));
     _ = try stash.push(&repo, io, .{ .who = who, .untracked = .include, .filters = &drivers, .programs = programs });

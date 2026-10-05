@@ -148,7 +148,7 @@ pub const Outcome = struct {
 /// `git commit -m <message>`: run the hooks, write the tree the index
 /// describes and a commit of it, and move the branch `HEAD` is on.
 pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Error!Outcome {
-    @import("repo/diagnostic.zig").reset(options.diagnostic);
+    diagnostic.reset(options.diagnostic);
     const gpa = repo.gpa;
     if (repo.work_dir == null) return error.BareRepository;
     for ([_][]const u8{ "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD" }) |name| {
@@ -417,6 +417,7 @@ pub fn stripspace(gpa: Allocator, text: []const u8, comment: ?[]const u8) Alloca
 
 const testing = std.testing;
 const testgit = @import("testing/git.zig");
+const diagnostic = @import("repo/diagnostic.zig");
 
 test "a message is cleaned the way git's stripspace cleans it" {
     const gpa = testing.allocator;

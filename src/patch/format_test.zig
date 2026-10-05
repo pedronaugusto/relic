@@ -11,6 +11,7 @@ const apply_mod = @import("apply.zig");
 const hash = @import("../hash.zig");
 const repo_mod = @import("../repo.zig");
 const testgit = @import("../testing/git.zig");
+const object = @import("../object.zig");
 
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;
@@ -149,7 +150,7 @@ test "a cover letter is written as git writes one, with its shortlog, its diffst
     const base = try oidOf(gpa, io, &git, "base");
     const head = try oidOf(gpa, io, &git, "HEAD");
     const range: formatpatch.Range = .{ .upstream = base, .tip = head };
-    const sender: @import("../object.zig").Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
+    const sender: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
     try compare(gpa, io, &git, &repo, &.{ "--no-signature", "--cover-letter" }, "base..HEAD", range, .{ .cover_letter = .{ .sender = sender } });
     try compare(gpa, io, &git, &repo, &.{ "--signature=sig", "--cover-letter", "--base=base", "--thread" }, "base..HEAD", range, .{
         .cover_letter = .{ .sender = sender },
@@ -177,7 +178,7 @@ test "the files format-patch -o writes are named as git names them" {
     const head = try oidOf(gpa, io, &git, "HEAD");
     const names = try git.run(io, &.{ "format-patch", "-o", "out", "--no-signature", "--cover-letter", "-v2", "--filename-max-length=30", "base..HEAD" });
     defer gpa.free(names);
-    const sender: @import("../object.zig").Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
+    const sender: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
     var series = try formatpatch.format(gpa, io, &repo, .{ .upstream = base, .tip = head }, .{ .cover_letter = .{ .sender = sender }, .reroll_count = "2", .filename_max_length = 30 });
     defer series.deinit();
     var ours: std.ArrayList(u8) = .empty;

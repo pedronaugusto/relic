@@ -21,6 +21,7 @@ const object = @import("../object.zig");
 const hooks = @import("../repo/hooks.zig");
 const repo_mod = @import("../repo.zig");
 const fs = @import("../repo/fs.zig");
+const builtin = @import("builtin");
 
 const Repository = repo_mod.Repository;
 
@@ -56,7 +57,7 @@ pub const Hooks = struct {
     pub fn path(h: *const Hooks, arena: Allocator, name: []const u8) Allocator.Error![]const u8 {
         const path_name = try std.fs.path.join(arena, &.{ h.git_dir, name });
         // Git hands hook scripts slash-separated paths on Windows too.
-        if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, path_name, '\\', '/');
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path_name, '\\', '/');
         return path_name;
     }
 

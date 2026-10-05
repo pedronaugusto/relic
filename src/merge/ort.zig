@@ -40,6 +40,8 @@ const attributes = @import("../worktree/attributes.zig");
 const revwalk = @import("../revwalk.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const convert = @import("../worktree/convert.zig");
+const textdiff = @import("../diff/textdiff.zig");
+const message = @import("../commit/message.zig");
 
 const Oid = hash.Oid;
 
@@ -111,13 +113,13 @@ pub const Options = struct {
     favor: merge.Favor = .none,
     /// The line diff; git's merge machinery uses histogram unless
     /// `diff.algorithm` says otherwise.
-    algorithm: @import("../diff/textdiff.zig").Algorithm = .histogram,
+    algorithm: textdiff.Algorithm = .histogram,
     /// Prove the Myers diffs minimal: `diff-algorithm=minimal`.
     minimal: bool = false,
     /// The whitespace differences the content merges overlook: the
     /// strategy options `ignore-all-space`, `ignore-space-change`,
     /// `ignore-space-at-eol` and `ignore-cr-at-eol`.
-    whitespace: @import("../diff/textdiff.zig").Whitespace = .{},
+    whitespace: textdiff.Whitespace = .{},
     /// `-X subtree` and `-X subtree=<path>`: before each merge the base and
     /// the second side are shifted to line up with the first side's tree,
     /// `subtreeshift.shift` with this as its path. `null` shifts nothing.
@@ -1019,9 +1021,9 @@ const Merge = struct {
         var status: LlStatus = .ok;
         var bytes: []const u8 = undefined;
         const binary = found.driver == .binary or
-            @import("../diff/textdiff.zig").isBinary(orig) or
-            @import("../diff/textdiff.zig").isBinary(src1) or
-            @import("../diff/textdiff.zig").isBinary(src2);
+            textdiff.isBinary(orig) or
+            textdiff.isBinary(src1) or
+            textdiff.isBinary(src2);
         if (binary) {
             // `ll_binary_merge`.
             if (virtual_ancestor) {
@@ -1176,7 +1178,7 @@ const Merge = struct {
             defer sdb.allocator().free(found.bytes);
             var parsed = try object.Commit.parse(m.arena, sdb.objectFormat(), found.bytes);
             defer parsed.deinit();
-            const subject = try @import("../commit/message.zig").onelineSubject(m.arena, parsed.message);
+            const subject = try message.onelineSubject(m.arena, parsed.message);
             try listing.print(m.arena, "    {s} {s}\n", .{ short, subject });
         }
         if (merges.len == 1) {

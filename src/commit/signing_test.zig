@@ -25,6 +25,11 @@ const hash = @import("../hash.zig");
 const repo_mod = @import("../repo.zig");
 const commit_mod = @import("../commit.zig");
 const archive_mod = @import("../archive.zig");
+const program = @import("../repo/program.zig");
+const merging = @import("merging.zig");
+const sequencer = @import("sequencer.zig");
+const rebase = @import("rebase.zig");
+const refs_filter = @import("../refs/filter.zig");
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;
 
@@ -154,7 +159,7 @@ const Keyed = struct {
         return Repository.open(k.gpa, io, k.repo.dir, .{});
     }
 
-    fn programs(k: *Keyed) @import("../repo/program.zig").Programs {
+    fn programs(k: *Keyed) program.Programs {
         return .{ .environ = &k.environ };
     }
 
@@ -435,9 +440,6 @@ test "a signing program is one path, spaces and all, as git runs it" {
 }
 
 test "history writes leave signing refusals in caller-owned diagnostics" {
-    const merging = @import("merging.zig");
-    const sequencer = @import("sequencer.zig");
-    const rebase = @import("rebase.zig");
     const gpa = testing.allocator;
     const io = testing.io;
     inline for (.{ "commit", "merge", "conclude", "pick", "rebase" }) |operation| {
@@ -504,7 +506,7 @@ test "a failed signing program leaves its stderr after the repository closes" {
     defer gpa.free(executable);
     var environ: std.process.Environ.Map = .init(gpa);
     defer environ.deinit();
-    const programs: @import("../repo/program.zig").Programs = .{ .environ = &environ };
+    const programs: program.Programs = .{ .environ = &environ };
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
     inline for (.{ "commit", "tag" }) |target| {
@@ -569,11 +571,11 @@ test "a history refusal before writing clears an earlier diagnostic" {
                 .message = "m",
             }, .{ .diagnostic = &diagnostic }));
         } else if (comptime std.mem.eql(u8, operation, "merge")) {
-            try testing.expectError(error.NoMergeInProgress, @import("merging.zig").conclude(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
+            try testing.expectError(error.NoMergeInProgress, merging.conclude(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
         } else if (comptime std.mem.eql(u8, operation, "sequencer")) {
-            try testing.expectError(error.NoSequencerInProgress, @import("sequencer.zig").proceed(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
+            try testing.expectError(error.NoSequencerInProgress, sequencer.proceed(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
         } else {
-            try testing.expectError(error.NoRebaseInProgress, @import("rebase.zig").proceed(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
+            try testing.expectError(error.NoRebaseInProgress, rebase.proceed(gpa, io, &repo, .{ .who = who, .diagnostic = &diagnostic }));
         }
         try testing.expectEqualStrings("", diagnostic.unsupported_setting);
         try testing.expectEqualStrings("", diagnostic.signing_stderr);
@@ -601,7 +603,6 @@ test "for-each-ref's signature atoms check each commit as git's do" {
     defer signer.deinit();
     var ours: Io.Writer.Allocating = .init(gpa);
     defer ours.deinit();
-    const refs_filter = @import("../refs/filter.zig");
     try refs_filter.listRefs(gpa, io, &repo, .{ .format = format, .context = .{ .signer = &signer } }, &ours.writer);
     try testing.expectEqualStrings(theirs, ours.written());
 }

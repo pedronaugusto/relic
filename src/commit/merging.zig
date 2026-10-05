@@ -36,6 +36,8 @@ const worktree = @import("../worktree.zig");
 const repo_mod = @import("../repo.zig");
 const refs_mod = @import("../refs.zig");
 const index_mod = @import("../index.zig");
+const diagnostic = @import("../repo/diagnostic.zig");
+const config = @import("../config.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -274,7 +276,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
 /// `threeway.applyOctopus`, whose commit leaves `HEAD` out of its parents
 /// when a target already contains it and a fast-forward is allowed.
 pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, options: Options) Error!Outcome {
-    @import("../repo/diagnostic.zig").reset(options.diagnostic);
+    diagnostic.reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -617,7 +619,7 @@ pub const ConcludeOptions = struct {
 /// what `git commit` and `git merge --continue` do once the conflicts are
 /// resolved.
 pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOptions) Error!Oid {
-    @import("../repo/diagnostic.zig").reset(options.diagnostic);
+    diagnostic.reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -704,7 +706,7 @@ pub fn removeMergeState(io: Io, repo: *Repository) head_mod.Error!void {
 fn configuredFastForward(repo: *Repository) FastForward {
     const text = repo.configuration().get("merge.ff") orelse return .allow;
     if (std.ascii.eqlIgnoreCase(text, "only")) return .only;
-    const on = @import("../config.zig").parseBool(text) catch return .allow;
+    const on = config.parseBool(text) catch return .allow;
     return if (on) .allow else .never;
 }
 
