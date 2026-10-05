@@ -412,11 +412,16 @@ pub const Server = struct {
         try n.sendPack(out, band);
     }
 
-    /// Whether a v0 client may want `oid`: a ref's tip, or more where
-    /// `uploadpack.allow*SHA1InWant` says so.
+    /// Whether a v0 client may want `oid`: an advertised ref's tip, or more
+    /// where `uploadpack.allow*SHA1InWant` says so — a hidden ref's tip
+    /// for either of tip and reachable, as git's `is_our_ref` allows it.
     fn wantAllowed(s: *Server, oid: Oid, advertised: *?protocol.RefList) Error!bool {
         if (s.allow_any) return s.db().exists(s.io, oid);
-        if (advertised.* == null) advertised.* = try s.remote.listRefs(s.gpa, s.io, &.{});
+        const with_hidden = s.allow_tip or s.allow_reachable;
+        if (advertised.* == null) advertised.* = if (with_hidden)
+            try s.remote.listAllRefs(s.gpa, s.io, &.{})
+        else
+            try s.remote.listRefs(s.gpa, s.io, &.{});
         const refs = advertised.*.?.refs;
         for (refs) |ref| {
             if (ref.unborn) continue;

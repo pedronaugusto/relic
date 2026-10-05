@@ -21,6 +21,7 @@ pub const objectfilter = @import("transport/objectfilter.zig");
 pub const objectwalk = @import("transport/objectwalk.zig");
 pub const sideband = @import("transport/sideband.zig");
 pub const httpsettings = @import("transport/httpsettings.zig");
+pub const hidden = @import("transport/hidden.zig");
 /// Which proxy an HTTP remote is reached through.
 pub const Proxy = httpsettings.Proxy;
 pub const httpauth = @import("transport/httpauth.zig");
@@ -215,6 +216,7 @@ pub const Session = struct {
                 here.* = try local.Remote.open(gpa, io, remote_url);
                 errdefer here.deinit(io);
                 if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
+                if (service == .receive_pack) try here.serve(.receive_pack);
                 return .{ .gpa = gpa, .service = service, .impl = .{ .local = here } };
             },
             .ssh => {

@@ -26,6 +26,7 @@ const revwalk = @import("../revwalk.zig");
 const shallow_mod = @import("../revwalk/shallow.zig");
 const safepath = @import("../worktree/safepath.zig");
 const sendpack = @import("sendpack.zig");
+const hidden_refs = @import("hidden.zig");
 const builtin = @import("builtin");
 
 const Oid = hash.Oid;
@@ -44,6 +45,10 @@ pub const Error = error{
 pub const Remote = struct {
     gpa: Allocator,
     repo: repo_mod.Repository,
+    /// The refs not shown: `uploadpack.hideRefs` and `transfer.hideRefs`
+    /// from the repository's configuration, or `receive.hideRefs` once
+    /// `serve` says a push is coming.
+    hidden: hidden_refs.HiddenRefs,
 
     /// Open the repository at `location`: a path, relative to the current
     /// directory or absolute, or a `file://` URL. The path is the
@@ -66,26 +71,53 @@ pub const Remote = struct {
             error.NotARepository => return error.NotARepository,
             else => |e| return e,
         };
-        return .{ .gpa = gpa, .repo = repo };
+        var opened = repo;
+        errdefer opened.deinit(io);
+        const hidden = try hidden_refs.HiddenRefs.load(gpa, opened.configuration(), .upload_pack);
+        return .{ .gpa = gpa, .repo = opened, .hidden = hidden };
     }
 
     /// Close the repository.
     pub fn deinit(r: *Remote, io: Io) void {
+        r.hidden.deinit();
         r.repo.deinit(io);
         r.* = undefined;
     }
 
-    /// The refs the other repository has, as a server lists them: `HEAD`
+    /// Hide what the repository hides from `service`: a push is shown
+    /// what `receive.hideRefs` leaves.
+    pub fn serve(r: *Remote, service: hidden_refs.Service) Error!void {
+        const hidden = try hidden_refs.HiddenRefs.load(r.gpa, r.repo.configuration(), service);
+        r.hidden.deinit();
+        r.hidden = hidden;
+    }
+
+    /// Whether `name` is a ref the repository does not show.
+    pub fn isHidden(r: *const Remote, name: []const u8) bool {
+        return r.hidden.isHidden(name, name);
+    }
+
+    /// The refs the other repository shows, as a server lists them: `HEAD`
     /// first, with its target, then every ref under `refs/` in name order,
-    /// each annotated tag with what it peels to.
+    /// each annotated tag with what it peels to. A hidden ref is left out.
     pub fn listRefs(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8) Error!protocol.RefList {
+        return r.listWith(gpa, io, prefixes, false);
+    }
+
+    /// `listRefs`, the hidden refs included: what a server asks of itself
+    /// when it decides whether a want is a ref's tip.
+    pub fn listAllRefs(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8) Error!protocol.RefList {
+        return r.listWith(gpa, io, prefixes, true);
+    }
+
+    fn listWith(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8, include_hidden: bool) Error!protocol.RefList {
         var list: protocol.RefList = .{ .arena = .init(gpa), .refs = &.{} };
         errdefer list.arena.deinit();
         const arena = list.arena.allocator();
         var out: std.ArrayList(protocol.RemoteRef) = .empty;
         const kind = r.repo.objectFormat();
 
-        if (matches("HEAD", prefixes)) {
+        if (matches("HEAD", prefixes) and (include_hidden or !r.isHidden("HEAD"))) {
             if (try r.repo.refStore().read(gpa, io, "HEAD")) |head| switch (head) {
                 .symbolic => |target| {
                     defer gpa.free(target);
@@ -114,6 +146,7 @@ pub const Remote = struct {
         defer listing.deinit();
         for (listing.entries) |entry| {
             if (!matches(entry.name, prefixes)) continue;
+            if (!include_hidden and r.isHidden(entry.name)) continue;
             var ref: protocol.RemoteRef = .{ .name = try arena.dupe(u8, entry.name), .oid = .zero(kind) };
             switch (entry.target) {
                 .direct => |oid| ref.oid = oid,
@@ -270,7 +303,16 @@ pub const Remote = struct {
             else
                 false;
             var reason: ?[]const u8 = null;
-            if (!std.mem.startsWith(u8, name, "refs/") or !safepath.isValidRefName(name)) {
+            if (r.isHidden(name)) {
+                // After the objects are found to be there, before any of
+                // receive-pack's own rules, as git rejects it.
+                reason = if (command.new.isZero())
+                    "deny deleting a hidden ref"
+                else if (!try r.repo.odb.exists(io, command.new))
+                    "missing necessary objects"
+                else
+                    "deny updating a hidden ref";
+            } else if (!std.mem.startsWith(u8, name, "refs/") or !safepath.isValidRefName(name)) {
                 reason = "funny refname";
             } else if (command.new.isZero()) {
                 if (deny_deletes) reason = "deletion prohibited";
