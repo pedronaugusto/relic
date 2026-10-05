@@ -182,10 +182,10 @@ pub const Proxy = struct {
         method: httpauth.Method = .any,
     };
 
-    /// Parse HTTP(S) and SOCKS proxy URLs. Slices belong to `arena` or `raw`.
+    /// Parse HTTP(S) and SOCKS proxy URLs. Every string belongs to `arena`.
     /// Callers retain their HTTP default port; every SOCKS scheme uses 1080.
     pub fn parse(arena: Allocator, raw: []const u8, http_port: u16) (Allocator.Error || error{InvalidProxy})!Proxy {
-        const text = if (std.mem.indexOf(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else raw;
+        const text = if (std.mem.indexOf(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else try arena.dupe(u8, raw);
         const uri = std.Uri.parse(text) catch return error.InvalidProxy;
         const version: ?socks.Version = if (std.ascii.eqlIgnoreCase(uri.scheme, "socks4")) .socks4 else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks4a")) .socks4a else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks5")) .socks5 else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks5h")) .socks5h else null;
         const secure = std.ascii.eqlIgnoreCase(uri.scheme, "https");
@@ -2242,6 +2242,22 @@ test "streaming finish consumes its connection when the response cannot be alloc
 
 test "streaming finish consumes its connection when the body is incomplete" {
     try checkStreamingFinishFailure(.incomplete);
+}
+
+test "parsed proxy strings outlive the URL buffer" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "http", "https", "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
+        var buffer: [128]u8 = undefined;
+        const raw = try std.fmt.bufPrint(&buffer, "{s}://user:secret@[::1]:3128", .{scheme});
+        const proxy = try Proxy.parse(arena.allocator(), raw, 80);
+        // Reuse the scratch storage before the cached transport reads it.
+        @memset(buffer[0..raw.len], 'x');
+        try std.testing.expectEqualStrings("::1", proxy.host);
+        try std.testing.expectEqualStrings("user", proxy.credential.?.user);
+        try std.testing.expectEqualStrings("secret", proxy.credential.?.password);
+        try std.testing.expectEqual(@as(u16, 3128), proxy.port);
+    }
 }
 
 test "proxy URLs share SOCKS defaults and preserve IPv6 hosts and decoded credentials" {
