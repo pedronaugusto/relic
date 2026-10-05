@@ -18,6 +18,7 @@ const repo_mod = @import("repo.zig");
 const fetch_mod = @import("transport/fetch.zig");
 const clone_mod = @import("transport/clone.zig");
 const transport = @import("transport.zig");
+const http_client = @import("transport/httpclient.zig");
 const testgit = @import("testing/git.zig");
 const testremote = @import("testing/remote.zig");
 const testlfs = @import("testing/lfs.zig");
@@ -904,6 +905,40 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
         try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
         try testing.expectEqualStrings(if (through_env) "GIT_SSL_NO_VERIFY" else "http.sslverify", warnings.items.items[0].ssl_verify_disabled);
     }
+}
+
+test "an idle HTTPS connection does not block another client" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .keep_alive = true, .redirect = true });
+    defer server.stop();
+    const front = try testremote.TlsFront.start(gpa, io, server.port);
+    defer front.stop(io);
+    const target: http_client.Target = .{ .tls = true, .host = "127.0.0.1", .port = front.port };
+    var idle: http_client.Client = .init(gpa, io);
+    defer idle.deinit();
+    idle.verify = false;
+    idle.timeouts = .{ .handshake = .fromSeconds(10), .activity = .fromSeconds(10) };
+    {
+        var response = try idle.send(.GET, target, "/moved/first", &.{}, null, null);
+        defer response.deinit();
+        try testing.expectEqual(std.http.Status.found, response.head.status);
+        _ = try response.reader().discardRemaining();
+    }
+    // The first client's connection stays pooled while the second makes a
+    // request. Closing it before this request would hide a serialized server.
+    var active: http_client.Client = .init(gpa, io);
+    defer active.deinit();
+    active.verify = false;
+    active.timeouts = .{ .handshake = .fromSeconds(10), .activity = .fromSeconds(10) };
+    var response = try active.send(.GET, target, "/moved/second", &.{}, null, null);
+    defer response.deinit();
+    try testing.expectEqual(std.http.Status.found, response.head.status);
+    _ = try response.reader().discardRemaining();
+    try testing.expectEqual(@as(u32, 1), idle.connections);
+    try testing.expectEqual(@as(u32, 1), active.connections);
 }
 
 test "requests share one connection and a large upload-pack request is gzipped, as git's are" {

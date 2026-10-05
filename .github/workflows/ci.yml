@@ -102,5 +102,5 @@ jobs:
         with:
           windows-git-latest: true
       - run: zig build ci-setup
-      - name: Reproduce shuffled history shard
-        run: zig build ci -Dci-lint=false -Doptimize=ReleaseSafe -Dtest-case=core-history --test-timeout 60s --seed 0xd8d6ec3e
+      - name: Reproduce idle HTTPS stall
+        run: zig build ci -Dci-lint=false -Doptimize=ReleaseSafe "-Dtest-filter=an idle HTTPS connection" --test-timeout 60s
