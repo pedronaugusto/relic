@@ -76,8 +76,8 @@ fn fixture(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
         try git.exec(io, &.{ "merge", "-q", "--no-ff", "-m", "merge side", "side" });
     }
 
-    // A signed commit, made by hand: what matters is the header, not the
-    // signature, which nothing here checks.
+    // Git 2.50 introduced embedded signatures in the stream. Older
+    // oracles still compare the same history with an unsigned commit.
     const head = try git.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head);
     const tree = try git.line(io, &.{ "rev-parse", "HEAD^{tree}" });
@@ -87,14 +87,10 @@ fn fixture(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
         \\parent {s}
         \\author A U Thor <author@example.com> 1700000300 +0000
         \\committer C O Mitter <committer@example.com> 1700000300 +0000
-        \\gpgsig -----BEGIN PGP SIGNATURE-----
-        \\
-        \\ c2lnbmF0dXJl
-        \\ -----END PGP SIGNATURE-----
-        \\
+        \\{s}
         \\signed
         \\
-    , .{ tree, head });
+    , .{ tree, head, if (try testgit.gitAtLeast(gpa, io, 2, 50)) "gpgsig -----BEGIN PGP SIGNATURE-----\n\n c2lnbmF0dXJl\n -----END PGP SIGNATURE-----\n" else "" });
     defer gpa.free(signed);
     const signed_oid = try git.runInput(io, &.{ "hash-object", "-t", "commit", "-w", "--stdin" }, signed);
     defer gpa.free(signed_oid);
@@ -174,7 +170,12 @@ test "every ref exports as git exports it, and imports back to the same objects"
         .tag_of_filtered = .drop,
     });
     gpa.free(plain);
-    const stream = try compare(gpa, io, &git, &.{ "--reencode=no", "--signed-commits=verbatim", "--mark-tags", "--fake-missing-tagger", "--all" }, .{
+    const signatures = try testgit.gitAtLeast(gpa, io, 2, 50);
+    const stream_args: []const []const u8 = if (signatures)
+        &.{ "--reencode=no", "--signed-commits=verbatim", "--mark-tags", "--fake-missing-tagger", "--all" }
+    else
+        &.{ "--reencode=no", "--mark-tags", "--fake-missing-tagger", "--all" };
+    const stream = try compare(gpa, io, &git, stream_args, .{
         .tips = tips,
         .reencode = .no,
         .signed_commits = .verbatim,
@@ -268,7 +269,9 @@ test "options shape the stream as git's do" {
             .tag_of_filtered = .rewrite,
         } },
     };
+    const signatures = try testgit.gitAtLeast(gpa, io, 2, 50);
     for (cases) |case| {
+        if (!signatures and case.options.signed_commits == .verbatim) continue;
         const out = try compare(gpa, io, &git, case.args, case.options);
         gpa.free(out);
     }
@@ -276,7 +279,7 @@ test "options shape the stream as git's do" {
     // What git refuses by default is refused by name.
     var sink: Io.Writer.Discarding = .init(&.{});
     try std.testing.expectError(error.EncodedCommit, fastexport.write(gpa, io, &repo, &sink.writer, .{ .tips = &tips }));
-    try std.testing.expectError(error.SignedObject, fastexport.write(gpa, io, &repo, &sink.writer, .{ .tips = &tips, .reencode = .no, .signed_commits = .abort }));
+    if (signatures) try std.testing.expectError(error.SignedObject, fastexport.write(gpa, io, &repo, &sink.writer, .{ .tips = &tips, .reencode = .no, .signed_commits = .abort }));
 }
 
 test "marks carry an export on from where the last one stopped" {
