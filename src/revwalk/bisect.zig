@@ -1668,9 +1668,18 @@ fn bisectLikeGit(case: Case) !void {
         defer t.deinit(io);
         var start_args: std.ArrayList([]const u8) = .empty;
         defer start_args.deinit(gpa);
+        var revisions: std.heap.ArenaAllocator = .init(gpa);
+        defer revisions.deinit();
         try start_args.append(gpa, "start");
-        try start_args.appendSlice(gpa, case.start);
-        try expectReport(&t, io, start_args.items, start(gpa, io, &t.repo, case.start, .{ .who = test_who }));
+        for (case.start) |arg| {
+            // HEAD moves while bisect runs; the replay log needs stable names.
+            if (std.mem.eql(u8, arg, "HEAD") or std.mem.startsWith(u8, arg, "HEAD~")) {
+                const oid = try t.git.line(io, &.{ "rev-parse", arg });
+                defer gpa.free(oid);
+                try start_args.append(gpa, try revisions.allocator().dupe(u8, oid));
+            } else try start_args.append(gpa, arg);
+        }
+        try expectReport(&t, io, start_args.items, start(gpa, io, &t.repo, start_args.items[1..], .{ .who = test_who }));
         const no_checkout = case.start[0][2] == 'n';
         const renamed = std.mem.startsWith(u8, case.start[0], "--term");
         var steps: usize = 0;
@@ -1683,9 +1692,8 @@ fn bisectLikeGit(case: Case) !void {
             if (renamed) word = if (std.mem.eql(u8, word, "bad")) "broken" else if (std.mem.eql(u8, word, "good")) "fine" else word;
             try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));
         }
-        // The log replays the same -- as git 2.56 replays it, without first
-        // going back to where the bisection started -- and a reset puts
-        // everything back.
+        // Replay from the completed bisection, as git 2.56 does without
+        // first restoring the original HEAD, then reset both twins.
         if (newest) {
             const recorded = try log(gpa, io, &t.repo);
             defer gpa.free(recorded);
