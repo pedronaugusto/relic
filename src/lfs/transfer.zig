@@ -711,82 +711,7 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
     var start: usize = 0;
     while (start < pending.items.len) : (start += limits.batch_size) {
         const chunk = pending.items[start..@min(pending.items.len, start + limits.batch_size)];
-        var wanted: std.ArrayList(Object) = .empty;
-        defer wanted.deinit(gpa);
-        for (chunk) |i| {
-            const r = outcome.results[i];
-            try wanted.append(gpa, .{ .oid = r.oid, .size = r.size, .name = r.name });
-        }
-        const answer = batchRequest(server, operation, wanted.items, options.ref, limits, arena) catch |err| switch (err) {
-            error.LfsBatchFailed => {
-                const why = try arena.dupe(u8, server.client.message());
-                for (chunk) |i| {
-                    outcome.results[i].status = .failed;
-                    outcome.results[i].message = why;
-                }
-                continue;
-            },
-            else => |e| return e,
-        };
-        var by_custom = false;
-        if (answer.transfer) |t| {
-            if (state.ssh == null and t.len != 0 and !std.mem.eql(u8, t, "basic")) {
-                const adapter = custom.find(adapters, t, operation) orelse return error.LfsTransferUnsupported;
-                if (chosen) |c| if (!std.mem.eql(u8, c.name, adapter.name)) return error.LfsTransferUnsupported;
-                chosen = adapter;
-                by_custom = true;
-            }
-        }
-        // The transfers go in the order of the server's answer, as
-        // git-lfs's queue takes them; an object it left out fails.
-        var asked: std.StringHashMapUnmanaged(usize) = .empty;
-        defer asked.deinit(gpa);
-        for (chunk) |i| try asked.put(gpa, &outcome.results[i].oid, i);
-        var order: std.ArrayList(struct { i: usize, o: ?*const BatchObject }) = .empty;
-        defer order.deinit(gpa);
-        for (answer.objects) |*o| {
-            const kv = asked.fetchRemove(o.oid) orelse continue;
-            try order.append(gpa, .{ .i = kv.value, .o = o });
-        }
-        for (chunk) |i| {
-            if (asked.contains(&outcome.results[i].oid)) try order.append(gpa, .{ .i = i, .o = null });
-        }
-        for (order.items) |entry| {
-            const i = entry.i;
-            const r = &outcome.results[i];
-            const o = entry.o orelse {
-                r.status = .failed;
-                r.message = "the server's answer left the object out";
-                continue;
-            };
-            if (o.@"error") |e| {
-                r.status = .refused;
-                r.message = try std.fmt.allocPrint(arena, "[{d}] {s}", .{ e.code, e.message });
-                continue;
-            }
-            switch (operation) {
-                .download => {
-                    const a = o.action(.download) orelse {
-                        r.status = .refused;
-                        r.message = "the server has no download for the object";
-                        continue;
-                    };
-                    try jobs.append(arena, .{ .result = r, .action = a, .verify = null, .authenticated = o.authenticated, .custom = by_custom });
-                },
-                .upload => {
-                    const a = o.action(.upload) orelse {
-                        r.status = .present;
-                        continue;
-                    };
-                    if (missing_here.items[i]) {
-                        r.status = if (limits.allow_incomplete_push) .present else .missing;
-                        r.message = "the object is not in the store, and the server does not have it";
-                        continue;
-                    }
-                    try jobs.append(arena, .{ .result = r, .action = a, .verify = o.action(.verify), .authenticated = o.authenticated, .custom = by_custom });
-                },
-            }
-        }
+        try batchChunk(&state, chunk, outcome.results, missing_here.items, adapters, &chosen, &jobs);
     }
     if (jobs.items.len == 0) return outcome;
     state.jobs = jobs.items;
@@ -799,6 +724,103 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
     if (state.failure()) |err| return err;
     return outcome;
 }
+
+/// One batch request for the pending objects `chunk` names: what the
+/// server answered becomes jobs, in the order of its answer, as git-lfs's
+/// queue takes them; an object it left out, refused, or has no action for
+/// is settled here. The custom adapter an answer chooses must be the one
+/// any other answer chose.
+fn batchChunk(
+    state: *Run,
+    chunk: []const usize,
+    results: []Result,
+    missing_here: []const bool,
+    adapters: []const custom.Adapter,
+    chosen: *?custom.Adapter,
+    jobs: *std.ArrayList(Job),
+) Error!void {
+    const server = state.server;
+    const operation = state.operation;
+    const gpa = server.gpa;
+    const arena = state.arena;
+    var wanted: std.ArrayList(Object) = .empty;
+    defer wanted.deinit(gpa);
+    for (chunk) |i| {
+        const r = results[i];
+        try wanted.append(gpa, .{ .oid = r.oid, .size = r.size, .name = r.name });
+    }
+    const answer = batchRequest(server, operation, wanted.items, state.options.ref, state.limits, arena) catch |err| switch (err) {
+        error.LfsBatchFailed => {
+            const why = try arena.dupe(u8, server.client.message());
+            for (chunk) |i| {
+                results[i].status = .failed;
+                results[i].message = why;
+            }
+            return;
+        },
+        else => |e| return e,
+    };
+    var by_custom = false;
+    if (answer.transfer) |t| {
+        if (state.ssh == null and t.len != 0 and !std.mem.eql(u8, t, "basic")) {
+            const adapter = custom.find(adapters, t, operation) orelse return error.LfsTransferUnsupported;
+            if (chosen.*) |c| if (!std.mem.eql(u8, c.name, adapter.name)) return error.LfsTransferUnsupported;
+            chosen.* = adapter;
+            by_custom = true;
+        }
+    }
+    // The transfers go in the order of the server's answer, as
+    // git-lfs's queue takes them; an object it left out fails.
+    var asked: std.StringHashMapUnmanaged(usize) = .empty;
+    defer asked.deinit(gpa);
+    for (chunk) |i| try asked.put(gpa, &results[i].oid, i);
+    var order: std.ArrayList(struct { i: usize, o: ?*const BatchObject }) = .empty;
+    defer order.deinit(gpa);
+    for (answer.objects) |*o| {
+        const kv = asked.fetchRemove(o.oid) orelse continue;
+        try order.append(gpa, .{ .i = kv.value, .o = o });
+    }
+    for (chunk) |i| {
+        if (asked.contains(&results[i].oid)) try order.append(gpa, .{ .i = i, .o = null });
+    }
+    for (order.items) |entry| {
+        const i = entry.i;
+        const r = &results[i];
+        const o = entry.o orelse {
+            r.status = .failed;
+            r.message = "the server's answer left the object out";
+            continue;
+        };
+        if (o.@"error") |e| {
+            r.status = .refused;
+            r.message = try std.fmt.allocPrint(arena, "[{d}] {s}", .{ e.code, e.message });
+            continue;
+        }
+        switch (operation) {
+            .download => {
+                const a = o.action(.download) orelse {
+                    r.status = .refused;
+                    r.message = "the server has no download for the object";
+                    continue;
+                };
+                try jobs.append(arena, .{ .result = r, .action = a, .verify = null, .authenticated = o.authenticated, .custom = by_custom });
+            },
+            .upload => {
+                const a = o.action(.upload) orelse {
+                    r.status = .present;
+                    continue;
+                };
+                if (missing_here[i]) {
+                    r.status = if (state.limits.allow_incomplete_push) .present else .missing;
+                    r.message = "the object is not in the store, and the server does not have it";
+                    continue;
+                }
+                try jobs.append(arena, .{ .result = r, .action = a, .verify = o.action(.verify), .authenticated = o.authenticated, .custom = by_custom });
+            },
+        }
+    }
+}
+
 
 /// The standalone agent `lfs.<url>.standalonetransferagent` names for the
 /// endpoint, else git-lfs's own for a remote on this machine.
