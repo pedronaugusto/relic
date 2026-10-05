@@ -51,7 +51,7 @@ const Keyed = struct {
     gnupg: testgit.GnupgHome,
     format: signing.Format,
 
-    fn init(gpa: Allocator, io: Io, format: signing.Format, init_args: []const []const u8) !*Keyed {
+    fn create(gpa: Allocator, io: Io, format: signing.Format, init_args: []const []const u8) !*Keyed {
         const k = try gpa.create(Keyed);
         errdefer gpa.destroy(k);
         k.gpa = gpa;
@@ -86,7 +86,7 @@ const Keyed = struct {
         return k;
     }
 
-    fn deinit(k: *Keyed, io: Io) void {
+    fn destroy(k: *Keyed, io: Io) void {
         if (k.format != .ssh) {
             // The daemons gpg started for this home go with it: the agent,
             // and keyboxd or dirmngr on a GnuPG that starts them.
@@ -96,8 +96,10 @@ const Keyed = struct {
         k.gnupg.deinit(io);
         k.repo.deinit();
         k.environ.deinit();
-        k.gpa.free(k.home);
-        k.gpa.destroy(k);
+        const gpa = k.gpa;
+        gpa.free(k.home);
+        k.* = undefined;
+        gpa.destroy(k);
     }
 
     /// Run a program in the keyed environment; `error.SkipZigTest` when it
@@ -203,8 +205,8 @@ fn verifyHere(k: *Keyed, io: Io, rev: []const u8, tag: bool) !signing.Verdict {
 fn bothWays(format: signing.Format, init_args: []const []const u8) !void {
     const gpa = testing.allocator;
     const io = testing.io;
-    var k = try Keyed.init(gpa, io, format, init_args);
-    defer k.deinit(io);
+    var k = try Keyed.create(gpa, io, format, init_args);
+    defer k.destroy(io);
     try k.makeKey(io);
 
     try k.repo.writeFile(io, "a.txt", "a\n");
@@ -283,8 +285,8 @@ test "ssh signatures made here verify in git, and git's verify here" {
 test "ssh signatures in a SHA-256 repository ride in gpgsig-sha256" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var k = try Keyed.init(gpa, io, .ssh, &.{"--object-format=sha256"});
-    defer k.deinit(io);
+    var k = try Keyed.create(gpa, io, .ssh, &.{"--object-format=sha256"});
+    defer k.destroy(io);
     try k.makeKey(io);
     try k.repo.writeFile(io, "a.txt", "a\n");
     try k.repo.exec(io, &.{ "add", "a.txt" });
@@ -301,8 +303,8 @@ test "ssh signatures in a SHA-256 repository ride in gpgsig-sha256" {
 test "export-subst's signature placeholders check the commit as git archive does" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var k = try Keyed.init(gpa, io, .ssh, &.{});
-    defer k.deinit(io);
+    var k = try Keyed.create(gpa, io, .ssh, &.{});
+    defer k.destroy(io);
     try k.makeKey(io);
     try k.repo.writeFile(io, ".gitattributes", "subst.txt export-subst\n");
     try k.repo.writeFile(io, "subst.txt", "$Format:%G?|%GS|%GK|%GF|%GP|%GT|%GG$\n");
@@ -336,8 +338,8 @@ test "openpgp signatures made here verify in git, and git's verify here" {
 test "a key no allowed signer names is untrusted to both, and not verified" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var k = try Keyed.init(gpa, io, .ssh, &.{});
-    defer k.deinit(io);
+    var k = try Keyed.create(gpa, io, .ssh, &.{});
+    defer k.destroy(io);
     try k.makeKey(io);
     try k.repo.writeFile(io, "a.txt", "a\n");
     try k.repo.exec(io, &.{ "add", "a.txt" });
@@ -399,8 +401,8 @@ test "signing configured with no programs is refused by name, never written unsi
 test "the commit porcelain signs as commit.gpgSign says" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var k = try Keyed.init(gpa, io, .ssh, &.{});
-    defer k.deinit(io);
+    var k = try Keyed.create(gpa, io, .ssh, &.{});
+    defer k.destroy(io);
     try k.makeKey(io);
     try k.repo.writeFile(io, "a.txt", "a\n");
     try k.repo.exec(io, &.{ "add", "a.txt" });
@@ -414,8 +416,8 @@ test "the commit porcelain signs as commit.gpgSign says" {
 test "a signing program is one path, spaces and all, as git runs it" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var k = try Keyed.init(gpa, io, .ssh, &.{});
-    defer k.deinit(io);
+    var k = try Keyed.create(gpa, io, .ssh, &.{});
+    defer k.destroy(io);
     try k.makeKey(io);
     // A native wrapper in a directory whose name a shell would split in two.
     try testgit.fixtureHook(gpa, io, k.repo.dir, "keys/my tools/keygen", "signing_wrapper", "");
@@ -587,8 +589,8 @@ test "for-each-ref's signature atoms check each commit as git's do" {
     const gpa = testing.allocator;
     const io = testing.io;
     if (!try testgit.gitAtLeast(gpa, io, 2, 42)) return error.SkipZigTest;
-    var k = try Keyed.init(gpa, io, .ssh, &.{});
-    defer k.deinit(io);
+    var k = try Keyed.create(gpa, io, .ssh, &.{});
+    defer k.destroy(io);
     try k.makeKey(io);
     try k.repo.writeFile(io, "a.txt", "a\n");
     try k.repo.exec(io, &.{ "add", "a.txt" });

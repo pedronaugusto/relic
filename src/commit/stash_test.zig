@@ -31,7 +31,7 @@ const Twin = struct {
     relic: testgit.Repo,
     environ: std.process.Environ.Map,
 
-    fn init(gpa: Allocator, io: Io) !*Twin {
+    fn create(gpa: Allocator, io: Io) !*Twin {
         const t = try gpa.create(Twin);
         errdefer gpa.destroy(t);
         t.environ = try testgit.programEnviron(gpa);
@@ -46,10 +46,11 @@ const Twin = struct {
         return t;
     }
 
-    fn deinit(t: *Twin, gpa: Allocator) void {
+    fn destroy(t: *Twin, gpa: Allocator) void {
         t.git.deinit();
         t.relic.deinit();
         t.environ.deinit();
+        t.* = undefined;
         gpa.destroy(t);
     }
 
@@ -146,8 +147,8 @@ test "a stash pushed here is the stash git pushes, and git lists, shows and appl
         .{ .args = &.{ "stash", "push", "-q", "--keep-index", "--", "a.txt", "b.txt", "new.txt" }, .options = .{ .who = who, .keep_index = true, .paths = &.{ "a.txt", "b.txt", "new.txt" } } },
     };
     for (cases) |case| {
-        var twin = try Twin.init(gpa, io);
-        defer twin.deinit(gpa);
+        var twin = try Twin.create(gpa, io);
+        defer twin.destroy(gpa);
         try twin.setUp(io);
 
         try twin.git.exec(io, case.args);
@@ -202,8 +203,8 @@ test "git's stash is applied and popped here as git applies and pops it" {
     const io = testing.io;
 
     for ([_]bool{ false, true }) |with_index| {
-        var twin = try Twin.init(gpa, io);
-        defer twin.deinit(gpa);
+        var twin = try Twin.create(gpa, io);
+        defer twin.destroy(gpa);
         try twin.setUp(io);
         try twin.both(io, &.{ "stash", "push", "-q", "-u" });
         // Something moves on meanwhile: a new commit touching another line,
@@ -249,8 +250,8 @@ test "git's stash is applied and popped here as git applies and pops it" {
 test "an index git cannot restore as a patch is not restored here either" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var twin = try Twin.init(gpa, io);
-    defer twin.deinit(gpa);
+    var twin = try Twin.create(gpa, io);
+    defer twin.destroy(gpa);
     try twin.setUp(io);
     try twin.both(io, &.{ "stash", "push", "-q" });
     // Line five is context for the staged change to line two: the tree
@@ -275,8 +276,8 @@ test "an index git cannot restore as a patch is not restored here either" {
 test "a conflicting stash leaves git's stages and markers, and pop keeps it" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var twin = try Twin.init(gpa, io);
-    defer twin.deinit(gpa);
+    var twin = try Twin.create(gpa, io);
+    defer twin.destroy(gpa);
     try twin.setUp(io);
     try twin.both(io, &.{ "stash", "push", "-q" });
     try twin.write(io, "a.txt", "1\n2, committed\n3\n4\n5\n6\n7\n8\n9\n10\n");
@@ -301,8 +302,8 @@ test "a conflicting stash leaves git's stages and markers, and pop keeps it" {
 test "a stash that would overwrite local changes or untracked files is refused and nothing moves" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var twin = try Twin.init(gpa, io);
-    defer twin.deinit(gpa);
+    var twin = try Twin.create(gpa, io);
+    defer twin.destroy(gpa);
     try twin.setUp(io);
     // Without the untracked files: git puts those back even when its merge
     // refuses, and here a refusal touches nothing.
@@ -330,8 +331,8 @@ test "a stash that would overwrite local changes or untracked files is refused a
 test "dropping and clearing leave git's list" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var twin = try Twin.init(gpa, io);
-    defer twin.deinit(gpa);
+    var twin = try Twin.create(gpa, io);
+    defer twin.destroy(gpa);
     try twin.setUp(io);
     try twin.both(io, &.{ "stash", "push", "-q", "-m", "first" });
     try twin.write(io, "b.txt", "second\n");
@@ -389,8 +390,8 @@ test "a stash goes through the clean and smudge filters as git's does" {
     defer gpa.free(clean);
     const smudge = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "lower");
     defer gpa.free(smudge);
-    var twin = try Twin.init(gpa, io);
-    defer twin.deinit(gpa);
+    var twin = try Twin.create(gpa, io);
+    defer twin.destroy(gpa);
     inline for (.{ &twin.git, &twin.relic }) |r| {
         try r.exec(io, &.{ "config", "filter.up.clean", clean });
         try r.exec(io, &.{ "config", "filter.up.smudge", smudge });

@@ -30,6 +30,7 @@ const Pair = struct {
     fn deinit(p: *Pair) void {
         p.git.deinit();
         p.ours.deinit();
+        p.* = undefined;
     }
 
     fn both(p: *Pair, io: Io, args: []const []const u8) !void {

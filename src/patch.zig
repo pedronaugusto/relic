@@ -320,7 +320,8 @@ fn findNameGnu(p: *Parser, line: []const u8, p_value: usize) Allocator.Error!?[]
         const slash = std.mem.indexOfScalar(u8, cp, '/') orelse return null;
         cp = cp[slash + 1 ..];
     }
-    return try withRoot(p, cp);
+    const name = try withRoot(p, cp);
+    return name;
 }
 
 fn saneTzLen(line: []const u8) usize {
@@ -427,9 +428,13 @@ fn findNameCommon(p: *Parser, line: []const u8, def: ?[]const u8, p_value: usize
     const len = i - s;
     if (len == 0) return if (def) |d| try squashSlash(p.a, d) else null;
     if (def) |d| {
-        if (d.len < len and std.mem.startsWith(u8, line[s..], d)) return try squashSlash(p.a, d);
+        if (d.len < len and std.mem.startsWith(u8, line[s..], d)) {
+            const name = try squashSlash(p.a, d);
+            return name;
+        }
     }
-    return try withRoot(p, line[s..i]);
+    const name = try withRoot(p, line[s..i]);
+    return name;
 }
 
 fn findName(p: *Parser, line: []const u8, def: ?[]const u8, p_value: usize, terminate: u2) Allocator.Error!?[]const u8 {

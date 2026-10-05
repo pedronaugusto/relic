@@ -464,6 +464,7 @@ const Twin = struct {
         t.environ.deinit();
         t.git.deinit();
         t.relic.deinit();
+        t.* = undefined;
     }
 
     fn bind(t: *Twin) void {

@@ -912,7 +912,8 @@ const Merge = struct {
                 at = slash;
             }
         }
-        return try attrs.lookup(m.arena, path, false);
+        const applied = try attrs.lookup(m.arena, path, false);
+        return applied;
     }
 
     /// `initialize_attr_index`: the top-level `.gitattributes` a

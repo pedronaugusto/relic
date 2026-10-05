@@ -7,13 +7,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z030",
-    "path": "src/commit.zig",
-    "source": "fn deinit(t: *Twin) void {",
-    "detail": "deinit should set t.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/commit/todo.zig",
     "source": "const nl = std.mem.indexOfScalarPos(u8, buf, at, '\\n');",
@@ -32,27 +25,6 @@
     "path": "src/commit/reset.zig",
     "source": "var current: std.StringArrayHashMapUnmanaged(?index_mod.Entry) = .empty;",
     "detail": "'StringArrayHashMapUnmanaged' is deprecated: Deprecated; use `array_hash_map.String`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/commit/notes.zig",
-    "source": "fn deinit(s: *Stack, gpa: Allocator) void {",
-    "detail": "deinit should set s.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z017",
-    "path": "src/commit/notes.zig",
-    "source": "return try gpa.dupe(u8, found.bytes);",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try gpa.dupe(u8, found.bytes); return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/commit/notes.zig",
-    "source": "fn deinit(t: *Twin) void {",
-    "detail": "deinit should set t.* = undefined",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -81,13 +53,6 @@
     "path": "src/commit/notes.zig",
     "source": "fn each(w: @This(), t2: *Notes, key: []const u8, val: Oid, path_in: []const u8) Error!void {",
     "detail": "inline @This() in named struct; use 'Notes' instead",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z017",
-    "path": "src/commit/rebase.zig",
-    "source": "return try sheetText(&r, gpa, items, upstream, onto, tip.orig_head, true);",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try sheetText(&r, gpa, items, upstre; return value;`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -140,13 +105,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z030",
-    "path": "src/commit/stash.zig",
-    "source": "fn deinit(ctx: *Ctx) void {",
-    "detail": "deinit should set ctx.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/commit/stash.zig",
     "source": "var candidates: std.StringArrayHashMapUnmanaged(void) = .empty;",
@@ -179,27 +137,6 @@
     "path": "src/commit/message.zig",
     "source": "const end = if (std.mem.indexOfScalarPos(u8, text, at, '\\n')) |nl| nl + 1 else text.len;",
     "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z025",
-    "path": "src/commit/head.zig",
-    "source": "tx.commit(io, null) catch |err| return err;",
-    "detail": "redundant catch: `catch |err| return err` -> use try",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/commit/stash_test.zig",
-    "source": "fn deinit(t: *Twin, gpa: Allocator) void {",
-    "detail": "deinit should set t.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/commit/signing_test.zig",
-    "source": "fn deinit(k: *Keyed, io: Io) void {",
-    "detail": "deinit should set k.* = undefined",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -1092,13 +1029,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z030",
-    "path": "src/merge/threeway.zig",
-    "source": "fn deinit(s: *SubmoduleOpener) void {",
-    "detail": "deinit should set s.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z013",
     "path": "src/merge/threeway.zig",
     "source": "const attributes = @import(\"../worktree/attributes.zig\");",
@@ -1225,13 +1155,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z017",
-    "path": "src/merge/ort.zig",
-    "source": "return try attrs.lookup(m.arena, path, false);",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try attrs.lookup(m.arena, path, fals; return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/merge/ort.zig",
     "source": "while (std.mem.lastIndexOfScalar(u8, path[0..end], '/')) |slash| {",
@@ -1243,13 +1166,6 @@
     "path": "src/merge/ort.zig",
     "source": "pub fn lessThan(s: @This(), a: usize, b: usize) bool {",
     "detail": "inline @This() in named struct; use 'Merge' instead",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/merge/ort_test.zig",
-    "source": "fn deinit(o: *SubOpener) void {",
-    "detail": "deinit should set o.* = undefined",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -3493,13 +3409,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z030",
-    "path": "src/patch/apply.zig",
-    "source": "fn deinit(f: *Fixture, io: Io) void {",
-    "detail": "deinit should set f.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z013",
     "path": "src/patch/apply.zig",
     "source": "const delta = @import(\"../odb/delta.zig\");",
@@ -3535,31 +3444,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z017",
-    "path": "src/patch/mail.zig",
-    "source": "return try decodeHeader(s, v);",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try decodeHeader(s, v); return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z017",
-    "path": "src/patch/mail.zig",
-    "source": "return try std.mem.concat(s.a, u8, &.{ next, \"\\n\" });",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try std.mem.concat(s.a, u8, &.{; return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/patch/mail.zig",
     "source": "const at_opt = std.mem.indexOfScalar(u8, f.items, '@');",
     "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/patch/am_test.zig",
-    "source": "fn deinit(p: *Pair) void {",
-    "detail": "deinit should set p.* = undefined",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -3602,13 +3490,6 @@
     "path": "src/patch/am.zig",
     "source": "const merge = @import(\"../merge.zig\");",
     "detail": "unused import 'merge'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/patch/apply_test.zig",
-    "source": "fn deinit(p: *Pair) void {",
-    "detail": "deinit should set p.* = undefined",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -6517,27 +6398,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z017",
-    "path": "src/patch.zig",
-    "source": "return try withRoot(p, cp);",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try withRoot(p, cp); return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z017",
-    "path": "src/patch.zig",
-    "source": "if (d.len < len and std.mem.startsWith(u8, line[s..], d)) return try squashSlash(p.a, d);",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try squashSlash(p.a, d); return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z017",
-    "path": "src/patch.zig",
-    "source": "return try withRoot(p, line[s..i]);",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try withRoot(p, line[s..i]); return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/patch.zig",
     "source": "if (std.mem.indexOfScalar(u8, name, '\"')) |q| {",
@@ -6745,13 +6605,6 @@
     "path": "src/revwalk/simplify.zig",
     "source": "return try gpa.dupe(u8, found.bytes);",
     "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try gpa.dupe(u8, found.bytes); return value;`",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/patch/rangediff.zig",
-    "source": "fn deinit(r: *Reader) void {",
-    "detail": "deinit should set r.* = undefined",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {

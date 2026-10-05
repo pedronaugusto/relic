@@ -340,6 +340,7 @@ const Ctx = struct {
         ctx.index.deinit();
         ctx.attrs.deinit();
         ctx.ignore_rules.deinit();
+        ctx.* = undefined;
     }
 
     fn unmerged(ctx: *Ctx) bool {

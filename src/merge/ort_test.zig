@@ -65,6 +65,7 @@ const SubOpener = struct {
         if (o.db) |*db| db.deinit(o.io);
         if (o.git_dir) |d| d.close(o.io);
         o.tips.deinit(o.gpa);
+        o.* = undefined;
     }
 
     fn open(context: *anyopaque, path: []const u8) ?ort.SubmoduleHistory {

@@ -536,6 +536,7 @@ const SubmoduleOpener = struct {
             s.gpa.destroy(o);
         }
         s.opened.deinit(s.gpa);
+        s.* = undefined;
     }
 
     fn open(context: *anyopaque, path: []const u8) ?ort.SubmoduleHistory {

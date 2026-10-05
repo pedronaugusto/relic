@@ -480,7 +480,8 @@ fn decodeHeader(s: *State, it: []const u8) Error![]const u8 {
 
 fn parseHeader(s: *State, line: []const u8, hdr: []const u8) Error!?[]const u8 {
     const v = skipHeader(line, hdr) orelse return null;
-    return try decodeHeader(s, v);
+    const decoded = try decodeHeader(s, v);
+    return decoded;
 }
 
 fn slurpAttr(line: []const u8, name: []const u8) ?[]const u8 {
@@ -783,7 +784,8 @@ fn handleBoundary(s: *State, line_in: []const u8) Error!?[]const u8 {
     var rest: ?[]const u8 = null;
     while (try readOneHeaderLine(s, &rest)) |h| _ = try checkHeader(s, h, .primary, false);
     const next = s.getLineLf() orelse return null;
-    return try std.mem.concat(s.a, u8, &.{ next, "\n" });
+    const terminated = try std.mem.concat(s.a, u8, &.{ next, "\n" });
+    return terminated;
 }
 
 fn handleBody(s: *State, first_line: []const u8) Error!void {

@@ -106,7 +106,7 @@ pub fn detach(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Self.Err
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.change("HEAD", .{ .direct = new }, .any, .{ .no_deref = true });
-    tx.commit(io, null) catch |err| return err;
+    try tx.commit(io, null);
     try appendHeadLog(io, repo, old, new, log);
 }
 

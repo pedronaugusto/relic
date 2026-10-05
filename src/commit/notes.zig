@@ -753,6 +753,7 @@ const Stack = struct {
             gpa.destroy(n);
         }
         s.buf.deinit(gpa);
+        s.* = undefined;
     }
 
     fn entry(s: *Stack, gpa: Allocator, mode: u32, name: []const u8, oid: Oid) Allocator.Error!void {
@@ -991,7 +992,7 @@ pub fn show(gpa: Allocator, io: Io, repo: *Repository, ref: ?[]const u8, obj: Oi
     const note = (try t.get(io, obj)) orelse return null;
     const found = try repo.odb.read(io, note);
     defer repo.odb.allocator().free(found.bytes);
-    return try gpa.dupe(u8, found.bytes);
+    return gpa.dupe(u8, found.bytes);
 }
 
 /// `format_note`: the note on `obj` in `t` as `git log` shows it under a
@@ -1469,6 +1470,7 @@ const Twin = struct {
         t.ours.deinit();
         t.git.deinit();
         t.env.deinit();
+        t.* = undefined;
     }
 
     fn blob(t: *Twin, io: Io, i: usize) !Oid {

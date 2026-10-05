@@ -754,7 +754,7 @@ pub fn plan(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: O
     if (options.autosquash) items = try rearrangeSquash(&r, items);
     items = try addExecCommands(&r, items, options.exec);
     const onto = options.onto orelse upstream;
-    return try sheetText(&r, gpa, items, upstream, onto, tip.orig_head, true);
+    return sheetText(&r, gpa, items, upstream, onto, tip.orig_head, true);
 }
 
 /// The sheet as git writes it for a person: the instructions and the

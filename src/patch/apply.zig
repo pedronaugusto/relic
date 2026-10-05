@@ -1833,6 +1833,7 @@ const Fixture = struct {
     fn deinit(f: *Fixture, io: Io) void {
         f.repo.deinit(io);
         f.git.deinit();
+        f.* = undefined;
     }
 
     fn reopen(f: *Fixture, gpa: Allocator, io: Io) !void {

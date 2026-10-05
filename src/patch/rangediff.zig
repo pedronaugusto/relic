@@ -177,6 +177,7 @@ const Reader = struct {
         if (r.mailmap) |*m| m.deinit();
         if (r.notes) |*n| n.deinit();
         if (r.attrs) |*x| x.deinit();
+        r.* = undefined;
     }
 
     fn readPatches(r: *Reader, range: Range) Error![]Patch {
