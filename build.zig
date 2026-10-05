@@ -312,6 +312,12 @@ pub fn build(b: *std.Build) void {
 
         const example_tests = b.addTest(.{ .root_module = example.root_module });
         const run_example_tests = b.addRunArtifact(example_tests);
+        if (target.result.os.tag == .windows and selected_case != null) {
+            // Zig 0.16 inherits all inheritable Windows pipe handles at
+            // spawn. Concurrent runners can keep each other's pipes open.
+            run_example_tests.step.dependOn(&run_tests.step);
+            run.step.dependOn(&run_example_tests.step);
+        }
         examples_step.dependOn(&run_example_tests.step);
         check_step.dependOn(&example_tests.step);
     }
