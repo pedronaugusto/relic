@@ -46,7 +46,8 @@ pub fn normalize(gpa: Allocator, path: []const u8) Allocator.Error![]u8 {
 fn realPath(gpa: Allocator, io: Io, path: []const u8) Allocator.Error!?[]u8 {
     if (Io.Dir.cwd().realPathFileAlloc(io, path, gpa)) |real| {
         defer gpa.free(real);
-        return try normalize(gpa, real);
+        const value = try normalize(gpa, real);
+        return value;
     } else |_| {}
     const parent = std.fs.path.dirname(path) orelse return null;
     const base = std.fs.path.basename(path);
@@ -54,7 +55,8 @@ fn realPath(gpa: Allocator, io: Io, path: []const u8) Allocator.Error!?[]u8 {
     defer gpa.free(real_parent);
     const joined = try std.fs.path.join(gpa, &.{ real_parent, base });
     defer gpa.free(joined);
-    return try normalize(gpa, joined);
+    const value = try normalize(gpa, joined);
+    return value;
 }
 
 /// Whether `safe.directory` in `protected` names the repository at `path`,

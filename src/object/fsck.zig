@@ -269,25 +269,27 @@ pub const Scope = enum {
 };
 
 /// Errors from reading the rules.
-pub const LoadError = error{
-    /// `fsck.<msg-id>` names no message git has. Under `fetch.fsck.` and
-    /// `receive.fsck.` git warns and goes on, and so does this.
-    UnknownFsckMessage,
-    /// A level other than `error`, `warn` or `ignore`.
-    UnknownFsckLevel,
-    /// A fatal problem lowered below an error, which git refuses.
-    FsckFatalLowered,
-    /// `largePathname`'s length is not a number.
-    InvalidFsckValue,
-    /// A `skipList` that could not be read.
-    SkipListUnreadable,
-    /// A `skipList` line that is not one full object name.
-    InvalidSkipListEntry,
-    /// A setting holds a value that does not decode.
-    MalformedValue,
-    /// A `<scope>.fsck.<msg-id>` with no value.
-    MissingValue,
-} || Allocator.Error || Io.Cancelable;
+pub const LoadError = errors: {
+    break :errors error{
+        /// `fsck.<msg-id>` names no message git has. Under `fetch.fsck.` and
+        /// `receive.fsck.` git warns and goes on, and so does this.
+        UnknownFsckMessage,
+        /// A level other than `error`, `warn` or `ignore`.
+        UnknownFsckLevel,
+        /// A fatal problem lowered below an error, which git refuses.
+        FsckFatalLowered,
+        /// `largePathname`'s length is not a number.
+        InvalidFsckValue,
+        /// A `skipList` that could not be read.
+        SkipListUnreadable,
+        /// A `skipList` line that is not one full object name.
+        InvalidSkipListEntry,
+        /// A setting holds a value that does not decode.
+        MalformedValue,
+        /// A `<scope>.fsck.<msg-id>` with no value.
+        MissingValue,
+    } || Allocator.Error || Io.Cancelable;
+};
 
 /// The levels the checks report at, the objects they leave alone, and the
 /// longest name a tree may carry.
@@ -323,7 +325,7 @@ pub const Rules = struct {
         const problem = Problem.fromConfigName(name) orelse return error.UnknownFsckMessage;
         var level_text = value;
         if (problem == .large_pathname) {
-            if (std.mem.indexOfScalar(u8, value, ':')) |colon| {
+            if (std.mem.findScalar(u8, value, ':')) |colon| {
                 level_text = value[0..colon];
                 const n = config_mod.parseInt(value[colon + 1 ..]) catch return error.InvalidFsckValue;
                 r.max_entry_len = std.math.cast(usize, n) orelse return error.InvalidFsckValue;
@@ -352,7 +354,7 @@ pub const Rules = struct {
         var lines = std.mem.splitScalar(u8, text_, '\n');
         while (lines.next()) |raw| {
             var line = raw;
-            if (std.mem.indexOfScalar(u8, line, '#')) |at| line = line[0..at];
+            if (std.mem.findScalar(u8, line, '#')) |at| line = line[0..at];
             line = std.mem.trim(u8, line, " \t\r\x0b\x0c");
             if (line.len == 0) continue;
             if (line.len != kind.hexLen()) return error.InvalidSkipListEntry;
@@ -437,8 +439,14 @@ pub fn wanted(config: *const config_mod.Config, scope: Scope) config_mod.ValueEr
         .fetch => "fetch.fsckobjects",
         .receive => "receive.fsckobjects",
     };
-    if (config.find(own) != null) return try config.getBool(own, false);
-    if (config.find("transfer.fsckobjects") != null) return try config.getBool("transfer.fsckobjects", false);
+    if (config.find(own) != null) {
+        const value = try config.getBool(own, false);
+        return value;
+    }
+    if (config.find("transfer.fsckobjects") != null) {
+        const value = try config.getBool("transfer.fsckobjects", false);
+        return value;
+    }
     return null;
 }
 
@@ -676,7 +684,7 @@ fn checkTree(gpa: Allocator, r: *Reporter, kind: Kind, bytes: []const u8, found:
             if (isHfsDot(name, "gitignore") or isNtfsDot(name, "gitignore", "gi250a")) _ = try r.report(.gitignore_symlink, "");
             if (isHfsDot(name, "mailmap") or isNtfsDot(name, "mailmap", "maba30")) _ = try r.report(.mailmap_symlink, "");
         }
-        var backslash = std.mem.indexOfScalar(u8, name, '\\');
+        var backslash = std.mem.findScalar(u8, name, '\\');
         while (backslash) |at| {
             const after = name[at + 1 ..];
             has_dotgit = has_dotgit or isNtfsDotGit(after);
@@ -685,7 +693,7 @@ fn checkTree(gpa: Allocator, r: *Reporter, kind: Kind, bytes: []const u8, found:
                     if (found) |f| try f.modules.put(gpa, entry.oidValue(kind), {});
                 } else _ = try r.report(.gitmodules_symlink, "");
             }
-            backslash = if (std.mem.indexOfScalar(u8, after, '\\')) |next| at + 1 + next else null;
+            backslash = if (std.mem.findScalar(u8, after, '\\')) |next| at + 1 + next else null;
         }
 
         rest = rest[entry.len..];
@@ -1314,6 +1322,7 @@ const Collected = struct {
         c.items.deinit(c.gpa);
         for (c.unknown.items) |name| c.gpa.free(name);
         c.unknown.deinit(c.gpa);
+        c.* = undefined;
     }
 
     fn sink(c: *Collected) Sink {

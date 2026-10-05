@@ -34,25 +34,27 @@ pub const Now = struct {
 };
 
 /// Errors from deciding an identity.
-pub const Error = error{
-    /// `user.useConfigOnly` and no email from the configuration or the
-    /// environment: "no email was given and auto-detection is disabled".
-    NoEmailGiven,
-    /// `user.useConfigOnly` and no name: "no name was given and
-    /// auto-detection is disabled".
-    NoNameGiven,
-    /// The machine's address is one git could not make out: "unable to
-    /// auto-detect email address".
-    EmailNotDetected,
-    /// The machine's name is one git could not make out.
-    NameNotDetected,
-    /// An empty name: "empty ident name not allowed".
-    EmptyName,
-    /// A name of nothing but `.,:;<>"\'` and whitespace.
-    NameOnlyDisallowedCharacters,
-    /// `GIT_<ROLE>_DATE` git cannot read: "invalid date format".
-    InvalidDate,
-} || Allocator.Error;
+pub const Error = errors: {
+    break :errors error{
+        /// `user.useConfigOnly` and no email from the configuration or the
+        /// environment: "no email was given and auto-detection is disabled".
+        NoEmailGiven,
+        /// `user.useConfigOnly` and no name: "no name was given and
+        /// auto-detection is disabled".
+        NoNameGiven,
+        /// The machine's address is one git could not make out: "unable to
+        /// auto-detect email address".
+        EmailNotDetected,
+        /// The machine's name is one git could not make out.
+        NameNotDetected,
+        /// An empty name: "empty ident name not allowed".
+        EmptyName,
+        /// A name of nothing but `.,:;<>"\'` and whitespace.
+        NameOnlyDisallowedCharacters,
+        /// `GIT_<ROLE>_DATE` git cannot read: "invalid date format".
+        InvalidDate,
+    } || Allocator.Error;
+};
 
 fn decoded(arena: Allocator, raw: []const u8) Allocator.Error![]const u8 {
     return config_mod.unquote(arena, raw) catch |err| switch (err) {
@@ -65,7 +67,8 @@ fn configValue(arena: Allocator, config: *const config_mod.Config, name: []const
     const entry = config.find(name) orelse return null;
     // a name with no value is git's `config_error_nonbool`; it gives nothing
     const raw = entry.value orelse return null;
-    return try decoded(arena, raw);
+    const value = try decoded(arena, raw);
+    return value;
 }
 
 fn environValue(environ: ?*const Environ.Map, name: []const u8) ?[]const u8 {

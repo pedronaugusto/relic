@@ -5,7 +5,6 @@
 //! directories, `packed-refs`, the index and the configuration.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -45,7 +44,7 @@ fn dirKindOf(path: []const u8) ?[]const u8 {
 
 /// Every kind found under `dir`, with the permission bits each has.
 fn modes(gpa: Allocator, io: Io, dir: Io.Dir) !std.StringArrayHashMapUnmanaged(std.ArrayList(u32)) {
-    var out: std.StringArrayHashMapUnmanaged(std.ArrayList(u32)) = .empty;
+    var out: std.array_hash_map.String(std.ArrayList(u32)) = .empty;
     var walker = try dir.walk(gpa);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {

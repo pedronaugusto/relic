@@ -677,7 +677,7 @@ pub const Shared = union(enum) {
 
     /// git's `git_config_perm` for `value`, `null` being the setting
     /// written with no value.
-    pub fn parse(value: ?[]const u8) ParseError!Shared {
+    pub fn parse(value: ?[]const u8) Shared.ParseError!Shared {
         const text = value orelse return .group;
         if (std.mem.eql(u8, text, "umask")) return .umask;
         if (std.mem.eql(u8, text, "group")) return .group;
@@ -753,7 +753,7 @@ pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) v
         new |= (new & 0o444) >> 2;
         if (new & 0o060 != 0) new |= 0o2000;
     }
-    if (new != old) dir.setFilePermissions(io, sub_path, @enumFromInt(@as(std.posix.mode_t, @intCast(new))), .{}) catch {};
+    if (new != old) dir.setFilePermissions(io, sub_path, @enumFromInt(@as(std.posix.mode_t, @intCast(new))), .{}) catch return;
 }
 
 /// A file git writes read-only into `objects` — a loose object, a pack and
@@ -854,13 +854,13 @@ pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]co
     }
 }
 
-const SE_FILE_OBJECT: c_int = 1;
-const OWNER_SECURITY_INFORMATION: u32 = 0x1;
-const DACL_SECURITY_INFORMATION: u32 = 0x4;
-const TOKEN_QUERY: u32 = 0x8;
-const TokenUser: c_int = 1;
-const TokenLinkedToken: c_int = 19;
-const WinBuiltinAdministratorsSid: c_int = 26;
+const se_file_object: c_int = 1;
+const owner_security_information: u32 = 0x1;
+const dacl_security_information: u32 = 0x4;
+const token_query: u32 = 0x8;
+const token_user: c_int = 1;
+const token_linked_token: c_int = 19;
+const win_builtin_administrators_sid: c_int = 26;
 
 extern "advapi32" fn GetNamedSecurityInfoW(object_name: [*:0]const u16, object_type: c_int, info: u32, owner: ?*?*anyopaque, group: ?*?*anyopaque, dacl: ?*?*anyopaque, sacl: ?*?*anyopaque, descriptor: ?*?*anyopaque) callconv(.winapi) u32;
 extern "advapi32" fn OpenProcessToken(process: std.os.windows.HANDLE, access: u32, token: *std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
@@ -888,25 +888,25 @@ fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bo
     wide_buf[wide_len] = 0;
     var owner: ?*anyopaque = null;
     var descriptor: ?*anyopaque = null;
-    if (GetNamedSecurityInfoW(wide_buf[0..wide_len :0].ptr, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, null, null, null, &descriptor) != 0) return false;
+    if (GetNamedSecurityInfoW(wide_buf[0..wide_len :0].ptr, se_file_object, owner_security_information | dacl_security_information, &owner, null, null, null, &descriptor) != 0) return false;
     defer _ = LocalFree(descriptor);
     const sid = owner orelse return false;
     if (!IsValidSid(sid).toBool()) return false;
     var token: std.os.windows.HANDLE = undefined;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token).toBool()) return false;
+    if (!OpenProcessToken(GetCurrentProcess(), token_query, &token).toBool()) return false;
     defer _ = CloseHandle(token);
     var user_buf: [256]u8 align(@alignOf(usize)) = undefined;
     var size: u32 = 0;
-    if (GetTokenInformation(token, TokenUser, &user_buf, user_buf.len, &size).toBool()) {
+    if (GetTokenInformation(token, token_user, &user_buf, user_buf.len, &size).toBool()) {
         // TOKEN_USER begins with the user's SID
         const user_sid: *anyopaque = @as(*const *anyopaque, @ptrCast(&user_buf)).*; // safe: TOKEN_USER's first field is a SID pointer, and the buffer is aligned for it
         if (IsValidSid(user_sid).toBool() and EqualSid(sid, user_sid).toBool()) return true;
     }
-    if (IsWellKnownSid(sid, WinBuiltinAdministratorsSid).toBool()) {
+    if (IsWellKnownSid(sid, win_builtin_administrators_sid).toBool()) {
         var member: std.os.windows.BOOL = .FALSE;
         if (CheckTokenMembership(null, sid, &member).toBool() and member.toBool()) return true;
         var linked: std.os.windows.HANDLE = undefined;
-        if (GetTokenInformation(token, TokenLinkedToken, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // safe: TOKEN_LINKED_TOKEN is one handle, which this receives
+        if (GetTokenInformation(token, token_linked_token, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // safe: TOKEN_LINKED_TOKEN is one handle, which this receives
             defer _ = CloseHandle(linked);
             if (CheckTokenMembership(linked, sid, &member).toBool() and member.toBool()) return true;
         }

@@ -174,17 +174,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     }
 
     const comment = commentPrefix(repo);
-    var first_message = try clean(arena, request.message, cleanup, comment);
-    if (options.trailers.len != 0) {
-        // git's `validate_trailer_args`, then `amend_file_with_trailers`
-        const settings = try message.trailerSettings(arena, repo.configuration());
-        const cl_separators = try std.mem.concat(arena, u8, &.{ "=", settings.separators });
-        for (options.trailers) |text| {
-            if (text.len == 0) return error.InvalidTrailer;
-            if (trailer.findSeparator(text, cl_separators)) |at| if (at == 0) return error.InvalidTrailer;
-        }
-        first_message = try trailer.amend(arena, io, settings, options.trailer_commands, first_message, options.trailers);
-    }
+    const first_message = try prepareMessage(arena, io, repo, request.message, cleanup, comment, options);
     try repo.git_dir.writeFile(io, .{ .sub_path = "COMMIT_EDITMSG", .data = first_message });
 
     // `pre-commit` may have staged something, so the index is read now and
@@ -230,12 +220,7 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
 
     const edited = try repo.git_dir.readFileAlloc(io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
     const cleaned = try clean(arena, edited, cleanup, comment);
-    if (!options.allow_empty_message and isEmpty(cleaned, cleanup, comment)) return error.EmptyMessage;
-    if (!options.allow_empty_message) {
-        if (options.template) |text| {
-            if (try templateUntouched(arena, cleaned, text, cleanup, comment)) return error.TemplateUntouched;
-        }
-    }
+    try validateMessage(arena, cleaned, cleanup, comment, options);
 
     const new = try repo.writeCommit(io, .{
         .tree = tree,
@@ -277,6 +262,30 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         }
     }
     return outcome;
+}
+
+fn validateMessage(arena: Allocator, cleaned: []const u8, cleanup: Cleanup, comment: []const u8, options: Options) Error!void {
+    if (!options.allow_empty_message and isEmpty(cleaned, cleanup, comment)) return error.EmptyMessage;
+    if (!options.allow_empty_message) {
+        if (options.template) |text| {
+            if (try templateUntouched(arena, cleaned, text, cleanup, comment)) return error.TemplateUntouched;
+        }
+    }
+}
+
+fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8, cleanup: Cleanup, comment: []const u8, options: Options) Error![]const u8 {
+    var first_message = try clean(arena, input, cleanup, comment);
+    if (options.trailers.len != 0) {
+        // git's `validate_trailer_args`, then `amend_file_with_trailers`
+        const settings = try message.trailerSettings(arena, repo.configuration());
+        const cl_separators = try std.mem.concat(arena, u8, &.{ "=", settings.separators });
+        for (options.trailers) |text| {
+            if (text.len == 0) return error.InvalidTrailer;
+            if (trailer.findSeparator(text, cl_separators)) |at| if (at == 0) return error.InvalidTrailer;
+        }
+        first_message = try trailer.amend(arena, io, settings, options.trailer_commands, first_message, options.trailers);
+    }
+    return first_message;
 }
 
 /// What `commit.template` holds: the text git starts a message from when

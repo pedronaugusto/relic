@@ -150,6 +150,34 @@ pub const Options = struct {
     odb: @import("../odb.zig").Options = .{},
 };
 
+fn hasUserConfig(options: Options) bool {
+    const user = options.user_config;
+    return user.system != null or user.xdg != null or user.global != null or user.command.len != 0 or user.pairs.len != 0;
+}
+
+fn rewriteUrl(arena: Allocator, settings: ?*const config_mod.Config, url: []const u8) Error!?[]const u8 {
+    return if (settings) |c| remote_mod.rewrite(arena, c, url, .fetch) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.MalformedValue,
+    } else null;
+}
+
+fn userConfiguration(gpa: Allocator, io: Io, options: Options) Error!?config_mod.Config {
+    const user = options.user_config;
+    const has_user_config = user.system != null or user.xdg != null or user.global != null or user.command.len != 0 or user.pairs.len != 0;
+    var user_settings: ?config_mod.Config = null;
+    if (options.config == null and has_user_config) {
+        user_settings = try config_mod.Config.open(gpa, io, .{
+            .system = user.system,
+            .xdg = user.xdg,
+            .global = user.global,
+            .command = user.command,
+            .pairs = user.pairs,
+        }, .{ .home = options.home });
+    }
+    return user_settings;
+}
+
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Error!Repository {
@@ -174,28 +202,14 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
 
     // Before the repository exists, the caller's own configuration is what
     // git reads.
-    const user = options.user_config;
-    const has_user_config = user.system != null or user.xdg != null or user.global != null or user.command.len != 0 or user.pairs.len != 0;
-    var user_settings: ?config_mod.Config = null;
+    var user_settings = try userConfiguration(gpa, io, options);
     defer if (user_settings) |*c| c.deinit();
-    if (options.config == null and has_user_config) {
-        user_settings = try config_mod.Config.open(gpa, io, .{
-            .system = user.system,
-            .xdg = user.xdg,
-            .global = user.global,
-            .command = user.command,
-            .pairs = user.pairs,
-        }, .{ .home = options.home });
-    }
     const settings: ?*const config_mod.Config = options.config orelse if (user_settings) |*c| c else null;
 
     // What `url.<base>.insteadOf` makes of the URL is where the clone goes;
     // the URL as given is what the new configuration records, as git's
     // does.
-    const rewritten = if (settings) |c| remote_mod.rewrite(arena, c, url, .fetch) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.MalformedValue,
-    } else null;
+    const rewritten = try rewriteUrl(arena, settings, url);
     const reached = rewritten orelse url;
 
     // A remote helper runs with the new repository's `GIT_DIR`, so the
@@ -286,7 +300,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         repo = try initRepository(gpa, io, dir, options, session.objectFormat(), initial);
         repo_made = true;
     }
-    try partial.storeAdvertised(&repo, io, session.promisorStores(), options.warnings);
+    try partial.storeAdvertised(io, &repo, session.promisorStores(), options.warnings);
     if (auto_filter and send_filter != null) {
         var empty: config_mod.Config = .initEmpty(gpa);
         defer empty.deinit();
@@ -495,16 +509,16 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
 
     // The caller's configuration joins the repository's, as git reads
     // every level: the checkout's filters come from there.
-    if (has_user_config or options.home != null) {
+    if (hasUserConfig(options) or options.home != null) {
         const reopened = try Repository.open(gpa, io, dir, .{
             .discover = false,
             .odb = options.odb,
-            .system_config = user.system,
-            .xdg_config = user.xdg,
-            .global_config = user.global,
+            .system_config = options.user_config.system,
+            .xdg_config = options.user_config.xdg,
+            .global_config = options.user_config.global,
             .home = options.home,
-            .config_overrides = user.command,
-            .config_pairs = user.pairs,
+            .config_overrides = options.user_config.command,
+            .config_pairs = options.user_config.pairs,
         });
         repo.deinit(io);
         repo = reopened;

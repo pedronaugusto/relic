@@ -3,7 +3,6 @@
 //! may be used.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -28,6 +27,7 @@ const Home = struct {
     fn deinit(h: *Home, gpa: Allocator) void {
         gpa.free(h.path);
         h.tmp.cleanup();
+        h.* = undefined;
     }
 
     fn setGlobal(h: *Home, io: Io, text: []const u8) !void {

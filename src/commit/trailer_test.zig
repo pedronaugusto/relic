@@ -3,8 +3,8 @@
 //! `git shortlog --group=trailer` and `git commit --trailer`, on the same
 //! messages and the same configuration.
 
+const object = @import("../object.zig");
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -90,6 +90,7 @@ const Fixture = struct {
     fn deinit(f: *Fixture) void {
         f.environ.deinit();
         f.git.deinit();
+        f.* = undefined;
     }
 
     /// The input through `git interpret-trailers <args>` and through
@@ -371,7 +372,7 @@ test "commit --trailer adds trailers as git commit does" {
 
     var repo = try Repository.open(gpa, io, b.git.dir, .{});
     defer repo.deinit(io);
-    const who: @import("../object.zig").Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
+    const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
     _ = try commit_mod.commit(&repo, io, .{ .author = who, .committer = who, .message = "subject\n\nbody\n" }, .{
         .trailers = &.{ "sign: Ann <ann@example.com>", "fix=12", "Acked-by: Bob" },
         .trailer_commands = .{ .programs = .{ .environ = &b.environ }, .cwd = .{ .dir = b.git.dir } },

@@ -60,24 +60,7 @@ fn publish(gpa: Allocator, io: Io, db: *const odb.Odb, dir: Io.Dir, path: []cons
     if (mode == .read_only) fs.readOnlyObject(io, dir, path, db.sharedPermissions());
 }
 
-/// Write the commits reachable from `tips`, including their parents, as git does.
-/// A split write keeps the older layers until the chain file is atomically replaced.
-/// A shallow database is refused because its absent parents cannot form a graph.
-pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, options: CommitGraphOptions) Error!?Oid {
-    if (db.shallow.count() != 0) return error.ShallowCommitGraph;
-    const dir = db.objectsDirectory();
-    var old = try graph_mod.Graph.open(gpa, io, dir, db.objectFormat());
-    defer if (old) |*g| g.deinit();
-    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_instance.deinit();
-    const arena = arena_instance.allocator();
-    var nodes: std.ArrayList(GraphNode) = .empty;
-    var seen: Oid.Set = .empty;
-    var pending: std.ArrayList(Oid) = .empty;
-    try pending.appendSlice(arena, tips);
-    if (old) |*g| if (options.append and options.split != .replace) {
-        for (0..g.count) |i| try pending.append(arena, g.nameAt(@intCast(i)));
-    };
+fn collectGraphNodes(arena: Allocator, io: Io, db: *odb.Odb, pending: *std.ArrayList(Oid), seen: *Oid.Set, nodes: *std.ArrayList(GraphNode)) Error!void {
     while (pending.pop()) |oid| {
         if ((try seen.getOrPut(arena, oid)).found_existing) continue;
         const found = try db.read(io, oid);
@@ -96,6 +79,27 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
         try nodes.append(arena, .{ .oid = oid, .tree = commit.tree, .parents = parents, .time = @intCast(commit.committer.when_secs) });
         try pending.appendSlice(arena, parents);
     }
+}
+
+/// Write the commits reachable from `tips`, including their parents, as git does.
+/// A split write keeps the older layers until the chain file is atomically replaced.
+/// A shallow database is refused because its absent parents cannot form a graph.
+pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, options: CommitGraphOptions) Error!?Oid {
+    if (db.shallow.count() != 0) return error.ShallowCommitGraph;
+    const dir = db.objectsDirectory();
+    var old = try graph_mod.Graph.open(gpa, io, dir, db.objectFormat());
+    defer if (old) |*g| g.deinit();
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    var nodes: std.ArrayList(GraphNode) = .empty;
+    var seen: Oid.Set = .empty;
+    var pending: std.ArrayList(Oid) = .empty;
+    try pending.appendSlice(arena, tips);
+    if (old) |*g| if (options.append and options.split != .replace) {
+        for (0..g.count) |i| try pending.append(arena, g.nameAt(@intCast(i)));
+    };
+    try collectGraphNodes(arena, io, db, &pending, &seen, &nodes);
     if (nodes.items.len == 0) return null;
     std.mem.sort(GraphNode, nodes.items, {}, GraphNode.byName);
     var by_name: Oid.Map(usize) = .empty;

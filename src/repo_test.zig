@@ -1,6 +1,9 @@
 //! The front door against the real git: a repository this creates is one git
 //! uses, and a commit this writes is one git shows.
 
+const builtin = @import("builtin");
+const config_mod = @import("config.zig");
+const config_state = @import("config/state.zig");
 const std = @import("std");
 const Io = std.Io;
 
@@ -744,8 +747,8 @@ test "reading a signing policy preserves allocation resource failures" {
     defer repo.deinit(io);
     try repo.editConfig(&.{.{ .set = .{ .name = "tag.gpgSign", .value = "true" } }}, null);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    @import("config/state.zig").get(repo._config).gpa = failing.allocator();
-    defer @import("config/state.zig").get(repo._config).gpa = gpa;
+    config_state.get(repo._config).gpa = failing.allocator();
+    defer config_state.get(repo._config).gpa = gpa;
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
     try std.testing.expectError(error.OutOfMemory, repo.writeTag(io, .{
@@ -948,12 +951,12 @@ test "worktree configuration adapters refuse malformed settings and allocation f
         try std.testing.expectError(error.MalformedValue, Adapter.rules(&repo));
         try repo.editConfig(&.{.{ .set = .{ .name = setting, .value = if (comptime std.mem.eql(u8, setting, "core.eol")) "native" else "default" } }}, null);
     }
-    @import("config/state.zig").get(repo._config).deinit();
-    @import("config/state.zig").get(repo._config).* = try @import("config.zig").Config.parseText(gpa, "[core]\n autocrlf = \"input\"\n", .local);
+    config_state.get(repo._config).deinit();
+    config_state.get(repo._config).* = try config_mod.Config.parseText(gpa, "[core]\n autocrlf = \"input\"\n", .local);
     try std.testing.expectEqual(worktree.attributes.CoreSettings.AutoCrlf.input, (try Adapter.core(&repo)).autocrlf);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    @import("config/state.zig").get(repo._config).gpa = failing.allocator();
-    defer @import("config/state.zig").get(repo._config).gpa = gpa;
+    config_state.get(repo._config).gpa = failing.allocator();
+    defer config_state.get(repo._config).gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Adapter.core(&repo));
 }
 
@@ -988,8 +991,8 @@ test "rule loaders preserve malformed case policy and allocation failures" {
     try std.testing.expectError(error.NotABoolean, Load.attributesRules(&r, io));
     try r.editConfig(&.{.{ .set = .{ .name = "core.ignorecase", .value = "true" } }}, null);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    @import("config/state.zig").get(r._config).gpa = failing.allocator();
-    defer @import("config/state.zig").get(r._config).gpa = gpa;
+    config_state.get(r._config).gpa = failing.allocator();
+    defer config_state.get(r._config).gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Load.ignoreRules(&r, io));
     failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, Load.attributesRules(&r, io));
@@ -1017,8 +1020,8 @@ test "required filter discovery keeps full names and resource failures" {
     try std.testing.expectEqualStrings(long_name, names[0]);
     // The query's allocation and the value decoder's allocation have owners.
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    @import("config/state.zig").get(r._config).gpa = failing.allocator();
-    defer @import("config/state.zig").get(r._config).gpa = gpa;
+    config_state.get(r._config).gpa = failing.allocator();
+    defer config_state.get(r._config).gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Read.count(&r));
 }
 
@@ -1098,7 +1101,7 @@ test "repository configuration edit copies keep their owners when allocation sto
             try std.testing.expectEqualStrings("yes", r.configuration().get("fixture.kept").?);
             try std.testing.expect(r.configuration().get("fixture.removed") == null);
             try std.testing.expectEqual(@as(usize, 8192), r.refStore().reftableOptions().write.block_size);
-            try @import("config/state.zig").get(r._config).write(io, r.common_dir, "config");
+            try config_state.get(r._config).write(io, r.common_dir, "config");
             _ = try r.refreshConfig(io, null);
             try std.testing.expectEqualStrings("yes", r.configuration().get("fixture.kept").?);
         }
@@ -1202,8 +1205,8 @@ fn probedOptions(gpa: std.mem.Allocator, io: Io, config_text: []const u8) repo_m
 }
 
 /// Every path under a `.git` with its contents, a directory's empty.
-fn treeOf(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !std.StringArrayHashMapUnmanaged([]u8) {
-    var out: std.StringArrayHashMapUnmanaged([]u8) = .empty;
+fn treeOf(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !std.array_hash_map.String([]u8) {
+    var out: std.array_hash_map.String([]u8) = .empty;
     var walker = try dir.walk(gpa);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
@@ -1223,7 +1226,7 @@ fn treeOf(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !std.StringArrayHashMapUn
     return out;
 }
 
-fn freeTree(gpa: std.mem.Allocator, tree: *std.StringArrayHashMapUnmanaged([]u8)) void {
+fn freeTree(gpa: std.mem.Allocator, tree: *std.array_hash_map.String([]u8)) void {
     for (tree.keys(), tree.values()) |k, v| {
         gpa.free(k);
         gpa.free(v);
@@ -1311,7 +1314,7 @@ test "init copies a template and starts from its configuration, as git init does
     try scratch.writeFile(io, "full/info/exclude", "*.tmp\n");
     try scratch.writeFile(io, "full/.hidden", "not copied\n");
     try scratch.dir.createDirPath(io, "full/empty");
-    if (@import("builtin").os.tag != .windows) try scratch.dir.symLink(io, "description", "full/link", .{});
+    if (builtin.os.tag != .windows) try scratch.dir.symLink(io, "description", "full/link", .{});
     try compareInit(gpa, io, &scratch, "full", &.{}, null);
     // a template without a configuration
     try scratch.writeFile(io, "plain/description", "plain\n");
@@ -1335,7 +1338,7 @@ test "init copies a template and starts from its configuration, as git init does
 
 test "init.templateDir names the template git init copies" {
     const gpa = std.testing.allocator;
-    var config = try @import("config.zig").Config.parseText(gpa, "[init]\n\ttemplateDir = ~/templates\n", .global);
+    var config = try config_mod.Config.parseText(gpa, "[init]\n\ttemplateDir = ~/templates\n", .global);
     defer config.deinit();
     config.context.home = "/home/someone";
     const path = (try repo_mod.templateDir(gpa, &config)).?;

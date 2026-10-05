@@ -11,6 +11,7 @@
 pub const userconfig = @import("config/userconfig.zig");
 // The modules relic's API puts under this one, as `relic.config.<name>`.
 
+const config_write = @import("config/write.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -1251,7 +1252,7 @@ pub const Config = struct {
     /// repository's.
     pub fn write(config: *Config, io: Io, dir: Io.Dir, sub_path: []const u8) SetError!void {
         const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
-        return @import("config/write.zig").writeFile(&config.files.items[file_index], io, dir, sub_path, config.sharedPermissions());
+        return config_write.writeFile(io, &config.files.items[file_index], dir, sub_path, config.sharedPermissions());
     }
 
     /// The permissions `core.sharedRepository` asks for here; a value git

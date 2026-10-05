@@ -707,13 +707,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/commit/message.zig",
-    "source": "if (std.mem.indexOf(u8, buf, pattern)) |at| return @min(at + 1, buf.len);",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/commit/commithooks.zig",
     "source": "pub fn init(arena: Allocator, io: Io, repo: *Repository, runner: ?*hooks.Runner, verify: bool) Error!Hooks {",
@@ -914,20 +907,6 @@
     "path": "src/commit/merging.zig",
     "source": "pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Error!Target {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/merging.zig",
-    "source": "pub fn upstream(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error!Target {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/merging.zig",
-    "source": "pub fn upstream(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error!Target {",
-    "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -1241,84 +1220,7 @@
   {
     "rule": "Z028",
     "path": "src/repo_test.zig",
-    "source": "@import(\"config/state.zig\").get(repo._config).gpa = failing.allocator();",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "defer @import(\"config/state.zig\").get(repo._config).gpa = gpa;",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
     "source": "const request: @import(\"commit/signing.zig\").Request = .{ .sign = .always, .programs = .{ .environ = &environ } };",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "@import(\"config/state.zig\").get(repo._config).deinit();",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "@import(\"config/state.zig\").get(repo._config).* = try @import(\"config.zig\").Config.parseText(gpa, \"[core]\\n autocrlf = \\\"input\\\"\\n\", .local);",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "@import(\"config/state.zig\").get(repo._config).* = try @import(\"config.zig\").Config.parseText(gpa, \"[core]\\n autocrlf = \\\"input\\\"\\n\", .local);",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "@import(\"config/state.zig\").get(repo._config).gpa = failing.allocator();",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "defer @import(\"config/state.zig\").get(repo._config).gpa = gpa;",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "@import(\"config/state.zig\").get(r._config).gpa = failing.allocator();",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "defer @import(\"config/state.zig\").get(r._config).gpa = gpa;",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "@import(\"config/state.zig\").get(r._config).gpa = failing.allocator();",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "defer @import(\"config/state.zig\").get(r._config).gpa = gpa;",
     "detail": "inline @import; assign to a top-level const",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
@@ -1333,13 +1235,6 @@
     "rule": "Z028",
     "path": "src/repo_test.zig",
     "source": "try std.testing.expectEqual(@import(\"refs.zig\").Format.files, r.refStore().refFormat());",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/repo_test.zig",
-    "source": "try @import(\"config/state.zig\").get(r._config).write(io, r.common_dir, \"config\");",
     "detail": "inline @import; assign to a top-level const",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
@@ -1722,13 +1617,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z028",
-    "path": "src/config.zig",
-    "source": "return @import(\"config/write.zig\").writeFile(&config.files.items[file_index], io, dir, sub_path);",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z026",
     "path": "src/config.zig",
     "source": "_ = config.getBool(\"core.bare\", false) catch {};",
@@ -1824,13 +1712,6 @@
     "path": "src/transport/partial.zig",
     "source": "fn fetchFn(context: *anyopaque, io: Io, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/transport/partial.zig",
-    "source": "try @import(\"../config/state.zig\").writeLocal(repo._config, io);",
-    "detail": "inline @import; assign to a top-level const",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2978,27 +2859,6 @@
     "rule": "Z015",
     "path": "src/transport/httpauth.zig",
     "source": "pub fn parse(arena: Allocator, value: []const u8) Error![]const Challenge {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/transport/local.zig",
-    "source": "pub fn open(gpa: Allocator, io: Io, location: []const u8) Error!Remote {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/transport/local.zig",
-    "source": "pub fn listRefs(r: *Remote, gpa: Allocator, io: Io, prefixes: []const []const u8) Error!protocol.RefList {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/transport/local.zig",
-    "source": "pub fn copyObjects(",
     "detail": "public function exposes private error set 'Error'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
@@ -5142,13 +5002,6 @@
     "path": "src/config/userconfig.zig",
     "source": "return try out.toOwnedSlice(gpa);",
     "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try out.toOwnedSlice(gpa); return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/config/write.zig",
-    "source": "pub fn writeFile(file: anytype, io: std.Io, dir: std.Io.Dir, sub_path: []const u8) !void {",
-    "detail": "'Io' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -7728,34 +7581,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z028",
-    "path": "src/patch/format.zig",
-    "source": "if (config.get(\"diff.context\")) |v| diff_options.context = @intCast(@max(0, @import(\"../config.zig\").parseInt(v) catch 3));",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/patch/format.zig",
-    "source": "if (config.get(\"diff.renamelimit\")) |v| r.limit = @intCast(@max(0, @import(\"../config.zig\").parseInt(v) catch 1000));",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/patch/format.zig",
-    "source": "const on = @import(\"../config.zig\").parseBool(setting) catch true;",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/patch/format.zig",
-    "source": "if (options.quote_path) |q| quote_path = q else if (config.get(\"core.quotepath\")) |v| quote_path = @import(\"../config.zig\").parseBool(v) catch true;",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z026",
     "path": "src/patch/format.zig",
     "source": "if (ctx.repo.work_dir) |wt| attrs.enter(ctx.io, wt, path) catch {};",
@@ -9279,13 +9104,6 @@
     "path": "src/refs/reflog.zig",
     "source": "pub fn exists(io: Io, git_dir: Io.Dir, gpa: Allocator, ref: []const u8) Allocator.Error!bool {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/refs/reflog.zig",
-    "source": "pub fn append(",
-    "detail": "public function exposes private error set 'AppendError'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -12310,13 +12128,6 @@
     "path": "src/lfs/custom_test.zig",
     "source": "fn deinit(fx: *Fixture) void {",
     "detail": "deinit should set fx.* = undefined",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/lfs/custom_test.zig",
-    "source": "const builtin = @import(\"builtin\");",
-    "detail": "unused import 'builtin'",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {

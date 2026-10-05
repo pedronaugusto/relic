@@ -333,15 +333,7 @@ pub fn receive(
     const tee_buffer = try gpa.alloc(u8, 64 * 1024);
     defer gpa.free(tee_buffer);
     var tee: Tee = .init(io, file, in, kind, tee_buffer, options);
-    var header: [12]u8 = undefined;
-    tee.interface.readSliceAll(&header) catch |err| return switch (err) {
-        error.EndOfStream => error.TruncatedPack,
-        error.ReadFailed => tee.err orelse error.ReadFailed,
-    };
-    if (!std.mem.eql(u8, header[0..4], "PACK")) return error.NotAPack;
-    const version = std.mem.readInt(u32, header[4..8], .big);
-    if (version != 2 and version != 3) return error.UnsupportedPackVersion;
-    const count = std.mem.readInt(u32, header[8..12], .big);
+    const count = try readPackHeader(&tee);
 
     var indexer: Indexer = try .init(gpa, io, db, file, options);
     defer indexer.deinit();
@@ -455,6 +447,18 @@ pub fn receive(
     if (options.sync == .batch) try fs.syncBarrier(io, pack_dir);
     try db.refresh(io);
     return result;
+}
+
+fn readPackHeader(tee: *Tee) Error!u32 {
+    var header: [12]u8 = undefined;
+    tee.interface.readSliceAll(&header) catch |err| return switch (err) {
+        error.EndOfStream => error.TruncatedPack,
+        error.ReadFailed => tee.err orelse error.ReadFailed,
+    };
+    if (!std.mem.eql(u8, header[0..4], "PACK")) return error.NotAPack;
+    const version = std.mem.readInt(u32, header[4..8], .big);
+    if (version != 2 and version != 3) return error.UnsupportedPackVersion;
+    return std.mem.readInt(u32, header[8..12], .big);
 }
 
 const Copied = struct {

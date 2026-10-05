@@ -409,7 +409,8 @@ pub fn autoFilter(arena: Allocator, config: *const config_mod.Config, taken: []c
     for (try remotes(arena, config)) |name| {
         const info = find(taken, name) orelse continue;
         const f = info.filter orelse continue;
-        return try filterspec.sendForm(arena, f);
+        const value = try filterspec.sendForm(arena, f);
+        return value;
     }
     return null;
 }

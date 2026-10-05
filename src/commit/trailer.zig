@@ -22,11 +22,13 @@ const program = @import("../repo/program.zig");
 const fs = @import("../repo/fs.zig");
 
 /// Errors from adding trailers.
-pub const Error = error{
-    /// A `trailer.<name>.command` or `.cmd` applies and no `Programs` were
-    /// given to run it.
-    TrailerCommandNeedsPrograms,
-} || Allocator.Error || program.Error;
+pub const Error = errors: {
+    break :errors error{
+        /// A `trailer.<name>.command` or `.cmd` applies and no `Programs` were
+        /// given to run it.
+        TrailerCommandNeedsPrograms,
+    } || Allocator.Error || program.Error;
+};
 
 /// Where a new trailer goes: `--where`, `trailer.where`.
 pub const Where = enum {
@@ -330,7 +332,7 @@ fn locateEnd(s: []const u8, comment: []const u8, len_in: usize) usize {
     const pattern = std.fmt.bufPrint(&pattern_buf, "\n{s} {s}", .{ comment, cut_line }) catch return len;
     if (std.mem.startsWith(u8, s, pattern[1..])) {
         len = 0;
-    } else if (std.mem.indexOf(u8, s, pattern)) |p| {
+    } else if (std.mem.find(u8, s, pattern)) |p| {
         const newlen = p + 1;
         if (newlen < len) len = newlen;
     }
@@ -662,7 +664,7 @@ fn applyCommand(arena: Allocator, io: Io, commands: ?Commands, rule: Rule, arg: 
         try argv.append(arena, arg);
     } else if (rule.command) |command| {
         var line = command;
-        if (std.mem.indexOf(u8, command, "$ARG")) |at| {
+        if (std.mem.find(u8, command, "$ARG")) |at| {
             line = try std.mem.concat(arena, u8, &.{ command[0..at], arg, command[at + 4 ..] });
         }
         try argv.append(arena, line);
@@ -823,8 +825,10 @@ pub fn process(gpa: Allocator, io: Io, settings: Settings, commands: ?Commands, 
 }
 
 /// Errors from processing a file.
-pub const FileError = Error || fs.AtomicWriteError || Io.Dir.ReadFileAllocError || Io.Dir.OpenError ||
-    Io.File.StatError || Io.Dir.SetFilePermissionsError;
+pub const FileError = errors: {
+    break :errors Error || fs.AtomicWriteError || Io.Dir.ReadFileAllocError || Io.Dir.OpenError ||
+        Io.File.StatError || Io.Dir.SetFilePermissionsError;
+};
 
 /// `git interpret-trailers <file>`, or `--in-place`: the file read, ended
 /// with a newline as git ends it, and processed; with `in_place` the result
@@ -838,7 +842,7 @@ pub fn processFile(gpa: Allocator, io: Io, settings: Settings, commands: ?Comman
     var result: std.ArrayList(u8) = .empty;
     defer result.deinit(gpa);
     try process(gpa, io, settings, commands, options, new, input.items, &result);
-    const slash = std.mem.lastIndexOfAny(u8, path, "/\\");
+    const slash = std.mem.findLastAny(u8, path, "/\\");
     var parent = if (slash) |at| try dir.openDir(io, path[0..at], .{}) else dir;
     defer if (slash != null) parent.close(io);
     const base = if (slash) |at| path[at + 1 ..] else path;
@@ -846,20 +850,21 @@ pub fn processFile(gpa: Allocator, io: Io, settings: Settings, commands: ?Comman
     var name_buf: [128]u8 = undefined;
     const temp = fs.tempName(io, &name_buf, "git-interpret-trailers-");
     var file = try parent.createFile(io, temp, .{ .exclusive = true });
+    var file_open = true;
     errdefer {
-        file.close(io);
-        parent.deleteFile(io, temp) catch {};
+        if (file_open) file.close(io);
+        parent.deleteFile(io, temp) catch |cleanup_error| {
+            std.log.warn("cannot remove trailer temporary file: {s}", .{@errorName(cleanup_error)});
+        };
     }
     var write_buf: [4096]u8 = undefined;
     var fw = file.writer(io, &write_buf);
     try fw.interface.writeAll(result.items);
     try fw.interface.flush();
     file.close(io);
-    fs.setFilePermissions(io, parent, temp, stat.permissions) catch {};
-    fs.renameWithRetry(io, parent, temp, base) catch |err| {
-        parent.deleteFile(io, temp) catch {};
-        return err;
-    };
+    file_open = false;
+    try fs.setFilePermissions(io, parent, temp, stat.permissions);
+    try fs.renameWithRetry(io, parent, temp, base);
 }
 
 /// git's `strbuf_complete_line`.

@@ -16,16 +16,18 @@ const fs = @import("../repo/fs.zig");
 const Oid = hash.Oid;
 
 /// Errors from appending to a log.
-pub const AppendError = Io.File.OpenError || Io.Writer.Error ||
-    Io.File.WritePositionalError || Io.File.StatError ||
-    Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Allocator.Error ||
-    error{
-        InvalidSignature,
-        /// The directory is a reftable repository's, whose logs are in
-        /// its tables: a `logs/` file there is one git never reads.
-        /// `refs.Store.appendLog` writes to either format.
-        ReftableRepository,
-    };
+pub const AppendError = errors: {
+    break :errors Io.File.OpenError || Io.Writer.Error ||
+        Io.File.WritePositionalError || Io.File.StatError ||
+        Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Allocator.Error ||
+        error{
+            InvalidSignature,
+            /// The directory is a reftable repository's, whose logs are in
+            /// its tables: a `logs/` file there is one git never reads.
+            /// `refs.Store.appendLog` writes to either format.
+            ReftableRepository,
+        };
+};
 
 /// Errors from reading a log.
 pub const ReadError = error{

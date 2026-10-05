@@ -32,14 +32,16 @@ const builtin = @import("builtin");
 const Oid = hash.Oid;
 
 /// Errors from a repository on this machine used as a remote.
-pub const Error = error{
-    /// The path names no repository.
-    NotARepository,
-    /// The repository has hooks a push would run — `pre-receive`, `update`,
-    /// `post-receive` and the rest — and relic runs no hook on another
-    /// repository's behalf.
-    RemoteHooksNotRun,
-} || repo_mod.Error || objectwalk.Error || refs_mod.ReadError || refs_mod.TransactionError;
+pub const Error = errors: {
+    break :errors error{
+        /// The path names no repository.
+        NotARepository,
+        /// The repository has hooks a push would run — `pre-receive`, `update`,
+        /// `post-receive` and the rest — and relic runs no hook on another
+        /// repository's behalf.
+        RemoteHooksNotRun,
+    } || repo_mod.Error || objectwalk.Error || refs_mod.ReadError || refs_mod.TransactionError;
+};
 
 /// Another repository, open.
 pub const Remote = struct {
@@ -304,14 +306,7 @@ pub const Remote = struct {
                 false;
             var reason: ?[]const u8 = null;
             if (r.isHidden(name)) {
-                // After the objects are found to be there, before any of
-                // receive-pack's own rules, as git rejects it.
-                reason = if (command.new.isZero())
-                    "deny deleting a hidden ref"
-                else if (!try r.repo.odb.exists(io, command.new))
-                    "missing necessary objects"
-                else
-                    "deny updating a hidden ref";
+                reason = try r.hiddenPushReason(io, command);
             } else if (!std.mem.startsWith(u8, name, "refs/") or !safepath.isValidRefName(name)) {
                 reason = "funny refname";
             } else if (command.new.isZero()) {
@@ -378,6 +373,17 @@ pub const Remote = struct {
         }
         report.refs = refs.items;
         return report;
+    }
+
+    fn hiddenPushReason(r: *Remote, io: Io, command: sendpack.Command) Error![]const u8 {
+        // After the objects are found to be there, before any of
+        // receive-pack's own rules, as git rejects it.
+        return if (command.new.isZero())
+            "deny deleting a hidden ref"
+        else if (!try r.repo.odb.exists(io, command.new))
+            "missing necessary objects"
+        else
+            "deny updating a hidden ref";
     }
 
     /// The pusher's boundary commits `tip`'s pushed history reaches.

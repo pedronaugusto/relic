@@ -795,11 +795,13 @@ pub const Clock = struct {
 };
 
 /// Errors from showing a date.
-pub const ShowError = error{
-    /// A mode that needs the time now or the local zone, and a `Clock`
-    /// without it.
-    DateNeedsClock,
-} || std.mem.Allocator.Error;
+pub const ShowError = errors: {
+    break :errors error{
+        /// A mode that needs the time now or the local zone, and a `Clock`
+        /// without it.
+        DateNeedsClock,
+    } || std.mem.Allocator.Error;
+};
 
 const short_weekdays = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const short_months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };

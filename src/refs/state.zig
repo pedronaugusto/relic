@@ -1,5 +1,6 @@
 //! The ref backend, hash and cache live and change together under Store.
 //! This module is package plumbing, reached by no public name.
+const fs = @import("../repo/fs.zig");
 const std = @import("std");
 const hash = @import("../hash.zig");
 const refs = @import("value.zig");
@@ -20,7 +21,7 @@ pub const Data = struct {
     packed_refs: ?*packed_cache.Cache,
     /// What `core.sharedRepository` asks of the permissions of what is
     /// written.
-    shared: @import("../repo/fs.zig").Shared = .umask,
+    shared: fs.Shared = .umask,
 };
 
 pub fn get(state: *State) *Data {

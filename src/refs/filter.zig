@@ -18,6 +18,7 @@
 //! `%(color:...)` git accepts writes nothing. Trailers are read as the
 //! repository's `trailer.*` settings say.
 
+const builtin = @import("builtin");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -40,7 +41,6 @@ const remote_mod = @import("../transport/remote.zig");
 const refspec = @import("../transport/refspec.zig");
 const unicodewidth = @import("../unicodewidth.zig");
 const pretty = @import("../pretty.zig");
-const reflog = @import("reflog.zig");
 const trailer = @import("../commit/trailer.zig");
 const message = @import("../commit/message.zig");
 
@@ -48,36 +48,38 @@ const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 
 /// Errors from listing and formatting refs.
-pub const Error = error{
-    /// `%(...)` naming no atom git has: "unknown field name".
-    UnknownField,
-    /// A `%(` with no `)`, or `%(*)`: "malformed format string".
-    MalformedFormat,
-    /// An atom's argument git does not take: "unrecognized argument", "does
-    /// not take arguments", "expected format", a bad width or position.
-    BadFieldArgument,
-    /// `%(then)`, `%(else)` or `%(end)` out of place, or a block left open.
-    UnbalancedBlock,
-    /// `%(raw)` under `--shell`, `--python` or `--tcl`.
-    RawNeedsBinarySafeQuote,
-    /// `%(rest)`, which only `cat-file` has.
-    RejectedField,
-    /// A ref names an object the repository does not have: "missing object".
-    MissingObject,
-    /// A tag that does not peel: "bad tag".
-    BadTag,
-    /// `%(ahead-behind:<rev>)` or `%(is-base:<rev>)` naming no commit:
-    /// "failed to find".
-    UnknownCommit,
-    /// A date mode git does not know.
-    UnknownDateFormat,
-    /// A `relative` or `human` date, or a `-local` one, with no clock or
-    /// zone in the `Context`.
-    DateNeedsClock,
-    /// A signature atom for a signed commit, with no `signer`.
-    SignatureNeedsSigner,
-} || Allocator.Error || refs_mod.ReadError || odb_mod.Error || object.ParseError ||
-    revwalk.Error || signing.Error || remote_mod.Error || worktrees.Error || mailmap_mod.LoadError || describe_mod.Error;
+pub const Error = errors: {
+    break :errors error{
+        /// `%(...)` naming no atom git has: "unknown field name".
+        UnknownField,
+        /// A `%(` with no `)`, or `%(*)`: "malformed format string".
+        MalformedFormat,
+        /// An atom's argument git does not take: "unrecognized argument", "does
+        /// not take arguments", "expected format", a bad width or position.
+        BadFieldArgument,
+        /// `%(then)`, `%(else)` or `%(end)` out of place, or a block left open.
+        UnbalancedBlock,
+        /// `%(raw)` under `--shell`, `--python` or `--tcl`.
+        RawNeedsBinarySafeQuote,
+        /// `%(rest)`, which only `cat-file` has.
+        RejectedField,
+        /// A ref names an object the repository does not have: "missing object".
+        MissingObject,
+        /// A tag that does not peel: "bad tag".
+        BadTag,
+        /// `%(ahead-behind:<rev>)` or `%(is-base:<rev>)` naming no commit:
+        /// "failed to find".
+        UnknownCommit,
+        /// A date mode git does not know.
+        UnknownDateFormat,
+        /// A `relative` or `human` date, or a `-local` one, with no clock or
+        /// zone in the `Context`.
+        DateNeedsClock,
+        /// A signature atom for a signed commit, with no `signer`.
+        SignatureNeedsSigner,
+    } || Allocator.Error || refs_mod.ReadError || odb_mod.Error || object.ParseError ||
+        revwalk.Error || signing.Error || remote_mod.Error || worktrees.Error || mailmap_mod.LoadError || describe_mod.Error;
+};
 
 /// The kinds of ref a listing takes: git's `FILTER_REFS_*`.
 pub const Kinds = packed struct {
@@ -257,12 +259,12 @@ pub fn configuredSort(gpa: Allocator, config: *const config_mod.Config, name: []
 // versioncmp
 // ---------------------------------------------------------------------------
 
-const S_N = 0x0;
-const S_I = 0x3;
-const S_F = 0x6;
-const S_Z = 0x9;
-const CMP = 2;
-const LEN = 3;
+const s_n = 0x0;
+const s_i = 0x3;
+const s_f = 0x6;
+const s_z = 0x9;
+const cmp = 2;
+const compare_length = 3;
 
 fn charAt(s: []const u8, i: usize) u8 {
     return if (i < s.len) s[i] else 0;
@@ -307,16 +309,16 @@ fn swapPrereleases(s1: []const u8, s2: []const u8, off: usize, prereleases: []co
 /// they precede.
 pub fn versioncmp(s1: []const u8, s2: []const u8, prereleases: []const []const u8) i32 {
     const next_state = [_]u8{
-        S_N, S_I, S_Z,
-        S_N, S_I, S_I,
-        S_N, S_F, S_F,
-        S_N, S_F, S_Z,
+        s_n, s_i, s_z,
+        s_n, s_i, s_i,
+        s_n, s_f, s_f,
+        s_n, s_f, s_z,
     };
     const result_type = [_]i8{
-        CMP, CMP, CMP, CMP, LEN, CMP, CMP, CMP, CMP,
-        CMP, -1,  -1,  1,   LEN, LEN, 1,   LEN, LEN,
-        CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP,
-        CMP, 1,   1,   -1,  CMP, CMP, -1,  CMP, CMP,
+        cmp, cmp, cmp, cmp, compare_length, cmp,            cmp, cmp,            cmp,
+        cmp, -1,  -1,  1,   compare_length, compare_length, 1,   compare_length, compare_length,
+        cmp, cmp, cmp, cmp, cmp,            cmp,            cmp, cmp,            cmp,
+        cmp, 1,   1,   -1,  cmp,            cmp,            -1,  cmp,            cmp,
     };
     var p1: usize = 0;
     var p2: usize = 0;
@@ -324,7 +326,7 @@ pub fn versioncmp(s1: []const u8, s2: []const u8, prereleases: []const []const u
     var c2 = charAt(s2, p2);
     p1 += 1;
     p2 += 1;
-    var state: u8 = S_N + digitClass(c1);
+    var state: u8 = s_n + digitClass(c1);
     var diff: i32 = @as(i32, c1) - @as(i32, c2);
     while (diff == 0) {
         if (c1 == 0) return 0;
@@ -341,8 +343,8 @@ pub fn versioncmp(s1: []const u8, s2: []const u8, prereleases: []const []const u
     }
     const kind = result_type[@as(usize, state) * 3 + digitClass(c2)];
     switch (kind) {
-        CMP => return diff,
-        LEN => {
+        cmp => return diff,
+        compare_length => {
             while (true) {
                 const d1 = std.ascii.isDigit(charAt(s1, p1));
                 p1 += 1;
@@ -934,7 +936,7 @@ pub const Listing = struct {
         const deref = sp.len > 0 and sp[0] == '*';
         if (deref) sp = sp[1..];
         if (sp.len == 0) return error.MalformedFormat;
-        const colon = std.mem.indexOfScalar(u8, sp, ':');
+        const colon = std.mem.findScalar(u8, sp, ':');
         const base = sp[0 .. colon orelse sp.len];
         const kind = std.meta.stringToEnum(AtomKind, base) orelse return error.UnknownField;
         var arg: ?[]const u8 = if (colon) |c| sp[c + 1 ..] else null;
@@ -953,30 +955,7 @@ pub const Listing = struct {
     fn parseArgument(l: *Listing, atom: *Atom, arg: ?[]const u8) Error!void {
         switch (atom.kind) {
             .refname, .symref => atom.refname = try parseRefnameOption(arg),
-            .upstream, .push => {
-                atom.push_remote = false;
-                const text = arg orelse return;
-                var params = std.mem.splitScalar(u8, text, ',');
-                while (params.next()) |s| {
-                    if (std.mem.eql(u8, s, "track")) {
-                        atom.remote = .track;
-                    } else if (std.mem.eql(u8, s, "trackshort")) {
-                        atom.remote = .trackshort;
-                    } else if (std.mem.eql(u8, s, "nobracket")) {
-                        atom.nobracket = true;
-                    } else if (std.mem.eql(u8, s, "remotename")) {
-                        atom.remote = .remotename;
-                        atom.push_remote = true;
-                    } else if (std.mem.eql(u8, s, "remoteref")) {
-                        atom.remote = .remoteref;
-                        atom.push_remote = true;
-                    } else {
-                        atom.remote = .ref;
-                        // git hands the whole argument on
-                        atom.refname = try parseRefnameOption(text);
-                    }
-                }
-            },
+            .upstream, .push => try parseRemoteArgument(atom, arg),
             .objecttype, .deltabase, .body, .rest, .HEAD => if (arg != null) return error.BadFieldArgument,
             .objectsize => if (arg) |text| {
                 if (!std.mem.eql(u8, text, "disk")) return error.BadFieldArgument;
@@ -1014,35 +993,7 @@ pub const Listing = struct {
                     atom.lines = parseUnsigned(text["lines=".len..]) orelse return error.BadFieldArgument;
                 } else return error.BadFieldArgument;
             },
-            .describe => {
-                var rest = arg orelse "";
-                var matches: std.ArrayList([]const u8) = .empty;
-                var excludes: std.ArrayList([]const u8) = .empty;
-                while (rest.len != 0) {
-                    if (matchArgValue(rest, "tags")) |m| {
-                        atom.describe.tags = if (m.value) |v| maybeBool(v) orelse return error.BadFieldArgument else true;
-                        rest = m.rest;
-                    } else if (matchArgValue(rest, "abbrev")) |m| {
-                        const v = m.value orelse return error.BadFieldArgument;
-                        const n = std.fmt.parseInt(i64, v, 10) catch return error.BadFieldArgument;
-                        if (n < 0) return error.BadFieldArgument;
-                        atom.describe.abbrev = @intCast(@min(n, std.math.maxInt(u32)));
-                        rest = m.rest;
-                    } else if (matchArgValue(rest, "match")) |m| {
-                        const v = m.value orelse return error.BadFieldArgument;
-                        if (v.len == 0) return error.BadFieldArgument;
-                        try matches.append(l.a(), v);
-                        rest = m.rest;
-                    } else if (matchArgValue(rest, "exclude")) |m| {
-                        const v = m.value orelse return error.BadFieldArgument;
-                        if (v.len == 0) return error.BadFieldArgument;
-                        try excludes.append(l.a(), v);
-                        rest = m.rest;
-                    } else return error.BadFieldArgument;
-                }
-                atom.describe.match = matches.items;
-                atom.describe.exclude = excludes.items;
-            },
+            .describe => try l.parseDescribeArgument(atom, arg),
             .raw => if (arg) |text| {
                 if (!std.mem.eql(u8, text, "size")) return error.BadFieldArgument;
                 atom.field = .ulong;
@@ -1084,23 +1035,7 @@ pub const Listing = struct {
                 // a formatted date sorts as text
                 atom.field = .str;
             },
-            .@"align" => {
-                const text = arg orelse return error.BadFieldArgument;
-                var width: ?u32 = null;
-                var params = std.mem.splitScalar(u8, text, ',');
-                while (params.next()) |s| {
-                    if (std.mem.startsWith(u8, s, "position=")) {
-                        atom.@"align".position = alignPosition(s["position=".len..]) orelse return error.BadFieldArgument;
-                    } else if (std.mem.startsWith(u8, s, "width=")) {
-                        width = parseUnsigned(s["width=".len..]) orelse return error.BadFieldArgument;
-                    } else if (parseUnsigned(s)) |w| {
-                        width = w;
-                    } else if (alignPosition(s)) |p| {
-                        atom.@"align".position = p;
-                    } else return error.BadFieldArgument;
-                }
-                atom.@"align".width = width orelse return error.BadFieldArgument;
-            },
+            .@"align" => try parseAlignArgument(atom, arg),
             .@"if" => if (arg) |text| {
                 if (std.mem.startsWith(u8, text, "equals=")) {
                     atom.compare = .equal;
@@ -1130,6 +1065,79 @@ pub const Listing = struct {
                 atom.head = null;
             }
         }
+    }
+
+    fn parseRemoteArgument(atom: *Atom, arg: ?[]const u8) Error!void {
+        atom.push_remote = false;
+        const text = arg orelse return;
+        var params = std.mem.splitScalar(u8, text, ',');
+        while (params.next()) |s| {
+            if (std.mem.eql(u8, s, "track")) {
+                atom.remote = .track;
+            } else if (std.mem.eql(u8, s, "trackshort")) {
+                atom.remote = .trackshort;
+            } else if (std.mem.eql(u8, s, "nobracket")) {
+                atom.nobracket = true;
+            } else if (std.mem.eql(u8, s, "remotename")) {
+                atom.remote = .remotename;
+                atom.push_remote = true;
+            } else if (std.mem.eql(u8, s, "remoteref")) {
+                atom.remote = .remoteref;
+                atom.push_remote = true;
+            } else {
+                atom.remote = .ref;
+                // git hands the whole argument on
+                atom.refname = try parseRefnameOption(text);
+            }
+        }
+    }
+
+    fn parseDescribeArgument(l: *Listing, atom: *Atom, arg: ?[]const u8) Error!void {
+        var rest = arg orelse "";
+        var matches: std.ArrayList([]const u8) = .empty;
+        var excludes: std.ArrayList([]const u8) = .empty;
+        while (rest.len != 0) {
+            if (matchArgValue(rest, "tags")) |m| {
+                atom.describe.tags = if (m.value) |v| maybeBool(v) orelse return error.BadFieldArgument else true;
+                rest = m.rest;
+            } else if (matchArgValue(rest, "abbrev")) |m| {
+                const v = m.value orelse return error.BadFieldArgument;
+                const n = std.fmt.parseInt(i64, v, 10) catch return error.BadFieldArgument;
+                if (n < 0) return error.BadFieldArgument;
+                atom.describe.abbrev = @intCast(@min(n, std.math.maxInt(u32)));
+                rest = m.rest;
+            } else if (matchArgValue(rest, "match")) |m| {
+                const v = m.value orelse return error.BadFieldArgument;
+                if (v.len == 0) return error.BadFieldArgument;
+                try matches.append(l.a(), v);
+                rest = m.rest;
+            } else if (matchArgValue(rest, "exclude")) |m| {
+                const v = m.value orelse return error.BadFieldArgument;
+                if (v.len == 0) return error.BadFieldArgument;
+                try excludes.append(l.a(), v);
+                rest = m.rest;
+            } else return error.BadFieldArgument;
+        }
+        atom.describe.match = matches.items;
+        atom.describe.exclude = excludes.items;
+    }
+
+    fn parseAlignArgument(atom: *Atom, arg: ?[]const u8) Error!void {
+        const text = arg orelse return error.BadFieldArgument;
+        var width: ?u32 = null;
+        var params = std.mem.splitScalar(u8, text, ',');
+        while (params.next()) |s| {
+            if (std.mem.startsWith(u8, s, "position=")) {
+                atom.@"align".position = alignPosition(s["position=".len..]) orelse return error.BadFieldArgument;
+            } else if (std.mem.startsWith(u8, s, "width=")) {
+                width = parseUnsigned(s["width=".len..]) orelse return error.BadFieldArgument;
+            } else if (parseUnsigned(s)) |w| {
+                width = w;
+            } else if (alignPosition(s)) |p| {
+                atom.@"align".position = p;
+            } else return error.BadFieldArgument;
+        }
+        atom.@"align".width = width orelse return error.BadFieldArgument;
     }
 
     fn alignPosition(s: []const u8) ?@FieldType(Align, "position") {
@@ -1313,12 +1321,12 @@ pub const Listing = struct {
         defer queue.deinit(gpa);
         var counter: usize = 0;
         const Push = struct {
-            fn put(list: *std.ArrayList(Entry), allocator: Allocator, e: Entry) Allocator.Error!void {
+            fn put(allocator: Allocator, list: *std.ArrayList(Entry), e: Entry) Allocator.Error!void {
                 try list.append(allocator, e);
             }
         };
         try best.put(gpa, tip, -1);
-        try Push.put(&queue, gpa, .{ .oid = tip, .generation = try l.generation(&generations, tip), .date = try l.commitDate(tip), .order = counter });
+        try Push.put(gpa, &queue, .{ .oid = tip, .generation = try l.generation(&generations, tip), .date = try l.commitDate(tip), .order = counter });
         counter += 1;
         var best_index: i64 = -1;
         for (bases, 0..) |c, i| {
@@ -1330,7 +1338,7 @@ pub const Listing = struct {
                 continue;
             }
             try best.put(gpa, c, @intCast(i + 1));
-            try Push.put(&queue, gpa, .{ .oid = c, .generation = try l.generation(&generations, c), .date = try l.commitDate(c), .order = counter });
+            try Push.put(gpa, &queue, .{ .oid = c, .generation = try l.generation(&generations, c), .date = try l.commitDate(c), .order = counter });
             counter += 1;
         }
         var branch_point: ?Oid = null;
@@ -1350,7 +1358,7 @@ pub const Listing = struct {
             const best_for_p = best.get(parent) orelse 0;
             if (best_for_p == 0) {
                 try best.put(gpa, parent, best_for_c);
-                try Push.put(&queue, gpa, .{ .oid = parent, .generation = try l.generation(&generations, parent), .date = try l.commitDate(parent), .order = counter });
+                try Push.put(gpa, &queue, .{ .oid = parent, .generation = try l.generation(&generations, parent), .date = try l.commitDate(parent), .order = counter });
                 counter += 1;
                 continue;
             }
@@ -1963,11 +1971,13 @@ pub const Listing = struct {
             defer remote.deinit();
             const tracking = (try remote.trackingRef(l.gpa, merge)) orelse return null;
             defer l.gpa.free(tracking);
-            return try l.a().dupe(u8, tracking);
+            const value = try l.a().dupe(u8, tracking);
+            return value;
         }
         const found = try l.dwimRef(merge);
         if (found.count == 1) return found.ref;
-        return try l.a().dupe(u8, merge);
+        const value = try l.a().dupe(u8, merge);
+        return value;
     }
 
     fn pushDefault(l: *Listing) enum { nothing, matching, current, upstream, simple } {
@@ -2062,7 +2072,8 @@ pub const Listing = struct {
                 defer branch.deinit();
                 if (!for_push) {
                     if (branch.remote == null or branch.merge.len == 0) return "";
-                    return try ar.dupe(u8, branch.merge[0]);
+                    const value = try ar.dupe(u8, branch.merge[0]);
+                    return value;
                 }
                 var remote = try remote_mod.Remote.get(l.gpa, l.repo.configuration(), l.pushRemoteName(&branch).name);
                 defer remote.deinit();
@@ -2134,7 +2145,8 @@ pub const Listing = struct {
         if (std.mem.startsWith(u8, trimmed, "refs/heads/")) return trimmed["refs/heads/".len..];
         if (std.mem.startsWith(u8, trimmed, "refs/")) return trimmed;
         if (Oid.parse(l.repo.objectFormat(), trimmed)) |oid| {
-            return try l.showOid(.short, oid);
+            const value = try l.showOid(.short, oid);
+            return value;
         } else |_| {}
         if (std.mem.eql(u8, trimmed, "detached HEAD")) return null;
         return trimmed;
@@ -2154,7 +2166,7 @@ pub const Listing = struct {
             const after = entry.message[prefix.len..];
             const to = std.mem.indexOf(u8, after, " to ") orelse continue;
             var target = after[to + 4 ..];
-            if (std.mem.indexOfScalar(u8, target, '\n')) |nl| target = target[0..nl];
+            if (std.mem.findScalar(u8, target, '\n')) |nl| target = target[0..nl];
             const noid = entry.new;
             if (std.mem.eql(u8, target, "HEAD")) target = try l.showOid(.short, noid);
             target = try l.a().dupe(u8, target);
@@ -2190,7 +2202,7 @@ pub const Listing = struct {
 
     /// git's `format_ref_array_item`: the item at `index` in `format`,
     /// appended to `out`.
-    pub fn formatItem(l: *Listing, index: usize, format: Format, gpa: Allocator, out: *std.ArrayList(u8)) Error!void {
+    pub fn formatItem(l: *Listing, gpa: Allocator, index: usize, format: Format, out: *std.ArrayList(u8)) Error!void {
         const item = l.items.items[index];
         try l.prepareFor(format);
         var stack: std.ArrayList(Frame) = .empty;
@@ -2230,7 +2242,7 @@ pub const Listing = struct {
         defer line.deinit(l.gpa);
         for (0..total) |i| {
             line.clearRetainingCapacity();
-            try l.formatItem(i, format, l.gpa, &line);
+            try l.formatItem(l.gpa, i, format, &line);
             if (line.items.len != 0 or !omit_empty) {
                 try writer.writeAll(line.items);
                 try writer.writeByte('\n');
@@ -2276,7 +2288,7 @@ fn exists(io: Io, dir: Io.Dir, path: []const u8) bool {
 
 fn normalizePath(gpa: Allocator, path: []const u8) Allocator.Error![]u8 {
     const copy = try gpa.dupe(u8, path);
-    if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, copy, '\\', '/');
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, copy, '\\', '/');
     return copy;
 }
 
@@ -2383,7 +2395,7 @@ fn headerValue(buf: []const u8, key: []const u8) ?[]const u8 {
 }
 
 fn headerBlock(buf: []const u8) []const u8 {
-    if (std.mem.indexOf(u8, buf, "\n\n")) |end| return buf[0..end];
+    if (std.mem.find(u8, buf, "\n\n")) |end| return buf[0..end];
     return buf;
 }
 
@@ -2411,9 +2423,9 @@ fn copyEmail(line: []const u8, atom: Atom) []const u8 {
     if (atom.email_localpart) {
         end = std.mem.indexOfScalar(u8, email, '@') orelse std.mem.indexOfScalar(u8, email, '>');
     } else if (atom.email_trim) {
-        end = std.mem.indexOfScalar(u8, email, '>');
+        end = std.mem.findScalar(u8, email, '>');
     } else {
-        if (std.mem.indexOfScalar(u8, email, '>')) |gt| end = gt + 1;
+        if (std.mem.findScalar(u8, email, '>')) |gt| end = gt + 1;
     }
     return email[0 .. end orelse return ""];
 }
@@ -2440,9 +2452,9 @@ fn findSubpos(buf_in: []const u8) Subpos {
     const sigstart = start + parseSignedBuffer(buf[start..]);
     const sig = buf[sigstart..];
     var eol: usize = sigstart;
-    if (std.mem.indexOf(u8, buf[start..], "\n\n")) |e| {
+    if (std.mem.find(u8, buf[start..], "\n\n")) |e| {
         eol = @min(start + e, sigstart);
-    } else if (std.mem.indexOf(u8, buf[start..], "\r\n\r\n")) |e| {
+    } else if (std.mem.find(u8, buf[start..], "\r\n\r\n")) |e| {
         eol = @min(start + e, sigstart);
     }
     var sublen = eol - start;
@@ -2465,7 +2477,7 @@ fn parseSignedBuffer(buf: []const u8) usize {
     var match = buf.len;
     while (len < buf.len) {
         if (signing.Format.of(buf[len..]) != null) match = len;
-        const eol = std.mem.indexOfScalarPos(u8, buf, len, '\n');
+        const eol = std.mem.findScalarPos(u8, buf, len, '\n');
         len = if (eol) |e| e + 1 else buf.len;
     }
     return match;
@@ -2507,7 +2519,7 @@ const Frame = struct {
 };
 
 fn quoteInto(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8, sized: bool, quote: Quote) Allocator.Error!void {
-    const s = if (sized and quote == .perl) text else if (std.mem.indexOfScalar(u8, text, 0)) |z| text[0..z] else text;
+    const s = if (sized and quote == .perl) text else if (std.mem.findScalar(u8, text, 0)) |z| text[0..z] else text;
     switch (quote) {
         .none => try out.appendSlice(gpa, if (sized) text else s),
         .shell => {
@@ -2567,7 +2579,7 @@ fn isEmpty(text: []const u8) bool {
 
 fn alignText(gpa: Allocator, a: Align, text: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    const s = if (std.mem.indexOfScalar(u8, text, 0)) |z| text[0..z] else text;
+    const s = if (std.mem.findScalar(u8, text, 0)) |z| text[0..z] else text;
     const display = unicodewidth.strWidth(s);
     if (display >= a.width) {
         try out.appendSlice(gpa, s);

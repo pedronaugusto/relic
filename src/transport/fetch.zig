@@ -244,6 +244,36 @@ const MapEntry = struct {
     rejected_shallow: bool = false,
 };
 
+fn reflogAction(arena: Allocator, remote_name: []const u8, options: Options) Allocator.Error![]const u8 {
+    return options.reflog_action orelse blk: {
+        var text: std.ArrayList(u8) = .empty;
+        try text.print(arena, "fetch {s}", .{remote_name});
+        for (options.refspecs) |spec| try text.print(arena, " {s}", .{spec});
+        break :blk text.items;
+    };
+}
+
+const FilterSelection = struct { auto: bool, spec: ?[]const u8 };
+
+fn selectFilter(arena: Allocator, config: *const config_mod.Config, explicit: ?[]const u8, promisor: bool, remote_name: ?[]const u8) Error!FilterSelection {
+    var auto_filter = false;
+    const filter_spec: ?[]const u8 = blk: {
+        const spec = explicit orelse if (promisor) configured: {
+            const key = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{remote_name.?});
+            const raw = config.get(key) orelse break :configured null;
+            break :configured try config_mod.unquote(arena, raw);
+        } else null;
+        const text = spec orelse break :blk null;
+        if (!promisor) return error.NotAPromisorRemote;
+        if (std.mem.eql(u8, text, "auto")) {
+            auto_filter = true;
+            break :blk null;
+        }
+        break :blk try partial.normalize(arena, text);
+    };
+    return .{ .auto = auto_filter, .spec = filter_spec };
+}
+
 /// Fetch from `remote_name`, a configured remote or a URL, into `repo`.
 pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {
     const deepen = try deepenRequest(repo, options);
@@ -267,12 +297,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     defer if (rules) |*r| r.deinit(gpa);
     const checks: ?*const fsck.Rules = if (rules) |*r| r else null;
 
-    const rla = options.reflog_action orelse blk: {
-        var text: std.ArrayList(u8) = .empty;
-        try text.print(arena, "fetch {s}", .{remote_name});
-        for (options.refspecs) |spec| try text.print(arena, " {s}", .{spec});
-        break :blk text.items;
-    };
+    const rla = try reflogAction(arena, remote_name, options);
 
     var cli_specs: std.ArrayList(Refspec) = .empty;
     for (options.refspecs) |text| {
@@ -312,21 +337,9 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     const promisor = remote.name != null and partial.isPromisor(repo.configuration(), remote.name.?);
     // `auto` is the filter of the promisor remotes taken from the server's
     // advertisement, known once the session is open.
-    var auto_filter = false;
-    var filter_spec: ?[]const u8 = blk: {
-        const spec = options.filter orelse if (promisor) configured: {
-            const key = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{remote.name.?});
-            const raw = repo.configuration().get(key) orelse break :configured null;
-            break :configured try config_mod.unquote(arena, raw);
-        } else null;
-        const text = spec orelse break :blk null;
-        if (!promisor) return error.NotAPromisorRemote;
-        if (std.mem.eql(u8, text, "auto")) {
-            auto_filter = true;
-            break :blk null;
-        }
-        break :blk try partial.normalize(arena, text);
-    };
+    const selection = try selectFilter(arena, repo.configuration(), options.filter, promisor, remote.name);
+    const auto_filter = selection.auto;
+    var filter_spec = selection.spec;
 
     const url = remote.urls[0];
     var session = try transport.Session.open(gpa, io, url, .upload_pack, repo.objectFormat(), .{
@@ -345,7 +358,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .who = options.who,
     });
     defer session.close(io);
-    try partial.storeAdvertised(repo, io, session.promisorStores(), options.warnings);
+    try partial.storeAdvertised(io, repo, session.promisorStores(), options.warnings);
     if (auto_filter) filter_spec = try promisors.autoFilter(arena, repo.configuration(), session.promisorsTaken());
 
     // Ask for the refs the refspecs can name, as git does.

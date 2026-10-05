@@ -20,6 +20,7 @@
 //! repository, with the permission to run them. Without one a read of a
 //! promised object is `error.ObjectNotFound`, as in any other repository.
 
+const config_state = @import("../config/state.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -77,7 +78,7 @@ pub fn promisorRemotes(arena: Allocator, config: *const config_mod.Config) Alloc
 /// Write into `repo`'s configuration what a server's `promisor-remote`
 /// was answered with storing (`promisor.storeFields`), saying each as git
 /// says it.
-pub fn storeAdvertised(repo: *Repository, io: Io, stores: []const promisors.Store, warnings: ?*warning.Warnings) (repo_mod.Error || config_mod.Config.SetError)!void {
+pub fn storeAdvertised(io: Io, repo: *Repository, stores: []const promisors.Store, warnings: ?*warning.Warnings) (repo_mod.Error || config_mod.Config.SetError)!void {
     if (stores.len == 0) return;
     var arena_state: std.heap.ArenaAllocator = .init(repo.gpa);
     defer arena_state.deinit();
@@ -94,7 +95,7 @@ pub fn storeAdvertised(repo: *Repository, io: Io, stores: []const promisors.Stor
             .new = store.new,
         } });
     }
-    try @import("../config/state.zig").writeLocal(repo._config, io);
+    try config_state.writeLocal(repo._config, io);
 }
 
 /// Whether `name` is a promisor remote of `config`'s repository: one
@@ -263,7 +264,7 @@ pub const Lazy = struct {
             const key = try std.fmt.bufPrint(&buf, "remote.{s}.partialclonefilter", .{name});
             if (repo.configuration().get(key) == null) {
                 try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = key, .value = "blob:none" } }}, null);
-                try @import("../config/state.zig").writeLocal(repo._config, io);
+                try config_state.writeLocal(repo._config, io);
             }
         }
         var remote = try @import("remote.zig").Remote.get(l.gpa, repo.configuration(), name);

@@ -600,7 +600,7 @@ test "a format git refuses is refused by name" {
     const unbalanced = try l.parseFormat("%(if)%(refname)", .none);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
-    try std.testing.expectError(error.UnbalancedBlock, l.formatItem(0, unbalanced, gpa, &out));
+    try std.testing.expectError(error.UnbalancedBlock, l.formatItem(gpa, 0, unbalanced, &out));
     const stray = try l.parseFormat("%(end)", .none);
-    try std.testing.expectError(error.UnbalancedBlock, l.formatItem(0, stray, gpa, &out));
+    try std.testing.expectError(error.UnbalancedBlock, l.formatItem(gpa, 0, stray, &out));
 }

@@ -42,7 +42,7 @@ pub fn writeLocal(state: *State, io: std.Io) config.Config.SetError!void {
     const owned = get(state);
     const path = owned.sources.local orelse return error.NoWritableSource;
     for (owned.files.items) |*file| {
-        if (file.writable and file.level == .local) return writeFile(file, io, path.dir, path.sub_path, owned.sharedPermissions());
+        if (file.writable and file.level == .local) return writeFile(io, file, path.dir, path.sub_path, owned.sharedPermissions());
     }
     return error.NoWritableSource;
 }
