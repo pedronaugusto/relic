@@ -1033,7 +1033,7 @@
     "path": "src/lfs.zig",
     "source": "pub fn fetch(f: Fetcher, io: Io, store: *const Store, settings: *const Settings, wanted: []const Wanted) FetchError!void {",
     "detail": "public function exposes private error set 'FetchError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'FetchError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z017",
@@ -1656,462 +1656,462 @@
     "path": "src/transport/remote.zig",
     "source": "pub fn get(gpa: Allocator, config: *const Config, name: []const u8) Error!Remote {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/remote.zig",
     "source": "pub fn rewrite(gpa: Allocator, config: *const Config, url: []const u8, which: Rewrite) Error!?[]u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/remote.zig",
     "source": "pub fn get(gpa: Allocator, config: *const Config, name: []const u8) Error!Branch {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/transport/partial.zig",
     "source": "fn fetchFn(context: *anyopaque, io: Io, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "Implements odb.Odb.Lazy.fetch, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z015",
     "path": "src/transport/bundle.zig",
     "source": "pub fn read(gpa: Allocator, r: *Io.Reader) ParseError!Header {",
     "detail": "public function exposes private error set 'ParseError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'ParseError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/bundle.zig",
     "source": "pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) OpenError!*File {",
     "detail": "public function exposes private error set 'OpenError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'OpenError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/bundle.zig",
     "source": "pub fn verify(gpa: Allocator, io: Io, db: *odb_mod.Odb, header: *const Header, refs: []const Oid) Error!Verification {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/bundle.zig",
     "source": "pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, options: UnbundleOptions) Error!indexpack.Result {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/bundle.zig",
     "source": "pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bundle: *File, refs: []const Oid, options: indexpack.Options) Error!indexpack.Result {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/bundle.zig",
     "source": "pub fn create(gpa: Allocator, io: Io, repo: *Repository, dir: Io.Dir, path: []const u8, request: CreateRequest) CreateError!void {",
     "detail": "public function exposes private error set 'CreateError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'CreateError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/bundle.zig",
     "source": "pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: CreateRequest) CreateError!void {",
     "detail": "public function exposes private error set 'CreateError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'CreateError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/httpclient.zig",
     "source": "pub fn trustSystem(c: *Client) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/httpclient.zig",
     "source": "pub fn connect(c: *Client, target: Target, diagnostic: ?*Diagnostic) Error!*Connection {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/httpclient.zig",
     "source": "pub fn send(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8, diagnostic: ?*Diagnostic) Error!Response {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/httpclient.zig",
     "source": "pub fn stream(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, length: ?u64, buffer: []u8, diagnostic: ?*Diagnostic) Error!Streaming {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/httpclient.zig",
     "source": "pub fn finish(s: *Streaming) Error!Response {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z012",
     "path": "src/transport/httpclient.zig",
     "source": "pub fn failure(r: *const Response) Error {",
     "detail": "public function exposes private type 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/credential.zig",
     "source": "pub fn fill(s: *Session, io: Io, opts: Options) Error!bool {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/credential.zig",
     "source": "pub fn approve(s: *Session, io: Io, opts: Options) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/credential.zig",
     "source": "pub fn reject(s: *Session, io: Io, opts: Options) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/uploadpack.zig",
     "source": "pub fn advertise(s: *Server, w: *Io.Writer) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/uploadpack.zig",
     "source": "pub fn serve(s: *Server, in: *Io.Reader, out: *Io.Writer) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/uploadpack.zig",
     "source": "pub fn serveRequest(s: *Server, in: *Io.Reader, out: *Io.Writer) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/transport/uploadpack.zig",
     "source": "fn close(context: *anyopaque, io: Io) void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "Implements connection.Connection.VTable.close, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z015",
     "path": "src/transport/sendpack.zig",
     "source": "pub fn send(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/clientcert.zig",
     "source": "pub fn load(gpa: Allocator, arena: Allocator, io: Io, files: Files, passphrase: ?[]const u8) Error!tls.ClientAuth {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/transport/auth_test.zig",
     "source": "fn ask(_: ?*anyopaque, allocator: Allocator, field: credential.Field, _: []const u8) Allocator.Error!?[]u8 {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "Implements credential.Prompt.ask, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z015",
     "path": "src/transport/socks.zig",
     "source": "pub fn authenticate(r: *Io.Reader, w: *Io.Writer, credential: ?Credential) WireError!void {",
     "detail": "public function exposes private error set 'WireError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'WireError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/socks.zig",
     "source": "pub fn request(w: *Io.Writer, version: Version, host: []const u8, port: u16, address: ?Io.net.IpAddress, credential: ?Credential) WireError!void {",
     "detail": "public function exposes private error set 'WireError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'WireError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/clone.zig",
     "source": "pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Error!Repository {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/httpsettings.zig",
     "source": "pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url) Error!Settings {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/httpsettings.zig",
     "source": "pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url, remote_name: ?[]const u8) Error!Settings {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/connection.zig",
     "source": "pub fn advertisement(c: *Connection) Error!*Io.Reader {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/connection.zig",
     "source": "pub fn request(c: *Connection) Error!*Io.Writer {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/connection.zig",
     "source": "pub fn response(c: *Connection) Error!*Io.Reader {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z012",
     "path": "src/transport/connection.zig",
     "source": "pub fn failure(c: *Connection) Error {",
     "detail": "public function exposes private type 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/connection.zig",
     "source": "pub fn readPacket(c: *Connection, r: *Io.Reader) Error!pktline.Packet {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z012",
     "path": "src/transport/connection.zig",
     "source": "pub fn writeFailed(c: *Connection, err: anyerror) Error {",
     "detail": "public function exposes private type 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/transport/connection.zig",
     "source": "fn close(context: *anyopaque, io: Io) void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "Implements connection.Connection.VTable.close, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z015",
     "path": "src/transport/connection.zig",
     "source": "pub fn finish(c: *Connection, io: Io) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/protocol.zig",
     "source": "pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Error!Advertisement {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/protocol.zig",
     "source": "pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, options: ListOptions) Error!RefList {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/transport/protocol.zig",
     "source": "fn close(_: *anyopaque, _: Io) void {}",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "Implements connection.Connection.VTable.close, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z015",
     "path": "src/transport/pktline.zig",
     "source": "pub fn read(r: *Io.Reader) ReadError!Packet {",
     "detail": "public function exposes private error set 'ReadError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'ReadError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/pktline.zig",
     "source": "pub fn write(w: *Io.Writer, data: []const u8) WriteError!void {",
     "detail": "public function exposes private error set 'WriteError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'WriteError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/pktline.zig",
     "source": "pub fn print(w: *Io.Writer, comptime fmt: []const u8, args: anytype) WriteError!void {",
     "detail": "public function exposes private error set 'WriteError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'WriteError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/transport/pktline.zig",
     "source": "pub fn print(w: *Io.Writer, comptime fmt: []const u8, args: anytype) WriteError!void {",
     "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "printf-style: the comptime format stays beside its arguments, as std's Writer.print(w, comptime fmt, args) has it; putting it first would part the pair."
   },
   {
     "rule": "Z015",
     "path": "src/transport/tls/ClientAuth.zig",
     "source": "pub fn init(gpa: Allocator, chain: []const []const u8, key: PrivateKey) Error!ClientAuth {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/tls/key.zig",
     "source": "pub fn parse(arena: Allocator, bytes: []const u8, passphrase: ?[]const u8) Error!PrivateKey {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/tls/key.zig",
     "source": "pub fn certificates(arena: Allocator, bytes: []const u8) Error![]const []const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/tls/Client.zig",
     "source": "pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client {",
     "detail": "public function exposes private error set 'InitError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "src/transport/tls/Client.zig is Zig's std TLS client, held byte for byte to std and its recorded patch by zig build check-tls-fork (ci/preflight.json vendored); this line is std's, and changing it would fork the fork."
   },
   {
     "rule": "Z020",
     "path": "src/transport/tls/Client.zig",
     "source": "fn clientCounter(key_log: *@This()) u64 {",
     "detail": "inline @This() in named struct; use 'SslKeyLog' instead",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "src/transport/tls/Client.zig is Zig's std TLS client, held byte for byte to std and its recorded patch by zig build check-tls-fork (ci/preflight.json vendored); this line is std's, and changing it would fork the fork."
   },
   {
     "rule": "Z020",
     "path": "src/transport/tls/Client.zig",
     "source": "fn serverCounter(key_log: *@This()) u64 {",
     "detail": "inline @This() in named struct; use 'SslKeyLog' instead",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "src/transport/tls/Client.zig is Zig's std TLS client, held byte for byte to std and its recorded patch by zig build check-tls-fork (ci/preflight.json vendored); this line is std's, and changing it would fork the fork."
   },
   {
     "rule": "Z026",
     "path": "src/transport/tls/Client.zig",
     "source": "}) catch {};",
     "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "src/transport/tls/Client.zig is Zig's std TLS client, held byte for byte to std and its recorded patch by zig build check-tls-fork (ci/preflight.json vendored); this line is std's, and changing it would fork the fork."
   },
   {
     "rule": "Z023",
     "path": "src/transport/clone/lfs.zig",
     "source": "fn fetchFn(context: *anyopaque, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "Implements lfs.Fetcher.fetchFn, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z015",
     "path": "src/transport/fetchpack.zig",
     "source": "pub fn fetch(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/filterspec.zig",
     "source": "pub fn parse(arena: Allocator, text: []const u8) Error!Spec {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/filterspec.zig",
     "source": "pub fn sendForm(arena: Allocator, text: []const u8) Error![]const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/ssh.zig",
     "source": "pub fn connect(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z012",
     "path": "src/transport/ssh.zig",
     "source": "pub fn explain(gpa: Allocator, conn: *Connection, io: Io, err: anyerror, url: url_mod.Url, failure: ?*auth.Failure) Error {",
     "detail": "public function exposes private type 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/transport/ssh.zig",
     "source": "pub fn explain(gpa: Allocator, conn: *Connection, io: Io, err: anyerror, url: url_mod.Url, failure: ?*auth.Failure) Error {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "The same line carries a merged-error-set survivor (see its entry); the ledger keys on the exact source, so reordering the signature would record a new exception, which the gate refuses. It goes with that survivor."
   },
   {
     "rule": "Z015",
     "path": "src/transport/fetch.zig",
     "source": "pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/httpauth.zig",
     "source": "pub fn parse(arena: Allocator, value: []const u8) Error![]const Challenge {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/smarthttp.zig",
     "source": "pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: Options) Error!*Connection {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/transport/smarthttp.zig",
     "source": "fn close(context: *anyopaque, io: Io) void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "Implements connection.Connection.VTable.close, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z015",
     "path": "src/transport/push.zig",
     "source": "pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z006",
@@ -4981,28 +4981,28 @@
     "path": "src/transport_test.zig",
     "source": "fn ask(context: ?*anyopaque, allocator: Allocator, field: credential.Field, prompt: []const u8) Allocator.Error!?[]u8 {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
+    "reason": "Implements credential.Prompt.ask, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z023",
     "path": "src/transport_test.zig",
     "source": "fn start(raw: *anyopaque, task_io: Io, allocator: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
+    "reason": "Implements repo/program.zig's SpawnHook, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z023",
     "path": "src/transport_test.zig",
     "source": "fn start(raw: *anyopaque, task_io: Io, allocator: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
+    "reason": "Implements repo/program.zig's SpawnHook, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z023",
     "path": "src/transport_test.zig",
     "source": "fn terminate(raw: *anyopaque, child: *Child, task_io: Io) void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
+    "reason": "Implements repo/program.zig's SpawnHook, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z023",
@@ -7662,7 +7662,7 @@
     "path": "src/lfs_test.zig",
     "source": "io: Io,",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
+    "reason": "Implements lfs.Fetcher.fetchFn, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z023",
@@ -8593,399 +8593,399 @@
     "path": "src/lfs/transfer.zig",
     "source": "pub fn download(server: *lfsapi.Server, objects: []const Object, options: Options) Error!Outcome {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/transfer.zig",
     "source": "pub fn upload(server: *lfsapi.Server, objects: []const Object, options: Options) Error!Outcome {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/transfer.zig",
     "source": "pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now: i64) SweepError!void {",
     "detail": "public function exposes private error set 'SweepError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'SweepError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/lfs/transfer.zig",
     "source": "fn fetchFn(context: *anyopaque, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "Implements lfs.Fetcher.fetchFn, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/transfer.zig",
     "source": "pub fn fetch(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) FetchError!Outcome {",
     "detail": "public function exposes private error set 'FetchError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'FetchError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/transfer.zig",
     "source": "pub fn pull(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) FetchError!PullOutcome {",
     "detail": "public function exposes private error set 'FetchError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'FetchError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/transfer.zig",
     "source": "pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const lfs.Store) FetchError!struct { replaced: u32, left: u32 } {",
     "detail": "public function exposes private error set 'FetchError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'FetchError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/transfer.zig",
     "source": "pub fn pushObjects(server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb_mod.PackEntry, options: Options) FetchError!Outcome {",
     "detail": "public function exposes private error set 'FetchError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'FetchError' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn lock(server: *lfsapi.Server, repo: *Repository, path: []const u8, arena: Allocator, options: Options) Error!Acquired {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/lfs/locks.zig",
     "source": "pub fn lock(server: *lfsapi.Server, repo: *Repository, path: []const u8, arena: Allocator, options: Options) Error!Acquired {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "The same line carries a merged-error-set survivor (see its entry); the ledger keys on the exact source, so reordering the signature would record a new exception, which the gate refuses. It goes with that survivor."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/lfs/locks.zig",
     "source": "pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "The same line carries a merged-error-set survivor (see its entry); the ledger keys on the exact source, so reordering the signature would record a new exception, which the gate refuses. It goes with that survivor."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn unlockPath(server: *lfsapi.Server, repo: *Repository, path: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/lfs/locks.zig",
     "source": "pub fn unlockPath(server: *lfsapi.Server, repo: *Repository, path: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "The same line carries a merged-error-set survivor (see its entry); the ledger keys on the exact source, so reordering the signature would record a new exception, which the gate refuses. It goes with that survivor."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: Options) Error!Listing {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Error!Verified {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn read(a: Allocator, io: Io, store: *const lfs.Store, ref: ?[]const u8) Error!Cache {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn cached(gpa: Allocator, io: Io, store: *const lfs.Store, ref: ?[]const u8) Error!Table {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn load(io: Io, repo: *Repository) Error!Lockables {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn isLockable(l: *Lockables, scratch: Allocator, path: []const u8) Error!bool {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const []const u8, options: Options) Error!Fixed {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/lfs/hooks.zig",
     "source": "fn run(context: ?*anyopaque, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "Implements repo/hooks.zig's runner, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn get(s: *const Settings, a: Allocator, full_name: []const u8) Error!?[]const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn urlGetAll(s: *const Settings, a: Allocator, full_section: []const u8, url: []const u8, key: []const u8) Error![]const []const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn urlGet(s: *const Settings, a: Allocator, section: []const u8, url: []const u8, key: []const u8) Error!?[]const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn findEndpoint(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn defaultRemote(arena: Allocator, settings: *const Settings, branch: ?[]const u8, operation: Operation) Error![]const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn gitRemoteUrl(arena: Allocator, settings: *const Settings, remote: []const u8, for_push: bool) Error!?[]const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn sshArguments(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn sshProgram(arena: Allocator, environ: *const std.process.Environ.Map, settings: *const Settings) Error!SshProgram {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn sshInvocation(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn parseAuthenticate(arena: Allocator, bytes: []const u8) Error!SshAuth {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn init(gpa: Allocator, io: Io, settings: *const Settings, remote: []const u8, where: Where, options: Options) Error!Client {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
     "path": "src/lfs/api.zig",
     "source": "fn fail(c: *Client, err: Error, comptime fmt: []const u8, args: anytype) Error {",
     "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "printf-style: the comptime format stays beside its arguments, as std's Writer.print(w, comptime fmt, args) has it; putting it first would part the pair."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn endpoint(c: *Client, operation: Operation) Error!Endpoint {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn apiBase(c: *Client, operation: Operation) Error!struct { url: []const u8, headers: []const http.Header } {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn sshTransfer(c: *Client, operation: Operation) Error!?*lfsssh.Transfer {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn learnLocksVerify(c: *Client, url: []const u8, value: bool) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn send(c: *Client, request: Request) Error!*Exchange {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn api(c: *Client, operation: Operation, method: http.Method, suffix: []const u8, body: ?[]const u8, network_retries: u32) Error!*Exchange {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z012",
     "path": "src/lfs/api.zig",
     "source": "pub fn failStatus(c: *Client, ex: *Exchange, what: []const u8) Error {",
     "detail": "public function exposes private type 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn reader(ex: *Exchange) Error!*Io.Reader {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn readAll(ex: *Exchange, limit: usize) Error![]const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) Error!httpclient.Timeouts {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn start(gpa: Allocator, io: Io, programs: program.Programs, invocation: program.Invocation, message: *std.ArrayList(u8)) Error!*Connection {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn send(c: *Connection, command: []const u8, args: []const []const u8) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn sendLines(c: *Connection, command: []const u8, args: []const []const u8, lines: []const []const u8) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn beginData(c: *Connection, command: []const u8, args: []const []const u8) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn writeData(c: *Connection, bytes: []const u8) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn endData(c: *Connection) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn readStatus(c: *Connection, arena: Allocator) Error!Status {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn readStatusWithData(c: *Connection, arena: Allocator) Error!struct { code: u16, args: []const []const u8 } {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn nextData(c: *Connection) Error!?[]const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn skipData(c: *Connection) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn open(gpa: Allocator, io: Io, programs: program.Programs, first: program.Invocation, rest: program.Invocation, control_dir: ?[]const u8, failure: *std.ArrayList(u8)) Error!*Transfer {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/ssh.zig",
     "source": "pub fn connection(t: *Transfer, n: usize) Error!*Connection {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/push.zig",
     "source": "pub fn beforePush(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z023",
@@ -9937,28 +9937,28 @@
     "path": "src/transport.zig",
     "source": "pub fn open(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport.zig",
     "source": "pub fn listRefs(s: *Session, gpa: Allocator, io: Io, prefixes: []const []const u8) Error!protocol.RefList {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport.zig",
     "source": "pub fn push(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: PushRequest) Error!sendpack.Report {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport.zig",
     "source": "pub fn fetch(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z020",
@@ -10063,42 +10063,42 @@
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn start(gpa: Allocator, io: Io, spec: Spec, options: StartOptions) Error!*Helper {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn option(h: *Helper, name: []const u8, value: []const u8, form: OptionValue) Error!Answer {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn connect(h: *Helper, service: connection.Service, service_program: ?[]const u8) Error!bool {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn list(h: *Helper, gpa: Allocator, repo: ?*Repository, for_push: bool) Error!protocol.RefList {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn fetch(h: *Helper, wants_in: []const Want, options: FetchOptions) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn push(h: *Helper, gpa: Allocator, commands: []const PushCommand, options: PushOptions) Error!sendpack.Report {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z030",
@@ -10364,14 +10364,14 @@
     "path": "src/lfs/custom.zig",
     "source": "pub fn start(gpa: Allocator, io: Io, programs: program.Programs, cwd: ?[]const u8, adapter: Adapter, init: Init) Error!*Agent {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z015",
     "path": "src/lfs/custom.zig",
     "source": "pub fn transfer(a: *Agent, request: Request, progress: anytype) Error!Completion {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+    "reason": "'Error' is pub. ziglint 0.5.3 counts a file-scope declaration as a public type only when isTypeExpression knows its initializer, and a merged error set (a || b) is not among them; upstream main is the same. The finding goes when ziglint learns .merge_error_sets."
   },
   {
     "rule": "Z011",
