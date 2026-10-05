@@ -9,6 +9,8 @@
 //! moved out. This is the merge `git merge-file` makes, and the one git's
 //! tree merge makes of each file both sides changed.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -111,7 +113,7 @@ pub fn blobs(
     ours: []const u8,
     theirs: []const u8,
     options: BlobOptions,
-) BlobError!BlobResult {
+) Self.BlobError!BlobResult {
     if (std.mem.eql(u8, ours, theirs)) return ownedBlob(gpa, ours, .clean);
     if (std.mem.eql(u8, ours, ancestor)) return ownedBlob(gpa, theirs, .clean);
     if (std.mem.eql(u8, theirs, ancestor)) return ownedBlob(gpa, ours, .clean);

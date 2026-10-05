@@ -10,6 +10,8 @@
 //! as it was, because git writes it back. A sheet is written as git writes
 //! it, with full object names or short ones.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -288,7 +290,7 @@ fn parseLine(line_in: []const u8, number: usize, resolver: Resolver, options: Pa
 }
 
 /// Parse a sheet. `bytes` is copied; the list owns what its items borrow.
-pub fn parse(gpa: Allocator, bytes: []const u8, resolver: Resolver, options: ParseOptions) ParseError!List {
+pub fn parse(gpa: Allocator, bytes: []const u8, resolver: Resolver, options: ParseOptions) Self.ParseError!List {
     const buf = try gpa.dupe(u8, bytes);
     errdefer gpa.free(buf);
     var items: std.ArrayList(Item) = .empty;

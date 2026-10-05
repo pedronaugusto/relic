@@ -373,12 +373,12 @@ test "commit --trailer adds trailers as git commit does" {
     var repo = try Repository.open(gpa, io, b.git.dir, .{});
     defer repo.deinit(io);
     const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
-    _ = try commit_mod.commit(&repo, io, .{ .author = who, .committer = who, .message = "subject\n\nbody\n" }, .{
+    _ = try commit_mod.commit(io, &repo, .{ .author = who, .committer = who, .message = "subject\n\nbody\n" }, .{
         .trailers = &.{ "sign: Ann <ann@example.com>", "fix=12", "Acked-by: Bob" },
         .trailer_commands = .{ .programs = .{ .environ = &b.environ }, .cwd = .{ .dir = b.git.dir } },
     });
     const ours = try b.git.run(io, &.{ "log", "-1", "--format=%B" });
     defer gpa.free(ours);
     try std.testing.expectEqualStrings(theirs, ours);
-    try std.testing.expectError(error.InvalidTrailer, commit_mod.commit(&repo, io, .{ .author = who, .committer = who, .message = "x\n" }, .{ .allow_empty = true, .trailers = &.{":no key"} }));
+    try std.testing.expectError(error.InvalidTrailer, commit_mod.commit(io, &repo, .{ .author = who, .committer = who, .message = "x\n" }, .{ .allow_empty = true, .trailers = &.{":no key"} }));
 }

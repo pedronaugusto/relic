@@ -18,6 +18,8 @@
 //! `GIT_EDITOR=:`. A merge, a cherry-pick or a revert in progress is a named
 //! refusal rather than a commit that quietly drops the other parent.
 
+const Self = @This();
+
 pub const notes = @import("commit/notes.zig");
 pub const todo = @import("commit/todo.zig");
 pub const rebase = @import("commit/rebase.zig");
@@ -147,7 +149,7 @@ pub const Outcome = struct {
 
 /// `git commit -m <message>`: run the hooks, write the tree the index
 /// describes and a commit of it, and move the branch `HEAD` is on.
-pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Error!Outcome {
+pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     const gpa = repo.gpa;
     if (repo.work_dir == null) return error.BareRepository;
@@ -502,7 +504,7 @@ const Twin = struct {
         defer runner.deinit();
         var opts = options;
         opts.hooks = &runner;
-        return commit(&repo, io, .{ .author = who, .committer = who, .message = text }, opts);
+        return commit(io, &repo, .{ .author = who, .committer = who, .message = text }, opts);
     }
 
     fn expectSame(t: *Twin, io: Io, args: []const []const u8) !void {
@@ -571,18 +573,18 @@ test "a refusing pre-commit or commit-msg hook writes nothing, and --no-verify s
     var runner = try repo.hookRunner(io, .{ .environ = &twin.environ }, .{ .output = .ignore });
     defer runner.deinit();
     const request: Request = .{ .author = Twin.who, .committer = Twin.who, .message = "a\n" };
-    try testing.expectError(error.HookRejected, commit(&repo, io, request, .{ .hooks = &runner }));
+    try testing.expectError(error.HookRejected, commit(io, &repo, request, .{ .hooks = &runner }));
     try testing.expectEqualStrings("pre-commit", runner.failure.event());
     try testing.expect((try repo.head(io)) == null);
 
     try twin.fixtureHook(io, "pre-commit", "status", "0\n");
     try twin.fixtureHook(io, "commit-msg", "status", "5\n");
-    try testing.expectError(error.HookRejected, commit(&repo, io, request, .{ .hooks = &runner }));
+    try testing.expectError(error.HookRejected, commit(io, &repo, request, .{ .hooks = &runner }));
     try testing.expectEqual(@as(?u8, 5), runner.failure.status());
     try testing.expect((try repo.head(io)) == null);
 
     try twin.fixtureHook(io, "pre-commit", "status", "1\n");
-    const made = try commit(&repo, io, request, .{ .hooks = &runner, .verify = false });
+    const made = try commit(io, &repo, request, .{ .hooks = &runner, .verify = false });
     const moved = (try repo.head(io)).?;
     defer gpa.free(moved.name);
     try testing.expect(moved.oid.eql(made.commit));
@@ -629,13 +631,13 @@ test "an unchanged tree, an empty message and a merge in progress are refused by
     var repo = try Repository.open(gpa, io, fixture.dir, .{});
     defer repo.deinit(io);
     const who = Twin.who;
-    try testing.expectError(error.NothingToCommit, commit(&repo, io, .{ .author = who, .committer = who, .message = "again" }, .{}));
-    try testing.expectError(error.EmptyMessage, commit(&repo, io, .{ .author = who, .committer = who, .message = " \n\n" }, .{ .allow_empty = true }));
-    const made = try commit(&repo, io, .{ .author = who, .committer = who, .message = "empty on purpose" }, .{ .allow_empty = true });
+    try testing.expectError(error.NothingToCommit, commit(io, &repo, .{ .author = who, .committer = who, .message = "again" }, .{}));
+    try testing.expectError(error.EmptyMessage, commit(io, &repo, .{ .author = who, .committer = who, .message = " \n\n" }, .{ .allow_empty = true }));
+    const made = try commit(io, &repo, .{ .author = who, .committer = who, .message = "empty on purpose" }, .{ .allow_empty = true });
     try testing.expect(made.previous != null);
 
     try fixture.writeFile(io, ".git/MERGE_HEAD", "0000000000000000000000000000000000000000\n");
-    try testing.expectError(error.OperationInProgress, commit(&repo, io, .{ .author = who, .committer = who, .message = "m" }, .{ .allow_empty = true }));
+    try testing.expectError(error.OperationInProgress, commit(io, &repo, .{ .author = who, .committer = who, .message = "m" }, .{ .allow_empty = true }));
 }
 
 test "a message that is commit.template unedited is refused, as git commit refuses it" {
@@ -671,12 +673,12 @@ test "a message that is commit.template unedited is refused, as git commit refus
             const edited_message = if (signoff) template_text ++ "\nSigned-off-by: Fixture <fixture@example.com>\n" else template_text;
             try twin.relic.exec(io, &.{ "config", "commit.cleanup", cleanup });
             _ = try repo.refreshConfig(io, null);
-            try testing.expectError(error.TemplateUntouched, commit(&repo, io, .{ .author = Twin.who, .committer = Twin.who, .message = edited_message }, .{ .template = text }));
+            try testing.expectError(error.TemplateUntouched, commit(io, &repo, .{ .author = Twin.who, .committer = Twin.who, .message = edited_message }, .{ .template = text }));
         }
     }
     // an edited one is committed, and a message given outright never asks
-    _ = try commit(&repo, io, .{ .author = Twin.who, .committer = Twin.who, .message = "Subject line\n\nBody, edited.\n" }, .{ .template = text });
+    _ = try commit(io, &repo, .{ .author = Twin.who, .committer = Twin.who, .message = "Subject line\n\nBody, edited.\n" }, .{ .template = text });
     try twin.relic.writeFile(io, "b.txt", "b\n");
     try twin.relic.exec(io, &.{ "add", "b.txt" });
-    _ = try commit(&repo, io, .{ .author = Twin.who, .committer = Twin.who, .message = template_text }, .{});
+    _ = try commit(io, &repo, .{ .author = Twin.who, .committer = Twin.who, .message = template_text }, .{});
 }

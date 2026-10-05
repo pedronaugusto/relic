@@ -16,6 +16,8 @@
 //! the line before it; an empty line is an empty context line. What is read
 //! is a value; applying it is `apply.zig`'s.
 
+const Self = @This();
+
 pub const am = @import("patch/am.zig");
 pub const mail = @import("patch/mail.zig");
 pub const format = @import("patch/format.zig");
@@ -233,7 +235,7 @@ const Parser = struct {
 ///
 /// Nothing in `text` that is not a patch is an error; a file header is.
 /// An input with no patch in it at all gives an empty list.
-pub fn parse(gpa: Allocator, text: []const u8, options: Options) Error!Patch {
+pub fn parse(gpa: Allocator, text: []const u8, options: Options) Self.Error!Patch {
     if (text.len >= max_patch_bytes) return error.PatchTooLarge;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();

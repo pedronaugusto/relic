@@ -14,6 +14,8 @@
 //! shift when nothing scores better are git's, so the merge lines the same
 //! files up as git's does.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -34,7 +36,7 @@ pub const Error = error{
 /// empty works the shift out from the trees; otherwise it is the path to
 /// shift by, as `-X subtree=<path>` gives it. `two` itself when no shift
 /// fits. A tree the shift makes is written to `db`.
-pub fn shift(gpa: Allocator, io: Io, db: *odb_mod.Odb, one: Oid, two: Oid, prefix: []const u8) Error!Oid {
+pub fn shift(gpa: Allocator, io: Io, db: *odb_mod.Odb, one: Oid, two: Oid, prefix: []const u8) Self.Error!Oid {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const s: Shifter = .{ .arena = arena_state.allocator(), .io = io, .db = db };

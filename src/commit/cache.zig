@@ -9,6 +9,8 @@
 //! It holds at most `capacity` commits and starts over when full, so a
 //! handle kept for days holds a bounded amount however much it walks.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -52,7 +54,7 @@ pub const Cache = struct {
 
     /// `oid`'s tree and parents, the parents copied with `out`. With no
     /// `out` the parents come back empty, for a caller that wants the tree.
-    pub fn get(c: *Cache, gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, out: ?Allocator) Error!Info {
+    pub fn get(c: *Cache, gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, out: ?Allocator) Self.Error!Info {
         c.mutex.lockUncancelable(io);
         defer c.mutex.unlock(io);
         const entry = c.map.get(oid.bytes) orelse try c.load(gpa, io, db, oid);

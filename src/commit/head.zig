@@ -11,6 +11,8 @@
 //! the sequencer's directory) are replaced whole, so a reader never sees half
 //! of one.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -78,7 +80,7 @@ pub const Log = struct {
 /// `HEAD` names a branch, as git does.
 /// The ref must still hold `from.oid`, which is what stops a move racing a
 /// second writer from losing that writer's commit.
-pub fn advance(io: Io, repo: *Repository, from: Head, new: Oid, log: Log) Error!void {
+pub fn advance(io: Io, repo: *Repository, from: Head, new: Oid, log: Log) Self.Error!void {
     // A move to where it already is changes no ref. git still writes the
     // line to `HEAD`'s log when `HEAD` names a branch, because its update of
     // `HEAD` through the branch is logged on its own; a detached `HEAD` that
@@ -100,7 +102,7 @@ pub fn advance(io: Io, repo: *Repository, from: Head, new: Oid, log: Log) Error!
 }
 
 /// Point `HEAD` straight at `new`, detaching it, with a line in its log.
-pub fn detach(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error!void {
+pub fn detach(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Self.Error!void {
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.change("HEAD", .{ .direct = new }, .any, .{ .no_deref = true });
@@ -110,7 +112,7 @@ pub fn detach(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error!vo
 
 /// Make `HEAD` name `branch` again, with a line in its log from `old` to
 /// whatever the branch holds.
-pub fn attach(io: Io, repo: *Repository, branch: []const u8, old: ?Oid, log: Log) Error!void {
+pub fn attach(io: Io, repo: *Repository, branch: []const u8, old: ?Oid, log: Log) Self.Error!void {
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.update("HEAD", .{ .symbolic = branch }, .any);
@@ -124,7 +126,7 @@ pub fn attach(io: Io, repo: *Repository, branch: []const u8, old: ?Oid, log: Log
 }
 
 /// Move a branch that `HEAD` does not name, with a line in its log.
-pub fn moveBranch(io: Io, repo: *Repository, branch: []const u8, expected: refs_mod.Expected, new: Oid, log: Log) Error!void {
+pub fn moveBranch(io: Io, repo: *Repository, branch: []const u8, expected: refs_mod.Expected, new: Oid, log: Log) Self.Error!void {
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.update(branch, .{ .direct = new }, expected);
@@ -139,7 +141,7 @@ fn appendHeadLog(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error
 
 /// Point the pseudo-ref `name` at `oid`, with no log, as git writes
 /// `ORIG_HEAD` and `CHERRY_PICK_HEAD`.
-pub fn writeRef(io: Io, repo: *Repository, name: []const u8, oid: Oid) Error!void {
+pub fn writeRef(io: Io, repo: *Repository, name: []const u8, oid: Oid) Self.Error!void {
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.update(name, .{ .direct = oid }, .any);
@@ -159,7 +161,7 @@ pub fn readRef(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) refs
 }
 
 /// Remove the pseudo-ref `name`, which need not exist.
-pub fn deleteRef(io: Io, repo: *Repository, name: []const u8) Error!void {
+pub fn deleteRef(io: Io, repo: *Repository, name: []const u8) Self.Error!void {
     repo.refStore().dirFor(name).deleteFile(io, name) catch |err| switch (err) {
         error.FileNotFound => {},
         else => |e| return e,
@@ -168,7 +170,7 @@ pub fn deleteRef(io: Io, repo: *Repository, name: []const u8) Error!void {
 
 /// Replace the state file `sub_path` under `dir` with `bytes`, making the
 /// directories above it.
-pub fn writeState(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8) Error!void {
+pub fn writeState(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8) Self.Error!void {
     if (std.fs.path.dirnamePosix(sub_path)) |parent| {
         dir.createDirPath(io, parent) catch |err| switch (err) {
             error.PathAlreadyExists => {},
@@ -190,7 +192,7 @@ pub fn readState(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) Io.D
 }
 
 /// Remove the state file `sub_path` under `dir`, which need not exist.
-pub fn removeState(io: Io, dir: Io.Dir, sub_path: []const u8) Error!void {
+pub fn removeState(io: Io, dir: Io.Dir, sub_path: []const u8) Self.Error!void {
     dir.deleteFile(io, sub_path) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {},
         else => |e| return e,

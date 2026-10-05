@@ -7,6 +7,8 @@
 //! itself. With `content_merge` it is git's merge, `ort.zig`'s: renames
 //! followed, files merged, conflicts recorded as git records them.
 
+const Self = @This();
+
 pub const rerere = @import("merge/rerere.zig");
 pub const threeway = @import("merge/threeway.zig");
 pub const subtreeshift = @import("merge/subtreeshift.zig");
@@ -97,7 +99,7 @@ pub const Conflict = struct {
         added_by_theirs,
 
         /// The shape of these stages.
-        pub fn of(base: bool, ours: bool, theirs: bool) Kind {
+        pub fn of(base: bool, ours: bool, theirs: bool) Conflict.Kind {
             if (base and ours and theirs) return .both_modified;
             if (ours and theirs) return .both_added;
             if (base and (ours or theirs)) return .modify_delete;
@@ -189,7 +191,7 @@ pub fn trees(
     base: ?Oid,
     ours: Oid,
     theirs: Oid,
-) Error!Result {
+) Self.Error!Result {
     return treesWithOptions(gpa, io, db, base, ours, theirs, .{});
 }
 
@@ -204,7 +206,7 @@ pub fn treesWithOptions(
     ours: Oid,
     theirs: Oid,
     options: TreeOptions,
-) Error!Result {
+) Self.Error!Result {
     if (options.content_merge) return contentMerge(gpa, io, db, base, ours, theirs, options);
 
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
@@ -332,7 +334,7 @@ fn contentMerge(
 }
 
 /// The index and conflicts of an `ort.Result`.
-pub fn fromOrt(gpa: Allocator, io: Io, db: *odb_mod.Odb, merged: *const ort.Result) Error!Result {
+pub fn fromOrt(gpa: Allocator, io: Io, db: *odb_mod.Odb, merged: *const ort.Result) Self.Error!Result {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -467,7 +469,7 @@ pub fn tree(
 /// content merge the tree it wrote, which is the one git records as
 /// `AUTO_MERGE` and `git merge-tree --write-tree` prints; for a stage-only
 /// one, every resolved path and our side of every conflicted one.
-pub fn conflictedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, result: *const Result) Error!Oid {
+pub fn conflictedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, result: *const Result) Self.Error!Oid {
     if (result.tree) |merged| return merged;
     var index: index_mod.Index = .initEmpty(gpa, db.objectFormat());
     defer index.deinit();
@@ -842,7 +844,7 @@ test "the content-merging tree merge writes the tree and the stages git merge-tr
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
     const tree_of = struct {
-        fn get(r: *testgit.Repo, g: Allocator, i: Io, rev: []const u8) !Oid {
+        fn get(g: Allocator, i: Io, r: *testgit.Repo, rev: []const u8) !Oid {
             const text = try r.line(i, &.{ "rev-parse", rev });
             defer g.free(text);
             return Oid.parse(.sha1, text);
@@ -852,9 +854,9 @@ test "the content-merging tree merge writes the tree and the stages git merge-tr
         gpa,
         io,
         &db,
-        try tree_of(&repo, gpa, io, "main~1^{tree}"),
-        try tree_of(&repo, gpa, io, "main^{tree}"),
-        try tree_of(&repo, gpa, io, "theirs^{tree}"),
+        try tree_of(gpa, io, &repo, "main~1^{tree}"),
+        try tree_of(gpa, io, &repo, "main^{tree}"),
+        try tree_of(gpa, io, &repo, "theirs^{tree}"),
         .{ .content_merge = true, .blob = .{ .labels = .{ .ours = "main", .theirs = "theirs" }, .algorithm = .histogram } },
     );
     defer result.deinit();

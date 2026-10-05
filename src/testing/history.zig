@@ -3320,7 +3320,7 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
             defer repo.deinit(io);
             var arena: std.heap.ArenaAllocator = .init(gpa);
             defer arena.deinit();
-            const targets = try merging.upstreams(gpa, io, &repo, arena.allocator());
+            const targets = try merging.upstreams(gpa, arena.allocator(), io, &repo);
             var outcome = try merging.startHeads(gpa, io, &repo, targets, .{ .who = who });
             defer outcome.deinit();
         }
@@ -3333,7 +3333,7 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
         defer repo.deinit(io);
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        try std.testing.expectError(error.NoMergeTarget, merging.upstreams(gpa, io, &repo, arena.allocator()));
+        try std.testing.expectError(error.NoMergeTarget, merging.upstreams(gpa, arena.allocator(), io, &repo));
     }
     {
         try pair.ours.exec(io, &.{ "config", "--unset", "merge.defaultToUpstream" });
@@ -3342,7 +3342,7 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
         defer repo.deinit(io);
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        try std.testing.expectError(error.NoDefaultUpstream, merging.upstreams(gpa, io, &repo, arena.allocator()));
+        try std.testing.expectError(error.NoDefaultUpstream, merging.upstreams(gpa, arena.allocator(), io, &repo));
     }
 }
 

@@ -12,6 +12,8 @@
 //! resolve; a conflict before it is the whole octopus failing, and git
 //! then leaves everything as it was.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -71,7 +73,7 @@ pub const Result = struct {
 /// Merge `heads`, in order, into the commit `head`, as `git merge-octopus`
 /// does: the heads are those `git merge` keeps once it has dropped every
 /// one another reaches.
-pub fn mergeCommits(gpa: Allocator, io: Io, db: *Odb, head: Oid, heads: []const Oid, options: Options) Error!Result {
+pub fn mergeCommits(gpa: Allocator, io: Io, db: *Odb, head: Oid, heads: []const Oid, options: Options) Self.Error!Result {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();

@@ -9,6 +9,8 @@
 //! from configuration, the later word winning where two disagree -- git's
 //! `parse_merge_opt`.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -181,7 +183,7 @@ pub const SplitError = error{
 /// a command line, and a leading `--` dropped from each, which is how an
 /// older git wrote them. The words and the slice are the caller's, in
 /// `arena`.
-pub fn split(arena: Allocator, line_in: []const u8) SplitError![]const []const u8 {
+pub fn split(arena: Allocator, line_in: []const u8) Self.SplitError![]const []const u8 {
     var line = line_in;
     if (line.len != 0 and line[0] == ' ') line = line[1..];
     var words: std.ArrayList([]const u8) = .empty;

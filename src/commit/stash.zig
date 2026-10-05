@@ -25,6 +25,8 @@
 //! Merging does not look for renames, so a path the stash renamed and the
 //! branch changed meets as a deletion and a change rather than as one file.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -218,7 +220,7 @@ pub const Applied = struct {
 };
 
 /// Every stash, newest first.
-pub fn list(repo: *Repository, io: Io) Error!List {
+pub fn list(io: Io, repo: *Repository) Self.Error!List {
     const gpa = repo.gpa;
     var log = try reflog.read(gpa, io, repo.common_dir, ref_name, repo.objectFormat());
     errdefer log.deinit();
@@ -231,15 +233,15 @@ pub fn list(repo: *Repository, io: Io) Error!List {
 }
 
 /// `stash@{n}`, taken apart.
-pub fn get(repo: *Repository, io: Io, n: usize) Error!Stash {
-    var l = try list(repo, io);
+pub fn get(io: Io, repo: *Repository, n: usize) Self.Error!Stash {
+    var l = try list(io, repo);
     defer l.deinit();
     if (n >= l.entries.len) return error.NoSuchStash;
-    return inspect(repo, io, l.entries[n].commit);
+    return inspect(io, repo, l.entries[n].commit);
 }
 
 /// A commit shaped like a stash, taken apart.
-pub fn inspect(repo: *Repository, io: Io, commit: Oid) Error!Stash {
+pub fn inspect(io: Io, repo: *Repository, commit: Oid) Self.Error!Stash {
     const gpa = repo.gpa;
     const found = try repo.odb.read(io, commit);
     defer gpa.free(found.bytes);
@@ -262,8 +264,8 @@ pub fn inspect(repo: *Repository, io: Io, commit: Oid) Error!Stash {
 
 /// What `stash@{n}` changed, from the commit it was made on to the working
 /// tree it recorded: `git stash show`.
-pub fn show(repo: *Repository, io: Io, n: usize, options: diff.TreeOptions) Error!diff.Changes {
-    const stash = try get(repo, io, n);
+pub fn show(io: Io, repo: *Repository, n: usize, options: diff.TreeOptions) Self.Error!diff.Changes {
+    const stash = try get(io, repo, n);
     return diff.tree(repo.gpa, io, &repo.odb, stash.base_tree, stash.tree, options);
 }
 
@@ -286,9 +288,9 @@ const Ctx = struct {
 
     fn init(
         ctx: *Ctx,
-        repo: *Repository,
-        io: Io,
         arena: Allocator,
+        io: Io,
+        repo: *Repository,
         filters: ?*const filter.Drivers,
         programs: ?program.Programs,
     ) Error!void {
@@ -435,13 +437,13 @@ fn matchesAny(specs: []const []const u8, path: []const u8) bool {
 /// untracked files, if asked — as a stash, then put the working tree and
 /// the index back to `HEAD`, as git does. `null` when there is nothing to
 /// stash, which git reports as "No local changes to save".
-pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
+pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     const gpa = repo.gpa;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var ctx: Ctx = undefined;
-    try ctx.init(repo, io, arena, options.filters, options.programs);
+    try ctx.init(arena, io, repo, options.filters, options.programs);
     defer ctx.deinit();
 
     const head = (try repo.head(io)) orelse return error.NoInitialCommit;
@@ -506,19 +508,19 @@ pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
     // A log that is gone with its ref still there is cleared first, as git
     // does, so the new stash starts a list rather than joining a broken one.
     if (!try reflog.exists(io, repo.common_dir, gpa, ref_name)) {
-        if (try repo.refStore().read(arena, io, ref_name)) |_| try clear(repo, io, .{ .hooks = options.hooks });
+        if (try repo.refStore().read(arena, io, ref_name)) |_| try clear(io, repo, .{ .hooks = options.hooks });
     }
 
     // `<branch>: <abbrev> <subject>`, which every message builds on.
     const branch = (try repo.refStore().currentBranch(arena, io)) orelse "(no branch)";
     var abbrev_buf: [hash.max_hex_len]u8 = undefined;
-    const abbrev = try abbreviate(repo, io, head.oid, &abbrev_buf);
+    const abbrev = try abbreviate(io, repo, head.oid, &abbrev_buf);
     const subject = try oneline(arena, head_commit.message);
     const label = try std.fmt.allocPrint(arena, "{s}: {s} {s}", .{ branch, abbrev, subject });
 
     // `I`: the index as it stands.
     const index_tree = try worktree.writeTree(gpa, io, &ctx.index, &repo.odb);
-    const index_commit = try writeCommit(repo, io, index_tree, &.{head.oid}, options.who, try std.fmt.allocPrint(arena, "index on {s}\n", .{label}));
+    const index_commit = try writeCommit(io, repo, index_tree, &.{head.oid}, options.who, try std.fmt.allocPrint(arena, "index on {s}\n", .{label}));
 
     // `U`: the untracked files, in a tree of their own.
     var untracked_commit: ?Oid = null;
@@ -530,7 +532,7 @@ pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
             try temp.add(.{ .path = path, .oid = s.oid, .mode = s.mode });
         }
         const tree = try worktree.writeTree(gpa, io, &temp, &repo.odb);
-        untracked_commit = try writeCommit(repo, io, tree, &.{}, options.who, try std.fmt.allocPrint(arena, "untracked files on {s}\n", .{label}));
+        untracked_commit = try writeCommit(io, repo, tree, &.{}, options.who, try std.fmt.allocPrint(arena, "untracked files on {s}\n", .{label}));
     }
 
     // `W`: the index, with every tracked file whose content differs from
@@ -556,7 +558,7 @@ pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
     var parents: std.ArrayList(Oid) = .empty;
     try parents.appendSlice(arena, &.{ head.oid, index_commit });
     if (untracked_commit) |u| try parents.append(arena, u);
-    const stash_commit = try writeCommit(repo, io, work_tree, parents.items, options.who, message);
+    const stash_commit = try writeCommit(io, repo, work_tree, parents.items, options.who, message);
 
     // `refs/stash` moves, and its log, which is the list, gains the line.
     {
@@ -701,7 +703,7 @@ fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
 
 /// A stash commit, written as git writes one: unsigned whatever the
 /// configuration says, because git never signs them.
-fn writeCommit(repo: *Repository, io: Io, tree: Oid, parents: []const Oid, who: object.Signature, message: []const u8) Error!Oid {
+fn writeCommit(io: Io, repo: *Repository, tree: Oid, parents: []const Oid, who: object.Signature, message: []const u8) Error!Oid {
     const bytes = object.Commit.build(repo.gpa, repo.objectFormat(), .{
         .tree = tree,
         .parents = parents,
@@ -719,7 +721,7 @@ fn writeCommit(repo: *Repository, io: Io, tree: Oid, parents: []const Oid, who: 
 /// The shortest prefix of `oid`, seven digits or more, that names nothing
 /// else: git's default abbreviation for a repository of this size, or
 /// `core.abbrev` when it is a number.
-fn abbreviate(repo: *Repository, io: Io, oid: Oid, buf: *[hash.max_hex_len]u8) Error![]const u8 {
+fn abbreviate(io: Io, repo: *Repository, oid: Oid, buf: *[hash.max_hex_len]u8) Error![]const u8 {
     const hex = oid.hex(buf);
     var len: usize = 7;
     if (repo.configuration().getInt("core.abbrev", 7)) |configured| {
@@ -757,26 +759,26 @@ fn oneline(arena: Allocator, message: []const u8) Allocator.Error![]const u8 {
 
 /// `git stash apply stash@{n}`: merge the stash onto the working tree and
 /// the index as they are.
-pub fn apply(repo: *Repository, io: Io, n: usize, options: ApplyOptions) Error!Applied {
-    const stash = try get(repo, io, n);
-    return applyStash(repo, io, stash, options);
+pub fn apply(io: Io, repo: *Repository, n: usize, options: ApplyOptions) Self.Error!Applied {
+    const stash = try get(io, repo, n);
+    return applyStash(io, repo, stash, options);
 }
 
 /// `git stash pop stash@{n}`: apply, then drop the stash if nothing
 /// conflicted.
-pub fn pop(repo: *Repository, io: Io, n: usize, options: ApplyOptions) Error!Applied {
-    const stash = try get(repo, io, n);
-    var applied = try applyStash(repo, io, stash, options);
+pub fn pop(io: Io, repo: *Repository, n: usize, options: ApplyOptions) Self.Error!Applied {
+    const stash = try get(io, repo, n);
+    var applied = try applyStash(io, repo, stash, options);
     errdefer applied.deinit();
     if (applied.isClean()) {
-        _ = try drop(repo, io, n, .{ .hooks = options.hooks });
+        _ = try drop(io, repo, n, .{ .hooks = options.hooks });
         applied.dropped = true;
     }
     return applied;
 }
 
 /// Apply a stash commit, by name rather than by its place in the list.
-pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions) Error!Applied {
+pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions) Self.Error!Applied {
     const gpa = repo.gpa;
     var result_arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer result_arena.deinit();
@@ -784,7 +786,7 @@ pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var ctx: Ctx = undefined;
-    try ctx.init(repo, io, arena, options.filters, options.programs);
+    try ctx.init(arena, io, repo, options.filters, options.programs);
     defer ctx.deinit();
     const db = &repo.odb;
 
@@ -1026,7 +1028,7 @@ pub const DropOptions = struct {
 /// `refs/stash` if the newest one went. The line after it takes the dropped
 /// one's old value, so the log still reads as a chain, which is what git's
 /// `reflog delete --rewrite` does. Returns the commit dropped.
-pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid {
+pub fn drop(io: Io, repo: *Repository, n: usize, options: DropOptions) Self.Error!Oid {
     const gpa = repo.gpa;
     var ref_buffer: [256]u8 = undefined;
     var ref_lock = try fs.LockFile.open(gpa, io, repo.common_dir, ref_name, &ref_buffer, .{ .shared = repo.shared });
@@ -1052,7 +1054,7 @@ pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid
     if (lines.items.len == 0) {
         ref_lock.deinit(io);
         ref_held = false;
-        try clear(repo, io, .{ .hooks = options.hooks });
+        try clear(io, repo, .{ .hooks = options.hooks });
         return dropped;
     }
 
@@ -1075,7 +1077,7 @@ pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid
 }
 
 /// `git stash clear`: remove `refs/stash` and the list with it.
-pub fn clear(repo: *Repository, io: Io, options: DropOptions) Error!void {
+pub fn clear(io: Io, repo: *Repository, options: DropOptions) Self.Error!void {
     var arena_instance: std.heap.ArenaAllocator = .init(repo.gpa);
     defer arena_instance.deinit();
     if (try repo.refStore().read(arena_instance.allocator(), io, ref_name)) |current| {

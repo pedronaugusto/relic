@@ -154,7 +154,7 @@ test "a stash pushed here is the stash git pushes, and git lists, shows and appl
         {
             var repo = try twin.open(gpa, io);
             defer repo.deinit(io);
-            const made = try stash.push(&repo, io, case.options);
+            const made = try stash.push(io, &repo, case.options);
             try testing.expect(made != null);
         }
 
@@ -191,9 +191,9 @@ test "nothing to stash is no stash" {
     try fixture.writeFile(io, "loose.txt", "untracked\n");
     var repo = try Repository.open(gpa, io, fixture.dir, .{});
     defer repo.deinit(io);
-    try testing.expect((try stash.push(&repo, io, .{ .who = who })) == null);
+    try testing.expect((try stash.push(io, &repo, .{ .who = who })) == null);
     var refusal: stash.Refusal = .{};
-    try testing.expectError(error.PathspecMatchesNothing, stash.push(&repo, io, .{ .who = who, .paths = &.{"missing"}, .refusal = &refusal }));
+    try testing.expectError(error.PathspecMatchesNothing, stash.push(io, &repo, .{ .who = who, .paths = &.{"missing"}, .refusal = &refusal }));
     try testing.expectEqualStrings("missing", refusal.path());
 }
 
@@ -219,7 +219,7 @@ test "git's stash is applied and popped here as git applies and pops it" {
         {
             var repo = try twin.open(gpa, io);
             defer repo.deinit(io);
-            var applied = try stash.apply(&repo, io, 0, .{ .index = with_index });
+            var applied = try stash.apply(io, &repo, 0, .{ .index = with_index });
             defer applied.deinit();
             try testing.expect(applied.isClean());
             try testing.expectEqual(with_index, applied.index_restored);
@@ -236,7 +236,7 @@ test "git's stash is applied and popped here as git applies and pops it" {
         {
             var repo = try twin.open(gpa, io);
             defer repo.deinit(io);
-            var popped = try stash.pop(&repo, io, 0, .{});
+            var popped = try stash.pop(io, &repo, 0, .{});
             defer popped.deinit();
             try testing.expect(popped.dropped);
         }
@@ -262,12 +262,12 @@ test "an index git cannot restore as a patch is not restored here either" {
     try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "apply", "-q", "--index" }));
     var repo = try twin.open(gpa, io);
     defer repo.deinit(io);
-    try testing.expectError(error.IndexConflict, stash.apply(&repo, io, 0, .{ .index = true }));
+    try testing.expectError(error.IndexConflict, stash.apply(io, &repo, 0, .{ .index = true }));
     try twin.expectSameState(io, &files);
 
     // Without the index, both merge it.
     try twin.git.exec(io, &.{ "stash", "apply", "-q" });
-    var applied = try stash.apply(&repo, io, 0, .{});
+    var applied = try stash.apply(io, &repo, 0, .{});
     defer applied.deinit();
     try twin.expectSameState(io, &files);
 }
@@ -288,7 +288,7 @@ test "a conflicting stash leaves git's stages and markers, and pop keeps it" {
     {
         var repo = try twin.open(gpa, io);
         defer repo.deinit(io);
-        var popped = try stash.pop(&repo, io, 0, .{});
+        var popped = try stash.pop(io, &repo, 0, .{});
         defer popped.deinit();
         try testing.expect(!popped.dropped);
         try testing.expectEqual(@as(usize, 2), popped.conflicts.len);
@@ -314,13 +314,13 @@ test "a stash that would overwrite local changes or untracked files is refused a
     var repo = try twin.open(gpa, io);
     defer repo.deinit(io);
     var refusal: stash.Refusal = .{};
-    try testing.expectError(error.LocalChangesWouldBeOverwritten, stash.apply(&repo, io, 0, .{ .refusal = &refusal }));
+    try testing.expectError(error.LocalChangesWouldBeOverwritten, stash.apply(io, &repo, 0, .{ .refusal = &refusal }));
     try testing.expectEqualStrings("b.txt", refusal.path());
     try twin.expectSameState(io, &files);
 
     try twin.both(io, &.{ "checkout", "b.txt" });
     try twin.write(io, "new.txt", "in the way\n");
-    try testing.expectError(error.UntrackedWouldBeOverwritten, stash.apply(&repo, io, 0, .{ .refusal = &refusal }));
+    try testing.expectError(error.UntrackedWouldBeOverwritten, stash.apply(io, &repo, 0, .{ .refusal = &refusal }));
     try testing.expectEqualStrings("new.txt", refusal.path());
     const kept = try twin.relic.readFile(io, "new.txt");
     defer gpa.free(kept);
@@ -342,14 +342,14 @@ test "dropping and clearing leave git's list" {
     var repo = try twin.open(gpa, io);
     defer repo.deinit(io);
     {
-        var l = try stash.list(&repo, io);
+        var l = try stash.list(io, &repo);
         defer l.deinit();
         try testing.expectEqual(@as(usize, 3), l.entries.len);
         try testing.expectEqualStrings("On main: third", l.entries[0].message);
     }
 
     {
-        var changes = try stash.show(&repo, io, 1, .{});
+        var changes = try stash.show(io, &repo, 1, .{});
         defer changes.deinit();
         var names: std.ArrayList(u8) = .empty;
         defer names.deinit(gpa);
@@ -365,21 +365,21 @@ test "dropping and clearing leave git's list" {
     }
 
     try twin.git.exec(io, &.{ "stash", "drop", "-q", "stash@{1}" });
-    _ = try stash.drop(&repo, io, 1, .{});
+    _ = try stash.drop(io, &repo, 1, .{});
     try twin.expectSameFile(io, ".git/logs/refs/stash");
     try twin.expectSame(io, &.{ "stash", "list" });
     try twin.expectSame(io, &.{ "rev-parse", "stash" });
 
     try twin.git.exec(io, &.{ "stash", "drop", "-q" });
-    _ = try stash.drop(&repo, io, 0, .{});
+    _ = try stash.drop(io, &repo, 0, .{});
     try twin.expectSameFile(io, ".git/logs/refs/stash");
     try twin.expectSame(io, &.{ "rev-parse", "stash" });
 
     try twin.git.exec(io, &.{ "stash", "clear" });
-    try stash.clear(&repo, io, .{});
+    try stash.clear(io, &repo, .{});
     try twin.expectSame(io, &.{ "stash", "list" });
     try testing.expectError(error.FileNotFound, twin.relic.readFile(io, ".git/logs/refs/stash"));
-    try testing.expectError(error.NoSuchStash, stash.drop(&repo, io, 0, .{}));
+    try testing.expectError(error.NoSuchStash, stash.drop(io, &repo, 0, .{}));
 }
 
 test "a stash goes through the clean and smudge filters as git's does" {
@@ -410,13 +410,13 @@ test "a stash goes through the clean and smudge filters as git's does" {
     defer drivers.deinit();
     const programs: program.Programs = .{ .environ = &twin.environ };
     // Without the permission to run the required filter, nothing is stashed.
-    try testing.expectError(error.UnsupportedAttribute, stash.push(&repo, io, .{ .who = who, .untracked = .include }));
-    _ = try stash.push(&repo, io, .{ .who = who, .untracked = .include, .filters = &drivers, .programs = programs });
+    try testing.expectError(error.UnsupportedAttribute, stash.push(io, &repo, .{ .who = who, .untracked = .include }));
+    _ = try stash.push(io, &repo, .{ .who = who, .untracked = .include, .filters = &drivers, .programs = programs });
     try twin.expectSame(io, &.{ "rev-parse", "stash", "stash^2", "stash^3" });
     try twin.expectSameState(io, &.{ "a.up", "b.up" });
 
     try twin.git.exec(io, &.{ "stash", "pop", "-q" });
-    var popped = try stash.pop(&repo, io, 0, .{ .filters = &drivers, .programs = programs });
+    var popped = try stash.pop(io, &repo, 0, .{ .filters = &drivers, .programs = programs });
     defer popped.deinit();
     try twin.expectSameState(io, &.{ "a.up", "b.up" });
 }

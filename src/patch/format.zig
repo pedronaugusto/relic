@@ -16,6 +16,8 @@
 //! letter's date and sender, a thread's message ids, a sign-off — is the
 //! caller's to hand in.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -254,7 +256,7 @@ const Ctx = struct {
 };
 
 /// Format `range` as `git format-patch` would.
-pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: Options) Error!Series {
+pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: Options) Self.Error!Series {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();

@@ -26,6 +26,8 @@
 //! below its highest verbosity, unless `Options.inner_messages` asks for
 //! them.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -296,7 +298,7 @@ pub fn mergeTrees(
     ours: Oid,
     theirs: Oid,
     options: Options,
-) Error!Result {
+) Self.Error!Result {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     var m: Merge = .{ .arena = arena_instance.allocator(), .io = io, .db = db, .options = options };
@@ -319,7 +321,7 @@ pub fn mergeCommits(
     theirs: Oid,
     bases: ?[]const Oid,
     options: Options,
-) Error!Result {
+) Self.Error!Result {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     var m: Merge = .{ .arena = arena_instance.allocator(), .io = io, .db = db, .options = options };
@@ -511,12 +513,12 @@ const Merge = struct {
     /// `Options.inner_messages` keeps them.
     fn pathMsg(
         m: *Merge,
+        comptime fmt: []const u8,
         kind: MessageKind,
         primary: []const u8,
         other1: ?[]const u8,
         other2: ?[]const u8,
         others: []const []const u8,
-        comptime fmt: []const u8,
         args: anytype,
     ) Allocator.Error!void {
         if (m.call_depth > 0 and !m.options.inner_messages) return;
@@ -1054,7 +1056,7 @@ const Merge = struct {
             if (!result.isClean()) status = .conflict;
         }
         if (status == .binary_conflict) {
-            try m.pathMsg(.binary, path, null, null, &.{}, "warning: Cannot merge binary files: {s} ({s} vs. {s})", .{ path, name1, name2 });
+            try m.pathMsg("warning: Cannot merge binary files: {s} ({s} vs. {s})", .binary, path, null, null, &.{}, .{ path, name1, name2 });
         }
         return .{ .bytes = bytes, .status = status };
     }
@@ -1089,7 +1091,7 @@ const Merge = struct {
             const merged = try m.merge3Way(path, if (two_way) m.zero() else o.oid, a.oid, b.oid, pathnames, extra_marker_size);
             result.oid = try m.db.write(m.io, .blob, merged.bytes);
             if (merged.status != .ok) clean = false;
-            try m.pathMsg(.auto_merging, path, null, null, &.{}, "Auto-merging {s}", .{path});
+            try m.pathMsg("Auto-merging {s}", .auto_merging, path, null, null, &.{}, .{path});
         } else if (a.mode & S_IFMT == S_IFGITLINK) {
             const two_way = (o.mode & S_IFMT) != (a.mode & S_IFMT);
             clean = try m.mergeSubmodule(pathnames[0], if (two_way) m.zero() else o.oid, a.oid, b.oid, &result.oid);
@@ -1125,49 +1127,49 @@ const Merge = struct {
         const search = m.call_depth == 0;
         const sub = if (m.options.submodules) |s| s.openFn(s.context, path) else null;
         const history = sub orelse {
-            try m.pathMsg(.submodule_not_initialized, path, null, null, &.{}, "Failed to merge submodule {s} (not checked out)", .{path});
+            try m.pathMsg("Failed to merge submodule {s} (not checked out)", .submodule_not_initialized, path, null, null, &.{}, .{path});
             return false;
         };
         if (o.isZero()) {
-            try m.pathMsg(.submodule_null_merge_base, path, null, null, &.{}, "Failed to merge submodule {s} (no merge base)", .{path});
+            try m.pathMsg("Failed to merge submodule {s} (no merge base)", .submodule_null_merge_base, path, null, null, &.{}, .{path});
             return false;
         }
         const sdb = history.db;
         for ([_]Oid{ o, a, b }) |oid| {
             const found = sdb.read(m.io, oid) catch |err| switch (err) {
                 error.ObjectNotFound => {
-                    try m.pathMsg(.submodule_history_not_available, path, null, null, &.{}, "Failed to merge submodule {s} (commits not present)", .{path});
+                    try m.pathMsg("Failed to merge submodule {s} (commits not present)", .submodule_history_not_available, path, null, null, &.{}, .{path});
                     return false;
                 },
                 else => |e| return e,
             };
             defer sdb.allocator().free(found.bytes);
             if (found.type != .commit) {
-                try m.pathMsg(.submodule_history_not_available, path, null, null, &.{}, "Failed to merge submodule {s} (commits not present)", .{path});
+                try m.pathMsg("Failed to merge submodule {s} (commits not present)", .submodule_history_not_available, path, null, null, &.{}, .{path});
                 return false;
             }
         }
         const gpa = m.db.allocator();
         if (!try revwalk.isAncestor(gpa, m.io, sdb, o, a) or !try revwalk.isAncestor(gpa, m.io, sdb, o, b)) {
-            try m.pathMsg(.submodule_may_have_rewinds, path, null, null, &.{}, "Failed to merge submodule {s} (commits don't follow merge-base)", .{path});
+            try m.pathMsg("Failed to merge submodule {s} (commits don't follow merge-base)", .submodule_may_have_rewinds, path, null, null, &.{}, .{path});
             return false;
         }
         var hex: [hash.max_hex_len]u8 = undefined;
         if (try revwalk.isAncestor(gpa, m.io, sdb, a, b)) {
             result.* = b;
-            try m.pathMsg(.submodule_fast_forwarding, path, null, null, &.{}, "Note: Fast-forwarding submodule {s} to {s}", .{ path, b.hex(&hex) });
+            try m.pathMsg("Note: Fast-forwarding submodule {s} to {s}", .submodule_fast_forwarding, path, null, null, &.{}, .{ path, b.hex(&hex) });
             return true;
         }
         if (try revwalk.isAncestor(gpa, m.io, sdb, b, a)) {
             result.* = a;
-            try m.pathMsg(.submodule_fast_forwarding, path, null, null, &.{}, "Note: Fast-forwarding submodule {s} to {s}", .{ path, a.hex(&hex) });
+            try m.pathMsg("Note: Fast-forwarding submodule {s} to {s}", .submodule_fast_forwarding, path, null, null, &.{}, .{ path, a.hex(&hex) });
             return true;
         }
         if (!search) return false;
 
         const merges = try m.findFirstMerges(sdb, history.tips, a, b);
         if (merges.len == 0) {
-            try m.pathMsg(.submodule_failed, path, null, null, &.{}, "Failed to merge submodule {s}", .{path});
+            try m.pathMsg("Failed to merge submodule {s}", .submodule_failed, path, null, null, &.{}, .{path});
             return false;
         }
         var listing: std.ArrayList(u8) = .empty;
@@ -1182,9 +1184,9 @@ const Merge = struct {
             try listing.print(m.arena, "    {s} {s}\n", .{ short, subject });
         }
         if (merges.len == 1) {
-            try m.pathMsg(.submodule_possible_resolution, path, null, null, &.{}, "Failed to merge submodule {s}, but a possible merge resolution exists: {s}", .{ path, listing.items });
+            try m.pathMsg("Failed to merge submodule {s}, but a possible merge resolution exists: {s}", .submodule_possible_resolution, path, null, null, &.{}, .{ path, listing.items });
         } else {
-            try m.pathMsg(.submodule_possible_resolution, path, null, null, &.{}, "Failed to merge submodule {s}, but multiple possible merges exist:\n{s}", .{ path, listing.items });
+            try m.pathMsg("Failed to merge submodule {s}, but multiple possible merges exist:\n{s}", .submodule_possible_resolution, path, null, null, &.{}, .{ path, listing.items });
         }
         return false;
     }
@@ -1256,12 +1258,12 @@ const Merge = struct {
         } else if (m.pathInWay(new_path, @as(u3, 1) << @intCast(side_index), p)) {
             c_info.reported_already = true;
             const joined = try std.mem.join(m.arena, ", ", c_info.source_files.items);
-            try m.pathMsg(.dir_rename_file_in_way, new_path, null, null, c_info.source_files.items, "CONFLICT (implicit dir rename): Existing file/dir at {s} in the way of implicit directory rename(s) putting the following path(s) there: {s}.", .{ new_path, joined });
+            try m.pathMsg("CONFLICT (implicit dir rename): Existing file/dir at {s} in the way of implicit directory rename(s) putting the following path(s) there: {s}.", .dir_rename_file_in_way, new_path, null, null, c_info.source_files.items, .{ new_path, joined });
             clean = false;
         } else if (c_info.source_files.items.len > 1) {
             c_info.reported_already = true;
             const joined = try std.mem.join(m.arena, ", ", c_info.source_files.items);
-            try m.pathMsg(.dir_rename_collision, new_path, null, null, c_info.source_files.items, "CONFLICT (implicit dir rename): Cannot map more than one path to {s}; implicit directory renames tried to put these paths there: {s}", .{ new_path, joined });
+            try m.pathMsg("CONFLICT (implicit dir rename): Cannot map more than one path to {s}; implicit directory renames tried to put these paths there: {s}", .dir_rename_collision, new_path, null, null, c_info.source_files.items, .{ new_path, joined });
             clean = false;
         }
         if (!clean) return null;
@@ -1288,7 +1290,7 @@ const Merge = struct {
             }
             if (max == 0) continue;
             if (bad_max == max) {
-                try m.pathMsg(.dir_rename_split, source_dir, null, null, &.{}, "CONFLICT (directory rename split): Unclear where to rename {s} to; it was renamed to multiple other directories, with no destination getting a majority of the files.", .{source_dir});
+                try m.pathMsg("CONFLICT (directory rename split): Unclear where to rename {s} to; it was renamed to multiple other directories, with no destination getting a majority of the files.", .dir_rename_split, source_dir, null, null, &.{}, .{source_dir});
                 clean.* = false;
             } else {
                 try m.dir_renames[side].put(m.arena, source_dir, best.?);
@@ -1364,7 +1366,7 @@ const Merge = struct {
         if (collisions[other_side].contains(path)) return null;
         const found = checkDirRenamed(path, dir_renames) orelse return null;
         if (exclusions.contains(found.new)) {
-            try m.pathMsg(.dir_rename_skipped, found.old, path, found.new, &.{}, "WARNING: Avoiding applying {s} -> {s} rename to {s}, because {s} itself was renamed.", .{ found.old, found.new, path, found.new });
+            try m.pathMsg("WARNING: Avoiding applying {s} -> {s} rename to {s}, because {s} itself was renamed.", .dir_rename_skipped, found.old, path, found.new, &.{}, .{ found.old, found.new, path, found.new });
             return null;
         }
         const new_path = try m.handlePathLevelConflicts(path, side_index, p, found.old, found.new, &collisions[side_index]);
@@ -1448,16 +1450,16 @@ const Merge = struct {
 
         if (m.options.directory_renames == .on) {
             if (pair.status == 'A') {
-                try m.pathMsg(.dir_rename_applied, interned, old_path, null, &.{}, "Path updated: {s} added in {s} inside a directory that was renamed in {s}; moving it to {s}.", .{ old_path, branch_with_new_path, branch_with_dir_rename, interned });
+                try m.pathMsg("Path updated: {s} added in {s} inside a directory that was renamed in {s}; moving it to {s}.", .dir_rename_applied, interned, old_path, null, &.{}, .{ old_path, branch_with_new_path, branch_with_dir_rename, interned });
             } else {
-                try m.pathMsg(.dir_rename_applied, interned, old_path, null, &.{}, "Path updated: {s} renamed to {s} in {s}, inside a directory that was renamed in {s}; moving it to {s}.", .{ pair.one.path, old_path, branch_with_new_path, branch_with_dir_rename, interned });
+                try m.pathMsg("Path updated: {s} renamed to {s} in {s}, inside a directory that was renamed in {s}; moving it to {s}.", .dir_rename_applied, interned, old_path, null, &.{}, .{ pair.one.path, old_path, branch_with_new_path, branch_with_dir_rename, interned });
             }
         } else {
             ci.path_conflict = true;
             if (pair.status == 'A') {
-                try m.pathMsg(.dir_rename_suggested, interned, old_path, null, &.{}, "CONFLICT (file location): {s} added in {s} inside a directory that was renamed in {s}, suggesting it should perhaps be moved to {s}.", .{ old_path, branch_with_new_path, branch_with_dir_rename, interned });
+                try m.pathMsg("CONFLICT (file location): {s} added in {s} inside a directory that was renamed in {s}, suggesting it should perhaps be moved to {s}.", .dir_rename_suggested, interned, old_path, null, &.{}, .{ old_path, branch_with_new_path, branch_with_dir_rename, interned });
             } else {
-                try m.pathMsg(.dir_rename_suggested, interned, old_path, null, &.{}, "CONFLICT (file location): {s} renamed to {s} in {s}, inside a directory that was renamed in {s}, suggesting it should perhaps be moved to {s}.", .{ pair.one.path, old_path, branch_with_new_path, branch_with_dir_rename, interned });
+                try m.pathMsg("CONFLICT (file location): {s} renamed to {s} in {s}, inside a directory that was renamed in {s}, suggesting it should perhaps be moved to {s}.", .dir_rename_suggested, interned, old_path, null, &.{}, .{ pair.one.path, old_path, branch_with_new_path, branch_with_dir_rename, interned });
             }
         }
         pair.two.path = interned;
@@ -1661,7 +1663,7 @@ const Merge = struct {
                 side1.path_conflict = true;
                 side2.path_conflict = true;
                 base.path_conflict = true;
-                try m.pathMsg(.rename_rename, pathnames[0], pathnames[1], pathnames[2], &.{}, "CONFLICT (rename/rename): {s} renamed to {s} in {s} and to {s} in {s}.", .{ pathnames[0], pathnames[1], m.branch1, pathnames[2], m.branch2 });
+                try m.pathMsg("CONFLICT (rename/rename): {s} renamed to {s} in {s} and to {s} in {s}.", .rename_rename, pathnames[0], pathnames[1], pathnames[2], &.{}, .{ pathnames[0], pathnames[1], m.branch1, pathnames[2], m.branch2 });
                 i += 1;
                 continue;
             }
@@ -1698,11 +1700,11 @@ const Merge = struct {
                 const clean = try m.handleContentMerge(pair.one.path, base.stages[0], side1.stages[1], side2.stages[2], pathnames, 1 + 2 * m.call_depth, &merged);
                 new.stages[target_index] = merged;
                 if (!clean) {
-                    try m.pathMsg(.rename_collides, newpath, old_path, null, &.{}, "CONFLICT (rename involved in collision): rename of {s} -> {s} has content conflicts AND collides with another path; this may result in nested conflict markers.", .{ old_path, newpath });
+                    try m.pathMsg("CONFLICT (rename involved in collision): rename of {s} -> {s} has content conflicts AND collides with another path; this may result in nested conflict markers.", .rename_collides, newpath, old_path, null, &.{}, .{ old_path, newpath });
                 }
             } else if (collision and source_deleted) {
                 new.path_conflict = true;
-                try m.pathMsg(.rename_delete, newpath, old_path, null, &.{}, "CONFLICT (rename/delete): {s} renamed to {s} in {s}, but deleted in {s}.", .{ old_path, newpath, rename_branch, delete_branch });
+                try m.pathMsg("CONFLICT (rename/delete): {s} renamed to {s} in {s}, but deleted in {s}.", .rename_delete, newpath, old_path, null, &.{}, .{ old_path, newpath, rename_branch, delete_branch });
             } else {
                 new.stages[0] = old.stages[0];
                 new.filemask |= 1;
@@ -1712,7 +1714,7 @@ const Merge = struct {
                     old.filemask &= 6;
                 } else if (source_deleted) {
                     new.path_conflict = true;
-                    try m.pathMsg(.rename_delete, newpath, old_path, null, &.{}, "CONFLICT (rename/delete): {s} renamed to {s} in {s}, but deleted in {s}.", .{ old_path, newpath, rename_branch, delete_branch });
+                    try m.pathMsg("CONFLICT (rename/delete): {s} renamed to {s} in {s}, but deleted in {s}.", .rename_delete, newpath, old_path, null, &.{}, .{ old_path, newpath, rename_branch, delete_branch });
                 } else {
                     new.stages[other_source_index] = old.stages[other_source_index];
                     new.filemask |= old_sidemask;
@@ -1839,7 +1841,7 @@ const Merge = struct {
             const old_path = path;
             path = try m.uniquePath(path, branch);
             try m.paths.put(m.arena, path, new_ci);
-            try m.pathMsg(.file_directory, path, old_path, null, &.{}, "CONFLICT (file/directory): directory in the way of {s} from {s}; moving it to {s} instead.", .{ old_path, branch, path });
+            try m.pathMsg("CONFLICT (file/directory): directory in the way of {s} from {s}; moving it to {s} instead.", .file_directory, path, old_path, null, &.{}, .{ old_path, branch, path });
             ci.filemask = 0;
             ci = new_ci;
         }
@@ -1880,9 +1882,9 @@ const Merge = struct {
                 if (rename_a) a_path = try m.uniquePath(path, m.branch1);
                 if (rename_b) b_path = try m.uniquePath(path, m.branch2);
                 if (rename_a and rename_b) {
-                    try m.pathMsg(.distinct_modes, path, a_path, b_path, &.{}, "CONFLICT (distinct types): {s} had different types on each side; renamed both of them so each can be recorded somewhere.", .{path});
+                    try m.pathMsg("CONFLICT (distinct types): {s} had different types on each side; renamed both of them so each can be recorded somewhere.", .distinct_modes, path, a_path, b_path, &.{}, .{path});
                 } else {
-                    try m.pathMsg(.distinct_modes, path, if (rename_a) a_path else b_path, null, &.{}, "CONFLICT (distinct types): {s} had different types on each side; renamed one of them so each can be recorded somewhere.", .{path});
+                    try m.pathMsg("CONFLICT (distinct types): {s} had different types on each side; renamed one of them so each can be recorded somewhere.", .distinct_modes, path, if (rename_a) a_path else b_path, null, &.{}, .{path});
                 }
                 ci.clean = false;
                 const new_ci = try m.arena.create(Info);
@@ -1923,7 +1925,7 @@ const Merge = struct {
                 var reason: []const u8 = "content";
                 if (ci.filemask == 6) reason = "add/add";
                 if (merged_file.mode & S_IFMT == S_IFGITLINK) reason = "submodule";
-                try m.pathMsg(.contents, path, null, null, &.{}, "CONFLICT ({s}): Merge conflict in {s}", .{ reason, path });
+                try m.pathMsg("CONFLICT ({s}): Merge conflict in {s}", .contents, path, null, null, &.{}, .{ reason, path });
             }
         } else if (ci.filemask == 3 or ci.filemask == 5) {
             const side: usize = if (ci.filemask == 5) 2 else 1;
@@ -1945,7 +1947,7 @@ const Merge = struct {
             } else if (ci.path_conflict and ci.stages[0].oid.eql(ci.stages[side].oid)) {
                 // From a rename/delete, which has said so already.
             } else {
-                try m.pathMsg(.modify_delete, path, null, null, &.{}, "CONFLICT (modify/delete): {s} deleted in {s} and modified in {s}.  Version {s} of {s} left in tree.", .{ path, delete_branch, modify_branch, modify_branch, path });
+                try m.pathMsg("CONFLICT (modify/delete): {s} deleted in {s} and modified in {s}.  Version {s} of {s} left in tree.", .modify_delete, path, null, null, &.{}, .{ path, delete_branch, modify_branch, modify_branch, path });
             }
         } else if (ci.filemask == 2 or ci.filemask == 4) {
             const side: usize = if (ci.filemask == 4) 2 else 1;

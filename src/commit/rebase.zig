@@ -24,6 +24,8 @@
 //! caller hands in. The commits a rebase rewrote come back as pairs, which is
 //! what git hands its `post-rewrite` hook.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -343,7 +345,7 @@ const Run = struct {
     }
 };
 
-fn newRun(gpa: Allocator, arena_state: *std.heap.ArenaAllocator, io: Io, repo: *Repository, options: Options) Error!Run {
+fn newRun(gpa: Allocator, io: Io, arena_state: *std.heap.ArenaAllocator, repo: *Repository, options: Options) Error!Run {
     const interactive = options.interactive or options.todo != null;
     return .{
         .gpa = gpa,
@@ -736,11 +738,11 @@ fn requireClean(r: *Run) Error!void {
 /// through, as git gives it to a person to edit: short object names, the
 /// subjects after them, and git's help below. Edit it and hand it back as
 /// `Options.todo`. The result is the caller's.
-pub fn plan(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: Options) Error![]u8 {
+pub fn plan(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: Options) Self.Error![]u8 {
     diagnostic.reset(options.diagnostic);
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    var r = try newRun(gpa, &arena_state, io, repo, options);
+    var r = try newRun(gpa, io, &arena_state, repo, options);
     const tip = try resolveTip(&r);
     var items = try makeScript(&r, upstream, tip.orig_head);
     if (items.len == 0) {
@@ -781,7 +783,7 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
 
 /// Rebase the current branch, or `options.branch`, onto `upstream` (or
 /// `options.onto`).
-pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: Options) Error!Outcome {
+pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     const arena_state = try gpa.create(std.heap.ArenaAllocator);
     arena_state.* = .init(gpa);
@@ -789,7 +791,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
         arena_state.deinit();
         gpa.destroy(arena_state);
     }
-    var r = try newRun(gpa, arena_state, io, repo, options);
+    var r = try newRun(gpa, io, arena_state, repo, options);
 
     if (inProgress(io, repo)) return error.RebaseInProgress;
     if (head_mod.stateExists(io, repo.git_dir, "rebase-apply")) return error.ApplyBackendInProgress;
@@ -1463,7 +1465,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     // A rebase takes care of the commit itself, so a conflict leaves no
     // `CHERRY_PICK_HEAD`, as git's leaves none. rerere runs on the stop.
     if (!outcome.isClean()) {
-        _ = try rerere.afterStop(gpa, io, repo, &index, arena, r.options.rerere_autoupdate);
+        _ = try rerere.afterStop(gpa, arena, io, repo, &index, r.options.rerere_autoupdate);
         return .conflict;
     }
     if (command == .pick or command == .reword or command == .edit) {
@@ -2230,7 +2232,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         const copied = try r.arena.dupe(threeway.Conflict, outcome.conflicts);
         for (copied) |*c| c.path = try r.arena.dupe(u8, c.path);
         r.conflicts = copied;
-        _ = try rerere.afterStop(gpa, io, repo, &index, r.arena, r.options.rerere_autoupdate);
+        _ = try rerere.afterStop(gpa, r.arena, io, repo, &index, r.options.rerere_autoupdate);
         if (item.commit) |original| try errorWithPatch(r, original, false) else if (r.have_message and !r.hasState("message")) try r.state("message", r.msg.items);
         _ = r.items.orderedRemove(0);
         return finishOutcome(r, .stopped, .conflict, item.commit);
@@ -2369,7 +2371,7 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
         arena_state.deinit();
         gpa.destroy(arena_state);
     }
-    var r = try newRun(gpa, arena_state, io, repo, options);
+    var r = try newRun(gpa, io, arena_state, repo, options);
     r.allow_ff = !options.force;
     _ = try readBasicState(&r);
     const text = (try r.readState("git-rebase-todo")) orelse "";
@@ -2384,7 +2386,7 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
 
 /// Continue the rebase that stopped, whoever stopped it: commit what is
 /// staged, as git does, and carry on down the sheet.
-pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     var r = try loadRun(gpa, io, repo, options);
     errdefer freeRun(&r);
@@ -2506,7 +2508,7 @@ const hooksEnv = ?hooks_mod.Runner.CommitEnv;
 
 /// Leave out the instruction that stopped, with whatever it changed, and
 /// carry on: `--skip`.
-pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     {
         var r = try loadRun(gpa, io, repo, options);
@@ -2526,7 +2528,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!O
 
 /// Stop the rebase and put the branch, `HEAD`, the index and the working
 /// tree back where they were when it began: `--abort`.
-pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Error!void {
+pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Self.Error!void {
     var r = try loadRun(gpa, io, repo, .{ .who = who });
     defer freeRun(&r);
     try rerere.clear(gpa, io, repo);
@@ -2553,7 +2555,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) E
 
 /// Forget the rebase and leave `HEAD`, the index and the working tree as
 /// they are: `--quit`.
-pub fn quit(gpa: Allocator, io: Io, repo: *Repository) Error!void {
+pub fn quit(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     var r = try loadRun(gpa, io, repo, .{ .who = .{ .name = "", .email = "", .when_secs = 0, .offset_minutes = 0 } });
     defer freeRun(&r);
     try removeState(&r);

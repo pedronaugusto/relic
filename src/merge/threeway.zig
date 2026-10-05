@@ -11,6 +11,8 @@
 //! merge puts one. A path the merge does not touch keeps whatever changes it
 //! has, and an ignored file in the way is replaced, both as in git.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -141,7 +143,7 @@ pub fn apply(
     ours: Oid,
     theirs: Oid,
     options: Options,
-) Error!Outcome {
+) Self.Error!Outcome {
     return run(gpa, io, repo, index, .{ .trees = .{ .base = base, .ours = ours, .theirs = theirs } }, options);
 }
 
@@ -159,7 +161,7 @@ pub fn applyCommits(
     theirs: Oid,
     bases: ?[]const Oid,
     options: Options,
-) Error!Outcome {
+) Self.Error!Outcome {
     return run(gpa, io, repo, index, .{ .commits = .{ .ours = ours, .theirs = theirs, .bases = bases } }, options);
 }
 
@@ -271,7 +273,7 @@ pub fn applyOctopus(
     head: Oid,
     heads: []const Oid,
     options: Options,
-) Error!Outcome {
+) Self.Error!Outcome {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();

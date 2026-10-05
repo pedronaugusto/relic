@@ -1,19 +1,5 @@
 [
   {
-    "rule": "Z015",
-    "path": "src/commit.zig",
-    "source": "pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit.zig",
-    "source": "pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Error!Outcome {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/commit.zig",
     "source": "const eol = std.mem.indexOfScalarPos(u8, text, i, '\\n');",
@@ -25,13 +11,6 @@
     "path": "src/commit.zig",
     "source": "fn deinit(t: *Twin) void {",
     "detail": "deinit should set t.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/todo.zig",
-    "source": "pub fn parse(gpa: Allocator, bytes: []const u8, resolver: Resolver, options: ParseOptions) ParseError!List {",
-    "detail": "public function exposes private error set 'ParseError'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -56,143 +35,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn open(gpa: Allocator, io: Io, repo: *Repository, ref: []const u8, combine: Combine) Error!Notes {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn get(t: *Notes, io: Io, obj: Oid) Error!?Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn add(t: *Notes, io: Io, obj: Oid, note: Oid, combine: ?Combine) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn remove(t: *Notes, io: Io, obj: Oid) Error!bool {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn copy(t: *Notes, io: Io, from: Oid, to: Oid, force: bool, combine: ?Combine) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn list(t: *Notes, io: Io, gpa: Allocator) Error![]Entry {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn list(t: *Notes, io: Io, gpa: Allocator) Error![]Entry {",
-    "detail": "'Allocator' parameter should come before 'Io'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn writeTree(t: *Notes, io: Io) Error!Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn commit(t: *Notes, io: Io, msg: []const u8, who: object.Signature) Error!?Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn prune(t: *Notes, io: Io, gpa: Allocator, dry_run: bool) Error![]Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn prune(t: *Notes, io: Io, gpa: Allocator, dry_run: bool) Error![]Oid {",
-    "detail": "'Allocator' parameter should come before 'Io'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z030",
     "path": "src/commit/notes.zig",
     "source": "fn deinit(s: *Stack, gpa: Allocator) void {",
     "detail": "deinit should set s.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/notes.zig",
-    "source": "fn finishSubtree(s: *Stack, t: *Notes, io: Io) Error!void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/notes.zig",
-    "source": "fn add(root: *Stack, t: *Notes, io: Io, path: []const u8, mode: u32, oid: Oid) Error!void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn add(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: WriteOptions) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn append(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: WriteOptions) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn copy(gpa: Allocator, io: Io, repo: *Repository, from: Oid, to: Oid, options: RefOptions) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn remove(gpa: Allocator, io: Io, repo: *Repository, objects: []const Oid, options: RefOptions) Error!usize {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: RefOptions, dry_run: bool) Error![]Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn show(gpa: Allocator, io: Io, repo: *Repository, ref: ?[]const u8, obj: Oid) Error!?[]u8 {",
-    "detail": "public function exposes private error set 'Error'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -203,45 +49,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, options: MergeOptions) Error!MergeOutcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/notes.zig",
-    "source": "fn f(r: *Repository, i: Io, oid: Oid, slot: *?[]u8) Error![]const u8 {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Error!Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/notes.zig",
-    "source": "pub fn mergeAbort(io: Io, repo: *Repository) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z030",
     "path": "src/commit/notes.zig",
     "source": "fn deinit(t: *Twin) void {",
     "detail": "deinit should set t.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/notes.zig",
-    "source": "fn gitOrFailed(r: *testgit.Repo, io: Io, args: []const []const u8) ![]u8 {",
-    "detail": "'Io' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -273,31 +84,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/commit/rebase.zig",
-    "source": "fn newRun(gpa: Allocator, arena_state: *std.heap.ArenaAllocator, io: Io, repo: *Repository, options: Options) Error!Run {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/rebase.zig",
-    "source": "pub fn plan(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: Options) Error![]u8 {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z017",
     "path": "src/commit/rebase.zig",
     "source": "return try sheetText(&r, gpa, items, upstream, onto, tip.orig_head, true);",
     "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try sheetText(&r, gpa, items, upstre; return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/rebase.zig",
-    "source": "pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -329,90 +119,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/commit/rebase.zig",
-    "source": "pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/rebase.zig",
-    "source": "pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/rebase.zig",
-    "source": "pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/rebase.zig",
-    "source": "pub fn quit(gpa: Allocator, io: Io, repo: *Repository) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/cache.zig",
-    "source": "pub fn get(c: *Cache, gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, out: ?Allocator) Error!Info {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/signing.zig",
-    "source": "pub fn init(gpa: Allocator, config: *const config_mod.Config, programs: program.Programs) Error!Signer {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/signing.zig",
-    "source": "pub fn sign(signer: *Signer, io: Io, payload: []const u8, key: ?[]const u8, identity: ?object.Signature) Error![]u8 {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/signing.zig",
-    "source": "fn signSsh(signer: *Signer, io: Io, arena: Allocator, payload: []const u8, key: []const u8) Error![]u8 {",
-    "detail": "'Allocator' parameter should come before 'Io'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/signing.zig",
-    "source": "fn defaultSshKey(signer: *Signer, io: Io, arena: Allocator) Error![]const u8 {",
-    "detail": "'Allocator' parameter should come before 'Io'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/signing.zig",
-    "source": "pub fn verify(signer: *Signer, io: Io, payload: []const u8, signature: []const u8, signed_at: ?i64) Error!Verdict {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/signing.zig",
-    "source": "arena: Allocator,",
-    "detail": "'Allocator' parameter should come before 'Io'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/signing.zig",
-    "source": "arena: Allocator,",
-    "detail": "'Allocator' parameter should come before 'Io'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/commit/signing.zig",
     "source": "const nl = std.mem.indexOfScalarPos(u8, bytes, at, '\\n');",
@@ -431,76 +137,6 @@
     "path": "src/commit/signing.zig",
     "source": "const nl = std.mem.indexOfScalarPos(u8, bytes, at, '\\n');",
     "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn list(repo: *Repository, io: Io) Error!List {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn list(repo: *Repository, io: Io) Error!List {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn get(repo: *Repository, io: Io, n: usize) Error!Stash {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn get(repo: *Repository, io: Io, n: usize) Error!Stash {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn inspect(repo: *Repository, io: Io, commit: Oid) Error!Stash {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn inspect(repo: *Repository, io: Io, commit: Oid) Error!Stash {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn show(repo: *Repository, io: Io, n: usize, options: diff.TreeOptions) Error!diff.Changes {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn show(repo: *Repository, io: Io, n: usize, options: diff.TreeOptions) Error!diff.Changes {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "io: Io,",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "arena: Allocator,",
-    "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -508,20 +144,6 @@
     "path": "src/commit/stash.zig",
     "source": "fn deinit(ctx: *Ctx) void {",
     "detail": "deinit should set ctx.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {",
-    "detail": "'Io' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -546,94 +168,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "fn writeCommit(repo: *Repository, io: Io, tree: Oid, parents: []const Oid, who: object.Signature, message: []const u8) Error!Oid {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "fn abbreviate(repo: *Repository, io: Io, oid: Oid, buf: *[hash.max_hex_len]u8) Error![]const u8 {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn apply(repo: *Repository, io: Io, n: usize, options: ApplyOptions) Error!Applied {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn apply(repo: *Repository, io: Io, n: usize, options: ApplyOptions) Error!Applied {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn pop(repo: *Repository, io: Io, n: usize, options: ApplyOptions) Error!Applied {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn pop(repo: *Repository, io: Io, n: usize, options: ApplyOptions) Error!Applied {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions) Error!Applied {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions) Error!Applied {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/commit/stash.zig",
     "source": "var paths: std.StringArrayHashMapUnmanaged(void) = .empty;",
     "detail": "'StringArrayHashMapUnmanaged' is deprecated: Deprecated; use `array_hash_map.String`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn clear(repo: *Repository, io: Io, options: DropOptions) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/stash.zig",
-    "source": "pub fn clear(repo: *Repository, io: Io, options: DropOptions) Error!void {",
-    "detail": "'Io' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -644,178 +182,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/commit/commithooks.zig",
-    "source": "pub fn init(arena: Allocator, io: Io, repo: *Repository, runner: ?*hooks.Runner, verify: bool) Error!Hooks {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/commithooks.zig",
-    "source": "pub fn beforeCommit(",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/commithooks.zig",
-    "source": "pub fn postCommit(h: *const Hooks, arena: Allocator, io: Io, author: ?object.Signature) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/sequencer.zig",
-    "source": "pub fn pick(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/sequencer.zig",
-    "source": "pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/sequencer.zig",
-    "source": "fn emptyTree(repo: *Repository, io: Io) Error!Oid {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/sequencer.zig",
-    "source": "pub fn commitResolver(repo: *Repository, io: Io) ResolverContext {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/sequencer.zig",
-    "source": "pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/sequencer.zig",
-    "source": "pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/sequencer.zig",
-    "source": "pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/sequencer.zig",
-    "source": "pub fn quit(io: Io, repo: *Repository) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/sequencer.zig",
-    "source": "pub fn resetMerge(",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/head.zig",
-    "source": "pub fn advance(io: Io, repo: *Repository, from: Head, new: Oid, log: Log) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/head.zig",
-    "source": "pub fn detach(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/head.zig",
-    "source": "pub fn attach(io: Io, repo: *Repository, branch: []const u8, old: ?Oid, log: Log) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/head.zig",
-    "source": "pub fn moveBranch(io: Io, repo: *Repository, branch: []const u8, expected: refs_mod.Expected, new: Oid, log: Log) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/head.zig",
-    "source": "pub fn writeRef(io: Io, repo: *Repository, name: []const u8, oid: Oid) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/head.zig",
-    "source": "pub fn deleteRef(io: Io, repo: *Repository, name: []const u8) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/head.zig",
-    "source": "pub fn writeState(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/head.zig",
-    "source": "pub fn removeState(io: Io, dir: Io.Dir, sub_path: []const u8) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z025",
     "path": "src/commit/head.zig",
     "source": "tx.commit(io, null) catch |err| return err;",
     "detail": "redundant catch: `catch |err| return err` -> use try",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/merging.zig",
-    "source": "pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Error!Target {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/merging.zig",
-    "source": "pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/merging.zig",
-    "source": "pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOptions) Error!Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/merging.zig",
-    "source": "pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -1701,20 +1071,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/merge/threeway.zig",
-    "source": "pub fn apply(",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/threeway.zig",
-    "source": "pub fn applyCommits(",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/merge/threeway.zig",
     "source": "var desired: std.StringArrayHashMapUnmanaged(?TreeEntry) = .empty;",
@@ -1757,24 +1113,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/merge/strategy.zig",
-    "source": "pub fn split(arena: Allocator, line_in: []const u8) SplitError![]const []const u8 {",
-    "detail": "public function exposes private error set 'SplitError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/merge/rerere.zig",
     "source": "const end = if (std.mem.indexOfScalarPos(u8, l.bytes, l.at, '\\n')) |nl| nl + 1 else l.bytes.len;",
     "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -1785,80 +1127,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn afterCommit(gpa: Allocator, io: Io, repo: *Repository) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn afterStop(gpa: Allocator, io: Io, repo: *Repository, index: *Index, arena: Allocator, autoupdate: ?bool) Error![]const []const u8 {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn afterStop(gpa: Allocator, io: Io, repo: *Repository, index: *Index, arena: Allocator, autoupdate: ?bool) Error![]const []const u8 {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/merge/rerere.zig",
-    "source": "fn startRun(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, attrs: ?*attributes.Attrs) Error!Run {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn status(gpa: Allocator, io: Io, repo: *Repository) Error!Paths {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn remaining(gpa: Allocator, io: Io, repo: *Repository) Error!Paths {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn diff(gpa: Allocator, io: Io, repo: *Repository) Error![]u8 {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []const u8) Error!Forgotten {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/merge/rerere.zig",
     "source": "var conflicts: std.StringArrayHashMapUnmanaged(Stages) = .empty;",
     "detail": "'StringArrayHashMapUnmanaged' is deprecated: Deprecated; use `array_hash_map.String`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/rerere.zig",
-    "source": "pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now: i64) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -1873,13 +1145,6 @@
     "path": "src/merge/rerere.zig",
     "source": "pub fn lessThan(c: @This(), a: usize, b: usize) bool {",
     "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/subtreeshift.zig",
-    "source": "pub fn shift(gpa: Allocator, io: Io, db: *odb_mod.Odb, one: Oid, two: Oid, prefix: []const u8) Error!Oid {",
-    "detail": "public function exposes private error set 'Error'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -1908,20 +1173,6 @@
     "path": "src/merge/subtreeshift.zig",
     "source": "const slash = std.mem.indexOfScalar(u8, prefix, '/');",
     "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/ort.zig",
-    "source": "pub fn mergeTrees(",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/ort.zig",
-    "source": "pub fn mergeCommits(",
-    "detail": "public function exposes private error set 'Error'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -1957,13 +1208,6 @@
     "path": "src/merge/ort.zig",
     "source": "const S_IFGITLINK: u32 = 0o160000;",
     "detail": "variable 'S_IFGITLINK' should be snake_case",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/merge/ort.zig",
-    "source": "comptime fmt: []const u8,",
-    "detail": "'comptime' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2016,13 +1260,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z012",
-    "path": "src/merge/strategy_test.zig",
-    "source": "pub fn format(w: Words, writer: *std.Io.Writer) std.Io.Writer.Error!void {",
-    "detail": "public function exposes private type 'Words'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/merge/strategy_test.zig",
     "source": "var out: std.StringArrayHashMapUnmanaged([]const u8) = .empty;",
@@ -2041,13 +1278,6 @@
     "path": "src/merge/strategy_test.zig",
     "source": "var map: std.StringArrayHashMapUnmanaged([]const u8) = .empty;",
     "detail": "'StringArrayHashMapUnmanaged' is deprecated: Deprecated; use `array_hash_map.String`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/blobmerge.zig",
-    "source": "pub fn blobs(",
-    "detail": "public function exposes private error set 'BlobError'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -4249,13 +3479,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/patch/apply.zig",
-    "source": "pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/patch/apply.zig",
     "source": "if (std.mem.indexOfScalar(u8, buf, '\\n')) |i| return i + 1;",
@@ -4298,13 +3521,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/patch/mail.zig",
-    "source": "pub fn split(gpa: Allocator, mbox: []const u8, options: SplitOptions) Error!Mailbox {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/patch/mail.zig",
     "source": "const end = if (std.mem.indexOfScalarPos(u8, text, start, '\\n')) |nl| nl + 1 else text.len;",
@@ -4340,13 +3556,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/patch/mail.zig",
-    "source": "pub fn info(gpa: Allocator, mail: []const u8, options: InfoOptions) Error!Info {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z030",
     "path": "src/patch/am_test.zig",
     "source": "fn deinit(p: *Pair) void {",
@@ -4358,13 +3567,6 @@
     "path": "src/patch/am_test.zig",
     "source": "const builtin = @import(\"builtin\");",
     "detail": "unused import 'builtin'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/patch/format.zig",
-    "source": "pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: Options) Error!Series {",
-    "detail": "public function exposes private error set 'Error'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -4389,41 +3591,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/patch/am.zig",
-    "source": "pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []const u8, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/patch/am.zig",
-    "source": "pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/patch/am.zig",
-    "source": "pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/patch/am.zig",
-    "source": "pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/patch/am.zig",
-    "source": "pub fn quit(io: Io, repo: *Repository) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z013",
     "path": "src/patch/am.zig",
     "source": "const ort = @import(\"../merge/ort.zig\");",
@@ -4442,13 +3609,6 @@
     "path": "src/patch/apply_test.zig",
     "source": "fn deinit(p: *Pair) void {",
     "detail": "deinit should set p.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/patch/binary.zig",
-    "source": "pub fn inflate(gpa: Allocator, data: []const u8, size: usize) InflateError![]u8 {",
-    "detail": "public function exposes private error set 'InflateError'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -7210,55 +6370,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z012",
-    "path": "src/merge.zig",
-    "source": "pub fn of(base: bool, ours: bool, theirs: bool) Kind {",
-    "detail": "public function exposes private type 'Kind'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge.zig",
-    "source": "pub fn trees(",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge.zig",
-    "source": "pub fn treesWithOptions(",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge.zig",
-    "source": "pub fn fromOrt(gpa: Allocator, io: Io, db: *odb_mod.Odb, merged: *const ort.Result) Error!Result {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge.zig",
-    "source": "pub fn conflictedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, result: *const Result) Error!Oid {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/merge.zig",
-    "source": "fn get(r: *testgit.Repo, g: Allocator, i: Io, rev: []const u8) !Oid {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/merge.zig",
-    "source": "fn get(r: *testgit.Repo, g: Allocator, i: Io, rev: []const u8) !Oid {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/revwalk.zig",
     "source": "pub fn prepare(walk: *Walk, io: Io) Error!void {",
@@ -7399,13 +6510,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/patch.zig",
-    "source": "pub fn parse(gpa: Allocator, text: []const u8, options: Options) Error!Patch {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/patch.zig",
     "source": "if (std.mem.indexOfScalar(u8, buf, '\\n')) |i| return i + 1;",
@@ -7469,48 +6573,6 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z015",
-    "path": "src/commit/merging.zig",
-    "source": "pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error![]const Target {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/merging.zig",
-    "source": "pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error![]const Target {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/commit/merging.zig",
-    "source": "pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, options: Options) Error!Outcome {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/merging.zig",
-    "source": "fn reduceParents(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, ours: Oid, targets: []const Target) Error!Reduced {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/merging.zig",
-    "source": "fn reduceHeads(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, oids: []const Oid) Error![]const Oid {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/commit/merging.zig",
-    "source": "fn shareHistory(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, ours: Oid, heads: []const Oid) Error!bool {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
     "rule": "Z017",
     "path": "src/grep.zig",
     "source": "return try p.new(.{ .@\"or\" = .{ x, y } });",
@@ -7550,20 +6612,6 @@
     "path": "src/fastimport_test.zig",
     "source": "fn deinit(p: *Pair) void {",
     "detail": "deinit should set p.* = undefined",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/threeway.zig",
-    "source": "pub fn applyOctopus(",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/merge/octopus.zig",
-    "source": "pub fn mergeCommits(gpa: Allocator, io: Io, db: *Odb, head: Oid, heads: []const Oid, options: Options) Error!Result {",
-    "detail": "public function exposes private error set 'Error'",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {
@@ -7697,27 +6745,6 @@
     "path": "src/revwalk/simplify.zig",
     "source": "return try gpa.dupe(u8, found.bytes);",
     "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try gpa.dupe(u8, found.bytes); return value;`",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/patch/rangediff.zig",
-    "source": "pub fn compute(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options) Error!RangeDiff {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/patch/rangediff.zig",
-    "source": "pub fn write(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options, w: *Io.Writer) Error!void {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/patch/rangediff.zig",
-    "source": "fn init(gpa: Allocator, io: Io, repo: *Repository, a: Allocator, options: Options) Error!Reader {",
-    "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {

@@ -9,6 +9,8 @@
 //! creation factor, found by git's Jonker-Volgenant solver step for step so
 //! that ties come out as git's do.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -107,11 +109,11 @@ pub const RangeDiff = struct {
 };
 
 /// Read both ranges' patches and pair them.
-pub fn compute(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options) Error!RangeDiff {
+pub fn compute(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options) Self.Error!RangeDiff {
     if (options.left_only and options.right_only) return error.LeftAndRightOnly;
     var result: RangeDiff = .{ .arena = .init(gpa), .old = &.{}, .new = &.{} };
     errdefer result.deinit();
-    var reader: Reader = try .init(gpa, io, repo, result.arena.allocator(), options);
+    var reader: Reader = try .init(gpa, result.arena.allocator(), io, repo, options);
     defer reader.deinit();
     result.old = try reader.readPatches(old);
     result.new = try reader.readPatches(new);
@@ -124,7 +126,7 @@ pub fn compute(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range
 /// the new range, an old commit with no partner once those before it have
 /// been shown, and under a pair whose patches differ, the diff between
 /// them. No colour.
-pub fn write(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options, w: *Io.Writer) Error!void {
+pub fn write(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options, w: *Io.Writer) Self.Error!void {
     var result = try compute(gpa, io, repo, old, new, options);
     defer result.deinit();
     try output(gpa, io, repo, &result, options, w);
@@ -148,7 +150,7 @@ const Reader = struct {
     show_root: bool,
     quote_path: bool,
 
-    fn init(gpa: Allocator, io: Io, repo: *Repository, a: Allocator, options: Options) Error!Reader {
+    fn init(gpa: Allocator, a: Allocator, io: Io, repo: *Repository, options: Options) Error!Reader {
         const config = repo.configuration();
         var r: Reader = .{
             .gpa = gpa,

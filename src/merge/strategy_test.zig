@@ -136,7 +136,7 @@ fn expectSameMerges(
 }
 
 /// The words as `-X` would take them, for a failure's message.
-const Words = struct {
+pub const Words = struct {
     words: []const []const u8,
 
     pub fn format(w: Words, writer: *std.Io.Writer) std.Io.Writer.Error!void {

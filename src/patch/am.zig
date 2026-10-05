@@ -17,6 +17,8 @@
 //! why; nothing is printed. The hooks are git's: `applypatch-msg`,
 //! `pre-applypatch`, `post-applypatch`.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -412,7 +414,7 @@ fn applyOptionsFrom(a: Allocator, words: []const []const u8) Error!apply_mod.Opt
 
 /// `git am <mailboxes>`: start a session over the mails in `mailboxes`,
 /// each a mailbox's whole contents, and run it until it finishes or stops.
-pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []const u8, options: Options) Error!Outcome {
+pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []const u8, options: Options) Self.Error!Outcome {
     if (repo.work_dir == null) return error.BareRepository;
     if (inProgress(io, repo)) return error.AmInProgress;
     if (head_mod.stateExists(io, repo.git_dir, state_dir)) return error.RebaseInProgress;
@@ -758,7 +760,7 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
     defer outcome.deinit();
     try repo.writeIndex(io, &current);
     if (!outcome.isClean()) {
-        _ = try rerere.afterStop(gpa, io, repo, &current, s.a, null);
+        _ = try rerere.afterStop(gpa, s.a, io, repo, &current, null);
         var paths: std.ArrayList([]const u8) = .empty;
         for (outcome.conflicts) |c| try paths.append(s.a, try s.a.dupe(u8, c.path));
         conflicts.* = paths.items;
@@ -918,7 +920,7 @@ fn run(s: *Session, arena: *std.heap.ArenaAllocator, resume_in: bool) Error!Outc
 
 /// `git am --continue`: commit what the index holds for the patch the
 /// session stopped at, and go on.
-pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     var s = try load(gpa, arena_instance.allocator(), io, repo, options);
@@ -939,7 +941,7 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Erro
 
 /// `git am --skip`: drop the patch the session stopped at, putting the
 /// index and the working tree back to `HEAD`, and go on.
-pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     var s = try load(gpa, arena_instance.allocator(), io, repo, options);
@@ -958,7 +960,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!O
 
 /// `git am --abort`: put `HEAD`, the index and the working tree back where
 /// the session started, unless `HEAD` moved since it stopped, and end it.
-pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Error!void {
+pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Self.Error!void {
     if (!inProgress(io, repo)) return error.NoAmInProgress;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -1000,7 +1002,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) E
 }
 
 /// `git am --quit`: end the session and leave everything as it is.
-pub fn quit(io: Io, repo: *Repository) Error!void {
+pub fn quit(io: Io, repo: *Repository) Self.Error!void {
     if (!inProgress(io, repo)) return error.NoAmInProgress;
     try destroy(io, repo);
 }

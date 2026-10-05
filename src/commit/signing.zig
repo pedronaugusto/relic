@@ -30,6 +30,8 @@
 //! standard input. The file is made in the temporary directory the
 //! caller's environment names, as git's is, and removed afterwards.
 
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -241,7 +243,7 @@ pub const Signer = struct {
     diagnostics: std.ArrayList(u8) = .empty,
 
     /// Read the settings from a repository's configuration.
-    pub fn init(gpa: Allocator, config: *const config_mod.Config, programs: program.Programs) Error!Signer {
+    pub fn init(gpa: Allocator, config: *const config_mod.Config, programs: program.Programs) Self.Error!Signer {
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();
@@ -308,7 +310,7 @@ pub const Signer = struct {
     ///
     /// `key` beats `user.signingKey`; with neither, `gpg` and `gpgsm` sign
     /// as `identity`, the committer or the tagger, as git does.
-    pub fn sign(signer: *Signer, io: Io, payload: []const u8, key: ?[]const u8, identity: ?object.Signature) Error![]u8 {
+    pub fn sign(signer: *Signer, io: Io, payload: []const u8, key: ?[]const u8, identity: ?object.Signature) Self.Error![]u8 {
         signer.diagnostics.clearRetainingCapacity();
         var arena_instance: std.heap.ArenaAllocator = .init(signer.gpa);
         defer arena_instance.deinit();
@@ -319,7 +321,7 @@ pub const Signer = struct {
                 const who = identity orelse return error.NoSigningKey;
                 break :blk try std.fmt.allocPrint(arena, "{s} <{s}>", .{ who.name, who.email });
             }),
-            .ssh => signer.signSsh(io, arena, payload, chosen orelse try signer.defaultSshKey(io, arena)),
+            .ssh => signer.signSsh(arena, io, payload, chosen orelse try signer.defaultSshKey(arena, io)),
         };
     }
 
@@ -338,7 +340,7 @@ pub const Signer = struct {
         return withoutCarriageReturns(signer.gpa, outcome.stdout);
     }
 
-    fn signSsh(signer: *Signer, io: Io, arena: Allocator, payload: []const u8, key: []const u8) Error![]u8 {
+    fn signSsh(signer: *Signer, arena: Allocator, io: Io, payload: []const u8, key: []const u8) Error![]u8 {
         // A key given as text rather than as a file goes through a file, and
         // `-U` says its private half is in the agent.
         var key_file: ?TempFile = null;
@@ -363,7 +365,7 @@ pub const Signer = struct {
     }
 
     /// The first line `gpg.ssh.defaultKeyCommand` prints, when it is a key.
-    fn defaultSshKey(signer: *Signer, io: Io, arena: Allocator) Error![]const u8 {
+    fn defaultSshKey(signer: *Signer, arena: Allocator, io: Io) Error![]const u8 {
         const command = signer.default_key_command orelse return error.NoSigningKey;
         const argv = try splitCommandLine(arena, command);
         if (argv.len == 0) return error.NoSigningKey;
@@ -378,7 +380,7 @@ pub const Signer = struct {
 
     /// Check `signature` over `payload`. `signed_at` is the committer's or
     /// the tagger's time, which an SSH check holds the key's validity to.
-    pub fn verify(signer: *Signer, io: Io, payload: []const u8, signature: []const u8, signed_at: ?i64) Error!Verdict {
+    pub fn verify(signer: *Signer, io: Io, payload: []const u8, signature: []const u8, signed_at: ?i64) Self.Error!Verdict {
         const format = Format.of(signature) orelse return error.UnknownSignature;
         var arena_instance: std.heap.ArenaAllocator = .init(signer.gpa);
         errdefer arena_instance.deinit();
@@ -388,8 +390,8 @@ pub const Signer = struct {
         // one this repository signs with.
         const program_name = if (format == signer.format) signer.program else format.defaultProgram();
         switch (format) {
-            .openpgp, .x509 => try signer.verifyGpg(io, arena, program_name, format, payload, signature, &verdict),
-            .ssh => try signer.verifySsh(io, arena, program_name, payload, signature, signed_at, &verdict),
+            .openpgp, .x509 => try signer.verifyGpg(arena, io, program_name, format, payload, signature, &verdict),
+            .ssh => try signer.verifySsh(arena, io, program_name, payload, signature, signed_at, &verdict),
         }
         verdict.arena = arena_instance.state;
         return verdict;
@@ -397,8 +399,8 @@ pub const Signer = struct {
 
     fn verifyGpg(
         signer: *Signer,
-        io: Io,
         arena: Allocator,
+        io: Io,
         program_name: []const u8,
         format: Format,
         payload: []const u8,
@@ -423,8 +425,8 @@ pub const Signer = struct {
 
     fn verifySsh(
         signer: *Signer,
-        io: Io,
         arena: Allocator,
+        io: Io,
         program_name: []const u8,
         payload: []const u8,
         signature: []const u8,

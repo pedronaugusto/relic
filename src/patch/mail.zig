@@ -13,6 +13,8 @@
 //! taken into UTF-8; any other character set is refused by name, where git
 //! would convert it with iconv.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -108,7 +110,7 @@ fn isGtFrom(line: []const u8) bool {
 }
 
 /// Cut `mbox` into its messages: `git mailsplit -b`.
-pub fn split(gpa: Allocator, mbox: []const u8, options: SplitOptions) Error!Mailbox {
+pub fn split(gpa: Allocator, mbox: []const u8, options: SplitOptions) Self.Error!Mailbox {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
@@ -965,7 +967,7 @@ fn unquoteQuotedPair(a: Allocator, out: *std.ArrayList(u8), in: []const u8) Allo
 }
 
 /// Take one message apart, as `git mailinfo` does.
-pub fn info(gpa: Allocator, mail: []const u8, options: InfoOptions) Error!Info {
+pub fn info(gpa: Allocator, mail: []const u8, options: InfoOptions) Self.Error!Info {
     var result: Info = .{ .arena = .init(gpa) };
     errdefer result.arena.deinit();
     const a = result.arena.allocator();

@@ -23,6 +23,8 @@
 //! resolved again, and `gc` prunes old records against a time the caller
 //! gives, since nothing here reads a clock.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -293,7 +295,7 @@ fn normalize(arena: Allocator, bytes: []const u8, size: usize, kind: hash.Kind) 
 /// `index` is the index as the conflict left it; a path a resolution is
 /// staged for is changed in it, and the caller writes it. Nothing happens
 /// when rerere is not enabled.
-pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Options) Error!Outcome {
+pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Options) Self.Error!Outcome {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -591,7 +593,7 @@ fn stagePath(r: *Run, index: *Index, path: []const u8) Error!void {
 
 /// `rerere_clear`: forget the conflicts in play that have no resolution,
 /// and `MERGE_RR` -- what an aborted rebase does.
-pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Error!void {
+pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     if (!enabled(io, repo)) return;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -632,7 +634,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Error!void {
 /// is made: `MERGE_HEAD`, `MERGE_MSG`, `MERGE_MODE`, `SQUASH_MSG` and
 /// `AUTO_MERGE` go, and rerere records how each conflict it took down was
 /// resolved.
-pub fn afterCommit(gpa: Allocator, io: Io, repo: *Repository) Error!void {
+pub fn afterCommit(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     for ([_][]const u8{ "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
         try head_mod.removeState(io, repo.git_dir, name);
     }
@@ -646,7 +648,7 @@ pub fn afterCommit(gpa: Allocator, io: Io, repo: *Repository) Error!void {
 /// Run rerere on a stop, as git does once a merge has left conflicts,
 /// writing the index again when it staged a resolution. The paths it
 /// resolved come back in `arena`.
-pub fn afterStop(gpa: Allocator, io: Io, repo: *Repository, index: *Index, arena: Allocator, autoupdate: ?bool) Error![]const []const u8 {
+pub fn afterStop(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, index: *Index, autoupdate: ?bool) Self.Error![]const []const u8 {
     var outcome = try run(gpa, io, repo, index, .{ .autoupdate = autoupdate });
     defer outcome.deinit();
     if (outcome.staged.len != 0) try repo.writeIndex(io, index);
@@ -674,7 +676,7 @@ pub const Paths = struct {
     }
 };
 
-fn startRun(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, attrs: ?*attributes.Attrs) Error!Run {
+fn startRun(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs) Error!Run {
     const wt = repo.work_dir orelse return error.BareRepository;
     var rules = try repo.worktreeRules();
     rules.attrs = attrs;
@@ -683,12 +685,12 @@ fn startRun(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, attrs: 
 
 /// `git rerere status`: the paths `MERGE_RR` records, in path order.
 /// Empty when rerere is not enabled.
-pub fn status(gpa: Allocator, io: Io, repo: *Repository) Error!Paths {
+pub fn status(gpa: Allocator, io: Io, repo: *Repository) Self.Error!Paths {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     var out: Paths = .{ .gpa = gpa, .arena = undefined };
     if (enabled(io, repo)) {
-        var r = try startRun(gpa, io, repo, arena_instance.allocator(), null);
+        var r = try startRun(gpa, arena_instance.allocator(), io, repo, null);
         const rr = try readMergeRr(&r);
         out.paths = rr.keys();
     }
@@ -700,13 +702,13 @@ pub fn status(gpa: Allocator, io: Io, repo: *Repository) Error!Paths {
 /// has not resolved, and the conflicts rerere leaves alone -- any that is
 /// not a regular file at both stage 2 and stage 3 -- in path order. Empty
 /// when rerere is not enabled.
-pub fn remaining(gpa: Allocator, io: Io, repo: *Repository) Error!Paths {
+pub fn remaining(gpa: Allocator, io: Io, repo: *Repository) Self.Error!Paths {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var out: Paths = .{ .gpa = gpa, .arena = undefined };
     if (enabled(io, repo)) {
-        var r = try startRun(gpa, io, repo, arena, null);
+        var r = try startRun(gpa, arena, io, repo, null);
         var rr = try readMergeRr(&r);
         var resolved: std.StringHashMapUnmanaged(void) = .empty;
         var index = try repo.openIndex(io);
@@ -744,14 +746,14 @@ pub fn remaining(gpa: Allocator, io: Io, repo: *Repository) Error!Paths {
 /// unified diff from the conflict's preimage to the file as it is now,
 /// under `--- a/<path>` and `+++ b/<path>`, as git prints it. The text is
 /// the caller's; empty when rerere is not enabled.
-pub fn diff(gpa: Allocator, io: Io, repo: *Repository) Error![]u8 {
+pub fn diff(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     if (!enabled(io, repo)) return out.toOwnedSlice() catch return error.OutOfMemory;
-    var r = try startRun(gpa, io, repo, arena, null);
+    var r = try startRun(gpa, arena, io, repo, null);
     const rr = try readMergeRr(&r);
     for (rr.keys(), rr.values()) |path, slot| {
         const id = slot orelse continue;
@@ -800,7 +802,7 @@ const Stages = [3]?struct { mode: u32, oid: Oid };
 /// to it is dropped, its preimage is written anew and `MERGE_RR` records
 /// it, so that the next resolution is recorded. No pathspec names every
 /// path. Nothing happens when rerere is not enabled.
-pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []const u8) Error!Forgotten {
+pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []const u8) Self.Error!Forgotten {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -814,7 +816,7 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
     }
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
-    var r = try startRun(gpa, io, repo, arena, &attrs);
+    var r = try startRun(gpa, arena, io, repo, &attrs);
     var rr = try readMergeRr(&r);
     var index = try repo.openIndex(io);
     defer index.deinit();
@@ -944,12 +946,12 @@ fn pathspecMatches(items: []const []const u8, path: []const u8) Error!bool {
 /// days from when it was recorded, 15 unless set. `never` keeps every
 /// one, `now` none. A conflict's directory goes once it is empty. Nothing
 /// happens when rerere is not enabled.
-pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now: i64) Error!void {
+pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now: i64) Self.Error!void {
     if (!enabled(io, repo)) return;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    var r = try startRun(gpa, io, repo, arena, null);
+    var r = try startRun(gpa, arena, io, repo, null);
     var cutoff_resolve = now - 60 * 86400;
     var cutoff_noresolve = now - 15 * 86400;
     try expiryInDays(repo, "gc.rerereresolved", &cutoff_resolve, now);

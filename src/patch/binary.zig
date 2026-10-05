@@ -15,6 +15,8 @@
 //! for the same change while decoding to the same files; git's own output
 //! differs from one zlib build to another in the same way.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -101,7 +103,7 @@ pub const InflateError = error{CorruptBinaryPatch} || Allocator.Error;
 
 /// Inflate a zlib stream that must come to exactly `size` bytes, as git's
 /// `inflate_it` requires.
-pub fn inflate(gpa: Allocator, data: []const u8, size: usize) InflateError![]u8 {
+pub fn inflate(gpa: Allocator, data: []const u8, size: usize) Self.InflateError![]u8 {
     const out = try gpa.alloc(u8, size);
     errdefer gpa.free(out);
     const decoder = try gpa.create(inflate_mod.Decoder);

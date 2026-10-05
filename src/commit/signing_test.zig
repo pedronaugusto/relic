@@ -406,8 +406,8 @@ test "the commit porcelain signs as commit.gpgSign says" {
     try k.repo.exec(io, &.{ "add", "a.txt" });
     var repo = try k.open(io);
     defer repo.deinit(io);
-    try testing.expectError(error.SigningRequiresPrograms, commit_mod.commit(&repo, io, .{ .author = who, .committer = who, .message = "m" }, .{}));
-    _ = try commit_mod.commit(&repo, io, .{ .author = who, .committer = who, .message = "m" }, .{ .signing = .{ .programs = k.programs() } });
+    try testing.expectError(error.SigningRequiresPrograms, commit_mod.commit(io, &repo, .{ .author = who, .committer = who, .message = "m" }, .{}));
+    _ = try commit_mod.commit(io, &repo, .{ .author = who, .committer = who, .message = "m" }, .{ .signing = .{ .programs = k.programs() } });
     try k.repo.exec(io, &.{ "verify-commit", "HEAD" });
 }
 
@@ -464,7 +464,7 @@ test "history writes leave signing refusals in caller-owned diagnostics" {
         if (comptime std.mem.eql(u8, operation, "commit")) {
             var options: commit_mod.Options = .{ .allow_empty = true };
             options.diagnostic = &diagnostic;
-            try testing.expectError(error.SigningRequiresPrograms, commit_mod.commit(&repo, io, .{ .author = who, .committer = who, .message = "m" }, options));
+            try testing.expectError(error.SigningRequiresPrograms, commit_mod.commit(io, &repo, .{ .author = who, .committer = who, .message = "m" }, options));
         } else if (comptime std.mem.eql(u8, operation, "merge")) {
             var options: merging.Options = .{ .who = who };
             options.diagnostic = &diagnostic;
@@ -566,7 +566,7 @@ test "a history refusal before writing clears an earlier diagnostic" {
         }, &diagnostic));
         diagnostic.signing_stderr = try gpa.dupe(u8, "earlier signer failure");
         if (comptime std.mem.eql(u8, operation, "commit")) {
-            try testing.expectError(error.NothingToCommit, commit_mod.commit(&repo, io, .{
+            try testing.expectError(error.NothingToCommit, commit_mod.commit(io, &repo, .{
                 .author = who,
                 .committer = who,
                 .message = "m",

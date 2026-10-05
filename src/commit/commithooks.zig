@@ -13,6 +13,8 @@
 //! to the top of the working tree, `.git/MERGE_MSG`, when the git directory
 //! is the `.git` there -- and the one sequence `git commit` runs.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -39,7 +41,7 @@ pub const Hooks = struct {
     git_dir: []const u8,
 
     /// The hooks of `repo`, with paths named as git names them.
-    pub fn init(arena: Allocator, io: Io, repo: *Repository, runner: ?*hooks.Runner, verify: bool) Error!Hooks {
+    pub fn init(arena: Allocator, io: Io, repo: *Repository, runner: ?*hooks.Runner, verify: bool) Self.Error!Hooks {
         var h: Hooks = .{ .runner = runner, .verify = verify, .git_dir = ".git" };
         if (runner == null) return h;
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -86,7 +88,7 @@ pub const Hooks = struct {
         text: []const u8,
         source: hooks.Runner.MessageSource,
         author: ?object.Signature,
-    ) Error![]const u8 {
+    ) Self.Error![]const u8 {
         const runner = h.runner orelse return text;
         const e = try h.env(arena, author);
         if (h.verify) _ = try runner.preCommit(io, e);
@@ -98,7 +100,7 @@ pub const Hooks = struct {
     }
 
     /// `post-commit`, once the branch has moved. It cannot undo anything.
-    pub fn postCommit(h: *const Hooks, arena: Allocator, io: Io, author: ?object.Signature) Error!void {
+    pub fn postCommit(h: *const Hooks, arena: Allocator, io: Io, author: ?object.Signature) Self.Error!void {
         const runner = h.runner orelse return;
         _ = try runner.postCommit(io, try h.env(arena, author));
     }

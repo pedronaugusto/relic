@@ -21,6 +21,8 @@
 //!
 //! `formatNote` writes a note the way `git log` shows it under a commit.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -171,7 +173,7 @@ pub const Notes = struct {
 
     /// `init_notes`: the notes `ref` names, read lazily. A ref that names
     /// nothing is an empty tree.
-    pub fn open(gpa: Allocator, io: Io, repo: *Repository, ref: []const u8, combine: Combine) Error!Notes {
+    pub fn open(gpa: Allocator, io: Io, repo: *Repository, ref: []const u8, combine: Combine) Self.Error!Notes {
         const root = try gpa.create(IntNode);
         root.* = .{};
         var t: Notes = .{
@@ -430,14 +432,14 @@ pub const Notes = struct {
     }
 
     /// The note on `object`, or `null`.
-    pub fn get(t: *Notes, io: Io, obj: Oid) Error!?Oid {
+    pub fn get(t: *Notes, io: Io, obj: Oid) Self.Error!?Oid {
         const l = (try t.find(io, obj.raw())) orelse return null;
         return l.val;
     }
 
     /// `add_note`: put `note` on `object`, meeting a note already there as
     /// `combine` says (`null` is the tree's own). A zero `note` removes it.
-    pub fn add(t: *Notes, io: Io, obj: Oid, note: Oid, combine: ?Combine) Error!void {
+    pub fn add(t: *Notes, io: Io, obj: Oid, note: Oid, combine: ?Combine) Self.Error!void {
         t.dirty = true;
         const l = try t.gpa.create(Leaf);
         l.* = .{ .key = @splat(0), .val = note };
@@ -446,7 +448,7 @@ pub const Notes = struct {
     }
 
     /// `remove_note`: whether there was a note on `object` to remove.
-    pub fn remove(t: *Notes, io: Io, obj: Oid) Error!bool {
+    pub fn remove(t: *Notes, io: Io, obj: Oid) Self.Error!bool {
         const removed = try t.removeKey(io, t.root, 0, obj.raw());
         if (removed == null) return false;
         t.dirty = true;
@@ -455,7 +457,7 @@ pub const Notes = struct {
 
     /// `copy_note`: `from`'s note onto `to`. With `force` false, a note on
     /// `to` is `error.NoteExists`.
-    pub fn copy(t: *Notes, io: Io, from: Oid, to: Oid, force: bool, combine: ?Combine) Error!void {
+    pub fn copy(t: *Notes, io: Io, from: Oid, to: Oid, force: bool, combine: ?Combine) Self.Error!void {
         const note = try t.get(io, from);
         const existing = try t.get(io, to);
         if (!force and existing != null) return error.NoteExists;
@@ -468,7 +470,7 @@ pub const Notes = struct {
 
     /// Every note, in the order `git notes list` prints them. Reads the
     /// whole tree. The result is the caller's.
-    pub fn list(t: *Notes, io: Io, gpa: Allocator) Error![]Entry {
+    pub fn list(t: *Notes, gpa: Allocator, io: Io) Self.Error![]Entry {
         var out: std.ArrayList(Entry) = .empty;
         errdefer out.deinit(gpa);
         const Collect = struct {
@@ -554,7 +556,7 @@ pub const Notes = struct {
 
     /// `write_notes_tree`: write the tree objects and return the root's
     /// name. Parts never read are written as they were.
-    pub fn writeTree(t: *Notes, io: Io) Error!Oid {
+    pub fn writeTree(t: *Notes, io: Io) Self.Error!Oid {
         var root: Stack = .{};
         defer root.deinit(t.gpa);
         t.writing = .{};
@@ -571,12 +573,12 @@ pub const Notes = struct {
                     mode = 0o040000;
                 }
                 try t2.writeNonNotesUntil(w.io, w.root, path);
-                try w.root.add(t2, w.io, path, mode, val);
+                try w.root.add(w.io, t2, path, mode, val);
             }
         };
         try t.forEach(io, t.root, 0, 0, .{ .yield_subtrees = true, .dont_unpack_subtrees = true }, Writer{ .root = &root, .io = io });
         try t.writeNonNotesUntil(io, &root, null);
-        try root.finishSubtree(t, io);
+        try root.finishSubtree(io, t);
         return t.repo.odb.write(io, .tree, root.buf.items);
     }
 
@@ -590,8 +592,8 @@ pub const Notes = struct {
             if (note_path) |p| {
                 const order = std.mem.order(u8, nn.path, p);
                 if (order == .gt) break;
-                if (order == .lt) try root.add(t, io, nn.path, nn.mode, nn.oid);
-            } else try root.add(t, io, nn.path, nn.mode, nn.oid);
+                if (order == .lt) try root.add(io, t, nn.path, nn.mode, nn.oid);
+            } else try root.add(io, t, nn.path, nn.mode, nn.oid);
             w.next_non_note += 1;
         }
     }
@@ -599,7 +601,7 @@ pub const Notes = struct {
     /// `commit_notes`: when anything changed, a commit of the tree on top
     /// of the ref, and the ref moved to it with `notes: <msg>` in its log.
     /// `null` when nothing changed.
-    pub fn commit(t: *Notes, io: Io, msg: []const u8, who: object.Signature) Error!?Oid {
+    pub fn commit(t: *Notes, io: Io, msg: []const u8, who: object.Signature) Self.Error!?Oid {
         if (!t.dirty) return null;
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(t.gpa);
@@ -629,8 +631,8 @@ pub const Notes = struct {
 
     /// `prune_notes`: drop every note on an object the repository does not
     /// have. The objects pruned are returned, the caller's.
-    pub fn prune(t: *Notes, io: Io, gpa: Allocator, dry_run: bool) Error![]Oid {
-        const all = try t.list(io, gpa);
+    pub fn prune(t: *Notes, gpa: Allocator, io: Io, dry_run: bool) Self.Error![]Oid {
+        const all = try t.list(gpa, io);
         defer gpa.free(all);
         var gone: std.ArrayList(Oid) = .empty;
         errdefer gone.deinit(gpa);
@@ -759,9 +761,9 @@ const Stack = struct {
     }
 
     /// `tree_write_stack_finish_subtree`.
-    fn finishSubtree(s: *Stack, t: *Notes, io: Io) Error!void {
+    fn finishSubtree(s: *Stack, io: Io, t: *Notes) Error!void {
         const n = s.next orelse return;
-        try n.finishSubtree(t, io);
+        try n.finishSubtree(io, t);
         const oid = try t.repo.odb.write(io, .tree, n.buf.items);
         n.buf.deinit(t.gpa);
         t.gpa.destroy(n);
@@ -771,7 +773,7 @@ const Stack = struct {
     }
 
     /// `write_each_note_helper`.
-    fn add(root: *Stack, t: *Notes, io: Io, path: []const u8, mode: u32, oid: Oid) Error!void {
+    fn add(root: *Stack, io: Io, t: *Notes, path: []const u8, mode: u32, oid: Oid) Error!void {
         var tws = root;
         var n: usize = 0;
         while (3 * n < path.len) {
@@ -780,7 +782,7 @@ const Stack = struct {
             n += 1;
             tws = tws.next orelse break;
         }
-        try tws.finishSubtree(t, io);
+        try tws.finishSubtree(io, t);
         while (3 * n + 2 < path.len and path[3 * n + 2] == '/') {
             const child = try t.gpa.create(Stack);
             child.* = .{};
@@ -880,7 +882,7 @@ fn concatContents(gpa: Allocator, io: Io, repo: *Repository, options: WriteOptio
 
 /// `git notes add`: put the note on `obj`, replacing one there only with
 /// `force`. An empty note removes the note unless `allow_empty`.
-pub fn add(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: WriteOptions) Error!Outcome {
+pub fn add(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: WriteOptions) Self.Error!Outcome {
     if (options.contents.len == 0) return error.EditorUnsupported;
     const text = try concatContents(gpa, io, repo, options);
     defer gpa.free(text);
@@ -906,7 +908,7 @@ fn writeNote(io: Io, t: *Notes, obj: Oid, text: []const u8, options: WriteOption
 }
 
 /// `git notes append`: the note there, a separator, and the new text.
-pub fn append(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: WriteOptions) Error!Outcome {
+pub fn append(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: WriteOptions) Self.Error!Outcome {
     if (options.contents.len == 0) return error.EditorUnsupported;
     var text: std.ArrayList(u8) = .fromOwnedSlice(try concatContents(gpa, io, repo, options));
     defer text.deinit(gpa);
@@ -937,7 +939,7 @@ pub const RefOptions = struct {
 };
 
 /// `git notes copy`: `from`'s note onto `to`.
-pub fn copy(gpa: Allocator, io: Io, repo: *Repository, from: Oid, to: Oid, options: RefOptions) Error!void {
+pub fn copy(gpa: Allocator, io: Io, repo: *Repository, from: Oid, to: Oid, options: RefOptions) Self.Error!void {
     const ref = try refFor(gpa, repo, options.ref);
     defer gpa.free(ref);
     var t = try Notes.open(gpa, io, repo, ref, .concatenate);
@@ -951,7 +953,7 @@ pub fn copy(gpa: Allocator, io: Io, repo: *Repository, from: Oid, to: Oid, optio
 /// `git notes remove`: the notes on `objects`. Without `ignore_missing`,
 /// an object with no note is `error.NoteNotFound` and nothing is committed,
 /// as git commits nothing then. Returns how many notes were removed.
-pub fn remove(gpa: Allocator, io: Io, repo: *Repository, objects: []const Oid, options: RefOptions) Error!usize {
+pub fn remove(gpa: Allocator, io: Io, repo: *Repository, objects: []const Oid, options: RefOptions) Self.Error!usize {
     const ref = try refFor(gpa, repo, options.ref);
     defer gpa.free(ref);
     var t = try Notes.open(gpa, io, repo, ref, .concatenate);
@@ -968,12 +970,12 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, objects: []const Oid, o
 
 /// `git notes prune`: drop the notes on objects the repository does not
 /// have. The objects are returned, the caller's.
-pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: RefOptions, dry_run: bool) Error![]Oid {
+pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: RefOptions, dry_run: bool) Self.Error![]Oid {
     const ref = try refFor(gpa, repo, options.ref);
     defer gpa.free(ref);
     var t = try Notes.open(gpa, io, repo, ref, .concatenate);
     defer t.deinit();
-    const gone = try t.prune(io, gpa, dry_run);
+    const gone = try t.prune(gpa, io, dry_run);
     errdefer gpa.free(gone);
     if (!dry_run) _ = try t.commit(io, "Notes removed by 'git notes prune'", options.who);
     return gone;
@@ -981,7 +983,7 @@ pub fn prune(gpa: Allocator, io: Io, repo: *Repository, options: RefOptions, dry
 
 /// The note on `obj` in `ref` (`null` for `defaultRef`), as bytes the
 /// caller owns, or `null`.
-pub fn show(gpa: Allocator, io: Io, repo: *Repository, ref: ?[]const u8, obj: Oid) Error!?[]u8 {
+pub fn show(gpa: Allocator, io: Io, repo: *Repository, ref: ?[]const u8, obj: Oid) Self.Error!?[]u8 {
     const name = try refFor(gpa, repo, ref);
     defer gpa.free(name);
     var t = try Notes.open(gpa, io, repo, name, .concatenate);
@@ -1125,7 +1127,7 @@ fn pairPosition(pairs: []const Pair, obj: Oid) struct { index: usize, occupied: 
 
 /// `git notes merge <remote>`: merge the remote notes ref into the local
 /// one, moving the local ref unless there are conflicts.
-pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, options: MergeOptions) Error!MergeOutcome {
+pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, options: MergeOptions) Self.Error!MergeOutcome {
     const local_ref = try refFor(gpa, repo, options.ref);
     defer gpa.free(local_ref);
     // `expand_loose_notes_ref`: a name that resolves stays as it is.
@@ -1312,7 +1314,7 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
     var held: [3]?[]u8 = .{ null, null, null };
     defer for (held) |h| if (h) |b| repo.odb.allocator().free(b);
     const read = struct {
-        fn f(r: *Repository, i: Io, oid: Oid, slot: *?[]u8) Error![]const u8 {
+        fn f(i: Io, r: *Repository, oid: Oid, slot: *?[]u8) Error![]const u8 {
             if (oid.isZero()) return "";
             const found = try r.odb.read(i, oid);
             slot.* = found.bytes;
@@ -1321,13 +1323,13 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
         }
     }.f;
     if (p.local.isZero()) {
-        bytes = try read(repo, io, p.remote, &held[0]);
+        bytes = try read(io, repo, p.remote, &held[0]);
     } else if (p.remote.isZero()) {
-        bytes = try read(repo, io, p.local, &held[0]);
+        bytes = try read(io, repo, p.local, &held[0]);
     } else {
-        const base = try read(repo, io, p.base, &held[0]);
-        const ours = try read(repo, io, p.local, &held[1]);
-        const theirs = try read(repo, io, p.remote, &held[2]);
+        const base = try read(io, repo, p.base, &held[0]);
+        const ours = try read(io, repo, p.local, &held[1]);
+        const theirs = try read(io, repo, p.remote, &held[2]);
         const style = if (repo.configuration().get("merge.conflictstyle")) |s| blobmerge.ConflictStyle.parse(s) orelse .merge else .merge;
         if (blobmerge.blobs(gpa, base, ours, theirs, .{
             .conflict_style = style,
@@ -1353,7 +1355,7 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
 /// `NOTES_MERGE_WORKTREE` added to the partial merge, committed with its
 /// message and parents, and the local ref moved to it; then the merge's
 /// state removed. Returns the commit.
-pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Error!Oid {
+pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Self.Error!Oid {
     const kind = repo.objectFormat();
     const partial = (try head_mod.readRef(gpa, io, repo, "NOTES_MERGE_PARTIAL")) orelse return error.NoMergeInProgress;
     const found = try repo.odb.read(io, partial);
@@ -1402,7 +1404,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
 /// `git notes merge --abort`: `NOTES_MERGE_PARTIAL` and `NOTES_MERGE_REF`
 /// removed, and the files in `NOTES_MERGE_WORKTREE`; the directory itself
 /// stays, as git leaves it.
-pub fn mergeAbort(io: Io, repo: *Repository) Error!void {
+pub fn mergeAbort(io: Io, repo: *Repository) Self.Error!void {
     try head_mod.deleteRef(io, repo, "NOTES_MERGE_PARTIAL");
     try head_mod.deleteRef(io, repo, "NOTES_MERGE_REF");
     var dir = repo.git_dir.openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
@@ -1480,9 +1482,9 @@ const Twin = struct {
     }
 
     fn expectSame(t: *Twin, io: Io, args: []const []const u8) !void {
-        const a = try gitOrFailed(&t.git, io, args);
+        const a = try gitOrFailed(io, &t.git, args);
         defer t.git.gpa.free(a);
-        const b = try gitOrFailed(&t.ours, io, args);
+        const b = try gitOrFailed(io, &t.ours, args);
         defer t.ours.gpa.free(b);
         std.testing.expectEqualStrings(a, b) catch |err| {
             std.debug.print("git {any} differs\n", .{args});
@@ -1500,7 +1502,7 @@ const Twin = struct {
     }
 };
 
-fn gitOrFailed(r: *testgit.Repo, io: Io, args: []const []const u8) ![]u8 {
+fn gitOrFailed(io: Io, r: *testgit.Repo, args: []const []const u8) ![]u8 {
     r.report_failures = false;
     defer r.report_failures = true;
     return r.run(io, args) catch |err| switch (err) {
@@ -1679,7 +1681,7 @@ test "notes merge under every strategy leaves what git notes merge leaves, and a
         try args.appendSlice(gpa, &.{ "notes", "merge" });
         if (strategy) |s| try args.appendSlice(gpa, &.{ "-s", @tagName(s) });
         try args.append(gpa, "other");
-        gpa.free(try gitOrFailed(&t.git, io, args.items));
+        gpa.free(try gitOrFailed(io, &t.git, args.items));
         var outcome = try merge(gpa, io, &repo, "other", .{ .who = fixture_who, .strategy = strategy });
         defer outcome.deinit();
         try t.expectSameState(io, &.{ "refs/notes/commits", "refs/notes/other" });
@@ -1728,7 +1730,7 @@ fn fuzzNotes(repo: *Repository, smith: *std.testing.Smith) anyerror!void {
         const tree = try repo.odb.write(io, .tree, input);
         var leaf: Leaf = .{ .key = @splat(0), .val = tree };
         if (t.loadSubtree(io, &leaf, t.root, 0)) {
-            if (t.list(io, gpa)) |entries| gpa.free(entries) else |_| {}
+            if (t.list(gpa, io)) |entries| gpa.free(entries) else |_| {}
         } else |_| {}
     }
 
@@ -1758,7 +1760,7 @@ fn fuzzNotes(repo: *Repository, smith: *std.testing.Smith) anyerror!void {
     defer back.deinit();
     var leaf: Leaf = .{ .key = @splat(0), .val = written };
     try back.loadSubtree(io, &leaf, back.root, 0);
-    const entries = try back.list(io, gpa);
+    const entries = try back.list(gpa, io);
     defer gpa.free(entries);
     try std.testing.expectEqual(model.count(), entries.len);
     for (entries) |e| try std.testing.expect(model.get(e.object).?.eql(e.note));

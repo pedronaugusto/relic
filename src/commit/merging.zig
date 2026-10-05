@@ -11,6 +11,8 @@
 //! first, as git does, nested conflict markers and all. Two or more heads
 //! make an octopus, merged as git's `merge-octopus` merges them.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -100,7 +102,7 @@ pub const Target = struct {
 /// `refs/<name>`, `refs/tags/<name>`, `refs/heads/<name>`,
 /// `refs/remotes/<name>` and `refs/remotes/<name>/HEAD`, and otherwise an
 /// object name or a unique prefix of one. `name` is borrowed by the result.
-pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Error!Target {
+pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Self.Error!Target {
     const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
     inline for (rules) |rule| {
         const full = try std.fmt.allocPrint(gpa, rule, .{name});
@@ -129,7 +131,7 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Erro
 /// remote's fetch refspecs map it to -- or the ref itself for a remote of
 /// `.` -- named by its full name, as git names it in the message. More than
 /// one is an octopus, `startHeads`. The names live in `arena`.
-pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error![]const Target {
+pub fn upstreams(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository) Self.Error![]const Target {
     if (!(repo.configuration().getBool("merge.defaulttoupstream", true) catch true)) return error.NoMergeTarget;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
@@ -266,7 +268,7 @@ pub fn inProgress(io: Io, repo: *Repository) bool {
 }
 
 /// Merge `target` into the current branch.
-pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options: Options) Error!Outcome {
+pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options: Options) Self.Error!Outcome {
     return startHeads(gpa, io, repo, &.{target}, options);
 }
 
@@ -275,7 +277,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, target: Target, options:
 /// first. One left is merged by ort; two or more by git's octopus,
 /// `threeway.applyOctopus`, whose commit leaves `HEAD` out of its parents
 /// when a target already contains it and a fast-forward is allowed.
-pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, options: Options) Error!Outcome {
+pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
@@ -304,7 +306,7 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
 
     // One target needs no reducing: the merge bases below say whether
     // `HEAD` reaches it or it reaches `HEAD`.
-    const reduced: Reduced = if (targets.len == 1) .{ .heads = targets, .head_subsumed = false } else try reduceParents(gpa, io, repo, arena, ours, targets);
+    const reduced: Reduced = if (targets.len == 1) .{ .heads = targets, .head_subsumed = false } else try reduceParents(gpa, arena, io, repo, ours, targets);
     // The reflog names the targets left.
     var action: std.ArrayList(u8) = .empty;
     try action.appendSlice(arena, "merge");
@@ -379,11 +381,11 @@ const Reduced = struct {
     head_subsumed: bool,
 };
 
-fn reduceParents(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, ours: Oid, targets: []const Target) Error!Reduced {
+fn reduceParents(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, ours: Oid, targets: []const Target) Error!Reduced {
     var oids: std.ArrayList(Oid) = .empty;
     try oids.append(arena, ours);
     for (targets) |target| try oids.append(arena, target.oid);
-    const kept_oids = try reduceHeads(gpa, io, repo, arena, oids.items);
+    const kept_oids = try reduceHeads(gpa, arena, io, repo, oids.items);
     var kept: std.ArrayList(Target) = .empty;
     var head_subsumed = true;
     for (kept_oids) |oid| {
@@ -400,7 +402,7 @@ fn reduceParents(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, ou
 
 /// git's `reduce_heads`: `oids` in order, each only once, without any one
 /// another reaches. The result lives in `arena`.
-fn reduceHeads(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, oids: []const Oid) Error![]const Oid {
+fn reduceHeads(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, oids: []const Oid) Error![]const Oid {
     var unique: std.ArrayList(Oid) = .empty;
     for (oids) |oid| {
         for (unique.items) |seen| {
@@ -435,7 +437,7 @@ fn octopus(
     const heads = try arena.alloc(Oid, reduced.heads.len);
     for (reduced.heads, heads) |target, *oid| oid.* = target.oid;
     try head_mod.writeRef(io, repo, "ORIG_HEAD", ours);
-    if (!options.allow_unrelated_histories and !try shareHistory(gpa, io, repo, arena, ours, heads)) return error.UnrelatedHistories;
+    if (!options.allow_unrelated_histories and !try shareHistory(gpa, arena, io, repo, ours, heads)) return error.UnrelatedHistories;
     // Up to date when `HEAD` reaches every head.
     for (heads) |one| {
         const bases = try revwalk.mergeBases(gpa, io, &repo.odb, ours, one);
@@ -468,7 +470,7 @@ fn octopus(
 
 /// Whether the commits have any merge base at all, folded as git's
 /// `get_octopus_merge_bases` folds them.
-fn shareHistory(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, ours: Oid, heads: []const Oid) Error!bool {
+fn shareHistory(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, ours: Oid, heads: []const Oid) Error!bool {
     var bases: std.ArrayList(Oid) = .empty;
     try bases.append(arena, ours);
     for (heads) |one| {
@@ -580,7 +582,7 @@ fn commitOrStop(
     try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", msg.items);
     try head_mod.writeState(io, repo.git_dir, "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
     var reused: []const []const u8 = &.{};
-    if (!outcome.isClean()) reused = try runRerere(gpa, io, repo, index, arena, options.rerere_autoupdate);
+    if (!outcome.isClean()) reused = try runRerere(gpa, arena, io, repo, index, options.rerere_autoupdate);
     return .{
         .gpa = gpa,
         .arena = arena_instance.state,
@@ -618,7 +620,7 @@ pub const ConcludeOptions = struct {
 /// Commit the merge `MERGE_HEAD` describes, from the index as it stands:
 /// what `git commit` and `git merge --continue` do once the conflicts are
 /// resolved.
-pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOptions) Error!Oid {
+pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOptions) Self.Error!Oid {
     diagnostic.reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -636,7 +638,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     // `git commit` drops a parent another reaches unless the merge was
     // asked not to fast-forward: an octopus that went past `HEAD`.
     const mode = (try head_mod.readState(arena, io, repo.git_dir, "MERGE_MODE")) orelse "";
-    const kept: []const Oid = if (std.mem.eql(u8, mode, "no-ff")) parents.items else try reduceHeads(gpa, io, repo, arena, parents.items);
+    const kept: []const Oid = if (std.mem.eql(u8, mode, "no-ff")) parents.items else try reduceHeads(gpa, arena, io, repo, parents.items);
 
     var index = try repo.openIndex(io);
     defer index.deinit();
@@ -678,7 +680,7 @@ pub const runRerere = rerere.afterStop;
 /// Undo a merge that stopped: `git merge --abort`, which is `git reset
 /// --merge`. Changes a person made before the merge, to paths the merge did
 /// not touch, survive it.
-pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Error!void {
+pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Self.Error!void {
     if (!inProgress(io, repo)) return error.NoMergeInProgress;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);

@@ -21,6 +21,8 @@
 //! matching when the content does, where git says "does not match index"
 //! until the index is refreshed.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -486,7 +488,7 @@ const State = struct {
 /// `error.PatchDoesNotApply` with nothing written, unless `reject` or
 /// `three_way` says otherwise, in which case `Outcome.clean` says whether
 /// everything went in.
-pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, options: Options) Error!Outcome {
+pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, options: Options) Self.Error!Outcome {
     if (options.diagnostic) |d| d.reset();
     if (options.reject and options.three_way) return error.RejectWithThreeWay;
     if (options.favor != .none and !options.three_way) return error.FavorWithoutThreeWay;
@@ -638,7 +640,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         try writeOutResults(&st, list.items, &conflicted);
         std.mem.sort([]const u8, conflicted.items, {}, lessPath);
         if (conflicted.items.len != 0 and !st.cached) {
-            if (st.index) |ix| _ = try rerere.afterStop(gpa, io, repo, ix, a, null);
+            if (st.index) |ix| _ = try rerere.afterStop(gpa, a, io, repo, ix, null);
         }
         if (st.update_index and options.index == null) try repo.writeIndex(io, st.index.?);
     }

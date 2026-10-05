@@ -13,6 +13,8 @@
 //! git: a sequence this stopped is continued, skipped or aborted by `git
 //! cherry-pick`, and one git stopped is continued, skipped or aborted here.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -215,13 +217,13 @@ pub const Outcome = struct {
 };
 
 /// Cherry-pick `commits` in order onto `HEAD`.
-pub fn pick(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Error!Outcome {
+pub fn pick(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     return start(gpa, io, repo, .pick, commits, options);
 }
 
 /// Revert `commits` in order.
-pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Error!Outcome {
+pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     return start(gpa, io, repo, .revert, commits, options);
 }
@@ -473,7 +475,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     else if (head.oid) |h|
         try repo.commitTree(io, h)
     else
-        try emptyTree(repo, io);
+        try emptyTree(io, repo);
 
     const picked = try readCommit(r, oid);
     const commit = picked.commit;
@@ -539,7 +541,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     if (r.options.signoff) try message.appendSignoff(arena, &msg, r.options.who, r.trailers);
 
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
-    var outcome = try threeway.apply(gpa, io, repo, &index, base_tree, head_tree, next_tree orelse try emptyTree(repo, io), .{
+    var outcome = try threeway.apply(gpa, io, repo, &index, base_tree, head_tree, next_tree orelse try emptyTree(io, repo), .{
         .blob = .{
             .conflict_style = style,
             .labels = .{ .ours = "HEAD", .base = base_label, .theirs = next_label },
@@ -579,15 +581,15 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     if (!clean) {
         try updateAbortSafety(gpa, io, repo);
         // git runs rerere once the pick has stopped.
-        _ = try rerere.afterStop(gpa, io, repo, &index, arena, r.options.rerere_autoupdate);
+        _ = try rerere.afterStop(gpa, arena, io, repo, &index, r.options.rerere_autoupdate);
         return .conflicted;
     }
 
     // Whether the result changes anything, and what to do if not.
     var allow_empty_commit = false;
-    const head_commit_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(repo, io);
+    const head_commit_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(io, repo);
     if (outcome.tree.?.eql(head_commit_tree)) {
-        const parent_tree = if (commit.parents.len != 0) try repo.commitTree(io, commit.parents[0]) else try emptyTree(repo, io);
+        const parent_tree = if (commit.parents.len != 0) try repo.commitTree(io, commit.parents[0]) else try emptyTree(io, repo);
         const originally_empty = parent_tree.eql(commit.tree);
         if (originally_empty) {
             allow_empty_commit = r.options.allow_empty or r.options.empty == .keep;
@@ -655,7 +657,7 @@ fn configuredCleanup(repo: *Repository) message.Cleanup {
     return message.Cleanup.parse(text) orelse .verbatim;
 }
 
-fn emptyTree(repo: *Repository, io: Io) Error!Oid {
+fn emptyTree(io: Io, repo: *Repository) Error!Oid {
     return repo.odb.write(io, .tree, "");
 }
 
@@ -783,7 +785,7 @@ fn saveTodo(r: *Replay, items: []const todo.Item) Error!void {
 
 /// How a sheet's names are resolved: any name a commit goes by, with its
 /// tags peeled.
-pub fn commitResolver(repo: *Repository, io: Io) ResolverContext {
+pub fn commitResolver(io: Io, repo: *Repository) ResolverContext {
     return .{ .repo = repo, .io = io };
 }
 
@@ -864,7 +866,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     const picked = try head_mod.readRef(gpa, io, repo, "CHERRY_PICK_HEAD");
     var author = r.options.who;
     if (picked) |oid| author = (try readCommit(r, oid)).commit.author;
-    const head_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(repo, io);
+    const head_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(io, repo);
     if (tree.eql(head_tree) and !r.options.allow_empty and r.options.empty != .keep) return error.EmptyCommit;
 
     const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
@@ -897,7 +899,7 @@ fn commitStaged(r: *Replay) Error!Oid {
 /// Continue the cherry-pick or revert that stopped, whoever stopped it:
 /// commit what is staged for the one that stopped, then carry on with the
 /// rest of the sequence.
-pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
@@ -941,7 +943,7 @@ fn requireIndexIsHead(r: *Replay) Error!void {
     defer index.deinit();
     var head = try head_mod.read(r.gpa, r.io, r.repo);
     defer head.deinit(r.gpa);
-    const head_tree = if (head.oid) |h| try r.repo.commitTree(r.io, h) else try emptyTree(r.repo, r.io);
+    const head_tree = if (head.oid) |h| try r.repo.commitTree(r.io, h) else try emptyTree(r.io, r.repo);
     for (index.entries.items) |entry| {
         if (entry.stage != 0) return error.UnresolvedConflicts;
     }
@@ -950,7 +952,7 @@ fn requireIndexIsHead(r: *Replay) Error!void {
 }
 
 /// Leave out the pick that stopped and carry on with the rest.
-pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
     if (!head_mod.stateExists(io, repo.git_dir, action.headRef())) {
@@ -968,7 +970,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!O
 /// working tree back to where it began -- unless something else has moved
 /// `HEAD` since the sequence last did, in which case `HEAD` is left where it
 /// is, as git leaves it. The state goes either way.
-pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Error!void {
+pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Self.Error!void {
     const text = (try head_mod.readState(gpa, io, repo.git_dir, head_path)) orelse {
         if (!head_mod.stateExists(io, repo.git_dir, "CHERRY_PICK_HEAD") and
             !head_mod.stateExists(io, repo.git_dir, "REVERT_HEAD")) return error.NoSequencerInProgress;
@@ -983,7 +985,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, b
 }
 
 /// Forget the sequence and leave everything else as it is: `--quit`.
-pub fn quit(io: Io, repo: *Repository) Error!void {
+pub fn quit(io: Io, repo: *Repository) Self.Error!void {
     try removeSequencerState(io, repo);
     try removeBranchState(io, repo);
 }
@@ -1020,7 +1022,7 @@ pub fn resetMerge(
     target: ?Oid,
     who: object.Signature,
     blocked: ?*threeway.Blocked,
-) Error!void {
+) Self.Error!void {
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const current = head.oid orelse return error.UnbornBranch;
