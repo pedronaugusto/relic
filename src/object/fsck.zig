@@ -1412,7 +1412,10 @@ test "fetch.fsckObjects falls back on transfer.fsckObjects" {
 test "every message id is git's" {
     const gpa = testing.allocator;
     const io = testing.io;
-    try testgit.requireGitVersion(gpa, io, 2, 20);
+    // Git 2.32's fsck API cleanup removed unused message ids such as
+    // badTagObject and missingTreeObject (RelNotes/2.32.0). Older git
+    // still advertises them even though its object checks never emit them.
+    try testgit.requireGitVersion(gpa, io, 2, 32);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     // `git help --config` lists every `fsck.<msg-id>` git knows.
