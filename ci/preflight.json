@@ -9,10 +9,6 @@
     "src/testing/*"
   ],
   "function_exceptions": {
-    "src/transport/clone.zig:clone": {
-      "lines": 361,
-      "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
-    },
     "src/testing/fake_ssh.zig:main": {
       "lines": 129,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
