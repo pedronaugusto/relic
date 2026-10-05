@@ -48,6 +48,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const assert = std.debug.assert;
 const http = std.http;
 
 const hash = @import("../hash.zig");
@@ -821,7 +822,6 @@ fn batchChunk(
     }
 }
 
-
 /// The standalone agent `lfs.<url>.standalonetransferagent` names for the
 /// endpoint, else git-lfs's own for a remote on this machine.
 fn standaloneAgent(arena: Allocator, server: *lfsapi.Server, endpoint: lfsapi.Endpoint) Error!?[]const u8 {
@@ -1220,16 +1220,10 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
         error.InvalidHttpHeader => return .{ .fail = "the server's action has a header with a line break in it" },
         error.OutOfMemory => return error.OutOfMemory,
     };
-
-    // `lfs.transfer.<url>.httpDownloadEncoding`, which git-lfs reads for
-    // the action's own URL: gzip unless it says zstd.
-    const encoding = try server.settings.urlGet(scratch, "lfs.transfer", action.href, "httpdownloadencoding");
-    const accept: lfsapi.Client.Accept = if (encoding == null or encoding.?.len == 0 or std.mem.eql(u8, encoding.?, "gzip"))
-        .gzip
-    else if (std.mem.eql(u8, encoding.?, "zstd"))
-        .zstd
-    else
-        return .{ .fail = try state.dupe(try std.fmt.allocPrint(scratch, "unsupported lfs.transfer.httpDownloadEncoding value \"{s}\": must be \"gzip\" or \"zstd\"", .{encoding.?})) };
+    const accept = switch (try downloadAccept(state, scratch, action.href)) {
+        .accept => |a| a,
+        .fail => |why| return .{ .fail = why },
+    };
 
     // The download goes into `<lfs>/incomplete`, as git-lfs's does, and a
     // download that breaks off leaves `<oid>.part` there for the next
@@ -1244,134 +1238,39 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
         error.FileNotFound => resumed = false,
         else => |e| return e,
     };
-    const file = if (resumed)
+    var partial: Partial = .{ .file = if (resumed)
         try store.base.openFile(io, temp_path, .{ .mode = .read_write })
     else
-        try store.base.createFile(io, temp_path, .{ .exclusive = true, .read = true });
-    var keep_part = false;
+        try store.base.createFile(io, temp_path, .{ .exclusive = true, .read = true }) };
     var installed = false;
     defer {
-        file.close(io);
+        partial.file.close(io);
         if (!installed) {
-            if (keep_part) {
+            if (partial.keep) {
                 fs.renameWithRetry(io, store.base, temp_path, part_path) catch {};
             } else store.base.deleteFile(io, temp_path) catch {};
         }
     }
+    if (resumed) try partial.hashResumed(io, r.size);
+    const resumed_from = partial.from;
 
-    // What is already there is hashed again, so the name is taken over the
-    // whole object whichever attempt brought each byte.
-    var sha: std.crypto.hash.sha2.Sha256 = .init(.{});
-    var from: u64 = 0;
-    if (resumed) {
-        var buf: [64 * 1024]u8 = undefined;
-        while (true) {
-            const n = try file.readPositionalAll(io, &buf, from);
-            if (n == 0) break;
-            sha.update(buf[0..n]);
-            from += n;
-            if (n < buf.len) break;
-        }
-        if (from >= r.size) {
-            // More than a partial object can be: start again.
-            try file.setLength(io, 0);
-            from = 0;
-            sha = .init(.{});
-        }
-    }
-    const resumed_from = from;
-
-    var range_buf: [64]u8 = undefined;
-    var attempt_range = from > 0;
-    const ex = while (true) {
-        var all: std.ArrayList(http.Header) = .empty;
-        try all.appendSlice(scratch, headers);
-        if (attempt_range) try all.append(scratch, .{ .name = "Range", .value = try std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ from, r.size - 1 }) });
-        const sent = server.client.send(.{
-            .method = .GET,
-            .url = href,
-            .headers = all.items,
-            .authenticated = authenticated,
-            .access_url = accessUrl(action.href, &r.oid),
-            // git-lfs asks for no encoding with a Range, and its client
-            // asks for gzip itself without one.
-            .accept = if (attempt_range) .none else accept,
-        }) catch |err| switch (err) {
-            error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects => {
-                keep_part = from > 0;
-                return .{ .retry = .{ .message = try state.dupe(server.client.message()) } };
-            },
-            error.OutOfMemory, error.Canceled => |e| return e,
-            else => |e| return .{ .fail = @errorName(e) },
-        };
-        const status = sent.status();
-        if (attempt_range and status == .range_not_satisfiable) {
-            // The server will not go on from there: from the start.
-            sent.close();
-            try file.setLength(io, 0);
-            from = 0;
-            sha = .init(.{});
-            attempt_range = false;
-            continue;
-        }
-        if (attempt_range and status == .partial_content) {
-            const content_range = sent.header("content-range") orelse "";
-            var want_buf: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&want_buf, "bytes {d}-", .{from}) catch unreachable; // unreachable: a u64 is at most 20 digits, 27 bytes with the words around it
-            if (!std.mem.startsWith(u8, content_range, want)) {
-                sent.close();
-                try file.setLength(io, 0);
-                from = 0;
-                sha = .init(.{});
-                attempt_range = false;
-                continue;
-            }
-        } else if (attempt_range and status == .ok) {
-            // The Range was passed over and the whole object came.
-            try file.setLength(io, 0);
-            from = 0;
-            sha = .init(.{});
-        }
-        break sent;
+    const ex = switch (try requestFrom(state, scratch, &partial, .{
+        .href = href,
+        .action_href = action.href,
+        .headers = headers,
+        .accept = accept,
+        .authenticated = authenticated,
+        .oid = &r.oid,
+        .size = r.size,
+    })) {
+        .exchange => |ex| ex,
+        .done => |attempt| return attempt,
     };
     defer ex.close();
-    const status = ex.status();
-    if (status.class() != .success) {
-        keep_part = from > 0;
-        const why = try std.fmt.allocPrint(scratch, "HTTP {d} from {s}", .{ @intFromEnum(status), lfsapi.stripQuery(action.href) });
-        if (status == .too_many_requests) return .{ .retry = .{ .message = try state.dupe(why), .after_s = ex.retryAfter() } };
-        return .{ .retry = .{ .message = try state.dupe(why) } };
-    }
+    if (try partial.receive(scratch, state, ex, r.size, action.href)) |attempt| return attempt;
 
-    if (from > 0) state.say(.{ .bytes = from });
-    const body = ex.reader() catch |err| switch (err) {
-        error.LfsZstdWindowTooLarge => return .{ .fail = "the server's zstd frame asks for a window wider than 512 MiB" },
-        else => |e| return e,
-    };
-    var counting: Counting = .init(body, state);
-    var buf: [64 * 1024]u8 = undefined;
-    var at = from;
-    while (true) {
-        const n = counting.interface.readSliceShort(&buf) catch {
-            // Broken off: what came is kept for the next attempt.
-            keep_part = at > 0;
-            return .{ .retry = .{ .message = try state.dupe(ex.bodyError()) } };
-        };
-        if (n == 0) break;
-        if (at + n > r.size) return .{ .fail = "the server sent more than the object's size" };
-        sha.update(buf[0..n]);
-        try file.writePositionalAll(io, buf[0..n], at);
-        at += n;
-        if (n < buf.len) break;
-    }
-    counting.flush();
-    if (at < r.size) {
-        // The body ended early: what came is kept for the next attempt.
-        keep_part = true;
-        return .{ .retry = .{ .message = "the download broke off" } };
-    }
     var digest: [32]u8 = undefined;
-    sha.final(&digest);
+    partial.sha.final(&digest);
     var hex: [64]u8 = undefined;
     _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable; // unreachable: a SHA-256 digest is 32 bytes, 64 hex digits
     if (!std.mem.eql(u8, &hex, &r.oid)) {
@@ -1389,6 +1288,168 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     try fs.renameWithRetry(io, store.base, temp_path, object_path);
     installed = true;
     return .ok;
+}
+
+/// The encoding a download asks for, or why it cannot be asked.
+const DownloadAccept = union(enum) { accept: lfsapi.Client.Accept, fail: []const u8 };
+
+/// `lfs.transfer.<url>.httpDownloadEncoding`, which git-lfs reads for the
+/// action's own URL: gzip unless it says zstd.
+fn downloadAccept(state: *Run, scratch: Allocator, href: []const u8) Error!DownloadAccept {
+    const encoding = try state.server.settings.urlGet(scratch, "lfs.transfer", href, "httpdownloadencoding");
+    if (encoding == null or encoding.?.len == 0 or std.mem.eql(u8, encoding.?, "gzip")) return .{ .accept = .gzip };
+    if (std.mem.eql(u8, encoding.?, "zstd")) return .{ .accept = .zstd };
+    return .{ .fail = try state.dupe(try std.fmt.allocPrint(scratch, "unsupported lfs.transfer.httpDownloadEncoding value \"{s}\": must be \"gzip\" or \"zstd\"", .{encoding.?})) };
+}
+
+/// A download's file in `<lfs>/incomplete`, and how far it has come.
+const Partial = struct {
+    file: Io.File,
+    /// The hash of the file's first `from` bytes.
+    sha: std.crypto.hash.sha2.Sha256 = .init(.{}),
+    from: u64 = 0,
+    /// Whether the file is kept as `<oid>.part` for the next attempt.
+    keep: bool = false,
+
+    /// What an earlier attempt left is hashed again, so the name is taken
+    /// over the whole object whichever attempt brought each byte. More than
+    /// a partial object can be starts again.
+    fn hashResumed(p: *Partial, io: Io, size: u64) Error!void {
+        assert(p.from == 0);
+        var buf: [64 * 1024]u8 = undefined;
+        while (true) {
+            const n = try p.file.readPositionalAll(io, &buf, p.from);
+            if (n == 0) break;
+            p.sha.update(buf[0..n]);
+            p.from += n;
+            if (n < buf.len) break;
+        }
+        if (p.from >= size) try p.restart(io);
+    }
+
+    /// Start again from nothing.
+    fn restart(p: *Partial, io: Io) Error!void {
+        try p.file.setLength(io, 0);
+        p.from = 0;
+        p.sha = .init(.{});
+    }
+
+    /// Read the body of the answer from `href` onto the file after what is
+    /// there: `null` once the whole object has come, else why the attempt
+    /// ends.
+    fn receive(p: *Partial, scratch: Allocator, state: *Run, ex: *lfsapi.Exchange, size: u64, href: []const u8) Error!?Attempt {
+        const io = state.server.io;
+        const status = ex.status();
+        if (status.class() != .success) {
+            p.keep = p.from > 0;
+            const why = try std.fmt.allocPrint(scratch, "HTTP {d} from {s}", .{ @intFromEnum(status), lfsapi.stripQuery(href) });
+            if (status == .too_many_requests) return .{ .retry = .{ .message = try state.dupe(why), .after_s = ex.retryAfter() } };
+            return .{ .retry = .{ .message = try state.dupe(why) } };
+        }
+        if (p.from > 0) state.say(.{ .bytes = p.from });
+        const body = ex.reader() catch |err| switch (err) {
+            error.LfsZstdWindowTooLarge => return .{ .fail = "the server's zstd frame asks for a window wider than 512 MiB" },
+            else => |e| return e,
+        };
+        var counting: Counting = .init(body, state);
+        var buf: [64 * 1024]u8 = undefined;
+        var at = p.from;
+        while (true) {
+            const n = counting.interface.readSliceShort(&buf) catch {
+                // Broken off: what came is kept for the next attempt.
+                p.keep = at > 0;
+                return .{ .retry = .{ .message = try state.dupe(ex.bodyError()) } };
+            };
+            if (n == 0) break;
+            if (at + n > size) return .{ .fail = "the server sent more than the object's size" };
+            p.sha.update(buf[0..n]);
+            try p.file.writePositionalAll(io, buf[0..n], at);
+            at += n;
+            if (n < buf.len) break;
+        }
+        counting.flush();
+        if (at < size) {
+            // The body ended early: what came is kept for the next attempt.
+            p.keep = true;
+            return .{ .retry = .{ .message = "the download broke off" } };
+        }
+        assert(at == size);
+        return null;
+    }
+};
+
+/// What `requestFrom` asks for.
+const DownloadRequest = struct {
+    /// The URL asked, after `lfs.transfer.enablehrefrewrite`.
+    href: []const u8,
+    /// The action's own URL, which settings and access are keyed by.
+    action_href: []const u8,
+    headers: []const http.Header,
+    accept: lfsapi.Client.Accept,
+    authenticated: bool,
+    oid: []const u8,
+    size: u64,
+};
+
+/// What asking for a download gave: the exchange to read, or the end of
+/// the attempt.
+const Requested = union(enum) { exchange: *lfsapi.Exchange, done: Attempt };
+
+/// Ask for the object from where `partial` has come to, with a Range when
+/// that is past the start: a server that will not go on from there, or
+/// goes on from elsewhere, is asked again for the whole object, and one
+/// that passed the Range over sends it whole.
+fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: DownloadRequest) Error!Requested {
+    const server = state.server;
+    const io = server.io;
+    var range_buf: [64]u8 = undefined;
+    var attempt_range = partial.from > 0;
+    while (true) {
+        var all: std.ArrayList(http.Header) = .empty;
+        try all.appendSlice(scratch, req.headers);
+        if (attempt_range) try all.append(scratch, .{ .name = "Range", .value = try std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ partial.from, req.size - 1 }) });
+        const sent = server.client.send(.{
+            .method = .GET,
+            .url = req.href,
+            .headers = all.items,
+            .authenticated = req.authenticated,
+            .access_url = accessUrl(req.action_href, req.oid),
+            // git-lfs asks for no encoding with a Range, and its client
+            // asks for gzip itself without one.
+            .accept = if (attempt_range) .none else req.accept,
+        }) catch |err| switch (err) {
+            error.ConnectionFailed, error.AuthenticationFailed, error.TooManyRedirects => {
+                partial.keep = partial.from > 0;
+                return .{ .done = .{ .retry = .{ .message = try state.dupe(server.client.message()) } } };
+            },
+            error.OutOfMemory, error.Canceled => |e| return e,
+            else => |e| return .{ .done = .{ .fail = @errorName(e) } },
+        };
+        if (!attempt_range) return .{ .exchange = sent };
+        const status = sent.status();
+        if (status == .range_not_satisfiable) {
+            // The server will not go on from there: from the start.
+            sent.close();
+            try partial.restart(io);
+            attempt_range = false;
+            continue;
+        }
+        if (status == .partial_content) {
+            const content_range = sent.header("content-range") orelse "";
+            var want_buf: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&want_buf, "bytes {d}-", .{partial.from}) catch unreachable; // unreachable: a u64 is at most 20 digits, 27 bytes with the words around it
+            if (!std.mem.startsWith(u8, content_range, want)) {
+                sent.close();
+                try partial.restart(io);
+                attempt_range = false;
+                continue;
+            }
+        } else if (status == .ok) {
+            // The Range was passed over and the whole object came.
+            try partial.restart(io);
+        }
+        return .{ .exchange = sent };
+    }
 }
 
 fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authenticated: bool) Error!Attempt {
