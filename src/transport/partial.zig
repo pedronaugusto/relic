@@ -34,6 +34,8 @@ const auth = @import("auth.zig");
 const transport = @import("../transport.zig");
 const repo_mod = @import("../repo.zig");
 const fsck = @import("../object/fsck.zig");
+const promisors = @import("promisors.zig");
+const warning = @import("../repo/warning.zig");
 const revindex = @import("../odb/revindex.zig");
 const filterspec = @import("filterspec.zig");
 
@@ -69,28 +71,30 @@ pub fn promisorRemote(config: *const config_mod.Config) ?[]const u8 {
 /// and the one `extensions.partialClone` names last. The names borrow
 /// `config`; the list is `arena`'s.
 pub fn promisorRemotes(arena: Allocator, config: *const config_mod.Config) Allocator.Error![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    for (config.entries.items) |entry| {
-        if (!std.ascii.eqlIgnoreCase(entry.section, "remote") or !entry.has_subsection) continue;
-        const promises = if (std.ascii.eqlIgnoreCase(entry.name, "promisor"))
-            entry.value == null or (config_mod.parseBool(entry.value.?) catch false)
-        else
-            std.ascii.eqlIgnoreCase(entry.name, "partialclonefilter");
-        if (!promises) continue;
-        for (out.items) |name| {
-            if (std.mem.eql(u8, name, entry.subsection)) break;
-        } else try out.append(arena, entry.subsection);
+    return promisors.remotes(arena, config);
+}
+
+/// Write into `repo`'s configuration what a server's `promisor-remote`
+/// was answered with storing (`promisor.storeFields`), saying each as git
+/// says it.
+pub fn storeAdvertised(repo: *Repository, io: Io, stores: []const promisors.Store, warnings: ?*warning.Warnings) (repo_mod.Error || config_mod.Config.SetError)!void {
+    if (stores.len == 0) return;
+    var arena_state: std.heap.ArenaAllocator = .init(repo.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for (stores) |store| {
+        try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = try store.key(arena), .value = store.new } }}, null);
+        try warning.note(warnings, .{ .promisor_stored = .{
+            .field = switch (store.field) {
+                .partial_clone_filter => "filter",
+                .token => "token",
+            },
+            .remote = store.remote,
+            .old = store.old,
+            .new = store.new,
+        } });
     }
-    if (config.get("extensions.partialclone")) |named| {
-        for (out.items, 0..) |name, i| {
-            if (std.mem.eql(u8, name, named)) {
-                _ = out.orderedRemove(i);
-                break;
-            }
-        }
-        try out.append(arena, named);
-    }
-    return out.items;
+    try @import("../config/state.zig").writeLocal(repo._config, io);
 }
 
 /// Whether `name` is a promisor remote of `config`'s repository: one
@@ -150,6 +154,9 @@ pub const Lazy = struct {
         /// takes `fetch.fsckObjects` or `transfer.fsckObjects`; see
         /// `fetch.Options.check_objects`.
         check_objects: ?bool = null,
+        /// The promisor remotes a server's `promisor-remote` was answered
+        /// with taking, which are asked first, as git asks them.
+        accepted: []const []const u8 = &.{},
     };
 
     /// A lazy fetch for `repo`, a partial clone.
@@ -205,7 +212,19 @@ pub const Lazy = struct {
         const names = try arena.alloc([]const u8, borrowed.len);
         // fetchFrom may publish configuration while registering a filter.
         // Keep every remote name under the request's owner across that edit.
-        for (borrowed, names) |name, *owned| owned.* = try arena.dupe(u8, name);
+        // The remotes a server's advertisement was answered with taking
+        // come first, each half in the configuration's order.
+        var at: usize = 0;
+        for ([_]bool{ true, false }) |taken| {
+            for (borrowed) |name| {
+                const is_taken = for (l.options.accepted) |a| {
+                    if (std.mem.eql(u8, a, name)) break true;
+                } else false;
+                if (is_taken != taken) continue;
+                names[at] = try arena.dupe(u8, name);
+                at += 1;
+            }
+        }
         if (names.len == 0) return error.NotAPartialClone;
         var remaining = try arena.dupe(Oid, oids);
         var last_error: anyerror = error.NotAPartialClone;

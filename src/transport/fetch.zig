@@ -48,6 +48,7 @@ const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const warning = @import("../repo/warning.zig");
 const fsck = @import("../object/fsck.zig");
+const promisors = @import("promisors.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -74,7 +75,7 @@ pub const Error = error{
     /// An object below a fetched ref is not in the repository after the
     /// pack arrived. `Outcome` is not returned; `Options.missing` names it.
     MissingObject,
-} || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error || fsck.LoadError ||
+} || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error || fsck.LoadError || config_mod.Config.SetError ||
     revwalk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
 
 /// How a fetch runs.
@@ -309,7 +310,10 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     // A promisor remote's packs are filtered as the clone was, and what
     // they leave out is promised rather than missing.
     const promisor = remote.name != null and partial.isPromisor(repo.configuration(), remote.name.?);
-    const filter_spec: ?[]const u8 = blk: {
+    // `auto` is the filter of the promisor remotes taken from the server's
+    // advertisement, known once the session is open.
+    var auto_filter = false;
+    var filter_spec: ?[]const u8 = blk: {
         const spec = options.filter orelse if (promisor) configured: {
             const key = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{remote.name.?});
             const raw = repo.configuration().get(key) orelse break :configured null;
@@ -317,6 +321,10 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         } else null;
         const text = spec orelse break :blk null;
         if (!promisor) return error.NotAPromisorRemote;
+        if (std.mem.eql(u8, text, "auto")) {
+            auto_filter = true;
+            break :blk null;
+        }
         break :blk try partial.normalize(arena, text);
     };
 
@@ -337,6 +345,8 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .who = options.who,
     });
     defer session.close(io);
+    try partial.storeAdvertised(repo, io, session.promisorStores(), options.warnings);
+    if (auto_filter) filter_spec = try promisors.autoFilter(arena, repo.configuration(), session.promisorsTaken());
 
     // Ask for the refs the refspecs can name, as git does.
     var prefixes: std.ArrayList([]const u8) = .empty;

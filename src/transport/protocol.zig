@@ -65,6 +65,9 @@ pub const Advertisement = struct {
     kind: hash.Kind,
     /// A shallow v0 server's boundary, from its advertisement.
     shallow: []const Oid = &.{},
+    /// What this side answers a v2 server's `promisor-remote` with, sent
+    /// with every command: the promisor remotes it took.
+    promisor_reply: ?[]const u8 = null,
 
     /// Release everything.
     pub fn deinit(adv: *Advertisement) void {
@@ -348,6 +351,7 @@ pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u
     } else try pktline.print(w, "command={s}", .{command});
     if (adv.has("agent")) try pktline.print(w, "agent={s}", .{agent});
     if (adv.has("object-format")) try pktline.print(w, "object-format={s}", .{adv.kind.name()});
+    if (adv.promisor_reply) |names| try pktline.print(w, "promisor-remote={s}", .{names});
     try pktline.delim(w);
 }
 

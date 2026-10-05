@@ -32,6 +32,7 @@ const ignore = @import("../worktree/ignore.zig");
 const revwalk = @import("../revwalk.zig");
 const local = @import("local.zig");
 const connection = @import("connection.zig");
+const promisors = @import("promisors.zig");
 const Oid = hash.Oid;
 const Connection = connection.Connection;
 
@@ -73,6 +74,10 @@ pub const Server = struct {
     allow_tip: bool,
     allow_reachable: bool,
     allow_any: bool,
+    /// A client answered `promisor-remote` taking one of this repository's
+    /// promisor remotes, so what that remote promises and this repository
+    /// lacks is left out of a pack: git's `--missing=allow-promisor`.
+    promisor_taken: bool = false,
 
     /// Serve `remote` in `version`; `stateless` for HTTP, where every
     /// request stands alone.
@@ -116,6 +121,12 @@ pub const Server = struct {
         try pktline.write(w, if (s.allow_filter) "fetch=shallow wait-for-done filter\n" else "fetch=shallow wait-for-done\n");
         try pktline.write(w, "server-option\n");
         try pktline.print(w, "object-format={s}\n", .{s.kind().name()});
+        // `promisor.advertise`: the promisor remotes this one borrows from.
+        var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
+        defer arena_state.deinit();
+        if (try promisors.advertisement(arena_state.allocator(), s.remote.repo.configuration(), null)) |info| {
+            try pktline.print(w, "promisor-remote={s}\n", .{info});
+        }
         try pktline.flush(w);
     }
 
@@ -211,6 +222,10 @@ pub const Server = struct {
                 .data => |raw| {
                     const line = std.mem.trimEnd(u8, raw, "\n");
                     if (std.mem.startsWith(u8, line, "command=")) command = try arena.dupe(u8, line["command=".len..]);
+                    if (std.mem.startsWith(u8, line, "promisor-remote=")) {
+                        const taken = try promisors.acceptedByClient(arena, s.remote.repo.configuration(), line["promisor-remote=".len..], null);
+                        if (taken.len != 0) s.promisor_taken = true;
+                    }
                 },
             }
         }
@@ -921,6 +936,17 @@ const Negotiation = struct {
         defer collected.deinit();
         var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
         try entries.appendSlice(n.arena, collected.entries);
+        if (s.promisor_taken) {
+            // What a promisor remote the client took holds and this
+            // repository does not is left to that remote.
+            var kept: usize = 0;
+            for (entries.items) |entry| {
+                if (!try n.db().exists(s.io, entry.oid)) continue;
+                entries.items[kept] = entry;
+                kept += 1;
+            }
+            entries.shrinkRetainingCapacity(kept);
+        }
         if (n.include_tag) try n.addTags(&entries);
 
         var framed: Sideband = .init(out, band);

@@ -22,6 +22,7 @@ pub const objectwalk = @import("transport/objectwalk.zig");
 pub const sideband = @import("transport/sideband.zig");
 pub const httpsettings = @import("transport/httpsettings.zig");
 pub const hidden = @import("transport/hidden.zig");
+pub const promisors = @import("transport/promisors.zig");
 /// Which proxy an HTTP remote is reached through.
 pub const Proxy = httpsettings.Proxy;
 pub const httpauth = @import("transport/httpauth.zig");
@@ -157,6 +158,11 @@ pub const Session = struct {
             /// v0 upload-pack after its pack — rather than waiting for a
             /// command.
             done: bool = false,
+            /// The promisor remotes taken from the server's
+            /// `promisor-remote`, and what is to be stored from it; the
+            /// advertisement's.
+            taken: []const promisors.Info = &.{},
+            stores: []const promisors.Store = &.{},
         },
         /// A remote helper spoken to in its own commands.
         helper: struct {
@@ -169,7 +175,57 @@ pub const Session = struct {
 
     /// Open the remote at `remote_url` for `service`. `kind` is the local
     /// repository's hash, or `null` when there is no local repository yet.
+    /// A v2 server's `promisor-remote` is answered as `options.config`
+    /// says (`promisorsTaken`, `promisorStores`).
     pub fn open(
+        gpa: Allocator,
+        io: Io,
+        remote_url: []const u8,
+        service: Service,
+        kind: ?hash.Kind,
+        options: Options,
+    ) Error!Session {
+        var session = try openUnanswered(gpa, io, remote_url, service, kind, options);
+        errdefer session.close(io);
+        try session.answerPromisors(options);
+        return session;
+    }
+
+    /// Answer a v2 server's `promisor-remote` with the remotes
+    /// `promisor.acceptFromServer` takes: sent with every command after.
+    fn answerPromisors(s: *Session, options: Options) Allocator.Error!void {
+        const smart = switch (s.impl) {
+            .smart => |*smart| smart,
+            else => return,
+        };
+        if (smart.advertisement.version != .v2) return;
+        const advertised = smart.advertisement.value("promisor-remote") orelse return;
+        const config = options.config orelse return;
+        const answer = try promisors.reply(smart.advertisement.arena.allocator(), config, advertised, options.warnings);
+        smart.advertisement.promisor_reply = answer.text;
+        smart.taken = answer.accepted;
+        smart.stores = answer.stores;
+    }
+
+    /// The promisor remotes this side took from the server's
+    /// `promisor-remote`, as advertised.
+    pub fn promisorsTaken(s: *const Session) []const promisors.Info {
+        return switch (s.impl) {
+            .smart => |smart| smart.taken,
+            else => &.{},
+        };
+    }
+
+    /// What `promisor.storeFields` asks to be written from the server's
+    /// `promisor-remote`: `partial.storeAdvertised` writes it.
+    pub fn promisorStores(s: *const Session) []const promisors.Store {
+        return switch (s.impl) {
+            .smart => |smart| smart.stores,
+            else => &.{},
+        };
+    }
+
+    fn openUnanswered(
         gpa: Allocator,
         io: Io,
         remote_url: []const u8,

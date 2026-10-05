@@ -48,6 +48,7 @@ const clonelfs = @import("clone/lfs.zig");
 const progress_mod = @import("progress.zig");
 const config_mod = @import("../config.zig");
 const fsck = @import("../object/fsck.zig");
+const promisors = @import("promisors.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -166,7 +167,10 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const filter_spec: ?[]const u8 = if (options.filter) |spec| try partial.normalize(arena, spec) else null;
+    // `auto` is recorded as it is, and sent as the filter of the promisor
+    // remotes taken from the server's advertisement, as git's is.
+    const auto_filter = if (options.filter) |spec| std.mem.eql(u8, spec, "auto") else false;
+    const filter_spec: ?[]const u8 = if (options.filter) |spec| (if (auto_filter) "auto" else try partial.normalize(arena, spec)) else null;
 
     // Before the repository exists, the caller's own configuration is what
     // git reads.
@@ -281,6 +285,12 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     } else {
         repo = try initRepository(gpa, io, dir, options, session.objectFormat(), initial);
         repo_made = true;
+    }
+    try partial.storeAdvertised(&repo, io, session.promisorStores(), options.warnings);
+    if (auto_filter and send_filter != null) {
+        var empty: config_mod.Config = .initEmpty(gpa);
+        defer empty.deinit();
+        send_filter = try promisors.autoFilter(arena, settings orelse &empty, session.promisorsTaken());
     }
 
     // The remote, in the new configuration.
@@ -504,7 +514,9 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         if (head_commit) |commit| {
             // A partial clone's checkout reads what the filter left out:
             // fetched first, in one request, as git does.
-            var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = options.programs, .prompt = options.prompt, .check_objects = options.check_objects });
+            var taken: std.ArrayList([]const u8) = .empty;
+            for (session.promisorsTaken()) |info| try taken.append(arena, info.name);
+            var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = options.programs, .prompt = options.prompt, .check_objects = options.check_objects, .accepted = taken.items });
             defer lazy.deinit();
             if (send_filter != null) {
                 lazy.install();

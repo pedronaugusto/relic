@@ -114,6 +114,7 @@ test {
         _ = @import("commit/trailer_test.zig");
         _ = @import("repo/safe_test.zig");
         _ = @import("transport/hidden_test.zig");
+        _ = @import("transport/promisors_test.zig");
         _ = @import("testing/shared.zig");
         _ = @import("repo/ident_test.zig");
     }

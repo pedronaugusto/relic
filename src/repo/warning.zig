@@ -43,6 +43,13 @@ pub const Warning = union(enum) {
     /// A `fetch.fsck.<msg-id>` or `receive.fsck.<msg-id>` naming no
     /// message git has, which is left out: the name.
     fsck_unknown_message: []const u8,
+    /// What git warns of while reading or answering a server's
+    /// `promisor-remote`: the text.
+    promisor: []const u8,
+    /// A field a server advertised for a promisor remote, stored as
+    /// `promisor.storeFields` asks: `filter` or `token`, the remote, the
+    /// value before and after.
+    promisor_stored: struct { field: []const u8, remote: []const u8, old: []const u8, new: []const u8 },
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -58,6 +65,8 @@ pub const Warning = union(enum) {
             .tag_known_as => |t| std.fmt.allocPrint(arena, "tag '{s}' is externally known as '{s}'", .{ t.path, t.name }),
             .fsck => |f| std.fmt.allocPrint(arena, "object {s}: {s}", .{ f.object, f.message }),
             .fsck_unknown_message => |name| std.fmt.allocPrint(arena, "Skipping unknown msg id '{s}'", .{name}),
+            .promisor => |text| text,
+            .promisor_stored => |s| std.fmt.allocPrint(arena, "Storing new {s} from server for remote '{s}'.\n    '{s}' -> '{s}'", .{ s.field, s.remote, s.old, s.new }),
         };
     }
 };
@@ -92,6 +101,8 @@ pub const Warnings = struct {
             .tag_known_as => |t| .{ .tag_known_as = .{ .path = try a.dupe(u8, t.path), .name = try a.dupe(u8, t.name) } },
             .fsck => |f| .{ .fsck = .{ .object = try a.dupe(u8, f.object), .message = try a.dupe(u8, f.message) } },
             .fsck_unknown_message => |t| .{ .fsck_unknown_message = try a.dupe(u8, t) },
+            .promisor => |t| .{ .promisor = try a.dupe(u8, t) },
+            .promisor_stored => |s| .{ .promisor_stored = .{ .field = try a.dupe(u8, s.field), .remote = try a.dupe(u8, s.remote), .old = try a.dupe(u8, s.old), .new = try a.dupe(u8, s.new) } },
         };
         try w.items.append(a, owned);
     }
