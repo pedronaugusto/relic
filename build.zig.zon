@@ -3,7 +3,7 @@
     .version = "0.3.0",
     .dependencies = .{
         .preflight = .{
-            .url = "https://codeload.github.com/pedronaugusto/preflight/tar.gz/c9402c40326a17daaeb579293960b44c8eb2132b",
+            .url = "https://codeload.github.com/pedronaugusto/preflight/tar.gz/f76ee985a56ee2acb107552febbdcaa32cc51853",
             .hash = "preflight-0.1.0-LX1ZwqftAQCXHIKF806T4R6kIz8uEKSG5hhCkqkk-_9y",
             .lazy = true,
         },
