@@ -13,10 +13,6 @@
       "lines": 129,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/transport/fetchpack.zig:fetchV0": {
-      "lines": 147,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
     "src/testing/history.zig:signedHistory": {
       "lines": 140,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."

@@ -468,27 +468,11 @@ fn fetchV0(
     shallow_info: ?*ShallowInfo,
 ) Error!indexpack.Result {
     const deepen = request.deepen != null;
-    if (deepen or request.shallow.len != 0) {
-        if (!adv.has("shallow")) return error.ShallowUnsupportedByServer;
-        if (request.deepen) |d| {
-            if (d.since != null and !adv.has("deepen-since")) return error.ShallowUnsupportedByServer;
-            if (d.not.len != 0 and !adv.has("deepen-not")) return error.ShallowUnsupportedByServer;
-            if (d.relative and !adv.has("deepen-relative")) return error.ShallowUnsupportedByServer;
-        }
-    }
-    const band: enum { none, small, large } = if (adv.has("side-band-64k"))
-        .large
-    else if (adv.has("side-band"))
-        .small
-    else
-        .none;
+    const caps = try capabilitiesV0(conn, adv, request);
+    const band = caps.band;
     const stateless = conn.stateless;
-    var multi_ack: u2 = if (adv.has("multi_ack_detailed")) 2 else if (adv.has("multi_ack")) 1 else 0;
-    if (stateless and multi_ack != 2) {
-        conn.setMessage("a stateless server must speak multi_ack_detailed");
-        return error.ProtocolError;
-    }
-    const no_done = stateless and multi_ack == 2 and adv.has("no-done");
+    var multi_ack = caps.multi_ack;
+    const no_done = caps.no_done;
 
     // What every stateless request begins with: the wants and how deep.
     var state: Io.Writer.Allocating = .init(gpa);
@@ -500,9 +484,7 @@ fn fetchV0(
     var shallow_kept = false;
 
     if (!stateless) {
-        const w = try conn.request();
-        w.writeAll(state.written()) catch |err| return conn.writeFailed(err);
-        in = try conn.response();
+        in = try exchange(conn, state.written());
         if (deepen) {
             try readShallowList(conn, in, adv.kind, shallow_info, true);
             shallow_kept = true;
@@ -525,9 +507,7 @@ fn fetchV0(
         count += 1;
         if (count < flush_at) continue;
         pktline.flush(&round.writer) catch return error.OutOfMemory;
-        const w = try conn.request();
-        w.writeAll(round.written()) catch |err| return conn.writeFailed(err);
-        in = try conn.response();
+        in = try exchange(conn, round.written());
         round.clearRetainingCapacity();
         round.writer.writeAll(state.written()) catch return error.OutOfMemory;
         flushes += 1;
@@ -570,9 +550,7 @@ fn fetchV0(
 
     if (!got_ready or !no_done) {
         pktline.write(&round.writer, "done\n") catch return error.OutOfMemory;
-        const w = try conn.request();
-        w.writeAll(round.written()) catch |err| return conn.writeFailed(err);
-        in = try conn.response();
+        in = try exchange(conn, round.written());
     }
     if (!acked_any) {
         multi_ack = 0;
@@ -581,15 +559,7 @@ fn fetchV0(
     if ((!got_ready or !no_done) and stateless and deepen) {
         try readShallowList(conn, in, adv.kind, shallow_info, !shallow_kept);
     }
-    while (flushes > 0 or multi_ack != 0) {
-        const ack = try readAck(conn, in, adv.kind, &acked);
-        if (ack != .nak) {
-            if (ack == .ack) break;
-            multi_ack = 1;
-            continue;
-        }
-        flushes -= 1;
-    }
+    try drainAcksV0(conn, in, adv.kind, flushes, multi_ack, &acked);
 
     var receive = receive_options;
     receive.progress = progress;
@@ -600,6 +570,70 @@ fn fetchV0(
         };
     }
     return receiveSideband(gpa, io, conn, in, db, pack_dir, progress, receive);
+}
+
+/// Send `bytes` as the next request and take the response to read.
+fn exchange(conn: *Connection, bytes: []const u8) Error!*Io.Reader {
+    const w = try conn.request();
+    w.writeAll(bytes) catch |err| return conn.writeFailed(err);
+    const in = try conn.response();
+    return in;
+}
+
+/// How a v0 server sends the pack: on its own, or in side-band packets
+/// of 999 or 65519 bytes.
+const Band = enum { none, small, large };
+
+/// What a v0 server's capabilities make of a fetch.
+const CapabilitiesV0 = struct {
+    band: Band,
+    /// 0 for none, 1 for `multi_ack`, 2 for `multi_ack_detailed`.
+    multi_ack: u2,
+    /// Whether the client may leave out `done` once the server is ready.
+    no_done: bool,
+};
+
+/// The server's capabilities for `request`: `error.ShallowUnsupportedByServer`
+/// for a deepening it cannot do, `error.ProtocolError` for a stateless
+/// server without `multi_ack_detailed`, which stateless negotiation needs.
+fn capabilitiesV0(conn: *Connection, adv: *const protocol.Advertisement, request: Request) Error!CapabilitiesV0 {
+    if (request.deepen != null or request.shallow.len != 0) {
+        if (!adv.has("shallow")) return error.ShallowUnsupportedByServer;
+        if (request.deepen) |d| {
+            if (d.since != null and !adv.has("deepen-since")) return error.ShallowUnsupportedByServer;
+            if (d.not.len != 0 and !adv.has("deepen-not")) return error.ShallowUnsupportedByServer;
+            if (d.relative and !adv.has("deepen-relative")) return error.ShallowUnsupportedByServer;
+        }
+    }
+    const band: Band = if (adv.has("side-band-64k"))
+        .large
+    else if (adv.has("side-band"))
+        .small
+    else
+        .none;
+    const multi_ack: u2 = if (adv.has("multi_ack_detailed")) 2 else if (adv.has("multi_ack")) 1 else 0;
+    if (conn.stateless and multi_ack != 2) {
+        conn.setMessage("a stateless server must speak multi_ack_detailed");
+        return error.ProtocolError;
+    }
+    return .{ .band = band, .multi_ack = multi_ack, .no_done = conn.stateless and multi_ack == 2 and adv.has("no-done") };
+}
+
+/// Read the answers still due after `done`, as git's `find_common` does:
+/// a NAK for each flush not yet answered, and, under multi_ack, the ACKs
+/// up to the final one.
+fn drainAcksV0(conn: *Connection, in: *Io.Reader, kind: hash.Kind, flushes: usize, multi_ack: u2, acked: *Oid) Error!void {
+    var pending = flushes;
+    var multi = multi_ack;
+    while (pending > 0 or multi != 0) {
+        const ack = try readAck(conn, in, kind, acked);
+        if (ack != .nak) {
+            if (ack == .ack) break;
+            multi = 1;
+            continue;
+        }
+        pending -= 1;
+    }
 }
 
 /// The wants of a v0 request, the first with the capabilities git asks
