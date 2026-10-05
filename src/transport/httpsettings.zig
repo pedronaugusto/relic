@@ -67,6 +67,105 @@ pub const Settings = struct {
     /// Only the TLS ones are kept.
     ca_info_from: ?[]const u8 = null,
     ssl_verify_from: ?[]const u8 = null,
+
+    /// Take `http.<name>`'s `value`, from `origin`; `bare` when it is
+    /// written without `=`, which a boolean reads as true.
+    fn take(
+        settings: *Settings,
+        arena: Allocator,
+        name: []const u8,
+        value: []const u8,
+        bare: bool,
+        origin: []const u8,
+        headers: *std.ArrayList([]const u8),
+    ) Error!void {
+        if (std.mem.eql(u8, name, "proxy")) {
+            settings.proxy = value;
+        } else if (std.mem.eql(u8, name, "sslverify")) {
+            settings.ssl_verify = if (bare) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
+            settings.ssl_verify_from = origin;
+        } else if (std.mem.eql(u8, name, "sslcainfo")) {
+            settings.ca_info = value;
+            settings.ca_info_from = origin;
+        } else if (std.mem.eql(u8, name, "sslcapath")) {
+            settings.ca_path = value;
+        } else if (std.mem.eql(u8, name, "sslcert")) {
+            settings.ssl_cert = value;
+        } else if (std.mem.eql(u8, name, "sslkey")) {
+            settings.ssl_key = value;
+        } else if (std.mem.eql(u8, name, "sslcerttype")) {
+            settings.ssl_cert_type = value;
+        } else if (std.mem.eql(u8, name, "sslkeytype")) {
+            settings.ssl_key_type = value;
+        } else if (std.mem.eql(u8, name, "proxysslcert")) {
+            settings.proxy_ssl_cert = value;
+        } else if (std.mem.eql(u8, name, "proxysslkey")) {
+            settings.proxy_ssl_key = value;
+        } else if (std.mem.eql(u8, name, "proxysslcainfo")) {
+            settings.proxy_ssl_ca_info = value;
+        } else if (std.mem.eql(u8, name, "proxysslcertpasswordprotected")) {
+            settings.proxy_ssl_cert_password_protected = if (bare) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
+        } else if (std.mem.eql(u8, name, "extraheader")) {
+            if (value.len == 0) headers.clearRetainingCapacity() else try headers.append(arena, value);
+        } else if (std.mem.eql(u8, name, "postbuffer")) {
+            const n = config_mod.parseInt(value) catch return error.InvalidHttpSetting;
+            settings.post_buffer = @intCast(std.math.clamp(n, 1024, 1 << 30));
+        } else if (std.mem.eql(u8, name, "useragent")) {
+            settings.user_agent = value;
+        } else if (std.mem.eql(u8, name, "proxyauthmethod")) {
+            settings.proxy_auth_method = value;
+        } else if (std.mem.eql(u8, name, "sslcertpasswordprotected")) {
+            settings.ssl_cert_password_protected = if (bare) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
+        }
+    }
+
+    /// What the environment says over the configuration, as git reads it:
+    /// `GIT_SSL_*`, `GIT_HTTP_*`, `GIT_PROXY_SSL_*`, and the proxy
+    /// variables unless the configuration named a proxy, `no_proxy`
+    /// turning a proxy off for the hosts it names.
+    fn takeEnvironment(settings: *Settings, env: *const Environ.Map, url: url_mod.Url, proxy_set: bool) void {
+        if (env.get("GIT_SSL_NO_VERIFY") != null) {
+            settings.ssl_verify = false;
+            settings.ssl_verify_from = "GIT_SSL_NO_VERIFY";
+        }
+        if (env.get("GIT_SSL_CAINFO")) |v| {
+            settings.ca_info = v;
+            settings.ca_info_from = "GIT_SSL_CAINFO";
+        }
+        if (env.get("GIT_SSL_CAPATH")) |v| settings.ca_path = v;
+        if (env.get("GIT_SSL_CERT")) |v| settings.ssl_cert = v;
+        if (env.get("GIT_SSL_KEY")) |v| settings.ssl_key = v;
+        if (env.get("GIT_HTTP_USER_AGENT")) |v| settings.user_agent = v;
+        if (env.get("GIT_HTTP_PROXY_AUTHMETHOD")) |v| settings.proxy_auth_method = v;
+        if (env.get("GIT_SSL_CERT_TYPE")) |v| settings.ssl_cert_type = v;
+        if (env.get("GIT_SSL_KEY_TYPE")) |v| settings.ssl_key_type = v;
+        // Set at all, these turn the prompt on, whatever they say, as git
+        // reads them — the first for an https URL only.
+        if (env.get("GIT_SSL_CERT_PASSWORD_PROTECTED") != null and url.scheme == .https) settings.ssl_cert_password_protected = true;
+        if (env.get("GIT_PROXY_SSL_CERT")) |v| settings.proxy_ssl_cert = v;
+        if (env.get("GIT_PROXY_SSL_KEY")) |v| settings.proxy_ssl_key = v;
+        if (env.get("GIT_PROXY_SSL_CAINFO")) |v| settings.proxy_ssl_ca_info = v;
+        if (env.get("GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED") != null) settings.proxy_ssl_cert_password_protected = true;
+        if (!proxy_set) {
+            const names: []const []const u8 = if (url.scheme == .https)
+                &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }
+            else
+                &.{ "http_proxy", "all_proxy", "ALL_PROXY" };
+            for (names) |name| {
+                const value = env.get(name) orelse continue;
+                if (value.len == 0) continue;
+                settings.proxy = value;
+                break;
+            }
+        }
+        if (settings.proxy) |_| {
+            for ([_][]const u8{ "no_proxy", "NO_PROXY" }) |name| {
+                const list = env.get(name) orelse continue;
+                if (noProxy(list, url.host)) settings.proxy = null;
+                break;
+            }
+        }
+    }
 };
 
 /// Errors from reading the settings.
@@ -128,45 +227,8 @@ pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, env
                 try std.fmt.allocPrint(arena, "http.{s}", .{name})
             else
                 try std.fmt.allocPrint(arena, "http.{s}.{s}", .{ entry.subsection, name });
-            if (std.mem.eql(u8, name, "proxy")) {
-                s.proxy = value;
-                proxy_set = true;
-            } else if (std.mem.eql(u8, name, "sslverify")) {
-                s.ssl_verify = if (entry.value == null) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
-                s.ssl_verify_from = origin;
-            } else if (std.mem.eql(u8, name, "sslcainfo")) {
-                s.ca_info = value;
-                s.ca_info_from = origin;
-            } else if (std.mem.eql(u8, name, "sslcapath")) {
-                s.ca_path = value;
-            } else if (std.mem.eql(u8, name, "sslcert")) {
-                s.ssl_cert = value;
-            } else if (std.mem.eql(u8, name, "sslkey")) {
-                s.ssl_key = value;
-            } else if (std.mem.eql(u8, name, "sslcerttype")) {
-                s.ssl_cert_type = value;
-            } else if (std.mem.eql(u8, name, "sslkeytype")) {
-                s.ssl_key_type = value;
-            } else if (std.mem.eql(u8, name, "proxysslcert")) {
-                s.proxy_ssl_cert = value;
-            } else if (std.mem.eql(u8, name, "proxysslkey")) {
-                s.proxy_ssl_key = value;
-            } else if (std.mem.eql(u8, name, "proxysslcainfo")) {
-                s.proxy_ssl_ca_info = value;
-            } else if (std.mem.eql(u8, name, "proxysslcertpasswordprotected")) {
-                s.proxy_ssl_cert_password_protected = if (entry.value == null) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
-            } else if (std.mem.eql(u8, name, "extraheader")) {
-                if (value.len == 0) headers.clearRetainingCapacity() else try headers.append(arena, value);
-            } else if (std.mem.eql(u8, name, "postbuffer")) {
-                const n = config_mod.parseInt(value) catch return error.InvalidHttpSetting;
-                s.post_buffer = @intCast(std.math.clamp(n, 1024, 1 << 30));
-            } else if (std.mem.eql(u8, name, "useragent")) {
-                s.user_agent = value;
-            } else if (std.mem.eql(u8, name, "proxyauthmethod")) {
-                s.proxy_auth_method = value;
-            } else if (std.mem.eql(u8, name, "sslcertpasswordprotected")) {
-                s.ssl_cert_password_protected = if (entry.value == null) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
-            }
+            if (std.mem.eql(u8, name, "proxy")) proxy_set = true;
+            try s.take(arena, name, value, entry.value == null, origin, &headers);
         }
     }
     s.extra_headers = headers.items;
@@ -181,49 +243,7 @@ pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, env
             proxy_set = true;
         }
     };
-    if (environ) |env| {
-        if (env.get("GIT_SSL_NO_VERIFY") != null) {
-            s.ssl_verify = false;
-            s.ssl_verify_from = "GIT_SSL_NO_VERIFY";
-        }
-        if (env.get("GIT_SSL_CAINFO")) |v| {
-            s.ca_info = v;
-            s.ca_info_from = "GIT_SSL_CAINFO";
-        }
-        if (env.get("GIT_SSL_CAPATH")) |v| s.ca_path = v;
-        if (env.get("GIT_SSL_CERT")) |v| s.ssl_cert = v;
-        if (env.get("GIT_SSL_KEY")) |v| s.ssl_key = v;
-        if (env.get("GIT_HTTP_USER_AGENT")) |v| s.user_agent = v;
-        if (env.get("GIT_HTTP_PROXY_AUTHMETHOD")) |v| s.proxy_auth_method = v;
-        if (env.get("GIT_SSL_CERT_TYPE")) |v| s.ssl_cert_type = v;
-        if (env.get("GIT_SSL_KEY_TYPE")) |v| s.ssl_key_type = v;
-        // Set at all, these turn the prompt on, whatever they say, as git
-        // reads them — the first for an https URL only.
-        if (env.get("GIT_SSL_CERT_PASSWORD_PROTECTED") != null and url.scheme == .https) s.ssl_cert_password_protected = true;
-        if (env.get("GIT_PROXY_SSL_CERT")) |v| s.proxy_ssl_cert = v;
-        if (env.get("GIT_PROXY_SSL_KEY")) |v| s.proxy_ssl_key = v;
-        if (env.get("GIT_PROXY_SSL_CAINFO")) |v| s.proxy_ssl_ca_info = v;
-        if (env.get("GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED") != null) s.proxy_ssl_cert_password_protected = true;
-        if (!proxy_set) {
-            const names: []const []const u8 = if (url.scheme == .https)
-                &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }
-            else
-                &.{ "http_proxy", "all_proxy", "ALL_PROXY" };
-            for (names) |name| {
-                const value = env.get(name) orelse continue;
-                if (value.len == 0) continue;
-                s.proxy = value;
-                break;
-            }
-        }
-        if (s.proxy) |_| {
-            for ([_][]const u8{ "no_proxy", "NO_PROXY" }) |name| {
-                const list = env.get(name) orelse continue;
-                if (noProxy(list, url.host)) s.proxy = null;
-                break;
-            }
-        }
-    }
+    if (environ) |env| s.takeEnvironment(env, url, proxy_set);
     if (s.proxy) |p| {
         if (p.len == 0) s.proxy = null;
     }
