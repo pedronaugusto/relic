@@ -23,6 +23,8 @@
 //! and `lock` and `unlock` set them for the path they touch.
 //! `lfs.setlockablereadonly` false turns all of it off, as in git-lfs.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -250,7 +252,7 @@ fn writeRef(s: *std.json.Stringify, ref: ?[]const u8) Io.Writer.Error!void {
 /// Take the lock on `path`, as `git lfs lock <path>` takes it. On success the
 /// file, when it is there, is made writable, and the caches say the lock is
 /// the person's.
-pub fn lock(server: *lfsapi.Server, repo: *Repository, path: []const u8, arena: Allocator, options: Options) Error!Acquired {
+pub fn lock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, path: []const u8, options: Options) Self.Error!Acquired {
     try checkPath(path);
     const ref = try refFor(arena, server.io, repo, options);
     if (try server.client.sshTransfer(.upload)) |t| {
@@ -304,7 +306,7 @@ fn tookLock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, taken: 
 /// Give back the lock with `id`, or break someone else's with `force`, as
 /// `git lfs unlock --id` does. The file is made read-only again when it is
 /// lockable, and the caches forget the lock.
-pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {
+pub fn unlock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, id: []const u8, force: bool, options: Options) Self.Error!Lock {
     const ref = try refFor(arena, server.io, repo, options);
     if (try server.client.sshTransfer(.upload)) |t| {
         const released = try sshUnlock(arena, server, t, id, ref);
@@ -369,7 +371,7 @@ fn gaveBack(arena: Allocator, server: *lfsapi.Server, repo: *Repository, release
 
 /// Give back the lock on `path`: its id is asked for first, as `git lfs
 /// unlock <path>` asks.
-pub fn unlockPath(server: *lfsapi.Server, repo: *Repository, path: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {
+pub fn unlockPath(arena: Allocator, server: *lfsapi.Server, repo: *Repository, path: []const u8, force: bool, options: Options) Self.Error!Lock {
     try checkPath(path);
     var found = try list(server, repo, .{ .path = path }, options);
     defer found.deinit();
@@ -379,7 +381,7 @@ pub fn unlockPath(server: *lfsapi.Server, repo: *Repository, path: []const u8, f
         else => return error.LockAmbiguous,
     }
     const id = try arena.dupe(u8, found.locks[0].id);
-    return unlock(server, repo, id, force, arena, options);
+    return unlock(arena, server, repo, id, force, options);
 }
 
 /// What a listing asks for.
@@ -393,7 +395,7 @@ pub const Filter = struct {
 /// List the locks on the server, following its pages, as `git lfs locks`
 /// does. A full listing — no filter, no limit — is kept as the `remote`
 /// cache.
-pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: Options) Error!Listing {
+pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: Options) Self.Error!Listing {
     var out: Listing = .{ .arena = .init(server.gpa), .locks = &.{} };
     errdefer out.arena.deinit();
     const arena = out.arena.allocator();
@@ -461,7 +463,7 @@ pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: 
 /// Ask the server which locks are the person's and which are not, following
 /// its pages, as `git lfs locks --verify` and the pre-push check ask. The
 /// answer is kept as the `verifiable` cache.
-pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Error!Verified {
+pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Self.Error!Verified {
     var out: Verified = .{ .arena = .init(server.gpa), .ours = &.{}, .theirs = &.{} };
     errdefer out.arena.deinit();
     const arena = out.arena.allocator();
@@ -711,7 +713,7 @@ pub const Cache = struct {
 
     /// Read what is cached for `ref`, which is nothing when there is no
     /// cache or it does not parse.
-    pub fn read(a: Allocator, io: Io, store: *const lfs.Store, ref: ?[]const u8) Error!Cache {
+    pub fn read(a: Allocator, io: Io, store: *const lfs.Store, ref: ?[]const u8) Self.Error!Cache {
         var c: Cache = .{};
         const dir = try dirPath(a, store, ref);
         const remote_path = try std.fmt.allocPrint(a, "{s}/remote", .{dir});
@@ -822,7 +824,7 @@ pub const Table = struct {
 
     /// The table from what is cached for `ref`, with no network: the split
     /// when there is one, else the listing. What a program shows offline.
-    pub fn cached(gpa: Allocator, io: Io, store: *const lfs.Store, ref: ?[]const u8) Error!Table {
+    pub fn cached(gpa: Allocator, io: Io, store: *const lfs.Store, ref: ?[]const u8) Self.Error!Table {
         var scratch: std.heap.ArenaAllocator = .init(gpa);
         defer scratch.deinit();
         const c = try Cache.read(scratch.allocator(), io, store, ref);
@@ -865,12 +867,12 @@ pub const Lockables = struct {
     work_dir: ?Io.Dir,
 
     /// Load them for `repo`.
-    pub fn load(io: Io, repo: *Repository) Error!Lockables {
+    pub fn load(io: Io, repo: *Repository) Self.Error!Lockables {
         return .{ .attrs = try repo.loadAttrs(io), .io = io, .work_dir = repo.work_dir };
     }
 
     /// Whether `path` has the `lockable` attribute.
-    pub fn isLockable(l: *Lockables, scratch: Allocator, path: []const u8) Error!bool {
+    pub fn isLockable(l: *Lockables, scratch: Allocator, path: []const u8) Self.Error!bool {
         if (l.work_dir) |wt| try l.attrs.enter(l.io, wt, path);
         const found = try l.attrs.lookup(scratch, path, false);
         return found.isSet("lockable");
@@ -903,7 +905,7 @@ pub const Fixed = struct {
 /// post-checkout hook does after a checkout. Whose a lock is comes from the
 /// cached split for `options.ref`; nothing is sent. Nothing is done when
 /// `lfs.setlockablereadonly` is false.
-pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const []const u8, options: Options) Error!Fixed {
+pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const []const u8, options: Options) Self.Error!Fixed {
     var fixed: Fixed = .{};
     const wt = repo.work_dir orelse return fixed;
     var settings = try lfsapi.Settings.load(gpa, io, repo.configuration(), repo.work_dir);

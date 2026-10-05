@@ -330,7 +330,7 @@ test "locks are taken, listed, verified and given back over git-lfs-transfer, as
             {
                 const server = try t.openServer(s.fx, &repo);
                 defer server.close();
-                const got = try lfslocks.lock(server, &repo, "a.bin", arena, .{});
+                const got = try lfslocks.lock(arena, server, &repo, "a.bin", .{});
                 try testing.expectEqualStrings("ada", got.locked.owner.?);
             }
             {
@@ -351,13 +351,13 @@ test "locks are taken, listed, verified and given back over git-lfs-transfer, as
             {
                 const server = try t.openServer(s.fx, &repo);
                 defer server.close();
-                const held = try lfslocks.lock(server, &repo, "b.bin", arena, .{});
+                const held = try lfslocks.lock(arena, server, &repo, "b.bin", .{});
                 try testing.expectEqualStrings("bob", held.held.owner.?);
             }
             {
                 const server = try t.openServer(s.fx, &repo);
                 defer server.close();
-                const released = try lfslocks.unlockPath(server, &repo, "a.bin", false, arena, .{});
+                const released = try lfslocks.unlockPath(arena, server, &repo, "a.bin", false, .{});
                 try testing.expectEqualStrings("a.bin", released.path);
             }
         }
@@ -504,7 +504,7 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     {
         const server = try t.openServer(fx, &repo);
         defer server.close();
-        _ = (try lfslocks.lock(server, &repo, "a.bin", arena, .{})).locked;
+        _ = (try lfslocks.lock(arena, server, &repo, "a.bin", .{})).locked;
     }
     const listed = try fx.gitOut(d, &.{ "lfs", "locks" });
     defer gpa.free(listed);
@@ -520,7 +520,7 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     {
         const server = try t.openServer(fx, &repo);
         defer server.close();
-        _ = try lfslocks.unlockPath(server, &repo, "b.bin", false, arena, .{});
+        _ = try lfslocks.unlockPath(arena, server, &repo, "b.bin", false, .{});
     }
     try fx.gitIn(d, &.{ "lfs", "unlock", "a.bin" });
     {

@@ -19,6 +19,8 @@
 //! `no_proxy` or `NO_PROXY` names the host. An empty `http.proxy` turns
 //! every proxy off.
 
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -199,13 +201,13 @@ pub fn chooseProxy(s: *Settings, choice: Proxy) void {
 
 /// The settings for `url`, from `config` and `environ`. Every slice is in
 /// `arena`, or borrowed from `config` or `environ`.
-pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url) Error!Settings {
+pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url) Self.Error!Settings {
     return resolveForRemote(arena, config, environ, url, null);
 }
 
 /// A named remote's proxy overrides `http.proxy`, including an empty value.
 /// The environment's `no_proxy` still applies to that proxy.
-pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url, remote_name: ?[]const u8) Error!Settings {
+pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url, remote_name: ?[]const u8) Self.Error!Settings {
     var s: Settings = .{};
     var headers: std.ArrayList([]const u8) = .empty;
     var proxy_set = false;

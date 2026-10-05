@@ -45,6 +45,8 @@
 //! uploads the objects the commits a push sends point at, as git-lfs's
 //! pre-push hook does.
 
+const transfer = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -399,13 +401,13 @@ pub fn writeBatchRequestOffering(w: *Io.Writer, operation: lfsapi.Operation, obj
 
 /// Download `objects` into the repository's store. An object already there
 /// is not asked for.
-pub fn download(server: *lfsapi.Server, objects: []const Object, options: Options) Error!Outcome {
+pub fn download(server: *lfsapi.Server, objects: []const Object, options: Options) transfer.Error!Outcome {
     return run(server, .download, objects, options);
 }
 
 /// Upload `objects` from the repository's store. An object the server
 /// already has is not sent.
-pub fn upload(server: *lfsapi.Server, objects: []const Object, options: Options) Error!Outcome {
+pub fn upload(server: *lfsapi.Server, objects: []const Object, options: Options) transfer.Error!Outcome {
     return run(server, .upload, objects, options);
 }
 
@@ -595,7 +597,7 @@ pub const SweepError = Allocator.Error || Io.Dir.OpenError || Io.Dir.Iterator.Er
 /// other file last changed more than an hour before, except in a
 /// directory under it changed within the hour, whose files may be links
 /// something is still using. Directories stay.
-pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now: i64) SweepError!void {
+pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now: i64) transfer.SweepError!void {
     var path_buf: [lfs.Store.max_path]u8 = undefined;
     const tmp_path = std.fmt.bufPrint(&path_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
     var tmp = store.base.openDir(io, tmp_path, .{ .iterate = true }) catch |err| switch (err) {
@@ -2079,12 +2081,11 @@ pub const FetchError = Error || objectwalk.Error || repo_mod.Error || error{
 /// store, as `git lfs fetch <remote> <refs>` does. A path
 /// `lfs.fetchinclude` leaves out, or `lfs.fetchexclude` names, is not
 /// fetched unless `all_paths` says so.
-pub fn fetch(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) FetchError!Outcome {
+pub fn fetch(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) transfer.FetchError!Outcome {
     const gpa = server.gpa;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const transfer = options.transfer;
     var tips: std.ArrayList(Oid) = .empty;
     var pointers: std.ArrayList(Object) = .empty;
     try pointers.appendSlice(arena, try scan(arena, server.io, repo, options, &tips));
@@ -2097,7 +2098,7 @@ pub fn fetch(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) F
         if (!options.all_paths and !server.lfs.settings.fetchAllowed(p.name)) continue;
         try objects.append(arena, p);
     }
-    return download(server, objects.items, transfer);
+    return download(server, objects.items, options.transfer);
 }
 
 /// What `git lfs fetch --recent` adds: the tips of the recent refs, and the
@@ -2301,7 +2302,7 @@ pub const PullOutcome = struct {
 /// and put their content in place of every pointer in the working tree
 /// whose object is now in the store. A file that is not its pointer any
 /// more is somebody's work and is left alone.
-pub fn pull(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) FetchError!PullOutcome {
+pub fn pull(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) transfer.FetchError!PullOutcome {
     var fetched = try fetch(server, repo, options);
     errdefer fetched.deinit();
     var out: PullOutcome = .{ .fetched = fetched };
@@ -2315,7 +2316,7 @@ pub fn pull(server: *lfsapi.Server, repo: *Repository, options: FetchOptions) Fe
 /// pointer its index entry names is replaced by the object, when the store
 /// has it, and its index entry is refreshed so git and relic both call it
 /// clean.
-pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const lfs.Store) FetchError!struct { replaced: u32, left: u32 } {
+pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const lfs.Store) transfer.FetchError!struct { replaced: u32, left: u32 } {
     const wt = repo.work_dir orelse return .{ .replaced = 0, .left = 0 };
     var index = try repo.openIndex(io);
     defer index.deinit();
@@ -2388,7 +2389,7 @@ fn replaceWith(io: Io, wt: Io.Dir, path: []const u8, source: Io.File, executable
 /// send, each with the path it was found at — that the server does not
 /// have, as git-lfs's pre-push hook uploads them. A blob that is not a
 /// pointer is not looked at twice.
-pub fn pushObjects(server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb_mod.PackEntry, options: Options) FetchError!Outcome {
+pub fn pushObjects(server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb_mod.PackEntry, options: Options) transfer.FetchError!Outcome {
     const gpa = server.gpa;
     const io = server.io;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);

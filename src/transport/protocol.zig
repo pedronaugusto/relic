@@ -10,6 +10,8 @@
 //! back to a server that predates v2 — and it is the only dialect
 //! `git-receive-pack` has.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -121,7 +123,7 @@ pub const Advertisement = struct {
 ///
 /// `kind` is the hash of the repository on this side, or `null` for one
 /// that does not exist yet — a clone takes whatever the server has.
-pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Error!Advertisement {
+pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Self.Error!Advertisement {
     var adv: Advertisement = .{
         .arena = .init(gpa),
         .version = .v0,
@@ -247,7 +249,7 @@ pub const ListOptions = struct {
 
 /// The refs the server has, asking with `ls-refs` under v2 and taking them
 /// from the advertisement under v0 and v1.
-pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, options: ListOptions) Error!RefList {
+pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, options: ListOptions) Self.Error!RefList {
     var list: RefList = .{ .arena = .init(gpa), .refs = &.{} };
     errdefer list.arena.deinit();
     const arena = list.arena.allocator();
@@ -285,7 +287,7 @@ pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, op
             try pktline.write(out, "peel\n");
             try pktline.write(out, "symrefs\n");
             if (want_unborn) try pktline.write(out, "unborn\n");
-            for (prefixes) |prefix| try pktline.print(out, "ref-prefix {s}\n", .{prefix});
+            for (prefixes) |prefix| try pktline.print("ref-prefix {s}\n", .{prefix}, out);
             try pktline.flush(out);
         }
     }).args(w, options.prefixes, unborn) catch |err| return conn.writeFailed(err);
@@ -347,11 +349,11 @@ pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u
     // are two functions in git), the capabilities without, the arguments
     // with.
     if (std.mem.eql(u8, command, "ls-refs")) {
-        try pktline.print(w, "command={s}\n", .{command});
-    } else try pktline.print(w, "command={s}", .{command});
-    if (adv.has("agent")) try pktline.print(w, "agent={s}", .{agent});
-    if (adv.has("object-format")) try pktline.print(w, "object-format={s}", .{adv.kind.name()});
-    if (adv.promisor_reply) |names| try pktline.print(w, "promisor-remote={s}", .{names});
+        try pktline.print("command={s}\n", .{command}, w);
+    } else try pktline.print("command={s}", .{command}, w);
+    if (adv.has("agent")) try pktline.print("agent={s}", .{agent}, w);
+    if (adv.has("object-format")) try pktline.print("object-format={s}", .{adv.kind.name()}, w);
+    if (adv.promisor_reply) |names| try pktline.print("promisor-remote={s}", .{names}, w);
     try pktline.delim(w);
 }
 
@@ -363,10 +365,10 @@ test "a v0 advertisement reads its refs, peels and symbolic refs" {
     defer wire.deinit();
     const a = "1111111111111111111111111111111111111111";
     const b = "2222222222222222222222222222222222222222";
-    try pktline.print(&wire.writer, "{s} HEAD\x00multi_ack thin-pack side-band-64k symref=HEAD:refs/heads/main agent=git/2\n", .{a});
-    try pktline.print(&wire.writer, "{s} refs/heads/main\n", .{a});
-    try pktline.print(&wire.writer, "{s} refs/tags/v1\n", .{b});
-    try pktline.print(&wire.writer, "{s} refs/tags/v1^{{}}\n", .{a});
+    try pktline.print("{s} HEAD\x00multi_ack thin-pack side-band-64k symref=HEAD:refs/heads/main agent=git/2\n", .{a}, &wire.writer);
+    try pktline.print("{s} refs/heads/main\n", .{a}, &wire.writer);
+    try pktline.print("{s} refs/tags/v1\n", .{b}, &wire.writer);
+    try pktline.print("{s} refs/tags/v1^{{}}\n", .{a}, &wire.writer);
     try pktline.flush(&wire.writer);
 
     var fake: Fake = .init(wire.written());
@@ -388,7 +390,7 @@ test "an empty v0 repository advertises capabilities and no refs" {
     const gpa = testing.allocator;
     var wire: Io.Writer.Allocating = .init(gpa);
     defer wire.deinit();
-    try pktline.print(&wire.writer, "{s} capabilities^{{}}\x00report-status delete-refs object-format=sha1\n", .{"0" ** 40});
+    try pktline.print("{s} capabilities^{{}}\x00report-status delete-refs object-format=sha1\n", .{"0" ** 40}, &wire.writer);
     try pktline.flush(&wire.writer);
     var fake: Fake = .init(wire.written());
     var adv = try readAdvertisement(gpa, &fake.connection, .sha1);

@@ -19,6 +19,8 @@
 //! `lfs.<url>.standalonetransferagent` (or `lfs.standalonetransferagent`)
 //! names it.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -172,7 +174,7 @@ pub const Agent = struct {
     arena_state: std.heap.ArenaAllocator,
 
     /// Start `adapter` in `cwd` and tell it `init`.
-    pub fn start(gpa: Allocator, io: Io, programs: program.Programs, cwd: ?[]const u8, adapter: Adapter, init: Init) Error!*Agent {
+    pub fn start(gpa: Allocator, io: Io, programs: program.Programs, cwd: ?[]const u8, adapter: Adapter, init: Init) Self.Error!*Agent {
         // git-lfs's `FormatForShell(ShellQuoteSingle(path), args)`.
         var command: std.ArrayList(u8) = .empty;
         defer command.deinit(gpa);
@@ -221,7 +223,7 @@ pub const Agent = struct {
 
     /// Hand the agent one transfer and wait for it to end. `progress` hears
     /// each `bytesSinceLast`.
-    pub fn transfer(a: *Agent, request: Request, progress: anytype) Error!Completion {
+    pub fn transfer(a: *Agent, request: Request, progress: anytype) Self.Error!Completion {
         var msg: Io.Writer.Allocating = .init(a.gpa);
         defer msg.deinit();
         writeRequest(&msg.writer, request) catch return error.OutOfMemory;

@@ -30,6 +30,8 @@
 //! the content, and a pointer that names one is refused by name rather than
 //! smudged without it.
 
+const Self = @This();
+
 pub const netrc = @import("lfs/netrc.zig");
 pub const lfsssh = @import("lfs/ssh.zig");
 pub const lfshooks = @import("lfs/hooks.zig");
@@ -567,7 +569,7 @@ pub const Fetcher = struct {
     ) FetchError!void,
 
     /// Ask for `wanted`.
-    pub fn fetch(f: Fetcher, io: Io, store: *const Store, settings: *const Settings, wanted: []const Wanted) FetchError!void {
+    pub fn fetch(f: Fetcher, io: Io, store: *const Store, settings: *const Settings, wanted: []const Wanted) Self.FetchError!void {
         return f.fetchFn(f.context, io, store, settings, wanted);
     }
 };

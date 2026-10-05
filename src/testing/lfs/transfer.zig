@@ -112,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
             try pktline.write(w, "status 200\n");
-            try pktline.print(w, "size={d}\n", .{bytes.len});
+            try pktline.print("size={d}\n", .{bytes.len}, w);
             try pktline.delim(w);
             var left = bytes;
             while (left.len != 0) {
@@ -271,11 +271,11 @@ fn sortStrings(items: [][]const u8) void {
 }
 
 fn status(w: *Io.Writer, code: u16, args: []const []const u8, lines: ?[]const []const u8) !void {
-    try pktline.print(w, "status {d}\n", .{code});
-    for (args) |a| try pktline.print(w, "{s}\n", .{a});
+    try pktline.print("status {d}\n", .{code}, w);
+    for (args) |a| try pktline.print("{s}\n", .{a}, w);
     if (lines) |ls| {
         try pktline.delim(w);
-        for (ls) |l| try pktline.print(w, "{s}\n", .{l});
+        for (ls) |l| try pktline.print("{s}\n", .{l}, w);
     }
     try pktline.flush(w);
     try w.flush();

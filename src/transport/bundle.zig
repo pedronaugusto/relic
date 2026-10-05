@@ -19,6 +19,8 @@
 //! completing a thin one from the repository. A path or `file://` URL that
 //! names a bundle is fetched and cloned from as git fetches from one.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -96,7 +98,7 @@ pub const Header = struct {
 
     /// `read_bundle_header_fd`: the header from `r`, which is left at the
     /// first byte of the pack.
-    pub fn read(gpa: Allocator, r: *Io.Reader) ParseError!Header {
+    pub fn read(gpa: Allocator, r: *Io.Reader) Self.ParseError!Header {
         var h: Header = .{
             .arena = .init(gpa),
             .version = .v2,
@@ -247,7 +249,7 @@ pub const File = struct {
     header: Header,
 
     /// Open the bundle at `path` and read its header.
-    pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) OpenError!*File {
+    pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) Self.OpenError!*File {
         const f = try gpa.create(File);
         errdefer gpa.destroy(f);
         f.file = try dir.openFile(io, path, .{});
@@ -313,7 +315,7 @@ pub const Verification = struct {
 /// git's `check_connected`, `rev-list --objects <prerequisites> --not
 /// --all`. Pass the tip of every ref, `HEAD` included; `repositoryTips`
 /// collects them.
-pub fn verify(gpa: Allocator, io: Io, db: *odb_mod.Odb, header: *const Header, refs: []const Oid) Error!Verification {
+pub fn verify(gpa: Allocator, io: Io, db: *odb_mod.Odb, header: *const Header, refs: []const Oid) Self.Error!Verification {
     if (header.object_format != db.objectFormat()) return error.ObjectFormatMismatch;
     var missing: std.ArrayList(Oid) = .empty;
     errdefer missing.deinit(gpa);
@@ -373,7 +375,7 @@ pub const UnbundleOptions = struct {
 /// `unbundle`: verify the prerequisites and index the pack into the
 /// repository, completing a thin pack from it; a filtered bundle's pack is
 /// kept as a promisor pack, as git keeps it. Returns what was received.
-pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, options: UnbundleOptions) Error!indexpack.Result {
+pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, options: UnbundleOptions) Self.Error!indexpack.Result {
     var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     const tips = try repositoryTips(gpa, io, repo);
@@ -391,7 +393,7 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
 /// `unbundle` into `db`, whose `objects/pack` is `pack_dir` and whose refs
 /// point at `refs`, with the pack received as `options` says: what a fetch
 /// from a bundle does.
-pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bundle: *File, refs: []const Oid, options: indexpack.Options) Error!indexpack.Result {
+pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bundle: *File, refs: []const Oid, options: indexpack.Options) Self.Error!indexpack.Result {
     var v = try verify(gpa, io, db, &bundle.header, refs);
     defer v.deinit();
     if (v.missing.len != 0) return error.MissingPrerequisites;
@@ -454,7 +456,7 @@ pub const CreateError = error{
 
 /// Write the bundle `request` asks for to `<path>` in `dir`, through
 /// `<path>.lock` as git writes it.
-pub fn create(gpa: Allocator, io: Io, repo: *Repository, dir: Io.Dir, path: []const u8, request: CreateRequest) CreateError!void {
+pub fn create(gpa: Allocator, io: Io, repo: *Repository, dir: Io.Dir, path: []const u8, request: CreateRequest) Self.CreateError!void {
     var buffer: [64 * 1024]u8 = undefined;
     var lock = try fs.LockFile.open(gpa, io, dir, path, &buffer, .{ .sync = .none, .write_pid = false });
     defer lock.deinit(io);
@@ -463,7 +465,7 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, dir: Io.Dir, path: []co
 }
 
 /// Write the bundle `request` asks for to `w`: `git bundle create -`.
-pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: CreateRequest) CreateError!void {
+pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: CreateRequest) Self.CreateError!void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();

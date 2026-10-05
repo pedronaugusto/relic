@@ -10,6 +10,8 @@
 //! protocol above writes each request whole for that reason. Nothing above
 //! this interface knows which it is talking to.
 
+const Self = @This();
+
 const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -93,22 +95,22 @@ pub const Connection = struct {
     }
 
     /// The reader for the server's first message.
-    pub fn advertisement(c: *Connection) Error!*Io.Reader {
+    pub fn advertisement(c: *Connection) Self.Error!*Io.Reader {
         return c.vtable.advertisement(c.context, c);
     }
 
     /// The writer for the next request.
-    pub fn request(c: *Connection) Error!*Io.Writer {
+    pub fn request(c: *Connection) Self.Error!*Io.Writer {
         return c.vtable.request(c.context, c);
     }
 
     /// Send the request and hand back the reader for its response.
-    pub fn response(c: *Connection) Error!*Io.Reader {
+    pub fn response(c: *Connection) Self.Error!*Io.Reader {
         return c.vtable.response(c.context, c);
     }
 
     /// The specific error behind a `ReadFailed` or `WriteFailed`.
-    pub fn failure(c: *Connection) Error {
+    pub fn failure(c: *Connection) Self.Error {
         return c.vtable.failure(c.context, c);
     }
 
@@ -120,7 +122,7 @@ pub const Connection = struct {
 
     /// Read one pkt-line, turning a transport failure into its own error
     /// and the end of the stream into `error.RemoteHungUp`.
-    pub fn readPacket(c: *Connection, r: *Io.Reader) Error!pktline.Packet {
+    pub fn readPacket(c: *Connection, r: *Io.Reader) Self.Error!pktline.Packet {
         return pktline.read(r) catch |err| switch (err) {
             error.BadPacket => error.ProtocolError,
             error.EndOfStream => error.RemoteHungUp,
@@ -129,7 +131,7 @@ pub const Connection = struct {
     }
 
     /// Map a writer's failure to the connection's own error.
-    pub fn writeFailed(c: *Connection, err: anyerror) Error {
+    pub fn writeFailed(c: *Connection, err: anyerror) Self.Error {
         return switch (err) {
             error.PacketTooLong => error.ProtocolError,
             error.OutOfMemory => error.OutOfMemory,
@@ -390,7 +392,7 @@ pub const Process = struct {
 
     /// Close the program's input and wait for it: whether it succeeded.
     /// The connection stays open for `close`.
-    pub fn finish(c: *Connection, io: Io) Error!void {
+    pub fn finish(c: *Connection, io: Io) Self.Error!void {
         const p = of(c) orelse return;
         if (p.exited) return;
         // ziglint-ignore: Z026 a program that stopped reading has ended or will; its exit status, waited for next, is the answer

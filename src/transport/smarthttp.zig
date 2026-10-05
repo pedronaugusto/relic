@@ -32,6 +32,8 @@
 //! come from `http.sslCert` and `http.sslKey`, or `http.proxySSLCert` and
 //! `http.proxySSLKey` for an https proxy, and relic's TLS client presents them.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -132,7 +134,7 @@ pub const Options = struct {
 pub const user_agent = "git/2.0 (relic 0.3)";
 
 /// Open a smart HTTP conversation with the service at `url`.
-pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: Options) Error!*Connection {
+pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: Options) Self.Error!*Connection {
     const h = try gpa.create(Http);
     errdefer gpa.destroy(h);
     h.* = .{

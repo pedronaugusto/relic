@@ -18,6 +18,8 @@
 //! exact format, the refs for merging first. With `prune`, remote-tracking
 //! refs whose source is gone are deleted first, with their logs.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -277,7 +279,7 @@ fn selectFilter(arena: Allocator, config: *const config_mod.Config, explicit: ?[
 }
 
 /// Fetch from `remote_name`, a configured remote or a URL, into `repo`.
-pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {
+pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Self.Error!Outcome {
     const deepen = try deepenRequest(repo, options);
 
     var outcome: Outcome = .{

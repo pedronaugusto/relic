@@ -21,6 +21,8 @@
 //! `filter.lfs` setting, no LFS directory — is not asked about at all, so a
 //! push to a plain git host costs nothing more than it did.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -137,7 +139,7 @@ pub fn beforePush(
     pushed: []const odb_mod.PackEntry,
     reach: Reach,
     options: Options,
-) Error!void {
+) Self.Error!void {
     if (options.mode == .off) return;
     var scratch: Report = .init(gpa);
     defer scratch.deinit();

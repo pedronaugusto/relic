@@ -12,6 +12,8 @@
 //! capability list after a NUL — belongs to whoever reads it. This file only
 //! frames.
 
+const Self = @This();
+
 const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -47,7 +49,7 @@ pub const ReadError = error{
 /// the returned data is a view of it; a smaller buffer is a caller's error
 /// and asserts. The end of the stream before a whole line is
 /// `error.EndOfStream`.
-pub fn read(r: *Io.Reader) ReadError!Packet {
+pub fn read(r: *Io.Reader) Self.ReadError!Packet {
     assert(r.buffer.len >= max_line);
     const head = try r.takeArray(4);
     const len = parseLength(head) orelse return error.BadPacket;
@@ -83,14 +85,14 @@ pub const WriteError = error{
 } || Io.Writer.Error;
 
 /// Write `data` as one line. Nothing is flushed.
-pub fn write(w: *Io.Writer, data: []const u8) WriteError!void {
+pub fn write(w: *Io.Writer, data: []const u8) Self.WriteError!void {
     if (data.len > max_data) return error.PacketTooLong;
     try writeLength(w, data.len + 4);
     try w.writeAll(data);
 }
 
 /// Write a line formatted in place, as git's `packet_write_fmt` does.
-pub fn print(w: *Io.Writer, comptime fmt: []const u8, args: anytype) WriteError!void {
+pub fn print(comptime fmt: []const u8, args: anytype, w: *Io.Writer) Self.WriteError!void {
     const len = std.fmt.count(fmt, args);
     if (len > max_data) return error.PacketTooLong;
     try writeLength(w, len + 4);
@@ -135,7 +137,7 @@ test "a message written is the message read" {
     defer out.deinit();
     try write(&out.writer, "command=ls-refs\n");
     try delim(&out.writer);
-    try print(&out.writer, "ref-prefix {s}\n", .{"refs/heads/"});
+    try print("ref-prefix {s}\n", .{"refs/heads/"}, &out.writer);
     try write(&out.writer, "");
     try flush(&out.writer);
     try responseEnd(&out.writer);

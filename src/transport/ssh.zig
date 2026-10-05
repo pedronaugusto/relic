@@ -18,6 +18,8 @@
 //! it. A host or a path beginning with `-` is refused, as git refuses it,
 //! because `ssh` would read it as an option.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -112,7 +114,7 @@ pub fn connect(
     url: url_mod.Url,
     service: connection.Service,
     options: Options,
-) Error!*Connection {
+) Self.Error!*Connection {
     const programs = options.programs orelse return error.ProgramsNotGranted;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
@@ -197,7 +199,7 @@ pub fn connect(
 /// connection's message on `TransportProgramFailed`. `err` is what the
 /// protocol met, returned when ssh said nothing more telling. With
 /// `failure`, a refusal is described there.
-pub fn explain(gpa: Allocator, conn: *Connection, io: Io, err: anyerror, url: url_mod.Url, failure: ?*auth.Failure) Error {
+pub fn explain(gpa: Allocator, io: Io, conn: *Connection, err: anyerror, url: url_mod.Url, failure: ?*auth.Failure) Self.Error {
     const ended = connection.Process.diagnose(conn, io) catch return error.Canceled;
     const said = std.mem.trim(u8, ended.stderr, " \t\r\n");
     const refusal: ?struct { e: Error, reason: auth.Failure.Reason } =

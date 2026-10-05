@@ -22,6 +22,8 @@
 //! report, the remote-tracking refs of what was pushed are moved, logged
 //! as git logs them, `update by push`.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -227,7 +229,7 @@ const Update = struct {
 /// Push from `repo` to `remote_name`, a configured remote or a URL. A
 /// remote with several push URLs is pushed to each in turn, as git pushes
 /// to each, and every URL's results are in the outcome.
-pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {
+pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Self.Error!Outcome {
     var outcome: Outcome = .{ .arena = .init(gpa), .refs = &.{} };
     errdefer outcome.arena.deinit();
     const arena = outcome.arena.allocator();
@@ -990,6 +992,20 @@ fn tagTarget(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) !Oid {
     return repo.peel(io, resolved.oid);
 }
 
+const PrePushSeen = struct {
+    text: std.ArrayList(u8) = .empty,
+    allow: bool = true,
+    fn run(context: ?*anyopaque, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool {
+        _ = url;
+        const self: *PrePushSeen = @ptrCast(@alignCast(context.?)); // safe: the context handed out with this function is a PrePushSeen
+        self.text.print(testing.allocator, "{s}\n", .{remote}) catch return false;
+        for (updates) |u| {
+            self.text.print(testing.allocator, "{s} {f} {s} {f}\n", .{ u.local_ref, u.local_oid, u.remote_ref, u.remote_oid }) catch return false;
+        }
+        return self.allow;
+    }
+};
+
 test "the pre-push hook point is shown what git's pre-push hook is shown, and can stop the push" {
     const gpa = testing.allocator;
     const io = testing.io;
@@ -1006,26 +1022,12 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
     try testgit.fixtureHook(gpa, io, work_git, ".git/hooks/pre-push", "record_stdin", hook_data);
     twins.git_settings = &.{ "-c", "core.hooksPath=.git/hooks" };
 
-    const Seen = struct {
-        const Self = @This();
-        text: std.ArrayList(u8) = .empty,
-        allow: bool = true,
-        fn run(context: ?*anyopaque, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool {
-            _ = url;
-            const self: *Self = @ptrCast(@alignCast(context.?));
-            self.text.print(testing.allocator, "{s}\n", .{remote}) catch return false;
-            for (updates) |u| {
-                self.text.print(testing.allocator, "{s} {f} {s} {f}\n", .{ u.local_ref, u.local_oid, u.remote_ref, u.remote_oid }) catch return false;
-            }
-            return self.allow;
-        }
-    };
-    var seen: Seen = .{};
+    var seen: PrePushSeen = .{};
     defer seen.text.deinit(gpa);
     var outcome = try twins.pushBoth(&.{ "origin", "main", "feature" }, .{
         .who = test_who,
         .refspecs = &.{ "main", "feature" },
-        .pre_push = .{ .context = &seen, .run = Seen.run },
+        .pre_push = .{ .context = &seen, .run = PrePushSeen.run },
     });
     outcome.deinit();
     const theirs = try twins.root.dir.readFileAlloc(io, "pre-push.log", gpa, .unlimited);
@@ -1041,7 +1043,7 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
     try testing.expectError(error.PrePushRefused, push(gpa, io, &repo, "origin", .{
         .who = test_who,
         .refspecs = &.{"v2"},
-        .pre_push = .{ .context = &seen, .run = Seen.run },
+        .pre_push = .{ .context = &seen, .run = PrePushSeen.run },
     }));
     var remote = try twins.root.dir.openDir(io, "remote-relic.git", .{});
     defer remote.close(io);

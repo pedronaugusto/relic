@@ -15,6 +15,8 @@
 //! imports, pushes or exports is spoken to in its own commands. A `Session`
 //! hides which it is from the operations above.
 
+const Self = @This();
+
 pub const filterspec = @import("transport/filterspec.zig");
 pub const partial = @import("transport/partial.zig");
 pub const objectfilter = @import("transport/objectfilter.zig");
@@ -184,7 +186,7 @@ pub const Session = struct {
         service: Service,
         kind: ?hash.Kind,
         options: Options,
-    ) Error!Session {
+    ) Self.Error!Session {
         var session = try openUnanswered(gpa, io, remote_url, service, kind, options);
         errdefer session.close(io);
         try session.answerPromisors(options);
@@ -287,7 +289,7 @@ pub const Session = struct {
                 });
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind) catch |err| switch (err) {
-                    error.RemoteHungUp, error.ConnectionFailed, error.ProtocolError => return ssh.explain(gpa, conn, io, err, identity.url, options.auth_failure),
+                    error.RemoteHungUp, error.ConnectionFailed, error.ProtocolError => return ssh.explain(gpa, io, conn, err, identity.url, options.auth_failure),
                     else => |e| return e,
                 };
             },
@@ -433,7 +435,7 @@ pub const Session = struct {
 
     /// The remote's refs, only those beginning with one of `prefixes` when
     /// any are given. The result is the caller's.
-    pub fn listRefs(s: *Session, gpa: Allocator, io: Io, prefixes: []const []const u8) Error!protocol.RefList {
+    pub fn listRefs(s: *Session, gpa: Allocator, io: Io, prefixes: []const []const u8) Self.Error!protocol.RefList {
         return switch (s.impl) {
             .local => |here| here.listRefs(gpa, io, prefixes),
             .bundle => |f| bundleRefs(gpa, f),
@@ -470,7 +472,7 @@ pub const Session = struct {
 
     /// Send a push, reading the objects from `db`, and return the remote's
     /// report of each command.
-    pub fn push(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: PushRequest) Error!sendpack.Report {
+    pub fn push(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: PushRequest) Self.Error!sendpack.Report {
         assert(s.service == .receive_pack);
         // A helper's sources and `+`s go with the commands by position.
         assert(request.sources.len == 0 or request.sources.len == request.commands.len);
@@ -549,7 +551,7 @@ pub const Session = struct {
         pack_dir: Io.Dir,
         request: FetchRequest,
         options: fetchpack.Options,
-    ) Error!Fetched {
+    ) Self.Error!Fetched {
         assert(s.service == .upload_pack);
         // The names go with the wants by position, or are not given.
         assert(request.want_names.len == 0 or request.want_names.len == request.wants.len);

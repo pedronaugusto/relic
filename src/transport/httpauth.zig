@@ -12,6 +12,8 @@
 //! Negotiate and NTLM need a security library of the system's and are not
 //! spoken: `pick` names them unsupported.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -45,7 +47,7 @@ pub const Error = error{
 } || Allocator.Error;
 
 /// Every challenge in one `Proxy-Authenticate` value, into `arena`.
-pub fn parse(arena: Allocator, value: []const u8) Error![]const Challenge {
+pub fn parse(arena: Allocator, value: []const u8) Self.Error![]const Challenge {
     var out: std.ArrayList(Challenge) = .empty;
     var params: std.ArrayList(Param) = .empty;
     var name: ?[]const u8 = null;

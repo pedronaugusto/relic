@@ -12,6 +12,8 @@
 //! each `url` rewritten with `insteadOf`. Of several bases that match, the
 //! one with the longest match wins.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -80,7 +82,7 @@ pub const Remote = struct {
     /// The remote configured as `name`, or — when there is no `remote.<name>`
     /// with a URL — a remote whose URL is `name` itself, which is how git
     /// reads `git fetch https://example.com/repo.git`.
-    pub fn get(gpa: Allocator, config: *const Config, name: []const u8) Error!Remote {
+    pub fn get(gpa: Allocator, config: *const Config, name: []const u8) Self.Error!Remote {
         var remote: Remote = .{
             .arena = .init(gpa),
             .name = null,
@@ -179,7 +181,7 @@ pub const Rewrite = enum { fetch, push };
 
 /// `url` rewritten by the longest matching `url.<base>.insteadOf` (or
 /// `pushInsteadOf`), or `null` when none matches. The result is `gpa`'s.
-pub fn rewrite(gpa: Allocator, config: *const Config, url: []const u8, which: Rewrite) Error!?[]u8 {
+pub fn rewrite(gpa: Allocator, config: *const Config, url: []const u8, which: Rewrite) Self.Error!?[]u8 {
     const wanted = switch (which) {
         .fetch => "insteadof",
         .push => "pushinsteadof",
@@ -237,7 +239,7 @@ pub const Branch = struct {
     }
 
     /// The settings for the branch `name`, short form.
-    pub fn get(gpa: Allocator, config: *const Config, name: []const u8) Error!Branch {
+    pub fn get(gpa: Allocator, config: *const Config, name: []const u8) Self.Error!Branch {
         var branch: Branch = .{ .arena = .init(gpa), .name = undefined };
         errdefer branch.arena.deinit();
         const arena = branch.arena.allocator();

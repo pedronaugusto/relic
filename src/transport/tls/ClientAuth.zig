@@ -27,7 +27,7 @@ pub const Error = error{
 
 /// Encode `chain` — DER certificates, the client's own first — for `key`,
 /// which must be the first certificate's.
-pub fn init(gpa: Allocator, chain: []const []const u8, key: PrivateKey) Error!ClientAuth {
+pub fn init(gpa: Allocator, chain: []const []const u8, key: PrivateKey) ClientAuth.Error!ClientAuth {
     if (chain.len == 0) return error.CertificateMissing;
     if (!key.matches(chain[0])) return error.KeyCertificateMismatch;
     var total12: usize = 0;

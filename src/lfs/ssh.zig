@@ -23,6 +23,8 @@
 //! `connection.Process` keeps it, for the message when a connection does
 //! not start.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -80,7 +82,7 @@ pub const Connection = struct {
     /// Start `invocation` and agree on version 1. A server that does not
     /// start, or does not speak it, is an error, and `message` holds what
     /// ssh said.
-    pub fn start(gpa: Allocator, io: Io, programs: program.Programs, invocation: program.Invocation, message: *std.ArrayList(u8)) Error!*Connection {
+    pub fn start(gpa: Allocator, io: Io, programs: program.Programs, invocation: program.Invocation, message: *std.ArrayList(u8)) Self.Error!*Connection {
         // `message` belongs to `gpa`.
         const conn = try connection.Process.start(gpa, io, programs, invocation);
         errdefer conn.close(io);
@@ -122,28 +124,28 @@ pub const Connection = struct {
     }
 
     /// Send `command` and its arguments.
-    pub fn send(c: *Connection, command: []const u8, args: []const []const u8) Error!void {
+    pub fn send(c: *Connection, command: []const u8, args: []const []const u8) Self.Error!void {
         try c.writeHead(command, args);
         pktline.flush(c.writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// Send `command`, its arguments, a delimiter, and `lines`.
-    pub fn sendLines(c: *Connection, command: []const u8, args: []const []const u8, lines: []const []const u8) Error!void {
+    pub fn sendLines(c: *Connection, command: []const u8, args: []const []const u8, lines: []const []const u8) Self.Error!void {
         try c.writeHead(command, args);
         pktline.delim(c.writer) catch |err| return c.conn.writeFailed(err);
-        for (lines) |line| pktline.print(c.writer, "{s}\n", .{line}) catch |err| return c.conn.writeFailed(err);
+        for (lines) |line| pktline.print("{s}\n", .{line}, c.writer) catch |err| return c.conn.writeFailed(err);
         pktline.flush(c.writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// Start `command` with its arguments and a delimiter; the data follows
     /// through `writeData` and ends with `endData`.
-    pub fn beginData(c: *Connection, command: []const u8, args: []const []const u8) Error!void {
+    pub fn beginData(c: *Connection, command: []const u8, args: []const []const u8) Self.Error!void {
         try c.writeHead(command, args);
         pktline.delim(c.writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// A piece of data, in lines of at most `pktline.max_data` bytes.
-    pub fn writeData(c: *Connection, bytes: []const u8) Error!void {
+    pub fn writeData(c: *Connection, bytes: []const u8) Self.Error!void {
         var rest = bytes;
         while (rest.len != 0) {
             const n = @min(rest.len, pktline.max_data);
@@ -153,13 +155,13 @@ pub const Connection = struct {
     }
 
     /// The end of the data.
-    pub fn endData(c: *Connection) Error!void {
+    pub fn endData(c: *Connection) Self.Error!void {
         pktline.flush(c.writer) catch |err| return c.conn.writeFailed(err);
     }
 
     fn writeHead(c: *Connection, command: []const u8, args: []const []const u8) Error!void {
-        pktline.print(c.writer, "{s}\n", .{command}) catch |err| return c.conn.writeFailed(err);
-        for (args) |a| pktline.print(c.writer, "{s}\n", .{a}) catch |err| return c.conn.writeFailed(err);
+        pktline.print("{s}\n", .{command}, c.writer) catch |err| return c.conn.writeFailed(err);
+        for (args) |a| pktline.print("{s}\n", .{a}, c.writer) catch |err| return c.conn.writeFailed(err);
     }
 
     fn flushOut(c: *Connection) Error!void {
@@ -168,7 +170,7 @@ pub const Connection = struct {
 
     /// Read an answer made of a status, arguments, and lines after a
     /// delimiter, to its flush. Everything is copied into `arena`.
-    pub fn readStatus(c: *Connection, arena: Allocator) Error!Status {
+    pub fn readStatus(c: *Connection, arena: Allocator) Self.Error!Status {
         try c.flushOut();
         var args: std.ArrayList([]const u8) = .empty;
         var lines: std.ArrayList([]const u8) = .empty;
@@ -196,7 +198,7 @@ pub const Connection = struct {
 
     /// Read the status and arguments of an answer that carries data after
     /// its delimiter; the data is then read with `nextData`.
-    pub fn readStatusWithData(c: *Connection, arena: Allocator) Error!struct { code: u16, args: []const []const u8 } {
+    pub fn readStatusWithData(c: *Connection, arena: Allocator) Self.Error!struct { code: u16, args: []const []const u8 } {
         try c.flushOut();
         var args: std.ArrayList([]const u8) = .empty;
         var code: ?u16 = null;
@@ -219,7 +221,7 @@ pub const Connection = struct {
 
     /// The next piece of an answer's data, valid until the next read, or
     /// `null` at its end.
-    pub fn nextData(c: *Connection) Error!?[]const u8 {
+    pub fn nextData(c: *Connection) Self.Error!?[]const u8 {
         return switch (try c.conn.readPacket(c.reader)) {
             .flush => null,
             .data => |d| d,
@@ -228,7 +230,7 @@ pub const Connection = struct {
     }
 
     /// Read the rest of an answer's data and let it go.
-    pub fn skipData(c: *Connection) Error!void {
+    pub fn skipData(c: *Connection) Self.Error!void {
         while (try c.nextData()) |_| {}
     }
 
@@ -279,7 +281,7 @@ pub const Transfer = struct {
 
     /// Start the first connection. `first`, `rest` and `control_dir` are
     /// copied. When it does not start, `failure` holds what ssh said.
-    pub fn open(gpa: Allocator, io: Io, programs: program.Programs, first: program.Invocation, rest: program.Invocation, control_dir: ?[]const u8, failure: *std.ArrayList(u8)) Error!*Transfer {
+    pub fn open(gpa: Allocator, io: Io, programs: program.Programs, first: program.Invocation, rest: program.Invocation, control_dir: ?[]const u8, failure: *std.ArrayList(u8)) Self.Error!*Transfer {
         const t = try gpa.create(Transfer);
         errdefer gpa.destroy(t);
         t.* = .{
@@ -313,7 +315,7 @@ pub const Transfer = struct {
     }
 
     /// Connection `n`, started the first time it is asked for.
-    pub fn connection(t: *Transfer, n: usize) Error!*Connection {
+    pub fn connection(t: *Transfer, n: usize) Self.Error!*Connection {
         try t.mutex.lock(t.io);
         defer t.mutex.unlock(t.io);
         while (t.connections.items.len <= n) try t.connections.append(t.gpa, null);

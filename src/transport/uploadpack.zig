@@ -16,6 +16,8 @@
 //! repository on the same machine is had — and a program of one's own can
 //! serve a repository with it over whatever carries bytes.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -110,7 +112,7 @@ pub const Server = struct {
 
     /// The server's first message: its refs and capabilities in v0, its
     /// capabilities in v2.
-    pub fn advertise(s: *Server, w: *Io.Writer) Error!void {
+    pub fn advertise(s: *Server, w: *Io.Writer) Self.Error!void {
         (switch (s.version) {
             .v2 => s.advertiseV2(w),
             .v0, .v1 => s.advertiseV0(w),
@@ -119,16 +121,16 @@ pub const Server = struct {
 
     fn advertiseV2(s: *Server, w: *Io.Writer) (pktline.WriteError || Allocator.Error)!void {
         try pktline.write(w, "version 2\n");
-        try pktline.print(w, "agent={s}\n", .{protocol.agent});
+        try pktline.print("agent={s}\n", .{protocol.agent}, w);
         try pktline.write(w, "ls-refs=unborn\n");
         try pktline.write(w, if (s.allow_filter) "fetch=shallow wait-for-done filter\n" else "fetch=shallow wait-for-done\n");
         try pktline.write(w, "server-option\n");
-        try pktline.print(w, "object-format={s}\n", .{s.kind().name()});
+        try pktline.print("object-format={s}\n", .{s.kind().name()}, w);
         // `promisor.advertise`: the promisor remotes this one borrows from.
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         if (try promisors.advertisement(arena_state.allocator(), s.remote.repo.configuration(), null)) |info| {
-            try pktline.print(w, "promisor-remote={s}\n", .{info});
+            try pktline.print("promisor-remote={s}\n", .{info}, w);
         }
         try pktline.flush(w);
     }
@@ -158,12 +160,12 @@ pub const Server = struct {
         for (refs.refs) |ref| {
             if (ref.unborn) continue;
             if (first) {
-                try pktline.print(w, "{f} {s}\x00{s}\n", .{ ref.oid, ref.name, caps.items });
+                try pktline.print("{f} {s}\x00{s}\n", .{ ref.oid, ref.name, caps.items }, w);
                 first = false;
-            } else try pktline.print(w, "{f} {s}\n", .{ ref.oid, ref.name });
-            if (ref.peeled) |p| try pktline.print(w, "{f} {s}^{{}}\n", .{ p, ref.name });
+            } else try pktline.print("{f} {s}\n", .{ ref.oid, ref.name }, w);
+            if (ref.peeled) |p| try pktline.print("{f} {s}^{{}}\n", .{ p, ref.name }, w);
         }
-        if (first) try pktline.print(w, "{f} capabilities^{{}}\x00{s}\n", .{ Oid.zero(s.kind()), caps.items });
+        if (first) try pktline.print("{f} capabilities^{{}}\x00{s}\n", .{ Oid.zero(s.kind()), caps.items }, w);
         // A shallow server says where its history ends, as git's does.
         const boundary = try s.gpa.alloc(Oid, s.db().shallow.count());
         defer s.gpa.free(boundary);
@@ -175,13 +177,13 @@ pub const Server = struct {
                 return a.order(b) == .lt;
             }
         }.lessThan);
-        for (boundary) |oid| try pktline.print(w, "shallow {f}\n", .{oid});
+        for (boundary) |oid| try pktline.print("shallow {f}\n", .{oid}, w);
         try pktline.flush(w);
     }
 
     /// A whole conversation over a pipe: the advertisement, then every
     /// request until the client ends it.
-    pub fn serve(s: *Server, in: *Io.Reader, out: *Io.Writer) Error!void {
+    pub fn serve(s: *Server, in: *Io.Reader, out: *Io.Writer) Self.Error!void {
         try s.advertise(out);
         out.flush() catch return error.WriteFailed;
         switch (s.version) {
@@ -193,7 +195,7 @@ pub const Server = struct {
 
     /// One request of a stateless conversation: a v2 command, or a v0
     /// round of wants and haves.
-    pub fn serveRequest(s: *Server, in: *Io.Reader, out: *Io.Writer) Error!void {
+    pub fn serveRequest(s: *Server, in: *Io.Reader, out: *Io.Writer) Self.Error!void {
         switch (s.version) {
             .v2 => _ = try s.commandV2(in, out),
             .v0, .v1 => try s.conversationV0(in, out),
@@ -339,7 +341,7 @@ pub const Server = struct {
                 (write: {
                     pktline.write(out, "acknowledgments\n") catch |e| break :write e;
                     if (n.common.items.len == 0) pktline.write(out, "NAK\n") catch |e| break :write e;
-                    for (n.common.items) |oid| pktline.print(out, "ACK {f}\n", .{oid}) catch |e| break :write e;
+                    for (n.common.items) |oid| pktline.print("ACK {f}\n", .{oid}, out) catch |e| break :write e;
                 }) catch |err| return writeError(err);
                 if (!wait_for_done and try n.okToGiveUp()) {
                     pktline.write(out, "ready\n") catch |err| return writeError(err);
@@ -465,7 +467,7 @@ pub const Server = struct {
     }
 
     fn sendError(_: *Server, out: *Io.Writer, text: []const u8) Error!void {
-        pktline.print(out, "ERR upload-pack: {s}\n", .{text}) catch return error.WriteFailed;
+        pktline.print("ERR upload-pack: {s}\n", .{text}, out) catch return error.WriteFailed;
         out.flush() catch return error.WriteFailed;
     }
 
@@ -653,11 +655,11 @@ const Negotiation = struct {
                     (write: {
                         if (multi_ack == 2 and got_common and !got_other and try n.okToGiveUp()) {
                             sent_ready = true;
-                            pktline.print(out, "ACK {f} ready\n", .{last.?}) catch |e| break :write e;
+                            pktline.print("ACK {f} ready\n", .{last.?}, out) catch |e| break :write e;
                         }
                         if (n.have_obj.items.len == 0 or multi_ack != 0) pktline.write(out, "NAK\n") catch |e| break :write e;
                         if (no_done and sent_ready) {
-                            pktline.print(out, "ACK {f}\n", .{last.?}) catch |e| break :write e;
+                            pktline.print("ACK {f}\n", .{last.?}, out) catch |e| break :write e;
                             out.flush() catch |e| break :write e;
                             return true;
                         }
@@ -678,8 +680,8 @@ const Negotiation = struct {
                     if (multi_ack != 0 and try n.okToGiveUp()) {
                         if (multi_ack == 2) {
                             sent_ready = true;
-                            pktline.print(out, "ACK {f} ready\n", .{oid}) catch |err| return writeError(err);
-                        } else pktline.print(out, "ACK {f} continue\n", .{oid}) catch |err| return writeError(err);
+                            pktline.print("ACK {f} ready\n", .{oid}, out) catch |err| return writeError(err);
+                        } else pktline.print("ACK {f} continue\n", .{oid}, out) catch |err| return writeError(err);
                     }
                     continue;
                 }
@@ -687,18 +689,18 @@ const Negotiation = struct {
                 got_common = true;
                 last = oid;
                 (if (multi_ack == 2)
-                    pktline.print(out, "ACK {f} common\n", .{oid})
+                    pktline.print("ACK {f} common\n", .{oid}, out)
                 else if (multi_ack == 1)
-                    pktline.print(out, "ACK {f} continue\n", .{oid})
+                    pktline.print("ACK {f} continue\n", .{oid}, out)
                 else if (n.have_obj.items.len == 1)
-                    pktline.print(out, "ACK {f}\n", .{oid})
+                    pktline.print("ACK {f}\n", .{oid}, out)
                 else {}) catch |err| return writeError(err);
                 continue;
             }
             if (std.mem.eql(u8, line, "done")) {
                 (write: {
                     if (n.have_obj.items.len > 0) {
-                        if (multi_ack != 0) pktline.print(out, "ACK {f}\n", .{last.?}) catch |e| break :write e;
+                        if (multi_ack != 0) pktline.print("ACK {f}\n", .{last.?}, out) catch |e| break :write e;
                     } else pktline.write(out, "NAK\n") catch |e| break :write e;
                 }) catch |err| return writeError(err);
                 return true;
@@ -836,7 +838,7 @@ const Negotiation = struct {
             const oid = result[i];
             if (n.client_shallow_set.contains(oid) or n.not_shallow.contains(oid)) continue;
             if (n.boundary.contains(oid)) continue;
-            pktline.print(out, "shallow {f}\n", .{oid}) catch |err| return writeError(err);
+            pktline.print("shallow {f}\n", .{oid}, out) catch |err| return writeError(err);
             try n.boundary.put(n.arena, oid, {});
         }
     }
@@ -846,7 +848,7 @@ const Negotiation = struct {
     fn sendUnshallow(n: *Negotiation, out: *Io.Writer) Error!void {
         for (n.client_shallows.items) |oid| {
             if (n.not_shallow.contains(oid)) {
-                pktline.print(out, "unshallow {f}\n", .{oid}) catch |err| return writeError(err);
+                pktline.print("unshallow {f}\n", .{oid}, out) catch |err| return writeError(err);
                 const c = (try n.commit(oid)) orelse continue;
                 for (c.parents) |p| try n.extra_wants.append(n.arena, p);
                 try n.edges.append(n.arena, oid);

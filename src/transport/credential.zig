@@ -24,6 +24,8 @@
 //! before it, which is how `gh auth setup-git` puts itself first for one
 //! host.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -260,7 +262,7 @@ pub const Session = struct {
     /// Fill in what is missing, after the server asked for it, as git's
     /// `credential_fill` fills it. Returns whether a credential is now
     /// known; `false` means the person was asked and declined.
-    pub fn fill(s: *Session, io: Io, opts: Options) Error!bool {
+    pub fn fill(s: *Session, io: Io, opts: Options) Self.Error!bool {
         try s.fromUrl();
         secretFree(s.gpa, s.header);
         s.header = null;
@@ -328,7 +330,7 @@ pub const Session = struct {
 
     /// The credential worked: every helper is told to `store` it — unless
     /// it has expired, which git does not store.
-    pub fn approve(s: *Session, io: Io, opts: Options) Error!void {
+    pub fn approve(s: *Session, io: Io, opts: Options) Self.Error!void {
         if (!s.hasCredential()) return;
         if (opts.now) |t| if (s.password_expiry_utc) |expiry| if (expiry < t) return;
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
@@ -343,7 +345,7 @@ pub const Session = struct {
 
     /// The credential was refused: every helper is told to `erase` it, and
     /// it is forgotten here.
-    pub fn reject(s: *Session, io: Io, opts: Options) Error!void {
+    pub fn reject(s: *Session, io: Io, opts: Options) Self.Error!void {
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const settings = try s.applyConfig(arena_state.allocator(), opts.config);

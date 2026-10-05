@@ -12,6 +12,8 @@
 //! The files are read here; the handshake that presents them is
 //! `tls/Client.zig`'s.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -63,7 +65,7 @@ pub fn keyIsEncrypted(arena: Allocator, io: Io, files: Files) bool {
 /// Read the certificate chain and the key, opening the key with
 /// `passphrase` when it is encrypted. The key's numbers are `arena`'s; the
 /// result's encoded chain is `gpa`'s, freed with `deinit`.
-pub fn load(gpa: Allocator, arena: Allocator, io: Io, files: Files, passphrase: ?[]const u8) Error!tls.ClientAuth {
+pub fn load(gpa: Allocator, arena: Allocator, io: Io, files: Files, passphrase: ?[]const u8) Self.Error!tls.ClientAuth {
     const cert_der = try isDer(files.cert_type);
     const key_der = try isDer(files.key_type);
     const cert_bytes = readAll(arena, io, files.cert) catch |err| switch (err) {

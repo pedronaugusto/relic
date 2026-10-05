@@ -19,6 +19,8 @@
 //! brought, and writes the boundary the server drew to `.git/shallow`. A
 //! partial one is refused by name in this release.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -186,7 +188,7 @@ fn userConfiguration(gpa: Allocator, io: Io, options: Options) Error!?config_mod
 
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
-pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Error!Repository {
+pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Self.Error!Repository {
     var deepen: ?fetchpack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
         .{ .depth = options.depth, .since = options.shallow_since, .not = options.shallow_exclude }
     else

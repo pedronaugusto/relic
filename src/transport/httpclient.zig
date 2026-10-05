@@ -32,6 +32,8 @@
 //! has its socket shut, and the request fails as `TimedOut`. The standard
 //! library's own connect timeout is not there yet on any system.
 
+const httpclient = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -299,7 +301,7 @@ pub const Client = struct {
 
     /// Read the system's certificates into the bundle, which is then what
     /// is trusted, together with anything added after.
-    pub fn trustSystem(c: *Client) Error!void {
+    pub fn trustSystem(c: *Client) httpclient.Error!void {
         c.bundle_lock.lockUncancelable(c.io);
         defer c.bundle_lock.unlock(c.io);
         try c.rescan();
@@ -443,7 +445,7 @@ pub const Client = struct {
 
     /// A connection to `target`: a kept one when one goes there, a new one
     /// otherwise. `diagnostic` belongs to this exchange, or is `null`.
-    pub fn connect(c: *Client, target: Target, diagnostic: ?*Diagnostic) Error!*Connection {
+    pub fn connect(c: *Client, target: Target, diagnostic: ?*Diagnostic) httpclient.Error!*Connection {
         if (diagnostic) |d| d.clear();
         return (try c.connectNoting(target, diagnostic)).conn;
     }
@@ -487,7 +489,7 @@ pub const Client = struct {
     /// whole with its length; `null` sends none. The response is the
     /// caller's to read and `deinit`. `diagnostic` belongs to this exchange,
     /// or is `null`.
-    pub fn send(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8, diagnostic: ?*Diagnostic) Error!Response {
+    pub fn send(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8, diagnostic: ?*Diagnostic) httpclient.Error!Response {
         if (diagnostic) |d| d.clear();
         var response = try c.sendKept(method, target, path, headers, body, diagnostic);
         // A proxy that asks, for a request it is handed whole: answered,
@@ -537,7 +539,7 @@ pub const Client = struct {
     /// response. Finish consumes the stream on success and failure; abort it
     /// only when giving up before finish.
     /// `diagnostic` belongs to this exchange, or is `null`.
-    pub fn stream(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, length: ?u64, buffer: []u8, diagnostic: ?*Diagnostic) Error!Streaming {
+    pub fn stream(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, length: ?u64, buffer: []u8, diagnostic: ?*Diagnostic) httpclient.Error!Streaming {
         const conn = try c.connect(target, diagnostic);
         errdefer conn.close();
         try conn.writeHead(method, path, headers, if (length) |n| .{ .content_length = n } else .chunked);
@@ -578,7 +580,7 @@ pub const Streaming = struct {
     /// on every outcome: the response owns the connection on success, and
     /// failure closes it. Do not use or abort the stream after calling this.
     /// A body shorter than its declared length is `BodyIncomplete`.
-    pub fn finish(s: *Streaming) Error!Response {
+    pub fn finish(s: *Streaming) httpclient.Error!Response {
         const conn = s.conn;
         defer s.* = undefined;
         errdefer conn.close();
@@ -727,7 +729,7 @@ pub const Response = struct {
 
     /// Why a read of the body failed: `TimedOut`, a TLS or HTTP framing
     /// failure, or the connection breaking.
-    pub fn failure(r: *const Response) Error {
+    pub fn failure(r: *const Response) httpclient.Error {
         const conn = r.conn;
         if (conn.timed_out.load(.acquire)) return error.TimedOut;
         if (r.state.http_reader.body_err != null) return error.HttpProtocolError;

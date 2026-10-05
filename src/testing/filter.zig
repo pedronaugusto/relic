@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
             if (ready.items.len == 0) {
                 for (delayed.keys()) |key| try ready.append(gpa, key);
             }
-            if (ready.pop()) |next| try pktline.print(w, "pathname={s}\n", .{next});
+            if (ready.pop()) |next| try pktline.print("pathname={s}\n", .{next}, w);
             try pktline.flush(w);
             try pktline.write(w, "status=success\n");
             try pktline.flush(w);
@@ -156,7 +156,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn status(w: *Io.Writer, value: []const u8) !void {
-    try pktline.print(w, "status={s}\n", .{value});
+    try pktline.print("status={s}\n", .{value}, w);
     try pktline.flush(w);
     try w.flush();
 }

@@ -25,6 +25,8 @@
 //! `stateless-connect` and `get` are not used: a helper offering nothing
 //! else cannot fetch here, `error.HelperCannotFetch`.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -223,7 +225,7 @@ pub const Helper = struct {
     line: Io.Writer.Allocating,
 
     /// Start the helper `spec` names and read its capabilities.
-    pub fn start(gpa: Allocator, io: Io, spec: Spec, options: StartOptions) Error!*Helper {
+    pub fn start(gpa: Allocator, io: Io, spec: Spec, options: StartOptions) Self.Error!*Helper {
         const h = try gpa.create(Helper);
         errdefer gpa.destroy(h);
         h.* = .{ .gpa = gpa, .io = io, .arena_state = .init(gpa), .name = "", .conn = null, .line = .init(gpa) };
@@ -377,7 +379,7 @@ pub const Helper = struct {
 
     /// `option <name> <value>`, and the helper's answer. A helper without
     /// the `option` capability is not asked.
-    pub fn option(h: *Helper, name: []const u8, value: []const u8, form: OptionValue) Error!Answer {
+    pub fn option(h: *Helper, name: []const u8, value: []const u8, form: OptionValue) Self.Error!Answer {
         if (!h.caps.option) return .unsupported;
         var buf: Io.Writer.Allocating = .init(h.gpa);
         defer buf.deinit();
@@ -405,7 +407,7 @@ pub const Helper = struct {
     /// `connect git-upload-pack` or `git-receive-pack`, when the helper
     /// can: whether the conversation is now the service's. `servpath`
     /// carries a service program other than git's.
-    pub fn connect(h: *Helper, service: connection.Service, service_program: ?[]const u8) Error!bool {
+    pub fn connect(h: *Helper, service: connection.Service, service_program: ?[]const u8) Self.Error!bool {
         if (!h.caps.connect) return false;
         if (service_program) |p| if (!std.mem.eql(u8, p, service.name())) {
             _ = try h.option("servpath", p, .quoted);
@@ -422,7 +424,7 @@ pub const Helper = struct {
     /// `list`, or `list for-push` for a push to a helper that pushes: the
     /// refs, a symbolic one given its target's value. `repo` is read for
     /// a ref the helper says is `unchanged`. The list is the caller's.
-    pub fn list(h: *Helper, gpa: Allocator, repo: ?*Repository, for_push: bool) Error!protocol.RefList {
+    pub fn list(h: *Helper, gpa: Allocator, repo: ?*Repository, for_push: bool) Self.Error!protocol.RefList {
         if (h.caps.object_format) _ = try h.option("object-format", "true", .raw);
         try h.send(if (h.caps.push and for_push) "list for-push\n" else "list\n");
         var out: protocol.RefList = .{ .arena = .init(gpa), .refs = &.{} };
@@ -480,7 +482,7 @@ pub const Helper = struct {
 
     /// Bring `wants` into the repository, through the helper's `fetch` or,
     /// failing that, its `import`.
-    pub fn fetch(h: *Helper, wants_in: []const Want, options: FetchOptions) Error!void {
+    pub fn fetch(h: *Helper, wants_in: []const Want, options: FetchOptions) Self.Error!void {
         // A symbolic ref is asked for as its target, once, as git asks.
         var wants: std.ArrayList(Want) = .empty;
         defer wants.deinit(h.gpa);
@@ -581,7 +583,7 @@ pub const Helper = struct {
 
     /// Push `commands` through the helper's `push` or, failing that, its
     /// `export`, and its report.
-    pub fn push(h: *Helper, gpa: Allocator, commands: []const PushCommand, options: PushOptions) Error!sendpack.Report {
+    pub fn push(h: *Helper, gpa: Allocator, commands: []const PushCommand, options: PushOptions) Self.Error!sendpack.Report {
         if (!h.caps.push and !h.caps.@"export") return error.HelperCannotPush;
         const repo = options.repo orelse return error.RepositoryNeeded;
         var report = if (h.caps.push)

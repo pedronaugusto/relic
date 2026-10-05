@@ -11,6 +11,8 @@
 //! one with no part at all is refused. `sparse:path=`, whose support git
 //! dropped, is refused, as git refuses it.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -41,7 +43,7 @@ pub const Spec = union(enum) {
 };
 
 /// Read `text`. The result's slices are `arena`'s or `text`'s.
-pub fn parse(arena: Allocator, text: []const u8) Error!Spec {
+pub fn parse(arena: Allocator, text: []const u8) Self.Error!Spec {
     if (std.mem.eql(u8, text, "blob:none")) return .blob_none;
     if (std.mem.startsWith(u8, text, "blob:limit=")) return .{ .blob_limit = try parseUlong(text["blob:limit=".len..]) };
     if (std.mem.startsWith(u8, text, "tree:")) return .{ .tree_depth = try parseUlong(text["tree:".len..]) };
@@ -75,7 +77,7 @@ pub fn parse(arena: Allocator, text: []const u8) Error!Spec {
 /// `remote.<name>.partialclonefilter`: a `blob:limit` on its own in bytes,
 /// anything else as written, once it reads. The result is `arena`'s, or
 /// `text` itself.
-pub fn sendForm(arena: Allocator, text: []const u8) Error![]const u8 {
+pub fn sendForm(arena: Allocator, text: []const u8) Self.Error![]const u8 {
     const spec = try parse(arena, text);
     return switch (spec) {
         .blob_limit => |n| std.fmt.allocPrint(arena, "blob:limit={d}", .{n}),

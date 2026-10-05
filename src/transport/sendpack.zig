@@ -11,6 +11,8 @@
 //! is one, so the server's progress and its hooks' output come back beside
 //! it. receive-pack speaks v0 and nothing else, whatever was asked for.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -108,7 +110,7 @@ pub fn send(
     adv: *const protocol.Advertisement,
     db: *odb_mod.Odb,
     request: Request,
-) Error!Report {
+) Self.Error!Report {
     if (request.atomic and !adv.has("atomic")) return error.AtomicPushUnsupported;
     if (request.push_options.len != 0 and !adv.has("push-options")) return error.PushOptionsUnsupported;
     var needs_pack = false;
@@ -122,7 +124,7 @@ pub fn send(
     const status = status_v2 or adv.has("report-status");
 
     const w = try conn.request();
-    for (request.shallow) |oid| pktline.print(w, "shallow {f}\n", .{oid}) catch |err| return conn.writeFailed(err);
+    for (request.shallow) |oid| pktline.print("shallow {f}\n", .{oid}, w) catch |err| return conn.writeFailed(err);
     writeCommands(w, adv, request, band, status_v2, status) catch |err| return conn.writeFailed(err);
     if (needs_pack) {
         _ = db.writePackTo(io, w, request.objects, .{
@@ -169,7 +171,7 @@ fn writeCommands(
     // capabilities after the NUL each with the space before it.
     for (request.commands, 0..) |command, i| {
         if (i != 0) {
-            try pktline.print(w, "{f} {f} {s}", .{ command.old, command.new, command.name });
+            try pktline.print("{f} {f} {s}", .{ command.old, command.new, command.name }, w);
             continue;
         }
         var caps_buffer: [256]u8 = undefined;
@@ -183,11 +185,11 @@ fn writeCommands(
         if (request.push_options.len != 0) try caps.writeAll(" push-options");
         if (adv.has("object-format")) try caps.print(" object-format={s}", .{adv.kind.name()});
         if (adv.has("agent")) try caps.print(" agent={s}", .{protocol.agent});
-        try pktline.print(w, "{f} {f} {s}\x00{s}", .{ command.old, command.new, command.name, caps.buffered() });
+        try pktline.print("{f} {f} {s}\x00{s}", .{ command.old, command.new, command.name, caps.buffered() }, w);
     }
     try pktline.flush(w);
     if (request.push_options.len != 0) {
-        for (request.push_options) |option| try pktline.print(w, "{s}", .{option});
+        for (request.push_options) |option| try pktline.print("{s}", .{option}, w);
         try pktline.flush(w);
     }
 }

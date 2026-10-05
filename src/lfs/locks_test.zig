@@ -94,7 +94,7 @@ test "locks relic takes git lfs locks lists, and the other way round, with the o
     const server = try pair.open(&repo);
     defer server.close();
 
-    const taken = try lfslocks.lock(server, &repo, "x.bin", arena, .{});
+    const taken = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
     try testing.expectEqualStrings("ada", taken.locked.owner.?);
     try fx.gitIn(pair.theirs, &.{ "lfs", "lock", "y.bin" });
 
@@ -119,21 +119,21 @@ test "locks relic takes git lfs locks lists, and the other way round, with the o
 
     // A lock someone holds is theirs: taking it says who, and giving it
     // back is refused unless forced.
-    const held = try lfslocks.lock(server, &repo, "y.bin", arena, .{});
+    const held = try lfslocks.lock(arena, server, &repo, "y.bin", .{});
     try testing.expectEqualStrings("bob", held.held.owner.?);
-    try testing.expectError(error.LockOwnedByOther, lfslocks.unlockPath(server, &repo, "y.bin", false, arena, .{}));
+    try testing.expectError(error.LockOwnedByOther, lfslocks.unlockPath(arena, server, &repo, "y.bin", false, .{}));
     if (testlfs.git(gpa, io, pair.theirs, &fx.env, &.{ "lfs", "unlock", "x.bin" }, false)) |out| {
         gpa.free(out);
         return error.TestUnexpectedResult;
     } else |_| {}
 
-    const broken = try lfslocks.unlockPath(server, &repo, "y.bin", true, arena, .{});
+    const broken = try lfslocks.unlockPath(arena, server, &repo, "y.bin", true, .{});
     try testing.expectEqualStrings("y.bin", broken.path);
     try fx.gitIn(pair.theirs, &.{ "lfs", "unlock", "--force", "x.bin" });
     const after = try fx.server.lockListing(gpa);
     defer gpa.free(after);
     try testing.expectEqualStrings("", after);
-    try testing.expectError(error.LockNotFound, lfslocks.unlockPath(server, &repo, "x.bin", false, arena, .{}));
+    try testing.expectError(error.LockNotFound, lfslocks.unlockPath(arena, server, &repo, "x.bin", false, .{}));
 }
 
 test "the lock cache is where git-lfs keeps it and what git-lfs writes, read both ways" {
@@ -151,7 +151,7 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
     defer repo.deinit(io);
     const server = try pair.open(&repo);
     defer server.close();
-    _ = try lfslocks.lock(server, &repo, "x.bin", arena, .{});
+    _ = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
     var all = try lfslocks.list(server, &repo, .{}, .{});
     all.deinit();
     var split = try lfslocks.verify(server, &repo, .{});
@@ -211,7 +211,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
 
     // Each takes a lock on a different file: the holder's file writable,
     // the other's still read-only.
-    _ = try lfslocks.lock(server, &repo, "x.bin", arena, .{});
+    _ = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
     try fx.gitIn(pair.theirs, &.{ "lfs", "lock", "y.bin" });
     try testing.expectEqual(try mode(io, pair.theirs, "y.bin"), try mode(io, pair.ours, "x.bin"));
     try testing.expectEqual(try mode(io, pair.theirs, "x.bin"), try mode(io, pair.ours, "y.bin"));
@@ -226,7 +226,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     try testing.expectEqual(try mode(io, pair.theirs, "x.bin"), try mode(io, pair.ours, "y.bin"));
 
     // Giving the lock back makes the file read-only again.
-    _ = try lfslocks.unlockPath(server, &repo, "x.bin", false, arena, .{});
+    _ = try lfslocks.unlockPath(arena, server, &repo, "x.bin", false, .{});
     try fx.gitIn(pair.theirs, &.{ "lfs", "unlock", "y.bin" });
     try testing.expectEqual(try mode(io, pair.theirs, "y.bin"), try mode(io, pair.ours, "x.bin"));
     try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "x.bin") & 0o222);
@@ -247,7 +247,7 @@ test "a server with no locking API is named" {
     defer server.close();
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    try testing.expectError(error.LockingUnsupported, lfslocks.lock(server, &repo, "a.bin", arena_state.allocator(), .{ .ref = "refs/heads/main" }));
+    try testing.expectError(error.LockingUnsupported, lfslocks.lock(arena_state.allocator(), server, &repo, "a.bin", .{ .ref = "refs/heads/main" }));
     try testing.expectError(error.LockingUnsupported, lfslocks.verify(server, &repo, .{ .ref = "refs/heads/main" }));
     try testing.expectError(error.LockingUnsupported, lfslocks.list(server, &repo, .{}, .{ .ref = "refs/heads/main" }));
 }

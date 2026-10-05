@@ -10,6 +10,8 @@
 //!
 //! A key signs for TLS through `sign`, with the schemes `schemes` offers.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const der = @import("der.zig");
@@ -47,7 +49,7 @@ pub const PrivateKey = union(enum) {
     /// Read a key from `bytes` — PEM, or DER — opening it with
     /// `passphrase` when it is encrypted. Slices of the result are
     /// `arena`'s.
-    pub fn parse(arena: Allocator, bytes: []const u8, passphrase: ?[]const u8) Error!PrivateKey {
+    pub fn parse(arena: Allocator, bytes: []const u8, passphrase: ?[]const u8) Self.Error!PrivateKey {
         if (std.mem.find(u8, bytes, "-----BEGIN ")) |_| {
             var blocks = pemBlocks(bytes);
             while (try blocks.next(arena)) |block| {
@@ -179,7 +181,7 @@ pub const PrivateKey = union(enum) {
 /// The certificates in `bytes`, PEM — every `CERTIFICATE` block, leaf
 /// first as the file has them — or one in DER. Slices are `arena`'s or
 /// `bytes`'.
-pub fn certificates(arena: Allocator, bytes: []const u8) Error![]const []const u8 {
+pub fn certificates(arena: Allocator, bytes: []const u8) Self.Error![]const []const u8 {
     if (std.mem.find(u8, bytes, "-----BEGIN ") == null) {
         // DER: one certificate, which must read as one.
         var r: der.Reader = .{ .bytes = bytes };

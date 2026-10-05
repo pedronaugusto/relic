@@ -1,6 +1,8 @@
 //! SOCKS CONNECT framing, as curl's lib/socks.c negotiates it.
 //! Reference: https://github.com/curl/curl/blob/master/lib/socks.c
 //! Reads consume exactly one reply; bytes of the tunneled protocol stay put.
+const Self = @This();
+
 const std = @import("std");
 const Io = std.Io;
 
@@ -61,7 +63,7 @@ pub fn reply(r: *Io.Reader, version: Version, status: ?*u16) (Error || Io.Reader
 
 /// Authenticate SOCKS5, offering no-auth and, when supplied, RFC 1929.
 /// Curl ignores the RFC 1929 reply version; the status alone decides it.
-pub fn authenticate(r: *Io.Reader, w: *Io.Writer, credential: ?Credential) WireError!void {
+pub fn authenticate(r: *Io.Reader, w: *Io.Writer, credential: ?Credential) Self.WireError!void {
     try w.writeAll(if (credential != null) &.{ 5, 2, 0, 2 } else &.{ 5, 1, 0 });
     try w.flush();
     var answer: [2]u8 = undefined;
@@ -86,7 +88,7 @@ pub fn authenticate(r: *Io.Reader, w: *Io.Writer, credential: ?Credential) WireE
 
 /// Write a CONNECT request. `address` is the local lookup for 4/5, or a
 /// literal for 5h; 4a always sends the name behind its 0.0.0.1 marker.
-pub fn request(w: *Io.Writer, version: Version, host: []const u8, port: u16, address: ?Io.net.IpAddress, credential: ?Credential) WireError!void {
+pub fn request(w: *Io.Writer, version: Version, host: []const u8, port: u16, address: ?Io.net.IpAddress, credential: ?Credential) Self.WireError!void {
     const port_bytes = std.mem.toBytes(std.mem.nativeToBig(u16, port));
     if (version == .socks4 or version == .socks4a) {
         if (std.mem.findScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
