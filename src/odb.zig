@@ -992,17 +992,21 @@ pub const Odb = struct {
         var final_buf: [hash.max_hex_len + 2]u8 = undefined;
         const final = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
 
-        var file = source.dir.createFile(io, temp, .{ .exclusive = true }) catch |err| switch (err) {
+        const shared = odb.backendData().options.shared;
+        var file = source.dir.createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions }) catch |err| switch (err) {
             error.FileNotFound => blk: {
-                source.dir.createDir(io, text[0..2], .default_dir) catch |e| switch (e) {
+                if (source.dir.createDir(io, text[0..2], .default_dir)) |_| {
+                    fs.adjustShared(io, source.dir, text[0..2], shared);
+                } else |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => |other| return other,
-                };
+                }
                 odb.stats.fan_out_created += 1;
-                break :blk try source.dir.createFile(io, temp, .{ .exclusive = true });
+                break :blk try source.dir.createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions });
             },
             else => |e| return e,
         };
+        if (shared != .umask) fs.adjustShared(io, source.dir, temp, shared);
         var failed = true;
         defer if (failed) {
             file.close(io);
@@ -1048,6 +1052,16 @@ pub const Odb = struct {
             try fs.syncDir(io, sub);
         }
         odb.stats.loose_written += 1;
+    }
+
+    /// What git creates a loose object with: read-only to everyone, less
+    /// the umask.
+    const object_permissions: Io.File.Permissions = if (Io.File.Permissions.has_executable_bit) @enumFromInt(@as(std.posix.mode_t, 0o444)) else .default_file;
+
+    /// What `core.sharedRepository` asks of the permissions of what this
+    /// database writes.
+    pub fn sharedPermissions(odb: *const Odb) fs.Shared {
+        return odb.backendData().options.shared;
     }
 
     /// `<xx>/tmp_obj_<random>`, written into `buf`.
@@ -1152,10 +1166,12 @@ pub const Odb = struct {
             if (s.hasher.collisionAttack()) return error.CollisionAttack;
             var hex: [hash.max_hex_len]u8 = undefined;
             const text = oid.hex(&hex);
-            s.dir.createDir(io, text[0..2], .default_dir) catch |err| switch (err) {
+            if (s.dir.createDir(io, text[0..2], .default_dir)) |_| {
+                fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
+            } else |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => |e| return e,
-            };
+            }
             var final_buf: [hash.max_hex_len + 2]u8 = undefined;
             const final_path = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
             fs.renameWithRetry(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
@@ -1196,7 +1212,8 @@ pub const Odb = struct {
         const source = odb.writableSource();
         var name_buf: [128]u8 = undefined;
         const temp = fs.tempName(io, &name_buf, "tmp_obj_");
-        const file = try source.dir.createFile(io, temp, .{ .exclusive = true });
+        const file = try source.dir.createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions });
+        fs.adjustShared(io, source.dir, temp, odb.backendData().options.shared);
         errdefer {
             file.close(io);
             source.dir.deleteFile(io, temp) catch {};
@@ -1655,6 +1672,7 @@ pub const Odb = struct {
             .sync = options.sync,
             .compression = options.compression,
             .reverse_index = options.reverse_index,
+            .shared = odb.backendData().options.shared,
         };
         var writer = switch (target) {
             .dir => |pack_dir| try pack.Writer.init(gpa, io, pack_dir, odb.backendData().kind, @intCast(entries.len), write_options),
@@ -2250,10 +2268,12 @@ pub const Odb = struct {
         const collected: struct { entries: []const PackEntry } = .{ .entries = entries };
 
         const source = odb.writableSource();
-        source.dir.createDir(io, "pack", .default_dir) catch |err| switch (err) {
+        if (source.dir.createDir(io, "pack", .default_dir)) |_| {
+            fs.adjustShared(io, source.dir, "pack", odb.backendData().options.shared);
+        } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
-        };
+        }
         var pack_dir = try source.dir.openDir(io, "pack", .{ .iterate = true });
         defer pack_dir.close(io);
 
@@ -2383,15 +2403,18 @@ pub const Odb = struct {
     /// `finishPack` is what closes it; `abortPack` leaves nothing behind.
     pub fn beginPack(odb: *Odb, io: Io, options: PackOptions) Error!OpenPack {
         const source = odb.writableSource();
-        source.dir.createDir(io, "pack", .default_dir) catch |err| switch (err) {
+        if (source.dir.createDir(io, "pack", .default_dir)) |_| {
+            fs.adjustShared(io, source.dir, "pack", odb.backendData().options.shared);
+        } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
-        };
+        }
         const dir = try source.dir.openDir(io, "pack", .{ .iterate = true });
         errdefer dir.close(io);
         const writer = try pack.Writer.initCounting(odb.backendData().gpa, io, dir, odb.backendData().kind, .{
             .sync = options.sync,
             .compression = options.compression,
+            .shared = odb.backendData().options.shared,
         });
         return .{ .writer = writer, .dir = dir };
     }
@@ -4026,6 +4049,8 @@ test "loose inflate distinguishes policy resource failures from corruption" {
     try std.testing.expectError(error.StreamTooLong, odb.read(io, oid));
     odb.backendData().options.max_object_bytes = 100;
     var path_buf: [hash.max_hex_len + 2]u8 = undefined;
+    // a loose object is read-only, as git's are
+    try objects.deleteFile(io, odb.loosePath(oid, &path_buf));
     try objects.writeFile(io, .{ .sub_path = odb.loosePath(oid, &path_buf), .data = "bad zlib" });
     try std.testing.expectError(error.CorruptLooseObject, odb.read(io, oid));
 }

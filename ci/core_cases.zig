@@ -20,6 +20,8 @@ pub const families = [_]Family{
         "repo.fs.test",
         "repo.safe.test",
         "repo.safe_test.test",
+        "testing.shared.test",
+        "repo.ident_test.test",
         "object.fsck.test",
         "object.gitdate.test",
         "hash.test",

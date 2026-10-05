@@ -476,6 +476,8 @@ test "merged split layers are marked at the write time before an older expiry cu
     try std.testing.expect(native_time > 1);
     // Git marks the layer too, so an older cutoff preserves it.
     try fs.setTimestamps(io, repo.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } } });
+    // the chain is read-only, as git leaves it
+    try repo.dir.deleteFile(io, ".git/objects/info/commit-graphs/commit-graph-chain");
     try repo.writeFile(io, ".git/objects/info/commit-graphs/commit-graph-chain", chain);
     try repo.exec(io, &.{ "commit-graph", "write", "--reachable", "--split=replace", "--expire-time=@1" });
     try repo.dir.access(io, path, .{});

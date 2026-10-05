@@ -453,7 +453,7 @@ const Op = struct {
         const repo = op.repo;
         try makeInfoDir(repo, op.io);
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(repo.gpa, op.io, repo.git_dir, pattern_file, &buffer, .{});
+        var lock = try fs.LockFile.open(repo.gpa, op.io, repo.git_dir, pattern_file, &buffer, .{ .shared = repo.shared });
         defer lock.deinit(op.io);
 
         var patterns = try sparse.Patterns.fromText(repo.gpa, text, .{ .case_fold = op.fold, .cone = op.state.cone });
@@ -487,7 +487,7 @@ const Op = struct {
 
         const buffer = try repo.gpa.alloc(u8, 64 * 1024);
         defer repo.gpa.free(buffer);
-        var lock = try fs.LockFile.open(repo.gpa, io, repo.git_dir, "index", buffer, .{});
+        var lock = try fs.LockFile.open(repo.gpa, io, repo.git_dir, "index", buffer, .{ .shared = repo.shared });
         defer lock.deinit(io);
 
         var index = try repo.openIndex(io);

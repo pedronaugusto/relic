@@ -572,7 +572,7 @@ pub fn push(repo: *Repository, io: Io, options: PushOptions) Error!?Oid {
     }
 
     try resetAfterPush(&ctx, &head_map, head_commit.tree, index_tree, untracked_files.items, options);
-    try ctx.index.write(io, repo.git_dir, "index", .{});
+    try ctx.index.write(io, repo.git_dir, "index", .{ .lock = .{ .shared = repo.shared } });
     return stash_commit;
 }
 
@@ -894,7 +894,7 @@ pub fn applyStash(repo: *Repository, io: Io, stash: Stash, options: ApplyOptions
     }
 
     _ = try worktree.writePaths(gpa, io, ctx.wt, &ctx.index, db, untracked_writes.items, checkout_options);
-    try ctx.index.write(io, repo.git_dir, "index", .{});
+    try ctx.index.write(io, repo.git_dir, "index", .{ .lock = .{ .shared = repo.shared } });
 
     return .{
         .gpa = gpa,
@@ -1029,7 +1029,7 @@ pub const DropOptions = struct {
 pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid {
     const gpa = repo.gpa;
     var ref_buffer: [256]u8 = undefined;
-    var ref_lock = try fs.LockFile.open(gpa, io, repo.common_dir, ref_name, &ref_buffer, .{});
+    var ref_lock = try fs.LockFile.open(gpa, io, repo.common_dir, ref_name, &ref_buffer, .{ .shared = repo.shared });
     var ref_held = true;
     defer if (ref_held) ref_lock.deinit(io);
 
@@ -1057,7 +1057,7 @@ pub fn drop(repo: *Repository, io: Io, n: usize, options: DropOptions) Error!Oid
     }
 
     var log_buffer: [4096]u8 = undefined;
-    var log_lock = try fs.LockFile.open(gpa, io, repo.common_dir, log_path, &log_buffer, .{});
+    var log_lock = try fs.LockFile.open(gpa, io, repo.common_dir, log_path, &log_buffer, .{ .shared = repo.shared });
     defer log_lock.deinit(io);
     var last_kept = Oid.zero(repo.objectFormat());
     var hex: [hash.max_hex_len]u8 = undefined;

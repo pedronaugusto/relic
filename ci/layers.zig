@@ -103,6 +103,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "repository policy", .patterns = &.{
         "src/repo/safe.zig",
+        "src/repo/ident.zig",
         "src/diff/userdiff.zig",
         "src/config/state.zig",
         "src/transport/credential.zig",
@@ -214,6 +215,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/refs/reftablestack_test.zig",
         "src/repo_test.zig",
         "src/repo/safe_test.zig",
+        "src/repo/ident_test.zig",
         "src/odb/revindex_test.zig",
         "src/revwalk/mailmap.zig",
         "src/revwalk/revparse.zig",
@@ -305,6 +307,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "submodules", .patterns = &.{} },
     .{ .name = "public", .patterns = &.{
         "src/relic.zig",
+        "src/testing/shared.zig",
         "src/tests.zig",
     } },
 };

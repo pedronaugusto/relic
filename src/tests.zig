@@ -113,6 +113,8 @@ test {
         _ = @import("refs/filter_test.zig");
         _ = @import("commit/trailer_test.zig");
         _ = @import("repo/safe_test.zig");
+        _ = @import("testing/shared.zig");
+        _ = @import("repo/ident_test.zig");
     }
 }
 

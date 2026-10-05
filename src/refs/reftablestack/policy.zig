@@ -23,6 +23,9 @@ pub const Options = struct {
     /// `reftable.lockTimeout`: how long to wait for `tables.list.lock`, with
     /// git's backoff. git waits 100 milliseconds unless told otherwise.
     lock: fs.OnContention = .{ .wait_ms = 100 },
+    /// What `core.sharedRepository` asks of the permissions of the tables,
+    /// the list and the directory.
+    shared: fs.Shared = .umask,
 };
 
 /// Errors from reading a stack.

@@ -262,6 +262,7 @@ pub const Pending = struct {
         lock: fs.LockFile,
         buffer: []u8,
         written: bool = false,
+        shared: fs.Shared = .umask,
     };
 
     fn release(p: *Pending, gpa: Allocator, io: Io) void {
@@ -275,8 +276,8 @@ pub const Pending = struct {
     }
 };
 
-fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, on_contention: fs.OnContention) refs.TransactionError!Pending.Locked {
-    parent.createDirPath(io, "reftable") catch |err| switch (err) {
+fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, options: Options) refs.TransactionError!Pending.Locked {
+    fs.makeDirs(io, parent, "reftable", options.shared) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => |e| return e,
     };
@@ -284,8 +285,8 @@ fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, on_contention: fs.OnContent
     errdefer dir.close(io);
     const buffer = try gpa.alloc(u8, 4096);
     errdefer gpa.free(buffer);
-    const lock = try fs.LockFile.open(gpa, io, dir, "tables.list", buffer, .{ .on_contention = on_contention });
-    return .{ .dir = dir, .lock = lock, .buffer = buffer };
+    const lock = try fs.LockFile.open(gpa, io, dir, "tables.list", buffer, .{ .on_contention = options.lock, .shared = options.shared });
+    return .{ .dir = dir, .lock = lock, .buffer = buffer, .shared = options.shared };
 }
 
 /// `Transaction.prepare` over reftable: take `tables.list.lock` on every
@@ -300,13 +301,13 @@ pub fn prepare(tx: anytype, io: Io) refs.TransactionError!void {
         if (isLinked(store) and isPerWorktree(store, edit.name)) needs_worktree = true;
     }
 
-    var main = try lockStack(gpa, io, store.commonDir(), store.reftableOptions().lock);
+    var main = try lockStack(gpa, io, store.commonDir(), store.reftableOptions());
     errdefer {
         main.lock.deinit(io);
         gpa.free(main.buffer);
         main.dir.close(io);
     }
-    var worktree: ?Pending.Locked = if (needs_worktree) try lockStack(gpa, io, store.gitDir(), store.reftableOptions().lock) else null;
+    var worktree: ?Pending.Locked = if (needs_worktree) try lockStack(gpa, io, store.gitDir(), store.reftableOptions()) else null;
     errdefer if (worktree) |*w| {
         w.lock.deinit(io);
         gpa.free(w.buffer);
@@ -461,7 +462,7 @@ pub fn appendLog(
     if (std.mem.indexOfAny(u8, who.name, "<>\n") != null or
         std.mem.indexOfAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
     const parent = if (isLinked(store) and isPerWorktree(store, name)) store.gitDir() else store.commonDir();
-    var locked = try lockStack(gpa, io, parent, store.reftableOptions().lock);
+    var locked = try lockStack(gpa, io, parent, store.reftableOptions());
     defer {
         if (!locked.written) locked.lock.deinit(io);
         gpa.free(locked.buffer);
@@ -496,7 +497,7 @@ pub fn appendLog(
 fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack, bytes: []const u8, update_index: u64) refs.TransactionError!void {
     var name_buf: [64]u8 = undefined;
     const name = tableName(&name_buf, io, update_index, update_index);
-    try writeTable(gpa, io, locked.dir, name, bytes);
+    try writeTable(gpa, io, locked.dir, name, bytes, locked.shared);
     const w = locked.lock.writer();
     w.writeAll(stack.list) catch return error.WriteFailed;
     if (stack.list.len != 0 and stack.list[stack.list.len - 1] != '\n') w.writeByte('\n') catch return error.WriteFailed;
@@ -617,9 +618,9 @@ fn logMessage(arena: Allocator, text: []const u8, block_size: u32) Allocator.Err
 
 /// Write a new table under its final name, through `<name>.lock`, so no
 /// reader sees half of it.
-fn writeTable(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8) refs.TransactionError!void {
+fn writeTable(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8, shared: fs.Shared) refs.TransactionError!void {
     var buffer: [16 * 1024]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, dir, name, &buffer, .{});
+    var lock = try fs.LockFile.open(gpa, io, dir, name, &buffer, .{ .shared = shared });
     defer lock.deinit(io);
     lock.writer().writeAll(bytes) catch return error.WriteFailed;
     try lock.commit(io);
@@ -650,7 +651,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     };
     defer dir.close(io);
     var buffer: [4096]u8 = undefined;
-    var list_lock = try fs.LockFile.open(gpa, io, dir, "tables.list", &buffer, .{ .on_contention = options.lock });
+    var list_lock = try fs.LockFile.open(gpa, io, dir, "tables.list", &buffer, .{ .on_contention = options.lock, .shared = options.shared });
     defer list_lock.deinit(io);
     var stack = try Stack.load(gpa, io, dir, kind);
     defer stack.deinit();
@@ -719,7 +720,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
         const bytes = try reftable.write(gpa, kind, options.write, min, max, merged_refs, merged_logs);
         defer gpa.free(bytes);
         const name = tableName(&name_buf, io, min, max);
-        try writeTable(gpa, io, dir, name, bytes);
+        try writeTable(gpa, io, dir, name, bytes, options.shared);
         new_name = name;
     }
 
@@ -814,7 +815,7 @@ pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: ref
     defer gpa.free(bytes);
     var name_buf: [64]u8 = undefined;
     const name = tableName(&name_buf, io, 1, 1);
-    try writeTable(gpa, io, dir, name, bytes);
+    try writeTable(gpa, io, dir, name, bytes, options.shared);
     var list_buf: [96]u8 = undefined;
     const list_text = std.fmt.bufPrint(&list_buf, "{s}\n", .{name}) catch unreachable;
     try dir.writeFile(io, .{ .sub_path = "tables.list", .data = list_text });

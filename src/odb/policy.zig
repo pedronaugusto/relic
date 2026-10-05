@@ -67,6 +67,9 @@ pub const Options = struct {
     /// in front of the content and moves every block of the message. A
     /// SHA-256 repository ignores it.
     detect_sha1_collisions: bool = false,
+    /// What `core.sharedRepository` asks of the permissions of what is
+    /// written: the objects, the packs and their directories.
+    shared: fs.Shared = .umask,
 };
 
 /// Errors from the object database.

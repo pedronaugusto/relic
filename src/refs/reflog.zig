@@ -138,11 +138,27 @@ pub fn append(
     who: object.Signature,
     message: []const u8,
 ) AppendError!void {
+    return appendShared(gpa, io, git_dir, ref, old, new, who, message, .umask);
+}
+
+/// `append`, the directories it makes and a log it starts given the
+/// permissions `core.sharedRepository` asks for, as git gives them.
+pub fn appendShared(
+    gpa: Allocator,
+    io: Io,
+    git_dir: Io.Dir,
+    ref: []const u8,
+    old: Oid,
+    new: Oid,
+    who: object.Signature,
+    message: []const u8,
+    shared: fs.Shared,
+) AppendError!void {
     if (isReftable(io, git_dir)) return error.ReftableRepository;
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     if (std.fs.path.dirnamePosix(path)) |parent| {
-        git_dir.createDirPath(io, parent) catch |err| switch (err) {
+        fs.makeDirs(io, git_dir, parent, shared) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
         };
@@ -177,7 +193,11 @@ pub fn append(
     // Opened for reading too because Windows does not let a write-only handle
     // query the length.
     const file = git_dir.openFile(io, path, .{ .mode = .read_write, .lock = .exclusive }) catch |err| switch (err) {
-        error.FileNotFound => try git_dir.createFile(io, path, .{ .truncate = false, .read = true, .lock = .exclusive }),
+        error.FileNotFound => blk: {
+            const created = try git_dir.createFile(io, path, .{ .truncate = false, .read = true, .lock = .exclusive });
+            fs.adjustShared(io, git_dir, path, shared);
+            break :blk created;
+        },
         else => |e| return e,
     };
     defer file.close(io);

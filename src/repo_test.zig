@@ -1186,3 +1186,159 @@ test "the git directory of a working tree is found without opening the repositor
     defer plain.close(io);
     try std.testing.expectError(error.NotARepository, repo_mod.Repository.gitDirOf(gpa, io, plain));
 }
+
+/// What `git init` decided about the file system, read from what it wrote,
+/// for an `init` to record the same.
+fn probedOptions(gpa: std.mem.Allocator, io: Io, config_text: []const u8) repo_mod.InitOptions {
+    _ = gpa;
+    _ = io;
+    var options: repo_mod.InitOptions = .{};
+    options.file_mode = std.mem.indexOf(u8, config_text, "filemode = true") != null;
+    options.ignore_case = std.mem.indexOf(u8, config_text, "ignorecase = true") != null;
+    options.symlinks = std.mem.indexOf(u8, config_text, "symlinks = false") == null;
+    if (std.mem.indexOf(u8, config_text, "precomposeunicode = true") != null) options.precompose_unicode = true;
+    if (std.mem.indexOf(u8, config_text, "precomposeunicode = false") != null) options.precompose_unicode = false;
+    return options;
+}
+
+/// Every path under a `.git` with its contents, a directory's empty.
+fn treeOf(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !std.StringArrayHashMapUnmanaged([]u8) {
+    var out: std.StringArrayHashMapUnmanaged([]u8) = .empty;
+    var walker = try dir.walk(gpa);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        const path = try gpa.dupe(u8, entry.path);
+        std.mem.replaceScalar(u8, path, '\\', '/');
+        const bytes: []u8 = switch (entry.kind) {
+            .file => try dir.readFileAlloc(io, entry.path, gpa, .limited(1 << 20)),
+            .sym_link => blk: {
+                var buf: [Io.Dir.max_path_bytes]u8 = undefined;
+                const n = try dir.readLink(io, entry.path, &buf);
+                break :blk try std.fmt.allocPrint(gpa, "-> {s}", .{buf[0..n]});
+            },
+            else => try gpa.dupe(u8, ""),
+        };
+        try out.put(gpa, path, bytes);
+    }
+    return out;
+}
+
+fn freeTree(gpa: std.mem.Allocator, tree: *std.StringArrayHashMapUnmanaged([]u8)) void {
+    for (tree.keys(), tree.values()) |k, v| {
+        gpa.free(k);
+        gpa.free(v);
+    }
+    tree.deinit(gpa);
+}
+
+/// `git init --template=<template>` in one directory and `init` with the
+/// same template in another, compared path by path and byte by byte.
+fn compareInit(gpa: std.mem.Allocator, io: Io, scratch: *testgit.Repo, template: []const u8, git_args: []const []const u8, shared: ?repo_mod.fs.Shared) !void {
+    const by_git = try std.fmt.allocPrint(gpa, "by-git-{s}", .{template});
+    defer gpa.free(by_git);
+    const by_relic = try std.fmt.allocPrint(gpa, "by-relic-{s}", .{template});
+    defer gpa.free(by_relic);
+    const template_path = try scratch.dir.realPathFileAlloc(io, template, gpa);
+    defer gpa.free(template_path);
+    const template_arg = try std.fmt.allocPrint(gpa, "--template={s}", .{template_path});
+    defer gpa.free(template_arg);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "init", "-q", "-b", "main", template_arg });
+    try argv.appendSlice(gpa, git_args);
+    try argv.append(gpa, by_git);
+    try scratch.exec(io, argv.items);
+    var git_dir = try scratch.dir.openDir(io, by_git, .{ .iterate = true });
+    defer git_dir.close(io);
+    const git_config = try git_dir.readFileAlloc(io, ".git/config", gpa, .limited(1 << 20));
+    defer gpa.free(git_config);
+    var options = probedOptions(gpa, io, git_config);
+    options.shared = shared;
+    var template_dir = try scratch.dir.openDir(io, template, .{ .iterate = true });
+    defer template_dir.close(io);
+    options.template = template_dir;
+    try scratch.dir.createDir(io, by_relic, .default_dir);
+    var relic_dir = try scratch.dir.openDir(io, by_relic, .{ .iterate = true });
+    defer relic_dir.close(io);
+    var repo = try repo_mod.Repository.init(gpa, io, relic_dir, options);
+    repo.deinit(io);
+
+    var theirs_dir = try git_dir.openDir(io, ".git", .{ .iterate = true });
+    defer theirs_dir.close(io);
+    var ours_dir = try relic_dir.openDir(io, ".git", .{ .iterate = true });
+    defer ours_dir.close(io);
+    var theirs = try treeOf(gpa, io, theirs_dir);
+    defer freeTree(gpa, &theirs);
+    var ours = try treeOf(gpa, io, ours_dir);
+    defer freeTree(gpa, &ours);
+    for (theirs.keys(), theirs.values()) |path, bytes| {
+        const mine = ours.get(path) orelse {
+            std.debug.print("{s}: relic did not write {s}\n", .{ template, path });
+            return error.TestUnexpectedResult;
+        };
+        std.testing.expectEqualStrings(bytes, mine) catch |err| {
+            std.debug.print("{s}: {s} differs\n", .{ template, path });
+            return err;
+        };
+        if (!Io.File.Permissions.has_executable_bit) continue;
+        const a = (try theirs_dir.statFile(io, path, .{ .follow_symlinks = false })).permissions;
+        const b = (try ours_dir.statFile(io, path, .{ .follow_symlinks = false })).permissions;
+        std.testing.expectEqual(a, b) catch |err| {
+            std.debug.print("{s}: {s} has other permissions\n", .{ template, path });
+            return err;
+        };
+    }
+    // relic makes `info/` whether a template does or not
+    for (ours.keys()) |path| {
+        if (theirs.get(path) == null and !std.mem.eql(u8, path, "info")) {
+            std.debug.print("{s}: relic wrote {s} and git did not\n", .{ template, path });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "init copies a template and starts from its configuration, as git init does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try testgit.Repo.init(gpa, io, &.{});
+    defer scratch.deinit();
+    // a template with a configuration of its own, hooks, a dotfile and a
+    // symbolic link
+    try scratch.writeFile(io, "full/description", "a repository\n");
+    try scratch.writeFile(io, "full/config", "[core]\n\tlogallrefupdates = false\n[user]\n\tname = Template\n");
+    try scratch.writeFile(io, "full/hooks/pre-commit", "#!/bin/sh\nexit 0\n");
+    if (Io.File.Permissions.has_executable_bit) try scratch.dir.setFilePermissions(io, "full/hooks/pre-commit", .fromMode(0o755), .{});
+    try scratch.writeFile(io, "full/info/exclude", "*.tmp\n");
+    try scratch.writeFile(io, "full/.hidden", "not copied\n");
+    try scratch.dir.createDirPath(io, "full/empty");
+    if (@import("builtin").os.tag != .windows) try scratch.dir.symLink(io, "description", "full/link", .{});
+    try compareInit(gpa, io, &scratch, "full", &.{}, null);
+    // a template without a configuration
+    try scratch.writeFile(io, "plain/description", "plain\n");
+    try scratch.writeFile(io, "plain/info/exclude", "x\n");
+    try compareInit(gpa, io, &scratch, "plain", &.{}, null);
+    // a template of a format git does not take is not copied at all
+    try scratch.writeFile(io, "future/config", "[core]\n\trepositoryformatversion = 9\n");
+    try scratch.writeFile(io, "future/info/exclude", "x\n");
+    try compareInit(gpa, io, &scratch, "future", &.{}, null);
+    // shared, by the argument and by the template's own setting
+    try scratch.writeFile(io, "empty/.keep", "");
+    if (try testgit.gitAtLeast(gpa, io, 2, 31)) {
+        try compareInit(gpa, io, &scratch, "empty", &.{"--shared=group"}, .group);
+        try scratch.writeFile(io, "mode/info/exclude", "x\n");
+        try compareInit(gpa, io, &scratch, "mode", &.{"--shared=0640"}, .{ .mode = 0o640 });
+        try scratch.writeFile(io, "all/config", "[core]\n\tsharedrepository = all\n");
+        try scratch.writeFile(io, "all/info/exclude", "x\n");
+        try compareInit(gpa, io, &scratch, "all", &.{}, null);
+    }
+}
+
+test "init.templateDir names the template git init copies" {
+    const gpa = std.testing.allocator;
+    var config = try @import("config.zig").Config.parseText(gpa, "[init]\n\ttemplateDir = ~/templates\n", .global);
+    defer config.deinit();
+    config.context.home = "/home/someone";
+    const path = (try repo_mod.templateDir(gpa, &config)).?;
+    defer gpa.free(path);
+    try std.testing.expectEqualStrings("/home/someone/templates", path);
+}

@@ -431,6 +431,9 @@ pub const LockFile = struct {
         /// the new name is flushed too. Independent of the file sync policy.
         /// A no-op on Windows: `FlushFileBuffers` cannot flush directories.
         sync_directory: bool = sync_directories_default,
+        /// The permissions `core.sharedRepository` asks for, given to the
+        /// lock, and so to the file it becomes, as git's tempfiles get them.
+        shared: Shared = .umask,
     };
 
     /// Take `<sub_path>.lock` in `dir`.
@@ -452,6 +455,7 @@ pub const LockFile = struct {
             file.close(io);
             dir.deleteFile(io, lock_name) catch {};
         }
+        adjustShared(io, dir, lock_name, options.shared);
 
         var pid_len: u8 = 0;
         if (options.write_pid) {
@@ -651,6 +655,134 @@ pub fn withReadOnly(p: Io.File.Permissions, read_only: bool) Io.File.Permissions
     if (!Io.File.Permissions.has_executable_bit) return p;
     const mode = p.toMode();
     return .fromMode(if (read_only) mode & ~@as(std.posix.mode_t, 0o222) else mode | 0o200);
+}
+
+/// What `core.sharedRepository` asks of the permissions of what a
+/// repository writes: git's `PERM_*` values.
+pub const Shared = union(enum) {
+    /// `umask`, `false`, `0`: as the process umask leaves them.
+    umask,
+    /// `group`, `true`, `1`: read and write for the group too.
+    group,
+    /// `all`, `world`, `everybody`, `2`: and read for everyone.
+    everybody,
+    /// `0xxx`: exactly these bits, the owner always reading and writing.
+    mode: u16,
+
+    /// Errors from reading the setting.
+    pub const ParseError = error{
+        /// An octal mode that leaves the owner unable to read or write.
+        InvalidSharedMode,
+    };
+
+    /// git's `git_config_perm` for `value`, `null` being the setting
+    /// written with no value.
+    pub fn parse(value: ?[]const u8) ParseError!Shared {
+        const text = value orelse return .group;
+        if (std.mem.eql(u8, text, "umask")) return .umask;
+        if (std.mem.eql(u8, text, "group")) return .group;
+        if (std.mem.eql(u8, text, "all") or std.mem.eql(u8, text, "world") or std.mem.eql(u8, text, "everybody")) return .everybody;
+        const n = parseOctalPrefix(text) orelse return if (truthy(text)) .group else .umask;
+        return switch (n) {
+            0 => .umask,
+            1 => .group,
+            2 => .everybody,
+            else => {
+                if (n & 0o600 != 0o600) return error.InvalidSharedMode;
+                // others never write
+                return .{ .mode = @intCast(n & 0o666) };
+            },
+        };
+    }
+
+    /// C's `strtol(text, &end, 8)` with nothing left after the number.
+    fn parseOctalPrefix(text: []const u8) ?u32 {
+        var i: usize = 0;
+        while (i < text.len and std.ascii.isWhitespace(text[i])) i += 1;
+        var neg = false;
+        if (i < text.len and (text[i] == '+' or text[i] == '-')) {
+            neg = text[i] == '-';
+            i += 1;
+        }
+        const start = i;
+        var n: u32 = 0;
+        while (i < text.len and text[i] >= '0' and text[i] <= '7') : (i += 1) n = n *% 8 +% (text[i] - '0');
+        if (i != text.len) return null;
+        if (i == start) return if (text.len == 0) 0 else null;
+        return if (neg) 0 else n;
+    }
+
+    /// git's `git_config_bool` for a value that is not a number.
+    fn truthy(text: []const u8) bool {
+        for ([_][]const u8{ "true", "yes", "on" }) |word| if (std.ascii.eqlIgnoreCase(text, word)) return true;
+        return false;
+    }
+
+    /// git's `calc_shared_perm`: the mode `mode` becomes.
+    pub fn calc(shared: Shared, mode: u32) u32 {
+        var tweak: u32 = switch (shared) {
+            .umask => return mode,
+            .group => 0o660,
+            .everybody => 0o664,
+            .mode => |m| m,
+        };
+        if (mode & 0o200 == 0) tweak &= ~@as(u32, 0o222);
+        if (mode & 0o100 != 0) tweak |= (tweak & 0o444) >> 2;
+        return switch (shared) {
+            .mode => (mode & ~@as(u32, 0o777)) | tweak,
+            else => mode | tweak,
+        };
+    }
+};
+
+/// git's `adjust_shared_perm` for `sub_path` in `dir`: its permissions as
+/// `shared` asks, a directory's read bits copied to its search bits and,
+/// where the group gains anything, set-group-ID set. Nothing where the
+/// platform has no permission bits. Permissions are a courtesy to the
+/// group, and a file system that will not set them leaves the write as it
+/// was rather than failing it.
+pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) void {
+    if (shared == .umask or !Io.File.Permissions.has_executable_bit) return;
+    const found = switch (platstat.full(dir, sub_path)) {
+        .found => |f| f,
+        .absent, .unavailable => return,
+    };
+    const old = found.mode & 0o7777;
+    var new = shared.calc(old);
+    if (found.kind == .directory) {
+        new |= (new & 0o444) >> 2;
+        if (new & 0o060 != 0) new |= 0o2000;
+    }
+    if (new != old) dir.setFilePermissions(io, sub_path, @enumFromInt(@as(std.posix.mode_t, @intCast(new))), .{}) catch {};
+}
+
+/// A file git writes read-only into `objects` — a loose object, a pack and
+/// its index and reverse index, a commit-graph — given git's mode for it:
+/// 0444 less the umask, then as `shared` asks. Nothing where the platform
+/// has no permission bits.
+pub fn readOnlyObject(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) void {
+    if (!Io.File.Permissions.has_executable_bit) return;
+    const mode: u32 = 0o444 & ~processUmask();
+    dir.setFilePermissions(io, sub_path, @enumFromInt(@as(std.posix.mode_t, @intCast(mode))), .{}) catch return;
+    adjustShared(io, dir, sub_path, shared);
+}
+
+/// Make `sub_path` and the directories above it in `dir`, each one this
+/// makes given `shared`'s permissions: git's
+/// `safe_create_leading_directories` for a path in a repository.
+pub fn makeDirs(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) Io.Dir.CreateDirPathError!void {
+    if (shared == .umask) return dir.createDirPath(io, sub_path);
+    var end: usize = 0;
+    while (end < sub_path.len) {
+        end = std.mem.indexOfAnyPos(u8, sub_path, end + 1, "/\\") orelse sub_path.len;
+        const part = sub_path[0..end];
+        if (dir.createDir(io, part, .default_dir)) |_| {
+            adjustShared(io, dir, part, shared);
+        } else |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => |e| return e,
+        }
+    }
 }
 
 /// `Dir.setFilePermissions`, on Windows as well, where the standard

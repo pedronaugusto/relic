@@ -10,6 +10,7 @@ pub const program = @import("repo/program.zig");
 
 pub const fs = @import("repo/fs.zig");
 pub const safe = @import("repo/safe.zig");
+pub const ident = @import("repo/ident.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -81,6 +82,9 @@ pub const Error = error{
     /// A bare repository discovered where `safe.bareRepository` is
     /// `explicit`: git's "cannot use bare repository".
     ImplicitBareRepository,
+    /// `core.sharedRepository` is a mode that leaves the owner unable to
+    /// read or write.
+    InvalidSharedMode,
 } || object.ParseError || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
@@ -119,7 +123,34 @@ pub const InitOptions = struct {
     /// reftable stack, which is `git init --ref-format=reftable` and which
     /// git 3.0 makes the default.
     ref_format: refs_mod.Format = .files,
+    /// The template directory git copies into a new repository: what
+    /// `--template`, `GIT_TEMPLATE_DIR`, `init.templateDir`
+    /// (`templateDir` reads it) or git's own installed one names, opened by
+    /// the caller. Everything in it but dotfiles is copied, nothing already
+    /// there replaced, a `config` in it the start of the repository's own.
+    template: ?Io.Dir = null,
+    /// `--shared`: written as `core.sharedRepository`, with
+    /// `receive.denyNonFastforwards`, and given to everything made. `null`
+    /// takes the template configuration's.
+    shared: ?fs.Shared = null,
+    /// Whether `core.ignorecase` is recorded as true: git probes for a file
+    /// system that folds case, and the caller decides here, as with
+    /// `file_mode`.
+    ignore_case: bool = false,
+    /// Whether the file system holds symbolic links; git records
+    /// `core.symlinks = false` where it does not.
+    symlinks: bool = true,
+    /// `core.precomposeunicode`, which git records on macOS from its probe
+    /// of how the file system stores decomposed names; `null` records
+    /// nothing.
+    precompose_unicode: ?bool = null,
 };
+
+/// `init.templateDir` in `config`, as git reads it for `git init`, with
+/// `~/` expanded; `null` when it is not set. The path is `gpa`'s.
+pub fn templateDir(gpa: Allocator, config: *const config_mod.Config) (Allocator.Error || error{MalformedValue})!?[]u8 {
+    return config.getPath(gpa, "init.templatedir");
+}
 
 /// An open repository.
 /// What `.lfsconfig` was last found from: see `Repository.lfsconfigText`.
@@ -182,6 +213,10 @@ pub const Repository = struct {
     /// and the branch `HEAD` was on when the files were read.
     _config: *config_owner.State,
     odb: odb_mod.Odb,
+    /// What `core.sharedRepository` asked of permissions when the
+    /// repository was opened: the objects, refs, logs, index and
+    /// configuration it writes are given them.
+    shared: fs.Shared = .umask,
     /// What `lfsconfigText` last found, and what it was found from.
     lfsconfig_cache: ?LfsconfigCache = null,
     lfsconfig_mutex: Io.Mutex = .init,
@@ -456,14 +491,20 @@ pub const Repository = struct {
         }, .{ .git_dir = git_dir_path, .branch = if (branch) |b| b["refs/heads/".len..] else null, .home = options.home }, options.diagnostic);
         repo._config = try config_owner.create(read.config);
         errdefer config_owner.destroy(repo._config);
-        repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, read.format.kind, options.odb);
+        repo.shared = try sharedOf(repo.configuration());
+        var odb_options = options.odb;
+        odb_options.shared = repo.shared;
+        repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, read.format.kind, odb_options);
         errdefer repo.odb.deinit(io);
         repo.odb.shallow = try shallow.read(gpa, io, repo.common_dir, read.format.kind);
         const store = try gpa.create(refs_mod.Store);
         errdefer gpa.destroy(store);
+        var stack_options: reftablestack.Options = if (read.format.ref_storage == .reftable) try reftableOptions(repo.configuration()) else .{};
+        stack_options.shared = repo.shared;
         store.* = try refs_mod.Store.initWithOptions(gpa, read.format.kind, repo.git_dir, repo.common_dir, .{
             .format = read.format.ref_storage,
-            .reftable = if (read.format.ref_storage == .reftable) try reftableOptions(repo.configuration()) else .{},
+            .reftable = stack_options,
+            .shared = repo.shared,
         });
         repo._refs = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
         return repo;
@@ -593,6 +634,18 @@ pub const Repository = struct {
     }
 
     /// The `reftable.*` settings, for the stack's writes and compactions.
+    /// `core.sharedRepository`, as git reads it.
+    fn sharedOf(config: *const config_mod.Config) Error!fs.Shared {
+        const entry = config.find("core.sharedrepository") orelse return .umask;
+        const raw = entry.value orelse return .group;
+        const value = config_mod.unquote(config.gpa, raw) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidSharedMode,
+        };
+        defer config.gpa.free(value);
+        return fs.Shared.parse(value) catch error.InvalidSharedMode;
+    }
+
     fn reftableOptions(config: *const config_mod.Config) Error!reftablestack.Options {
         var options: reftablestack.Options = .{};
         const block_size = try config.getInt("reftable.blocksize", options.write.block_size);
@@ -675,18 +728,35 @@ pub const Repository = struct {
         var git_dir = try dir.openDir(io, git_path, .{ .iterate = true });
         errdefer git_dir.close(io);
 
-        try git_dir.createDirPath(io, "objects/pack");
-        try git_dir.createDirPath(io, "objects/info");
+        // git copies the templates first, and reads the configuration they
+        // leave before it writes its own
+        var shared: fs.Shared = options.shared orelse .umask;
+        if (options.template) |template| {
+            if (try templateUsable(gpa, io, template)) try copyTemplate(gpa, io, template, git_dir, shared);
+            if (options.shared == null) {
+                if (try fs.readFileAlloc(gpa, io, git_dir, "config", 1 << 20)) |text| {
+                    defer gpa.free(text);
+                    var template_config = try config_mod.Config.parseText(gpa, text, .local);
+                    defer template_config.deinit();
+                    shared = template_config.sharedPermissions();
+                }
+            }
+        }
+        fs.adjustShared(io, git_dir, ".", shared);
+
+        try fs.makeDirs(io, git_dir, "objects/pack", shared);
+        try fs.makeDirs(io, git_dir, "objects/info", shared);
         try git_dir.createDirPath(io, "info");
 
         var head_buf: [512]u8 = undefined;
         switch (options.ref_format) {
             .files => {
-                try git_dir.createDirPath(io, "refs/heads");
-                try git_dir.createDirPath(io, "refs/tags");
+                try fs.makeDirs(io, git_dir, "refs/heads", shared);
+                try fs.makeDirs(io, git_dir, "refs/tags", shared);
                 const head_line = std.fmt.bufPrint(&head_buf, "ref: refs/heads/{s}\n", .{options.default_branch}) catch
                     return error.NotARepository;
                 try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = head_line });
+                fs.adjustShared(io, git_dir, "HEAD", shared);
             },
             .reftable => {
                 const target = std.fmt.bufPrint(&head_buf, "refs/heads/{s}", .{options.default_branch}) catch
@@ -695,27 +765,10 @@ pub const Repository = struct {
             },
         }
 
-        var config_text: std.Io.Writer.Allocating = .init(gpa);
-        defer config_text.deinit();
-        const w = &config_text.writer;
         const version: u8 = if (options.object_format == .sha1 and options.ref_format == .files) 0 else 1;
-        w.print("[core]\n", .{}) catch return error.OutOfMemory;
-        w.print("\trepositoryformatversion = {d}\n", .{version}) catch return error.OutOfMemory;
-        w.print("\tfilemode = {s}\n", .{if (options.file_mode) "true" else "false"}) catch return error.OutOfMemory;
-        w.print("\tbare = {s}\n", .{if (options.bare) "true" else "false"}) catch return error.OutOfMemory;
-        if (!options.bare) {
-            w.print("\tlogallrefupdates = true\n", .{}) catch return error.OutOfMemory;
-        }
-        if (options.object_format != .sha1 or options.ref_format == .reftable) {
-            w.print("[extensions]\n", .{}) catch return error.OutOfMemory;
-        }
-        if (options.object_format != .sha1) {
-            w.print("\tobjectformat = {s}\n", .{options.object_format.name()}) catch return error.OutOfMemory;
-        }
-        if (options.ref_format == .reftable) {
-            w.print("\trefstorage = reftable\n", .{}) catch return error.OutOfMemory;
-        }
-        try git_dir.writeFile(io, .{ .sub_path = "config", .data = config_text.written() });
+        if (git_dir.access(io, "config", .{})) |_| {
+            try initTemplateConfig(gpa, io, git_dir, options, version, shared);
+        } else |_| try initConfig(gpa, io, git_dir, options, version, shared);
 
         const work_dir: ?Io.Dir = if (options.bare) null else try dir.openDir(io, ".", .{ .iterate = true });
         const discovered: Discovered = .{
@@ -725,6 +778,139 @@ pub const Repository = struct {
             .common_is_separate = false,
         };
         return finish(gpa, io, discovered, .{ .discover = false, .odb = options.odb });
+    }
+
+    /// The configuration of a new repository with none from a template:
+    /// the lines git's `init` sets, in its order.
+    fn initConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: InitOptions, version: u8, shared: fs.Shared) Error!void {
+        var config_text: std.Io.Writer.Allocating = .init(gpa);
+        defer config_text.deinit();
+        const w = &config_text.writer;
+        w.print("[core]\n", .{}) catch return error.OutOfMemory;
+        w.print("\trepositoryformatversion = {d}\n", .{version}) catch return error.OutOfMemory;
+        w.print("\tfilemode = {s}\n", .{if (options.file_mode) "true" else "false"}) catch return error.OutOfMemory;
+        w.print("\tbare = {s}\n", .{if (options.bare) "true" else "false"}) catch return error.OutOfMemory;
+        if (!options.bare) {
+            w.print("\tlogallrefupdates = true\n", .{}) catch return error.OutOfMemory;
+        }
+        if (!options.symlinks) w.print("\tsymlinks = false\n", .{}) catch return error.OutOfMemory;
+        if (options.ignore_case) w.print("\tignorecase = true\n", .{}) catch return error.OutOfMemory;
+        if (options.precompose_unicode) |p| w.print("\tprecomposeunicode = {s}\n", .{if (p) "true" else "false"}) catch return error.OutOfMemory;
+        var shared_buf: [8]u8 = undefined;
+        if (sharedSetting(shared, &shared_buf)) |value| w.print("\tsharedrepository = {s}\n", .{value}) catch return error.OutOfMemory;
+        if (options.object_format != .sha1 or options.ref_format == .reftable) {
+            w.print("[extensions]\n", .{}) catch return error.OutOfMemory;
+        }
+        if (options.object_format != .sha1) {
+            w.print("\tobjectformat = {s}\n", .{options.object_format.name()}) catch return error.OutOfMemory;
+        }
+        if (options.ref_format == .reftable) {
+            w.print("\trefstorage = reftable\n", .{}) catch return error.OutOfMemory;
+        }
+        if (shared != .umask) w.print("[receive]\n\tdenyNonFastforwards = true\n", .{}) catch return error.OutOfMemory;
+        try git_dir.writeFile(io, .{ .sub_path = "config", .data = config_text.written() });
+        fs.adjustShared(io, git_dir, "config", shared);
+    }
+
+    /// How `git init` writes a shared mode: `1` and `2` for the old names,
+    /// `0` and the octal digits for a mode.
+    fn sharedSetting(shared: fs.Shared, buf: *[8]u8) ?[]const u8 {
+        return switch (shared) {
+            .umask => null,
+            .group => "1",
+            .everybody => "2",
+            .mode => |m| std.fmt.bufPrint(buf, "0{o}", .{m}) catch unreachable,
+        };
+    }
+
+    /// A template's configuration, carried on: git's `init` sets its own
+    /// values in it one by one, as `git config` would, a template's
+    /// `core.logallrefupdates` kept.
+    fn initTemplateConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: InitOptions, version: u8, shared: fs.Shared) Error!void {
+        var config = try config_mod.Config.openFile(gpa, io, .{ .dir = git_dir, .sub_path = "config" }, .local, .{});
+        defer config.deinit();
+        const set = struct {
+            fn one(c: *config_mod.Config, name: []const u8, value: []const u8) Error!void {
+                c.set(name, value) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.MalformedValue,
+                };
+            }
+        }.one;
+        if (options.object_format != .sha1) try set(&config, "extensions.objectformat", options.object_format.name());
+        if (options.ref_format == .reftable) try set(&config, "extensions.refstorage", "reftable");
+        var version_buf: [4]u8 = undefined;
+        try set(&config, "core.repositoryformatversion", std.fmt.bufPrint(&version_buf, "{d}", .{version}) catch unreachable);
+        try set(&config, "core.filemode", if (options.file_mode) "true" else "false");
+        try set(&config, "core.bare", if (options.bare) "true" else "false");
+        if (!options.bare and !config.has("core.logallrefupdates")) try set(&config, "core.logallrefupdates", "true");
+        if (!options.symlinks) try set(&config, "core.symlinks", "false");
+        if (options.ignore_case) try set(&config, "core.ignorecase", "true");
+        if (options.precompose_unicode) |p| try set(&config, "core.precomposeunicode", if (p) "true" else "false");
+        var shared_buf: [8]u8 = undefined;
+        if (sharedSetting(shared, &shared_buf)) |value| {
+            try set(&config, "core.sharedrepository", value);
+            try set(&config, "receive.denyNonFastforwards", "true");
+        }
+        config.write(io, git_dir, "config") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.MalformedValue,
+        };
+    }
+
+    /// Whether a template's own `config`, when it has one, is of a format
+    /// git copies from: a `core.repositoryformatversion` of 0 or 1, or
+    /// none.
+    fn templateUsable(gpa: Allocator, io: Io, template: Io.Dir) Error!bool {
+        const text = (try fs.readFileAlloc(gpa, io, template, "config", 1 << 20)) orelse return true;
+        defer gpa.free(text);
+        var config = config_mod.Config.parseText(gpa, text, .local) catch return false;
+        defer config.deinit();
+        if (!config.has("core.repositoryformatversion")) return true;
+        const version = config.getInt("core.repositoryformatversion", 0) catch return false;
+        return version == 0 or version == 1;
+    }
+
+    /// git's `copy_templates_1`: every entry of `from` but a dotfile, into
+    /// `to`, a directory merged, anything already there kept, a symbolic
+    /// link copied as one and a file with its executable bit.
+    fn copyTemplate(gpa: Allocator, io: Io, from: Io.Dir, to: Io.Dir, shared: fs.Shared) Error!void {
+        var it = from.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.name.len == 0 or entry.name[0] == '.') continue;
+            const exists = if (to.statFile(io, entry.name, .{ .follow_symlinks = false })) |_| true else |_| false;
+            switch (entry.kind) {
+                .directory => {
+                    if (!exists) {
+                        try to.createDir(io, entry.name, .default_dir);
+                        fs.adjustShared(io, to, entry.name, shared);
+                    }
+                    var sub_from = try from.openDir(io, entry.name, .{ .iterate = true });
+                    defer sub_from.close(io);
+                    var sub_to = try to.openDir(io, entry.name, .{ .iterate = true });
+                    defer sub_to.close(io);
+                    try copyTemplate(gpa, io, sub_from, sub_to, shared);
+                },
+                .sym_link => {
+                    if (exists) continue;
+                    var buf: [Io.Dir.max_path_bytes]u8 = undefined;
+                    const n = from.readLink(io, entry.name, &buf) catch continue;
+                    to.symLink(io, buf[0..n], entry.name, .{}) catch continue;
+                },
+                .file => {
+                    if (exists) continue;
+                    const stat = try from.statFile(io, entry.name, .{});
+                    const executable = fs.isExecutable(stat.permissions);
+                    const bytes = try from.readFileAlloc(io, entry.name, gpa, .limited(1 << 30));
+                    defer gpa.free(bytes);
+                    const file = try to.createFile(io, entry.name, .{ .exclusive = true, .permissions = fs.permissionsFor(executable) });
+                    defer file.close(io);
+                    try file.writeStreamingAll(io, bytes);
+                    fs.adjustShared(io, to, entry.name, shared);
+                },
+                else => {},
+            }
+        }
     }
 
     /// Close everything the repository holds.
@@ -1074,13 +1260,13 @@ pub const Repository = struct {
     /// racily clean entry is smudged only where its file changed, read
     /// through the repository's own rules and attributes.
     pub fn writeIndex(repo: *Repository, io: Io, index: *index_mod.Index) (index_mod.WriteError || Error)!void {
-        const wt = repo.work_dir orelse return index.write(io, repo.git_dir, "index", .{});
+        const wt = repo.work_dir orelse return index.write(io, repo.git_dir, "index", .{ .lock = .{ .shared = repo.shared } });
         var attrs = try repo.loadAttrs(io);
         defer attrs.deinit();
         var rules = try repo.worktreeRules();
         rules.attrs = &attrs;
         var check: worktree.RacyCheck = .{ .gpa = repo.gpa, .io = io, .wt = wt, .rules = rules };
-        try index.write(io, repo.git_dir, "index", .{ .racy = check.racy() });
+        try index.write(io, repo.git_dir, "index", .{ .racy = check.racy(), .lock = .{ .shared = repo.shared } });
     }
 
     pub fn openIndex(repo: *Repository, io: Io) index_mod.ReadError!index_mod.Index {

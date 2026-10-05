@@ -1717,6 +1717,9 @@ pub const WriteOptions = struct {
     /// Write `pack-<name>.rev` too, as git's pack-objects does while
     /// `pack.writeReverseIndex` is on: `revindex.wanted`.
     reverse_index: bool = false,
+    /// What `core.sharedRepository` asks of the files' permissions, which
+    /// are otherwise git's read-only ones.
+    shared: fs.Shared = .umask,
 };
 
 /// What a finished pack turned out to be.
@@ -2215,6 +2218,10 @@ pub const Writer = struct {
         if (rev_temp) |t| try revindex.write(w.gpa, io, w.dir, t, w.kind, w.entries.items, checksum, w.options.sync);
         errdefer if (rev_temp) |t| w.dir.deleteFile(io, t) catch {};
 
+        // read-only, as git leaves a pack and its indexes
+        fs.readOnlyObject(io, w.dir, w.temp[0..w.temp_len], w.options.shared);
+        fs.readOnlyObject(io, w.dir, idx_temp, w.options.shared);
+        if (rev_temp) |t| fs.readOnlyObject(io, w.dir, t, w.options.shared);
         fs.renameWithRetry(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
             w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
             w.dir.deleteFile(io, idx_temp) catch {};

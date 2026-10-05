@@ -18,6 +18,9 @@ pub const Data = struct {
     cache: ?*stack.Cache,
     /// `packed-refs` as last read, for the files format.
     packed_refs: ?*packed_cache.Cache,
+    /// What `core.sharedRepository` asks of the permissions of what is
+    /// written.
+    shared: @import("../repo/fs.zig").Shared = .umask,
 };
 
 pub fn get(state: *State) *Data {

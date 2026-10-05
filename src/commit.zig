@@ -70,6 +70,9 @@ pub const Error = error{
     InvalidCleanupMode,
     /// A `--trailer` that is empty, or has no key before its separator.
     InvalidTrailer,
+    /// The message is the template's, unedited but for blank lines and
+    /// sign-offs: git's "you did not edit the message".
+    TemplateUntouched,
 } || trailer.Error || hooks.Error || commithooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
     index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError ||
     error{NameTooLong};
@@ -116,6 +119,11 @@ pub const Options = struct {
     trailers: []const []const u8 = &.{},
     /// What runs a `trailer.<name>.command` or `.cmd` those rules name.
     trailer_commands: ?trailer.Commands = null,
+    /// The template the message was edited from, when it was: `commit.template`
+    /// (`template` reads it) or git's `-t`. A message that is the template
+    /// unedited is `error.TemplateUntouched`. git drops the template when a
+    /// message is given with `-m`, which is what leaving this `null` is.
+    template: ?[]const u8 = null,
 };
 
 /// Who, when, and what to say. The times are the caller's, because nothing
@@ -223,6 +231,11 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     const edited = try repo.git_dir.readFileAlloc(io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
     const cleaned = try clean(arena, edited, cleanup, comment);
     if (!options.allow_empty_message and isEmpty(cleaned, cleanup, comment)) return error.EmptyMessage;
+    if (!options.allow_empty_message) {
+        if (options.template) |text| {
+            if (try templateUntouched(arena, cleaned, text, cleanup, comment)) return error.TemplateUntouched;
+        }
+    }
 
     const new = try repo.writeCommit(io, .{
         .tree = tree,
@@ -264,6 +277,55 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
         }
     }
     return outcome;
+}
+
+/// What `commit.template` holds: the text git starts a message from when
+/// none is given, `null` when it is not set, cannot be read or is empty.
+/// A path that is not absolute is the working tree's, where git runs
+/// `commit`, and `~/` is the home the repository was opened with. The text
+/// is `gpa`'s.
+pub fn template(gpa: Allocator, io: Io, repo: *Repository) Allocator.Error!?[]u8 {
+    const path = (repo.configuration().getPath(gpa, "commit.template") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }) orelse return null;
+    defer gpa.free(path);
+    const dir = if (std.fs.path.isAbsolute(path)) Io.Dir.cwd() else repo.work_dir orelse Io.Dir.cwd();
+    const text = dir.readFileAlloc(io, path, gpa, .limited(1 << 30)) catch return null;
+    if (text.len == 0) {
+        gpa.free(text);
+        return null;
+    }
+    return text;
+}
+
+/// git's `template_untouched`: whether `text`, a cleaned message, is the template
+/// cleaned the same way and nothing more than blank lines and
+/// `Signed-off-by:` lines.
+pub fn templateUntouched(arena: Allocator, text: []const u8, template_text: []const u8, cleanup: Cleanup, comment: []const u8) Allocator.Error!bool {
+    if (cleanup == .verbatim and text.len != 0) return false;
+    const cleaned = try stripspace(arena, template_text, if (cleanup == .strip) comment else null);
+    const start = if (std.mem.startsWith(u8, text, cleaned)) cleaned.len else 0;
+    return restIsEmpty(text, start);
+}
+
+/// git's `rest_is_empty`: nothing after `start` but whitespace and
+/// sign-offs.
+fn restIsEmpty(text: []const u8, start: usize) bool {
+    const sign_off = "Signed-off-by: ";
+    var i = start;
+    while (i < text.len) {
+        const eol = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+        if (eol - i >= sign_off.len and std.mem.startsWith(u8, text[i..], sign_off)) {
+            i = eol + 1;
+            continue;
+        }
+        while (i < eol) : (i += 1) {
+            if (!isSpace(text[i])) return false;
+        }
+        i += 1;
+    }
+    return true;
 }
 
 fn configuredCleanup(repo: *Repository) error{InvalidCleanupMode}!Cleanup {
@@ -564,4 +626,47 @@ test "an unchanged tree, an empty message and a merge in progress are refused by
 
     try fixture.writeFile(io, ".git/MERGE_HEAD", "0000000000000000000000000000000000000000\n");
     try testing.expectError(error.OperationInProgress, commit(&repo, io, .{ .author = who, .committer = who, .message = "m" }, .{ .allow_empty = true }));
+}
+
+test "a message that is commit.template unedited is refused, as git commit refuses it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twin = try Twin.init(gpa, io);
+    defer twin.deinit();
+    const template_text = "Subject line\n\n# say what changed\nBody of the template.\n";
+    for ([_]*testgit.Repo{ &twin.git, &twin.relic }) |r| {
+        try r.writeFile(io, "template.txt", template_text);
+        try r.exec(io, &.{ "config", "commit.template", "template.txt" });
+        try r.writeFile(io, "a.txt", "a\n");
+        try r.exec(io, &.{ "add", "a.txt" });
+    }
+    var repo = try Repository.open(gpa, io, twin.relic.dir, .{});
+    defer repo.deinit(io);
+    const text = (try template(gpa, io, &repo)).?;
+    defer gpa.free(text);
+    try testing.expectEqualStrings(template_text, text);
+    // git's editor leaving the template as it was, with and without a
+    // sign-off after it; under `strip`, since with any other cleanup the
+    // status git adds below the template stays in the message
+    twin.git.report_failures = false;
+    for ([_][]const u8{"strip"}) |cleanup| {
+        for ([_]bool{ false, true }) |signoff| {
+            const mode = try std.fmt.allocPrint(gpa, "commit.cleanup={s}", .{cleanup});
+            defer gpa.free(mode);
+            var theirs = try twin.git.capture(io, if (signoff) &.{ "-c", "core.editor=true", "-c", mode, "commit", "-q", "-s" } else &.{ "-c", "core.editor=true", "-c", mode, "commit", "-q" });
+            defer theirs.deinit(gpa);
+            errdefer std.debug.print("{s} {}: git {d}: {s}\n", .{ cleanup, signoff, theirs.code, theirs.stderr });
+            try testing.expect(theirs.code != 0);
+            try testing.expect(std.mem.indexOf(u8, theirs.stderr, "you did not edit the message") != null);
+            const edited_message = if (signoff) template_text ++ "\nSigned-off-by: Fixture <fixture@example.com>\n" else template_text;
+            try twin.relic.exec(io, &.{ "config", "commit.cleanup", cleanup });
+            _ = try repo.refreshConfig(io, null);
+            try testing.expectError(error.TemplateUntouched, commit(&repo, io, .{ .author = Twin.who, .committer = Twin.who, .message = edited_message }, .{ .template = text }));
+        }
+    }
+    // an edited one is committed, and a message given outright never asks
+    _ = try commit(&repo, io, .{ .author = Twin.who, .committer = Twin.who, .message = "Subject line\n\nBody, edited.\n" }, .{ .template = text });
+    try twin.relic.writeFile(io, "b.txt", "b\n");
+    try twin.relic.exec(io, &.{ "add", "b.txt" });
+    _ = try commit(&repo, io, .{ .author = Twin.who, .committer = Twin.who, .message = template_text }, .{});
 }

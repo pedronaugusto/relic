@@ -114,12 +114,22 @@ pub const Store = struct {
     pub const Options = struct {
         format: Format = .files,
         reftable: stack_engine.Options = .{},
+        /// What `core.sharedRepository` asks of the permissions of the
+        /// refs, logs and directories written.
+        shared: fs.Shared = .umask,
     };
 
     /// Choose the backend and its cache once, before the store is published.
     /// Changing the backend or object format requires opening another store.
     pub fn initWithOptions(gpa: Allocator, kind: Kind, git_dir: Io.Dir, common_dir: Io.Dir, options: Options) Allocator.Error!Store {
-        return .{ ._state = try state_mod.create(gpa, kind, options.format, options.reftable, git_dir, common_dir) };
+        const state = try state_mod.create(gpa, kind, options.format, options.reftable, git_dir, common_dir);
+        state_mod.get(state).shared = options.shared;
+        return .{ ._state = state };
+    }
+
+    /// What `core.sharedRepository` asks of what this store writes.
+    pub fn sharedPermissions(store: *const Store) fs.Shared {
+        return state_mod.get(store._state).shared;
     }
 
     /// Borrowed directories; their handles stay owned by the caller of init.
@@ -462,7 +472,7 @@ pub const Store = struct {
     /// already peeled.
     pub fn writePacked(store: *const Store, io: Io, entries: []const PackedEntry) TransactionError!void {
         var buffer: [64 * 1024]u8 = undefined;
-        var lock = try fs.LockFile.open(state_mod.get(store._state).gpa, io, store.commonDir(), "packed-refs", &buffer, .{});
+        var lock = try fs.LockFile.open(state_mod.get(store._state).gpa, io, store.commonDir(), "packed-refs", &buffer, .{ .shared = store.sharedPermissions() });
         defer lock.deinit(io);
         const w = lock.writer();
         w.writeAll(packed_header) catch return error.WriteFailed;
@@ -508,7 +518,7 @@ pub const Store = struct {
         // The message a transaction would write: collapsed as git collapses it.
         const text = try reflog.normalizeMessage(gpa, message);
         defer gpa.free(text);
-        return reflog.append(gpa, io, store.dirFor(name), name, old, new, who, text);
+        return reflog.appendShared(gpa, io, store.dirFor(name), name, old, new, who, text, store.sharedPermissions());
     }
 
     /// A ref's log, oldest first, from `logs/<ref>` or from the reftable
@@ -688,14 +698,14 @@ pub const Transaction = struct {
         for (tx.edits.items) |*edit| {
             const dir = tx.store.dirFor(edit.name);
             if (std.fs.path.dirnamePosix(edit.name)) |parent| {
-                dir.createDirPath(io, parent) catch |err| switch (err) {
+                fs.makeDirs(io, dir, parent, tx.store.sharedPermissions()) catch |err| switch (err) {
                     error.PathAlreadyExists => {},
                     else => |e| return e,
                 };
             }
             const buffer = try tx.gpa.alloc(u8, 4096);
             edit.lock_buffer = buffer;
-            edit.lock = fs.LockFile.open(tx.gpa, io, dir, edit.name, buffer, .{}) catch |err| switch (err) {
+            edit.lock = fs.LockFile.open(tx.gpa, io, dir, edit.name, buffer, .{ .shared = tx.store.sharedPermissions() }) catch |err| switch (err) {
                 error.LockHeld => return error.LockHeld,
                 else => |e| return e,
             };
@@ -978,7 +988,7 @@ pub const Transaction = struct {
                 // An edit's own words, or the transaction's.
                 const own = if (source.message) |m| try reflog.normalizeMessage(tx.gpa, m) else null;
                 defer if (own) |t| tx.gpa.free(t);
-                try reflog.append(
+                try reflog.appendShared(
                     tx.gpa,
                     io,
                     tx.store.dirFor(edit.name),
@@ -987,6 +997,7 @@ pub const Transaction = struct {
                     new,
                     message.who,
                     own orelse shared,
+                    tx.store.sharedPermissions(),
                 );
             }
         }

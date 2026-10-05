@@ -1201,10 +1201,22 @@ pub const Config = struct {
     ///
     /// The bytes are the original file with only the changed lines different.
     /// With multiple writable sources, open the intended file on its own
-    /// before editing and writing it.
+    /// before editing and writing it. The file is given the permissions the
+    /// configuration's own `core.sharedRepository` asks for, as git gives a
+    /// repository's.
     pub fn write(config: *Config, io: Io, dir: Io.Dir, sub_path: []const u8) SetError!void {
         const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
-        return @import("config/write.zig").writeFile(&config.files.items[file_index], io, dir, sub_path);
+        return @import("config/write.zig").writeFile(&config.files.items[file_index], io, dir, sub_path, config.sharedPermissions());
+    }
+
+    /// The permissions `core.sharedRepository` asks for here; a value git
+    /// would refuse asks for none.
+    pub fn sharedPermissions(config: *const Config) fs.Shared {
+        const entry = config.find("core.sharedrepository") orelse return .umask;
+        const raw = entry.value orelse return .group;
+        const value = decodeValue(config.gpa, raw) catch return .umask;
+        defer config.gpa.free(value);
+        return fs.Shared.parse(value) catch .umask;
     }
 
     /// The bytes the writable file would be written as. The result is the

@@ -46,12 +46,18 @@ const GraphNode = struct {
     }
 };
 
-fn publish(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, bytes: []const u8, sync: fs.Sync) (Allocator.Error || fs.LockError || fs.CommitError)!void {
+/// How a published file's permissions are left: git's commit-graphs and
+/// bitmaps read-only, its multi-pack index as the umask leaves it, each then
+/// as `core.sharedRepository` asks.
+const Mode = enum { read_only, umask };
+
+fn publish(gpa: Allocator, io: Io, db: *const odb.Odb, dir: Io.Dir, path: []const u8, bytes: []const u8, sync: fs.Sync, mode: Mode) (Allocator.Error || fs.LockError || fs.CommitError)!void {
     var buffer: [8192]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, dir, path, &buffer, .{ .sync = sync });
+    var lock = try fs.LockFile.open(gpa, io, dir, path, &buffer, .{ .sync = sync, .shared = db.sharedPermissions() });
     defer lock.deinit(io);
     try lock.writer().writeAll(bytes);
     try lock.commit(io);
+    if (mode == .read_only) fs.readOnlyObject(io, dir, path, db.sharedPermissions());
 }
 
 /// Write the commits reachable from `tips`, including their parents, as git does.
@@ -169,16 +175,16 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     const bytes = try graph_mod.encode(gpa, db.objectFormat(), inputs.items, .{ .generations = options.generations and (if (retained) |base| base.hasGenerations() else true), .changed_paths = options.changed_paths, .bases = bases.items });
     defer gpa.free(bytes);
     const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable;
-    try dir.createDirPath(io, "info");
+    try fs.makeDirs(io, dir, "info", db.sharedPermissions());
     if (options.split == .none) {
-        try publish(gpa, io, dir, "info/commit-graph", bytes, options.sync);
+        try publish(gpa, io, db, dir, "info/commit-graph", bytes, options.sync, .read_only);
         try removeIfPresent(io, dir, "info/commit-graphs/commit-graph-chain");
     } else {
-        try dir.createDirPath(io, "info/commit-graphs");
+        try fs.makeDirs(io, dir, "info/commit-graphs", db.sharedPermissions());
         // Take the chain lock before writing layers. Its rename is the only
         // point at which a reader begins to see the new chain.
         var buffer: [8192]u8 = undefined;
-        var chain_lock = try fs.LockFile.open(gpa, io, dir, "info/commit-graphs/commit-graph-chain", &buffer, .{ .sync = options.sync });
+        var chain_lock = try fs.LockFile.open(gpa, io, dir, "info/commit-graphs/commit-graph-chain", &buffer, .{ .sync = options.sync, .shared = db.sharedPermissions() });
         defer chain_lock.deinit(io);
         var hex_buffer: [hash.max_hex_len]u8 = undefined;
         if (retained) |base| {
@@ -186,16 +192,17 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
             var bottom = base;
             while (bottom.base) |lower| bottom = lower;
             const name = try std.fmt.allocPrint(arena, "info/commit-graphs/graph-{s}.graph", .{bottom.checksum().hex(&hex_buffer)});
-            try publish(gpa, io, dir, name, bottom.bytes, options.sync);
+            try publish(gpa, io, db, dir, name, bottom.bytes, options.sync, .read_only);
         }
         const name = try std.fmt.allocPrint(arena, "info/commit-graphs/graph-{s}.graph", .{checksum.hex(&hex_buffer)});
-        try publish(gpa, io, dir, name, bytes, options.sync);
+        try publish(gpa, io, db, dir, name, bytes, options.sync, .read_only);
         try bases.append(arena, checksum);
         for (bases.items) |base| {
             try chain_lock.writer().writeAll(base.hex(&hex_buffer));
             try chain_lock.writer().writeByte('\n');
         }
         try chain_lock.commit(io);
+        fs.readOnlyObject(io, dir, "info/commit-graphs/commit-graph-chain", db.sharedPermissions());
         try removeIfPresent(io, dir, "info/commit-graph");
     }
     // Git marks merged-out layers at this write's time, then expires
@@ -353,7 +360,7 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Mid
     const bytes = try midx_mod.encode(gpa, db.objectFormat(), inputs.packs, .{ .preferred_pack = options.preferred_pack, .reverse_index = options.reverse_index });
     defer gpa.free(bytes);
     const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable;
-    try publish(gpa, io, dir, "multi-pack-index", bytes, options.sync);
+    try publish(gpa, io, db, dir, "multi-pack-index", bytes, options.sync, .umask);
     if (!options.keep_bitmaps) try clearMidxBitmaps(gpa, io, dir, null);
     try db.refresh(io);
     return checksum;
@@ -651,7 +658,7 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const 
     defer gpa.free(bytes);
     const target = try std.fmt.allocPrint(gpa, "{s}.bitmap", .{base});
     defer gpa.free(target);
-    try publish(gpa, io, dir, target, bytes, options.sync);
+    try publish(gpa, io, db, dir, target, bytes, options.sync, .read_only);
     try db.refresh(io);
 }
 
@@ -683,7 +690,7 @@ pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, 
     var hex: [hash.max_hex_len]u8 = undefined;
     const path = try std.fmt.allocPrint(gpa, "multi-pack-index-{s}.bitmap", .{checksum.hex(&hex)});
     defer gpa.free(path);
-    try publish(gpa, io, dir, path, bytes, options.sync);
+    try publish(gpa, io, db, dir, path, bytes, options.sync, .read_only);
     try clearMidxBitmaps(gpa, io, dir, path);
     try db.refresh(io);
     return checksum;

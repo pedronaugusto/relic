@@ -412,6 +412,11 @@ pub fn receive(
     if (rev_temp) |t| try revindex.write(gpa, io, pack_dir, t, kind, index_entries, name, options.sync);
     errdefer if (rev_temp) |t| pack_dir.deleteFile(io, t) catch {};
 
+    // read-only, as git leaves a pack and its indexes
+    const shared = db.sharedPermissions();
+    fs.readOnlyObject(io, pack_dir, temp, shared);
+    fs.readOnlyObject(io, pack_dir, idx_temp, shared);
+    if (rev_temp) |t| fs.readOnlyObject(io, pack_dir, t, shared);
     // Pack first, then the reverse index, index last, as git renames them:
     // a reader finds a pack by its index.
     try fs.renameWithRetry(io, pack_dir, temp, pack_name);
