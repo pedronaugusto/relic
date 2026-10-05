@@ -1,13 +1,6 @@
 [
   {
     "rule": "debug-print",
-    "path": "src/commit/notes.zig",
-    "source": "std.debug.print(\"git {any} differs\\n\", .{args});",
-    "detail": "std.debug.print outside tests and src/testing/",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "debug-print",
     "path": "src/revwalk.zig",
     "source": "for (args) |arg| std.debug.print(\"{s} \", .{arg});",
     "detail": "std.debug.print outside tests and src/testing/",

@@ -472,7 +472,7 @@ pub const Notes = struct {
         gpa: Allocator,
         fn each(c: Collect, t2: *Notes, key: []const u8, val: Oid, path: []const u8) Error!void {
             _ = path;
-            try c.out.append(c.gpa, .{ .object = Oid.fromRaw(t2.repo.objectFormat(), key[0..t2.rawLen()]) catch unreachable, .note = val });
+            try c.out.append(c.gpa, .{ .object = Oid.fromRaw(t2.repo.objectFormat(), key[0..t2.rawLen()]) catch unreachable, .note = val }); // unreachable: the key is cut to the format's raw length
         }
     };
 
@@ -503,6 +503,7 @@ pub const Notes = struct {
     /// `construct_path_with_fanout`.
     fn pathWithFanout(t: *const Notes, key: []const u8, fanout: usize, buf: []u8) []u8 {
         var hex_buf: [hash.max_hex_len]u8 = undefined;
+        // unreachable: a raw name of the format's length is at most max_hex_len hex digits
         const hex = std.fmt.bufPrint(&hex_buf, "{x}", .{key[0..t.rawLen()]}) catch unreachable;
         var i: usize = 0;
         var j: usize = 0;
@@ -894,19 +895,18 @@ pub fn add(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: WriteOp
     var t = try Notes.open(gpa, io, repo, ref, .concatenate);
     defer t.deinit();
     if (try t.get(io, obj) != null and !options.force) return error.NoteExists;
-    return writeNote(io, &t, obj, text, options, "add");
+    return writeNote("add", io, &t, obj, text, options);
 }
 
-fn writeNote(io: Io, t: *Notes, obj: Oid, text: []const u8, options: WriteOptions, verb: []const u8) Error!Outcome {
-    var buf: [64]u8 = undefined;
+fn writeNote(comptime verb: []const u8, io: Io, t: *Notes, obj: Oid, text: []const u8, options: WriteOptions) Error!Outcome {
     if (text.len != 0 or options.allow_empty) {
         const blob = try t.repo.odb.write(io, .blob, text);
         try t.add(io, obj, blob, .overwrite);
-        _ = try t.commit(io, std.fmt.bufPrint(&buf, "Notes added by 'git notes {s}'", .{verb}) catch unreachable, options.who);
+        _ = try t.commit(io, "Notes added by 'git notes " ++ verb ++ "'", options.who);
         return .added;
     }
     _ = try t.remove(io, obj);
-    _ = try t.commit(io, std.fmt.bufPrint(&buf, "Notes removed by 'git notes {s}'", .{verb}) catch unreachable, options.who);
+    _ = try t.commit(io, "Notes removed by 'git notes " ++ verb ++ "'", options.who);
     return .removed;
 }
 
@@ -928,7 +928,7 @@ pub fn append(gpa: Allocator, io: Io, repo: *Repository, obj: Oid, options: Writ
         if (text.items.len != 0 and found.bytes.len != 0) try appendSeparator(gpa, &prev, options.separator);
         try text.insertSlice(gpa, 0, prev.items);
     }
-    return writeNote(io, &t, obj, text.items, options, "append");
+    return writeNote("append", io, &t, obj, text.items, options);
 }
 
 /// How `copy` and `remove` work.
@@ -1491,7 +1491,7 @@ const Twin = struct {
         const b = try gitOrFailed(io, &t.ours, args);
         defer t.ours.gpa.free(b);
         std.testing.expectEqualStrings(a, b) catch |err| {
-            std.debug.print("git {any} differs\n", .{args});
+            std.log.err("git {any} differs", .{args});
             return err;
         };
     }

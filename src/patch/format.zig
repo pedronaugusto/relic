@@ -574,6 +574,7 @@ pub fn logText(a: Allocator, c: *const object.Commit, text: []const u8) error{ U
         for (text) |b| {
             if (b < 0x80) try out.append(a, b) else {
                 var buf: [4]u8 = undefined;
+                // unreachable: a byte is a code point below U+0100, two bytes in UTF-8
                 const n = std.unicode.utf8Encode(b, &buf) catch unreachable;
                 try out.appendSlice(a, buf[0..n]);
             }

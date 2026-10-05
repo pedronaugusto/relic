@@ -2029,6 +2029,7 @@ const Merge = struct {
     fn fakeOid(m: *Merge, n: usize) Oid {
         var bytes: [hash.max_raw_len]u8 = @splat(0xff);
         std.mem.writeInt(u64, bytes[0..8], n, .big);
+        // unreachable: the bytes are cut to the format's raw length
         return Oid.fromRaw(m.db.objectFormat(), bytes[0..m.db.objectFormat().rawLen()]) catch unreachable;
     }
 

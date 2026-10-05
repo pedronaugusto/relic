@@ -407,6 +407,7 @@ fn updateAbortSafety(gpa: Allocator, io: Io, repo: *Repository) Error!void {
     defer head.deinit(gpa);
     var buf: [hash.max_hex_len + 1]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
+    // unreachable: a hex name is at most max_hex_len digits, the buffer with its newline
     const text = std.fmt.bufPrint(&buf, "{s}\n", .{if (head.oid) |oid| oid.hex(&hex) else ""}) catch unreachable;
     try head_mod.writeState(io, repo.git_dir, safety_path, text);
 }

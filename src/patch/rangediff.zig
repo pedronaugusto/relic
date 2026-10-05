@@ -786,6 +786,7 @@ const Writer = struct {
             return;
         };
         var number: [20]u8 = undefined;
+        // unreachable: a usize is at most 20 digits
         const text = std.fmt.bufPrint(&number, "{d}", .{index + 1}) catch unreachable;
         if (text.len < s.width) try s.w.splatByteAll(' ', s.width - text.len);
         var buf: [hash.max_hex_len]u8 = undefined;
