@@ -49,6 +49,7 @@ const auth = @import("auth.zig");
 const warning = @import("../repo/warning.zig");
 const fsck = @import("../object/fsck.zig");
 const promisors = @import("promisors.zig");
+const accelerators = @import("../odb/accelerators.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -697,7 +698,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     if (options.write_fetch_head) try writeFetchHead(gpa, io, repo, fetch_head.items, options.append);
 
     if (try repo.configuration().getBool("fetch.writecommitgraph", false)) {
-        _ = @import("../odb/accelerators.zig").writeConfiguredCommitGraph(gpa, io, repo, .fetch) catch |err| blk: {
+        _ = accelerators.writeConfiguredCommitGraph(gpa, io, repo, .fetch) catch |err| blk: {
             try warning.note(options.warnings, .{ .commit_graph_write_failed = err });
             break :blk null;
         };
@@ -746,7 +747,7 @@ fn expectation(old: ?Oid) refs_mod.Expected {
 
 /// Whether `remote.<name>.followRemoteHEAD` asks for `refs/remotes/<name>/HEAD`
 /// to be created when it is missing, which is its default.
-fn followRemoteHead(config: *const @import("../config.zig").Config, name: []const u8) bool {
+fn followRemoteHead(config: *const config_mod.Config, name: []const u8) bool {
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "remote.{s}.followremotehead", .{name}) catch return false;
     const value = config.get(key) orelse return true;

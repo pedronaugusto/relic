@@ -89,6 +89,8 @@ const lfsssh = @import("ssh.zig");
 const httpclient = @import("../transport/httpclient.zig");
 const clientcert = @import("../transport/clientcert.zig");
 const tls = @import("../transport/tls.zig");
+const config_state = @import("../config/state.zig");
+const refs_mod = @import("../refs.zig");
 
 const Config = config_mod.Config;
 
@@ -1193,10 +1195,10 @@ pub const Client = struct {
             if (repo.configuration().get(l.key)) |existing| {
                 if (std.mem.eql(u8, existing, l.value)) continue;
             }
-            try @import("../config/state.zig").rememberLfs(repo._config, l.key, l.value);
+            try config_state.rememberLfs(repo._config, l.key, l.value);
             changed = true;
         }
-        if (changed) try @import("../config/state.zig").writeLocal(repo._config, io);
+        if (changed) try config_state.writeLocal(repo._config, io);
     }
 
     /// Describe a request that failed for want of a credential, or that the
@@ -1901,7 +1903,7 @@ pub const Client = struct {
             // Git LFS names the key with slashes on Windows, unlike Git's
             // own certificate helper request.
             const helper_path = try arena.dupe(u8, key_path);
-            if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, helper_path, '\\', '/');
+            if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, helper_path, '\\', '/');
             session = .forCertificate(c.gpa, helper_path);
             const s = &session.?;
             if (try s.fill(c.io, c.credentialOptions())) passphrase = s.password;
@@ -2309,7 +2311,7 @@ pub const Server = struct {
 /// is for: the branch `HEAD` is on, or its `branch.<name>.merge` when that
 /// is set; `HEAD` when it is detached; and nothing on a branch with no
 /// commit yet, which git-lfs cannot resolve. The result is the caller's.
-pub fn downloadRef(gpa: Allocator, io: Io, repo: *repo_mod.Repository, settings: *const Settings) (Error || @import("../refs.zig").ReadError)![]u8 {
+pub fn downloadRef(gpa: Allocator, io: Io, repo: *repo_mod.Repository, settings: *const Settings) (Error || refs_mod.ReadError)![]u8 {
     const head = (try repo.head(io)) orelse return gpa.dupe(u8, "");
     defer repo.gpa.free(head.name);
     if (!std.mem.startsWith(u8, head.name, "refs/heads/")) return gpa.dupe(u8, head.name);

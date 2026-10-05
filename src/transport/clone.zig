@@ -49,6 +49,10 @@ const progress_mod = @import("progress.zig");
 const config_mod = @import("../config.zig");
 const fsck = @import("../object/fsck.zig");
 const promisors = @import("promisors.zig");
+const odb_mod = @import("../odb.zig");
+const safepath = @import("../worktree/safepath.zig");
+const config_state = @import("../config/state.zig");
+const refspec = @import("refspec.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -147,7 +151,7 @@ pub const Options = struct {
     /// `.git` refused (`fsck.baseline`); `false` checks nothing.
     check_objects: ?bool = null,
     /// What the new repository's object database is opened with.
-    odb: @import("../odb.zig").Options = .{},
+    odb: odb_mod.Options = .{},
 };
 
 fn hasUserConfig(options: Options) bool {
@@ -357,7 +361,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             try std.fmt.allocPrint(arena, "refs/remotes/{s}/{s}", .{ origin, ref.name["refs/heads/".len..] })
         else
             try arena.dupe(u8, ref.name);
-        if (!@import("../worktree/safepath.zig").isValidRefName(local_name)) continue;
+        if (!safepath.isValidRefName(local_name)) continue;
         try packed_entries.append(arena, .{ .name = local_name, .oid = ref.oid, .peeled = ref.peeled });
         try packed_sources.append(arena, ref.name);
     }
@@ -429,7 +433,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             if (!std.mem.startsWith(u8, ref.name, "refs/tags/") or std.mem.endsWith(u8, ref.name, "^{}")) continue;
             if (single_tag != null and std.mem.eql(u8, ref.name, single_tag.?)) continue;
             if (!try repo.odb.exists(io, ref.oid)) continue;
-            if (!@import("../worktree/safepath.zig").isValidRefName(ref.name)) continue;
+            if (!safepath.isValidRefName(ref.name)) continue;
             try packed_entries.append(arena, .{ .name = try arena.dupe(u8, ref.name), .oid = ref.oid, .peeled = ref.peeled });
         }
     }
@@ -505,7 +509,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             }
         }
     }
-    try @import("../config/state.zig").writeLocal(repo._config, io);
+    try config_state.writeLocal(repo._config, io);
 
     // The caller's configuration joins the repository's, as git reads
     // every level: the checkout's filters come from there.
@@ -565,7 +569,7 @@ fn refspecNameOk(name: []const u8) bool {
     if (name.len == 0) return false;
     var buf: [512]u8 = undefined;
     const probe = std.fmt.bufPrint(&buf, "refs/remotes/{s}/x", .{name}) catch return false;
-    return @import("refspec.zig").checkRefFormat(probe, .{});
+    return refspec.checkRefFormat(probe, .{});
 }
 
 fn containsOid(list: []const Oid, oid: Oid) bool {
@@ -832,7 +836,7 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
     const cpus = std.Thread.getCpuCount() catch 1;
     // An unset count reaches the pack writer as zero: its CPU default.
     const objects = std.mem.readInt(u32, serial_bytes[8..12], .big);
-    try testing.expect(objects <= @import("../odb.zig").search_group_objects);
+    try testing.expect(objects <= odb_mod.search_group_objects);
     const default_workers = @min(cpus, objects);
     const cases = [_]Case{
         .{ .pairs = &.{}, .workers = default_workers },

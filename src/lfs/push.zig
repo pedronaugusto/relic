@@ -34,6 +34,8 @@ const lfs = @import("../lfs.zig");
 const lfsapi = @import("api.zig");
 const lfstransfer = @import("transfer.zig");
 const lfslocks = @import("locks.zig");
+const auth = @import("../transport/auth.zig");
+const config_mod = @import("../config.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -120,7 +122,7 @@ pub const Reach = struct {
     progress: ?progress_mod.Progress = null,
     /// Filled in when the LFS server refuses for want of a credential: see
     /// `auth.Failure`.
-    auth_failure: ?*@import("../transport/auth.zig").Failure = null,
+    auth_failure: ?*auth.Failure = null,
 };
 
 /// git-lfs's pre-push hook for one push URL: check locks for `remote_refs`
@@ -253,6 +255,6 @@ fn verifyState(a: Allocator, settings: *const lfsapi.Settings, url: []const u8) 
             std.ascii.eqlIgnoreCase(parts.host, "github.com");
         return if (known) .enabled else .unknown;
     };
-    const enabled = @import("../config.zig").parseBool(value) catch false;
+    const enabled = config_mod.parseBool(value) catch false;
     return if (enabled) .enabled else .disabled;
 }

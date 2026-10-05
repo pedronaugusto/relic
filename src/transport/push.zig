@@ -43,6 +43,8 @@ const auth = @import("auth.zig");
 const warning = @import("../repo/warning.zig");
 const progress_mod = @import("progress.zig");
 const lfspush = @import("../lfs/push.zig");
+const reflog = @import("../refs/reflog.zig");
+const builtin = @import("builtin");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -681,7 +683,7 @@ fn updateTracking(gpa: Allocator, io: Io, repo: *Repository, remote: *const remo
         if (current == null) return;
         try tx.delete(name, .any);
         try tx.commit(io, null);
-        const path = try @import("../refs/reflog.zig").pathFor(gpa, name);
+        const path = try reflog.pathFor(gpa, name);
         defer gpa.free(path);
         // ziglint-ignore: Z026 the ref is gone; a reflog that cannot be removed stays, as git leaves one it cannot unlink
         repo.refStore().dirFor(name).deleteFile(io, path) catch {};
@@ -1010,7 +1012,7 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
         if (over_http) server = try testremote.HttpServer.start(gpa, io, twins.root.dir, .{});
         const ssh_path = try gpa.dupe(u8, twins.root_path);
         defer gpa.free(ssh_path);
-        if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
         for ([_][2][]const u8{ .{ "work-git", "remote-git.git" }, .{ "work-relic", "remote-relic.git" } }) |pair| {
             var work = try twins.root.dir.openDir(io, pair[0], .{});
             defer work.close(io);
@@ -1020,7 +1022,7 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
             const url = if (server) |s|
                 try s.url(gpa, pair[1])
             else
-                try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/{s}", .{ if (@import("builtin").os.tag == .windows) "/" else "", ssh_path, pair[1] });
+                try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/{s}", .{ if (builtin.os.tag == .windows) "/" else "", ssh_path, pair[1] });
             defer gpa.free(url);
             try twins.git(work, &.{ "remote", "set-url", "origin", url });
             try twins.git(work, &.{ "config", "core.sshCommand", fake });

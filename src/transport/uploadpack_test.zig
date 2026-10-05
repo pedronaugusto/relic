@@ -19,6 +19,7 @@ const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 
 const helper = @import("build_options").upload_pack_helper_path;
+const config_mod = @import("../config.zig");
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 const sparse_spec = "/file\n/dir/\n!/dir/deep/\n";
@@ -353,7 +354,7 @@ test "git and relic clone over HTTP from relic's upload-pack, one request at a t
         try tmp.dir.createDirPath(io, "relic-both");
         var c = try tmp.dir.openDir(io, "relic-both", .{ .iterate = true });
         defer c.close(io);
-        var config = try @import("../config.zig").Config.parseText(gpa, if (std.mem.eql(u8, version, "0")) "[protocol]\nversion = 0\n" else "", .command);
+        var config = try config_mod.Config.parseText(gpa, if (std.mem.eql(u8, version, "0")) "[protocol]\nversion = 0\n" else "", .command);
         defer config.deinit();
         var options: clone_mod.Options = .{ .who = test_who, .checkout = false, .programs = .{ .environ = &env }, .config = &config };
         for (extra) |arg| {

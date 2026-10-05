@@ -19,8 +19,9 @@ const fetch_mod = @import("fetch.zig");
 const testgit = @import("../testing/git.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
+const object = @import("../object.zig");
 
-const test_who: @import("../object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 const Pki = testremote.Pki;
 const passphrase = testremote.Pki.passphrase;
 

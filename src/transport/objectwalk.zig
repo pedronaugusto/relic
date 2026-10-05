@@ -30,6 +30,7 @@ const objectfilter = @import("objectfilter.zig");
 const ignore = @import("../worktree/ignore.zig");
 const bitmap = @import("../odb/bitmap.zig");
 const indexpack = @import("../odb/indexpack.zig");
+const reachability = @import("../odb/bitmap/reachability.zig");
 
 const Oid = hash.Oid;
 const Odb = odb_mod.Odb;
@@ -635,7 +636,7 @@ test "a tip with an object missing below it is refused, and names the object" {
     try testing.expect(gone.eql(try Oid.parse(.sha1, blob_hex)));
 }
 
-const BitmapDifference = struct { store: *const @import("../odb/bitmap/reachability.zig").Store, words: []u64 };
+const BitmapDifference = struct { store: *const reachability.Store, words: []u64 };
 
 fn bitmapDifference(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclude: []const Oid) Error!?BitmapDifference {
     const store = (try db.reachabilityBitmap(io)) orelse return null;

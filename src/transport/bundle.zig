@@ -37,6 +37,9 @@ const filterspec = @import("filterspec.zig");
 const message = @import("../commit/message.zig");
 const fs = @import("../repo/fs.zig");
 const ignore = @import("../worktree/ignore.zig");
+const progress_mod = @import("progress.zig");
+const revindex = @import("../odb/revindex.zig");
+const safepath = @import("../worktree/safepath.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -358,7 +361,7 @@ pub const UnbundleOptions = struct {
     /// strict levels. Off, as `git bundle unbundle` is; a fetch from a
     /// bundle checks as the fetch's `fsck.Rules` say.
     check_objects: bool = false,
-    progress: ?@import("progress.zig").Progress = null,
+    progress: ?progress_mod.Progress = null,
 };
 
 /// `unbundle`: verify the prerequisites and index the pack into the
@@ -374,7 +377,7 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
         .fix_thin = true,
         .fsck = if (options.check_objects) &strict else null,
         .progress = options.progress,
-        .reverse_index = @import("../odb/revindex.zig").wanted(repo.configuration()),
+        .reverse_index = revindex.wanted(repo.configuration()),
         .threads = indexpack.configuredThreads(repo.configuration()),
     });
 }
@@ -659,7 +662,7 @@ fn dwimRef(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateErro
     var count: usize = 0;
     for (rules) |rule| {
         const full = try std.mem.concat(a, u8, &.{ rule[0], name, rule[1] });
-        if (!@import("../worktree/safepath.zig").isValidRefName(full) and !std.mem.eql(u8, full, "HEAD")) continue;
+        if (!safepath.isValidRefName(full) and !std.mem.eql(u8, full, "HEAD")) continue;
         const resolved = (store.resolve(a, io, full) catch continue) orelse continue;
         count += 1;
         if (found == null) found = resolved.name;

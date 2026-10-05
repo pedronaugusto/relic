@@ -28,8 +28,12 @@ const userconfig = @import("../config/userconfig.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const testlfs = @import("../testing/lfs.zig");
+const object = @import("../object.zig");
+const build_options = @import("build_options");
+const url_mod = @import("url.zig");
+const warning = @import("../repo/warning.zig");
 
-const test_who: @import("../object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 /// A person, as far as git can tell: a home with a `~/.gitconfig`, a system
 /// file where their git was built to look, and their environment.
@@ -86,7 +90,7 @@ const Person = struct {
     /// `<name>.log` and answers `get` with `<name>.answer`. The path is
     /// the caller's.
     fn standIn(p: *Person, io: Io, name: []const u8, answer: []const u8) ![]u8 {
-        const path = try testlfs.installProgram(p.gpa, io, p.tools.dir, name, @import("build_options").lfs_test_tool_path);
+        const path = try testlfs.installProgram(p.gpa, io, p.tools.dir, name, build_options.lfs_test_tool_path);
         errdefer p.gpa.free(path);
         const sidecar = try std.fmt.allocPrint(p.gpa, "{s}.fixture", .{path});
         defer p.gpa.free(sidecar);
@@ -501,7 +505,7 @@ test "a refusal says what git says: the server's words, the helpers asked, the p
             .auth_failure = &failure,
         }));
         try testing.expectEqual(case.reason, failure.reason);
-        try testing.expectEqual(@import("url.zig").Scheme.http, failure.scheme);
+        try testing.expectEqual(url_mod.Scheme.http, failure.scheme);
         try testing.expectEqualStrings(url, failure.url);
         try testing.expectEqual(@as(usize, 1), failure.helpers.len);
         try testing.expectEqualStrings(helper, failure.helpers[0].command);
@@ -654,7 +658,7 @@ test "what ssh says on a conversation that succeeds is handed back as a warning,
     var person = try Person.init(gpa, io);
     defer person.deinit();
     // ssh that adds a host key, says so, and goes on.
-    const ssh = try testlfs.installProgram(gpa, io, person.tools.dir, "ssh", @import("build_options").fake_ssh_helper_path);
+    const ssh = try testlfs.installProgram(gpa, io, person.tools.dir, "ssh", build_options.fake_ssh_helper_path);
     defer gpa.free(ssh);
     const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{ssh});
     defer gpa.free(sidecar);
@@ -680,7 +684,7 @@ test "what ssh says on a conversation that succeeds is handed back as a warning,
     var repo = try person.open(io, by_relic.dir, &locations);
     defer repo.deinit(io);
     defer locations.deinit();
-    var warnings: @import("../repo/warning.zig").Warnings = .init(gpa);
+    var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
     var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env }, .warnings = &warnings });
     outcome.deinit();
@@ -701,7 +705,7 @@ test "what ssh says on a conversation that succeeds is handed back as a warning,
 /// agent and home it was started with, then either says `refusal` on its
 /// standard error and exits 255, as ssh does, or runs the command here.
 fn sshStandIn(person: *Person, io: Io, refusal: ?[]const u8) ![]u8 {
-    const path = try testlfs.installProgram(person.gpa, io, person.tools.dir, "ssh", @import("build_options").fake_ssh_helper_path);
+    const path = try testlfs.installProgram(person.gpa, io, person.tools.dir, "ssh", build_options.fake_ssh_helper_path);
     errdefer person.gpa.free(path);
     const sidecar = try std.fmt.allocPrint(person.gpa, "{s}.fixture", .{path});
     defer person.gpa.free(sidecar);
@@ -720,7 +724,7 @@ test "ssh's refusal is named once ssh has ended, while something it started stil
     var person = try Person.init(gpa, io);
     defer person.deinit();
     const said = "git@work-github: Permission denied (publickey).";
-    const ssh = try testlfs.installProgram(gpa, io, person.tools.dir, "ssh", @import("build_options").fake_ssh_helper_path);
+    const ssh = try testlfs.installProgram(gpa, io, person.tools.dir, "ssh", build_options.fake_ssh_helper_path);
     defer gpa.free(ssh);
     const release = try std.fs.path.join(gpa, &.{ person.tools_path, "release" });
     defer gpa.free(release);
@@ -882,7 +886,7 @@ test "ssh's refusal of a key or a host is named, with what ssh said" {
             .auth_failure = &failure,
         }));
         try testing.expectEqual(case.reason, failure.reason);
-        try testing.expectEqual(@import("url.zig").Scheme.ssh, failure.scheme);
+        try testing.expectEqual(url_mod.Scheme.ssh, failure.scheme);
         try testing.expectEqualStrings("work-github:org/repo.git", failure.url);
         try testing.expectEqualStrings(case.said, failure.server_message);
         try testing.expectEqualStrings("git", failure.username.?);

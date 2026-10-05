@@ -33,6 +33,7 @@ const fs = @import("../repo/fs.zig");
 const lfs = @import("../lfs.zig");
 const lfsapi = @import("api.zig");
 const lfsssh = @import("ssh.zig");
+const index_mod = @import("../index.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -53,7 +54,7 @@ pub const Error = error{
     /// A path that is not inside the working tree, or is a directory.
     InvalidLockPath,
 } || attributes.Error || lfsapi.Error || fs.AtomicWriteError || Io.Dir.CreateDirPathError || Io.Dir.StatFileError ||
-    Io.Dir.SetFilePermissionsError || repo_mod.Error || @import("../index.zig").ReadError ||
+    Io.Dir.SetFilePermissionsError || repo_mod.Error || index_mod.ReadError ||
     lfsapi.Settings.LoadError || lfs.Lfs.LoadError;
 
 /// A lock, as the server reports it. Every slice is owned by whatever

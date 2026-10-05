@@ -28,6 +28,8 @@ const safepath = @import("../worktree/safepath.zig");
 const sendpack = @import("sendpack.zig");
 const hidden_refs = @import("hidden.zig");
 const builtin = @import("builtin");
+const revindex = @import("../odb/revindex.zig");
+const config_mod = @import("../config.zig");
 
 const Oid = hash.Oid;
 
@@ -217,7 +219,7 @@ pub const Remote = struct {
                     try chain.append(r.gpa, current);
                     const found = try r.repo.odb.read(io, current);
                     defer r.gpa.free(found.bytes);
-                    var tag = try @import("../object.zig").Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes);
+                    var tag = try object.Tag.parse(r.gpa, r.repo.objectFormat(), found.bytes);
                     defer tag.deinit();
                     current = tag.target;
                 }
@@ -280,7 +282,7 @@ pub const Remote = struct {
         if (needs_pack and objects.len != 0) {
             var pack_dir = try r.repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
             defer pack_dir.close(io);
-            _ = try from.writePack(io, pack_dir, objects, .{ .reverse_index = @import("../odb/revindex.zig").wanted(r.repo.configuration()) });
+            _ = try from.writePack(io, pack_dir, objects, .{ .reverse_index = revindex.wanted(r.repo.configuration()) });
             try r.repo.odb.refresh(io);
         }
 
@@ -402,7 +404,7 @@ pub const Remote = struct {
             const found = from.read(io, oid) catch continue;
             defer from.allocator().free(found.bytes);
             if (found.type != .commit) continue;
-            var commit = try @import("../object.zig").Commit.parse(arena, from.objectFormat(), found.bytes);
+            var commit = try object.Commit.parse(arena, from.objectFormat(), found.bytes);
             defer commit.deinit();
             for (commit.parents) |p| try stack.append(arena, p);
         }
@@ -447,12 +449,12 @@ pub const Remote = struct {
 
 /// Whether a `receive.deny*` setting denies: `refuse` and true do, and so
 /// does an unset one whose default is to.
-fn denies(config: *const @import("../config.zig").Config, key: []const u8, default: bool) bool {
+fn denies(config: *const config_mod.Config, key: []const u8, default: bool) bool {
     const raw = config.get(key) orelse return default;
     if (std.ascii.eqlIgnoreCase(raw, "refuse")) return true;
     if (std.ascii.eqlIgnoreCase(raw, "warn") or std.ascii.eqlIgnoreCase(raw, "ignore")) return false;
     if (std.ascii.eqlIgnoreCase(raw, "updateinstead")) return true;
-    return @import("../config.zig").parseBool(raw) catch default;
+    return config_mod.parseBool(raw) catch default;
 }
 
 fn matches(name: []const u8, prefixes: []const []const u8) bool {

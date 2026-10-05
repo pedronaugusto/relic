@@ -305,7 +305,7 @@ test "ssh without the permission to run it, or a port a simple ssh cannot take, 
     try testing.expectError(error.ProgramsNotGranted, connect(gpa, io, url, .upload_pack, .{}));
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    var config = try @import("../config.zig").Config.parseText(gpa, "[ssh]\nvariant = simple\n", .local);
+    var config = try config_mod.Config.parseText(gpa, "[ssh]\nvariant = simple\n", .local);
     defer config.deinit();
     try testing.expectError(error.SshVariantRefusesPort, connect(gpa, io, url, .upload_pack, .{
         .programs = .{ .environ = &env },

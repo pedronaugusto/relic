@@ -20,6 +20,8 @@ const lfsapi = @import("api.zig");
 const lfslocks = @import("locks.zig");
 const testlfs = @import("../testing/lfs.zig");
 const lt = @import("transfer_test.zig");
+const lfs = @import("../lfs.zig");
+const hash = @import("../hash.zig");
 
 const Fixture = lt.Fixture;
 
@@ -173,7 +175,7 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
     gpa.free(listed);
     var theirs_repo = try repo_mod.Repository.open(gpa, io, pair.theirs, .{});
     defer theirs_repo.deinit(io);
-    const store: @import("../lfs.zig").Store = .{ .base = theirs_repo.common_dir, .root = "lfs" };
+    const store: lfs.Store = .{ .base = theirs_repo.common_dir, .root = "lfs" };
     var table = try lfslocks.Table.cached(gpa, io, &store, "refs/heads/main");
     defer table.deinit();
     try testing.expectEqualStrings("ada", table.find("x.bin").?.owner.?);
@@ -290,7 +292,7 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     defer repo.deinit(io);
     const head = (try repo.head(io)).?;
     defer gpa.free(head.name);
-    const zero = @import("../hash.zig").Oid.zero(repo.objectFormat());
+    const zero = hash.Oid.zero(repo.objectFormat());
     const place: hooks.Place = .{ .config = repo.configuration(), .git_dir = repo.git_dir, .common_dir = repo.common_dir, .work_dir = repo.work_dir };
 
     // Run as they are, they stop: git-lfs was not found.

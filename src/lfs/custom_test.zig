@@ -16,6 +16,7 @@ const lfstransfer = @import("transfer.zig");
 const objectwalk = @import("../transport/objectwalk.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
+const build_options = @import("build_options");
 
 const Fixture = struct {
     gpa: Allocator,
@@ -70,7 +71,7 @@ const Fixture = struct {
             .{ "lfs.concurrenttransfers", "1" },
             .{ "lfs.standalonetransferagent", "agent" },
         }) |kv| try fx.git(d, &.{ "config", kv[0], kv[1] });
-        const agent = @import("build_options").lfs_agent_path;
+        const agent = build_options.lfs_agent_path;
         try fx.git(d, &.{ "config", "lfs.customtransfer.agent.path", agent });
         const objects = try fx.path("objects with space");
         defer fx.gpa.free(objects);

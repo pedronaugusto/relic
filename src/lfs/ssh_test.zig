@@ -17,6 +17,8 @@ const lfspush = @import("push.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
 const t = @import("transfer_test.zig");
+const objectwalk = @import("../transport/objectwalk.zig");
+const builtin = @import("builtin");
 
 const Fixture = t.Fixture;
 
@@ -145,7 +147,7 @@ fn relicPrePush(fx: *Fixture, d: Io.Dir) !void {
     defer repo.deinit(io);
     const head = (try repo.head(io)).?;
     defer gpa.free(head.name);
-    var collected = try @import("../transport/objectwalk.zig").missing(gpa, io, &repo.odb, &.{head.oid}, &.{});
+    var collected = try objectwalk.missing(gpa, io, &repo.odb, &.{head.oid}, &.{});
     defer collected.deinit();
     var report: lfspush.Report = .init(gpa);
     defer report.deinit();
@@ -179,7 +181,7 @@ test "objects go up and come down over git-lfs-transfer, asked for as git-lfs as
     try expectSame(up[0], up[1]);
     try testing.expect(std.mem.find(u8, up[1][0], "> put-object ") != null);
     try testing.expect(std.mem.find(u8, up[1][0], "> verify-object ") != null);
-    if (@import("builtin").os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         // Git LFS leaves SSH multiplexing off by default on Windows.
         try testing.expect(std.mem.find(u8, up[1][1], "[-oControlMaster=") == null);
     } else {
@@ -434,7 +436,7 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     gpa.free(try testlfs.installProgram(gpa, io, fx.tools, "git-lfs-transfer", server_program));
     const remote_path = try fx.path("served/repo.git");
     defer gpa.free(remote_path);
-    const url = try std.fmt.allocPrint(gpa, "ssh://git@example.invalid:2222{s}{s}", .{ if (@import("builtin").os.tag == .windows) "/" else "", remote_path });
+    const url = try std.fmt.allocPrint(gpa, "ssh://git@example.invalid:2222{s}{s}", .{ if (builtin.os.tag == .windows) "/" else "", remote_path });
     defer gpa.free(url);
     const Point = struct {
         fn at(f: *Fixture, d: Io.Dir, u: []const u8, ssh: []const u8) !void {

@@ -18,6 +18,8 @@ const fetch_mod = @import("fetch.zig");
 const partial = @import("partial.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
+const warning = @import("../repo/warning.zig");
+const config_mod = @import("../config.zig");
 
 const Oid = hash.Oid;
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -194,7 +196,7 @@ test "a partial clone is the one git makes, filtered by blob:none, blob:limit, t
     defer gpa.free(path);
     const cloned = try testremote.gitInputEnv(gpa, io, local.tmp.dir, &env, &.{ "clone", "-q", "--filter=blob:none", path, local.git_path }, "", true);
     gpa.free(cloned);
-    var warnings: @import("../repo/warning.zig").Warnings = .init(gpa);
+    var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
     var plain = try clone_mod.clone(gpa, io, path, local.by_relic, .{ .who = test_who, .filter = "blob:none", .warnings = &warnings });
     plain.deinit(io);
@@ -333,9 +335,9 @@ test "a filter the server does not know is left off with a warning and everythin
         gpa.free(out);
         const text = try std.fmt.allocPrint(gpa, "[protocol]\n\tversion = {s}\n", .{version});
         defer gpa.free(text);
-        var settings = try @import("../config.zig").Config.parseText(gpa, text, .command);
+        var settings = try config_mod.Config.parseText(gpa, text, .command);
         defer settings.deinit();
-        var warnings: @import("../repo/warning.zig").Warnings = .init(gpa);
+        var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
         var repo = try clone_mod.clone(gpa, io, url, twins.by_relic, .{
             .who = test_who,

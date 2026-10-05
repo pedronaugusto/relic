@@ -22,8 +22,14 @@ const httpclient = @import("transport/httpclient.zig");
 const testgit = @import("testing/git.zig");
 const testremote = @import("testing/remote.zig");
 const testlfs = @import("testing/lfs.zig");
+const object = @import("object.zig");
+const progress_mod = @import("transport/progress.zig");
+const build_options = @import("build_options");
+const builtin = @import("builtin");
+const warning = @import("repo/warning.zig");
+const push_mod = @import("transport/push.zig");
 
-const test_who: @import("object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 /// A bare copy of a history under a directory an HTTP server serves.
 fn servedRepo(gpa: Allocator, io: Io, root: *testing.TmpDir, commits: usize) !void {
@@ -82,7 +88,7 @@ test "a fetch over smart HTTP leaves what git fetch leaves, in v2 and in v0" {
             remote: usize = 0,
             received: u64 = 0,
             indexed: u64 = 0,
-            fn report(context: ?*anyopaque, event: @import("transport/progress.zig").Event) void {
+            fn report(context: ?*anyopaque, event: progress_mod.Event) void {
                 const self_: *@This() = @ptrCast(@alignCast(context.?));
                 switch (event) {
                     .remote => self_.remote += 1,
@@ -171,7 +177,7 @@ test "a missing repository, a dumb setting and a header that is not one are refu
 /// A credential helper that notes each operation and its input in `<dir>/helper.log`
 /// and answers `get` with `ada` and `password`.
 fn helperScript(gpa: Allocator, io: Io, dir: Io.Dir, password: []const u8) ![]u8 {
-    const path = try testlfs.installProgram(gpa, io, dir, "helper", @import("build_options").lfs_test_tool_path);
+    const path = try testlfs.installProgram(gpa, io, dir, "helper", build_options.lfs_test_tool_path);
     errdefer gpa.free(path);
     const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{path});
     defer gpa.free(sidecar);
@@ -271,7 +277,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     // askpass: asked with git's own prompts.
     var tools = testing.tmpDir(.{ .iterate = true });
     defer tools.cleanup();
-    const askpass = try testlfs.installProgram(gpa, io, tools.dir, "askpass", @import("build_options").lfs_test_tool_path);
+    const askpass = try testlfs.installProgram(gpa, io, tools.dir, "askpass", build_options.lfs_test_tool_path);
     defer gpa.free(askpass);
     const askpass_sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{askpass});
     defer gpa.free(askpass_sidecar);
@@ -347,7 +353,7 @@ test "ssh is handed the same arguments git hands it" {
     defer repo.deinit(io);
 
     const Case = struct { url: []const u8, variant: ?[]const u8 = null };
-    const drive_slash = if (@import("builtin").os.tag == .windows) "/" else "";
+    const drive_slash = if (builtin.os.tag == .windows) "/" else "";
     const url_port = try std.fmt.allocPrint(gpa, "ssh://ada@example.invalid:2222{s}{s}", .{ drive_slash, source_path });
     defer gpa.free(url_port);
     const url_scp = try std.fmt.allocPrint(gpa, "example.invalid:{s}/it's", .{source_path});
@@ -393,7 +399,7 @@ test "ssh is handed the same arguments git hands it" {
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(gpa);
         try text.print(gpa, "[core]\nsshCommand = {s}\n[ssh]\nvariant = {s}\n", .{ fake, case.variant orelse "auto" });
-        var settings = try @import("config.zig").Config.parseText(gpa, text.items, .local);
+        var settings = try config_mod.Config.parseText(gpa, text.items, .local);
         defer settings.deinit();
         if (transport.Session.open(gpa, io, case.url, .upload_pack, .sha1, .{
             .programs = .{ .environ = &env },
@@ -427,7 +433,7 @@ test "a fetch over ssh leaves what git fetch leaves, in v2 and in v0" {
         defer source.deinit();
         const source_path = try testremote.absolutePath(gpa, io, source.dir);
         defer gpa.free(source_path);
-        const drive_slash = if (@import("builtin").os.tag == .windows) "/" else "";
+        const drive_slash = if (builtin.os.tag == .windows) "/" else "";
         const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}", .{ drive_slash, source_path });
         defer gpa.free(url);
 
@@ -576,7 +582,7 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
         .{ .url = secure, .config = &.{.{ "http.proxy", proxy_url }}, .through = true },
         // On Windows environment names are case-insensitive, so asking for
         // http_proxy finds the value set as HTTP_PROXY.
-        .{ .url = plain, .env = &.{.{ "HTTP_PROXY", proxy_url }}, .through = @import("builtin").os.tag == .windows },
+        .{ .url = plain, .env = &.{.{ "HTTP_PROXY", proxy_url }}, .through = builtin.os.tag == .windows },
         .{ .url = secure, .env = &.{ .{ "https_proxy", proxy_url }, .{ "no_proxy", "127.0.0.1" } }, .through = false },
         .{ .url = plain, .env = &.{.{ "http_proxy", proxy_url }}, .config = &.{.{ "http.proxy", "" }}, .through = false },
     }, 0..) |case, case_index| {
@@ -727,7 +733,7 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
         // curl's Windows SSPI build cannot answer SHA-256 Digest. Git
         // returns CURLE_AUTH_ERROR after the first 407; relic still proves
         // that its own SHA-256 answer is accepted by this proxy.
-        const git_ok = case.ok and !(@import("builtin").os.tag == .windows and case.scheme == .digest_sha256);
+        const git_ok = case.ok and !(builtin.os.tag == .windows and case.scheme == .digest_sha256);
         var logs: [2][]u8 = undefined;
         var results: [2]bool = undefined;
         var by_git = try testgit.Repo.init(gpa, io, &.{});
@@ -882,7 +888,7 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
         gpa.free(fetched);
         var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
         defer repo.deinit(io);
-        var warnings: @import("repo/warning.zig").Warnings = .init(gpa);
+        var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
         outcome.deinit();
@@ -1008,7 +1014,7 @@ test "the negotiation git's fetch-pack makes is made byte for byte, over a pipe 
     defer server.stop();
     const http_url = try server.url(gpa, "repo.git");
     defer gpa.free(http_url);
-    const drive_slash = if (@import("builtin").os.tag == .windows) "/" else "";
+    const drive_slash = if (builtin.os.tag == .windows) "/" else "";
     const ssh_url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/repo.git", .{ drive_slash, root_path });
     defer gpa.free(ssh_url);
 
@@ -1080,7 +1086,7 @@ fn withoutAgent(gpa: Allocator, bytes: []const u8) ![]u8 {
 
 test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     // the stand-in is a shell script; Windows has no /bin/sh to run it
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const Child = @import("dependencies.zig").conduit.Child;
     const Controlled = struct {
@@ -1224,7 +1230,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
             defer gpa.free(theirs);
             var ours = testing.tmpDir(.{ .iterate = true });
             defer ours.cleanup();
-            var repo = try @import("transport/clone.zig").clone(gpa, io, url, ours.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .config = &config });
+            var repo = try clone_mod.clone(gpa, io, url, ours.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .config = &config });
             defer repo.deinit(io);
             const our_log = try proxy.take(gpa);
             defer gpa.free(our_log);
@@ -1259,7 +1265,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
             defer gpa.free(relic_spec);
             const pushed_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "push", "-q", "origin", git_spec }, "", true);
             gpa.free(pushed_git);
-            var pushed = try @import("transport/push.zig").push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{relic_spec} });
+            var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{relic_spec} });
             defer pushed.deinit();
             const git_refs = try testremote.gitInput(gpa, io, bare, &.{ "rev-parse", git_ref, relic_ref }, "");
             defer gpa.free(git_refs);

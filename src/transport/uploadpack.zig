@@ -34,6 +34,8 @@ const revwalk = @import("../revwalk.zig");
 const local = @import("local.zig");
 const connection = @import("connection.zig");
 const promisors = @import("promisors.zig");
+const repo_mod = @import("../repo.zig");
+
 const Oid = hash.Oid;
 const Connection = connection.Connection;
 
@@ -1182,7 +1184,7 @@ test "fuzz: whatever a client sends is answered or refused, in v2 and v0" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var repo = try @import("../repo.zig").Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
     repo.deinit(io);
     const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);

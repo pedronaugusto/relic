@@ -39,6 +39,7 @@ const promisors = @import("promisors.zig");
 const warning = @import("../repo/warning.zig");
 const revindex = @import("../odb/revindex.zig");
 const filterspec = @import("filterspec.zig");
+const remote_mod = @import("remote.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -269,7 +270,7 @@ pub const Lazy = struct {
                 try config_state.writeLocal(repo._config, io);
             }
         }
-        var remote = try @import("remote.zig").Remote.get(l.gpa, repo.configuration(), name);
+        var remote = try remote_mod.Remote.get(l.gpa, repo.configuration(), name);
         defer remote.deinit();
         if (remote.urls.len == 0) return error.NotAPartialClone;
         var session = try transport.Session.open(l.gpa, io, remote.urls[0], .upload_pack, repo.objectFormat(), .{

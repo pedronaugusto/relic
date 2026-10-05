@@ -17,10 +17,11 @@ const push_mod = @import("../transport/push.zig");
 const lfspush = @import("push.zig");
 const testlfs = @import("../testing/lfs.zig");
 const lt = @import("transfer_test.zig");
+const object = @import("../object.zig");
 
 const Fixture = lt.Fixture;
 
-const test_who: @import("../object.zig").Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
 fn relicPush(fx: *Fixture, d: Io.Dir, report: *lfspush.Report) !push_mod.Outcome {
     var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});

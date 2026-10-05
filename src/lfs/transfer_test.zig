@@ -22,6 +22,10 @@ const fs = @import("../repo/fs.zig");
 const progress_mod = @import("../transport/progress.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
+const program = @import("../repo/program.zig");
+const auth = @import("../transport/auth.zig");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 /// A server, a home, and a place for tools and repositories.
 pub const Fixture = struct {
@@ -147,7 +151,7 @@ pub const Fixture = struct {
         try fx.gitIn(d, &.{ "config", "filter.lfs.required", "true" });
     }
 
-    pub fn programs(fx: *Fixture) @import("../repo/program.zig").Programs {
+    pub fn programs(fx: *Fixture) program.Programs {
         return .{ .environ = &fx.env };
     }
 };
@@ -1601,7 +1605,7 @@ test "a refused credential is described as git-lfs's helpers hear it, with the s
         if (i == 0) {
             try testing.expectError(error.GitFailed, testlfs.git(gpa, io, d, &fx.env, &.{ "lfs", "fetch" }, false));
         } else {
-            var failure: @import("../transport/auth.zig").Failure = .{};
+            var failure: auth.Failure = .{};
             defer failure.deinit();
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
@@ -1845,7 +1849,7 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
         }
         while (try walker.next(io)) |e| {
             const path = try gpa.dupe(u8, e.path);
-            if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+            if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
             try found.append(gpa, path);
         }
         std.mem.sort([]const u8, found.items, {}, struct {
@@ -2036,7 +2040,7 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
         defer gpa.free(log_dir);
         const args = try std.fmt.allocPrint(gpa, "'{s}' '{s}'", .{ objects, log_dir });
         defer gpa.free(args);
-        try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.path", @import("build_options").lfs_agent_path });
+        try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.path", build_options.lfs_agent_path });
         try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.args", args });
         try fx.gitIn(dirs[i], &.{ "config", "lfs.concurrenttransfers", "1" });
     }

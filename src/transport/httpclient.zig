@@ -40,6 +40,7 @@ const http = std.http;
 const tls = @import("tls.zig");
 const httpauth = @import("httpauth.zig");
 const socks = @import("socks.zig");
+const testremote = @import("../testing/remote.zig");
 pub const SocksError = socks.Error;
 const Certificate = std.crypto.Certificate;
 
@@ -2010,7 +2011,7 @@ test "trust refresh samples certificate time even after a failed read" {
     defer client.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try @import("../testing/remote.zig").absolutePath(std.testing.allocator, std.testing.io, tmp.dir);
+    const path = try testremote.absolutePath(std.testing.allocator, std.testing.io, tmp.dir);
     defer std.testing.allocator.free(path);
     const absent = try std.fs.path.join(std.testing.allocator, &.{ path, "absent.pem" });
     defer std.testing.allocator.free(absent);
@@ -2025,7 +2026,7 @@ test "trust refresh samples certificate time even after a failed read" {
 test "new TLS connections check certificate validity at their own time" {
     const gpa = std.testing.allocator;
     const fixture_io = std.testing.io;
-    const front = try @import("../testing/remote.zig").TlsFront.start(gpa, fixture_io, 1);
+    const front = try testremote.TlsFront.start(gpa, fixture_io, 1);
     defer front.stop(fixture_io);
     var vtable: Io.VTable = undefined;
     var client: Client = .init(gpa, CertificateClock.io(&vtable));
@@ -2113,7 +2114,7 @@ test "overlapping TLS failures keep their own certificate diagnostic" {
     };
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const front = try @import("../testing/remote.zig").TlsFront.start(gpa, io, 1);
+    const front = try testremote.TlsFront.start(gpa, io, 1);
     defer front.stop(io);
     var vtable: Io.VTable = undefined;
     var client: Client = .init(gpa, CertificateClock.io(&vtable));

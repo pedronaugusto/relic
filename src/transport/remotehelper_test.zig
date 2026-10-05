@@ -20,6 +20,8 @@ const push_mod = @import("push.zig");
 const transport = @import("../transport.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
+const build_options = @import("build_options");
+const program = @import("../repo/program.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -39,7 +41,7 @@ const Helpers = struct {
         for ([_][]const u8{ "git-remote-testgit", "git-remote-testfetch" }) |name| {
             const exe = if (builtin.os.tag == .windows) try std.fmt.allocPrint(gpa, "{s}.exe", .{name}) else try gpa.dupe(u8, name);
             defer gpa.free(exe);
-            try Io.Dir.cwd().copyFile(@import("build_options").remote_helper_path, bin.dir, exe, io, .{});
+            try Io.Dir.cwd().copyFile(build_options.remote_helper_path, bin.dir, exe, io, .{});
             if (builtin.os.tag != .windows) {
                 const file = try bin.dir.openFile(io, exe, .{});
                 defer file.close(io);
@@ -71,7 +73,7 @@ const Helpers = struct {
         try git.isolated.?.put("PATH", h.path);
     }
 
-    fn programs(h: *const Helpers) @import("../repo/program.zig").Programs {
+    fn programs(h: *const Helpers) program.Programs {
         return .{ .environ = &h.environ };
     }
 };

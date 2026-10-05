@@ -50,6 +50,7 @@ const httpclient = @import("httpclient.zig");
 const clientcert = @import("clientcert.zig");
 const tls = @import("tls.zig");
 const warning = @import("../repo/warning.zig");
+const builtin = @import("builtin");
 
 const Connection = connection.Connection;
 const Service = connection.Service;
@@ -305,7 +306,7 @@ const Http = struct {
             // Git for Windows leaves the helper's certificate passphrase in
             // place on a local key parse error; its curl backend does not
             // classify that error as a rejected credential.
-            if (@import("builtin").os.tag != .windows) {
+            if (builtin.os.tag != .windows) {
                 // ziglint-ignore: Z026 git fails nothing over a helper that cannot forget; the load error, returned below, is the outcome
                 if (session_slot.*) |*session| session.reject(h.io, h.credentialOptions()) catch {};
             }
