@@ -40,7 +40,8 @@ fn fixture(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     try git.writeFile(io, "src/util.c", "/* a long enough file to be found again after a rename */\nint util(void) { return 1; }\nint other(void) { return 2; }\n");
     try git.writeFile(io, "run.sh", "#!/bin/sh\necho run\n");
     try git.writeFile(io, "with space.txt", "spaced\n");
-    try git.writeFile(io, "tab\there.txt", "tabbed\n");
+    // Windows cannot create control characters in filenames.
+    if (builtin.os.tag != .windows) try git.writeFile(io, "tab\there.txt", "tabbed\n");
     try git.writeFile(io, "h\xc3\xa9llo.txt", "accented\n");
     try git.exec(io, &.{ "add", "." });
     try git.exec(io, &.{ "update-index", "--chmod=+x", "run.sh" });

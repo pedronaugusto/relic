@@ -3,6 +3,7 @@
 //! marks and what was printed agree.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -106,7 +107,7 @@ const stream_one =
     \\M 120000 inline link
     \\data 9
     \\hello.txt
-    \\M 100644 inline "quoted\tname.txt"
+    \\M 100644 inline "quoted name.txt"
     \\data 3
     \\q!
     \\M 100644 :1 spaced name.txt
@@ -218,6 +219,19 @@ test "a stream of every command imports to the objects and refs git makes, and a
     defer gpa.free(b);
     try std.testing.expectEqualStrings(a, b);
     try std.testing.expectEqual(@as(usize, 7), report.marks.map.count());
+}
+
+test "quoted tab filenames import as git imports them where NTFS protection permits them" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var pair: Pair = try .init(gpa, io);
+    defer pair.deinit();
+    const stream = try std.mem.replaceOwned(u8, gpa, stream_one, "quoted name.txt", "quoted\\tname.txt");
+    defer gpa.free(stream);
+    var report = try pair.import(gpa, io, stream, &.{}, .{ .who = who });
+    defer report.deinit();
+    try std.testing.expectEqual(@as(usize, 0), report.rejected.len);
 }
 
 test "an incremental import reads the marks, continues a branch from itself, and leaves a branch that would lose commits" {
