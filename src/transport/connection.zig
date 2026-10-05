@@ -79,7 +79,7 @@ pub const Connection = struct {
         failure: *const fn (context: *anyopaque, connection: *Connection) Error,
         /// End the conversation and release everything. After a failure it
         /// is still called, and still releases everything.
-        close: *const fn (context: *anyopaque, io: Io) void,
+        close: *const fn (io: Io, context: *anyopaque) void,
     };
 
     /// What the far side last said about a failure.
@@ -117,7 +117,7 @@ pub const Connection = struct {
     /// End the conversation. The connection is released with it and is
     /// not used again.
     pub fn close(c: *Connection, io: Io) void {
-        c.vtable.close(c.context, io);
+        c.vtable.close(io, c.context);
     }
 
     /// Read one pkt-line, turning a transport failure into its own error
@@ -338,7 +338,7 @@ pub const Process = struct {
         return error.ConnectionFailed;
     }
 
-    fn close(context: *anyopaque, io: Io) void {
+    fn close(io: Io, context: *anyopaque) void {
         const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
         if (!p.exited) {
             // The end of the conversation: the program's input ends, and so

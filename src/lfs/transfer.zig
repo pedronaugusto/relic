@@ -2010,7 +2010,7 @@ pub const Fetcher = struct {
         f.* = undefined;
     }
 
-    fn fetchFn(context: *anyopaque, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
+    fn fetchFn(io: Io, context: *anyopaque, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
         _ = io;
         _ = store;
         _ = settings;

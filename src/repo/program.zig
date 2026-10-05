@@ -47,12 +47,12 @@ pub const SpawnHook = struct {
     context: *anyopaque,
     /// `options` borrows the prepared command and environment for this call;
     /// spawn the child before returning rather than retaining them.
-    start: *const fn (*anyopaque, Io, Allocator, Child.SpawnOptions) Child.SpawnError!Child,
+    start: *const fn (Allocator, Io, *anyopaque, Child.SpawnOptions) Child.SpawnError!Child,
     /// Called on cleanup after normal completion too, as well as on timeout
     /// and error paths. It must reap or kill the child; when absent, relic
     /// ends it through conduit. In `run` the child is already reaped by then:
     /// on a timeout conduit has killed it, and the hook ends what it left.
-    terminate: ?*const fn (*anyopaque, *Child, Io) void = null,
+    terminate: ?*const fn (Io, *anyopaque, *Child) void = null,
 };
 
 /// One variable set for a program on top of the environment it starts
@@ -191,7 +191,7 @@ pub const Running = struct {
         defer _ = io.swapCancelProtection(protection);
         if (running.spawn) |hook| {
             if (hook.terminate) |terminate| {
-                terminate(hook.context, &running.child, io);
+                terminate(io, hook.context, &running.child);
                 return;
             }
         }
@@ -250,7 +250,7 @@ pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation)
             },
         } },
     };
-    const child = if (programs.spawn) |hook| try hook.start(hook.context, io, gpa, options) else try Child.spawn(io, gpa, options);
+    const child = if (programs.spawn) |hook| try hook.start(gpa, io, hook.context, options) else try Child.spawn(io, gpa, options);
     return .{ .child = child, .spawn = programs.spawn, .environ = environ, .line = line, .gpa = gpa };
 }
 
@@ -328,7 +328,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
         started: bool = false,
         ended: bool = false,
 
-        fn start(raw: *anyopaque, io: Io, gpa: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {
+        fn start(gpa: Allocator, io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.started = true;
             testing.expectEqualStrings(process_fixture, options.argv[0]) catch unreachable;
@@ -337,7 +337,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
             return Child.spawn(io, gpa, options);
         }
 
-        fn terminate(raw: *anyopaque, child: *Child, io: Io) void {
+        fn terminate(io: Io, raw: *anyopaque, child: *Child) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.ended = true;
             _ = child.killWait(io, 0) catch {};

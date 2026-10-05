@@ -49,7 +49,7 @@ pub const Native = struct {
         return .{ .context = n, .run = run };
     }
 
-    fn run(context: ?*anyopaque, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool {
+    fn run(io: Io, context: ?*anyopaque, event: []const u8, args: []const []const u8, input: []const u8) bool {
         _ = input;
         const n: *Native = @ptrCast(@alignCast(context.?)); // safe: the context handed out with this function is a Native
         n.fixed = null;

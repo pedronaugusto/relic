@@ -69,7 +69,7 @@ pub const Prompt = struct {
     /// `Username for 'https://example.com': ` — with an answer the
     /// caller's allocator owns, or `null` to decline. `null` here asks
     /// nothing beyond askpass.
-    ask: ?*const fn (context: ?*anyopaque, gpa: Allocator, field: Field, prompt: []const u8) Allocator.Error!?[]u8 = null,
+    ask: ?*const fn (gpa: Allocator, context: ?*anyopaque, field: Field, prompt: []const u8) Allocator.Error!?[]u8 = null,
 };
 
 /// What `fill` needs besides the URL.
@@ -549,7 +549,7 @@ pub const Session = struct {
         }
         const ask_fn = p.ask orelse return error.CredentialsUnavailable;
         s.prompted = true;
-        const answer = try ask_fn(p.context, s.gpa, field, prompt);
+        const answer = try ask_fn(s.gpa, p.context, field, prompt);
         const owned = answer orelse return null;
         defer s.gpa.free(owned);
         const copy = try s.gpa.dupe(u8, owned);

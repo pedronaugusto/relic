@@ -502,5 +502,5 @@ pub const Fake = struct {
         return error.ConnectionFailed;
     }
 
-    fn close(_: *anyopaque, _: Io) void {}
+    fn close(_: Io, _: *anyopaque) void {}
 };

@@ -222,7 +222,7 @@ pub const Odb = struct {
         context: *anyopaque,
         /// Bring `oids` into the database. Called with `lazy` unset, so a
         /// read it makes cannot ask again.
-        fetch: *const fn (context: *anyopaque, io: Io, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void,
+        fetch: *const fn (io: Io, context: *anyopaque, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void,
     };
 
     /// Ask the promisor remote for `oids`, then look again.
@@ -230,7 +230,7 @@ pub const Odb = struct {
         const lazy = odb.lazy orelse return error.ObjectNotFound;
         odb.lazy = null;
         defer odb.lazy = lazy;
-        try lazy.fetch(lazy.context, io, oids);
+        try lazy.fetch(io, lazy.context, oids);
         try odb.refresh(io);
     }
 

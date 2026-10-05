@@ -93,7 +93,7 @@ pub const LfsHooks = struct {
     context: ?*anyopaque = null,
     /// Do what `git lfs <event>` would do with these arguments and this
     /// input. Returning false fails the hook, as the hook's own exit would.
-    run: *const fn (context: ?*anyopaque, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool,
+    run: *const fn (io: Io, context: ?*anyopaque, event: []const u8, args: []const []const u8, input: []const u8) bool,
 };
 
 /// The hook `git lfs install` writes for `{{Command}}`, and the ones older
@@ -385,7 +385,7 @@ pub const Runner = struct {
                     if (gitLfsHookFile(io, event, path)) {
                         ran.count += 1;
                         ran.lfs_native = true;
-                        if (!lfs_hooks.run(lfs_hooks.context, io, event, request.args, request.input) and ran.failure == null) {
+                        if (!lfs_hooks.run(io, lfs_hooks.context, event, request.args, request.input) and ran.failure == null) {
                             ran.failure = .init(event, .{ .exited = 1 });
                         }
                         return ran;

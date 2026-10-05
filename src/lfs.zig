@@ -561,8 +561,8 @@ pub const FetchError = error{LfsFetchFailed} || Allocator.Error || Io.Cancelable
 pub const Fetcher = struct {
     context: *anyopaque,
     fetchFn: *const fn (
-        context: *anyopaque,
         io: Io,
+        context: *anyopaque,
         store: *const Store,
         settings: *const Settings,
         wanted: []const Wanted,
@@ -570,7 +570,7 @@ pub const Fetcher = struct {
 
     /// Ask for `wanted`.
     pub fn fetch(f: Fetcher, io: Io, store: *const Store, settings: *const Settings, wanted: []const Wanted) Self.FetchError!void {
-        return f.fetchFn(f.context, io, store, settings, wanted);
+        return f.fetchFn(io, f.context, store, settings, wanted);
     }
 };
 

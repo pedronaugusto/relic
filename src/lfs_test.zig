@@ -185,8 +185,8 @@ const MemoryFetcher = struct {
     }
 
     fn fetch(
-        context: *anyopaque,
         io: Io,
+        context: *anyopaque,
         store: *const lfs.Store,
         settings: *const lfs.Settings,
         wanted: []const lfs.Wanted,

@@ -826,7 +826,7 @@ const Http = struct {
         return error.ConnectionFailed;
     }
 
-    fn close(context: *anyopaque, io: Io) void {
+    fn close(io: Io, context: *anyopaque) void {
         _ = io;
         const h = self(context);
         h.endRequest();

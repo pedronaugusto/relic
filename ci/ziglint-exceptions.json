@@ -1645,41 +1645,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/transport/partial.zig",
-    "source": "fn fetchFn(context: *anyopaque, io: Io, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements odb.Odb.Lazy.fetch, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/uploadpack.zig",
-    "source": "fn close(context: *anyopaque, io: Io) void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements connection.Connection.VTable.close, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/auth_test.zig",
-    "source": "fn ask(_: ?*anyopaque, allocator: Allocator, field: credential.Field, _: []const u8) Allocator.Error!?[]u8 {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Implements credential.Prompt.ask, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/connection.zig",
-    "source": "fn close(context: *anyopaque, io: Io) void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements connection.Connection.VTable.close, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/protocol.zig",
-    "source": "fn close(_: *anyopaque, _: Io) void {}",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements connection.Connection.VTable.close, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/tls/Client.zig",
     "source": "pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client {",
@@ -1706,20 +1671,6 @@
     "source": "}) catch {};",
     "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "src/transport/tls/Client.zig is Zig's std TLS client, held byte for byte to std and its recorded patch by zig build check-tls-fork (ci/preflight.json vendored); this line is std's, and changing it would fork the fork."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/clone/lfs.zig",
-    "source": "fn fetchFn(context: *anyopaque, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements lfs.Fetcher.fetchFn, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/smarthttp.zig",
-    "source": "fn close(context: *anyopaque, io: Io) void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements connection.Connection.VTable.close, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
   },
   {
     "rule": "Z006",
@@ -4586,34 +4537,6 @@
   },
   {
     "rule": "Z023",
-    "path": "src/transport_test.zig",
-    "source": "fn ask(context: ?*anyopaque, allocator: Allocator, field: credential.Field, prompt: []const u8) Allocator.Error!?[]u8 {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Implements credential.Prompt.ask, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport_test.zig",
-    "source": "fn start(raw: *anyopaque, task_io: Io, allocator: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements repo/program.zig's SpawnHook, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport_test.zig",
-    "source": "fn start(raw: *anyopaque, task_io: Io, allocator: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Implements repo/program.zig's SpawnHook, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport_test.zig",
-    "source": "fn terminate(raw: *anyopaque, child: *Child, task_io: Io) void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements repo/program.zig's SpawnHook, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
     "path": "src/testing/remote.zig",
     "source": "arena: Allocator,",
     "detail": "'Allocator' parameter should come before 'other'",
@@ -7267,13 +7190,6 @@
   },
   {
     "rule": "Z023",
-    "path": "src/lfs_test.zig",
-    "source": "io: Io,",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements lfs.Fetcher.fetchFn, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
     "path": "src/refs/reftablestack.zig",
     "source": "pub fn read(store: *const refs.Store, gpa: Allocator, io: Io, name: []const u8) refs.ReadError!?refs.Ref {",
     "detail": "'Allocator' parameter should come before 'other'",
@@ -8198,20 +8114,6 @@
   },
   {
     "rule": "Z023",
-    "path": "src/lfs/transfer.zig",
-    "source": "fn fetchFn(context: *anyopaque, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements lfs.Fetcher.fetchFn, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/lfs/hooks.zig",
-    "source": "fn run(context: ?*anyopaque, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Implements repo/hooks.zig's runner, whose functions take the type-erased context first, as std's own VTables (Allocator, Io) do; the order is the interface's."
-  },
-  {
-    "rule": "Z023",
     "path": "src/index/sparseindex_test.zig",
     "source": "fn setupTree(repo: *testgit.Repo, io: Io) anyerror!void {",
     "detail": "'Io' parameter should come before 'other'",
@@ -8782,27 +8684,6 @@
     "path": "src/repo/program.zig",
     "source": "pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation) Error!Running {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/repo/program.zig",
-    "source": "fn start(raw: *anyopaque, io: Io, gpa: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/repo/program.zig",
-    "source": "fn start(raw: *anyopaque, io: Io, gpa: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/repo/program.zig",
-    "source": "fn terminate(raw: *anyopaque, child: *Child, io: Io) void {",
-    "detail": "'Io' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {

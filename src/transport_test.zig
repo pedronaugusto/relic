@@ -311,7 +311,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     const Asked = struct {
         const Self = @This();
         prompts: std.ArrayList(u8) = .empty,
-        fn ask(context: ?*anyopaque, allocator: Allocator, field: credential.Field, prompt: []const u8) Allocator.Error!?[]u8 {
+        fn ask(allocator: Allocator, context: ?*anyopaque, field: credential.Field, prompt: []const u8) Allocator.Error!?[]u8 {
             const self_: *Self = @ptrCast(@alignCast(context.?));
             try self_.prompts.appendSlice(testing.allocator, prompt);
             try self_.prompts.append(testing.allocator, '\n');
@@ -1102,7 +1102,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
         read_canceled: bool = false,
         failure: ?anyerror = null,
 
-        fn start(raw: *anyopaque, task_io: Io, allocator: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {
+        fn start(allocator: Allocator, task_io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
             const state: *Self = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Self state
             const child = try Child.spawn(task_io, allocator, options);
             for (options.argv) |arg| if (std.mem.eql(u8, arg, "-G")) return child;
@@ -1111,7 +1111,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
             return child;
         }
 
-        fn terminate(raw: *anyopaque, child: *Child, task_io: Io) void {
+        fn terminate(task_io: Io, raw: *anyopaque, child: *Child) void {
             const state: *Self = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Self state
             const tracked = state.child != null and state.child.? == child.*;
             _ = child.killWait(task_io, 0) catch return;

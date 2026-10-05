@@ -1169,7 +1169,7 @@ const InProcess = struct {
         return error.ConnectionFailed;
     }
 
-    fn close(context: *anyopaque, io: Io) void {
+    fn close(io: Io, context: *anyopaque) void {
         const c = self(context);
         if (c.started) {
             c.request_bytes.deinit();
