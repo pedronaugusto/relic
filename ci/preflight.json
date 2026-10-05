@@ -41,10 +41,6 @@
       "lines": 180,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/lfs/api.zig:send": {
-      "lines": 149,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
     "src/lfs/transfer.zig:runTransfers": {
       "lines": 167,
       "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."

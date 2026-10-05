@@ -1512,67 +1512,18 @@ pub const Client = struct {
         const scratch = scratch_state.allocator();
         var url = request.url;
         var redirects: u8 = 0;
-        var auth_attempts: u8 = 0;
         var retries_left = request.network_retries;
         const has_auth = hasHeader(request.headers, "authorization");
-        // The last refusal's challenges and words, for the helpers and for
-        // a failure's description.
-        var challenges: []const []const u8 = &.{};
-        var said: []const u8 = "";
+        var refusal: Refusal = .{};
         while (true) {
-            var auth_header: ?[]const u8 = null;
-            var cred: ?*Cred = null;
-            var netrc_host: ?[]const u8 = null;
-            var access: Access = .none;
             const access_url = request.access_url orelse url;
-            {
+            const attempt: Attempt = blk: {
                 try c.mutex.lock(c.io);
                 defer c.mutex.unlock(c.io);
-                access = try c.accessFor(access_url);
-                if (!request.authenticated and !has_auth and access == .basic) {
-                    const found = try c.credentialUrl(url, operation);
-                    if (found.inline_auth) |h| auth_header = try scratch.dupe(u8, h) else if (try c.netrcAuth(scratch, found.url.?)) |n| {
-                        // `.netrc` comes before every helper, as in git-lfs,
-                        // and what it gives is not stored with them.
-                        auth_header = n.header;
-                        netrc_host = n.host;
-                    } else if (found.url) |cred_url| {
-                        const cr = try c.credentialFor(cred_url);
-                        if (cr.session.authorization() == null) {
-                            // The server's challenges go to the helpers as
-                            // `wwwauth[]`, unless git-lfs's
-                            // `credential.<url>.skipwwwauth` says not.
-                            const skip = gitLfsBool(try c.settings.urlGet(scratch, "credential", cred_url, "skipwwwauth"), false);
-                            try cr.session.setChallenges(if (skip) &.{} else challenges);
-                            const filled = cr.session.fill(c.io, c.credentialOptions()) catch |err| {
-                                c.describeRefusal(switch (err) {
-                                    error.CredentialHelperQuit => .helper_quit,
-                                    error.ProgramsNotGranted => .programs_not_granted,
-                                    else => if (auth_attempts > 0) .refused else .no_credential,
-                                }, 401, url, said, cr);
-                                if (err == error.CredentialsUnavailable)
-                                    return c.fail(error.AuthenticationFailed, "no credential for {s}", .{stripQuery(cred_url)});
-                                return err;
-                            };
-                            if (!filled) {
-                                c.describeRefusal(.declined, 401, url, said, cr);
-                                return c.fail(error.AuthenticationFailed, "no credential for {s}", .{stripQuery(cred_url)});
-                            }
-                        }
-                        const h = cr.session.authorization() orelse return error.AuthenticationFailed;
-                        auth_header = try scratch.dupe(u8, h);
-                        cred = cr;
-                    }
-                } else if (!request.authenticated and !has_auth) {
-                    // A password in the URL is sent whatever the access
-                    // mode, as git-lfs sends it.
-                    if (UrlParts.parse(url)) |parts| {
-                        if (parts.password) |password| auth_header = try basicHeader(scratch, parts.user orelse "", password);
-                    }
-                }
-            }
+                break :blk try c.authorize(scratch, url, access_url, operation, request.authenticated or has_auth, refusal);
+            };
 
-            const ex = c.exchangeOnce(request, url, auth_header) catch |err| switch (err) {
+            const ex = c.exchangeOnce(request, url, attempt.header) catch |err| switch (err) {
                 error.ConnectionFailed => {
                     if (retries_left > 0) {
                         retries_left -= 1;
@@ -1584,50 +1535,18 @@ pub const Client = struct {
             };
             const status = ex.status();
             if (status == .unauthorized) {
-                const offers = ex.authenticateOffers();
-                challenges = try ex.challenges(scratch);
-                said = ex.refusalText(scratch);
-                ex.close();
-                try c.mutex.lock(c.io);
-                defer c.mutex.unlock(c.io);
-                if (cred) |cr| {
-                    cr.approved = false;
-                    try cr.session.reject(c.io, c.credentialOptions());
-                }
-                if (netrc_host) |h| {
-                    try c.netrc_refused.append(c.gpa, try c.arena.allocator().dupe(u8, h));
-                    continue;
-                }
-                if (has_auth) {
-                    // A header the server itself handed over — an action's,
-                    // or git-lfs-authenticate's — that it no longer takes.
-                    c.dropSshAuth(operation);
-                    c.describeRefusal(.refused, 401, url, said, null);
-                    return c.fail(error.AuthenticationFailed, "HTTP 401 from {s}", .{stripQuery(url)});
-                }
-                if (access == .none) {
-                    if (!offers.basic and offers.other) return error.LfsAccessUnsupported;
-                    try c.setAccess(access_url, .basic);
-                    continue;
-                }
-                auth_attempts += 1;
-                if (auth_attempts >= 3) {
-                    c.describeRefusal(.refused, 401, url, said, cred);
-                    return c.fail(error.AuthenticationFailed, "HTTP 401 from {s}", .{stripQuery(url)});
-                }
+                try c.refused(scratch, ex, url, access_url, operation, has_auth, attempt, &refusal);
                 continue;
             }
-            if (status.class() == .success) {
-                if (cred) |cr| {
-                    try c.mutex.lock(c.io);
-                    defer c.mutex.unlock(c.io);
-                    if (!cr.approved) {
-                        cr.approved = true;
-                        try cr.session.setChallenges(&.{});
-                        try cr.session.approve(c.io, c.credentialOptions());
-                    }
+            if (status.class() == .success) if (attempt.cred) |cr| {
+                try c.mutex.lock(c.io);
+                defer c.mutex.unlock(c.io);
+                if (!cr.approved) {
+                    cr.approved = true;
+                    try cr.session.setChallenges(&.{});
+                    try cr.session.approve(c.io, c.credentialOptions());
                 }
-            }
+            };
             switch (status) {
                 .moved_permanently, .found, .see_other, .temporary_redirect, .permanent_redirect => {
                     const location = ex.location() orelse {
@@ -1646,6 +1565,137 @@ pub const Client = struct {
                 },
                 else => return ex,
             }
+        }
+    }
+
+    /// The last refusal of a request: its challenges and words, for the
+    /// helpers and for a failure's description, and how many credentials
+    /// were refused.
+    const Refusal = struct {
+        challenges: []const []const u8 = &.{},
+        said: []const u8 = "",
+        attempts: u8 = 0,
+    };
+
+    /// What one attempt of a request is sent with.
+    const Attempt = struct {
+        header: ?[]const u8 = null,
+        /// The helpers' credential the header is, to approve or reject.
+        cred: ?*Cred = null,
+        /// The host whose `.netrc` entry the header is.
+        netrc_host: ?[]const u8 = null,
+        access: Access = .none,
+    };
+
+    /// The authorization for an attempt at `url`, as git-lfs chooses it:
+    /// none when the request carries its own (`carried`); under basic
+    /// access a URL's own, else `.netrc`'s, else the helpers', told the
+    /// last refusal's challenges; under none, only a password written in
+    /// the URL. Holds `c.mutex`.
+    fn authorize(
+        c: *Client,
+        scratch: Allocator,
+        url: []const u8,
+        access_url: []const u8,
+        operation: Operation,
+        carried: bool,
+        refusal: Refusal,
+    ) Error!Attempt {
+        var attempt: Attempt = .{ .access = try c.accessFor(access_url) };
+        if (carried) return attempt;
+        if (attempt.access != .basic) {
+            // A password in the URL is sent whatever the access mode, as
+            // git-lfs sends it.
+            if (UrlParts.parse(url)) |parts| {
+                if (parts.password) |password| attempt.header = try basicHeader(scratch, parts.user orelse "", password);
+            }
+            return attempt;
+        }
+        const found = try c.credentialUrl(url, operation);
+        if (found.inline_auth) |h| {
+            attempt.header = try scratch.dupe(u8, h);
+            return attempt;
+        }
+        if (try c.netrcAuth(scratch, found.url.?)) |n| {
+            // `.netrc` comes before every helper, as in git-lfs, and what
+            // it gives is not stored with them.
+            attempt.header = n.header;
+            attempt.netrc_host = n.host;
+            return attempt;
+        }
+        const cred_url = found.url orelse return attempt;
+        const cr = try c.credentialFor(cred_url);
+        if (cr.session.authorization() == null) {
+            // The server's challenges go to the helpers as `wwwauth[]`,
+            // unless git-lfs's `credential.<url>.skipwwwauth` says not.
+            const skip = gitLfsBool(try c.settings.urlGet(scratch, "credential", cred_url, "skipwwwauth"), false);
+            try cr.session.setChallenges(if (skip) &.{} else refusal.challenges);
+            const filled = cr.session.fill(c.io, c.credentialOptions()) catch |err| {
+                c.describeRefusal(switch (err) {
+                    error.CredentialHelperQuit => .helper_quit,
+                    error.ProgramsNotGranted => .programs_not_granted,
+                    else => if (refusal.attempts > 0) .refused else .no_credential,
+                }, 401, url, refusal.said, cr);
+                if (err == error.CredentialsUnavailable)
+                    return c.fail(error.AuthenticationFailed, "no credential for {s}", .{stripQuery(cred_url)});
+                return err;
+            };
+            if (!filled) {
+                c.describeRefusal(.declined, 401, url, refusal.said, cr);
+                return c.fail(error.AuthenticationFailed, "no credential for {s}", .{stripQuery(cred_url)});
+            }
+        }
+        const h = cr.session.authorization() orelse return error.AuthenticationFailed;
+        attempt.header = try scratch.dupe(u8, h);
+        attempt.cred = cr;
+        return attempt;
+    }
+
+    /// A 401 to `attempt`: its credential rejected, and the next attempt
+    /// prepared — another `.netrc` host, basic access, or another
+    /// credential — or the request failed, after three credentials or a
+    /// header the server handed over itself.
+    fn refused(
+        c: *Client,
+        scratch: Allocator,
+        ex: *Exchange,
+        url: []const u8,
+        access_url: []const u8,
+        operation: Operation,
+        has_auth: bool,
+        attempt: Attempt,
+        refusal: *Refusal,
+    ) Error!void {
+        const offers = ex.authenticateOffers();
+        refusal.challenges = try ex.challenges(scratch);
+        refusal.said = ex.refusalText(scratch);
+        ex.close();
+        try c.mutex.lock(c.io);
+        defer c.mutex.unlock(c.io);
+        if (attempt.cred) |cr| {
+            cr.approved = false;
+            try cr.session.reject(c.io, c.credentialOptions());
+        }
+        if (attempt.netrc_host) |h| {
+            try c.netrc_refused.append(c.gpa, try c.arena.allocator().dupe(u8, h));
+            return;
+        }
+        if (has_auth) {
+            // A header the server itself handed over — an action's, or
+            // git-lfs-authenticate's — that it no longer takes.
+            c.dropSshAuth(operation);
+            c.describeRefusal(.refused, 401, url, refusal.said, null);
+            return c.fail(error.AuthenticationFailed, "HTTP 401 from {s}", .{stripQuery(url)});
+        }
+        if (attempt.access == .none) {
+            if (!offers.basic and offers.other) return error.LfsAccessUnsupported;
+            try c.setAccess(access_url, .basic);
+            return;
+        }
+        refusal.attempts += 1;
+        if (refusal.attempts >= 3) {
+            c.describeRefusal(.refused, 401, url, refusal.said, attempt.cred);
+            return c.fail(error.AuthenticationFailed, "HTTP 401 from {s}", .{stripQuery(url)});
         }
     }
 
