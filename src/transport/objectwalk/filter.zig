@@ -5,8 +5,6 @@ const hash = @import("../../hash.zig");
 const Kind = hash.Kind;
 const Oid = hash.Oid;
 const object = @import("../../object.zig");
-const pack = @import("../../odb/pack.zig");
-const fs = @import("../../repo/fs.zig");
 const odb_mod = @import("../../odb.zig");
 const ignore = @import("../../worktree/ignore.zig");
 /// Errors from walking objects.

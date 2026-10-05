@@ -63,7 +63,6 @@ const Io = std.Io;
 
 const hash = @import("hash.zig");
 const odb_mod = @import("odb.zig");
-const pack = @import("odb/pack.zig");
 const program = @import("repo/program.zig");
 const config_mod = @import("config.zig");
 const warning = @import("repo/warning.zig");

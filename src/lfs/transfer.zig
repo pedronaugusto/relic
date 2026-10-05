@@ -902,8 +902,10 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
         request_action = .{ .href = a.href, .header = headers.items, .expires_at = a.expires_at, .expires_in = a.expires_in orelse 0 };
     }
     const Progress = struct {
+        pub const Self = @This();
+
         state: *Run,
-        pub fn bytes(p: @This(), n: u64) void {
+        pub fn bytes(p: Self, n: u64) void {
             p.state.say(.{ .bytes = n });
         }
     };
@@ -989,11 +991,12 @@ fn runJobs(state: *Run) Error!void {
 
 test "a transfer worker observes a fatal error under its publication lock" {
     const Controlled = struct {
+        const Self = @This();
         run: *Run,
         waited: bool = false,
 
         fn wait(raw: ?*anyopaque, _: *const u32, _: u32) void {
-            const state: *@This() = @ptrCast(@alignCast(raw.?));
+            const state: *Self = @ptrCast(@alignCast(raw.?));
             state.waited = true;
             // Another worker already holds the lock, and publishes its
             // failure before handing it to this worker.

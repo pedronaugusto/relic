@@ -1673,11 +1673,12 @@ test "tasks sending at once through one client share the connections it keeps" {
 
 fn checkConcurrentTimeoutFallbacks(notify: bool, readiness_limit: Io.Duration) !void {
     const Controlled = struct {
+        const Self = @This();
         waiting: std.atomic.Value(usize) = .init(0),
         ready: Io.Event = .unset,
         waiting_on: *const anyopaque = undefined,
         notify: bool,
-        threadlocal var state: ?*@This() = null;
+        threadlocal var state: ?*Self = null;
         threadlocal var counted: bool = false;
 
         fn wait(_: ?*anyopaque, ptr: *const u32, expected: u32) void {
@@ -1694,7 +1695,7 @@ fn checkConcurrentTimeoutFallbacks(notify: bool, readiness_limit: Io.Duration) !
             return error.ConnectionRefused;
         }
 
-        fn run(c: *Client, control: *@This(), result: *Error!Io.net.Stream) void {
+        fn run(c: *Client, control: *Self, result: *Error!Io.net.Stream) void {
             state = control;
             counted = false;
             defer state = null;
@@ -1759,6 +1760,7 @@ test "the HTTP counter fixture gives up when worker readiness is not signaled" {
 
 fn checkWatchdogActivity(initial_start: u64, sampled: u64, fresh: u64) !void {
     const Controlled = struct {
+        const Self = @This();
         conn: *Connection,
         sleeps: usize = 0,
         shutdowns: usize = 0,
@@ -1767,14 +1769,14 @@ fn checkWatchdogActivity(initial_start: u64, sampled: u64, fresh: u64) !void {
         fresh: u64,
 
         fn sleep(context: ?*anyopaque, _: Io.Timeout) Io.Cancelable!void {
-            const state: *@This() = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Controlled state as userdata
+            const state: *Self = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Self state as userdata
             state.sleeps += 1;
             if (state.sleeps == 2) state.fresh_expired = state.conn.timed_out.load(.acquire);
             if (state.sleeps > 2) return error.Canceled;
         }
 
         fn now(context: ?*anyopaque, _: Io.Clock) Io.Timestamp {
-            const state: *@This() = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Controlled state as userdata
+            const state: *Self = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Self state as userdata
             if (state.sleeps == 1) {
                 // Refresh activity while the clock is sampled. The cases
                 // cover starts before and after the sample's timestamp.
@@ -1785,7 +1787,7 @@ fn checkWatchdogActivity(initial_start: u64, sampled: u64, fresh: u64) !void {
         }
 
         fn shutdown(context: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.ShutdownHow) Io.net.ShutdownError!void {
-            const state: *@This() = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Controlled state as userdata
+            const state: *Self = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Self state as userdata
             state.shutdowns += 1;
         }
     };
@@ -1823,7 +1825,8 @@ test "the watchdog cannot expire activity refreshed before its clock sample" {
 
 test "a connection expires at its controlled connect deadline and cancels the dial" {
     const Controlled = struct {
-        var active: *@This() = undefined;
+        const Self = @This();
+        var active: *Self = undefined;
         const base = std.testing.io;
         clock: std.atomic.Value(i64) = .init(0),
         connecting: Io.Event = .unset,
@@ -1865,7 +1868,7 @@ test "a connection expires at its controlled connect deadline and cancels the di
             }
         }
 
-        fn run(client: *Client, state: *@This()) void {
+        fn run(client: *Client, state: *Self) void {
             state.result = Connection.dial(client, "127.0.0.1", 1);
             state.done.set(base);
         }

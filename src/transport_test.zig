@@ -85,11 +85,12 @@ test "a fetch over smart HTTP leaves what git fetch leaves, in v2 and in v0" {
         defer repo.deinit(io);
         // The server's progress comes to the caller, and only there.
         const Heard = struct {
+            const Self = @This();
             remote: usize = 0,
             received: u64 = 0,
             indexed: u64 = 0,
             fn report(context: ?*anyopaque, event: progress_mod.Event) void {
-                const self_: *@This() = @ptrCast(@alignCast(context.?));
+                const self_: *Self = @ptrCast(@alignCast(context.?));
                 switch (event) {
                     .remote => self_.remote += 1,
                     .received => |n| self_.received = n,
@@ -308,9 +309,10 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
 
     // The caller's prompt, where no askpass is set.
     const Asked = struct {
+        const Self = @This();
         prompts: std.ArrayList(u8) = .empty,
         fn ask(context: ?*anyopaque, allocator: Allocator, field: credential.Field, prompt: []const u8) Allocator.Error!?[]u8 {
-            const self_: *@This() = @ptrCast(@alignCast(context.?));
+            const self_: *Self = @ptrCast(@alignCast(context.?));
             try self_.prompts.appendSlice(testing.allocator, prompt);
             try self_.prompts.append(testing.allocator, '\n');
             const answer = try allocator.dupe(u8, switch (field) {
@@ -711,8 +713,7 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
     const secure = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(secure);
 
-    const Scheme = @FieldType(testremote.Proxy, "scheme");
-    const Case = struct { scheme: Scheme, method: ?[]const u8 = null, ok: bool = true };
+    const Case = struct { scheme: @FieldType(testremote.Proxy, "scheme"), method: ?[]const u8 = null, ok: bool = true };
     for ([_]Case{
         .{ .scheme = .basic },
         .{ .scheme = .basic, .method = "basic" },
@@ -1090,7 +1091,8 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
     const gpa = testing.allocator;
     const Child = @import("dependencies.zig").conduit.Child;
     const Controlled = struct {
-        threadlocal var active: ?*@This() = null;
+        const Self = @This();
+        threadlocal var active: ?*Self = null;
         reading: Io.Event = .unset,
         never_answered: Io.Event = .unset,
         canceled: Io.Event = .unset,
@@ -1101,7 +1103,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
         failure: ?anyerror = null,
 
         fn start(raw: *anyopaque, task_io: Io, allocator: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {
-            const state: *@This() = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Controlled state
+            const state: *Self = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Self state
             const child = try Child.spawn(task_io, allocator, options);
             for (options.argv) |arg| if (std.mem.eql(u8, arg, "-G")) return child;
             state.child = child;
@@ -1110,7 +1112,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
         }
 
         fn terminate(raw: *anyopaque, child: *Child, task_io: Io) void {
-            const state: *@This() = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Controlled state
+            const state: *Self = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Self state
             const tracked = state.child != null and state.child.? == child.*;
             _ = child.killWait(task_io, 0) catch return;
             if (tracked) state.reaped = true;
@@ -1132,7 +1134,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
             return testing.io.vtable.operate(context, operation);
         }
 
-        fn fetch(allocator: Allocator, task_io: Io, repo: *repo_mod.Repository, env: *const std.process.Environ.Map, state: *@This()) void {
+        fn fetch(allocator: Allocator, task_io: Io, repo: *repo_mod.Repository, env: *const std.process.Environ.Map, state: *Self) void {
             active = state;
             defer active = null;
             var outcome = fetch_mod.fetch(allocator, task_io, repo, "origin", .{
@@ -1145,7 +1147,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
             outcome.deinit();
         }
 
-        fn cancel(task: *Io.Future(void), state: *@This()) void {
+        fn cancel(task: *Io.Future(void), state: *Self) void {
             task.cancel(testing.io);
             state.canceled.set(testing.io);
         }

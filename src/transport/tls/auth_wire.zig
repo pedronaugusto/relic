@@ -106,10 +106,13 @@ pub fn signWith(
 
 /// The nonce for record `seq` under `iv` (RFC 8446, 5.3).
 pub fn sequenceNonce(comptime P: type, iv: [P.AEAD.nonce_length]u8, seq: u64) [P.AEAD.nonce_length]u8 {
-    const V = @Vector(P.AEAD.nonce_length, u8);
     const pad = [1]u8{0} ** (P.AEAD.nonce_length - 8);
-    const operand: V = pad ++ @as([8]u8, @bitCast(mem.nativeToBig(u64, seq)));
-    return @as(V, iv) ^ operand;
+    const operand: NonceVector(P) = pad ++ @as([8]u8, @bitCast(mem.nativeToBig(u64, seq)));
+    return @as(NonceVector(P), iv) ^ operand;
+}
+
+fn NonceVector(comptime P: type) type {
+    return @Vector(P.AEAD.nonce_length, u8);
 }
 
 /// The most handshake bytes put in one record the client writes.
@@ -119,6 +122,8 @@ pub const client_fragment_len = 4096;
 /// gathered into records of `client_fragment_len`.
 pub fn Sealer13(comptime P: type) type {
     return struct {
+        const Self = @This();
+
         output: *Writer,
         key: [P.AEAD.key_length]u8,
         iv: [P.AEAD.nonce_length]u8,
@@ -126,7 +131,7 @@ pub fn Sealer13(comptime P: type) type {
         buf: [client_fragment_len + 1]u8 = undefined,
         len: usize = 0,
 
-        pub fn add(s: *@This(), bytes: []const u8) Writer.Error!void {
+        pub fn add(s: *Self, bytes: []const u8) Writer.Error!void {
             var rest = bytes;
             while (rest.len > 0) {
                 const n = @min(rest.len, client_fragment_len - s.len);
@@ -137,7 +142,7 @@ pub fn Sealer13(comptime P: type) type {
             }
         }
 
-        pub fn seal(s: *@This()) Writer.Error!void {
+        pub fn seal(s: *Self) Writer.Error!void {
             if (s.len == 0) return;
             s.buf[s.len] = @intFromEnum(tls.ContentType.handshake);
             const inner = s.buf[0 .. s.len + 1];

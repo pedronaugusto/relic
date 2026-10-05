@@ -24,6 +24,7 @@ const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
 const program = @import("../repo/program.zig");
 const auth = @import("../transport/auth.zig");
+const worktree = @import("../worktree.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 
@@ -513,6 +514,7 @@ test "checkout fetches what the store lacks through the server, many at once, an
     const server = try openServer(fx, &repo);
     defer server.close();
     const Heard = struct {
+        const Self = @This();
         objects: u64 = 0,
         bytes: u64 = 0,
         total: u64 = 0,
@@ -520,7 +522,7 @@ test "checkout fetches what the store lacks through the server, many at once, an
         thread: std.Thread.Id,
         wrong_thread: bool = false,
         fn report(context: ?*anyopaque, event: progress_mod.Event) void {
-            const h: *@This() = @ptrCast(@alignCast(context.?));
+            const h: *Self = @ptrCast(@alignCast(context.?));
             h.calls += 1;
             if (std.Thread.getCurrentId() != h.thread) h.wrong_thread = true;
             switch (event) {
@@ -550,7 +552,6 @@ test "checkout fetches what the store lacks through the server, many at once, an
     var index = try repo.openIndex(io);
     defer index.deinit();
     const tree = (try repo.headTree(io)).?;
-    const worktree = @import("../worktree.zig");
     // Every file is written again, as `git checkout -f` writes it.
     const outcome = try worktree.checkout(gpa, io, ours, &index, &repo.odb, tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher(), .force = true });
     try testing.expectEqual(@as(u32, 0), outcome.lfs_pointers);
@@ -1237,7 +1238,6 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
                 var index = try repo.openIndex(io);
                 defer index.deinit();
                 const tree = (try repo.headTree(io)).?;
-                const worktree = @import("../worktree.zig");
                 // Every file is written again, as `git checkout -f` writes it.
                 const done = worktree.checkout(gpa, io, d, &index, &repo.odb, tree, .{ .rules = rules, .lfs_fetch = fetcher.fetcher(), .force = true });
                 if (skip) {

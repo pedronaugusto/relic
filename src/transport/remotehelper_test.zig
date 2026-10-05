@@ -10,7 +10,6 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Environ = std.process.Environ;
 
-const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const repo_mod = @import("../repo.zig");
 const config_mod = @import("../config.zig");

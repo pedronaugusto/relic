@@ -1785,55 +1785,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z020",
-    "path": "src/transport/httpclient.zig",
-    "source": "threadlocal var state: ?*@This() = null;",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport/httpclient.zig",
-    "source": "fn run(c: *Client, control: *@This(), result: *Error!Io.net.Stream) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport/httpclient.zig",
-    "source": "const state: *@This() = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Controlled state as userdata",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport/httpclient.zig",
-    "source": "const state: *@This() = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Controlled state as userdata",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport/httpclient.zig",
-    "source": "const state: *@This() = @ptrCast(@alignCast(context.?)); // safe: this test Io carries a Controlled state as userdata",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport/httpclient.zig",
-    "source": "var active: *@This() = undefined;",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport/httpclient.zig",
-    "source": "fn run(client: *Client, state: *@This()) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/credential.zig",
     "source": "pub fn fill(s: *Session, io: Io, opts: Options) Error!bool {",
@@ -2030,20 +1981,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z010",
-    "path": "src/transport/objectfilter.zig",
-    "source": "} else return Verdict.zero;",
-    "detail": "prefer `.zero` over `Verdict.zero`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z010",
-    "path": "src/transport/objectfilter.zig",
-    "source": "if (p.seen.contains(oid)) return Verdict.zero;",
-    "detail": "prefer `.zero` over `Verdict.zero`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/protocol.zig",
     "source": "pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Error!Advertisement {",
@@ -2114,27 +2051,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z006",
-    "path": "src/transport/tls/auth_wire.zig",
-    "source": "const V = @Vector(P.AEAD.nonce_length, u8);",
-    "detail": "variable 'V' should be snake_case",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport/tls/auth_wire.zig",
-    "source": "pub fn add(s: *@This(), bytes: []const u8) Writer.Error!void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport/tls/auth_wire.zig",
-    "source": "pub fn seal(s: *@This()) Writer.Error!void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/tls/Client.zig",
     "source": "pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client {",
@@ -2184,13 +2100,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z013",
-    "path": "src/transport/objectwalk.zig",
-    "source": "const ignore = @import(\"../worktree/ignore.zig\");",
-    "detail": "unused import 'ignore'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/filterspec.zig",
     "source": "pub fn parse(arena: Allocator, text: []const u8) Error!Spec {",
@@ -2233,20 +2142,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z013",
-    "path": "src/transport/objectwalk/filter.zig",
-    "source": "const fs = @import(\"../../repo/fs.zig\");",
-    "detail": "unused import 'fs'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/transport/objectwalk/filter.zig",
-    "source": "const pack = @import(\"../../odb/pack.zig\");",
-    "detail": "unused import 'pack'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/httpauth.zig",
     "source": "pub fn parse(arena: Allocator, value: []const u8) Error![]const Challenge {",
@@ -2272,13 +2167,6 @@
     "path": "src/transport/push.zig",
     "source": "pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, options: Options) Error!Outcome {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport/push.zig",
-    "source": "const self: *@This() = @ptrCast(@alignCast(context.?));",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -5152,13 +5040,6 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z006",
-    "path": "src/transport_test.zig",
-    "source": "const Scheme = @FieldType(testremote.Proxy, \"scheme\");",
-    "detail": "variable 'Scheme' should be snake_case",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z023",
     "path": "src/transport_test.zig",
     "source": "fn start(raw: *anyopaque, task_io: Io, allocator: Allocator, options: Child.SpawnOptions) Child.SpawnError!Child {",
@@ -5177,55 +5058,6 @@
     "path": "src/transport_test.zig",
     "source": "fn terminate(raw: *anyopaque, child: *Child, task_io: Io) void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport_test.zig",
-    "source": "const self_: *@This() = @ptrCast(@alignCast(context.?));",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport_test.zig",
-    "source": "const self_: *@This() = @ptrCast(@alignCast(context.?));",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport_test.zig",
-    "source": "threadlocal var active: ?*@This() = null;",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport_test.zig",
-    "source": "const state: *@This() = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Controlled state",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport_test.zig",
-    "source": "const state: *@This() = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Controlled state",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport_test.zig",
-    "source": "fn fetch(allocator: Allocator, task_io: Io, repo: *repo_mod.Repository, env: *const std.process.Environ.Map, state: *@This()) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/transport_test.zig",
-    "source": "fn cancel(task: *Io.Future(void), state: *@This()) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
@@ -8876,27 +8708,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z020",
-    "path": "src/lfs/transfer.zig",
-    "source": "const state: *@This() = @ptrCast(@alignCast(raw.?));",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z007",
-    "path": "src/lfs/transfer_test.zig",
-    "source": "const worktree = @import(\"../worktree.zig\");",
-    "detail": "duplicate import '\"../worktree.zig\"'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/lfs/transfer_test.zig",
-    "source": "const h: *@This() = @ptrCast(@alignCast(context.?));",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn lock(server: *lfsapi.Server, repo: *Repository, path: []const u8, arena: Allocator, options: Options) Error!Acquired {",
@@ -10262,13 +10073,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z013",
-    "path": "src/transport.zig",
-    "source": "const pack = @import(\"odb/pack.zig\");",
-    "detail": "unused import 'pack'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z020",
     "path": "examples/usage.zig",
     "source": "threadlocal var state: ?*@This() = null;",
@@ -10367,13 +10171,6 @@
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {
-    "rule": "Z013",
-    "path": "src/transport/remotehelper_test.zig",
-    "source": "const hash = @import(\"../hash.zig\");",
-    "detail": "unused import 'hash'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn start(gpa: Allocator, io: Io, spec: Spec, options: StartOptions) Error!*Helper {",
@@ -10413,13 +10210,6 @@
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn push(h: *Helper, gpa: Allocator, commands: []const PushCommand, options: PushOptions) Error!sendpack.Report {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/transport/remotehelper.zig",
-    "source": "const refs_mod = @import(\"../refs.zig\");",
-    "detail": "unused import 'refs_mod'",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {
@@ -10686,13 +10476,6 @@
     "path": "src/lfs/transfer.zig",
     "source": "fn standaloneAgent(server: *lfsapi.Server, arena: Allocator, endpoint: lfsapi.Endpoint) Error!?[]const u8 {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/lfs/transfer.zig",
-    "source": "pub fn bytes(p: @This(), n: u64) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {

@@ -27,7 +27,6 @@ const odb_mod = @import("../odb.zig");
 const pack = @import("../odb/pack.zig");
 const revwalk = @import("../revwalk.zig");
 const objectfilter = @import("objectfilter.zig");
-const ignore = @import("../worktree/ignore.zig");
 const bitmap = @import("../odb/bitmap.zig");
 const indexpack = @import("../odb/indexpack.zig");
 const reachability = @import("../odb/bitmap/reachability.zig");

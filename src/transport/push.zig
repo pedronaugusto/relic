@@ -957,11 +957,12 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
     twins.git_settings = &.{ "-c", "core.hooksPath=.git/hooks" };
 
     const Seen = struct {
+        const Self = @This();
         text: std.ArrayList(u8) = .empty,
         allow: bool = true,
         fn run(context: ?*anyopaque, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool {
             _ = url;
-            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const self: *Self = @ptrCast(@alignCast(context.?));
             self.text.print(testing.allocator, "{s}\n", .{remote}) catch return false;
             for (updates) |u| {
                 self.text.print(testing.allocator, "{s} {f} {s} {f}\n", .{ u.local_ref, u.local_oid, u.remote_ref, u.remote_oid }) catch return false;

@@ -33,7 +33,6 @@ const Environ = std.process.Environ;
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const repo_mod = @import("../repo.zig");
-const refs_mod = @import("../refs.zig");
 const program = @import("../repo/program.zig");
 const config_mod = @import("../config.zig");
 const cquote = @import("../cquote.zig");

@@ -280,9 +280,9 @@ const Traversal = struct {
         if (p.skipping) |skipped| {
             if (sit == .end_tree and skipped.eql(oid)) {
                 p.skipping = null;
-            } else return Verdict.zero;
+            } else return .zero;
         }
-        if (p.seen.contains(oid)) return Verdict.zero;
+        if (p.seen.contains(oid)) return .zero;
         const v = try t.verdict(p.state, sit, oid, path);
         if (v.seen) try p.seen.put(t.a, oid, {});
         if (v.skip) p.skipping = oid;
