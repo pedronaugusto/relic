@@ -29,7 +29,7 @@ const Fixture = struct {
         errdefer tmp.cleanup();
         const root = try testremote.absolutePath(gpa, io, tmp.dir);
         errdefer gpa.free(root);
-        for ([_][]const u8{ "home", "objects" }) |name| try tmp.dir.createDirPath(io, name);
+        for ([_][]const u8{ "home", "objects with space" }) |name| try tmp.dir.createDirPath(io, name);
         const home = try std.fmt.allocPrint(gpa, "{s}/home", .{root});
         defer gpa.free(home);
         var env = try testlfs.environ(gpa, home);
@@ -71,11 +71,11 @@ const Fixture = struct {
         }) |kv| try fx.git(d, &.{ "config", kv[0], kv[1] });
         const agent = @import("build_options").lfs_agent_path;
         try fx.git(d, &.{ "config", "lfs.customtransfer.agent.path", agent });
-        const objects = try fx.path("objects");
+        const objects = try fx.path("objects with space");
         defer fx.gpa.free(objects);
         const log_dir = try fx.path(logs);
         defer fx.gpa.free(log_dir);
-        const args = try std.fmt.allocPrint(fx.gpa, "{s} {s}", .{ objects, log_dir });
+        const args = try std.fmt.allocPrint(fx.gpa, "'{s}' '{s}'", .{ objects, log_dir });
         defer fx.gpa.free(args);
         try fx.git(d, &.{ "config", "lfs.customtransfer.agent.args", args });
         for (extra) |kv| try fx.git(d, &.{ "config", kv[0], kv[1] });
@@ -186,11 +186,11 @@ test "a standalone agent is sent what git-lfs sends it, an upload and a download
     for ([_][2][]const u8{ .{ "theirs", "logs-theirs-down" }, .{ "ours", "logs-ours-down" } }) |pair| {
         const d = try fx.tmp.dir.openDir(io, pair[0], .{});
         defer d.close(io);
-        const objects = try fx.path("objects");
+        const objects = try fx.path("objects with space");
         defer gpa.free(objects);
         const log_dir = try fx.path(pair[1]);
         defer gpa.free(log_dir);
-        const args = try std.fmt.allocPrint(gpa, "{s} {s}", .{ objects, log_dir });
+        const args = try std.fmt.allocPrint(gpa, "'{s}' '{s}'", .{ objects, log_dir });
         defer gpa.free(args);
         try fx.git(d, &.{ "config", "lfs.customtransfer.agent.args", args });
     }
@@ -253,11 +253,11 @@ test "concurrent agents start as many as git-lfs starts, one when not concurrent
 
     var refusing = try fx.repo("refusing", "logs-refusing", &.{});
     defer refusing.close(io);
-    const objects = try fx.path("objects");
+    const objects = try fx.path("objects with space");
     defer gpa.free(objects);
     const log_dir = try fx.path("logs-refusing");
     defer gpa.free(log_dir);
-    const args = try std.fmt.allocPrint(gpa, "{s} {s} refuse-init", .{ objects, log_dir });
+    const args = try std.fmt.allocPrint(gpa, "'{s}' '{s}' refuse-init", .{ objects, log_dir });
     defer gpa.free(args);
     try fx.git(refusing, &.{ "config", "lfs.customtransfer.agent.args", args });
     try testing.expectError(error.LfsAdapterInitFailed, relicUpload(&fx, refusing));

@@ -2016,13 +2016,13 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
     defer gpa.free(content);
     const oid = testlfs.sha256Hex(content);
     try fx.server.putObject(&oid, content);
-    try fx.tmp.dir.createDirPath(io, "agent-objects");
+    try fx.tmp.dir.createDirPath(io, "agent objects");
     {
         var name_buf: [96]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "agent-objects/{s}", .{&oid});
+        const name = try std.fmt.bufPrint(&name_buf, "agent objects/{s}", .{&oid});
         try fx.tmp.dir.writeFile(io, .{ .sub_path = name, .data = content });
     }
-    const objects = try fx.path("agent-objects");
+    const objects = try fx.path("agent objects");
     defer gpa.free(objects);
     var dirs: [2]Io.Dir = undefined;
     for ([_][]const u8{ "theirs", "ours" }, 0..) |name, i| {
@@ -2033,7 +2033,7 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
         try fx.tmp.dir.createDirPath(io, logs);
         const log_dir = try fx.path(logs);
         defer gpa.free(log_dir);
-        const args = try std.fmt.allocPrint(gpa, "{s} {s}", .{ objects, log_dir });
+        const args = try std.fmt.allocPrint(gpa, "'{s}' '{s}'", .{ objects, log_dir });
         defer gpa.free(args);
         try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.path", @import("build_options").lfs_agent_path });
         try fx.gitIn(dirs[i], &.{ "config", "lfs.customtransfer.agent.args", args });
