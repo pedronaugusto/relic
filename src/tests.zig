@@ -175,4 +175,9 @@ test {
     _ = @import("worktree/dirscan.zig");
     _ = @import("worktree/safepath.zig");
     _ = @import("worktree/sparsecheckout.zig");
+    _ = @import("diff/userdiff.zig");
+    _ = @import("lfs/custom.zig");
+    _ = @import("merge/octopus.zig");
+    _ = @import("transport/remotehelper.zig");
+    _ = @import("worktree/encoding.zig");
 }
