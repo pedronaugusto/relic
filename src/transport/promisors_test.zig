@@ -181,7 +181,7 @@ test "a clone with the filter auto takes it from the promisor remotes taken, as 
     try ws.exec(io, &.{ "-c", "protocol.version=2", "-c", "promisor.acceptFromServer=All", "-c", lop_url, "-c", "remote.lop.promisor=true", "clone", "-q", "--filter=auto", url, "by-git" });
 
     try ws.dir.createDirPath(io, "by-relic");
-    var b = try ws.dir.openDir(io, "by-relic", .{});
+    var b = try ws.dir.openDir(io, "by-relic", .{ .iterate = true });
     defer b.close(io);
     var env = try testremote.environ(gpa);
     defer env.deinit();
