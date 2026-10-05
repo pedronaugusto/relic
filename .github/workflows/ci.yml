@@ -8,6 +8,10 @@ on:
         description: Run the full merge gate
         type: boolean
         default: false
+      adopt:
+        description: Initialize absent source ledgers from findings already on main
+        type: boolean
+        default: false
   pull_request:
   merge_group:
 concurrency:
@@ -20,17 +24,18 @@ permissions:
 jobs:
   skip:
     if: github.event_name != 'push'
-    uses: pedronaugusto/preflight/.github/workflows/skip.yml@f76ee985a56ee2acb107552febbdcaa32cc51853
+    uses: pedronaugusto/preflight/.github/workflows/skip.yml@9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
     with:
       full: ${{ github.event_name != 'workflow_dispatch' || inputs.full }}
-      preflight-ref: f76ee985a56ee2acb107552febbdcaa32cc51853
+      preflight-ref: 9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
   gate:
     needs: skip
     if: always() && (github.event_name == 'push' || (needs.skip.result == 'success' && needs.skip.outputs.docs-only != 'true'))
-    uses: pedronaugusto/preflight/.github/workflows/zig.yml@f76ee985a56ee2acb107552febbdcaa32cc51853
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
     with:
-      preflight-ref: f76ee985a56ee2acb107552febbdcaa32cc51853
+      preflight-ref: 9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
       full: ${{ github.event_name != 'workflow_dispatch' || inputs.full }}
+      adopt: ${{ github.event_name == 'workflow_dispatch' && inputs.adopt }}
       attest: ${{ github.event_name == 'push' }}
       # Generated from ci/workflow.json with zig build plan -- --full false.
       fast-matrix: >-
@@ -52,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: pedronaugusto/preflight
-          ref: f76ee985a56ee2acb107552febbdcaa32cc51853
+          ref: 9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
           path: .preflight
       - uses: mlugg/setup-zig@v2
         with:
@@ -73,7 +78,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: pedronaugusto/preflight
-          ref: f76ee985a56ee2acb107552febbdcaa32cc51853
+          ref: 9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
           path: .preflight
       - uses: ./.preflight/.github/actions/setup
       - run: zig build ci-setup -- master

@@ -1,0 +1,786 @@
+[
+  {
+    "rule": "catch-unreachable",
+    "path": "src/commit/notes.zig",
+    "source": "try c.out.append(c.gpa, .{ .object = Oid.fromRaw(t2.repo.objectFormat(), key[0..t2.rawLen()]) catch unreachable, .note = val });",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/commit/notes.zig",
+    "source": "const hex = std.fmt.bufPrint(&hex_buf, \"{x}\", .{key[0..t.rawLen()]}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/commit/notes.zig",
+    "source": "_ = try t.commit(io, std.fmt.bufPrint(&buf, \"Notes added by 'git notes {s}'\", .{verb}) catch unreachable, options.who);",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/commit/notes.zig",
+    "source": "_ = try t.commit(io, std.fmt.bufPrint(&buf, \"Notes removed by 'git notes {s}'\", .{verb}) catch unreachable, options.who);",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/commit/sequencer.zig",
+    "source": "const text = std.fmt.bufPrint(&buf, \"{s}\\n\", .{if (head.oid) |oid| oid.hex(&hex) else \"\"}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/commit/sequencer.zig",
+    "source": "std.fmt.bufPrint(&buf, \"reset: moving to {s}\", .{oid.hex(&hex)}) catch unreachable",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/config.zig",
+    "source": "const parsed = parseVariableLine(replacement) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/config.zig",
+    "source": "const parsed = parseVariableLine(new_text) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/config/userconfig.zig",
+    "source": "const key = environ.get(std.fmt.bufPrint(&key_buf, \"GIT_CONFIG_KEY_{d}\", .{i}) catch unreachable) orelse",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/config/userconfig.zig",
+    "source": "const value = environ.get(std.fmt.bufPrint(&value_buf, \"GIT_CONFIG_VALUE_{d}\", .{i}) catch unreachable) orelse",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/diff.zig",
+    "source": "return std.fmt.bufPrint(buf, \"Subproject commit {s}\\n\", .{oid.hex(&hex)}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/diff/patchid.zig",
+    "source": "return Oid.fromRaw(db.objectFormat(), result[0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/diff/patchid.zig",
+    "source": "h.update(std.fmt.bufPrint(&buf, \"{o:0>6}\", .{mode.raw()}) catch unreachable);",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/hash.zig",
+    "source": "const header = std.fmt.bufPrint(&buf, \"{s} {d}\\x00\", .{ type_name, size }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/hash/sha1.zig",
+    "source": "_ = std.fmt.bufPrint(&text, \"{x}\", .{&out}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/hash/sha1dc.zig",
+    "source": "_ = std.fmt.hexToBytes(&out, text) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/index.zig",
+    "source": "oid = Oid.fromRaw(kind, data[offset.*..][0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/index.zig",
+    "source": "oids[i] = Oid.fromRaw(kind, data[offset..][0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/index.zig",
+    "source": "const stored = Oid.fromRaw(kind, trailer) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/index.zig",
+    "source": "const base = Oid.fromRaw(index.kind, data[0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/index.zig",
+    "source": "const name = std.fmt.bufPrint(&name_buf, \"sharedindex.{s}\", .{base.hex(&hex)}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/index.zig",
+    "source": ".oid = Oid.fromRaw(kind, b[40..][0..raw_len]) catch unreachable,",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/lfs.zig",
+    "source": "p.encode(&w) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/lfs.zig",
+    "source": "_ = std.fmt.bufPrint(&p.oid, \"{x}\", .{&digest}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/lfs/api.zig",
+    "source": "const port_text = std.fmt.bufPrint(&port_buf, \"{d}\", .{port}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/lfs/transfer.zig",
+    "source": "const want = std.fmt.bufPrint(&want_buf, \"bytes {d}-\", .{from}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/lfs/transfer.zig",
+    "source": "_ = std.fmt.bufPrint(&hex, \"{x}\", .{&digest}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/merge/ort.zig",
+    "source": "return Oid.fromRaw(m.db.objectFormat(), bytes[0..m.db.objectFormat().rawLen()]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/object.zig",
+    "source": "return std.fmt.bufPrint(buf, \"{o}\", .{m.raw()}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/object.zig",
+    "source": "const oid = Oid.fromRaw(it.tree.kind, rest[oid_start..][0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/object/fsck.zig",
+    "source": "return Oid.fromRaw(kind, e.oid) catch unreachable; // safe: decodeEntry took exactly rawLen bytes",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/object/gitdate.zig",
+    "source": "}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "return std.fmt.bufPrint(buf, \"{s}/{s}\", .{ text[0..2], text[2..] }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "const final = std.fmt.bufPrint(&final_buf, \"{s}/{s}\", .{ text[0..2], text[2..] }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "const header = std.fmt.bufPrint(&header_buf, \"{s} {d}\\x00\", .{ t.name(), bytes.len }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "return std.fmt.bufPrint(buf, \"{s}/tmp_obj_{x}\", .{ fan_out, &raw }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "const final_path = std.fmt.bufPrint(&final_buf, \"{s}/{s}\", .{ text[0..2], text[2..] }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "const header = std.fmt.bufPrint(&header_buf, \"{s} {d}\\x00\", .{ t.name(), size }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "const pack_path = std.fmt.bufPrint(&path_buf, \"{s}.pack\", .{named.name}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "const idx_path = std.fmt.bufPrint(&path_buf, \"{s}.idx\", .{named.name}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "_ = std.fmt.bufPrint(&path, \"{x:0>2}\", .{byte}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb.zig",
+    "source": "const base = std.fmt.bufPrint(&base_buf, \"pack-{s}\", .{written.name.hex(&hex)}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/accelerators.zig",
+    "source": "const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/accelerators.zig",
+    "source": "const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/commitgraph.zig",
+    "source": "return Oid.fromRaw(graph.kind, graph.bytes[graph.bytes.len - graph.kind.rawLen() ..]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/commitgraph.zig",
+    "source": "return Oid.fromRaw(graph.kind, graph.bytes[graph.names_at + @as(usize, local) * raw_len ..][0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/commitgraph.zig",
+    "source": "const tree = Oid.fromRaw(graph.kind, row[0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/indexpack.zig",
+    "source": "const trailer = Oid.fromRaw(kind, copied.tail[0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/indexpack.zig",
+    "source": "const pack_name = std.fmt.bufPrint(&pack_name_buf, \"pack-{s}.pack\", .{text}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/indexpack.zig",
+    "source": "const idx_name = std.fmt.bufPrint(&idx_name_buf, \"pack-{s}.idx\", .{text}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/indexpack.zig",
+    "source": "const rev_name = std.fmt.bufPrint(&rev_name_buf, \"pack-{s}.rev\", .{text}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/indexpack.zig",
+    "source": "const trailer = Oid.fromRaw(kind, c.tail[0..kind.rawLen()]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/indexpack.zig",
+    "source": ".base = Oid.fromRaw(x.kind, raw[0..x.kind.rawLen()]) catch unreachable,",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/inflate.zig",
+    "source": "build(.litlen, &d.fixed_litlen, &lens, &countLengths(&lens), litlen_table_bits) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/inflate.zig",
+    "source": "build(.dist, &d.fixed_dist, &dlens, &countLengths(&dlens), dist_table_bits) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/midx.zig",
+    "source": "return Oid.fromRaw(index.kind, index.bytes[index.bytes.len - index.kind.rawLen() ..]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/midx.zig",
+    "source": "return Oid.fromRaw(index.kind, index.bytes[index.oids_at + @as(usize, position) * raw_len ..][0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/pack.zig",
+    "source": "const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/pack.zig",
+    "source": "const pack_checksum = Oid.fromRaw(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/pack.zig",
+    "source": "return Oid.fromRaw(index.kind, index.rawNameAt(i)) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/pack.zig",
+    "source": ".slots = @intCast(@max(1, @min(options.read_cache_bytes / read_block_bytes, std.math.divCeil(u64, stat.size, read_block_bytes) catch unreachable))),",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/pack.zig",
+    "source": "const oid = Oid.fromRaw(p.kind, bytes[i..][0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/pack.zig",
+    "source": "const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/pack.zig",
+    "source": "const pack_name = std.fmt.bufPrint(&pack_name_buf, \"pack-{s}.pack\", .{text}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/pack.zig",
+    "source": "const idx_name = std.fmt.bufPrint(&idx_name_buf, \"pack-{s}.idx\", .{text}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/odb/pack.zig",
+    "source": "const rev_name = std.fmt.bufPrint(&rev_name_buf, \"pack-{s}.rev\", .{text}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/patch/format.zig",
+    "source": "const n = std.unicode.utf8Encode(b, &buf) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/patch/rangediff.zig",
+    "source": "const text = std.fmt.bufPrint(&number, \"{d}\", .{index + 1}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/refs.zig",
+    "source": "const folder = if (base.len == 0) scope.sub_path else if (scope.sub_path.len == 0) base else std.fmt.bufPrint(&buf, \"{s}/{s}\", .{ base, scope.sub_path }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/refs/reftable.zig",
+    "source": "return Oid.fromRaw(t.kind, data[at..][0..len]) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/refs/reftable.zig",
+    "source": "return Oid.fromRaw(.sha1, &raw) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/refs/reftablestack/cache.zig",
+    "source": "}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/refs/reftablestack/transaction.zig",
+    "source": "const list_text = std.fmt.bufPrint(&list_buf, \"{s}\\n\", .{name}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/repo.zig",
+    "source": ".mode => |m| std.fmt.bufPrint(buf, \"0{o}\", .{m}) catch unreachable,",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/repo.zig",
+    "source": "try set(&config, \"core.repositoryformatversion\", std.fmt.bufPrint(&version_buf, \"{d}\", .{version}) catch unreachable);",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/repo/fs.zig",
+    "source": "const line = std.fmt.bufPrint(&text, \"pid {d}\\n\", .{currentPid()}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/repo/fs.zig",
+    "source": "_ = std.fmt.bufPrint(&hex, \"{x}\", .{&raw}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/repo/fs.zig",
+    "source": "return std.fmt.bufPrint(buf, \"{s}{s}\", .{ prefix, hex }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/repo/hooks.zig",
+    "source": "return std.fmt.bufPrint(buf, \"@{d} {c}{d:0>2}{d:0>2}\", .{ who.when_secs, sign, abs / 60, abs % 60 }) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/repo/ident.zig",
+    "source": "const key = std.fmt.bufPrint(&key_buf, \"{s}.email\", .{role_name}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/repo/ident.zig",
+    "source": "const key = std.fmt.bufPrint(&key_buf, \"{s}.name\", .{role_name}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/bundle.zig",
+    "source": "const promisor = std.fmt.bufPrint(&name_buf, \"pack-{s}.promisor\", .{name.hex(&hex)}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/clone.zig",
+    "source": "const idx_name = std.fmt.bufPrint(&idx_buf, \"pack-{s}.idx\", .{name.hex(&hex)}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/fetch.zig",
+    "source": "const idx_name = std.fmt.bufPrint(&idx_buf, \"pack-{s}.idx\", .{name.hex(&hex)}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/filterspec.zig",
+    "source": "const high = std.fmt.charToDigit(text[i + 1], 16) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/filterspec.zig",
+    "source": "const low = std.fmt.charToDigit(text[i + 2], 16) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/httpauth.zig",
+    "source": "const nc = std.fmt.bufPrint(&nc_buf, \"{x:0>8}\", .{d.nc}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/httpclient.zig",
+    "source": "const address = Io.net.IpAddress.parse(\"127.0.0.1\", s.port) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/local.zig",
+    "source": "const executable = std.fmt.bufPrint(&name_buf, \"{s}.exe\", .{name}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/partial.zig",
+    "source": "const file_name = std.fmt.bufPrint(&name_buf, \"pack-{s}.promisor\", .{name.hex(&hex)}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/remotehelper.zig",
+    "source": "_ = try h.option(\"verbosity\", std.fmt.bufPrint(&buf, \"{d}\", .{options.verbosity}) catch unreachable, .raw);",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/remotehelper.zig",
+    "source": "try h.send(std.fmt.bufPrint(&buf, \"connect {s}\\n\", .{service.name()}) catch unreachable);",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/remotehelper.zig",
+    "source": "if (d.depth) |depth| try h.requireOption(\"depth\", std.fmt.bufPrint(&buf, \"{d}\", .{depth}) catch unreachable, .quoted);",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/remotehelper.zig",
+    "source": "if (d.since) |since| try h.requireOption(\"deepen-since\", std.fmt.bufPrint(&buf, \"{d}\", .{since}) catch unreachable, .quoted);",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/smarthttp.zig",
+    "source": "const suffix = std.fmt.bufPrint(&suffix_buf, \"/info/refs?service={s}\", .{h.service.name()}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/smarthttp.zig",
+    "source": "const expected = std.fmt.bufPrint(&expected_buf, \"application/x-{s}-advertisement\", .{h.service.name()}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/smarthttp.zig",
+    "source": "const suffix = std.fmt.bufPrint(&suffix_buf, \"/{s}\", .{h.service.name()}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/smarthttp.zig",
+    "source": "const suffix = std.fmt.bufPrint(&suffix_buf, \"/{s}\", .{h.service.name()}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/smarthttp.zig",
+    "source": "const expected = std.fmt.bufPrint(&expected_buf, \"application/x-{s}-result\", .{h.service.name()}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/ssh.zig",
+    "source": "const port: ?[]const u8 = if (url.port) |p| std.fmt.bufPrint(&port_buf, \"{d}\", .{p}) catch unreachable else null;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/tls/Client.zig",
+    "source": "const record_ct = input.takeEnumNonexhaustive(tls.ContentType, .big) catch unreachable; // already peeked",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/tls/Client.zig",
+    "source": "const record_len = input.takeInt(u16, .big) catch unreachable; // already peeked",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/tls/Client.zig",
+    "source": "const ad = input.take(tls.record_header_len) catch unreachable; // already peeked",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/tls/Client.zig",
+    "source": "const ciphertext = input.take(ciphertext_len) catch unreachable; // already peeked",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/tls/Client.zig",
+    "source": "const auth_tag = (input.takeArray(P.AEAD.tag_length) catch unreachable).*; // already peeked",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/tls/Client.zig",
+    "source": "const ad_header = input.take(tls.record_header_len) catch unreachable; // already peeked",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/tls/Client.zig",
+    "source": "const record_iv = (input.takeArray(P.record_iv_length) catch unreachable).*; // already peeked",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/tls/Client.zig",
+    "source": "const ciphertext = input.take(message_len) catch unreachable; // already peeked",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/tls/Client.zig",
+    "source": "const auth_tag = (input.takeArray(P.mac_length) catch unreachable).*; // already peeked",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/transport/uploadpack.zig",
+    "source": "_ = std.fmt.bufPrint(head[0..4], \"{x:0>4}\", .{bytes.len + 5}) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/worktree/convert.zig",
+    "source": ".hash_only => lfs.hashOnly(&source) catch unreachable,",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  }
+]

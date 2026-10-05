@@ -18,7 +18,7 @@
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
     "src/transport/fetch.zig:fetch": {
-      "lines": 435,
+      "lines": 432,
       "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
     },
     "src/transport/fetchpack.zig:fetchV0": {
@@ -38,7 +38,7 @@
       "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
     },
     "src/odb/indexpack.zig:receive": {
-      "lines": 144,
+      "lines": 142,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
     "src/odb/inflate.zig:build": {
@@ -63,10 +63,6 @@
     },
     "src/lfs/transfer.zig:attemptDownload": {
       "lines": 182,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
-    "src/commit/merging.zig:start": {
-      "lines": 149,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
     "src/odb.zig:verifyPack": {
@@ -129,10 +125,6 @@
       "lines": 154,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/merge/threeway.zig:run": {
-      "lines": 276,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
     "src/transport/tls/Client.zig:init": {
       "lines": 889,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
@@ -158,7 +150,7 @@
       "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
     },
     "src/odb/accelerators.zig:writeCommitGraph": {
-      "lines": 183,
+      "lines": 167,
       "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
     },
     "src/odb/accelerators.zig:buildBitmap": {
@@ -174,7 +166,7 @@
       "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
     },
     "src/patch/format.zig:format": {
-      "lines": 158,
+      "lines": 145,
       "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
     },
     "src/transport/httpsettings.zig:resolveForRemote": {
@@ -232,5 +224,8 @@
       "build",
       "check-tls-fork"
     ]
-  ]
+  ],
+  "unreachable_exceptions": "ci/unreachable-exceptions.json",
+  "debug_print_exceptions": "ci/debug-print-exceptions.json",
+  "file_name_exceptions": "ci/file-name-exceptions.json"
 }
