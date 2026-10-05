@@ -219,6 +219,7 @@ const testing = std.testing;
 test "names are read as git compares them" {
     try testing.expectEqual(Encoding.utf16le, Encoding.fromName("UTF-16LE").?);
     try testing.expectEqual(Encoding.utf16le, Encoding.fromName("utf16le").?);
+    try testing.expectEqual(Encoding.utf16be, Encoding.fromName("utf16be").?);
     try testing.expectEqual(Encoding.utf16be_bom, Encoding.fromName("UTF-16BE-BOM").?);
     try testing.expectEqual(Encoding.utf32, Encoding.fromName("Utf-32").?);
     try testing.expect(Encoding.fromName("SHIFT-JIS") == null);
