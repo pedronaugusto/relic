@@ -29,6 +29,7 @@ const revwalk = @import("../revwalk.zig");
 const config_mod = @import("../config.zig");
 const strategy = @import("strategy.zig");
 const convert = @import("../worktree/convert.zig");
+const attributes = @import("../worktree/attributes.zig");
 const filter = @import("../worktree/filter.zig");
 const program = @import("../repo/program.zig");
 const diff = @import("../diff.zig");
@@ -340,7 +341,7 @@ fn carry(
     // every subtree the two share, so a pick costs what it changes.
     var tree_changes = try diff.tree(gpa, io, db, ours, merged.tree, .{});
     defer tree_changes.deinit();
-    var desired: std.array_hash_map.String(?TreeEntry) = .empty;
+    var desired: Desired = .empty;
     for (tree_changes.items) |change| {
         const path = try arena.dupe(u8, change.path());
         try desired.put(arena, path, if (change.new) |e| .{ .mode = e.mode, .oid = e.oid } else null);
@@ -371,50 +372,10 @@ fn carry(
         return err;
     };
 
-    // Removals first, so that a directory the merge turns into a file is
-    // gone before the file is written.
-    var outcome_removed: u32 = 0;
-    var outcome_written: u32 = 0;
-    var i = changes.items.len;
-    while (i > 0) {
-        i -= 1;
-        const path = changes.items[i];
-        if (desired.get(path).? != null) continue;
-        const entry = index.find(path).?;
-        if (entry.skip_worktree) continue;
-        if (entry.mode == .gitlink) {
-            // Only an empty submodule directory goes, as with git.
-            try removeIfEmpty(io, wt, path);
-            outcome_removed += 1;
-            continue;
-        }
-        try worktree.removeEntry(io, wt, path);
-        outcome_removed += 1;
-    }
-
-    // The files are written under the attributes git's checkout of the
-    // merge reads: the merged tree's own `.gitattributes` first, as git
-    // reads them from the index it is writing, and a working tree file
-    // only for a directory the tree has none in. A `.gitattributes` the
-    // merge brings therefore applies to the files written with it, itself
-    // included -- except at the top when renormalizing read attributes:
-    // git's checkout keeps the top level its renormalizing read, the
-    // merge's own file or else the working tree's as it was before
-    // anything is written, which `enter` reads first.
+    const outcome_removed = try removeGone(io, wt, index, changes.items, &desired);
     var write_attrs = try repo.loadAttrs(io);
     defer write_attrs.deinit();
-    // Only the `.gitattributes` above a path being written can say how it
-    // is written.
-    var merged_entries = try attributesAbove(arena, io, db, merged.tree, changes.items);
-    if (merged.renormalize_read_attributes) {
-        _ = merged_entries.remove(".gitattributes");
-        if (merged.merged_attributes_blob) |oid| {
-            const found = try db.read(io, oid);
-            defer db.allocator().free(found.bytes);
-            try write_attrs.addText(try arena.dupe(u8, found.bytes), "", ".gitattributes", 1);
-        }
-    }
-    try worktree.addTreeAttributes(arena, io, db, &write_attrs, &merged_entries);
+    try mergedAttributes(arena, io, db, &write_attrs, merged, changes.items);
     var write_rules = rules;
     write_rules.attrs = &write_attrs;
 
@@ -428,64 +389,20 @@ fn carry(
     });
     defer conv.deinit();
     var stats: std.StringHashMapUnmanaged(fs.Stat) = .empty;
-    for (changes.items) |path| {
-        const want = (desired.get(path).?) orelse continue;
-        if (index.find(path)) |entry| {
-            // A clean change to a path outside the sparse patterns stays out
-            // of the working tree; a conflict is brought in, because someone
-            // has to resolve it.
-            if (entry.skip_worktree and !conflicted.contains(path)) continue;
-        }
-        if (try fs.statAt(io, wt, path)) |found| {
-            if (found.kind == .directory) {
-                // A submodule's checkout is left as it is, as git leaves it
-                // without `--recurse-submodules`; the index records the
-                // new commit.
-                if (want.mode == .gitlink) {
-                    if (index.find(path)) |old| {
-                        if (old.mode == .gitlink) continue;
-                    }
-                }
-                try wt.deleteTree(io, path);
-            }
-        }
-        try write_attrs.enter(io, wt, path);
-        const written = try worktree.writeEntry(gpa, io, wt, db, &conv, path, want.mode, want.oid, write_rules);
-        try stats.put(arena, path, written.stat);
-        outcome_written += 1;
-    }
+    const outcome_written = try writeChanged(.{
+        .gpa = gpa,
+        .arena = arena,
+        .io = io,
+        .wt = wt,
+        .db = db,
+        .index = index,
+        .conv = &conv,
+        .attrs = &write_attrs,
+        .rules = write_rules,
+    }, changes.items, &desired, &conflicted, &stats);
 
-    // The index, changed where the merge changed it and nowhere else:
-    // every other entry keeps what the index knew about it, a changed one
-    // takes the stat of what was just written, and a conflict is its
-    // stages.
-    var leaving: std.ArrayList([]const u8) = .empty;
-    var coming: std.ArrayList(index_mod.Entry) = .empty;
     const cache_tree = try index.cacheTree();
-    for (changes.items) |path| {
-        cache_tree.invalidate(path);
-        const old = index.find(path);
-        if (old != null) try leaving.append(arena, path);
-        if (conflicted.contains(path)) continue;
-        const want = desired.get(path).? orelse continue;
-        var entry: index_mod.Entry = .{ .path = path, .oid = want.oid, .mode = want.mode };
-        if (old) |o| entry.skip_worktree = o.skip_worktree;
-        if (stats.get(path)) |stat| entry.stat = stat;
-        try coming.append(arena, entry);
-    }
-    for (conflicted.keys(), conflicted.values()) |path, c| {
-        cache_tree.invalidate(path);
-        if (!desired.contains(path) and index.find(path) != null) try leaving.append(arena, path);
-        for (c.stages, 0..) |stage_entry, at| {
-            const st = stage_entry orelse continue;
-            // git's index takes a mode of nothing as a regular file.
-            const mode = object.Mode.fromRaw(st.mode) catch .file;
-            try coming.append(arena, .{ .path = path, .oid = st.oid, .mode = mode, .stage = @intCast(at + 1) });
-        }
-    }
-    std.mem.sort([]const u8, leaving.items, {}, lessThanPath);
-    index.removeMany(leaving.items);
-    try index.addMany(coming.items);
+    try updateIndex(arena, index, changes.items, &desired, &conflicted, &stats);
 
     const conflicts = try arena.alloc(Conflict, conflicted.count());
     for (conflicted.keys(), conflicted.values(), conflicts) |path, c, *out| {
@@ -515,6 +432,157 @@ fn carry(
         .removed = outcome_removed,
         .messages = messages,
     };
+}
+
+/// Each path the merge changes, with what the merged tree has there:
+/// `null` where it has nothing.
+const Desired = std.array_hash_map.String(?TreeEntry);
+
+/// Remove what the merge takes away, last path first, so that a directory
+/// the merge turns into a file is gone before the file is written. How
+/// many went.
+fn removeGone(io: Io, wt: Io.Dir, index: *const Index, changes: []const []const u8, desired: *const Desired) Error!u32 {
+    var removed: u32 = 0;
+    var i = changes.len;
+    while (i > 0) {
+        i -= 1;
+        const path = changes[i];
+        if (desired.get(path).? != null) continue;
+        // A path the merge removes is one ours, and so the index, has.
+        const entry = index.find(path).?;
+        if (entry.skip_worktree) continue;
+        if (entry.mode == .gitlink) {
+            // Only an empty submodule directory goes, as with git.
+            try removeIfEmpty(io, wt, path);
+            removed += 1;
+            continue;
+        }
+        try worktree.removeEntry(io, wt, path);
+        removed += 1;
+    }
+    return removed;
+}
+
+/// The attributes git's checkout of the merge reads, into `write_attrs`:
+/// the merged tree's own `.gitattributes` first, as git reads them from
+/// the index it is writing, and a working tree file only for a directory
+/// the tree has none in. A `.gitattributes` the merge brings therefore
+/// applies to the files written with it, itself included -- except at the
+/// top when renormalizing read attributes: git's checkout keeps the top
+/// level its renormalizing read, the merge's own file or else the working
+/// tree's as it was before anything is written, which `enter` reads first.
+fn mergedAttributes(
+    arena: Allocator,
+    io: Io,
+    db: *odb_mod.Odb,
+    write_attrs: *attributes.Attrs,
+    merged: Merged,
+    changes: []const []const u8,
+) Error!void {
+    // Only the `.gitattributes` above a path being written can say how it
+    // is written.
+    var merged_entries = try attributesAbove(arena, io, db, merged.tree, changes);
+    if (merged.renormalize_read_attributes) {
+        _ = merged_entries.remove(".gitattributes");
+        if (merged.merged_attributes_blob) |oid| {
+            const found = try db.read(io, oid);
+            defer db.allocator().free(found.bytes);
+            try write_attrs.addText(try arena.dupe(u8, found.bytes), "", ".gitattributes", 1);
+        }
+    }
+    try worktree.addTreeAttributes(arena, io, db, write_attrs, &merged_entries);
+}
+
+/// What `writeChanged` writes with.
+const Writer = struct {
+    gpa: Allocator,
+    arena: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    db: *odb_mod.Odb,
+    index: *const Index,
+    conv: *convert.Session,
+    attrs: *attributes.Attrs,
+    rules: worktree.Rules,
+};
+
+/// Write every file the merge changes, recording each one's stat in
+/// `stats`. How many were written.
+fn writeChanged(
+    w: Writer,
+    changes: []const []const u8,
+    desired: *const Desired,
+    conflicted: *const std.array_hash_map.String(ort.Conflicted),
+    stats: *std.StringHashMapUnmanaged(fs.Stat),
+) Error!u32 {
+    var written_count: u32 = 0;
+    for (changes) |path| {
+        const want = (desired.get(path).?) orelse continue;
+        if (w.index.find(path)) |entry| {
+            // A clean change to a path outside the sparse patterns stays out
+            // of the working tree; a conflict is brought in, because someone
+            // has to resolve it.
+            if (entry.skip_worktree and !conflicted.contains(path)) continue;
+        }
+        if (try fs.statAt(w.io, w.wt, path)) |found| {
+            if (found.kind == .directory) {
+                // A submodule's checkout is left as it is, as git leaves it
+                // without `--recurse-submodules`; the index records the
+                // new commit.
+                if (want.mode == .gitlink) {
+                    if (w.index.find(path)) |old| {
+                        if (old.mode == .gitlink) continue;
+                    }
+                }
+                try w.wt.deleteTree(w.io, path);
+            }
+        }
+        try w.attrs.enter(w.io, w.wt, path);
+        const written = try worktree.writeEntry(w.gpa, w.io, w.wt, w.db, w.conv, path, want.mode, want.oid, w.rules);
+        try stats.put(w.arena, path, written.stat);
+        written_count += 1;
+    }
+    return written_count;
+}
+
+/// The index, changed where the merge changed it and nowhere else: every
+/// other entry keeps what the index knew about it, a changed one takes the
+/// stat of what was just written, and a conflict is its stages.
+fn updateIndex(
+    arena: Allocator,
+    index: *Index,
+    changes: []const []const u8,
+    desired: *const Desired,
+    conflicted: *const std.array_hash_map.String(ort.Conflicted),
+    stats: *const std.StringHashMapUnmanaged(fs.Stat),
+) Error!void {
+    var leaving: std.ArrayList([]const u8) = .empty;
+    var coming: std.ArrayList(index_mod.Entry) = .empty;
+    const cache_tree = try index.cacheTree();
+    for (changes) |path| {
+        cache_tree.invalidate(path);
+        const old = index.find(path);
+        if (old != null) try leaving.append(arena, path);
+        if (conflicted.contains(path)) continue;
+        const want = desired.get(path).? orelse continue;
+        var entry: index_mod.Entry = .{ .path = path, .oid = want.oid, .mode = want.mode };
+        if (old) |o| entry.skip_worktree = o.skip_worktree;
+        if (stats.get(path)) |stat| entry.stat = stat;
+        try coming.append(arena, entry);
+    }
+    for (conflicted.keys(), conflicted.values()) |path, c| {
+        cache_tree.invalidate(path);
+        if (!desired.contains(path) and index.find(path) != null) try leaving.append(arena, path);
+        for (c.stages, 0..) |stage_entry, at| {
+            const st = stage_entry orelse continue;
+            // git's index takes a mode of nothing as a regular file.
+            const mode = object.Mode.fromRaw(st.mode) catch .file;
+            try coming.append(arena, .{ .path = path, .oid = st.oid, .mode = mode, .stage = @intCast(at + 1) });
+        }
+    }
+    std.mem.sort([]const u8, leaving.items, {}, lessThanPath);
+    index.removeMany(leaving.items);
+    try index.addMany(coming.items);
 }
 
 /// The submodules a merge meets, opened from the working tree where they

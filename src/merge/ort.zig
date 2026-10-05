@@ -1866,54 +1866,7 @@ const Merge = struct {
                 ci.clean = false;
                 ci.result = ci.stages[0];
                 ci.is_null = ci.result.mode == 0;
-            } else {
-                const o_mode = ci.stages[0].mode;
-                const a_mode = ci.stages[1].mode;
-                const b_mode = ci.stages[2].mode;
-                var rename_a = false;
-                var rename_b = false;
-                if (isReg(a_mode)) {
-                    rename_a = true;
-                } else if (isReg(b_mode)) {
-                    rename_b = true;
-                } else {
-                    rename_a = true;
-                    rename_b = true;
-                }
-                var a_path: ?[]const u8 = null;
-                var b_path: ?[]const u8 = null;
-                if (rename_a) a_path = try m.uniquePath(path, m.branch1);
-                if (rename_b) b_path = try m.uniquePath(path, m.branch2);
-                if (rename_a and rename_b) {
-                    try m.pathMsg("CONFLICT (distinct types): {s} had different types on each side; renamed both of them so each can be recorded somewhere.", .distinct_modes, path, a_path, b_path, &.{}, .{path});
-                } else {
-                    try m.pathMsg("CONFLICT (distinct types): {s} had different types on each side; renamed one of them so each can be recorded somewhere.", .distinct_modes, path, if (rename_a) a_path else b_path, null, &.{}, .{path});
-                }
-                ci.clean = false;
-                const new_ci = try m.arena.create(Info);
-                new_ci.* = ci.*;
-                new_ci.result = ci.stages[2];
-                new_ci.stages[1] = .{ .oid = m.zero() };
-                new_ci.filemask = 5;
-                if ((b_mode & s_ifmt) != (o_mode & s_ifmt)) {
-                    new_ci.stages[0] = .{ .oid = m.zero() };
-                    new_ci.filemask = 4;
-                }
-                ci.result = ci.stages[1];
-                ci.stages[2] = .{ .oid = m.zero() };
-                ci.filemask = 3;
-                if ((a_mode & s_ifmt) != (o_mode & s_ifmt)) {
-                    ci.stages[0] = .{ .oid = m.zero() };
-                    ci.filemask = 2;
-                }
-                if (rename_a) try m.paths.put(m.arena, a_path.?, ci);
-                if (!rename_b) b_path = path;
-                try m.paths.put(m.arena, b_path.?, new_ci);
-                if (rename_a and rename_b) _ = m.paths.remove(path);
-                try m.conflicted.put(m.arena, b_path.?, new_ci);
-                try m.recordEntryForTree(meta, b_path.?, new_ci);
-                if (a_path) |p| path = p;
-            }
+            } else path = try m.distinctTypes(path, ci, meta);
         } else if (ci.filemask >= 6) {
             var merged_file: Version = .{ .oid = m.zero() };
             const clean_merge = try m.handleContentMerge(path, ci.stages[0], ci.stages[1], ci.stages[2], ci.pathnames, m.call_depth * 2, &merged_file);
@@ -1964,6 +1917,59 @@ const Merge = struct {
 
         if (!ci.clean) try m.conflicted.put(m.arena, path, ci);
         try m.recordEntryForTree(meta, path, ci);
+    }
+
+    /// `process_entry` for a path whose sides are of different types, a
+    /// file and a symlink or a submodule: each is renamed aside, both
+    /// unless one is a regular file, so that each can be recorded. The path
+    /// the entry goes on under.
+    fn distinctTypes(m: *Merge, path: []const u8, ci: *Info, meta: *DirMetadata) Error![]const u8 {
+        const o_mode = ci.stages[0].mode;
+        const a_mode = ci.stages[1].mode;
+        const b_mode = ci.stages[2].mode;
+        var rename_a = false;
+        var rename_b = false;
+        if (isReg(a_mode)) {
+            rename_a = true;
+        } else if (isReg(b_mode)) {
+            rename_b = true;
+        } else {
+            rename_a = true;
+            rename_b = true;
+        }
+        var a_path: ?[]const u8 = null;
+        var b_path: ?[]const u8 = null;
+        if (rename_a) a_path = try m.uniquePath(path, m.branch1);
+        if (rename_b) b_path = try m.uniquePath(path, m.branch2);
+        if (rename_a and rename_b) {
+            try m.pathMsg("CONFLICT (distinct types): {s} had different types on each side; renamed both of them so each can be recorded somewhere.", .distinct_modes, path, a_path, b_path, &.{}, .{path});
+        } else {
+            try m.pathMsg("CONFLICT (distinct types): {s} had different types on each side; renamed one of them so each can be recorded somewhere.", .distinct_modes, path, if (rename_a) a_path else b_path, null, &.{}, .{path});
+        }
+        ci.clean = false;
+        const new_ci = try m.arena.create(Info);
+        new_ci.* = ci.*;
+        new_ci.result = ci.stages[2];
+        new_ci.stages[1] = .{ .oid = m.zero() };
+        new_ci.filemask = 5;
+        if ((b_mode & s_ifmt) != (o_mode & s_ifmt)) {
+            new_ci.stages[0] = .{ .oid = m.zero() };
+            new_ci.filemask = 4;
+        }
+        ci.result = ci.stages[1];
+        ci.stages[2] = .{ .oid = m.zero() };
+        ci.filemask = 3;
+        if ((a_mode & s_ifmt) != (o_mode & s_ifmt)) {
+            ci.stages[0] = .{ .oid = m.zero() };
+            ci.filemask = 2;
+        }
+        if (rename_a) try m.paths.put(m.arena, a_path.?, ci);
+        if (!rename_b) b_path = path;
+        try m.paths.put(m.arena, b_path.?, new_ci);
+        if (rename_a and rename_b) _ = m.paths.remove(path);
+        try m.conflicted.put(m.arena, b_path.?, new_ci);
+        try m.recordEntryForTree(meta, b_path.?, new_ci);
+        return a_path orelse path;
     }
 
     /// `sort_dirs_next_to_their_children`: a path sorts as though it ended

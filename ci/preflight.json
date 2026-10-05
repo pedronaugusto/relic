@@ -45,10 +45,6 @@
       "lines": 127,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/merge/ort.zig:processEntry": {
-      "lines": 159,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
     "src/diff/rename.zig:GitMap": {
       "lines": 121,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
@@ -100,26 +96,6 @@
     "src/odb/accelerators.zig:buildBitmap": {
       "lines": 152,
       "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
-    },
-    "src/patch/apply.zig:apply": {
-      "lines": 202,
-      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
-    },
-    "src/patch/apply.zig:applyOneFragment": {
-      "lines": 128,
-      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
-    },
-    "src/patch/format.zig:format": {
-      "lines": 145,
-      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
-    },
-    "src/merge/threeway.zig:carry": {
-      "lines": 194,
-      "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
-    },
-    "src/patch/rangediff.zig:computeAssignment": {
-      "lines": 214,
-      "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
     },
     "src/pretty.zig:one": {
       "lines": 121,

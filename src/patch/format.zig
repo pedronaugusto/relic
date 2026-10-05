@@ -272,21 +272,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         .configured => configuredRenames(config),
     };
 
-    // the subject prefix, as git builds it
-    var prefix: std.ArrayList(u8) = .empty;
-    try prefix.appendSlice(a, options.subject_prefix);
-    if (options.rfc) |rfc| {
-        if (rfc.len > 0) {
-            if (rfc[0] == '-') {
-                try prefix.print(a, " {s}", .{rfc[1..]});
-            } else {
-                const old = try a.dupe(u8, prefix.items);
-                prefix.clearRetainingCapacity();
-                try prefix.print(a, "{s} {s}", .{ rfc, old });
-            }
-        }
-    }
-    if (options.reroll_count) |v| try prefix.print(a, " v{s}", .{v});
+    const prefix = try subjectPrefix(a, options);
 
     // the commits, newest first, then reversed
     var list: std.ArrayList(Oid) = .empty;
@@ -297,14 +283,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     var upstream_ids: std.ArrayList(Oid) = .empty;
     if (options.ignore_if_in_upstream and range.upstream != null) {
         if (range.upstream.?.eql(range.tip)) return emptySeries(gpa, &arena_instance);
-        var back = revwalk.Walk.init(gpa, db);
-        defer back.deinit();
-        try back.push(range.upstream.?);
-        try back.hide(range.tip);
-        while (try back.next(io)) |c| {
-            if (c.parents.len > 1) continue;
-            if (try patchid.ofCommit(gpa, io, db, c.oid)) |id| try upstream_ids.append(a, id);
-        }
+        try upstreamPatchIds(gpa, a, io, db, range, &upstream_ids);
     }
     var in_list: std.ArrayList(Oid) = .empty;
     var walked: std.ArrayList(Oid) = .empty;
@@ -315,11 +294,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         try in_list.append(a, c.oid);
         if (upstream_ids.items.len != 0) {
             if (try patchid.ofCommit(gpa, io, db, c.oid)) |id| {
-                var dup = false;
-                for (upstream_ids.items) |u| {
-                    if (u.eql(id)) dup = true;
-                }
-                if (dup) continue;
+                if (containsOid(upstream_ids.items, id)) continue;
             }
         }
         try list.append(a, c.oid);
@@ -352,7 +327,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         .quote_path = quote_path,
         .abbrev_len = abbrev.defaultLength(config, db),
         .attrs = if (own_attrs) |*x| x else null,
-        .prefix = prefix.items,
+        .prefix = prefix,
         .total = if (options.keep_subject) -1 else if (numbered) @intCast(total + start_number - 1) else 0,
     };
     defer if (ctx.attrs) |x| x.leave();
@@ -399,6 +374,45 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         try mails.append(a, .{ .name = try fileName(&ctx, commit, null), .text = text.items, .commit = commit });
     }
     return .{ .gpa = gpa, .arena = arena_instance.state, .mails = mails.items };
+}
+
+/// The subject prefix, as git builds it: `PATCH` or the caller's, with the
+/// RFC word before it (after it for `-word`) and the reroll count.
+fn subjectPrefix(a: Allocator, options: Options) Allocator.Error![]const u8 {
+    var prefix: std.ArrayList(u8) = .empty;
+    try prefix.appendSlice(a, options.subject_prefix);
+    if (options.rfc) |rfc| {
+        if (rfc.len > 0) {
+            if (rfc[0] == '-') {
+                try prefix.print(a, " {s}", .{rfc[1..]});
+            } else {
+                const old = try a.dupe(u8, prefix.items);
+                prefix.clearRetainingCapacity();
+                try prefix.print(a, "{s} {s}", .{ rfc, old });
+            }
+        }
+    }
+    if (options.reroll_count) |v| try prefix.print(a, " v{s}", .{v});
+    return prefix.items;
+}
+
+/// The patch ids of the upstream's own commits, which
+/// `--ignore-if-in-upstream` leaves out of the series.
+fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, out: *std.ArrayList(Oid)) Error!void {
+    var back = revwalk.Walk.init(gpa, db);
+    defer back.deinit();
+    // Asked only of a range with an upstream.
+    try back.push(range.upstream.?);
+    try back.hide(range.tip);
+    while (try back.next(io)) |c| {
+        if (c.parents.len > 1) continue;
+        if (try patchid.ofCommit(gpa, io, db, c.oid)) |id| try out.append(a, id);
+    }
+}
+
+fn containsOid(oids: []const Oid, oid: Oid) bool {
+    for (oids) |o| if (o.eql(oid)) return true;
+    return false;
 }
 
 /// The content diff `git log -p` and `format-patch` make with nothing

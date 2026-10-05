@@ -505,20 +505,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     const check_index = options.target != .worktree or options.three_way;
     const cached = options.target == .cached;
     const writes = !options.check;
-    var ws_action: WsAction = .warn;
-    var squelch: usize = 5;
-    if (ws_option) |w| switch (w) {
-        .nowarn => ws_action = .nowarn,
-        .warn => ws_action = .warn,
-        .fix => ws_action = .correct,
-        .@"error" => ws_action = .die,
-        .error_all => {
-            ws_action = .die;
-            squelch = 0;
-        },
-    } else {
-        ws_action = if (writes) .warn else .nowarn;
-    }
+    const ws = wsPolicy(ws_option, writes);
 
     const wt: ?Io.Dir = repo.work_dir;
     if (!cached and wt == null) return error.BareRepository;
@@ -556,9 +543,9 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
             .drivers = rules.filters,
             .programs = options.programs,
         }),
-        .ws_action = ws_action,
+        .ws_action = ws.action,
         .ws_ignore_change = ignore_change,
-        .squelch = squelch,
+        .squelch = ws.squelch,
         .apply = writes,
         .check_index = check_index,
         .cached = cached,
@@ -569,36 +556,11 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     defer if (rules.attrs) |attrs| attrs.leave();
     _ = &rules;
 
-    var parse_diag: patchparse.Diagnostic = .{};
-    var parsed = patchparse.parse(gpa, text, .{
-        .strip = options.strip,
-        .root = if (options.directory.len == 0) "" else try std.mem.concat(a, u8, &.{ std.mem.trimEnd(u8, options.directory, "/"), "/" }),
-        .recount = options.recount,
-        .inaccurate_eof = options.inaccurate_eof,
-        .reverse = options.reverse,
-        .diagnostic = &parse_diag,
-    }) catch |err| {
-        if (options.diagnostic) |d| d.line = parse_diag.line;
-        return err;
-    };
+    var parsed = try parsePatches(gpa, a, text, options);
     defer parsed.deinit();
 
-    // the files the limits keep, reversed and in reverse order under -R
     var list: std.ArrayList(*Entry) = .empty;
-    var skipped: usize = 0;
-    for (parsed.files) |file| {
-        var entry = try a.create(Entry);
-        entry.* = .{ .p = file };
-        if (options.reverse) reversePatch(&entry.p);
-        if (!usePatch(&st, &entry.p)) {
-            skipped += 1;
-            continue;
-        }
-        entry.ws_rule = try wsRuleFor(&st, entry.p.new_name orelse entry.p.old_name.?, configured_ws);
-        entry.frag_rejected = try a.alloc(bool, entry.p.fragments.len);
-        @memset(entry.frag_rejected, false);
-        if (options.reverse) try list.insert(a, 0, entry) else try list.append(a, entry);
-    }
+    const skipped = try keepEntries(&st, parsed.files, configured_ws, &list);
     if (list.items.len == 0 and skipped == 0) {
         if (!options.allow_empty) return error.NoValidPatches;
     }
@@ -608,25 +570,8 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     if (st.whitespace_error != 0 and st.ws_action == .die) st.apply = false;
 
     st.update_index = (st.check_index or options.intent_to_add) and st.apply;
-    if (st.check_index or st.update_index) {
-        if (options.index) |ix| {
-            st.index = ix;
-        } else {
-            st.owned_index = try repo.openIndex(io);
-            st.index = &st.owned_index.?;
-        }
-    }
-
-    var any_failed = false;
-    if (!options.check and !st.apply and st.ws_action == .die) {
-        // refused for whitespace: nothing is checked or written
-    } else if (st.apply or options.check) {
-        try prepareSymlinkChanges(&st, list.items);
-        try prepareFnTable(&st, list.items);
-        for (list.items) |entry| {
-            if (!try checkPatch(&st, entry)) any_failed = true;
-        }
-    }
+    if (st.check_index or st.update_index) try useIndex(&st);
+    const any_failed = try checkAll(&st, list.items);
 
     if (st.whitespace_error != 0 and st.ws_action == .die) {
         if (options.diagnostic) |d| d.line = 0;
@@ -644,8 +589,102 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         if (st.update_index and options.index == null) try repo.writeIndex(io, st.index.?);
     }
 
+    const files = try resultFiles(a, list.items);
+    try ownNames(&st, conflicted.items);
+    return .{
+        .gpa = gpa,
+        .arena = arena_instance.state,
+        .files = files,
+        .conflicted = conflicted.items,
+        .notes = st.notes.items,
+        .whitespace_errors = st.whitespace_error,
+        .whitespace_fixed = st.applied_after_fixing_ws,
+        .written = st.apply,
+    };
+}
+
+/// Parse `text` as `options` says, the line of a malformed patch left in
+/// the caller's diagnostic.
+fn parsePatches(gpa: Allocator, a: Allocator, text: []const u8, options: Options) Error!patchparse.Patch {
+    var parse_diag: patchparse.Diagnostic = .{};
+    return patchparse.parse(gpa, text, .{
+        .strip = options.strip,
+        .root = if (options.directory.len == 0) "" else try std.mem.concat(a, u8, &.{ std.mem.trimEnd(u8, options.directory, "/"), "/" }),
+        .recount = options.recount,
+        .inaccurate_eof = options.inaccurate_eof,
+        .reverse = options.reverse,
+        .diagnostic = &parse_diag,
+    }) catch |err| {
+        if (options.diagnostic) |d| d.line = parse_diag.line;
+        return err;
+    };
+}
+
+/// The index a check or an update reads: the caller's, or the
+/// repository's, opened here.
+fn useIndex(st: *State) Error!void {
+    if (st.options.index) |ix| {
+        st.index = ix;
+        return;
+    }
+    st.owned_index = try st.repo.openIndex(st.io);
+    st.index = &st.owned_index.?;
+}
+
+/// Check every patch against what it applies to. Whether any failed;
+/// nothing is checked when whitespace has refused the lot.
+fn checkAll(st: *State, list: []const *Entry) Error!bool {
+    if (!st.options.check and !st.apply and st.ws_action == .die) return false;
+    if (!st.apply and !st.options.check) return false;
+    try prepareSymlinkChanges(st, list);
+    try prepareFnTable(st, list);
+    var any_failed = false;
+    for (list) |entry| {
+        if (!try checkPatch(st, entry)) any_failed = true;
+    }
+    return any_failed;
+}
+
+/// How whitespace errors are met, and after how many reports the rest go
+/// unsaid: `apply.whitespace` or the caller's, else a warning when writing.
+fn wsPolicy(option: ?Whitespace, writes: bool) struct { action: WsAction, squelch: usize } {
+    const w = option orelse return .{ .action = if (writes) .warn else .nowarn, .squelch = 5 };
+    return switch (w) {
+        .nowarn => .{ .action = .nowarn, .squelch = 5 },
+        .warn => .{ .action = .warn, .squelch = 5 },
+        .fix => .{ .action = .correct, .squelch = 5 },
+        .@"error" => .{ .action = .die, .squelch = 5 },
+        .error_all => .{ .action = .die, .squelch = 0 },
+    };
+}
+
+/// The files the limits keep into `list`, reversed and in reverse order
+/// under `-R`. How many the limits left out.
+fn keepEntries(st: *State, parsed: []const patchparse.FilePatch, configured_ws: whitespace.Rule, list: *std.ArrayList(*Entry)) Error!usize {
+    const a = st.a;
+    var skipped: usize = 0;
+    for (parsed) |file| {
+        var entry = try a.create(Entry);
+        entry.* = .{ .p = file };
+        if (st.options.reverse) reversePatch(&entry.p);
+        if (!usePatch(st, &entry.p)) {
+            skipped += 1;
+            continue;
+        }
+        // A patch names its file on at least one side.
+        entry.ws_rule = try wsRuleFor(st, entry.p.new_name orelse entry.p.old_name.?, configured_ws);
+        entry.frag_rejected = try a.alloc(bool, entry.p.fragments.len);
+        @memset(entry.frag_rejected, false);
+        if (st.options.reverse) try list.insert(a, 0, entry) else try list.append(a, entry);
+    }
+    return skipped;
+}
+
+/// What became of each file, for the outcome: its names are copied by
+/// `ownNames`.
+fn resultFiles(a: Allocator, list: []const *Entry) Allocator.Error![]File {
     var files: std.ArrayList(File) = .empty;
-    for (list.items) |entry| {
+    for (list) |entry| {
         var rejected_hunks: std.ArrayList(usize) = .empty;
         for (entry.frag_rejected, 0..) |r, i| if (r) try rejected_hunks.append(a, i + 1);
         const status: File.Status = if (entry.rejected)
@@ -658,18 +697,21 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
             .merged
         else
             .applied;
+        // Names in the outcome must outlive the parsed patch.
         try files.append(a, .{
-            .old_path = entry.p.old_name,
-            .new_path = entry.p.new_name,
+            .old_path = if (entry.p.old_name) |p| try a.dupe(u8, p) else null,
+            .new_path = if (entry.p.new_name) |p| try a.dupe(u8, p) else null,
             .status = status,
             .rejected_hunks = rejected_hunks.items,
         });
     }
-    // names in the outcome must outlive the parsed patch
-    for (files.items) |*f| {
-        if (f.old_path) |p| f.old_path = try a.dupe(u8, p);
-        if (f.new_path) |p| f.new_path = try a.dupe(u8, p);
-    }
+    return files.items;
+}
+
+/// Copy the names the notes and the conflicts hold out of the parsed
+/// patch, which goes before the outcome does.
+fn ownNames(st: *State, conflicted: [][]const u8) Allocator.Error!void {
+    const a = st.a;
     for (st.notes.items) |*n| switch (n.*) {
         .offset => |*x| x.path = try a.dupe(u8, x.path),
         .context_reduced => |*x| x.path = try a.dupe(u8, x.path),
@@ -677,17 +719,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         .mode_differs => |*x| x.path = try a.dupe(u8, x.path),
         .becomes_empty => |*x| x.path = try a.dupe(u8, x.path),
     };
-    for (conflicted.items) |*c| c.* = try a.dupe(u8, c.*);
-    return .{
-        .gpa = gpa,
-        .arena = arena_instance.state,
-        .files = files.items,
-        .conflicted = conflicted.items,
-        .notes = st.notes.items,
-        .whitespace_errors = st.whitespace_error,
-        .whitespace_fixed = st.applied_after_fixing_ws,
-        .written = st.apply,
-    };
+    for (conflicted) |*c| c.* = try a.dupe(u8, c.*);
 }
 
 fn lessPath(_: void, x: []const u8, y: []const u8) bool {
@@ -1032,13 +1064,14 @@ fn updateImage(st: *State, img: *Image, applied_pos: usize, preimage: *const Ima
     }
 }
 
-/// Place one hunk in `img`. Returns whether it applied.
-fn applyOneFragment(st: *State, img: *Image, frag: patchparse.Fragment, inaccurate_eof: bool, ws_rule: whitespace.Rule, nth: usize, path: []const u8) Error!bool {
+/// Blank lines a hunk adds at the end of the file: how many, and the
+/// hunk's line of the first.
+const Blanks = struct { count: usize, first_line: usize };
+
+/// Read a hunk into the lines it expects, `pre`, and the lines it leaves,
+/// `post`. `null` when a line is not a patch line.
+fn hunkImages(st: *State, frag: patchparse.Fragment, inaccurate_eof: bool, ws_rule: whitespace.Rule, pre: *Image, post: *Image) Error!?Blanks {
     const gpa = st.gpa;
-    var preimage: Image = .{};
-    defer preimage.deinit(gpa);
-    var postimage: Image = .{};
-    defer postimage.deinit(gpa);
     var new_blank_lines_at_end: usize = 0;
     var found_new_blank_lines_at_end: usize = 0;
     var hunk_linenr = frag.line;
@@ -1061,36 +1094,36 @@ fn applyOneFragment(st: *State, img: *Image, frag: patchparse.Fragment, inaccura
         switch (first) {
             '\n' => {
                 if (plen >= 0) {
-                    try preimage.buf.append(gpa, '\n');
-                    try postimage.buf.append(gpa, '\n');
-                    try preimage.addLine(gpa, "\n", line_common);
-                    try postimage.addLine(gpa, "\n", line_common);
+                    try pre.buf.append(gpa, '\n');
+                    try post.buf.append(gpa, '\n');
+                    try pre.addLine(gpa, "\n", line_common);
+                    try post.addLine(gpa, "\n", line_common);
                     is_blank_context = true;
                 }
             },
             ' ', '-' => {
                 if (first == ' ' and plen > 0 and ws_rule & whitespace.blank_at_eof != 0 and whitespace.blankLine(data)) is_blank_context = true;
-                try preimage.buf.appendSlice(gpa, data);
-                try preimage.addLine(gpa, data, if (first == ' ') line_common else 0);
+                try pre.buf.appendSlice(gpa, data);
+                try pre.addLine(gpa, data, if (first == ' ') line_common else 0);
                 if (first == ' ') {
-                    try postimage.buf.appendSlice(gpa, data);
-                    try postimage.addLine(gpa, data, line_common);
+                    try post.buf.appendSlice(gpa, data);
+                    try post.addLine(gpa, data, line_common);
                 }
             },
             '+' => {
                 if (!st.options.no_add) {
-                    const start = postimage.buf.items.len;
+                    const start = post.buf.items.len;
                     if (st.whitespace_error == 0 or st.ws_action != .correct) {
-                        try postimage.buf.appendSlice(gpa, data);
+                        try post.buf.appendSlice(gpa, data);
                     } else {
-                        if (try whitespace.fixCopy(gpa, &postimage.buf, data, ws_rule)) st.applied_after_fixing_ws += 1;
+                        if (try whitespace.fixCopy(gpa, &post.buf, data, ws_rule)) st.applied_after_fixing_ws += 1;
                     }
-                    try postimage.addLine(gpa, postimage.buf.items[start..], 0);
+                    try post.addLine(gpa, post.buf.items[start..], 0);
                     if (ws_rule & whitespace.blank_at_eof != 0 and whitespace.blankLine(data)) added_blank_line = true;
                 }
             },
             '@', '\\' => {},
-            else => return false,
+            else => return null,
         }
         if (added_blank_line) {
             if (new_blank_lines_at_end == 0) found_new_blank_lines_at_end = hunk_linenr;
@@ -1101,14 +1134,27 @@ fn applyOneFragment(st: *State, img: *Image, frag: patchparse.Fragment, inaccura
         text = text[len..];
         hunk_linenr += 1;
     }
-    if (inaccurate_eof and preimage.buf.items.len > 0 and preimage.buf.items[preimage.buf.items.len - 1] == '\n' and
-        postimage.buf.items.len > 0 and postimage.buf.items[postimage.buf.items.len - 1] == '\n')
+    if (inaccurate_eof and pre.buf.items.len > 0 and pre.buf.items[pre.buf.items.len - 1] == '\n' and
+        post.buf.items.len > 0 and post.buf.items[post.buf.items.len - 1] == '\n')
     {
-        _ = preimage.buf.pop();
-        _ = postimage.buf.pop();
-        preimage.lines.items[preimage.lines.items.len - 1].len -= 1;
-        postimage.lines.items[postimage.lines.items.len - 1].len -= 1;
+        _ = pre.buf.pop();
+        _ = post.buf.pop();
+        pre.lines.items[pre.lines.items.len - 1].len -= 1;
+        post.lines.items[post.lines.items.len - 1].len -= 1;
     }
+    return .{ .count = new_blank_lines_at_end, .first_line = found_new_blank_lines_at_end };
+}
+
+/// Place one hunk in `img`. Returns whether it applied.
+fn applyOneFragment(st: *State, img: *Image, frag: patchparse.Fragment, inaccurate_eof: bool, ws_rule: whitespace.Rule, nth: usize, path: []const u8) Error!bool {
+    const gpa = st.gpa;
+    var preimage: Image = .{};
+    defer preimage.deinit(gpa);
+    var postimage: Image = .{};
+    defer postimage.deinit(gpa);
+    const blanks = try hunkImages(st, frag, inaccurate_eof, ws_rule, &preimage, &postimage) orelse return false;
+    var new_blank_lines_at_end = blanks.count;
+    const found_new_blank_lines_at_end = blanks.first_line;
 
     var leading = frag.leading;
     var trailing = frag.trailing;

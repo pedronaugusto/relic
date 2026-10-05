@@ -13,6 +13,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
@@ -537,12 +538,12 @@ const Costs = struct {
 
 /// git's `compute_assignment`, after Jonker and Volgenant (1987): the
 /// assignment of columns to rows of least total cost, `cost[column +
-/// column_count * row]`. Ported line for line, ties included.
+/// column_count * row]`. Ported line for line, ties included; each phase
+/// of git's function is a step of `Assignment`.
 fn computeAssignment(gpa: Allocator, column_count: usize, row_count: usize, cost: []const i32, column2row: []i32, row2column: []i32) Allocator.Error!void {
-    const cc: i32 = @intCast(column_count);
-    const rc: i32 = @intCast(row_count);
-    const m: Costs = .{ .cost = cost, .n = column_count };
-
+    assert(cost.len == column_count * row_count);
+    assert(column2row.len == column_count);
+    assert(row2column.len == row_count);
     if (column_count < 2) {
         @memset(column2row, 0);
         @memset(row2column, 0);
@@ -553,125 +554,192 @@ fn computeAssignment(gpa: Allocator, column_count: usize, row_count: usize, cost
     @memset(row2column, -1);
     const v = try gpa.alloc(i32, column_count);
     defer gpa.free(v);
-
-    // column reduction
-    var j: i32 = cc - 1;
-    while (j >= 0) : (j -= 1) {
-        var i_1: i32 = 0;
-        var i: i32 = 1;
-        while (i < rc) : (i += 1) {
-            if (m.at(j, i_1) > m.at(j, i)) i_1 = i;
-        }
-        v[@intCast(j)] = m.at(j, i_1);
-        if (row2column[@intCast(i_1)] == -1) {
-            // row i_1 unassigned
-            row2column[@intCast(i_1)] = j;
-            column2row[@intCast(j)] = i_1;
-        } else {
-            if (row2column[@intCast(i_1)] >= 0) row2column[@intCast(i_1)] = -2 - row2column[@intCast(i_1)];
-            column2row[@intCast(j)] = -1;
-        }
-    }
-
-    // reduction transfer
     const free_row = try gpa.alloc(i32, row_count);
     defer gpa.free(free_row);
-    var free_count: i32 = 0;
-    var i: i32 = 0;
-    while (i < rc) : (i += 1) {
-        const j_1 = row2column[@intCast(i)];
-        if (j_1 == -1) {
-            free_row[@intCast(free_count)] = i;
-            free_count += 1;
-        } else if (j_1 < -1) {
-            row2column[@intCast(i)] = -2 - j_1;
-        } else {
-            const not_j1: i32 = @intFromBool(j_1 == 0);
-            var min = m.at(not_j1, i) - v[@intCast(not_j1)];
-            j = 1;
-            while (j < cc) : (j += 1) {
-                if (j != j_1 and min > m.at(j, i) - v[@intCast(j)]) min = m.at(j, i) - v[@intCast(j)];
+    var lap: Assignment = .{
+        .m = .{ .cost = cost, .n = column_count },
+        .cc = @intCast(column_count),
+        .rc = @intCast(row_count),
+        .column2row = column2row,
+        .row2column = row2column,
+        .v = v,
+        .free_row = free_row,
+    };
+    lap.columnReduction();
+    lap.reductionTransfer();
+    if (lap.free_count == (if (column_count < row_count) lap.rc - lap.cc else 0)) return;
+    lap.augmentingRowReduction();
+    try lap.augmentation(gpa);
+}
+
+/// The state `compute_assignment` keeps from one phase to the next.
+const Assignment = struct {
+    m: Costs,
+    cc: i32,
+    rc: i32,
+    column2row: []i32,
+    row2column: []i32,
+    v: []i32,
+    free_row: []i32,
+    free_count: i32 = 0,
+
+    /// Column reduction: each column's cheapest row, taken where it is
+    /// still free.
+    fn columnReduction(l: *Assignment) void {
+        const m = l.m;
+        var j: i32 = l.cc - 1;
+        while (j >= 0) : (j -= 1) {
+            var i_1: i32 = 0;
+            var i: i32 = 1;
+            while (i < l.rc) : (i += 1) {
+                if (m.at(j, i_1) > m.at(j, i)) i_1 = i;
             }
-            v[@intCast(j_1)] -= min;
+            l.v[@intCast(j)] = m.at(j, i_1);
+            if (l.row2column[@intCast(i_1)] == -1) {
+                // row i_1 unassigned
+                l.row2column[@intCast(i_1)] = j;
+                l.column2row[@intCast(j)] = i_1;
+            } else {
+                if (l.row2column[@intCast(i_1)] >= 0) l.row2column[@intCast(i_1)] = -2 - l.row2column[@intCast(i_1)];
+                l.column2row[@intCast(j)] = -1;
+            }
         }
     }
 
-    if (free_count == (if (column_count < row_count) rc - cc else 0)) return;
+    /// Reduction transfer: the free rows listed, and each assigned
+    /// column's price lowered by its row's second best.
+    fn reductionTransfer(l: *Assignment) void {
+        const m = l.m;
+        const v = l.v;
+        l.free_count = 0;
+        var i: i32 = 0;
+        while (i < l.rc) : (i += 1) {
+            const j_1 = l.row2column[@intCast(i)];
+            if (j_1 == -1) {
+                l.free_row[@intCast(l.free_count)] = i;
+                l.free_count += 1;
+            } else if (j_1 < -1) {
+                l.row2column[@intCast(i)] = -2 - j_1;
+            } else {
+                const not_j1: i32 = @intFromBool(j_1 == 0);
+                var min = m.at(not_j1, i) - v[@intCast(not_j1)];
+                var j: i32 = 1;
+                while (j < l.cc) : (j += 1) {
+                    if (j != j_1 and min > m.at(j, i) - v[@intCast(j)]) min = m.at(j, i) - v[@intCast(j)];
+                }
+                v[@intCast(j_1)] -= min;
+            }
+        }
+    }
 
-    // augmenting row reduction
-    var saved_free_count: i32 = undefined;
-    var phase: u32 = 0;
-    while (phase < 2) : (phase += 1) {
-        var k: i32 = 0;
-        saved_free_count = free_count;
-        free_count = 0;
-        while (k < saved_free_count) {
-            var j_1: i32 = 0;
-            i = free_row[@intCast(k)];
-            k += 1;
-            var u_1 = m.at(j_1, i) - v[@intCast(j_1)];
-            var j_2: i32 = -1;
-            var u_2: i32 = std.math.maxInt(i32);
-            j = 1;
-            while (j < cc) : (j += 1) {
-                const c = m.at(j, i) - v[@intCast(j)];
-                if (u_2 > c) {
-                    if (u_1 < c) {
-                        u_2 = c;
-                        j_2 = j;
-                    } else {
-                        u_2 = u_1;
-                        u_1 = c;
-                        j_2 = j_1;
-                        j_1 = j;
+    /// Augmenting row reduction, twice: each free row takes its cheapest
+    /// column, the row it displaces freed in its turn.
+    fn augmentingRowReduction(l: *Assignment) void {
+        const m = l.m;
+        const v = l.v;
+        var phase: u32 = 0;
+        while (phase < 2) : (phase += 1) {
+            var k: i32 = 0;
+            const saved_free_count = l.free_count;
+            l.free_count = 0;
+            while (k < saved_free_count) {
+                var j_1: i32 = 0;
+                const i = l.free_row[@intCast(k)];
+                k += 1;
+                var u_1 = m.at(j_1, i) - v[@intCast(j_1)];
+                var j_2: i32 = -1;
+                var u_2: i32 = std.math.maxInt(i32);
+                var j: i32 = 1;
+                while (j < l.cc) : (j += 1) {
+                    const c = m.at(j, i) - v[@intCast(j)];
+                    if (u_2 > c) {
+                        if (u_1 < c) {
+                            u_2 = c;
+                            j_2 = j;
+                        } else {
+                            u_2 = u_1;
+                            u_1 = c;
+                            j_2 = j_1;
+                            j_1 = j;
+                        }
                     }
                 }
-            }
-            if (j_2 < 0) {
-                j_2 = j_1;
-                u_2 = u_1;
-            }
-
-            var i_0 = column2row[@intCast(j_1)];
-            if (u_1 < u_2) {
-                v[@intCast(j_1)] -= u_2 - u_1;
-            } else if (i_0 >= 0) {
-                j_1 = j_2;
-                i_0 = column2row[@intCast(j_1)];
-            }
-
-            if (i_0 >= 0) {
-                if (u_1 < u_2) {
-                    k -= 1;
-                    free_row[@intCast(k)] = i_0;
-                } else {
-                    free_row[@intCast(free_count)] = i_0;
-                    free_count += 1;
+                if (j_2 < 0) {
+                    j_2 = j_1;
+                    u_2 = u_1;
                 }
+
+                var i_0 = l.column2row[@intCast(j_1)];
+                if (u_1 < u_2) {
+                    v[@intCast(j_1)] -= u_2 - u_1;
+                } else if (i_0 >= 0) {
+                    j_1 = j_2;
+                    i_0 = l.column2row[@intCast(j_1)];
+                }
+
+                if (i_0 >= 0) {
+                    if (u_1 < u_2) {
+                        k -= 1;
+                        l.free_row[@intCast(k)] = i_0;
+                    } else {
+                        l.free_row[@intCast(l.free_count)] = i_0;
+                        l.free_count += 1;
+                    }
+                }
+                l.row2column[@intCast(i)] = j_1;
+                l.column2row[@intCast(j_1)] = i;
             }
-            row2column[@intCast(i)] = j_1;
-            column2row[@intCast(j_1)] = i;
         }
     }
 
-    // augmentation
-    saved_free_count = free_count;
-    const d = try gpa.alloc(i32, column_count);
-    defer gpa.free(d);
-    const pred = try gpa.alloc(i32, column_count);
-    defer gpa.free(pred);
-    const col = try gpa.alloc(i32, column_count);
-    defer gpa.free(col);
-    free_count = 0;
-    while (free_count < saved_free_count) : (free_count += 1) {
-        const i_1 = free_row[@intCast(free_count)];
+    /// Augmentation: a shortest path from each row still free to a free
+    /// column, the prices updated and the path's assignments flipped.
+    fn augmentation(l: *Assignment, gpa: Allocator) Allocator.Error!void {
+        const column_count: usize = @intCast(l.cc);
+        const d = try gpa.alloc(i32, column_count);
+        defer gpa.free(d);
+        const pred = try gpa.alloc(i32, column_count);
+        defer gpa.free(pred);
+        const col = try gpa.alloc(i32, column_count);
+        defer gpa.free(col);
+        const saved_free_count = l.free_count;
+        l.free_count = 0;
+        while (l.free_count < saved_free_count) : (l.free_count += 1) {
+            const i_1 = l.free_row[@intCast(l.free_count)];
+            const found = l.shortestPath(i_1, d, pred, col);
+            var j = found.column;
+
+            // updating of the column pieces
+            var k: i32 = 0;
+            while (k < found.last) : (k += 1) {
+                const j_1 = col[@intCast(k)];
+                l.v[@intCast(j_1)] += d[@intCast(j_1)] - found.min;
+            }
+
+            // augmentation
+            while (true) {
+                assert(j >= 0);
+                const i = pred[@intCast(j)];
+                l.column2row[@intCast(j)] = i;
+                std.mem.swap(i32, &j, &l.row2column[@intCast(i)]);
+                if (i_1 == i) break;
+            }
+        }
+    }
+
+    /// The search of `augmentation` from free row `i_1`: the free column it
+    /// reached, the reduced cost of the path there, and how many columns
+    /// were scanned before it.
+    fn shortestPath(l: *Assignment, i_1: i32, d: []i32, pred: []i32, col: []i32) struct { column: i32, min: i32, last: i32 } {
+        const m = l.m;
+        const v = l.v;
         var low: i32 = 0;
         var up: i32 = 0;
         var last: i32 = undefined;
         var min: i32 = undefined;
 
-        j = 0;
-        while (j < cc) : (j += 1) {
+        var j: i32 = 0;
+        while (j < l.cc) : (j += 1) {
             d[@intCast(j)] = m.at(j, i_1) - v[@intCast(j)];
             pred[@intCast(j)] = i_1;
             col[@intCast(j)] = j;
@@ -683,7 +751,7 @@ fn computeAssignment(gpa: Allocator, column_count: usize, row_count: usize, cost
             min = d[@intCast(col[@intCast(up)])];
             up += 1;
             var k: i32 = up;
-            while (k < cc) : (k += 1) {
+            while (k < l.cc) : (k += 1) {
                 j = col[@intCast(k)];
                 const c = d[@intCast(j)];
                 if (c <= min) {
@@ -699,24 +767,24 @@ fn computeAssignment(gpa: Allocator, column_count: usize, row_count: usize, cost
             // git leaves `j` as the scan left it when a column here is free
             k = low;
             while (k < up) : (k += 1) {
-                if (column2row[@intCast(col[@intCast(k)])] == -1) break :search;
+                if (l.column2row[@intCast(col[@intCast(k)])] == -1) break :search;
             }
 
             // scan a row
             while (true) {
                 const j_1 = col[@intCast(low)];
                 low += 1;
-                i = column2row[@intCast(j_1)];
+                const i = l.column2row[@intCast(j_1)];
                 const u_1 = m.at(j_1, i) - v[@intCast(j_1)] - min;
                 k = up;
-                while (k < cc) : (k += 1) {
+                while (k < l.cc) : (k += 1) {
                     j = col[@intCast(k)];
                     const c = m.at(j, i) - v[@intCast(j)] - u_1;
                     if (c < d[@intCast(j)]) {
                         d[@intCast(j)] = c;
                         pred[@intCast(j)] = i;
                         if (c == min) {
-                            if (column2row[@intCast(j)] == -1) break :search;
+                            if (l.column2row[@intCast(j)] == -1) break :search;
                             col[@intCast(k)] = col[@intCast(up)];
                             col[@intCast(up)] = j;
                             up += 1;
@@ -727,24 +795,9 @@ fn computeAssignment(gpa: Allocator, column_count: usize, row_count: usize, cost
             }
             if (low != up) break;
         }
-
-        // updating of the column pieces
-        var k: i32 = 0;
-        while (k < last) : (k += 1) {
-            const j_1 = col[@intCast(k)];
-            v[@intCast(j_1)] += d[@intCast(j_1)] - min;
-        }
-
-        // augmentation
-        while (true) {
-            std.debug.assert(j >= 0);
-            i = pred[@intCast(j)];
-            column2row[@intCast(j)] = i;
-            std.mem.swap(i32, &j, &row2column[@intCast(i)]);
-            if (i_1 == i) break;
-        }
+        return .{ .column = j, .min = min, .last = last };
     }
-}
+};
 
 // ---------------------------------------------------------------------------
 // Writing.
