@@ -2355,6 +2355,7 @@ pub fn goProxyAllowed(raw_host: []const u8, port: u16, no_proxy: []const u8) boo
     const ip: ?Io.net.IpAddress = Io.net.IpAddress.parse(host, 0) catch null;
     if (ip) |a| if (isLoopback(a)) return false;
     var port_buf: [8]u8 = undefined;
+    // unreachable: a u16 is at most five digits
     const port_text = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch unreachable;
     var it = std.mem.splitScalar(u8, no_proxy, ',');
     while (it.next()) |raw| {

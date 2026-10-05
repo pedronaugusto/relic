@@ -19,6 +19,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const assert = std.debug.assert;
 
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
@@ -1040,7 +1041,10 @@ const Sideband = struct {
 
     fn emit(sb: *Sideband, bytes: []const u8) Io.Writer.Error!void {
         if (bytes.len == 0) return;
+        // The band byte and the four length digits count in the length.
+        assert(bytes.len + 5 <= pktline.max_line);
         var head: [5]u8 = undefined;
+        // unreachable: asserted above: the length fits four hex digits
         _ = std.fmt.bufPrint(head[0..4], "{x:0>4}", .{bytes.len + 5}) catch unreachable;
         head[4] = 1;
         try sb.out.writeAll(&head);

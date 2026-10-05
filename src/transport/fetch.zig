@@ -593,7 +593,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         if (outcome.pack) |name| {
             var hex: [hash.max_hex_len]u8 = undefined;
             var idx_buf: [96]u8 = undefined;
-            const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
+            const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
             fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
         }
         if (fresh) |*index| {
@@ -1362,7 +1362,8 @@ fn expectSameRefs(gpa: Allocator, io: Io, a: *testgit.Repo, b: *testgit.Repo) !v
             const eb = entries_b.next();
             if (ea == null and eb == null) break;
             if (ea == null or eb == null) {
-                std.debug.print("reflog of {s} differs:\n{s}\n---\n{s}\n", .{ name, log_a, log_b });
+                // One log is longer: the two shown whole are the failure.
+                try testing.expectEqualStrings(log_a, log_b);
                 return error.TestUnexpectedResult;
             }
             try testing.expectEqualStrings(ea.?[0..81], eb.?[0..81]);

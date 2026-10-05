@@ -684,10 +684,12 @@ const Http = struct {
 
     fn advertisementInner(h: *Http) Error!*Io.Reader {
         var suffix_buf: [64]u8 = undefined;
+        // unreachable: the longer service name, git-receive-pack, makes 35 bytes
         const suffix = std.fmt.bufPrint(&suffix_buf, "/info/refs?service={s}", .{h.service.name()}) catch unreachable;
         const res = try h.get(suffix);
         try h.checkStatus(res);
         var expected_buf: [64]u8 = undefined;
+        // unreachable: the longer service name, git-receive-pack, makes 44 bytes
         const expected = std.fmt.bufPrint(&expected_buf, "application/x-{s}-advertisement", .{h.service.name()}) catch unreachable;
         const content_type = res.head.content_type orelse "";
         if (!std.mem.eql(u8, content_type, expected)) return error.DumbHttpUnsupported;
@@ -751,6 +753,7 @@ const Http = struct {
 
     fn startStreaming(h: *Http) Error!void {
         var suffix_buf: [64]u8 = undefined;
+        // unreachable: a service name is at most 16 bytes
         const suffix = std.fmt.bufPrint(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
         const arena = h.arena.allocator();
         if (h.stream_buffer.len == 0) h.stream_buffer = try arena.alloc(u8, 64 * 1024);
@@ -777,6 +780,7 @@ const Http = struct {
             h.in_flight = streaming.finish() catch |err| return h.clientFailed(err);
         } else {
             var suffix_buf: [64]u8 = undefined;
+            // unreachable: a service name is at most 16 bytes
             const suffix = std.fmt.bufPrint(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
             var arena_state: std.heap.ArenaAllocator = .init(h.gpa);
             defer arena_state.deinit();
@@ -791,6 +795,7 @@ const Http = struct {
         const res = &h.in_flight.?;
         try h.checkStatus(res);
         var expected_buf: [64]u8 = undefined;
+        // unreachable: the longer service name, git-receive-pack, makes 37 bytes
         const expected = std.fmt.bufPrint(&expected_buf, "application/x-{s}-result", .{h.service.name()}) catch unreachable;
         if (!std.mem.eql(u8, res.head.content_type orelse "", expected)) return h.fail(error.ProtocolError, "unexpected content type");
         h.body_reader = res.reader();

@@ -122,6 +122,7 @@ pub const PromisorRef = struct {
 pub fn writePromisor(io: Io, pack_dir: Io.Dir, name: Oid, refs: []const PromisorRef) (Io.File.OpenError || Io.Writer.Error)!void {
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [96]u8 = undefined;
+    // unreachable: the longest hex name is 64 digits, 78 bytes with the words around it
     const file_name = std.fmt.bufPrint(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
     const file = try pack_dir.createFile(io, file_name, .{});
     defer file.close(io);

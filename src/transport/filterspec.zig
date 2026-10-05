@@ -139,8 +139,9 @@ fn percentDecode(arena: Allocator, text: []const u8) Allocator.Error![]const u8 
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
         if (text[i] == '%' and i + 2 < text.len and std.ascii.isHex(text[i + 1]) and std.ascii.isHex(text[i + 2])) {
+            // unreachable: both digits passed isHex above
             const high = std.fmt.charToDigit(text[i + 1], 16) catch unreachable;
-            const low = std.fmt.charToDigit(text[i + 2], 16) catch unreachable;
+            const low = std.fmt.charToDigit(text[i + 2], 16) catch unreachable; // unreachable: as above
             try out.append(arena, high * 16 + low);
             i += 2;
             continue;

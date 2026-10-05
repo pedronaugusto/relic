@@ -436,6 +436,7 @@ pub const Remote = struct {
             } else |_| {}
             if (builtin.os.tag != .windows) continue;
             var name_buf: [64]u8 = undefined;
+            // unreachable: the longest hook name above, reference-transaction, is 21 bytes, 25 with .exe
             const executable = std.fmt.bufPrint(&name_buf, "{s}.exe", .{name}) catch unreachable;
             const stat = dir.statFile(io, executable, .{}) catch continue;
             if (stat.kind != .file) continue;

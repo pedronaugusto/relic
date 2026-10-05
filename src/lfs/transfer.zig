@@ -1288,7 +1288,7 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
         if (attempt_range and status == .partial_content) {
             const content_range = sent.header("content-range") orelse "";
             var want_buf: [32]u8 = undefined;
-            const want = std.fmt.bufPrint(&want_buf, "bytes {d}-", .{from}) catch unreachable;
+            const want = std.fmt.bufPrint(&want_buf, "bytes {d}-", .{from}) catch unreachable; // unreachable: a u64 is at most 20 digits, 27 bytes with the words around it
             if (!std.mem.startsWith(u8, content_range, want)) {
                 sent.close();
                 try file.setLength(io, 0);
@@ -1344,7 +1344,7 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     var digest: [32]u8 = undefined;
     sha.final(&digest);
     var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable; // unreachable: a SHA-256 digest is 32 bytes, 64 hex digits
     if (!std.mem.eql(u8, &hex, &r.oid)) {
         // A partial file that was not the start of this object: it is
         // thrown away, and the next attempt starts from nothing.

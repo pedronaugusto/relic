@@ -64,13 +64,6 @@
   },
   {
     "rule": "debug-print",
-    "path": "src/transport/fetch.zig",
-    "source": "std.debug.print(\"reflog of {s} differs:\\n{s}\\n---\\n{s}\\n\", .{ name, log_a, log_b });",
-    "detail": "std.debug.print outside tests and src/testing/",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "debug-print",
     "path": "src/worktree/sparsecheckout.zig",
     "source": "std.debug.print(\"{s} differs\\n\", .{path});",
     "detail": "std.debug.print outside tests and src/testing/",

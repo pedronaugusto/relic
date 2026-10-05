@@ -393,6 +393,7 @@ pub fn receive(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bundl
     if (bundle.header.filter != null) if (result.name) |name| {
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [96]u8 = undefined;
+        // unreachable: the longest hex name is 64 digits, 78 bytes with the words around it
         const promisor = std.fmt.bufPrint(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
         if (pack_dir.createFile(io, promisor, .{ .exclusive = true })) |file| {
             defer file.close(io);

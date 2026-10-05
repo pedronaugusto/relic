@@ -253,6 +253,7 @@ pub const Helper = struct {
         if (h.caps.option) {
             _ = try h.option("progress", if (options.progress) "true" else "false", .raw);
             var buf: [4]u8 = undefined;
+            // unreachable: a u8 is at most three digits
             _ = try h.option("verbosity", std.fmt.bufPrint(&buf, "{d}", .{options.verbosity}) catch unreachable, .raw);
         }
         return h;
@@ -409,6 +410,7 @@ pub const Helper = struct {
             _ = try h.option("servpath", p, .quoted);
         };
         var buf: [64]u8 = undefined;
+        // unreachable: the longer service name, git-receive-pack, makes 25 bytes
         try h.send(std.fmt.bufPrint(&buf, "connect {s}\n", .{service.name()}) catch unreachable);
         const answer = try h.readLine();
         if (answer.len == 0) return true;
@@ -507,8 +509,9 @@ pub const Helper = struct {
         if (options.filter) |spec| try h.requireOption("filter", spec, .quoted);
         if (options.deepen) |d| {
             var buf: [24]u8 = undefined;
+            // unreachable: a u32 depth is at most ten digits and an i64 time at most 20 with its sign
             if (d.depth) |depth| try h.requireOption("depth", std.fmt.bufPrint(&buf, "{d}", .{depth}) catch unreachable, .quoted);
-            if (d.since) |since| try h.requireOption("deepen-since", std.fmt.bufPrint(&buf, "{d}", .{since}) catch unreachable, .quoted);
+            if (d.since) |since| try h.requireOption("deepen-since", std.fmt.bufPrint(&buf, "{d}", .{since}) catch unreachable, .quoted); // unreachable: as above
             for (d.not) |n| try h.requireOption("deepen-not", n, .quoted);
             if (d.relative) try h.requireOption("deepen-relative", "true", .raw);
         }

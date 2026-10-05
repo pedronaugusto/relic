@@ -196,6 +196,7 @@ pub const Pointer = struct {
     /// `encode` into a buffer of the caller's.
     pub fn encodeBuf(p: *const Pointer, buf: *[max_encoded_len]u8) []const u8 {
         var w: Io.Writer = .fixed(buf);
+        // unreachable: max_encoded_len holds the version line, every extension line and the oid and size lines
         p.encode(&w) catch unreachable;
         return w.buffered();
     }
@@ -442,6 +443,7 @@ fn copyHashing(source: *Io.Reader, sink: ?*Io.Writer) (Io.Reader.ShortError || I
     var digest: [Sha256.digest_length]u8 = undefined;
     sha.final(&digest);
     var p: Pointer = .{ .oid = undefined, .size = size };
+    // unreachable: a SHA-256 digest is 32 bytes, 64 hex digits, the length of oid
     _ = std.fmt.bufPrint(&p.oid, "{x}", .{&digest}) catch unreachable;
     return p;
 }

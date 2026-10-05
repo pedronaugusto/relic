@@ -1513,6 +1513,7 @@ const TestServer = struct {
     fn stop(s: *TestServer, gpa: Allocator) void {
         const io = s.io;
         s.stopping.store(true, .release);
+        // unreachable: a literal IPv4 address, the one start listened on
         const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable;
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         s.task.await(io);

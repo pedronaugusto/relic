@@ -273,6 +273,7 @@ pub const Digest = struct {
     pub fn answer(d: *Digest, gpa: Allocator, user: []const u8, password: []const u8, method: []const u8, uri: []const u8) Allocator.Error![]u8 {
         d.nc += 1;
         var nc_buf: [8]u8 = undefined;
+        // unreachable: a u32 is at most eight hex digits
         const nc = std.fmt.bufPrint(&nc_buf, "{x:0>8}", .{d.nc}) catch unreachable;
 
         var ha1 = try d.hash(gpa, &.{ user, ":", d.realm, ":", password });
