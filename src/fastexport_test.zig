@@ -64,7 +64,8 @@ fn fixture(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     try git.writeFile(io, "run.sh/inner", "now a directory\n");
     try git.exec(io, &.{ "add", "run.sh" });
     try commitAt(io, git, 1_700_000_050, "file to directory");
-    try git.exec(io, &.{ "-c", "i18n.commitEncoding=ISO-8859-1", "commit", "-q", "--allow-empty", "-m", "caf\xe9" });
+    // Windows argv is UTF-16; the Latin-1 message belongs in stdin.
+    gpa.free(try git.runInput(io, &.{ "-c", "i18n.commitEncoding=ISO-8859-1", "commit", "-q", "--allow-empty", "-F", "-" }, "caf\xe9"));
 
     try git.exec(io, &.{ "checkout", "-q", "main" });
     {
