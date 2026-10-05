@@ -98,6 +98,7 @@ const Fixture = struct {
     fn sent(fx: *Fixture, logs: []const u8, repo_dir: Io.Dir) ![]u8 {
         const repo_path = try repo_dir.realPathFileAlloc(fx.io, ".", fx.gpa);
         defer fx.gpa.free(repo_path);
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, repo_path, '\\', '/');
         var lines: std.ArrayList([]u8) = .empty;
         defer {
             for (lines.items) |l| fx.gpa.free(l);
@@ -112,7 +113,22 @@ const Fixture = struct {
             var split = std.mem.splitScalar(u8, text, '\n');
             while (split.next()) |l| {
                 if (l.len == 0) continue;
-                try lines.append(fx.gpa, try std.mem.replaceOwned(u8, fx.gpa, l, repo_path, "<repo>"));
+                var parsed = try std.json.parseFromSlice(std.json.Value, fx.gpa, l, .{});
+                defer parsed.deinit();
+                // Normalize the decoded filesystem path, leaving URLs and
+                // other protocol fields intact. JSON escapes Windows slashes.
+                var normalized: ?[]u8 = null;
+                defer if (normalized) |p| fx.gpa.free(p);
+                if (parsed.value.object.getPtr("path")) |value| {
+                    if (value.* == .string) {
+                        const path_text = try fx.gpa.dupe(u8, value.string);
+                        defer fx.gpa.free(path_text);
+                        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path_text, '\\', '/');
+                        normalized = try std.mem.replaceOwned(u8, fx.gpa, path_text, repo_path, "<repo>");
+                        value.* = .{ .string = normalized.? };
+                    }
+                }
+                try lines.append(fx.gpa, try std.json.Stringify.valueAlloc(fx.gpa, parsed.value, .{}));
             }
         }
         std.mem.sort([]u8, lines.items, {}, struct {
