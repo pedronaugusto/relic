@@ -25,6 +25,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const assert = std.debug.assert;
 
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
@@ -264,7 +265,67 @@ fn pushTo(
     all_results: *std.ArrayList(RefResult),
     outcome: *Outcome,
 ) Error!void {
-    var session = try transport.Session.open(gpa, io, url, .receive_pack, repo.objectFormat(), .{
+    var session = try openSession(gpa, io, repo, remote, url, options);
+    defer session.close(io);
+    var remote_refs = try session.listRefs(gpa, io, &.{});
+    defer remote_refs.deinit();
+
+    var local_refs = try repo.refStore().list(gpa, io, "refs/");
+    defer local_refs.deinit();
+
+    const updates = try matchRefs(arena, gpa, io, repo, &local_refs, &remote_refs, specs);
+
+    // Judge each before anything is sent.
+    const results = try judgeAll(arena, gpa, io, repo, remote, url, updates, &remote_refs, options);
+    assert(results.len == updates.len);
+
+    var commands: std.ArrayList(sendpack.Command) = .empty;
+    // What a remote helper is told beside: the local ref and the `+`.
+    var sources: std.ArrayList(?[]const u8) = .empty;
+    var forced: std.ArrayList(bool) = .empty;
+    for (results, updates) |r, u| {
+        if (r.status != .ok) continue;
+        try commands.append(arena, .{ .name = r.remote_ref, .old = r.old, .new = r.new });
+        try sources.append(arena, r.local_ref);
+        try forced.append(arena, u.force or options.force);
+    }
+
+    if (options.pre_push) |hook| try runPrePush(arena, hook, remote.name orelse url, url, results);
+
+    if (options.dry_run) {
+        for (results) |*r| {
+            if (r.status == .ok) r.status = .not_sent;
+        }
+        try all_results.appendSlice(arena, results);
+        return;
+    }
+
+    if (commands.items.len != 0) {
+        try send(arena, gpa, io, repo, &session, remote.name orelse url, remote_refs.refs, .{
+            .commands = commands.items,
+            .objects = &.{},
+            .atomic = options.atomic,
+            .push_options = options.push_options,
+            .who = options.who,
+            .progress = options.progress,
+            .sources = sources.items,
+            .force = forced.items,
+        }, options, results, outcome);
+    }
+
+    // What the remote took moves its remote-tracking ref, as git moves it.
+    if (remote.name != null) {
+        for (results) |r| {
+            if (r.status != .ok and r.status != .up_to_date) continue;
+            try updateTracking(gpa, io, repo, remote, r, options.who);
+        }
+    }
+    try all_results.appendSlice(arena, results);
+}
+
+/// The session a push to `remote` at `url` talks over.
+fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, url: []const u8, options: Options) Error!transport.Session {
+    const session = try transport.Session.open(gpa, io, url, .receive_pack, repo.objectFormat(), .{
         .programs = options.programs,
         .config = repo.configuration(),
         .remote_name = remote.name,
@@ -279,20 +340,27 @@ fn pushTo(
         .repository = repo,
         .who = options.who,
     });
-    defer session.close(io);
-    var remote_refs = try session.listRefs(gpa, io, &.{});
-    defer remote_refs.deinit();
+    return session;
+}
 
-    var local_refs = try repo.refStore().list(gpa, io, "refs/");
-    defer local_refs.deinit();
-
-    const updates = try matchRefs(arena, gpa, io, repo, &local_refs, &remote_refs, specs);
-
-    // Judge each before anything is sent.
-    var results: std.ArrayList(RefResult) = .empty;
-    for (updates) |u| {
+/// What becomes of each update before anything is sent, as git judges it;
+/// under `--atomic`, one refusal refuses them all.
+fn judgeAll(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    remote: *const remote_mod.Remote,
+    url: []const u8,
+    updates: []const Update,
+    remote_refs: *const protocol.RefList,
+    options: Options,
+) Error![]RefResult {
+    const results = try arena.alloc(RefResult, updates.len);
+    var any_refused = false;
+    for (updates, results) |u, *result| {
         const old = if (remote_refs.find(u.remote_ref)) |r| r.oid else Oid.zero(repo.objectFormat());
-        var result: RefResult = .{
+        result.* = .{
             .url = url,
             .local_ref = u.local_ref,
             .remote_ref = u.remote_ref,
@@ -300,121 +368,100 @@ fn pushTo(
             .new = u.new,
             .status = .ok,
         };
-        try judge(gpa, io, repo, remote, &result, u.force or options.force, options.leases);
-        try results.append(arena, result);
-    }
-
-    var any_refused = false;
-    for (results.items) |r| {
-        if (r.rejected()) any_refused = true;
+        try judge(gpa, io, repo, remote, result, u.force or options.force, options.leases);
+        if (result.rejected()) any_refused = true;
     }
     if (options.atomic and any_refused) {
-        for (results.items) |*r| {
+        for (results) |*r| {
             if (r.status == .ok) r.status = .atomic_failed;
         }
     }
+    return results;
+}
 
-    var commands: std.ArrayList(sendpack.Command) = .empty;
-    // What a remote helper is told beside: the local ref and the `+`.
-    var sources: std.ArrayList(?[]const u8) = .empty;
-    var forced: std.ArrayList(bool) = .empty;
-    for (results.items, updates) |r, u| {
-        if (r.status != .ok) continue;
-        try commands.append(arena, .{ .name = r.remote_ref, .old = r.old, .new = r.new });
-        try sources.append(arena, r.local_ref);
-        try forced.append(arena, u.force or options.force);
-    }
-
-    if (options.pre_push) |hook| {
-        var lines: std.ArrayList(PrePushUpdate) = .empty;
-        for (results.items) |r| {
-            switch (r.status) {
-                .rejected_non_fast_forward, .rejected_stale, .up_to_date => continue,
-                else => {},
-            }
-            try lines.append(arena, .{
-                .local_ref = if (r.new.isZero()) "(delete)" else (r.local_ref orelse r.remote_ref),
-                .local_oid = r.new,
-                .remote_ref = r.remote_ref,
-                .remote_oid = r.old,
-            });
+/// Show the pre-push hook point what git's pre-push hook is shown: every
+/// update not already refused or up to date. `error.PrePushRefused` when
+/// it says no.
+fn runPrePush(arena: Allocator, hook: PrePush, remote_name: []const u8, url: []const u8, results: []const RefResult) Error!void {
+    var lines: std.ArrayList(PrePushUpdate) = .empty;
+    for (results) |r| {
+        switch (r.status) {
+            .rejected_non_fast_forward, .rejected_stale, .up_to_date => continue,
+            else => {},
         }
-        if (lines.items.len != 0 and !hook.run(hook.context, remote.name orelse url, url, lines.items)) {
-            return error.PrePushRefused;
-        }
-    }
-
-    if (options.dry_run) {
-        for (results.items) |*r| {
-            if (r.status == .ok) r.status = .not_sent;
-        }
-        try all_results.appendSlice(arena, results.items);
-        return;
-    }
-
-    if (commands.items.len != 0) {
-        var include: std.ArrayList(Oid) = .empty;
-        for (commands.items) |c| {
-            if (!c.new.isZero()) try include.append(arena, c.new);
-        }
-        var exclude: std.ArrayList(Oid) = .empty;
-        for (remote_refs.refs) |r| {
-            if (r.unborn) continue;
-            if (try repo.odb.exists(io, r.oid)) try exclude.append(arena, r.oid);
-        }
-        var objects = try objectwalk.missing(gpa, io, &repo.odb, include.items, exclude.items);
-        defer objects.deinit();
-
-        var remote_refs_pushed: std.ArrayList([]const u8) = .empty;
-        for (commands.items) |c| {
-            if (!c.new.isZero()) try remote_refs_pushed.append(arena, c.name);
-        }
-        try lfspush.beforePush(gpa, io, repo, remote.name orelse url, remote_refs_pushed.items, objects.entries, .{
-            .programs = options.programs,
-            .prompt = options.prompt,
-            .progress = options.progress,
-            .auth_failure = options.auth_failure,
-        }, options.lfs);
-
-        var report = try session.push(gpa, io, &repo.odb, .{
-            .commands = commands.items,
-            .objects = objects.entries,
-            .atomic = options.atomic,
-            .push_options = options.push_options,
-            .who = options.who,
-            .progress = options.progress,
-            .sources = sources.items,
-            .force = forced.items,
+        try lines.append(arena, .{
+            .local_ref = if (r.new.isZero()) "(delete)" else (r.local_ref orelse r.remote_ref),
+            .local_oid = r.new,
+            .remote_ref = r.remote_ref,
+            .remote_oid = r.old,
         });
-        defer report.deinit();
-        if (!report.unpack_ok) {
-            outcome.unpack_ok = false;
-            if (report.unpack_message) |m| outcome.unpack_message = try arena.dupe(u8, m);
-        }
-        for (results.items) |*r| {
-            if (r.status != .ok) continue;
-            if (!report.unpack_ok) {
-                r.status = .rejected_by_remote;
-                r.message = outcome.unpack_message;
-                continue;
-            }
-            if (report.find(r.remote_ref)) |said| {
-                if (!said.ok) {
-                    r.status = .rejected_by_remote;
-                    if (said.message) |m| r.message = try arena.dupe(u8, m);
-                }
-            }
-        }
     }
+    if (lines.items.len != 0 and !hook.run(hook.context, remote_name, url, lines.items)) {
+        return error.PrePushRefused;
+    }
+}
 
-    // What the remote took moves its remote-tracking ref, as git moves it.
-    if (remote.name != null) {
-        for (results.items) |r| {
-            if (r.status != .ok and r.status != .up_to_date) continue;
-            try updateTracking(gpa, io, repo, remote, r, options.who);
+/// Send `request`'s commands with the objects the remote lacks, LFS
+/// objects first, and mark each result with what the remote said.
+fn send(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    session: *transport.Session,
+    remote_name: []const u8,
+    remote_refs: []const protocol.RemoteRef,
+    request: transport.Session.PushRequest,
+    options: Options,
+    results: []RefResult,
+    outcome: *Outcome,
+) Error!void {
+    assert(request.commands.len != 0);
+    var include: std.ArrayList(Oid) = .empty;
+    for (request.commands) |c| {
+        if (!c.new.isZero()) try include.append(arena, c.new);
+    }
+    var exclude: std.ArrayList(Oid) = .empty;
+    for (remote_refs) |r| {
+        if (r.unborn) continue;
+        if (try repo.odb.exists(io, r.oid)) try exclude.append(arena, r.oid);
+    }
+    var objects = try objectwalk.missing(gpa, io, &repo.odb, include.items, exclude.items);
+    defer objects.deinit();
+
+    var remote_refs_pushed: std.ArrayList([]const u8) = .empty;
+    for (request.commands) |c| {
+        if (!c.new.isZero()) try remote_refs_pushed.append(arena, c.name);
+    }
+    try lfspush.beforePush(gpa, io, repo, remote_name, remote_refs_pushed.items, objects.entries, .{
+        .programs = options.programs,
+        .prompt = options.prompt,
+        .progress = options.progress,
+        .auth_failure = options.auth_failure,
+    }, options.lfs);
+
+    var with_objects = request;
+    with_objects.objects = objects.entries;
+    var report = try session.push(gpa, io, &repo.odb, with_objects);
+    defer report.deinit();
+    if (!report.unpack_ok) {
+        outcome.unpack_ok = false;
+        if (report.unpack_message) |m| outcome.unpack_message = try arena.dupe(u8, m);
+    }
+    for (results) |*r| {
+        if (r.status != .ok) continue;
+        if (!report.unpack_ok) {
+            r.status = .rejected_by_remote;
+            r.message = outcome.unpack_message;
+            continue;
+        }
+        if (report.find(r.remote_ref)) |said| {
+            if (!said.ok) {
+                r.status = .rejected_by_remote;
+                if (said.message) |m| r.message = try arena.dupe(u8, m);
+            }
         }
     }
-    try all_results.appendSlice(arena, results.items);
 }
 
 /// The refspecs `push.default` asks for when none are named.

@@ -65,10 +65,6 @@
       "lines": 159,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/transport/push.zig:pushTo": {
-      "lines": 164,
-      "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
-    },
     "src/commit/rebase.zig:doPickCommit": {
       "lines": 210,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
