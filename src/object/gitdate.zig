@@ -1051,7 +1051,7 @@ pub fn strftime(gpa: std.mem.Allocator, out: *std.ArrayList(u8), fmt: []const u8
             'W' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - @mod(tm.wday + 6, 7), 7)))}),
             'x' => {
                 try out.print(gpa, "{d:0>2}/{d:0>2}/", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) });
-                if (context.date_full_year) try out.print(gpa, "{d:0>4}", .{year}) else try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))});
+                if (context.date_full_year) try out.print(gpa, "{d:0>4}", .{@as(u64, @intCast(@max(year, 0)))}) else try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))});
             },
             'y' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))}),
             'Y' => try out.print(gpa, "{d}", .{year}),
@@ -1060,6 +1060,19 @@ pub fn strftime(gpa: std.mem.Allocator, out: *std.ArrayList(u8), fmt: []const u8
             else => try out.appendSlice(gpa, fmt[i - 2 .. i]),
         }
     }
+}
+
+test "locale date year width changes percent x without changing percent D" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    const secs: i64 = 1700270000;
+    const mode: Mode = .{ .kind = .strftime, .strftime = "%x|%D" };
+    try show(gpa, &out, secs, 0, mode, .{});
+    try std.testing.expectEqualStrings("11/18/23|11/18/23", out.items);
+    out.clearRetainingCapacity();
+    try show(gpa, &out, secs, 0, mode, .{ .locale_date_full_year = true });
+    try std.testing.expectEqualStrings("11/18/2023|11/18/23", out.items);
 }
 
 test "approximate dates read as git's t0006 reads them" {
