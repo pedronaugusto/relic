@@ -13,10 +13,9 @@
 //! A subject is the commit's `%s` with any `[PATCH...]` prefix taken off;
 //! `wrap` folds it as `-w` does, counting columns as git's own table does.
 //! `--group=format:<format>` groups by what `pretty` makes of the format,
-//! for commits added by name. A message in an encoding other than UTF-8,
-//! which git would convert first, is refused by name, as is a trailer group
-//! in a repository that configures `trailer.*`, which changes what git
-//! reads as one.
+//! for commits added by name. Trailers are read as the repository's
+//! `trailer.*` settings say. A message in an encoding other than UTF-8,
+//! which git would convert first, is refused by name.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -26,6 +25,7 @@ const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const odb_mod = @import("../odb.zig");
 const message = @import("../commit/message.zig");
+const trailer = @import("../commit/trailer.zig");
 const mailmap_mod = @import("mailmap.zig");
 const unicodewidth = @import("../unicodewidth.zig");
 const config_mod = @import("../config.zig");
@@ -67,12 +67,10 @@ pub const Options = struct {
     wrap: ?Wrap = null,
     /// Who people are, as `Mailmap.load` reads it. `null` maps nobody.
     mailmap: ?*const mailmap_mod.Mailmap = null,
+    /// How trailers are read: the repository's `trailer.*` settings and
     /// `core.commentChar`, which decides where a message's trailer block
-    /// ends.
-    comment: []const u8 = "#",
-    /// Whether the repository configures `trailer.*`; a trailer group is
-    /// then refused, since git would read trailers as configured.
-    trailer_config: bool = false,
+    /// ends. Borrowed.
+    trailers: trailer.Settings = .{},
     /// What a format group's placeholders need besides the commit.
     format_context: pretty.Context = .{},
 };
@@ -84,9 +82,6 @@ pub const Error = error{
     FormatGroupNeedsName,
     /// A commit whose `encoding` header names something other than UTF-8.
     EncodingUnsupported,
-    /// A trailer group in a repository whose `trailer.*` settings change
-    /// what a trailer is.
-    TrailerConfigUnsupported,
     /// A `-w` whose width is no wider than an indent: git's usage error.
     InvalidWrap,
 } || pretty.Error;
@@ -124,7 +119,6 @@ pub const Shortlog = struct {
             .format => |format| try formats.append(gpa, format),
         };
         if (options.groups.len == 0) author = true;
-        if (keys.items.len != 0 and options.trailer_config) return error.TrailerConfigUnsupported;
         if (options.wrap) |w| {
             if (w.width != 0 and ((w.indent1 != 0 and w.width <= w.indent1) or (w.indent2 != 0 and w.width <= w.indent2)))
                 return error.InvalidWrap;
@@ -199,7 +193,7 @@ pub const Shortlog = struct {
             // line, the blank line itself included, so the title paragraph
             // can be a trailer block of its own.
             const body = try std.mem.concat(a, u8, &.{ "\n\n", commit.message });
-            for (try message.trailers(a, body, s.options.comment)) |t| {
+            for (try trailer.iterate(a, s.options.trailers, body)) |t| {
                 if (!s.wantsKey(t.key)) continue;
                 const value = try s.identOf(a, t.value) orelse t.value;
                 if ((try seen.getOrPut(a, value)).found_existing) continue;
@@ -436,22 +430,19 @@ pub fn addWrappedText(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8,
     }
 }
 
-/// `base` with what a repository's configuration decides filled in: the
-/// comment string from `core.commentChar` (or `core.commentString`) and
-/// whether `trailer.*` is configured. `auto` reads as `#`, which is what
-/// git's trailer parser sees for a commit already made.
-pub fn configured(config: *const config_mod.Config, base: Options) Options {
+/// `base` with what a repository's configuration decides filled in: how
+/// trailers are read, `core.commentChar` (or `core.commentString`) and the
+/// `trailer.*` settings. `auto` reads as `#`, which is what git's trailer
+/// parser sees for a commit already made. What it reads is `arena`'s.
+pub fn configured(arena: Allocator, config: *const config_mod.Config, base: Options) Allocator.Error!Options {
     var options = base;
-    options.comment = "#";
+    var comment: []const u8 = "#";
     for ([_][]const u8{ "core.commentchar", "core.commentstring" }) |key| {
         if (config.get(key)) |raw| {
-            if (raw.len != 0 and !std.mem.eql(u8, raw, "auto")) options.comment = raw;
+            if (raw.len != 0 and !std.mem.eql(u8, raw, "auto")) comment = raw;
         }
     }
-    options.trailer_config = false;
-    for (config.entries.items) |entry| {
-        if (std.ascii.eqlIgnoreCase(entry.section, "trailer")) options.trailer_config = true;
-    }
+    options.trailers = try trailer.Settings.load(arena, config, comment);
     return options;
 }
 
@@ -479,7 +470,9 @@ fn commitAs(r: *testgit.Repo, io: Io, author: []const u8, committer: []const u8,
 }
 
 fn shortlogOf(gpa: Allocator, io: Io, repo: *repo_mod.Repository, options: Options) ![]u8 {
-    var s = try Shortlog.init(gpa, configured(repo.configuration(), options));
+    var settings_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer settings_arena.deinit();
+    var s = try Shortlog.init(gpa, try configured(settings_arena.allocator(), repo.configuration(), options));
     defer s.deinit();
     var walk: revwalk.Walk = .init(gpa, &repo.odb);
     defer walk.deinit();
@@ -570,5 +563,4 @@ test "shortlog refuses what it does not do by name" {
     var commit = try object.Commit.parse(gpa, .sha1, "tree " ++ "0" ** 40 ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\ns\n");
     defer commit.deinit();
     try std.testing.expectError(error.FormatGroupNeedsName, formatted.addCommit(&commit));
-    try std.testing.expectError(error.TrailerConfigUnsupported, Shortlog.init(gpa, .{ .groups = &.{.{ .trailer = "a" }}, .trailer_config = true }));
 }

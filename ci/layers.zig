@@ -93,6 +93,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/odb/inflate_test.zig",
         "src/lfs/ssh.zig",
         "src/commit/message.zig",
+        "src/commit/trailer.zig",
         "src/odb/pack/entry.zig",
         "src/transport/protocol.zig",
         "src/refs/reflog.zig",
@@ -258,6 +259,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "transfer orchestration", .patterns = &.{
         "src/patch/am.zig",
+        "src/commit/trailer_test.zig",
         "src/patch/am_test.zig",
         "src/transport/clone/lfs.zig",
         "src/transport/remotehelper.zig",

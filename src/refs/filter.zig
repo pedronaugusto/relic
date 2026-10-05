@@ -15,8 +15,8 @@
 //! any of git's four quoting styles.
 //!
 //! Colour is off, as git's is when it is not writing to a terminal: a
-//! `%(color:...)` git accepts writes nothing. `%(trailers)` and
-//! `%(contents:trailers)` are refused by name.
+//! `%(color:...)` git accepts writes nothing. Trailers are read as the
+//! repository's `trailer.*` settings say.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -41,6 +41,8 @@ const refspec = @import("../transport/refspec.zig");
 const unicodewidth = @import("../unicodewidth.zig");
 const pretty = @import("../pretty.zig");
 const reflog = @import("reflog.zig");
+const trailer = @import("../commit/trailer.zig");
+const message = @import("../commit/message.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -74,8 +76,6 @@ pub const Error = error{
     DateNeedsClock,
     /// A signature atom for a signed commit, with no `signer`.
     SignatureNeedsSigner,
-    /// `%(trailers)` and `%(contents:trailers)`.
-    UnsupportedField,
 } || Allocator.Error || refs_mod.ReadError || odb_mod.Error || object.ParseError ||
     revwalk.Error || signing.Error || remote_mod.Error || worktrees.Error || mailmap_mod.LoadError || describe_mod.Error;
 
@@ -481,6 +481,7 @@ const Atom = struct {
     base_name: []const u8 = "",
     head: ?[]const u8 = null,
     date: ?gitdate.Mode = null,
+    trailers: trailer.Options = .{ .no_divider = true },
 };
 
 const SignatureOption = enum { bare, grade, signer, key, fingerprint, primarykeyfingerprint, trustlevel };
@@ -491,6 +492,18 @@ fn parseSignatureOption(arg: ?[]const u8) ?SignatureOption {
         if (std.mem.eql(u8, text, name)) return @field(SignatureOption, name);
     }
     return null;
+}
+
+/// git's `trailers_atom_parser`: no divider, and the options of
+/// `%(trailers:...)` as `%(trailers)` in a log format takes them.
+fn parseTrailerOptions(arena: Allocator, arg: ?[]const u8) Error!trailer.Options {
+    const text = arg orelse return .{ .no_divider = true };
+    const with_paren = try std.mem.concat(arena, u8, &.{ text, ")" });
+    const parsed = (try trailer.parsePlaceholderOptions(arena, with_paren)) orelse return error.BadFieldArgument;
+    if (parsed.len != text.len) return error.BadFieldArgument;
+    var options = parsed.options;
+    options.no_divider = true;
+    return options;
 }
 
 fn parseUnsigned(text: []const u8) ?u32 {
@@ -668,6 +681,7 @@ pub const Listing = struct {
     describers: std.ArrayList(?*describe_mod.Describer) = .empty,
     commits: Oid.Map(CommitNode) = .empty,
     head_description: ?[]const u8 = null,
+    trailer_settings: ?trailer.Settings = null,
 
     /// An empty listing over `repo`.
     pub fn init(gpa: Allocator, io: Io, repo: *Repository, context: Context) Listing {
@@ -975,7 +989,10 @@ pub const Listing = struct {
                 atom.contents = .sub;
             },
             .signature => atom.signature = parseSignatureOption(arg) orelse return error.BadFieldArgument,
-            .trailers => return error.UnsupportedField,
+            .trailers => {
+                atom.contents = .trailers;
+                atom.trailers = try parseTrailerOptions(l.a(), arg);
+            },
             .contents => if (arg) |text| {
                 if (std.mem.eql(u8, text, "body")) {
                     atom.contents = .body;
@@ -986,8 +1003,12 @@ pub const Listing = struct {
                     atom.contents = .sig;
                 } else if (std.mem.eql(u8, text, "subject")) {
                     atom.contents = .sub;
-                } else if (std.mem.eql(u8, text, "trailers") or std.mem.startsWith(u8, text, "trailers:")) {
-                    return error.UnsupportedField;
+                } else if (std.mem.eql(u8, text, "trailers")) {
+                    atom.contents = .trailers;
+                    atom.trailers = try parseTrailerOptions(l.a(), null);
+                } else if (std.mem.startsWith(u8, text, "trailers:")) {
+                    atom.contents = .trailers;
+                    atom.trailers = try parseTrailerOptions(l.a(), text["trailers:".len..]);
                 } else if (std.mem.startsWith(u8, text, "lines=")) {
                     atom.contents = .lines;
                     atom.lines = parseUnsigned(text["lines=".len..]) orelse return error.BadFieldArgument;
@@ -1553,7 +1574,7 @@ pub const Listing = struct {
                 .object => return .{ .s = headerValue(buf, "object") orelse "" },
                 .tagger, .taggername, .taggeremail, .taggerdate, .creator, .creatordate => return l.person(atom, buf, "tagger"),
                 .describe => return l.describeValue(atom, data.oid),
-                .subject, .body, .contents => return l.contentsValue(atom, buf),
+                .subject, .body, .contents, .trailers => return l.contentsValue(atom, buf),
                 else => return .{},
             },
             .commit => switch (atom.kind) {
@@ -1576,7 +1597,7 @@ pub const Listing = struct {
                 .committer, .committername, .committeremail, .committerdate, .creator, .creatordate => return l.person(atom, buf, "committer"),
                 .signature => return l.signatureValue(atom, data),
                 .describe => return l.describeValue(atom, data.oid),
-                .subject, .body, .contents => return l.contentsValue(atom, buf),
+                .subject, .body, .contents, .trailers => return l.contentsValue(atom, buf),
                 else => return .{},
             },
             else => return .{},
@@ -1804,7 +1825,14 @@ pub const Listing = struct {
                 return .{ .s = out.items };
             },
             .bare => return .{ .s = pos.from_sub },
-            .trailers => return error.UnsupportedField,
+            .trailers => {
+                if (l.trailer_settings == null) l.trailer_settings = try message.trailerSettings(ar, l.repo.configuration());
+                // the message without its signature
+                const msg = if (pos.sig.len != 0) pos.from_sub[0 .. pos.from_sub.len - pos.sig.len] else pos.from_sub;
+                var out: std.ArrayList(u8) = .empty;
+                try trailer.format(ar, l.trailer_settings.?, atom.trailers, msg, &out);
+                return .{ .s = out.items };
+            },
         }
     }
 

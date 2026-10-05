@@ -26,6 +26,7 @@ pub const merging = @import("commit/merging.zig");
 pub const stash = @import("commit/stash.zig");
 // The modules relic's API puts under this one, as `relic.commit.<name>`.
 pub const message = @import("commit/message.zig");
+pub const trailer = @import("commit/trailer.zig");
 pub const head = @import("commit/head.zig");
 pub const reset = @import("commit/reset.zig");
 
@@ -67,7 +68,9 @@ pub const Error = error{
     OperationInProgress,
     /// `commit.cleanup` names no mode git knows.
     InvalidCleanupMode,
-} || hooks.Error || commithooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
+    /// A `--trailer` that is empty, or has no key before its separator.
+    InvalidTrailer,
+} || trailer.Error || hooks.Error || commithooks.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error ||
     index_mod.ReadError || Io.Dir.RealPathError || fs.CommitError || fs.LockError ||
     error{NameTooLong};
 
@@ -107,6 +110,12 @@ pub const Options = struct {
     signing: signing.Request = .{},
     /// Caller-owned output for a refused write or failed signing program.
     diagnostic: ?*repo_mod.Diagnostic = null,
+    /// `--trailer`: each `<key>`, `<key>=<value>` or `<key>:<value>` added
+    /// to the message as `git interpret-trailers` adds it, before
+    /// `prepare-commit-msg` runs, with the repository's `trailer.*` rules.
+    trailers: []const []const u8 = &.{},
+    /// What runs a `trailer.<name>.command` or `.cmd` those rules name.
+    trailer_commands: ?trailer.Commands = null,
 };
 
 /// Who, when, and what to say. The times are the caller's, because nothing
@@ -157,7 +166,17 @@ pub fn commit(repo: *Repository, io: Io, request: Request, options: Options) Err
     }
 
     const comment = commentPrefix(repo);
-    const first_message = try clean(arena, request.message, cleanup, comment);
+    var first_message = try clean(arena, request.message, cleanup, comment);
+    if (options.trailers.len != 0) {
+        // git's `validate_trailer_args`, then `amend_file_with_trailers`
+        const settings = try message.trailerSettings(arena, repo.configuration());
+        const cl_separators = try std.mem.concat(arena, u8, &.{ "=", settings.separators });
+        for (options.trailers) |text| {
+            if (text.len == 0) return error.InvalidTrailer;
+            if (trailer.findSeparator(text, cl_separators)) |at| if (at == 0) return error.InvalidTrailer;
+        }
+        first_message = try trailer.amend(arena, io, settings, options.trailer_commands, first_message, options.trailers);
+    }
     try repo.git_dir.writeFile(io, .{ .sub_path = "COMMIT_EDITMSG", .data = first_message });
 
     // `pre-commit` may have staged something, so the index is read now and

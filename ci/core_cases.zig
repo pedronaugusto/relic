@@ -103,6 +103,7 @@ pub const families = [_]Family{
         "patch.rangediff_test.test",
         "refs.filter.test",
         "refs.filter_test.test",
+        "commit.trailer_test.test",
         "grep.test",
         "grep_test.test",
         "testing.history.test",

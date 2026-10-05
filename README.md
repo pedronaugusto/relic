@@ -287,6 +287,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `commit` | Making a commit the way `git commit` does, its hooks in git's order. |
 | `commit.merging`, `commit.sequencer`, `commit.rebase`, `commit.todo` | Merge, cherry-pick, revert and rebase, with their state files in git's format. |
 | `commit.message`, `commit.head`, `commit.reset`, `commit.commithooks` | What those commands share: messages as git shapes them, `HEAD` as git moves it, `git reset`, the hooks around the commits they make. |
+| `commit.trailer` | `process`, `processFile`, `format`, `iterate`, `amend`, `Settings.load` — `git interpret-trailers` byte for byte: the trailer block found as git finds it, `--trailer` added by `--where`, `--if-exists` and `--if-missing`, `--trim-empty`, `--only-trailers`, `--only-input`, `--unfold`, `--parse`, `--no-divider`, `--in-place`; `trailer.separators`, `.where`, `.ifExists`, `.ifMissing` and every `trailer.<name>.key`, `.command` and `.cmd`. `%(trailers)` and `git commit --trailer` go through it. |
 | `commit.stash` | `push`, `apply`, `pop`, `list`, `show`, `drop`, `clear`. |
 | `commit.notes` | `Notes`, `add`, `append`, `copy`, `remove`, `prune`, `show`, `merge`, `mergeCommit`, `mergeAbort`, `formatNote`: `refs/notes/*` read and written as `git notes` does, git's fanout and every merge strategy included. |
 | `commit.signing` | Sign and verify commits and tags: OpenPGP, SSH, X.509. |
@@ -312,7 +313,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `patch.am` | `start`, `proceed`, `skip`, `abort`, `quit` — `git am` with `--3way`, its state in `rebase-apply` as git keeps it. |
 | `grep` | `grep` — `git grep` over the working tree, the index or a tree: fixed, basic and extended patterns with back-references, `--and`/`--or`/`--not` and `--all-match`, `-i -w -v -n -l -c`, context, `-p` and `-W` with git's `diff` driver function lines, pathspecs, binary files, written as git writes it; `-P` through the caller's `Matcher`. |
 | `archive` | `archive` — `git archive` as tar or zip, git's bytes: the pax comment, `--prefix`, `export-ignore`, `export-subst`, `tar.umask`. |
-| `pretty` | `formatCommit`, `Context`, `Decorations` — git's `--format` placeholders for one commit, the mailmap's names, decorations, notes and signatures among them. |
+| `pretty` | `formatCommit`, `Context`, `Decorations` — git's `--format` placeholders for one commit, the mailmap's names, decorations, notes, signatures and `%(trailers)` with every option among them. |
 | `clean` | `clean` — `git clean`: `-n`, `-f`, `-ff`, `-d`, `-x`, `-X`, `-e`, pathspecs, repositories inside the tree left alone, git's lines. |
 | `fastimport` | `import`, `Marks` — `git fast-import`: every command, its dates, marks files and notes fanout, branches updated as git updates them. |
 | `fastexport` | `write` — `git fast-export` byte for byte: marks, renames, tags, signatures, refspecs. |
@@ -701,16 +702,16 @@ uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 - **LFS without tus.** The tus adapter is refused by name; custom transfer adapters run as git-lfs runs them.
 - **No receive-pack server.** relic serves fetches; a push goes to git's server.
 - **No `git://` or dumb HTTP.** Refused by name. A remote helper is spoken to through `connect`, `fetch`, `import`, `push` and `export`; one with only `stateless-connect` or `get` cannot fetch here, `HelperCannotFetch`.
-- **No editor for a note.** Refused by name, as is a shortlog by trailer where `trailer.*` is configured.
+- **No editor for a note.** Refused by name.
 - **`apply` with the index compares content where a stat differs.** git says "does not match index" until the index is refreshed; this reads the file and agrees when its content does.
 - **A binary hunk in a written patch is this package's deflate.** It decodes to the same file; the compressed bytes are not zlib's. A cover letter's shortlog under a mailmap is refused by name.
 - **`am` reads mailboxes only.** StGit and Mercurial patches are refused by name, as is a mail in a character set other than UTF-8, US-ASCII or ISO-8859-1.
 - **`grep -P` only through a caller's matcher.** Without one, Perl expressions are refused by name; back-references follow glibc's matcher, which git uses on Linux and builds in for Windows, where macOS's differs.
-- **A deflated zip entry is this package's deflate,** decoding to the same file; a stored zip and every tar are git's bytes. `export-subst` leaves `%N` as it stands, as git does, and refuses `%(describe)`, relative and human dates, trailers, wrapping, padding and colour by name.
+- **A deflated zip entry is this package's deflate,** decoding to the same file; a stored zip and every tar are git's bytes. `export-subst` leaves `%N` as it stands, as git does, and refuses `%(describe)`, relative and human dates, wrapping, padding and colour by name.
 - **No interactive `clean`.**
 - **A hunk's function line by git's default rule.** In `patch.format` and `patch.rangediff` a `diff` driver's `funcname` does not reach the `@@` line, and in `patch.rangediff` its `textconv` does not reach the patch.
 - **`range-diff` over commits that are not merges, without colour.** `--diff-merges`, `--remerge-diff` and dual colour are not offered; the notes compared are `core.notesRef`'s (or `refs/notes/commits`), not `--notes=<ref>` or `notes.displayRef`, and no `git log` arguments follow the ranges.
-- **Ref listings write no colour.** A `%(color:...)` git accepts writes nothing, as git's does when it is not writing to a terminal, and `--column` is not offered. `%(trailers)` is refused by name.
+- **Ref listings write no colour.** A `%(color:...)` git accepts writes nothing, as git's does when it is not writing to a terminal, and `--column` is not offered.
 - **No fsmonitor daemon.** `core.fsmonitor=true`, git's built-in daemon, is `error.FsmonitorDaemonUnsupported`; a hook and a program's own change source are asked as git asks the hook.
 - **fast-import does not check signatures, and fast-export does not anonymize.** git's `--signed-commits=*-if-invalid`, `rewrite-submodules-*` and `export-pack-edges` are refused by name; fast-export takes no path limit and no `--reencode=yes`.
 
@@ -787,7 +788,7 @@ clone, fetch and push against `git http-backend`, git's own ssh transport
 through a stand-in, and relic's upload-pack, with refs, reflogs,
 `.git/shallow` and `.promisor` files compared; merges, cherry-picks, rebases
 and rerere against the git that made the fixture, state files and reflogs
-included; `for-each-ref`, `branch` and `tag` listings under every atom, sort key and filter; `describe` (with `--contains`), `shortlog` and `check-mailmap`
+included; `for-each-ref`, `branch` and `tag` listings under every atom, sort key and filter; `interpret-trailers` under every option and `trailer.*` rule, and `%(trailers)` in `log` and `for-each-ref`; `describe` (with `--contains`), `shortlog` and `check-mailmap`
 under each of their options; notes added, appended, copied, removed and
 merged under every strategy, commit for commit, fanout included; a bundle's
 header byte for byte and what git unbundles from it, and git's bundles read

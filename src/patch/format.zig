@@ -830,10 +830,11 @@ fn formatOne(ctx: *Ctx, out: *std.ArrayList(u8), oid: Oid) Error!void {
     if (out.items.len <= beginning_of_body) try out.append(a, '\n');
     if (ctx.options.signoff) |who| {
         const line = try std.fmt.allocPrint(a, "Signed-off-by: {s} <{s}>\n", .{ who.name, who.email });
-        const footer: message.Footer = if (std.mem.eql(u8, out.items, line)) .ends_with_line else message.conformingFooter(out.items, line, "#");
+        const trailers = try message.trailerSettings(a, ctx.repo.configuration());
+        const footer: message.Footer = if (std.mem.eql(u8, out.items, line)) .ends_with_line else try message.conformingFooter(a, out.items, line, trailers);
         if (footer != .has_line) {
             const sig: object.Signature = .{ .name = who.name, .email = who.email, .when_secs = 0, .offset_minutes = 0 };
-            try message.appendSignoff(a, out, sig, "#");
+            try message.appendSignoff(a, out, sig, trailers);
         }
     }
 

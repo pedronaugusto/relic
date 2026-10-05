@@ -14,6 +14,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const object = @import("../object.zig");
+const trailer = @import("trailer.zig");
+const config_mod = @import("../config.zig");
 
 /// How a message is cleaned before it is committed: `commit.cleanup`.
 pub const Cleanup = enum {
@@ -45,18 +47,10 @@ pub const cut_line = "------------------------ >8 ------------------------";
 /// The prefix of the line `-x` adds.
 pub const cherry_picked_prefix = "(cherry picked from commit ";
 
-/// Trailer prefixes git writes itself, which make a paragraph a trailer
-/// block even when most of it is not trailers.
-const generated_prefixes = [_][]const u8{ "Signed-off-by: ", cherry_picked_prefix };
-
 /// git's `isspace`, which is narrower than C's: no vertical tab and no form
 /// feed.
 fn isSpace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';
-}
-
-fn isAlnum(c: u8) bool {
-    return std.ascii.isAlphanumeric(c);
 }
 
 /// `strbuf_stripspace`: trailing whitespace off every line, comment lines
@@ -111,218 +105,11 @@ fn nextLine(buf: []const u8, at: usize) usize {
     return if (std.mem.indexOfScalarPos(u8, buf, at, '\n')) |nl| nl + 1 else buf.len;
 }
 
-/// The start of the last line of `buf[0..len]`, or `null` when it is empty.
-fn lastLine(buf: []const u8, len: usize) ?usize {
-    if (len == 0) return null;
-    if (len == 1) return 0;
-    var i = len - 1;
-    while (i > 0) {
-        i -= 1;
-        if (buf[i] == '\n') return i + 1;
-    }
-    return 0;
-}
-
-/// `wt_status_locate_end`: the cut line and everything after it are not
-/// part of the message.
-fn locateEnd(buf: []const u8, comment: []const u8) usize {
-    var pattern_buf: [256]u8 = undefined;
-    const pattern = std.fmt.bufPrint(&pattern_buf, "\n{s} {s}", .{ comment, cut_line }) catch return buf.len;
-    if (std.mem.startsWith(u8, buf, pattern[1..])) return 0;
-    if (std.mem.indexOf(u8, buf, pattern)) |at| return @min(at + 1, buf.len);
-    return buf.len;
-}
-
-/// `ignored_log_message_bytes`: how many bytes at the end of `buf` are
-/// trailing comments, blank lines, an old-style `Conflicts:` list, or
-/// everything below a cut line.
-fn ignoredBytes(buf: []const u8, comment: []const u8) usize {
-    var boc: usize = 0;
-    var bol: usize = 0;
-    var in_old_conflicts = false;
-    const cutoff = locateEnd(buf, comment);
-    while (bol < cutoff) {
-        const next = nextLine(buf, bol);
-        if (std.mem.startsWith(u8, buf[bol..cutoff], comment) or buf[bol] == '\n') {
-            if (boc == 0) boc = bol;
-        } else if (std.mem.startsWith(u8, buf[bol..], "Conflicts:\n")) {
-            in_old_conflicts = true;
-            if (boc == 0) boc = bol;
-        } else if (in_old_conflicts and buf[bol] == '\t') {
-            // A path in the conflicts list.
-        } else if (boc != 0) {
-            boc = 0;
-            in_old_conflicts = false;
-        }
-        bol = next;
-    }
-    return if (boc != 0) buf.len - boc else buf.len - cutoff;
-}
-
-/// Where `token: value` puts its colon, or `null` for a line that is not a
-/// trailer: a token of letters, digits and dashes, then optional
-/// whitespace. A colon that begins `://` straight after the token is a URL
-/// and not a separator, as git 2.56 reads it.
-fn findSeparator(line: []const u8) ?usize {
-    var whitespace_found = false;
-    for (line, 0..) |c, i| {
-        if (c == ':') {
-            if (!whitespace_found and std.mem.startsWith(u8, line[i..], "://")) return null;
-            return i;
-        }
-        if (!whitespace_found and (isAlnum(c) or c == '-')) continue;
-        if (i != 0 and (c == ' ' or c == '\t')) {
-            whitespace_found = true;
-            continue;
-        }
-        break;
-    }
-    return null;
-}
-
-/// `find_trailer_block_start`: where the trailer block of `buf[0..len]`
-/// begins, or `len` when there is none. The first paragraph is the title
-/// and never trailers.
-fn trailerBlockStart(buf: []const u8, len: usize, comment: []const u8) usize {
-    var s: usize = 0;
-    while (s < len) : (s = nextLine(buf[0..len], s)) {
-        if (std.mem.startsWith(u8, buf[s..len], comment)) continue;
-        if (isBlankLine(buf[s..len])) break;
-    }
-    const end_of_title = s;
-
-    var only_spaces = true;
-    var recognized_prefix = false;
-    var trailer_lines: usize = 0;
-    var non_trailer_lines: usize = 0;
-    var possible_continuation_lines: usize = 0;
-    var cursor = lastLine(buf, len);
-    while (cursor) |l| : (cursor = lastLine(buf, l)) {
-        if (l < end_of_title) break;
-        const bol = buf[l..len];
-        if (std.mem.startsWith(u8, bol, comment)) {
-            non_trailer_lines += possible_continuation_lines;
-            possible_continuation_lines = 0;
-            continue;
-        }
-        if (isBlankLine(bol)) {
-            if (only_spaces) continue;
-            non_trailer_lines += possible_continuation_lines;
-            if (recognized_prefix and trailer_lines * 3 >= non_trailer_lines) return nextLine(buf[0..len], l);
-            if (trailer_lines != 0 and non_trailer_lines == 0) return nextLine(buf[0..len], l);
-            return len;
-        }
-        only_spaces = false;
-
-        var generated = false;
-        for (generated_prefixes) |prefix| {
-            if (std.mem.startsWith(u8, buf[l..], prefix)) generated = true;
-        }
-        if (generated) {
-            trailer_lines += 1;
-            possible_continuation_lines = 0;
-            recognized_prefix = true;
-            continue;
-        }
-
-        const separator = findSeparator(buf[l..]);
-        if (separator != null and separator.? >= 1 and !isSpace(bol[0])) {
-            trailer_lines += 1;
-            possible_continuation_lines = 0;
-        } else if (isSpace(bol[0])) {
-            possible_continuation_lines += 1;
-        } else {
-            non_trailer_lines += 1 + possible_continuation_lines;
-            possible_continuation_lines = 0;
-        }
-        if (l == 0) break;
-    }
-    return len;
-}
-
-/// One trailer, as git's `trailer_iterator` hands it back: the key and the
-/// value each without whitespace at either end, and a value carried over
-/// continuation lines folded onto one line.
-pub const Trailer = struct {
-    key: []const u8,
-    value: []const u8,
-    /// Whether the line had a separator; a line of the block without one
-    /// is handed back too, its whole text the key, as git's iterator does.
-    separated: bool,
-};
-
-/// The trailers of `msg`, in order, as `trailer_iterator_advance` reads
-/// them: the trailer block found as `trailerBlock` finds it, its lines with
-/// a continuation line (one beginning with whitespace, after a line that has
-/// a separator) joined to the line above, each split at its first `:`.
-/// Everything is allocated with `arena`; the configured trailer names and
-/// separators git's `trailer.*` settings add are not read.
-pub fn trailers(arena: Allocator, msg: []const u8, comment: []const u8) Allocator.Error![]Trailer {
-    const block = trailerBlock(msg, comment);
-    var lines: std.ArrayList(std.ArrayList(u8)) = .empty;
-    var last: ?usize = null;
-    var at = block.start;
-    while (at < block.end) {
-        const next = @min(nextLine(msg, at), block.end);
-        const piece = msg[at..next];
-        at = next;
-        if (last != null and isSpace(piece[0])) {
-            try lines.items[last.?].appendSlice(arena, piece);
-            continue;
-        }
-        var line: std.ArrayList(u8) = .empty;
-        try line.appendSlice(arena, piece);
-        try lines.append(arena, line);
-        last = if (findSeparator(piece)) |sep| (if (sep >= 1) lines.items.len - 1 else null) else null;
-    }
-    const out = try arena.alloc(Trailer, lines.items.len);
-    for (lines.items, out) |line, *t| {
-        const text = line.items;
-        if (findSeparator(text)) |sep| {
-            t.* = .{ .key = trim(text[0..sep]), .value = try unfold(arena, trim(text[sep + 1 ..])), .separated = true };
-        } else {
-            t.* = .{ .key = trim(text), .value = "", .separated = false };
-        }
-    }
-    return out;
-}
-
-fn trim(text: []const u8) []const u8 {
-    var start: usize = 0;
-    var end = text.len;
-    while (start < end and isSpace(text[start])) start += 1;
-    while (end > start and isSpace(text[end - 1])) end -= 1;
-    return text[start..end];
-}
-
-/// `unfold_value`: every newline, and the whitespace after it, one space.
-fn unfold(arena: Allocator, value: []const u8) Allocator.Error![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < value.len) {
-        var c = value[i];
-        i += 1;
-        if (c == '\n') {
-            while (i < value.len and isSpace(value[i])) i += 1;
-            c = ' ';
-        }
-        try out.append(arena, c);
-    }
-    return trim(out.items);
-}
-
-/// Where a message's trailer block is: `start == end` when it has none.
-pub const TrailerBlock = struct {
-    start: usize,
-    end: usize,
-};
-
-/// The trailer block of `msg`, found the way `git interpret-trailers` and
-/// the sequencer find it, with no `---` divider and no configured trailer
-/// names.
-pub fn trailerBlock(msg: []const u8, comment: []const u8) TrailerBlock {
-    const end = msg.len - ignoredBytes(msg, comment);
-    return .{ .start = trailerBlockStart(msg, end, comment), .end = end };
+/// How a repository reads trailers: its `trailer.*` settings, with the
+/// comment string `core.commentChar` names (`#` for `auto`). Everything is
+/// `arena`'s.
+pub fn trailerSettings(arena: Allocator, config: *const config_mod.Config) Allocator.Error!trailer.Settings {
+    return trailer.Settings.load(arena, config, commentString(config.get("core.commentchar"), ""));
 }
 
 /// What `has_conforming_footer` says of a message: no trailer block, one
@@ -331,33 +118,20 @@ pub fn trailerBlock(msg: []const u8, comment: []const u8) TrailerBlock {
 pub const Footer = enum { none, trailers, has_line, ends_with_line };
 
 /// Whether `msg` ends in a trailer block, and whether `line` -- the whole
-/// line, newline included -- is in it and last.
-pub fn conformingFooter(msg: []const u8, line: ?[]const u8, comment: []const u8) Footer {
-    const block = trailerBlock(msg, comment);
-    if (block.start >= block.end) return .none;
-    // The block's lines, a continuation line folded into the trailer above
-    // it; each counts once.
-    var count: usize = 0;
+/// line, newline included -- is in it and last: git's
+/// `has_conforming_footer`, reading trailers as `settings` say.
+pub fn conformingFooter(gpa: Allocator, msg: []const u8, line: ?[]const u8, settings: trailer.Settings) Allocator.Error!Footer {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const lines = try trailer.iterate(arena_state.allocator(), settings, msg);
+    if (lines.len == 0) return .none;
     var found: usize = 0;
-    var at = block.start;
-    var last_was_trailer = false;
-    while (at < block.end) {
-        const next = @min(nextLine(msg, at), block.end);
-        const text = msg[at..next];
-        if (last_was_trailer and text.len != 0 and isSpace(text[0])) {
-            at = next;
-            continue;
-        }
-        count += 1;
+    for (lines, 1..) |t, n| {
         if (line) |wanted| {
-            if (std.mem.startsWith(u8, msg[at..], wanted)) found = count;
+            if (std.mem.startsWith(u8, t.raw, wanted)) found = n;
         }
-        const separator = findSeparator(text);
-        last_was_trailer = separator != null and separator.? >= 1;
-        at = next;
     }
-    if (count == 0) return .none;
-    if (found != 0 and found == count) return .ends_with_line;
+    if (found != 0 and found == lines.len) return .ends_with_line;
     if (found != 0) return .has_line;
     return .trailers;
 }
@@ -369,9 +143,9 @@ fn completeLine(gpa: Allocator, msg: *std.ArrayList(u8)) Allocator.Error!void {
 
 /// `-x`: the line naming the commit a pick came from, after a blank line
 /// unless the message already ends in trailers.
-pub fn appendCherryPicked(gpa: Allocator, msg: *std.ArrayList(u8), hex: []const u8, comment: []const u8) Allocator.Error!void {
+pub fn appendCherryPicked(gpa: Allocator, msg: *std.ArrayList(u8), hex: []const u8, settings: trailer.Settings) Allocator.Error!void {
     try completeLine(gpa, msg);
-    if (conformingFooter(msg.items, null, comment) == .none) try msg.append(gpa, '\n');
+    if (try conformingFooter(gpa, msg.items, null, settings) == .none) try msg.append(gpa, '\n');
     try msg.appendSlice(gpa, cherry_picked_prefix);
     try msg.appendSlice(gpa, hex);
     try msg.appendSlice(gpa, ")\n");
@@ -380,14 +154,14 @@ pub fn appendCherryPicked(gpa: Allocator, msg: *std.ArrayList(u8), hex: []const 
 /// `--signoff`: `Signed-off-by: Name <email>`, after a blank line unless the
 /// message already ends in trailers, and not again when it is already the
 /// last one.
-pub fn appendSignoff(gpa: Allocator, msg: *std.ArrayList(u8), who: object.Signature, comment: []const u8) Allocator.Error!void {
+pub fn appendSignoff(gpa: Allocator, msg: *std.ArrayList(u8), who: object.Signature, settings: trailer.Settings) Allocator.Error!void {
     const line = try std.fmt.allocPrint(gpa, "Signed-off-by: {s} <{s}>\n", .{ who.name, who.email });
     defer gpa.free(line);
     try completeLine(gpa, msg);
     const footer: Footer = if (std.mem.eql(u8, msg.items, line))
         .ends_with_line
     else
-        conformingFooter(msg.items, line, comment);
+        try conformingFooter(gpa, msg.items, line, settings);
     if (footer == .none) {
         const len = msg.items.len;
         if (len == 0) {
@@ -533,7 +307,7 @@ test "a sign-off goes after a blank line, joins a trailer block, and is not repe
         var msg: std.ArrayList(u8) = .empty;
         defer msg.deinit(gpa);
         try msg.appendSlice(gpa, case.in);
-        try appendSignoff(gpa, &msg, who, "#");
+        try appendSignoff(gpa, &msg, who, .{});
         try std.testing.expectEqualStrings(case.out, msg.items);
     }
 }
@@ -546,10 +320,12 @@ fn fuzzMessage(_: void, smith: *std.testing.Smith) anyerror!void {
     const gpa = std.testing.allocator;
     var buf: [256]u8 = undefined;
     const text = buf[0..smith.slice(&buf)];
-    const block = trailerBlock(text, "#");
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const block = try trailer.block(arena_state.allocator(), .{}, text, true);
     try std.testing.expect(block.start <= text.len);
     try std.testing.expect(block.end <= text.len);
-    _ = conformingFooter(text, "Signed-off-by: A <a@b>\n", "#");
+    _ = try conformingFooter(gpa, text, "Signed-off-by: A <a@b>\n", .{});
     const stripped = try stripSpace(gpa, text, "#");
     defer gpa.free(stripped);
     // Stripping twice changes nothing more.
@@ -559,37 +335,9 @@ fn fuzzMessage(_: void, smith: *std.testing.Smith) anyerror!void {
     var msg: std.ArrayList(u8) = .empty;
     defer msg.deinit(gpa);
     try msg.appendSlice(gpa, text);
-    try appendSignoff(gpa, &msg, .{ .name = "A", .email = "a@b", .when_secs = 0, .offset_minutes = 0 }, "#");
+    try appendSignoff(gpa, &msg, .{ .name = "A", .email = "a@b", .when_secs = 0, .offset_minutes = 0 }, .{});
     try std.testing.expect(std.mem.endsWith(u8, msg.items, "Signed-off-by: A <a@b>\n"));
     const subject = try onelineSubject(gpa, text);
     gpa.free(subject);
     _ = commentString("auto", text);
-}
-
-test "trailers are git interpret-trailers' trailers, a URL line not one" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var r = try testgit.Repo.init(gpa, io, &.{});
-    defer r.deinit();
-    const urls = try testgit.gitAtLeast(gpa, io, 2, 56);
-    const messages = [_][]const u8{
-        "subject\n\nKey: value\nOther-Key:   spaced  \n  continued\n",
-        "subject\n\nbody\n\nSigned-off-by: A <a@b>\nnot a trailer\nMore: x\n",
-        "Fix: only a title\n",
-        "subject\n\nSee https://example.com/x\nhttps://example.com/y\nKey: v\n",
-    };
-    for (messages, 0..) |msg, i| {
-        if (i == 3 and !urls) continue;
-        const expected = try r.runInput(io, &.{ "interpret-trailers", "--parse", "--no-divider" }, msg);
-        defer gpa.free(expected);
-        var arena: std.heap.ArenaAllocator = .init(gpa);
-        defer arena.deinit();
-        var got: std.ArrayList(u8) = .empty;
-        defer got.deinit(gpa);
-        // `--parse` shows only the lines with a separator.
-        for (try trailers(arena.allocator(), msg, "#")) |t| {
-            if (t.separated) try got.print(gpa, "{s}: {s}\n", .{ t.key, t.value });
-        }
-        try std.testing.expectEqualStrings(expected, got.items);
-    }
 }

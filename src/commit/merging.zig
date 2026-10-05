@@ -527,7 +527,7 @@ fn commitOrStop(
         // signed off, into `MERGE_MSG` beside `MERGE_HEAD` for the message
         // hooks, and back out of it.
         const h = try commithooks.Hooks.init(arena, io, repo, options.hooks, options.verify);
-        if (options.signoff) try message.appendSignoff(arena, &msg, options.who, comment);
+        if (options.signoff) try message.appendSignoff(arena, &msg, options.who, try message.trailerSettings(arena, repo.configuration()));
         var text: []const u8 = msg.items;
         if (h.runner) |runner| {
             const e = try h.env(arena, null);

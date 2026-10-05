@@ -111,6 +111,7 @@ test {
         _ = @import("worktree/fsmonitor_test.zig");
         _ = @import("patch/rangediff_test.zig");
         _ = @import("refs/filter_test.zig");
+        _ = @import("commit/trailer_test.zig");
     }
 }
 

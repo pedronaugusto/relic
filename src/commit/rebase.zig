@@ -40,6 +40,7 @@ const strategy = @import("../merge/strategy.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
 const message = @import("message.zig");
+const trailer = @import("trailer.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const todo = @import("todo.zig");
 const worktree = @import("../worktree.zig");
@@ -277,6 +278,8 @@ const Run = struct {
     repo: *Repository,
     options: Options,
     comment: []const u8,
+    /// How trailers are read, for `--signoff`.
+    trailers: trailer.Settings,
     abbrev_len: usize,
     allow_ff: bool,
     empty: Empty,
@@ -349,6 +352,7 @@ fn newRun(gpa: Allocator, arena_state: *std.heap.ArenaAllocator, io: Io, repo: *
         .repo = repo,
         .options = options,
         .comment = message.commentString(repo.configuration().get("core.commentchar"), ""),
+        .trailers = try message.trailerSettings(arena_state.allocator(), repo.configuration()),
         .abbrev_len = abbrev.defaultLength(repo.configuration(), &repo.odb),
         .allow_ff = !options.force and !options.signoff,
         .empty = options.empty orelse if (interactive) .stop else .drop,
@@ -1421,7 +1425,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
             msg_source = .squash_edit;
         }
     }
-    if (r.options.signoff and !is_fixup) try message.appendSignoff(arena, &r.msg, r.options.who, r.comment);
+    if (r.options.signoff and !is_fixup) try message.appendSignoff(arena, &r.msg, r.options.who, r.trailers);
     try writeAuthorScript(r, commit.author);
 
     const base_tree = if (parent) |p| try repo.commitTree(io, p) else null;
@@ -1770,7 +1774,7 @@ fn appendSquashMessage(r: *Run, buf: *std.ArrayList(u8), body: []const u8, item:
     const fixup_off = buf.items.len;
     try buf.appendSlice(arena, body[commented_len..]);
     if (isFixupFlag(item) and !seenSquash(r)) {
-        if (r.options.signoff) try message.appendSignoff(arena, buf, r.options.who, r.comment);
+        if (r.options.signoff) try message.appendSignoff(arena, buf, r.options.who, r.trailers);
         if (item.replace_message and (r.hasState("message-fixup") or !r.hasState("message-squash"))) {
             var rest = buf.items[fixup_off..];
             while (rest.len != 0) {

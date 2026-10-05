@@ -29,6 +29,7 @@ const filter = @import("../worktree/filter.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
 const message = @import("message.zig");
+const trailer = @import("trailer.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const todo = @import("todo.zig");
 const worktree = @import("../worktree.zig");
@@ -423,6 +424,8 @@ const Replay = struct {
     action: Action,
     options: Options,
     comment: []const u8,
+    /// How trailers are read, for `-x` and `--signoff`.
+    trailers: trailer.Settings,
     abbrev_len: usize,
     made: std.ArrayList(Oid) = .empty,
     conflicts: []const threeway.Conflict = &.{},
@@ -526,12 +529,12 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
             try msg.appendSlice(arena, message.fromSubject(commit.message));
             if (r.options.record_origin) {
                 var hex: [hash.max_hex_len]u8 = undefined;
-                try message.appendCherryPicked(arena, &msg, oid.hex(&hex), r.comment);
+                try message.appendCherryPicked(arena, &msg, oid.hex(&hex), r.trailers);
             }
             author = commit.author;
         },
     }
-    if (r.options.signoff) try message.appendSignoff(arena, &msg, r.options.who, r.comment);
+    if (r.options.signoff) try message.appendSignoff(arena, &msg, r.options.who, r.trailers);
 
     const style = r.options.conflict_style orelse merging.configuredStyle(repo);
     var outcome = try threeway.apply(gpa, io, repo, &index, base_tree, head_tree, next_tree orelse try emptyTree(repo, io), .{
@@ -691,6 +694,7 @@ fn newReplay(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, action
         .action = action,
         .options = options,
         .comment = message.commentString(repo.configuration().get("core.commentchar"), ""),
+        .trailers = try message.trailerSettings(arena, repo.configuration()),
         .abbrev_len = abbrev.defaultLength(repo.configuration(), &repo.odb),
     };
 }

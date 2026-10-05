@@ -31,6 +31,7 @@ const attributes = @import("worktree/attributes.zig");
 const convert = @import("worktree/convert.zig");
 const pathspec_mod = @import("pathspec.zig");
 const pretty = @import("pretty.zig");
+const message = @import("commit/message.zig");
 const abbrev = @import("odb/abbrev.zig");
 const mailfmt = @import("patch/mail/format.zig");
 const program = @import("repo/program.zig");
@@ -507,6 +508,7 @@ const Walk = struct {
             .mailmap = if (wk.mailmap) |*m| m else null,
             .decorations = if (wk.decorations) |*d| d else null,
             .signer = if (wk.signer) |*s| s else null,
+            .trailers = try message.trailerSettings(wk.a, wk.repo.configuration()),
         };
     }
 

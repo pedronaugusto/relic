@@ -872,7 +872,7 @@ fn run(s: *Session, arena: *std.heap.ArenaAllocator, resume_in: bool) Error!Outc
                 if (s.signoff) {
                     var msg: std.ArrayList(u8) = .empty;
                     try msg.appendSlice(s.a, s.msg.?);
-                    try message.appendSignoff(s.a, &msg, s.options.committer, "#");
+                    try message.appendSignoff(s.a, &msg, s.options.committer, try message.trailerSettings(s.a, s.repo.configuration()));
                     s.msg = msg.items;
                 }
                 try writeAuthorScript(s);

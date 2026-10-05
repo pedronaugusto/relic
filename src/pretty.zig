@@ -8,8 +8,9 @@
 //! placeholder is written as it stands, as git writes it. The mailmap's
 //! names (`%aN`, `%aE`, `%aL`), decorations (`%d`, `%D`, `%(decorate)`),
 //! notes (`%N`) and signatures (`%G?` and the rest) come from what the
-//! `Context` holds. What needs more — `%(describe)`, relative and human
-//! dates, `%(trailers)`, wrapping, padding and colour — is refused as
+//! `Context` holds, and `%(trailers)` with every option reads trailers as
+//! its `trailers` settings say. What needs more — `%(describe)`, relative
+//! and human dates, wrapping, padding and colour — is refused as
 //! `error.UnsupportedPlaceholder`.
 
 const std = @import("std");
@@ -25,6 +26,7 @@ const repo_mod = @import("repo.zig");
 const refs_mod = @import("refs.zig");
 const shallow = @import("revwalk/shallow.zig");
 const signing = @import("commit/signing.zig");
+const trailer = @import("commit/trailer.zig");
 const mailmap_mod = @import("revwalk/mailmap.zig");
 
 const Oid = hash.Oid;
@@ -58,6 +60,9 @@ pub const Context = struct {
     /// What checks a signature for `%G?`, `%GG`, `%GS`, `%GK`, `%GF`,
     /// `%GP` and `%GT`. A commit with no signature needs none.
     signer: ?*signing.Signer = null,
+    /// How `%(trailers)` reads trailers: git's defaults unless given;
+    /// `commit.message.trailerSettings` reads a repository's.
+    trailers: trailer.Settings = .{},
 };
 
 /// The refs that point at each object, as git loads them for a format:
@@ -459,6 +464,25 @@ fn signature(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
     return 2;
 }
 
+/// `%(trailers)` and `%(trailers:<options>)`: the trailers of the message
+/// from its subject on, as git's `format_trailers_from_commit` writes them.
+/// Options git does not take, or no closing parenthesis, leave it as it
+/// stands.
+fn trailers(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
+    var at: usize = "(trailers".len;
+    var options: trailer.Options = .{ .no_divider = true };
+    if (at < ph.len and ph[at] == ':') {
+        at += 1;
+        const parsed = (try trailer.parsePlaceholderOptions(st.a, ph[at..])) orelse return 0;
+        options = parsed.options;
+        options.no_divider = true;
+        at += parsed.len;
+    }
+    if (at >= ph.len or ph[at] != ')') return 0;
+    try trailer.format(st.a, st.ctx.trailers, options, skipBlankLines(cstr(st.p.message)), out);
+    return at + 1;
+}
+
 /// One placeholder, `ph` being what follows the `%`. Returns how many
 /// bytes it took, zero for one git does not know.
 fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
@@ -486,8 +510,8 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
         else => {},
     }
     if (std.mem.startsWith(u8, ph, "(decorate")) return decorate(st, out, ph);
-    if (std.mem.startsWith(u8, ph, "(describe") or
-        std.mem.startsWith(u8, ph, "(trailers") or std.mem.startsWith(u8, ph, "(count)") or
+    if (std.mem.startsWith(u8, ph, "(trailers")) return trailers(st, out, ph);
+    if (std.mem.startsWith(u8, ph, "(describe") or std.mem.startsWith(u8, ph, "(count)") or
         std.mem.startsWith(u8, ph, "(total)")) return error.UnsupportedPlaceholder;
     var hexbuf: [hash.max_hex_len]u8 = undefined;
     switch (ph[0]) {
