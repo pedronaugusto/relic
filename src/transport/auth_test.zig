@@ -71,6 +71,7 @@ const Person = struct {
         p.gpa.free(p.tools_path);
         p.home.cleanup();
         p.tools.cleanup();
+        p.* = undefined;
     }
 
     fn writeSystem(p: *Person, io: Io, text: []const u8) !void {
@@ -433,7 +434,8 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         defer locations.deinit();
         const Asker = struct {
             fn ask(_: ?*anyopaque, allocator: Allocator, field: credential.Field, _: []const u8) Allocator.Error!?[]u8 {
-                return try allocator.dupe(u8, if (field == .username) "ada" else "secret");
+                const answer = try allocator.dupe(u8, if (field == .username) "ada" else "secret");
+                return answer;
             }
         };
         var first = try fetch_mod.fetch(gpa, io, &repo, "origin", .{

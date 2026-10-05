@@ -307,10 +307,11 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
             const self_: *@This() = @ptrCast(@alignCast(context.?));
             try self_.prompts.appendSlice(testing.allocator, prompt);
             try self_.prompts.append(testing.allocator, '\n');
-            return try allocator.dupe(u8, switch (field) {
+            const answer = try allocator.dupe(u8, switch (field) {
                 .username => "ada",
                 .password => "secret",
             });
+            return answer;
         }
     };
     var asked: Asked = .{};

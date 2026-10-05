@@ -371,8 +371,10 @@ pub const Helper = struct {
         }
     }
 
-    const OptionValue = enum { raw, quoted };
-    const Answer = enum { ok, unsupported, refused };
+    /// How `option` writes its value: as given, or as a C-quoted string.
+    pub const OptionValue = enum { raw, quoted };
+    /// What the helper said to an `option`.
+    pub const Answer = enum { ok, unsupported, refused };
 
     /// `option <name> <value>`, and the helper's answer. A helper without
     /// the `option` capability is not asked.
@@ -568,7 +570,10 @@ pub const Helper = struct {
     /// The private ref the helper's refspecs keep `name` in; with none,
     /// `name` itself, as git's implied `*:*`. The name is the caller's.
     fn privateName(h: *Helper, name: []const u8) Allocator.Error!?[]u8 {
-        if (h.refspecs.items.len == 0) return try h.gpa.dupe(u8, name);
+        if (h.refspecs.items.len == 0) {
+            const copy = try h.gpa.dupe(u8, name);
+            return copy;
+        }
         for (h.refspecs.items) |spec| {
             if (try spec.mapSource(h.gpa, name)) |mapped| return mapped;
         }

@@ -64,6 +64,7 @@ const Pair = struct {
         p.ours.close(p.fx.io);
         p.theirs.close(p.fx.io);
         p.fx.deinit();
+        p.* = undefined;
     }
 
     fn open(p: *Pair, repo: *repo_mod.Repository) !*lfsapi.Server {

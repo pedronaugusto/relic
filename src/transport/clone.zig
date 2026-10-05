@@ -227,7 +227,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         repo_made = true;
     } else {
         // A path is recorded absolute, as git records it (`absolutePathAsGit`).
-        const parsed = url_mod.Url.parse(reached) catch |err| return err;
+        const parsed = try url_mod.Url.parse(reached);
         // A path is a local clone, copied as it is: git ignores a depth and a
         // filter there, says so, and keeps what they decided besides — one
         // branch, the promisor settings. `file://` goes through upload-pack.
@@ -729,6 +729,7 @@ const Twin = struct {
         t.dir.close(io);
         gpa.free(t.path);
         t.tmp.cleanup();
+        t.* = undefined;
     }
 };
 
@@ -931,7 +932,7 @@ test "an empty remote clones to an unborn branch, as git's does" {
     defer by_git.deinit(gpa, io);
     var by_relic = try Twin.init(gpa, io);
     defer by_relic.deinit(gpa, io);
-    const out = git(gpa, io, &env, by_git.tmp.dir, &.{ "clone", "-q", empty_path, by_git.path }) catch |err| return err;
+    const out = try git(gpa, io, &env, by_git.tmp.dir, &.{ "clone", "-q", empty_path, by_git.path });
     gpa.free(out);
     var repo = try clone(gpa, io, empty_path, by_relic.dir, .{ .who = test_who });
     repo.deinit(io);

@@ -147,6 +147,7 @@ const Twins = struct {
         t.by_relic.close(io);
         gpa.free(t.git_path);
         t.tmp.cleanup();
+        t.* = undefined;
     }
 };
 

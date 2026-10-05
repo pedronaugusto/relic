@@ -228,6 +228,7 @@ const Walk = struct {
         w.added.deinit(w.gpa);
         w.named.deinit(w.gpa);
         w.arena.deinit();
+        w.* = undefined;
     }
 
     const Peeled = struct { oid: Oid, type: object.Type };

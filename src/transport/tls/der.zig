@@ -72,7 +72,8 @@ pub const Reader = struct {
     /// The next element when it has `tag`, else nothing is taken.
     pub fn optional(r: *Reader, tag: u8) Error!?[]const u8 {
         if (r.done() or r.bytes[r.at] != tag) return null;
-        return try r.expect(tag);
+        const content = try r.expect(tag);
+        return content;
     }
 };
 

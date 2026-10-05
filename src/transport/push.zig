@@ -768,6 +768,7 @@ const PushTwins = struct {
         t.env.deinit();
         t.gpa.free(t.root_path);
         t.root.cleanup();
+        t.* = undefined;
     }
 
     fn git(t: *PushTwins, dir: Io.Dir, args: []const []const u8) !void {

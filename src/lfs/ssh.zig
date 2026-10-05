@@ -94,7 +94,7 @@ pub const Connection = struct {
             .writer = try conn.request(),
         };
         c.negotiate() catch |err| {
-            const said = connection.Process.diagnose(conn, io) catch |e| return e;
+            const said = try connection.Process.diagnose(conn, io);
             message.clearRetainingCapacity();
             try message.appendSlice(gpa, std.mem.trim(u8, said.stderr, " \t\r\n"));
             return err;

@@ -170,6 +170,7 @@ pub const Lazy = struct {
     pub fn deinit(l: *Lazy) void {
         l.uninstall();
         l.auth_failure.deinit();
+        l.* = undefined;
     }
 
     /// Have every read of a missing object in the repository ask.

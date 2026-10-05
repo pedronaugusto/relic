@@ -259,7 +259,8 @@ pub const Settings = struct {
     /// last, else `.lfsconfig`'s.
     pub fn get(s: *const Settings, a: Allocator, full_name: []const u8) Error!?[]const u8 {
         const entry = s.lastEntry(full_name) orelse return null;
-        return try unquoteValue(a, entry.value orelse "");
+        const value = try unquoteValue(a, entry.value orelse "");
+        return value;
     }
 
     /// The value of `full_name` as a boolean, or `fallback` when it is not
@@ -624,12 +625,19 @@ pub fn defaultRemote(arena: Allocator, settings: *const Settings, branch: ?[]con
 fn remoteEndpoint(arena: Allocator, settings: *const Settings, remote: []const u8, operation: Operation, base: ?[]const u8) Error!?Endpoint {
     if (operation == .upload) {
         const key = try std.fmt.allocPrint(arena, "remote.{s}.lfspushurl", .{remote});
-        if (try settings.get(arena, key)) |u| return try newEndpoint(arena, settings, operation, u, base);
+        if (try settings.get(arena, key)) |u| {
+            const endpoint = try newEndpoint(arena, settings, operation, u, base);
+            return endpoint;
+        }
     }
     const key = try std.fmt.allocPrint(arena, "remote.{s}.lfsurl", .{remote});
-    if (try settings.get(arena, key)) |u| return try newEndpoint(arena, settings, operation, u, base);
+    if (try settings.get(arena, key)) |u| {
+        const endpoint = try newEndpoint(arena, settings, operation, u, base);
+        return endpoint;
+    }
     const git_url = (try gitRemoteUrl(arena, settings, remote, operation == .upload)) orelse return null;
-    return try endpointFromCloneUrl(arena, settings, operation, git_url, base);
+    const endpoint = try endpointFromCloneUrl(arena, settings, operation, git_url, base);
+    return endpoint;
 }
 
 /// The remote's own URL, as git-lfs asks for it: `pushurl` for a push, else

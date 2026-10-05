@@ -565,7 +565,8 @@ const Negotiation = struct {
         const found = try n.db().read(n.io(), oid);
         defer n.db().allocator().free(found.bytes);
         if (found.type != .commit) return null;
-        return try object.Commit.parse(n.arena, n.db().objectFormat(), found.bytes);
+        const parsed = try object.Commit.parse(n.arena, n.db().objectFormat(), found.bytes);
+        return parsed;
     }
 
     fn peelToCommit(n: *Negotiation, start: Oid) Error!?Oid {

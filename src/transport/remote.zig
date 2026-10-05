@@ -205,7 +205,8 @@ pub fn rewrite(gpa: Allocator, config: *const Config, url: []const u8, which: Re
         } else gpa.free(prefix);
     }
     const base = best_base orelse return null;
-    return try std.mem.concat(gpa, u8, &.{ base, url[best_len..] });
+    const rewritten = try std.mem.concat(gpa, u8, &.{ base, url[best_len..] });
+    return rewritten;
 }
 
 /// The fetch refspec `git remote add` and `git clone` write for the remote

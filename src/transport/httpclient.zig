@@ -101,6 +101,7 @@ pub const Diagnostic = struct {
     /// Release the copies and clear every failure detail.
     pub fn deinit(d: *Diagnostic) void {
         d.clear();
+        d.* = undefined;
     }
 
     fn clear(d: *Diagnostic) void {
@@ -217,6 +218,7 @@ const ProxyAnswer = union(enum) {
             .basic => |v| gpa.free(v),
             .digest => |*d| d.deinit(gpa),
         }
+        a.* = undefined;
     }
 };
 
@@ -487,16 +489,19 @@ pub const Client = struct {
     pub fn send(c: *Client, method: http.Method, target: Target, path: []const u8, headers: []const http.Header, body: ?[]const u8, diagnostic: ?*Diagnostic) Error!Response {
         if (diagnostic) |d| d.clear();
         var response = try c.sendKept(method, target, path, headers, body, diagnostic);
-        errdefer response.deinit();
         // A proxy that asks, for a request it is handed whole: answered,
         // and the request made again, as curl makes it again.
         if (response.head.status == .proxy_auth_required and c.proxy != null and !target.tls) {
             if (diagnostic) |d| d.proxy_status = 407;
-            if (try c.proxyChallenged(&response.head, diagnostic)) {
+            const again = c.proxyChallenged(&response.head, diagnostic) catch |err| {
+                response.deinit();
+                return err;
+            };
+            if (again) {
                 // ziglint-ignore: Z026 a body left unread costs only the connection: deinit keeps it only when the response is complete
                 _ = response.reader().discardRemaining() catch {};
                 response.deinit();
-                response = try c.sendKept(method, target, path, headers, body, diagnostic);
+                return c.sendKept(method, target, path, headers, body, diagnostic);
             }
         }
         return response;
@@ -681,7 +686,8 @@ pub const Head = struct {
 
 /// A response: its head, owned, and its body, read through `reader`.
 pub const Response = struct {
-    conn: ?*Connection,
+    /// The connection the response came on, the response's until `deinit`.
+    conn: *Connection,
     /// The head's bytes, which `head` points into.
     head_bytes: []u8,
     head: Head,
@@ -721,7 +727,7 @@ pub const Response = struct {
     /// Why a read of the body failed: `TimedOut`, a TLS or HTTP framing
     /// failure, or the connection breaking.
     pub fn failure(r: *const Response) Error {
-        const conn = r.conn orelse return error.ConnectionFailed;
+        const conn = r.conn;
         if (conn.timed_out.load(.acquire)) return error.TimedOut;
         if (r.state.http_reader.body_err != null) return error.HttpProtocolError;
         return conn.readFailed();
@@ -731,15 +737,15 @@ pub const Response = struct {
     /// when the body was read to its end and the server did not ask to
     /// close.
     pub fn deinit(r: *Response) void {
-        const conn = r.conn orelse return;
+        const conn = r.conn;
         const client = conn.client;
         const reusable = r.head.keep_alive and r.complete();
         client.gpa.free(r.head_bytes);
         client.gpa.free(r.state.transfer_buffer);
         if (r.state.decompress_buffer.len != 0) client.gpa.free(r.state.decompress_buffer);
         client.gpa.destroy(r.state);
-        r.conn = null;
         client.release(conn, reusable);
+        r.* = undefined;
     }
 };
 
@@ -755,8 +761,7 @@ const TlsLayer = struct {
 /// A TLS alert's description as an error: `TlsAlertBadCertificate` and
 /// the like.
 fn alertError(description: std.crypto.tls.Alert.Description) anyerror {
-    description.toError() catch |err| return err;
-    return error.TlsAlert;
+    if (description.toError()) |_| return error.TlsAlert else |err| return err;
 }
 
 /// Whether a TLS alert is a server's refusal of a client certificate — or
@@ -2145,7 +2150,7 @@ test "a pooled connection drops its previous exchange's diagnostic" {
         var diagnostic: Diagnostic = .init(gpa);
         defer diagnostic.deinit();
         var response = try client.send(.GET, target, "/", &.{}, null, &diagnostic);
-        const conn = response.conn.?;
+        const conn = response.conn;
         try std.testing.expect(conn.diagnostic == &diagnostic);
         _ = try response.reader().discardRemaining();
         response.deinit();
@@ -2158,7 +2163,7 @@ test "a pooled connection drops its previous exchange's diagnostic" {
     try diagnostic.setOffered("previous");
     var response = try client.send(.GET, target, "/", &.{}, null, &diagnostic);
     defer response.deinit();
-    try std.testing.expect(response.conn.?.diagnostic == &diagnostic);
+    try std.testing.expect(response.conn.diagnostic == &diagnostic);
     try std.testing.expect(diagnostic.tls_error == null);
     try std.testing.expect(diagnostic.proxy_status == null);
     try std.testing.expect(diagnostic.proxy_offered == null);

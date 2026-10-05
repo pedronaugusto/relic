@@ -63,6 +63,7 @@ const Helpers = struct {
         h.environ.deinit();
         h.gpa.free(h.path);
         h.bin.cleanup();
+        h.* = undefined;
     }
 
     /// Have `git`'s runs find the helpers too.

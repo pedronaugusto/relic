@@ -106,7 +106,8 @@ const Words = struct {
         if (w.text[w.at] != '"') {
             const start = w.at;
             while (w.at < w.text.len and !std.ascii.isWhitespace(w.text[w.at])) w.at += 1;
-            return try a.dupe(u8, w.text[start..w.at]);
+            const token = try a.dupe(u8, w.text[start..w.at]);
+            return token;
         }
         w.at += 1;
         var out: std.ArrayList(u8) = .empty;

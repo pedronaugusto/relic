@@ -31,7 +31,10 @@ fn promisorLine(gpa: Allocator, advertisement: []const u8) !?[]u8 {
         switch (packet) {
             .data => |raw| {
                 const line = std.mem.trimEnd(u8, raw, "\n");
-                if (std.mem.startsWith(u8, line, "promisor-remote=")) return try gpa.dupe(u8, line);
+                if (std.mem.startsWith(u8, line, "promisor-remote=")) {
+                    const copy = try gpa.dupe(u8, line);
+                    return copy;
+                }
             },
             .flush => return null,
             else => {},

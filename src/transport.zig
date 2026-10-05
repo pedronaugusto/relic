@@ -234,7 +234,7 @@ pub const Session = struct {
         options: Options,
     ) Error!Session {
         if (try openHelper(gpa, io, remote_url, service, kind, options)) |session| return session;
-        const parsed = url.Url.parse(remote_url) catch |err| return err;
+        const parsed = try url.Url.parse(remote_url);
         if (parsed.scheme == .local and service == .upload_pack) bundled: {
             // `url_is_local_not_ssh && is_file && is_bundle`: a path to a
             // bundle is fetched from as one; a `file://` URL never is.
@@ -339,7 +339,8 @@ pub const Session = struct {
         if (try h.connect(service, options.service_program)) {
             const conn = h.takeOver();
             errdefer conn.close(io);
-            return try fromConnection(gpa, conn, service, kind);
+            const session = try fromConnection(gpa, conn, service, kind);
+            return session;
         }
         switch (service) {
             .upload_pack => if (!h.caps.fetch and !h.caps.import) return error.HelperCannotFetch,

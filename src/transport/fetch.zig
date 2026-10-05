@@ -931,6 +931,7 @@ const LocalIndex = struct {
 
     fn deinit(index: *LocalIndex, gpa: Allocator) void {
         index.names.deinit(gpa);
+        index.* = undefined;
     }
 };
 
@@ -1302,6 +1303,7 @@ const Twins = struct {
         gpa.free(t.source_path);
         t.by_git.deinit();
         t.by_relic.deinit();
+        t.* = undefined;
     }
 
     /// Run `git fetch <args>` in the one twin and `fetch` with `options` in

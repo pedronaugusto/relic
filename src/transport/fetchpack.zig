@@ -103,6 +103,7 @@ pub const ShallowInfo = struct {
     pub fn deinit(info: *ShallowInfo) void {
         info.shallow.deinit(info.gpa);
         info.unshallow.deinit(info.gpa);
+        info.* = undefined;
     }
 
     /// Take a `shallow <oid>` or `unshallow <oid>` line; whether it was
@@ -682,6 +683,7 @@ const Negotiator = struct {
         n.arena.deinit();
         n.nodes.deinit(n.gpa);
         n.queue.deinit(n.gpa);
+        n.* = undefined;
     }
 
     /// The node for `oid`, its commit read, or `null` when `oid` is not a

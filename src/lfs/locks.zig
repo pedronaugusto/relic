@@ -233,7 +233,8 @@ pub const Listing = struct {
 fn refFor(arena: Allocator, io: Io, repo: *Repository, options: Options) Error!?[]const u8 {
     if (options.ref) |r| return r;
     const branch = (try repo.refStore().currentBranch(arena, io)) orelse return null;
-    return try std.fmt.allocPrint(arena, "refs/heads/{s}", .{branch});
+    const ref = try std.fmt.allocPrint(arena, "refs/heads/{s}", .{branch});
+    return ref;
 }
 
 fn writeRef(s: *std.json.Stringify, ref: ?[]const u8) Io.Writer.Error!void {
@@ -824,8 +825,8 @@ pub const Table = struct {
         var scratch: std.heap.ArenaAllocator = .init(gpa);
         defer scratch.deinit();
         const c = try Cache.read(scratch.allocator(), io, store, ref);
-        if (c.have_verifiable) return try fromVerified(gpa, c.ours, c.theirs);
-        return try fromListing(gpa, c.remote);
+        if (c.have_verifiable) return fromVerified(gpa, c.ours, c.theirs);
+        return fromListing(gpa, c.remote);
     }
 
     fn put(t: *Table, l: Lock, ours: ?bool) Allocator.Error!void {

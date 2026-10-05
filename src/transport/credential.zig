@@ -550,7 +550,8 @@ pub const Session = struct {
         const answer = try ask_fn(p.context, s.gpa, field, prompt);
         const owned = answer orelse return null;
         defer s.gpa.free(owned);
-        return try s.gpa.dupe(u8, owned);
+        const copy = try s.gpa.dupe(u8, owned);
+        return copy;
     }
 
     fn askpass(s: *Session, io: Io, opts: Options, prompt: []const u8) Error!?[]u8 {
@@ -585,7 +586,8 @@ pub const Session = struct {
         }
         if (!outcome.succeeded()) return null;
         const end = std.mem.findAny(u8, outcome.stdout, "\r\n") orelse outcome.stdout.len;
-        return try s.gpa.dupe(u8, outcome.stdout[0..end]);
+        const copy = try s.gpa.dupe(u8, outcome.stdout[0..end]);
+        return copy;
     }
 };
 

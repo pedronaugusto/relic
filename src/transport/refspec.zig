@@ -151,10 +151,12 @@ pub const Refspec = struct {
         if (dst.len == 0) return null;
         if (!spec.pattern) {
             if (!std.mem.eql(u8, spec.src, name)) return null;
-            return try gpa.dupe(u8, dst);
+            const mapped = try gpa.dupe(u8, dst);
+            return mapped;
         }
         const middle = matchPattern(spec.src, name) orelse return null;
-        return try substitute(gpa, dst, middle);
+        const mapped = try substitute(gpa, dst, middle);
+        return mapped;
     }
 
     /// The source a destination ref came from: `mapSource` the other way
@@ -166,10 +168,12 @@ pub const Refspec = struct {
         if (dst.len == 0) return null;
         if (!spec.pattern) {
             if (!std.mem.eql(u8, dst, name)) return null;
-            return try gpa.dupe(u8, spec.src);
+            const mapped = try gpa.dupe(u8, spec.src);
+            return mapped;
         }
         const middle = matchPattern(dst, name) orelse return null;
-        return try substitute(gpa, spec.src, middle);
+        const mapped = try substitute(gpa, spec.src, middle);
+        return mapped;
     }
 };
 

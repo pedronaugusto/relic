@@ -42,6 +42,7 @@ const Fixture = struct {
         fx.env.deinit();
         fx.gpa.free(fx.root);
         fx.tmp.cleanup();
+        fx.* = undefined;
     }
 
     fn git(fx: *Fixture, d: Io.Dir, args: []const []const u8) !void {

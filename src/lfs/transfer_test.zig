@@ -67,13 +67,14 @@ pub const Fixture = struct {
 
     pub fn deinit(fx: *Fixture) void {
         const gpa = fx.gpa;
+        defer gpa.destroy(fx);
         fx.server.stop();
         fx.tools.close(fx.io);
         fx.served.close(fx.io);
         fx.env.deinit();
         gpa.free(fx.root);
         fx.tmp.cleanup();
-        gpa.destroy(fx);
+        fx.* = undefined;
     }
 
     /// `http://127.0.0.1:<port>/repo.git`. The caller's.

@@ -60,6 +60,7 @@ const Ssh = struct {
         gpa.free(s.root);
         gpa.free(s.logs_path);
         s.fx.deinit();
+        s.* = undefined;
     }
 
     /// A working repository whose `origin` is the ssh remote.

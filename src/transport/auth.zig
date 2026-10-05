@@ -102,6 +102,13 @@ pub const Failure = struct {
     /// Release what the failure holds. A failure that was never filled
     /// holds nothing.
     pub fn deinit(f: *Failure) void {
+        f.release();
+        f.* = undefined;
+    }
+
+    /// Release what the failure holds and leave it empty, to be filled
+    /// again.
+    fn release(f: *Failure) void {
         if (f.arena) |*a| a.deinit();
         f.* = .{};
     }
@@ -109,7 +116,7 @@ pub const Failure = struct {
     /// Start describing a failure: what was there before is released.
     /// `url` is anonymized here.
     pub fn begin(f: *Failure, gpa: Allocator, reason: Reason, scheme: url_mod.Scheme, url: []const u8) Allocator.Error!void {
-        f.deinit();
+        f.release();
         f.arena = .init(gpa);
         f.reason = reason;
         f.scheme = scheme;
