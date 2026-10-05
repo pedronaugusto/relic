@@ -12,10 +12,6 @@ on:
         description: Initialize absent source ledgers from findings already on main
         type: boolean
         default: false
-      diagnose:
-        description: Reproduce the Windows HTTPS fixture timeout
-        type: boolean
-        default: false
   pull_request:
   merge_group:
 concurrency:
@@ -34,7 +30,7 @@ jobs:
       preflight-ref: 9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
   gate:
     needs: skip
-    if: always() && !inputs.diagnose && (github.event_name == 'push' || (needs.skip.result == 'success' && needs.skip.outputs.docs-only != 'true'))
+    if: always() && (github.event_name == 'push' || (needs.skip.result == 'success' && needs.skip.outputs.docs-only != 'true'))
     uses: pedronaugusto/preflight/.github/workflows/zig.yml@9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
     with:
       preflight-ref: 9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
@@ -87,20 +83,3 @@ jobs:
       - uses: ./.preflight/.github/actions/setup
       - run: zig build ci-setup -- master
       - run: zig build ci -Dci-lint=false -Doptimize=ReleaseSafe --test-timeout 60s
-  diagnose:
-    if: github.event_name == 'workflow_dispatch' && inputs.diagnose
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: pedronaugusto/preflight
-          ref: 9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba
-          path: .preflight
-      - uses: ./.preflight/.github/actions/setup
-        with:
-          windows-git-latest: true
-      - run: zig build ci-setup
-      - name: Reproduce idle HTTPS stall
-        run: zig build ci -Dci-lint=false -Doptimize=ReleaseSafe "-Dtest-filter=an idle HTTPS connection" --test-timeout 60s
