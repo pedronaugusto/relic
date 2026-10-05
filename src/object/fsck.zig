@@ -1,300 +1,1175 @@
-//! What git's `fsck` finds wrong with one object's bytes.
+//! What git's `fsck` finds wrong with an object's bytes, and how much each
+//! finding matters.
 //!
 //! An object that arrives over the wire was written by someone else, and a
 //! well-formed name says nothing about well-formed content: a tree whose
 //! entries are out of order, or name `.git`, or a commit with two authors,
-//! hashes as happily as any other. git checks each received object when
-//! `transfer.fsckObjects` asks; relic checks every one it receives, and a
-//! failure is a refusal that names the problem with git's own message id.
+//! hashes as happily as any other. git checks what it receives when
+//! `transfer.fsckObjects` asks (`fetch.fsckObjects`, `receive.fsckObjects`),
+//! and so does relic; a failure is a refusal that names the problem with
+//! git's own message id.
 //!
-//! The checks are the ones git reports as errors, taken from `fsck.c`, plus
-//! three of its warnings that are about safety rather than style: a tree
-//! entry named `.`, `..` or `.git` in any spelling is a path that escapes a
-//! working tree on checkout, and relic refuses to check one out anyway.
-//! Style warnings — a zero-padded mode, a tag with no tagger — are not
-//! reported, because old and perfectly good repositories carry them.
+//! The checks are `fsck.c`'s, line for line: every message id git has,
+//! each with git's level — fatal, error, warning, information, ignored —
+//! which `Rules` takes from `fsck.<msg-id>`, `fetch.fsck.<msg-id>` and
+//! `receive.fsck.<msg-id>`, with objects named in a `skipList` left alone.
+//! A tree's `.gitmodules` and `.gitattributes` blobs are gathered in
+//! `Found` and read by `checkBlob`, as git reads them once the pack is in.
+//! Before any of it, a commit or tag git's parser cannot read is refused,
+//! as `index-pack` refuses it, whatever the levels say.
+//!
+//! When nothing is configured, relic still checks what it receives, with
+//! git's levels and a tree naming `.`, `..` or `.git` in any spelling
+//! raised from a warning to an error: `baseline`. A checkout refuses such a
+//! path anyway, and an old repository's style warnings stay warnings.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
+const config_mod = @import("../config.zig");
+const gitmodules = @import("../submodule/gitmodules.zig");
 const safepath = @import("../worktree/safepath.zig");
+const warning = @import("../repo/warning.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
 
-/// One problem, named as git's `fsck.<msg-id>` names it.
+/// One problem, named as git's `fsck.<msg-id>` names it, in git's order.
+/// The ones about refs are here so that configuration naming them is
+/// read as git reads it; no object check reports them.
 pub const Problem = enum {
-    // Any object with headers.
+    // Fatal.
     nul_in_header,
     unterminated_header,
-    // Commits.
-    missing_tree,
-    bad_tree_sha1,
-    bad_parent_sha1,
-    missing_author,
-    multiple_authors,
-    missing_committer,
-    // Identities, in a commit or a tag.
-    missing_name_before_email,
-    bad_name,
-    missing_email,
-    missing_space_before_email,
-    bad_email,
-    missing_space_before_date,
-    zero_padded_date,
-    bad_date_overflow,
+    // Errors.
+    bad_header_continuation,
     bad_date,
+    bad_date_overflow,
+    bad_email,
+    bad_gpgsig,
+    bad_head_target,
+    bad_name,
+    bad_object_sha1,
+    bad_packed_ref_entry,
+    bad_packed_ref_header,
+    bad_parent_sha1,
+    bad_referent_name,
+    bad_ref_content,
+    bad_ref_filetype,
+    bad_ref_name,
+    bad_ref_oid,
     bad_timezone,
-    // Trees.
     bad_tree,
-    tree_not_sorted,
+    bad_tree_sha1,
+    bad_type,
     duplicate_entries,
+    gitattributes_blob,
+    gitattributes_large,
+    gitattributes_line_length,
+    gitattributes_missing,
+    gitmodules_blob,
+    gitmodules_large,
+    gitmodules_missing,
+    gitmodules_name,
+    gitmodules_path,
+    gitmodules_symlink,
+    gitmodules_update,
+    gitmodules_url,
+    missing_author,
+    missing_committer,
+    missing_email,
+    missing_name_before_email,
+    missing_object,
+    missing_space_before_date,
+    missing_space_before_email,
+    missing_tag,
+    missing_tag_entry,
+    missing_tree,
+    missing_type,
+    missing_type_entry,
+    multiple_authors,
+    packed_ref_entry_not_terminated,
+    packed_ref_unsorted,
+    tree_not_sorted,
+    unknown_type,
+    zero_padded_date,
+    // Warnings.
+    bad_reftable_table_name,
+    empty_name,
+    full_pathname,
     has_dot,
     has_dotdot,
     has_dotgit,
-    // Tags.
-    missing_object,
-    bad_object_sha1,
-    missing_type_entry,
-    missing_type,
-    bad_type,
-    missing_tag_entry,
-    missing_tag,
+    large_pathname,
+    null_sha1,
+    nul_in_commit,
+    zero_padded_filemode,
+    // Information: reported as warnings, ignored unless raised.
+    bad_filemode,
+    bad_tag_name,
+    empty_packed_refs_file,
+    gitattributes_symlink,
+    gitignore_symlink,
+    gitmodules_parse,
+    mailmap_symlink,
+    missing_tagger_entry,
+    ref_missing_newline,
+    symlink_ref,
+    symref_target_is_not_a_ref,
+    trailing_ref_content,
+    // Ignored unless raised.
+    extra_header_entry,
+
+    pub const count = @typeInfo(Problem).@"enum".fields.len;
 
     /// git's message id: `treeNotSorted`, `badTimezone`, and so on, which
     /// is what `fsck.<msg-id>` configuration and git's own messages use.
     pub fn id(problem: Problem) []const u8 {
+        return ids[@intFromEnum(problem)];
+    }
+
+    /// The id as configuration spells it once read: lower case, no
+    /// underscores, which is what git matches a configured name against.
+    pub fn fromConfigName(name: []const u8) ?Problem {
+        for (std.enums.values(Problem)) |problem| {
+            if (std.ascii.eqlIgnoreCase(problem.id(), name)) return problem;
+        }
+        return null;
+    }
+
+    /// The level git gives the problem when nothing says otherwise.
+    pub fn defaultLevel(problem: Problem) Level {
+        const at = @intFromEnum(problem);
+        if (at <= @intFromEnum(Problem.unterminated_header)) return .fatal;
+        if (at <= @intFromEnum(Problem.zero_padded_date)) return .@"error";
+        if (at <= @intFromEnum(Problem.zero_padded_filemode)) return .warn;
+        if (at <= @intFromEnum(Problem.trailing_ref_content)) return .info;
+        return .ignore;
+    }
+
+    /// What git says after the id, without what it names.
+    pub fn text(problem: Problem) []const u8 {
         return switch (problem) {
-            .nul_in_header => "nulInHeader",
-            .unterminated_header => "unterminatedHeader",
-            .missing_tree => "missingTree",
-            .bad_tree_sha1 => "badTreeSha1",
-            .bad_parent_sha1 => "badParentSha1",
-            .missing_author => "missingAuthor",
-            .multiple_authors => "multipleAuthors",
-            .missing_committer => "missingCommitter",
-            .missing_name_before_email => "missingNameBeforeEmail",
-            .bad_name => "badName",
-            .missing_email => "missingEmail",
-            .missing_space_before_email => "missingSpaceBeforeEmail",
-            .bad_email => "badEmail",
-            .missing_space_before_date => "missingSpaceBeforeDate",
-            .zero_padded_date => "zeroPaddedDate",
-            .bad_date_overflow => "badDateOverflow",
-            .bad_date => "badDate",
-            .bad_timezone => "badTimezone",
-            .bad_tree => "badTree",
-            .tree_not_sorted => "treeNotSorted",
-            .duplicate_entries => "duplicateEntries",
-            .has_dot => "hasDot",
-            .has_dotdot => "hasDotdot",
-            .has_dotgit => "hasDotgit",
-            .missing_object => "missingObject",
-            .bad_object_sha1 => "badObjectSha1",
-            .missing_type_entry => "missingTypeEntry",
-            .missing_type => "missingType",
-            .bad_type => "badType",
-            .missing_tag_entry => "missingTagEntry",
-            .missing_tag => "missingTag",
+            .nul_in_header, .unterminated_header => "unterminated header",
+            .bad_tree_sha1 => "invalid 'tree' line format - bad sha1",
+            .bad_parent_sha1 => "invalid 'parent' line format - bad sha1",
+            .bad_object_sha1 => "invalid 'object' line format - bad sha1",
+            .missing_tree => "invalid format - expected 'tree' line",
+            .missing_author => "invalid format - expected 'author' line",
+            .multiple_authors => "invalid format - multiple 'author' lines",
+            .missing_committer => "invalid format - expected 'committer' line",
+            .missing_name_before_email => "invalid author/committer line - missing space before email",
+            .missing_email => "invalid author/committer line - missing email",
+            .bad_name => "invalid author/committer line - bad name",
+            .missing_space_before_email => "invalid author/committer line - missing space before email",
+            .bad_email => "invalid author/committer line - bad email",
+            .missing_space_before_date => "invalid author/committer line - missing space before date",
+            .bad_date => "invalid author/committer line - bad date",
+            .zero_padded_date => "invalid author/committer line - zero-padded date",
+            .bad_date_overflow => "invalid author/committer line - date causes integer overflow",
+            .bad_timezone => "invalid author/committer line - bad time zone",
+            .nul_in_commit => "NUL byte in the commit object body",
+            .missing_object => "invalid format - expected 'object' line",
+            .missing_type_entry => "invalid format - expected 'type' line",
+            .missing_type => "invalid format - unexpected end after 'type' line",
+            .bad_type => "invalid 'type' value",
+            .missing_tag_entry => "invalid format - expected 'tag' line",
+            .missing_tag => "invalid format - unexpected end after 'type' line",
+            .bad_tag_name => "invalid 'tag' name: ",
+            .missing_tagger_entry => "invalid format - expected 'tagger' line",
+            .bad_gpgsig => "invalid format - unexpected end after 'gpgsig' or 'gpgsig-sha256' line",
+            .bad_header_continuation => "invalid format - unexpected end in 'gpgsig' or 'gpgsig-sha256' continuation line",
+            .extra_header_entry => "invalid format - extra header(s) after 'tagger'",
+            .bad_tree => "cannot be parsed as a tree",
+            .null_sha1 => "contains entries pointing to null sha1",
+            .full_pathname => "contains full pathnames",
+            .empty_name => "contains empty pathname",
+            .has_dot => "contains '.'",
+            .has_dotdot => "contains '..'",
+            .has_dotgit => "contains '.git'",
+            .zero_padded_filemode => "contains zero-padded file modes",
+            .bad_filemode => "contains bad file modes",
+            .duplicate_entries => "contains duplicate file entries",
+            .tree_not_sorted => "not properly sorted",
+            .large_pathname => "contains excessively large pathname",
+            .gitmodules_symlink => ".gitmodules is a symbolic link",
+            .gitattributes_symlink => ".gitattributes is a symlink",
+            .gitignore_symlink => ".gitignore is a symlink",
+            .mailmap_symlink => ".mailmap is a symlink",
+            .gitmodules_large => ".gitmodules too large to parse",
+            .gitmodules_parse => "could not parse gitmodules blob",
+            .gitmodules_name => "disallowed submodule name: ",
+            .gitmodules_url => "disallowed submodule url: ",
+            .gitmodules_path => "disallowed submodule path: ",
+            .gitmodules_update => "disallowed submodule update setting: ",
+            .gitmodules_missing => "unable to read .gitmodules blob",
+            .gitmodules_blob => "non-blob found at .gitmodules",
+            .gitattributes_large => ".gitattributes too large to parse",
+            .gitattributes_line_length => ".gitattributes has too long lines to parse",
+            .gitattributes_missing => "unable to read .gitattributes blob",
+            .gitattributes_blob => "non-blob found at .gitattributes",
+            .unknown_type => "unknown type (internal fsck error)",
+            else => "",
         };
     }
 };
 
-/// The first problem with an object of type `t` whose content is `bytes`,
-/// or `null` when git's checks find none. A blob is never a problem.
-pub fn check(kind: Kind, t: object.Type, bytes: []const u8) ?Problem {
-    return switch (t) {
-        .blob => null,
-        .tree => checkTree(kind, bytes),
-        .commit => checkCommit(kind, bytes),
-        .tag => checkTag(kind, bytes),
+const ids = blk: {
+    @setEvalBranchQuota(20_000);
+    var out: [Problem.count][]const u8 = undefined;
+    for (std.enums.values(Problem), 0..) |problem, i| {
+        const snake = @tagName(problem);
+        var camel: [snake.len]u8 = undefined;
+        var len: usize = 0;
+        var upper = false;
+        for (snake) |c| {
+            if (c == '_') {
+                upper = true;
+                continue;
+            }
+            camel[len] = if (upper) std.ascii.toUpper(c) else c;
+            len += 1;
+            upper = false;
+        }
+        const final = camel[0..len].*;
+        out[i] = &final;
+    }
+    break :blk out;
+};
+
+/// How much a problem matters.
+pub const Level = enum {
+    /// An error that may not be lowered: the object cannot be read safely.
+    fatal,
+    @"error",
+    warn,
+    /// Reported as a warning, and not at all unless asked.
+    info,
+    ignore,
+
+    /// A level as configuration writes it: `error`, `warn` or `ignore`.
+    pub fn parse(text_: []const u8) ?Level {
+        if (std.mem.eql(u8, text_, "error")) return .@"error";
+        if (std.mem.eql(u8, text_, "warn")) return .warn;
+        if (std.mem.eql(u8, text_, "ignore")) return .ignore;
+        return null;
+    }
+};
+
+/// Whose configuration the rules come from: `git fsck`'s own, a fetch's
+/// or clone's, or a push received.
+pub const Scope = enum {
+    fsck,
+    fetch,
+    receive,
+};
+
+/// Errors from reading the rules.
+pub const LoadError = error{
+    /// `fsck.<msg-id>` names no message git has. Under `fetch.fsck.` and
+    /// `receive.fsck.` git warns and goes on, and so does this.
+    UnknownFsckMessage,
+    /// A level other than `error`, `warn` or `ignore`.
+    UnknownFsckLevel,
+    /// A fatal problem lowered below an error, which git refuses.
+    FsckFatalLowered,
+    /// `largePathname`'s length is not a number.
+    InvalidFsckValue,
+    /// A `skipList` that could not be read.
+    SkipListUnreadable,
+    /// A `skipList` line that is not one full object name.
+    InvalidSkipListEntry,
+    /// A setting holds a value that does not decode.
+    MalformedValue,
+    /// A `<scope>.fsck.<msg-id>` with no value.
+    MissingValue,
+} || Allocator.Error || Io.Cancelable;
+
+/// The levels the checks report at, the objects they leave alone, and the
+/// longest name a tree may carry.
+pub const Rules = struct {
+    /// git's strict mode, which a fetch, a clone and a received push use:
+    /// every warning is an error unless configured otherwise.
+    strict: bool = false,
+    /// What configuration set, by problem.
+    levels: [Problem.count]?Level = @splat(null),
+    /// Objects a `skipList` names, which no finding is reported for.
+    skip: Oid.Set = .empty,
+    /// `largePathname`'s bound: the longest tree entry name.
+    max_entry_len: usize = 4096,
+
+    /// Release the skip list.
+    pub fn deinit(r: *Rules, gpa: Allocator) void {
+        r.skip.deinit(gpa);
+        r.* = undefined;
+    }
+
+    /// The level `problem` is reported at.
+    pub fn level(r: *const Rules, problem: Problem) Level {
+        if (r.levels[@intFromEnum(problem)]) |configured| return configured;
+        const default = problem.defaultLevel();
+        if (r.strict and default == .warn) return .@"error";
+        return default;
+    }
+
+    /// Set the level of the problem `name` names, as `fsck.<name>=<value>`
+    /// does: `value` is `error`, `warn` or `ignore`, and for
+    /// `largePathname` may carry `:<length>`.
+    pub fn set(r: *Rules, name: []const u8, value: []const u8) LoadError!void {
+        const problem = Problem.fromConfigName(name) orelse return error.UnknownFsckMessage;
+        var level_text = value;
+        if (problem == .large_pathname) {
+            if (std.mem.indexOfScalar(u8, value, ':')) |colon| {
+                level_text = value[0..colon];
+                const n = config_mod.parseInt(value[colon + 1 ..]) catch return error.InvalidFsckValue;
+                r.max_entry_len = std.math.cast(usize, n) orelse return error.InvalidFsckValue;
+            }
+        }
+        const new = Level.parse(level_text) orelse return error.UnknownFsckLevel;
+        if (new != .@"error" and problem.defaultLevel() == .fatal) return error.FsckFatalLowered;
+        r.levels[@intFromEnum(problem)] = new;
+    }
+
+    /// Whether `oid` is on the skip list.
+    pub fn skips(r: *const Rules, oid: Oid) bool {
+        return r.skip.contains(oid);
+    }
+
+    /// Add the names in the skip list at `path`: one full name a line,
+    /// with `#` comments, blank lines and surrounding space allowed, as
+    /// git reads `fsck.skipList`.
+    pub fn readSkipList(r: *Rules, gpa: Allocator, io: Io, kind: Kind, path: []const u8) LoadError!void {
+        const text_ = Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 30)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.SkipListUnreadable,
+        };
+        defer gpa.free(text_);
+        var lines = std.mem.splitScalar(u8, text_, '\n');
+        while (lines.next()) |raw| {
+            var line = raw;
+            if (std.mem.indexOfScalar(u8, line, '#')) |at| line = line[0..at];
+            line = std.mem.trim(u8, line, " \t\r\x0b\x0c");
+            if (line.len == 0) continue;
+            if (line.len != kind.hexLen()) return error.InvalidSkipListEntry;
+            const oid = Oid.parse(kind, line) catch return error.InvalidSkipListEntry;
+            try r.skip.put(gpa, oid, {});
+        }
+    }
+
+    /// The rules `config` gives `scope`: `<scope>.fsck.<msg-id>` and
+    /// `<scope>.fsck.skipList` in the order they are set, each skip list
+    /// read whole, a relative path from the current directory. `strict`
+    /// for a fetch, a clone or a received push, as git checks them.
+    /// `fetch.fsck.` and `receive.fsck.` names no message has are left out
+    /// and said in `warnings`, as git warns; `fsck.` ones are refused.
+    pub fn load(gpa: Allocator, io: Io, config: *const config_mod.Config, kind: Kind, scope: Scope, strict: bool, sink: ?Sink) LoadError!Rules {
+        var rules: Rules = .{ .strict = strict };
+        errdefer rules.deinit(gpa);
+        try rules.configure(gpa, io, config, kind, scope, sink);
+        return rules;
+    }
+
+    /// `load`, over rules already made: `baseline` takes the
+    /// configuration this way.
+    pub fn configure(r: *Rules, gpa: Allocator, io: Io, config: *const config_mod.Config, kind: Kind, scope: Scope, sink: ?Sink) LoadError!void {
+        for (config.entries.items) |entry| {
+            if (!entryUnder(entry, scope)) continue;
+            const raw = entry.value orelse return error.MissingValue;
+            const value = config_mod.unquote(gpa, raw) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.MalformedValue,
+            };
+            defer gpa.free(value);
+            if (std.ascii.eqlIgnoreCase(entry.name, "skiplist")) {
+                var path = value;
+                var expanded: ?[]u8 = null;
+                defer if (expanded) |e| gpa.free(e);
+                if (std.mem.startsWith(u8, value, "~/")) if (config.context.home) |home| {
+                    expanded = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, value[2..] });
+                    path = expanded.?;
+                };
+                try r.readSkipList(gpa, io, kind, path);
+                continue;
+            }
+            if (scope != .fsck) {
+                // git checks the level first and warns of a name it does
+                // not know, so `largePathname=warn:<n>` is refused here.
+                if (Level.parse(value) == null) return error.UnknownFsckLevel;
+                if (Problem.fromConfigName(entry.name) == null) {
+                    if (sink) |s| try s.unknown(s.context, entry.name);
+                    continue;
+                }
+            }
+            try r.set(entry.name, value);
+        }
+    }
+};
+
+fn entryUnder(entry: config_mod.Entry, scope: Scope) bool {
+    return switch (scope) {
+        .fsck => !entry.has_subsection and std.mem.eql(u8, entry.section, "fsck"),
+        .fetch => entry.has_subsection and std.mem.eql(u8, entry.section, "fetch") and std.mem.eql(u8, entry.subsection, "fsck"),
+        .receive => entry.has_subsection and std.mem.eql(u8, entry.section, "receive") and std.mem.eql(u8, entry.subsection, "fsck"),
     };
 }
 
-fn checkTree(kind: Kind, bytes: []const u8) ?Problem {
-    var it = object.Tree.parse(kind, bytes).iterate();
-    var previous: ?object.Tree.Entry = null;
-    // A blob `a` and a tree `a` sort apart — `a`, `a.c`, `a/` — so a
-    // duplicate is not always the entry before; git keeps the names it may
-    // still meet, and the ones still pending here are the entries that
-    // were a prefix of the ones after them.
-    var pending: [64][]const u8 = undefined;
-    var pending_len: usize = 0;
-    while (true) {
-        const entry = (it.next() catch return .bad_tree) orelse break;
-        if (safepath.checkComponent(entry.name, .stored)) |reason| switch (reason) {
-            .dot_component => return if (entry.name.len == 1) .has_dot else .has_dotdot,
-            .git_directory => return .has_dotgit,
-            else => {},
-        };
-        if (previous) |prev| {
-            switch (compareEntries(prev, entry)) {
-                .lt => {},
-                .eq => return .duplicate_entries,
-                .gt => return .tree_not_sorted,
-            }
-        }
-        // Names that are a strict prefix of this one followed by a byte
-        // below `/` may still meet their twin further on.
-        var kept: usize = 0;
-        for (pending[0..pending_len]) |name| {
-            if (std.mem.eql(u8, name, entry.name)) return .duplicate_entries;
-            if (entry.name.len > name.len and std.mem.startsWith(u8, entry.name, name) and entry.name[name.len] < '/') {
-                pending[kept] = name;
-                kept += 1;
-            }
-        }
-        pending_len = kept;
-        if (pending_len < pending.len) {
-            pending[pending_len] = entry.name;
-            pending_len += 1;
-        }
-        previous = entry;
-    }
+/// relic's checks when nothing asks for git's: git's levels, with a tree
+/// naming `.`, `..` or `.git` refused.
+pub const baseline: Rules = blk: {
+    var r: Rules = .{};
+    r.levels[@intFromEnum(Problem.has_dot)] = .@"error";
+    r.levels[@intFromEnum(Problem.has_dotdot)] = .@"error";
+    r.levels[@intFromEnum(Problem.has_dotgit)] = .@"error";
+    break :blk r;
+};
+
+/// Whether `<scope>.fsckObjects` — falling back on `transfer.fsckObjects`
+/// — asks for git's checks: `null` when neither is set. `git fsck` checks
+/// whatever is set.
+pub fn wanted(config: *const config_mod.Config, scope: Scope) config_mod.ValueError!?bool {
+    const own = switch (scope) {
+        .fsck => return true,
+        .fetch => "fetch.fsckobjects",
+        .receive => "receive.fsckobjects",
+    };
+    if (config.find(own) != null) return try config.getBool(own, false);
+    if (config.find("transfer.fsckobjects") != null) return try config.getBool("transfer.fsckobjects", false);
     return null;
 }
 
-/// git's `base_name_compare`: names compared as if a tree's had a `/` on
-/// the end, so `a.c` sorts before the tree `a` and `a0` after it.
-fn compareEntries(a: object.Tree.Entry, b: object.Tree.Entry) std.math.Order {
-    const len = @min(a.name.len, b.name.len);
-    const common = std.mem.order(u8, a.name[0..len], b.name[0..len]);
-    if (common != .eq) return common;
-    const ca: u8 = if (a.name.len > len) a.name[len] else if (a.mode.isTree()) '/' else 0;
-    const cb: u8 = if (b.name.len > len) b.name[len] else if (b.mode.isTree()) '/' else 0;
-    if (ca == cb) return if (a.name.len == b.name.len) .eq else std.math.order(a.name.len, b.name.len);
-    return std.math.order(ca, cb);
+/// The rules a fetch or clone with `config` checks with, or `null` for
+/// none: `explicit` when the caller says, otherwise `fetch.fsckObjects` or
+/// `transfer.fsckObjects`. On, they are git's strict checks with
+/// `fetch.fsck.*`; unset, `baseline` with `fetch.fsck.*`; off, none, as git
+/// checks nothing then. The result's skip list is `gpa`'s.
+pub fn forTransfer(gpa: Allocator, io: Io, config: ?*const config_mod.Config, kind: Kind, scope: Scope, explicit: ?bool, sink: ?Sink) (LoadError || config_mod.ValueError)!?Rules {
+    const on = explicit orelse if (config) |c| try wanted(c, scope) else null;
+    var rules = baseline;
+    if (on) |yes| {
+        if (!yes) return null;
+        rules = .{ .strict = true };
+    }
+    errdefer rules.deinit(gpa);
+    if (config) |c| try rules.configure(gpa, io, c, kind, scope, sink);
+    return rules;
 }
 
-fn verifyHeaders(bytes: []const u8) ?Problem {
-    for (bytes, 0..) |c, i| {
-        switch (c) {
-            0 => return .nul_in_header,
-            '\n' => if (i + 1 < bytes.len and bytes[i + 1] == '\n') return null,
-            else => {},
-        }
-    }
-    // No blank line: no body, which is allowed, as long as the last header
-    // line is terminated.
-    if (bytes.len != 0 and bytes[bytes.len - 1] == '\n') return null;
-    return .unterminated_header;
-}
+/// One problem found.
+pub const Finding = struct {
+    /// The object it is about.
+    oid: Oid,
+    /// `null` when git's parser cannot read the commit or tag at all,
+    /// which `index-pack` refuses before any check.
+    problem: ?Problem,
+    /// `error` or `warn`: what the rules made of it.
+    level: Level,
+    /// What git's message names after the text: a submodule's name, url,
+    /// path or update, a tag's name. Borrowed for the call.
+    detail: []const u8 = "",
 
-const Cursor = struct {
-    bytes: []const u8,
-    at: usize = 0,
-
-    fn skip(c: *Cursor, prefix: []const u8) bool {
-        if (!std.mem.startsWith(u8, c.bytes[c.at..], prefix)) return false;
-        c.at += prefix.len;
-        return true;
-    }
-
-    /// An object name ending the line, and the line taken.
-    fn oidLine(c: *Cursor, kind: Kind) bool {
-        const hex_len = kind.hexLen();
-        const rest = c.bytes[c.at..];
-        if (rest.len < hex_len + 1 or rest[hex_len] != '\n') {
-            c.skipLine();
-            return false;
-        }
-        _ = Oid.parse(kind, rest[0..hex_len]) catch {
-            c.skipLine();
-            return false;
-        };
-        c.at += hex_len + 1;
-        return true;
-    }
-
-    fn skipLine(c: *Cursor) void {
-        const nl = std.mem.indexOfScalarPos(u8, c.bytes, c.at, '\n') orelse c.bytes.len;
-        c.at = @min(nl + 1, c.bytes.len);
+    /// git's message: `<msg-id>: <text>`. The result is `gpa`'s.
+    pub fn message(f: Finding, gpa: Allocator) Allocator.Error![]u8 {
+        const problem = f.problem orelse return gpa.dupe(u8, "cannot be parsed");
+        return std.fmt.allocPrint(gpa, "{s}: {s}{s}", .{ problem.id(), problem.text(), f.detail });
     }
 };
 
-fn checkCommit(kind: Kind, bytes: []const u8) ?Problem {
-    if (verifyHeaders(bytes)) |problem| return problem;
-    var c: Cursor = .{ .bytes = bytes };
-    if (!c.skip("tree ")) return .missing_tree;
-    if (!c.oidLine(kind)) return .bad_tree_sha1;
-    while (c.skip("parent ")) {
-        if (!c.oidLine(kind)) return .bad_parent_sha1;
+/// Where warnings go, and names configuration gave that no message has.
+pub const Sink = struct {
+    context: *anyopaque,
+    warning: *const fn (context: *anyopaque, finding: Finding) Allocator.Error!void,
+    unknown: *const fn (context: *anyopaque, name: []const u8) Allocator.Error!void,
+};
+
+/// A `Sink` that keeps what it is given in `warnings`, as git prints it.
+/// One task at a time.
+pub const ToWarnings = struct {
+    warnings: ?*warning.Warnings,
+
+    pub fn sink(t: *ToWarnings) Sink {
+        return .{ .context = t, .warning = noteFinding, .unknown = noteUnknown };
+    }
+
+    fn noteFinding(context: *anyopaque, finding: Finding) Allocator.Error!void {
+        const t: *ToWarnings = @ptrCast(@alignCast(context)); // safe: the context is the ToWarnings the sink was made from
+        try note(t.warnings, finding);
+    }
+
+    fn noteUnknown(context: *anyopaque, name: []const u8) Allocator.Error!void {
+        const t: *ToWarnings = @ptrCast(@alignCast(context)); // safe: the context is the ToWarnings the sink was made from
+        try warning.note(t.warnings, .{ .fsck_unknown_message = name });
+    }
+};
+
+/// Keep `finding` in `to`, as git's warning words it.
+pub fn note(to: ?*warning.Warnings, finding: Finding) Allocator.Error!void {
+    const w = to orelse return;
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const message = try finding.message(w.arena.allocator());
+    try w.add(.{ .fsck = .{ .object = finding.oid.hex(&hex), .message = message } });
+}
+
+/// The `.gitmodules` and `.gitattributes` blobs trees name, which git
+/// reads once every object has come.
+pub const Found = struct {
+    modules: Oid.Set = .empty,
+    attributes: Oid.Set = .empty,
+
+    pub fn deinit(f: *Found, gpa: Allocator) void {
+        f.modules.deinit(gpa);
+        f.attributes.deinit(gpa);
+        f.* = undefined;
+    }
+};
+
+/// What a found blob is read as.
+pub const Special = enum { modules, attributes };
+
+const Reporter = struct {
+    rules: *const Rules,
+    oid: Oid,
+    sink: ?Sink,
+    first: ?Finding = null,
+
+    /// Report `problem`; whether it is an error, which stops a commit's or
+    /// tag's checks where git's stop.
+    fn report(r: *Reporter, problem: Problem, detail: []const u8) Allocator.Error!bool {
+        if (r.rules.skips(r.oid)) return false;
+        switch (r.rules.level(problem)) {
+            .ignore => return false,
+            .warn, .info => {
+                if (r.sink) |s| try s.warning(s.context, .{ .oid = r.oid, .problem = problem, .level = .warn, .detail = detail });
+                return false;
+            },
+            .fatal, .@"error" => {
+                if (r.first == null) r.first = .{ .oid = r.oid, .problem = problem, .level = .@"error" };
+                return true;
+            },
+        }
+    }
+};
+
+/// The first error in object `oid` of type `t`, whose content is `bytes`,
+/// as git's `index-pack` finds it with `rules`: a commit or tag git's
+/// parser cannot read, then `checkObject`. `null` when there is none.
+pub fn inspect(gpa: Allocator, rules: *const Rules, kind: Kind, oid: Oid, t: object.Type, bytes: []const u8, found: ?*Found, sink: ?Sink) Allocator.Error!?Finding {
+    if (!parsesAsGit(kind, t, bytes)) return .{ .oid = oid, .problem = null, .level = .@"error" };
+    return checkObject(gpa, rules, kind, oid, t, bytes, found, sink);
+}
+
+/// The first error git's `fsck_object` finds in an object with `rules`,
+/// or `null`. Warnings go to `sink`; a tree's `.gitmodules` and
+/// `.gitattributes` go to `found`, for `checkBlob`. A blob is checked by
+/// `checkBlob`, once it is known to be one of those.
+pub fn checkObject(gpa: Allocator, rules: *const Rules, kind: Kind, oid: Oid, t: object.Type, bytes: []const u8, found: ?*Found, sink: ?Sink) Allocator.Error!?Finding {
+    var r: Reporter = .{ .rules = rules, .oid = oid, .sink = sink };
+    switch (t) {
+        .blob => {},
+        .tree => try checkTree(gpa, &r, kind, bytes, found),
+        .commit => _ = try checkCommit(&r, kind, bytes),
+        .tag => _ = try checkTag(&r, kind, bytes),
+    }
+    return r.first;
+}
+
+/// git's `parse_commit_buffer` and `parse_tag_buffer`, which `index-pack`
+/// runs before any check and dies on.
+fn parsesAsGit(kind: Kind, t: object.Type, bytes: []const u8) bool {
+    const hex_len = kind.hexLen();
+    switch (t) {
+        .blob, .tree => return true,
+        .commit => {
+            const tree_entry_len = hex_len + 5;
+            const parent_entry_len = hex_len + 7;
+            if (bytes.len <= tree_entry_len + 1 or !std.mem.startsWith(u8, bytes, "tree ") or bytes[tree_entry_len] != '\n') return false;
+            _ = Oid.parse(kind, bytes[5..tree_entry_len]) catch return false;
+            var at = tree_entry_len + 1;
+            while (at + parent_entry_len < bytes.len and std.mem.startsWith(u8, bytes[at..], "parent ")) {
+                if (bytes.len <= at + parent_entry_len + 1 or bytes[at + parent_entry_len] != '\n') return false;
+                _ = Oid.parse(kind, bytes[at + 7 .. at + parent_entry_len]) catch return false;
+                at += parent_entry_len + 1;
+            }
+            return true;
+        },
+        .tag => {
+            if (bytes.len < hex_len + 24) return false;
+            if (!std.mem.startsWith(u8, bytes, "object ")) return false;
+            _ = Oid.parse(kind, bytes[7 .. 7 + hex_len]) catch return false;
+            var at = 7 + hex_len;
+            if (bytes[at] != '\n') return false;
+            at += 1;
+            if (!std.mem.startsWith(u8, bytes[at..], "type ")) return false;
+            at += 5;
+            const nl = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return false;
+            if (nl - at >= 20) return false;
+            _ = object.Type.parse(bytes[at..nl]) catch return false;
+            at = nl + 1;
+            if (!(at + 4 < bytes.len and std.mem.startsWith(u8, bytes[at..], "tag "))) return false;
+            at += 4;
+            _ = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return false;
+            return true;
+        },
+    }
+}
+
+/// The byte at `i`, or NUL past the end, as git's NUL-terminated buffers
+/// read.
+fn byteAt(bytes: []const u8, i: usize) u8 {
+    return if (i < bytes.len) bytes[i] else 0;
+}
+
+const s_ifmt: u32 = 0o170000;
+const s_ifdir: u32 = 0o040000;
+const s_iflnk: u32 = 0o120000;
+
+fn checkTree(gpa: Allocator, r: *Reporter, kind: Kind, bytes: []const u8, found: ?*Found) Allocator.Error!void {
+    const raw_len = kind.rawLen();
+    var has_null_sha1 = false;
+    var has_full_path = false;
+    var has_empty_name = false;
+    var has_dot = false;
+    var has_dotdot = false;
+    var has_dotgit = false;
+    var has_zero_pad = false;
+    var has_bad_modes = false;
+    var has_dup_entries = false;
+    var not_properly_sorted = false;
+    var has_large_name = false;
+    var candidates: std.ArrayList([]const u8) = .empty;
+    defer candidates.deinit(gpa);
+
+    if (bytes.len == 0) return;
+    var rest = bytes;
+    var entry = decodeEntry(rest, raw_len) orelse {
+        _ = try r.report(.bad_tree, "");
+        return;
+    };
+    var previous: ?TreeEntry = null;
+    while (rest.len != 0) {
+        const name = entry.name;
+        has_null_sha1 = has_null_sha1 or std.mem.allEqual(u8, entry.oid, 0);
+        has_full_path = has_full_path or std.mem.indexOfScalar(u8, name, '/') != null;
+        has_empty_name = has_empty_name or name.len == 0;
+        has_dot = has_dot or std.mem.eql(u8, name, ".");
+        has_dotdot = has_dotdot or std.mem.eql(u8, name, "..");
+        has_dotgit = has_dotgit or isHfsDot(name, "git") or isNtfsDotGit(name);
+        has_zero_pad = has_zero_pad or rest[0] == '0';
+        has_large_name = has_large_name or name.len > r.rules.max_entry_len;
+
+        const is_link = entry.mode & s_ifmt == s_iflnk;
+        if (isHfsDot(name, "gitmodules") or isNtfsDot(name, "gitmodules", "gi7eba")) {
+            if (!is_link) {
+                if (found) |f| try f.modules.put(gpa, entry.oidValue(kind), {});
+            } else _ = try r.report(.gitmodules_symlink, "");
+        }
+        if (isHfsDot(name, "gitattributes") or isNtfsDot(name, "gitattributes", "gi7d29")) {
+            if (!is_link) {
+                if (found) |f| try f.attributes.put(gpa, entry.oidValue(kind), {});
+            } else _ = try r.report(.gitattributes_symlink, "");
+        }
+        if (is_link) {
+            if (isHfsDot(name, "gitignore") or isNtfsDot(name, "gitignore", "gi250a")) _ = try r.report(.gitignore_symlink, "");
+            if (isHfsDot(name, "mailmap") or isNtfsDot(name, "mailmap", "maba30")) _ = try r.report(.mailmap_symlink, "");
+        }
+        var backslash = std.mem.indexOfScalar(u8, name, '\\');
+        while (backslash) |at| {
+            const after = name[at + 1 ..];
+            has_dotgit = has_dotgit or isNtfsDotGit(after);
+            if (isNtfsDot(after, "gitmodules", "gi7eba")) {
+                if (!is_link) {
+                    if (found) |f| try f.modules.put(gpa, entry.oidValue(kind), {});
+                } else _ = try r.report(.gitmodules_symlink, "");
+            }
+            backslash = if (std.mem.indexOfScalar(u8, after, '\\')) |next| at + 1 + next else null;
+        }
+
+        rest = rest[entry.len..];
+        const next = if (rest.len != 0) decodeEntry(rest, raw_len) else null;
+        if (rest.len != 0 and next == null) {
+            _ = try r.report(.bad_tree, "");
+            break;
+        }
+
+        switch (entry.mode) {
+            0o100755, 0o100644, s_iflnk, s_ifdir, 0o160000 => {},
+            // Nonstandard, but early git wrote it.
+            0o100664 => if (r.rules.strict) {
+                has_bad_modes = true;
+            },
+            else => has_bad_modes = true,
+        }
+        if (previous) |prev| switch (try verifyOrdered(gpa, prev, entry, &candidates)) {
+            .ordered => {},
+            .unordered => not_properly_sorted = true,
+            .duplicate => has_dup_entries = true,
+        };
+        previous = entry;
+        if (next) |n| entry = n;
+    }
+
+    if (has_null_sha1) _ = try r.report(.null_sha1, "");
+    if (has_full_path) _ = try r.report(.full_pathname, "");
+    if (has_empty_name) _ = try r.report(.empty_name, "");
+    if (has_dot) _ = try r.report(.has_dot, "");
+    if (has_dotdot) _ = try r.report(.has_dotdot, "");
+    if (has_dotgit) _ = try r.report(.has_dotgit, "");
+    if (has_zero_pad) _ = try r.report(.zero_padded_filemode, "");
+    if (has_bad_modes) _ = try r.report(.bad_filemode, "");
+    if (has_dup_entries) _ = try r.report(.duplicate_entries, "");
+    if (not_properly_sorted) _ = try r.report(.tree_not_sorted, "");
+    if (has_large_name) _ = try r.report(.large_pathname, "");
+}
+
+const TreeEntry = struct {
+    /// git's raw mode, kept to sixteen bits as git keeps it.
+    mode: u16,
+    name: []const u8,
+    oid: []const u8,
+    /// The whole entry's length.
+    len: usize,
+
+    fn oidValue(e: TreeEntry, kind: Kind) Oid {
+        return Oid.fromRaw(kind, e.oid) catch unreachable; // safe: decodeEntry took exactly rawLen bytes
+    }
+};
+
+/// git's `decode_tree_entry`: `<octal mode> <name>\0<raw name>`, the mode
+/// read until its space and the name until its NUL.
+fn decodeEntry(bytes: []const u8, raw_len: usize) ?TreeEntry {
+    if (bytes.len < raw_len + 3 or bytes[bytes.len - (raw_len + 1)] != 0) return null;
+    if (bytes[0] == ' ') return null;
+    var mode: u32 = 0;
+    var at: usize = 0;
+    while (true) : (at += 1) {
+        const c = byteAt(bytes, at);
+        if (c == ' ') break;
+        if (c < '0' or c > '7') return null;
+        mode = (mode << 3) +% (c - '0');
+    }
+    at += 1;
+    const nul = std.mem.indexOfScalarPos(u8, bytes, at, 0) orelse return null;
+    if (nul == at) return null;
+    if (nul + 1 + raw_len > bytes.len) return null;
+    return .{
+        .mode = @truncate(mode),
+        .name = bytes[at..nul],
+        .oid = bytes[nul + 1 .. nul + 1 + raw_len],
+        .len = nul + 1 + raw_len,
+    };
+}
+
+const Order = enum { ordered, unordered, duplicate };
+
+fn lessThanSlash(c: u8) bool {
+    return c != 0 and c < '/';
+}
+
+/// git's `verify_ordered`: names compared as if a tree's had a `/` on the
+/// end, with names that may meet a twin further on kept on a stack.
+fn verifyOrdered(gpa: Allocator, a: TreeEntry, b: TreeEntry, candidates: *std.ArrayList([]const u8)) Allocator.Error!Order {
+    const len = @min(a.name.len, b.name.len);
+    switch (std.mem.order(u8, a.name[0..len], b.name[0..len])) {
+        .lt => return .ordered,
+        .gt => return .unordered,
+        .eq => {},
+    }
+    var c1 = byteAt(a.name, len);
+    var c2 = byteAt(b.name, len);
+    if (c1 == 0 and c2 == 0) return .duplicate;
+    if (c1 == 0 and a.mode & s_ifmt == s_ifdir) c1 = '/';
+    if (c2 == 0 and b.mode & s_ifmt == s_ifdir) c2 = '/';
+    if (c1 == 0 and lessThanSlash(c2)) {
+        try candidates.append(gpa, a.name);
+    } else if (c2 == '/' and lessThanSlash(c1)) {
+        while (candidates.pop()) |f_name| {
+            if (!std.mem.startsWith(u8, b.name, f_name)) continue;
+            const p = b.name[f_name.len..];
+            if (p.len == 0) return .duplicate;
+            if (lessThanSlash(p[0])) {
+                try candidates.append(gpa, f_name);
+                break;
+            }
+        }
+    }
+    return if (c1 < c2) .ordered else .unordered;
+}
+
+/// git's `verify_headers`: the headers end in a blank line, or at least
+/// in a line break, and hold no NUL. Whether the checks go on.
+fn verifyHeaders(r: *Reporter, bytes: []const u8) Allocator.Error!bool {
+    for (bytes, 0..) |c, i| {
+        switch (c) {
+            0 => return !try r.report(.nul_in_header, ""),
+            '\n' => if (i + 1 < bytes.len and bytes[i + 1] == '\n') return true,
+            else => {},
+        }
+    }
+    if (bytes.len != 0 and bytes[bytes.len - 1] == '\n') return true;
+    return !try r.report(.unterminated_header, "");
+}
+
+/// Where a header's object name ends, when it is one: `hexLen` hex digits
+/// then a line break.
+fn oidLine(kind: Kind, bytes: []const u8, at: usize) bool {
+    const end = at + kind.hexLen();
+    if (end >= bytes.len or bytes[end] != '\n') return false;
+    _ = Oid.parse(kind, bytes[at..end]) catch return false;
+    return true;
+}
+
+fn nextLine(bytes: []const u8, at: usize) usize {
+    const nl = std.mem.indexOfScalarPos(u8, bytes, @min(at, bytes.len), '\n') orelse return bytes.len;
+    return nl + 1;
+}
+
+fn checkCommit(r: *Reporter, kind: Kind, bytes: []const u8) Allocator.Error!bool {
+    if (!try verifyHeaders(r, bytes)) return true;
+    var at: usize = 0;
+    if (!std.mem.startsWith(u8, bytes, "tree ")) return r.report(.missing_tree, "");
+    at = 5;
+    if (!oidLine(kind, bytes, at)) {
+        if (try r.report(.bad_tree_sha1, "")) return true;
+    }
+    at = nextLine(bytes, at);
+    while (at < bytes.len and std.mem.startsWith(u8, bytes[at..], "parent ")) {
+        at += 7;
+        if (!oidLine(kind, bytes, at)) {
+            if (try r.report(.bad_parent_sha1, "")) return true;
+        }
+        at = nextLine(bytes, at);
     }
     var authors: usize = 0;
-    while (c.skip("author ")) {
+    while (at < bytes.len and std.mem.startsWith(u8, bytes[at..], "author ")) {
         authors += 1;
-        if (checkIdent(&c)) |problem| return problem;
+        at += 7;
+        if (try checkIdent(r, bytes, &at)) return true;
     }
-    if (authors == 0) return .missing_author;
-    if (authors > 1) return .multiple_authors;
-    if (!c.skip("committer ")) return .missing_committer;
-    if (checkIdent(&c)) |problem| return problem;
-    return null;
+    if (authors < 1) {
+        if (try r.report(.missing_author, "")) return true;
+    } else if (authors > 1) {
+        if (try r.report(.multiple_authors, "")) return true;
+    }
+    if (!(at < bytes.len and std.mem.startsWith(u8, bytes[at..], "committer "))) return r.report(.missing_committer, "");
+    at += 10;
+    if (try checkIdent(r, bytes, &at)) return true;
+    if (std.mem.indexOfScalar(u8, bytes, 0) != null) {
+        if (try r.report(.nul_in_commit, "")) return true;
+    }
+    return false;
 }
 
-fn checkTag(kind: Kind, bytes: []const u8) ?Problem {
-    if (verifyHeaders(bytes)) |problem| return problem;
-    var c: Cursor = .{ .bytes = bytes };
-    if (!c.skip("object ")) return .missing_object;
-    if (!c.oidLine(kind)) return .bad_object_sha1;
-    if (!c.skip("type ")) return .missing_type_entry;
-    const type_end = std.mem.indexOfScalarPos(u8, bytes, c.at, '\n') orelse return .missing_type;
-    _ = object.Type.parse(bytes[c.at..type_end]) catch return .bad_type;
-    c.at = type_end + 1;
-    if (!c.skip("tag ")) return .missing_tag_entry;
-    const tag_end = std.mem.indexOfScalarPos(u8, bytes, c.at, '\n') orelse return .missing_tag;
-    c.at = tag_end + 1;
-    // Early tags carry no tagger, which git reports only as information.
-    if (c.skip("tagger ")) {
-        if (checkIdent(&c)) |problem| return problem;
+fn checkTag(r: *Reporter, kind: Kind, bytes: []const u8) Allocator.Error!bool {
+    if (!try verifyHeaders(r, bytes)) return true;
+    var at: usize = 0;
+    if (!std.mem.startsWith(u8, bytes, "object ")) return r.report(.missing_object, "");
+    at = 7;
+    if (!oidLine(kind, bytes, at)) {
+        if (try r.report(.bad_object_sha1, "")) return true;
     }
-    return null;
+    at = nextLine(bytes, at);
+    if (!(at < bytes.len and std.mem.startsWith(u8, bytes[at..], "type "))) return r.report(.missing_type_entry, "");
+    at += 5;
+    const type_end = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return r.report(.missing_type, "");
+    if (object.Type.parse(bytes[at..type_end])) |_| {} else |_| {
+        if (try r.report(.bad_type, "")) return true;
+    }
+    at = type_end + 1;
+    if (!(at < bytes.len and std.mem.startsWith(u8, bytes[at..], "tag "))) return r.report(.missing_tag_entry, "");
+    at += 4;
+    const tag_end = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return r.report(.missing_tag, "");
+    const tag_name = bytes[at..tag_end];
+    var ref_buf: [4096]u8 = undefined;
+    const ref_name = std.fmt.bufPrint(&ref_buf, "refs/tags/{s}", .{tag_name}) catch "";
+    if (ref_name.len == 0 or safepath.checkRefName(ref_name) != null) {
+        if (try r.report(.bad_tag_name, tag_name)) return true;
+    }
+    at = tag_end + 1;
+    if (!(at < bytes.len and std.mem.startsWith(u8, bytes[at..], "tagger "))) {
+        // Early tags carry no tagger, which git reports only as information.
+        if (try r.report(.missing_tagger_entry, "")) return true;
+    } else {
+        at += 7;
+        if (try checkIdent(r, bytes, &at)) return true;
+    }
+    if (at < bytes.len and (std.mem.startsWith(u8, bytes[at..], "gpgsig ") or std.mem.startsWith(u8, bytes[at..], "gpgsig-sha256 "))) {
+        const eol = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return r.report(.bad_gpgsig, "");
+        at = eol + 1;
+        while (at < bytes.len and bytes[at] == ' ') {
+            const cont = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return r.report(.bad_header_continuation, "");
+            at = cont + 1;
+        }
+    }
+    if (at < bytes.len and bytes[at] != '\n') {
+        if (try r.report(.extra_header_entry, "")) return true;
+    }
+    return false;
 }
 
-/// git's `fsck_ident`: `Name <email> <seconds> <±hhmm>` and a newline.
-fn checkIdent(c: *Cursor) ?Problem {
-    const bytes = c.bytes;
-    const nl = std.mem.indexOfScalarPos(u8, bytes, c.at, '\n') orelse bytes.len;
-    var p = c.at;
-    c.at = @min(nl + 1, bytes.len);
-    const end = nl;
+/// git's `fsck_ident`: `Name <email> <seconds> <±hhmm>` and a line break.
+/// `at` moves past the line. Whether the problem found is an error.
+fn checkIdent(r: *Reporter, bytes: []const u8, at: *usize) Allocator.Error!bool {
+    var p = at.*;
+    const nl = std.mem.indexOfScalarPos(u8, bytes, @min(p, bytes.len), '\n') orelse bytes.len;
+    at.* = @min(nl + 1, bytes.len);
+    const end = bytes.len;
 
-    if (p < end and bytes[p] == '<') return .missing_name_before_email;
+    if (byteAt(bytes, p) == '<') return r.report(.missing_name_before_email, "");
     while (true) : (p += 1) {
-        if (p >= end) return .missing_email;
-        if (bytes[p] == '>') return .bad_name;
+        if (p >= end or bytes[p] == '\n') return r.report(.missing_email, "");
+        if (bytes[p] == '>') return r.report(.bad_name, "");
         if (bytes[p] == '<') break;
     }
-    if (bytes[p - 1] != ' ') return .missing_space_before_email;
+    if (p == 0 or bytes[p - 1] != ' ') return r.report(.missing_space_before_email, "");
     p += 1;
     while (true) : (p += 1) {
-        if (p >= end or bytes[p] == '<') return .bad_email;
+        if (p >= end or bytes[p] == '<' or bytes[p] == '\n') return r.report(.bad_email, "");
         if (bytes[p] == '>') break;
     }
     p += 1;
-    if (p >= end or bytes[p] != ' ') return .missing_space_before_date;
+    if (byteAt(bytes, p) != ' ') return r.report(.missing_space_before_date, "");
     p += 1;
-    if (p < end and bytes[p] == '0' and (p + 1 >= end or bytes[p + 1] != ' ')) return .zero_padded_date;
+    while (byteAt(bytes, p) == ' ' or byteAt(bytes, p) == '\t') p += 1;
+    if (!std.ascii.isDigit(byteAt(bytes, p))) return r.report(.bad_date, "");
+    if (byteAt(bytes, p) == '0' and byteAt(bytes, p + 1) != ' ') return r.report(.zero_padded_date, "");
+    // git copies at most 23 digits, and more is past any date it keeps.
     const digits_start = p;
-    while (p < end and std.ascii.isDigit(bytes[p])) p += 1;
-    if (p == digits_start or p >= end or bytes[p] != ' ') return .bad_date;
-    // git keeps a date in an unsigned 64-bit timestamp and refuses one past
-    // what its date functions can hold.
-    const seconds = std.fmt.parseInt(u64, bytes[digits_start..p], 10) catch return .bad_date_overflow;
-    if (seconds > max_date) return .bad_date_overflow;
+    var overflow = false;
+    while (p < end and std.ascii.isDigit(bytes[p])) {
+        if (p - digits_start >= 23) {
+            overflow = true;
+            break;
+        }
+        p += 1;
+    }
+    if (!overflow) {
+        const seconds = std.fmt.parseInt(u64, bytes[digits_start..p], 10) catch std.math.maxInt(u64);
+        overflow = seconds > std.math.maxInt(i64);
+    }
+    if (overflow) return r.report(.bad_date_overflow, "");
+    if (byteAt(bytes, p) != ' ') return r.report(.bad_date, "");
     p += 1;
-    if (end - p != 5) return .bad_timezone;
-    if (bytes[p] != '+' and bytes[p] != '-') return .bad_timezone;
-    for (bytes[p + 1 .. p + 5]) |d| {
-        if (!std.ascii.isDigit(d)) return .bad_timezone;
+    if ((byteAt(bytes, p) != '+' and byteAt(bytes, p) != '-') or
+        !std.ascii.isDigit(byteAt(bytes, p + 1)) or !std.ascii.isDigit(byteAt(bytes, p + 2)) or
+        !std.ascii.isDigit(byteAt(bytes, p + 3)) or !std.ascii.isDigit(byteAt(bytes, p + 4)) or
+        byteAt(bytes, p + 5) != '\n')
+        return r.report(.bad_timezone, "");
+    return false;
+}
+
+/// git's largest `.gitattributes` it reads, and its longest line.
+const attr_max_file_size: usize = 100 * 1024 * 1024;
+const attr_max_line_length: usize = 2048;
+
+/// The first error in a blob a tree named `.gitmodules` or
+/// `.gitattributes`, as git's `fsck_blob` finds it; `bytes` is `null` for
+/// one too large to read.
+pub fn checkBlob(gpa: Allocator, rules: *const Rules, oid: Oid, as: Special, bytes: ?[]const u8, sink: ?Sink) Allocator.Error!?Finding {
+    var r: Reporter = .{ .rules = rules, .oid = oid, .sink = sink };
+    if (rules.skips(oid)) return null;
+    switch (as) {
+        .modules => {
+            const content = bytes orelse {
+                _ = try r.report(.gitmodules_large, "");
+                return r.first;
+            };
+            var partial = try config_mod.Config.parseTextUntilError(gpa, content, .local);
+            defer partial.config.deinit();
+            var failed = partial.failure != null;
+            for (partial.config.entries.items) |entry| {
+                if (!entry.has_subsection or !std.mem.eql(u8, entry.section, "submodule")) continue;
+                const name = entry.subsection;
+                const value: ?[]u8 = if (entry.value) |raw| config_mod.unquote(gpa, raw) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {
+                        // git's parser stops at a value it cannot read.
+                        failed = true;
+                        break;
+                    },
+                } else null;
+                defer if (value) |v| gpa.free(v);
+                if (!gitmodules.checkName(name)) _ = try r.report(.gitmodules_name, name);
+                if (value) |v| {
+                    if (std.mem.eql(u8, entry.name, "url") and !gitmodules.checkUrl(v)) _ = try r.report(.gitmodules_url, v);
+                    if (std.mem.eql(u8, entry.name, "path") and v.len != 0 and v[0] == '-') _ = try r.report(.gitmodules_path, v);
+                    if (std.mem.eql(u8, entry.name, "update") and v.len != 0 and v[0] == '!') _ = try r.report(.gitmodules_update, v);
+                }
+            }
+            if (failed) _ = try r.report(.gitmodules_parse, "");
+        },
+        .attributes => {
+            const content = bytes orelse {
+                _ = try r.report(.gitattributes_large, "");
+                return r.first;
+            };
+            if (content.len > attr_max_file_size) {
+                _ = try r.report(.gitattributes_large, "");
+                return r.first;
+            }
+            // git reads it as a C string: a NUL ends it.
+            const text_ = content[0 .. std.mem.indexOfScalar(u8, content, 0) orelse content.len];
+            var lines = std.mem.splitScalar(u8, text_, '\n');
+            while (lines.next()) |line| {
+                if (line.len >= attr_max_line_length) {
+                    _ = try r.report(.gitattributes_line_length, "");
+                    break;
+                }
+            }
+        },
+    }
+    return r.first;
+}
+
+/// A found blob that is not there, or is not a blob: git's
+/// `gitmodulesMissing`, `gitmodulesBlob` and the `.gitattributes` pair.
+pub fn checkFoundObject(rules: *const Rules, oid: Oid, as: Special, missing: bool, sink: ?Sink) Allocator.Error!?Finding {
+    var r: Reporter = .{ .rules = rules, .oid = oid, .sink = sink };
+    const problem: Problem = switch (as) {
+        .modules => if (missing) .gitmodules_missing else .gitmodules_blob,
+        .attributes => if (missing) .gitattributes_missing else .gitattributes_blob,
+    };
+    _ = try r.report(problem, "");
+    return r.first;
+}
+
+/// The code point at the front of `s`, git's `pick_one_utf8_char`, and how
+/// many bytes it took; `null` for malformed UTF-8 or a NUL.
+fn pickUtf8(s: []const u8) ?struct { cp: u21, len: usize } {
+    const b0 = byteAt(s, 0);
+    if (b0 < 0x80) return .{ .cp = b0, .len = 1 };
+    const b1 = byteAt(s, 1);
+    if (b0 & 0xe0 == 0xc0) {
+        if (b1 & 0xc0 != 0x80 or b0 & 0xfe == 0xc0) return null;
+        return .{ .cp = (@as(u21, b0 & 0x1f) << 6) | (b1 & 0x3f), .len = 2 };
+    }
+    const b2 = byteAt(s, 2);
+    if (b0 & 0xf0 == 0xe0) {
+        if (b1 & 0xc0 != 0x80 or b2 & 0xc0 != 0x80 or
+            (b0 == 0xe0 and b1 & 0xe0 == 0x80) or
+            (b0 == 0xed and b1 & 0xe0 == 0xa0) or
+            (b0 == 0xef and b1 == 0xbf and b2 & 0xfe == 0xbe)) return null;
+        return .{ .cp = (@as(u21, b0 & 0x0f) << 12) | (@as(u21, b1 & 0x3f) << 6) | (b2 & 0x3f), .len = 3 };
+    }
+    const b3 = byteAt(s, 3);
+    if (b0 & 0xf8 == 0xf0) {
+        if (b1 & 0xc0 != 0x80 or b2 & 0xc0 != 0x80 or b3 & 0xc0 != 0x80 or
+            (b0 == 0xf0 and b1 & 0xf0 == 0x80) or
+            (b0 == 0xf4 and b1 > 0x8f) or b0 > 0xf4) return null;
+        return .{ .cp = (@as(u21, b0 & 0x07) << 18) | (@as(u21, b1 & 0x3f) << 12) | (@as(u21, b2 & 0x3f) << 6) | (b3 & 0x3f), .len = 4 };
     }
     return null;
 }
 
-/// The largest date git's `date_overflows` lets through: a timestamp must
-/// fit a signed 64-bit `time_t`.
-const max_date: u64 = std.math.maxInt(i64);
+/// git's `next_hfs_char`: the next code point HFS+ does not ignore, `0`
+/// at the end or for malformed UTF-8.
+fn nextHfsChar(s: []const u8, at: *usize) u21 {
+    while (true) {
+        if (at.* >= s.len) return 0;
+        const picked = pickUtf8(s[at.*..]) orelse {
+            at.* = s.len;
+            return 0;
+        };
+        at.* += picked.len;
+        switch (picked.cp) {
+            0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x206a, 0x206b, 0x206c, 0x206d, 0x206e, 0x206f, 0xfeff => continue,
+            else => return picked.cp,
+        }
+    }
+}
+
+fn isDirSep(c: u21) bool {
+    return c == '/' or (builtin.os.tag == .windows and c == '\\');
+}
+
+/// git's `is_hfs_dot_generic`: `.<needle>` as HFS+ reads it, ignoring
+/// the code points it ignores and case.
+fn isHfsDot(name: []const u8, needle: []const u8) bool {
+    var at: usize = 0;
+    if (nextHfsChar(name, &at) != '.') return false;
+    for (needle) |n| {
+        const c = nextHfsChar(name, &at);
+        if (c > 127) return false;
+        if (std.ascii.toLower(@intCast(c)) != n) return false;
+    }
+    const c = nextHfsChar(name, &at);
+    return c == 0 or isDirSep(c);
+}
+
+/// git's `is_ntfs_dotgit`: `.git` or `git~1`, then only spaces and dots
+/// to a separator, a colon or the end.
+fn isNtfsDotGit(name: []const u8) bool {
+    var i: usize = 0;
+    const c0 = byteAt(name, 0);
+    if (c0 == '.') {
+        if (std.ascii.toLower(byteAt(name, 1)) != 'g' or std.ascii.toLower(byteAt(name, 2)) != 'i' or std.ascii.toLower(byteAt(name, 3)) != 't') return false;
+        i = 4;
+    } else if (c0 == 'g' or c0 == 'G') {
+        if (std.ascii.toLower(byteAt(name, 1)) != 'i' or std.ascii.toLower(byteAt(name, 2)) != 't' or byteAt(name, 3) != '~' or byteAt(name, 4) != '1') return false;
+        i = 5;
+    } else return false;
+    while (true) : (i += 1) {
+        const c = byteAt(name, i);
+        if (c == 0 or c == '/' or c == '\\' or c == ':') return true;
+        if (c != '.' and c != ' ') return false;
+    }
+}
+
+/// git's `is_ntfs_dot_generic`: `.<name>`, its 8.3 short name `<first
+/// six>~<1-4>`, or the fall-back short name `<prefix>~<digit>`, then only
+/// spaces and dots to a colon or the end.
+fn isNtfsDot(name: []const u8, dotgit_name: []const u8, shortname_prefix: []const u8) bool {
+    const onlySpacesAndPeriods = struct {
+        fn f(n: []const u8, start: usize) bool {
+            var i = start;
+            while (true) : (i += 1) {
+                const c = byteAt(n, i);
+                if (c == 0 or c == ':') return true;
+                if (c != ' ' and c != '.') return false;
+            }
+        }
+    }.f;
+    if (byteAt(name, 0) == '.' and strncasecmp(name[@min(1, name.len)..], dotgit_name, dotgit_name.len)) {
+        return onlySpacesAndPeriods(name, dotgit_name.len + 1);
+    }
+    if (strncasecmp(name, dotgit_name, 6) and byteAt(name, 6) == '~' and byteAt(name, 7) >= '1' and byteAt(name, 7) <= '4') {
+        return onlySpacesAndPeriods(name, 8);
+    }
+    var saw_tilde = false;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        const c = byteAt(name, i);
+        if (c == 0) return false;
+        if (saw_tilde) {
+            if (c < '0' or c > '9') return false;
+        } else if (c == '~') {
+            i += 1;
+            const d = byteAt(name, i);
+            if (d < '1' or d > '9') return false;
+            saw_tilde = true;
+        } else if (i >= 6) {
+            return false;
+        } else if (c & 0x80 != 0) {
+            return false;
+        } else if (std.ascii.toLower(c) != shortname_prefix[i]) return false;
+    }
+    return onlySpacesAndPeriods(name, i);
+}
+
+/// C's `strncasecmp(a, b, n) == 0`, with `a` NUL-terminated at its end.
+fn strncasecmp(a: []const u8, b: []const u8, n: usize) bool {
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const ca = std.ascii.toLower(byteAt(a, i));
+        const cb = std.ascii.toLower(byteAt(b, i));
+        if (ca != cb) return false;
+        if (ca == 0) return true;
+    }
+    return true;
+}
 
 const testing = std.testing;
 const testgit = @import("../testing/git.zig");
@@ -302,15 +1177,26 @@ const testgit = @import("../testing/git.zig");
 const zero_hex = "0000000000000000000000000000000000000000";
 const good_ident = "A U Thor <author@example.com> 1700000000 +0000";
 
+/// The first problem `rules` makes an error of, by git's `fsck_object`.
+fn firstProblem(rules: *const Rules, t: object.Type, bytes: []const u8) !?Problem {
+    const finding = try checkObject(testing.allocator, rules, .sha1, .zero(.sha1), t, bytes, null, null) orelse return null;
+    return finding.problem;
+}
+
+fn baselineProblem(t: object.Type, bytes: []const u8) !?Problem {
+    return firstProblem(&baseline, t, bytes);
+}
+
 test "a well-formed commit, tree and tag have no problem" {
     const commit = "tree " ++ zero_hex ++ "\nparent " ++ zero_hex ++ "\nauthor " ++ good_ident ++
         "\ncommitter " ++ good_ident ++ "\n\nmessage\n";
-    try testing.expect(check(.sha1, .commit, commit) == null);
+    try testing.expect(try baselineProblem(.commit, commit) == null);
     const tag = "object " ++ zero_hex ++ "\ntype commit\ntag v1\ntagger " ++ good_ident ++ "\n\nv1\n";
-    try testing.expect(check(.sha1, .tag, tag) == null);
+    try testing.expect(try baselineProblem(.tag, tag) == null);
     const tree = "100644 a.c\x00" ++ ("\x01" ** 20) ++ "40000 a\x00" ++ ("\x02" ** 20) ++ "100644 a0\x00" ++ ("\x03" ** 20);
-    try testing.expect(check(.sha1, .tree, tree) == null);
-    try testing.expect(check(.sha1, .blob, "\x00anything") == null);
+    try testing.expect(try baselineProblem(.tree, tree) == null);
+    try testing.expect(try baselineProblem(.tree, "") == null);
+    try testing.expect(try baselineProblem(.blob, "\x00anything") == null);
 }
 
 test "each broken commit is named as git names it" {
@@ -336,7 +1222,7 @@ test "each broken commit is named as git names it" {
         .{ .bytes = "tree " ++ zero_hex ++ "\x00\n", .problem = .nul_in_header },
     };
     for (cases) |case| {
-        try testing.expectEqual(@as(?Problem, case.problem), check(.sha1, .commit, case.bytes));
+        try testing.expectEqual(@as(?Problem, case.problem), try baselineProblem(.commit, case.bytes));
     }
 }
 
@@ -351,24 +1237,193 @@ test "each broken tag is named as git names it" {
         .{ .bytes = "object " ++ zero_hex ++ "\ntype commit\ntag v1\ntagger A <a@b> 1 +00\n", .problem = .bad_timezone },
     };
     for (cases) |case| {
-        try testing.expectEqual(@as(?Problem, case.problem), check(.sha1, .tag, case.bytes));
+        try testing.expectEqual(@as(?Problem, case.problem), try baselineProblem(.tag, case.bytes));
     }
     // A tag with no tagger is old, not broken.
-    try testing.expect(check(.sha1, .tag, "object " ++ zero_hex ++ "\ntype commit\ntag v1\n\nold\n") == null);
+    try testing.expect(try baselineProblem(.tag, "object " ++ zero_hex ++ "\ntype commit\ntag v1\n\nold\n") == null);
 }
 
 test "a tree out of order, with a twin, or naming .git is refused by name" {
     const oid = "\x01" ** 20;
-    try testing.expectEqual(@as(?Problem, .tree_not_sorted), check(.sha1, .tree, "100644 b\x00" ++ oid ++ "100644 a\x00" ++ oid));
-    try testing.expectEqual(@as(?Problem, .duplicate_entries), check(.sha1, .tree, "100644 a\x00" ++ oid ++ "100644 a\x00" ++ oid));
+    try testing.expectEqual(@as(?Problem, .tree_not_sorted), try baselineProblem(.tree, "100644 b\x00" ++ oid ++ "100644 a\x00" ++ oid));
+    try testing.expectEqual(@as(?Problem, .duplicate_entries), try baselineProblem(.tree, "100644 a\x00" ++ oid ++ "100644 a\x00" ++ oid));
     // The blob `a` and the tree `a` sort apart, with `a.c` between them.
-    try testing.expectEqual(@as(?Problem, .duplicate_entries), check(.sha1, .tree, "100644 a\x00" ++ oid ++ "100644 a.c\x00" ++ oid ++ "40000 a\x00" ++ oid));
-    try testing.expectEqual(@as(?Problem, .has_dotgit), check(.sha1, .tree, "40000 .git\x00" ++ oid));
-    try testing.expectEqual(@as(?Problem, .has_dotgit), check(.sha1, .tree, "40000 .GIT\x00" ++ oid));
-    try testing.expectEqual(@as(?Problem, .has_dotdot), check(.sha1, .tree, "40000 ..\x00" ++ oid));
-    try testing.expectEqual(@as(?Problem, .has_dot), check(.sha1, .tree, "40000 .\x00" ++ oid));
-    try testing.expectEqual(@as(?Problem, .bad_tree), check(.sha1, .tree, "100644 a\x00" ++ "\x01" ** 3));
-    try testing.expectEqual(@as(?Problem, .bad_tree), check(.sha1, .tree, "999999 a\x00" ++ oid));
+    try testing.expectEqual(@as(?Problem, .duplicate_entries), try baselineProblem(.tree, "100644 a\x00" ++ oid ++ "100644 a.c\x00" ++ oid ++ "40000 a\x00" ++ oid));
+    for ([_][]const u8{ ".git", ".GIT", "git~1", ".git. ", ".g\u{200c}it", ".git::$INDEX_ALLOCATION" }) |name| {
+        var buf: [64]u8 = undefined;
+        const tree = try std.fmt.bufPrint(&buf, "40000 {s}\x00{s}", .{ name, oid });
+        try testing.expectEqual(@as(?Problem, .has_dotgit), try baselineProblem(.tree, tree));
+    }
+    try testing.expectEqual(@as(?Problem, .has_dotdot), try baselineProblem(.tree, "40000 ..\x00" ++ oid));
+    try testing.expectEqual(@as(?Problem, .has_dot), try baselineProblem(.tree, "40000 .\x00" ++ oid));
+    try testing.expectEqual(@as(?Problem, .bad_tree), try baselineProblem(.tree, "100644 a\x00" ++ "\x01" ** 3));
+    try testing.expectEqual(@as(?Problem, .bad_tree), try baselineProblem(.tree, "999999 a\x00" ++ oid));
+    // A style warning is not an error unless strict.
+    const padded = "040000 a\x00" ++ oid;
+    try testing.expect(try baselineProblem(.tree, padded) == null);
+    const strict: Rules = .{ .strict = true };
+    try testing.expectEqual(@as(?Problem, .zero_padded_filemode), try firstProblem(&strict, .tree, padded));
+    // `100664` is information, an error only when raised.
+    try testing.expect(try firstProblem(&strict, .tree, "100664 a\x00" ++ oid) == null);
+}
+
+test "the found .gitmodules and .gitattributes are read as git reads them" {
+    const gpa = testing.allocator;
+    var found: Found = .{};
+    defer found.deinit(gpa);
+    const a = "\x0a" ** 20;
+    const m = "\x0b" ** 20;
+    const tree = "100644 .gitattributes\x00" ++ a ++ "100644 .gitmodules\x00" ++ m ++ "120000 .mailmap\x00" ++ m;
+    var warnings: Collected = .{ .gpa = gpa };
+    defer warnings.deinit();
+    try testing.expect(try checkObject(gpa, &baseline, .sha1, .zero(.sha1), .tree, tree, &found, warnings.sink()) == null);
+    try testing.expect(found.modules.contains(try Oid.fromRaw(.sha1, m)));
+    try testing.expect(found.attributes.contains(try Oid.fromRaw(.sha1, a)));
+    // A symbolic `.mailmap` is information: a warning, never an error.
+    try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
+    try testing.expectEqual(Problem.mailmap_symlink, warnings.items.items[0]);
+
+    const strict: Rules = .{ .strict = true };
+    const oid: Oid = .zero(.sha1);
+    const Case = struct { text: []const u8, problem: ?Problem };
+    for ([_]Case{
+        .{ .text = "[submodule \"a\"]\n\tpath = a\n\turl = https://example.com/a\n", .problem = null },
+        .{ .text = "[submodule \"../a\"]\n\tpath = a\n", .problem = .gitmodules_name },
+        .{ .text = "[submodule \"a\"]\n\turl = -u/x\n", .problem = .gitmodules_url },
+        .{ .text = "[submodule \"a\"]\n\tpath = -a\n", .problem = .gitmodules_path },
+        .{ .text = "[submodule \"a\"]\n\tupdate = !rm -rf /\n", .problem = .gitmodules_update },
+        // What comes before a parse error is still read.
+        .{ .text = "[submodule \"a\"]\n\turl = -u/x\n[broken\n", .problem = .gitmodules_url },
+    }) |case| {
+        const finding = try checkBlob(gpa, &strict, oid, .modules, case.text, null);
+        try testing.expectEqual(case.problem, if (finding) |f| f.problem else null);
+    }
+    // An unparsable file is information.
+    try testing.expect(try checkBlob(gpa, &strict, oid, .modules, "[broken\n", null) == null);
+    const long = "a" ** 2048 ++ " text\n";
+    try testing.expectEqual(@as(?Problem, .gitattributes_line_length), (try checkBlob(gpa, &strict, oid, .attributes, long, null)).?.problem);
+    try testing.expect(try checkBlob(gpa, &strict, oid, .attributes, "*.c text\n", null) == null);
+}
+
+const Collected = struct {
+    gpa: Allocator,
+    items: std.ArrayList(Problem) = .empty,
+    unknown: std.ArrayList([]const u8) = .empty,
+
+    fn deinit(c: *Collected) void {
+        c.items.deinit(c.gpa);
+        for (c.unknown.items) |name| c.gpa.free(name);
+        c.unknown.deinit(c.gpa);
+    }
+
+    fn sink(c: *Collected) Sink {
+        return .{ .context = c, .warning = noteProblem, .unknown = unknownName };
+    }
+
+    fn noteProblem(context: *anyopaque, finding: Finding) Allocator.Error!void {
+        const c: *Collected = @ptrCast(@alignCast(context)); // safe: the context is the Collected the sink was made from
+        try c.items.append(c.gpa, finding.problem.?);
+    }
+
+    fn unknownName(context: *anyopaque, name: []const u8) Allocator.Error!void {
+        const c: *Collected = @ptrCast(@alignCast(context)); // safe: the context is the Collected the sink was made from
+        try c.unknown.append(c.gpa, try c.gpa.dupe(u8, name));
+    }
+};
+
+test "levels and skip lists come from the scope's own settings" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const skipped = "1111111111111111111111111111111111111111";
+    try tmp.dir.writeFile(io, .{ .sub_path = "skip", .data = "# known broken\n  " ++ skipped ++ "  # old import\r\n\n" });
+    const skip_path = try tmp.dir.realPathFileAlloc(io, "skip", gpa);
+    defer gpa.free(skip_path);
+    // A backslash would be an escape in the configuration.
+    std.mem.replaceScalar(u8, skip_path, '\\', '/');
+    const text = try std.fmt.allocPrint(gpa,
+        \\[fsck]
+        \\    missingEmail = ignore
+        \\[fetch "fsck"]
+        \\    badTimezone = warn
+        \\    noSuchMessage = ignore
+        \\    zeroPaddedFilemode = ignore
+        \\    skipList = {s}
+        \\
+    , .{skip_path});
+    defer gpa.free(text);
+    var config = try config_mod.Config.parseText(gpa, text, .local);
+    defer config.deinit();
+
+    var collected: Collected = .{ .gpa = gpa };
+    defer collected.deinit();
+    var rules = try Rules.load(gpa, io, &config, .sha1, .fetch, true, collected.sink());
+    defer rules.deinit(gpa);
+    try testing.expectEqual(Level.warn, rules.level(.bad_timezone));
+    try testing.expectEqual(Level.ignore, rules.level(.zero_padded_filemode));
+    // `fsck.` does not reach a fetch, and strict raises the warnings.
+    try testing.expectEqual(Level.@"error", rules.level(.missing_email));
+    try testing.expectEqual(Level.@"error", rules.level(.null_sha1));
+    try testing.expectEqual(Level.info, rules.level(.bad_filemode));
+    try testing.expectEqual(@as(usize, 1), collected.unknown.items.len);
+    try testing.expectEqualStrings("nosuchmessage", collected.unknown.items[0]);
+    try testing.expect(rules.skips(try Oid.parse(.sha1, skipped)));
+
+    // A skipped object is not reported, and a lowered one only warns.
+    const bad_tz = "tree " ++ zero_hex ++ "\nauthor A <a@b> 1 0000\ncommitter " ++ good_ident ++ "\n\n";
+    try testing.expect(try checkObject(gpa, &rules, .sha1, try Oid.parse(.sha1, skipped), .commit, "tree 1\n", null, null) == null);
+    try testing.expect(try checkObject(gpa, &rules, .sha1, .zero(.sha1), .commit, bad_tz, null, collected.sink()) == null);
+    try testing.expectEqual(Problem.bad_timezone, collected.items.items[0]);
+
+    // git's own `fsck.` refuses a name it does not know, and lowering a
+    // fatal problem.
+    var fsck_config = try config_mod.Config.parseText(gpa, "[fsck]\n\tnoSuchMessage = ignore\n", .local);
+    defer fsck_config.deinit();
+    try testing.expectError(error.UnknownFsckMessage, Rules.load(gpa, io, &fsck_config, .sha1, .fsck, false, null));
+    var r: Rules = .{};
+    try testing.expectError(error.FsckFatalLowered, r.set("nulinheader", "warn"));
+    try r.set("nulinheader", "error");
+    try testing.expectError(error.UnknownFsckLevel, r.set("baddate", "loud"));
+    try r.set("largepathname", "error:10");
+    try testing.expectEqual(@as(usize, 10), r.max_entry_len);
+}
+
+test "fetch.fsckObjects falls back on transfer.fsckObjects" {
+    const gpa = testing.allocator;
+    var none = try config_mod.Config.parseText(gpa, "", .local);
+    defer none.deinit();
+    try testing.expectEqual(@as(?bool, null), try wanted(&none, .fetch));
+    var transfer = try config_mod.Config.parseText(gpa, "[transfer]\n\tfsckObjects = true\n[receive]\n\tfsckObjects = false\n", .local);
+    defer transfer.deinit();
+    try testing.expectEqual(@as(?bool, true), try wanted(&transfer, .fetch));
+    try testing.expectEqual(@as(?bool, false), try wanted(&transfer, .receive));
+}
+
+test "every message id is git's" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 20);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    // `git help --config` lists every `fsck.<msg-id>` git knows.
+    const out = try repo.run(io, &.{ "help", "--config" });
+    defer gpa.free(out);
+    var listed: usize = 0;
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "fsck.")) continue;
+        const name = line["fsck.".len..];
+        if (std.ascii.eqlIgnoreCase(name, "skipList")) continue;
+        const problem = Problem.fromConfigName(name) orelse {
+            std.debug.print("git knows fsck.{s}\n", .{name});
+            return error.TestUnexpectedResult;
+        };
+        try testing.expectEqualStrings(name, problem.id());
+        listed += 1;
+    }
+    // The ids about refs came with later versions; this one's are all.
+    if (try testgit.gitAtLeast(gpa, io, 2, 55)) try testing.expectEqual(@as(usize, Problem.count), listed);
 }
 
 test "git refuses the same objects and names the same problem" {
@@ -392,7 +1447,7 @@ test "git refuses the same objects and names the same problem" {
         .{ .t = .tree, .bytes = "40000 .git\x00" ++ oid, .problem = .has_dotgit },
     };
     for (cases) |case| {
-        try testing.expectEqual(@as(?Problem, case.problem), check(.sha1, case.t, case.bytes));
+        try testing.expectEqual(@as(?Problem, case.problem), try baselineProblem(case.t, case.bytes));
         // `hash-object` without `--literally` runs git's fsck checks and
         // refuses, naming the message id on standard error.
         try repo.writeFile(io, "object", case.bytes);
@@ -419,8 +1474,14 @@ test "fuzz: any bytes are a verdict, never a crash" {
 fn fuzzCheck(_: void, smith: *testing.Smith) anyerror!void {
     var scratch: [1024]u8 = undefined;
     const input = scratch[0..smith.slice(&scratch)];
+    const strict: Rules = .{ .strict = true };
     for ([_]object.Type{ .blob, .tree, .commit, .tag }) |t| {
-        _ = check(.sha1, t, input);
-        _ = check(.sha256, t, input);
+        for ([_]Kind{ .sha1, .sha256 }) |kind| {
+            var found: Found = .{};
+            defer found.deinit(testing.allocator);
+            _ = try inspect(testing.allocator, &strict, kind, .zero(kind), t, input, &found, null);
+        }
     }
+    _ = try checkBlob(testing.allocator, &strict, .zero(.sha1), .modules, input, null);
+    _ = try checkBlob(testing.allocator, &strict, .zero(.sha1), .attributes, input, null);
 }

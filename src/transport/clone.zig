@@ -47,6 +47,7 @@ const warning = @import("../repo/warning.zig");
 const clonelfs = @import("clone/lfs.zig");
 const progress_mod = @import("progress.zig");
 const config_mod = @import("../config.zig");
+const fsck = @import("../object/fsck.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -64,7 +65,7 @@ pub const Error = error{
     InvalidRemoteName,
 } || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
     worktree.Error || config_mod.Config.SetError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
-    filter.Drivers.LoadError;
+    filter.Drivers.LoadError || fsck.LoadError;
 
 /// How a clone runs.
 pub const Options = struct {
@@ -138,8 +139,12 @@ pub const Options = struct {
     /// `warning.Warnings`.
     warnings: ?*warning.Warnings = null,
     progress: ?progress_mod.Progress = null,
-    /// Checks received objects the way git's `fsck` does.
-    check_objects: bool = true,
+    /// Whether received objects are checked as git's `index-pack --strict`
+    /// checks them, with `fetch.fsck.*`: `null` takes `fetch.fsckObjects`,
+    /// or `transfer.fsckObjects`, from the caller's configuration. Neither
+    /// set, they are still checked, with git's levels and a path naming
+    /// `.git` refused (`fsck.baseline`); `false` checks nothing.
+    check_objects: ?bool = null,
     /// What the new repository's object database is opened with.
     odb: @import("../odb.zig").Options = .{},
 };
@@ -345,6 +350,9 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     // whether it is connected is asked without reading it again.
     var links: indexpack.Links = .init(gpa);
     defer links.deinit();
+    var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
+    var rules = try fsck.forTransfer(gpa, io, settings, repo.objectFormat(), .fetch, options.check_objects, to_warnings.sink());
+    defer if (rules) |*r| r.deinit(gpa);
     const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
         .wants = wants.items,
         .want_names = want_names.items,
@@ -354,7 +362,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .filter = send_filter,
     }, .{
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(settings), .links = &links, .threads = indexpack.configuredThreads(settings) },
+        .receive = .{ .fsck = if (rules) |*r| r else null, .promised = send_filter != null, .warnings = options.warnings, .reverse_index = revindex.wanted(settings), .links = &links, .threads = indexpack.configuredThreads(settings) },
         .shallow_info = &shallow_info,
         .warnings = options.warnings,
     });
@@ -672,8 +680,8 @@ fn expectSameClone(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, 
             try testing.expectEqualStrings(theirs, ours);
         }
     }
-    const fsck = try git(gpa, io, env, b, &.{ "fsck", "--strict", "--no-dangling" });
-    gpa.free(fsck);
+    const checked = try git(gpa, io, env, b, &.{ "fsck", "--strict", "--no-dangling" });
+    gpa.free(checked);
 }
 
 const Twin = struct {

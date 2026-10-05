@@ -15,8 +15,11 @@
 //! writes for the same pack, and the two files are renamed into place pack
 //! first, as git renames them.
 //!
-//! Every commit, tree and tag is checked the way git's `fsck` checks one
-//! before it is kept, and a malformed one is refused by name. A stream that
+//! Every commit, tree and tag is checked the way git's `index-pack
+//! --strict` checks one, with the levels `fsck.Rules` give, before it is
+//! kept, and a malformed one is refused by name; the blobs trees name as
+//! `.gitmodules` and `.gitattributes` are read back and checked once every
+//! object is in hand. A stream that
 //! is not a pack, or stops short, or carries a delta that reaches outside
 //! itself, is a named error and leaves nothing behind.
 
@@ -36,6 +39,7 @@ const delta = @import("delta.zig");
 const fs = @import("../repo/fs.zig");
 const odb_mod = @import("../odb.zig");
 const fsck = @import("../object/fsck.zig");
+const warning = @import("../repo/warning.zig");
 const progress_mod = @import("../transport/progress.zig");
 
 const Oid = hash.Oid;
@@ -85,6 +89,9 @@ pub const Error = error{
     MalformedTree,
     /// A tag git's `fsck` refuses.
     MalformedTag,
+    /// A blob a tree names as `.gitmodules` or `.gitattributes` that git's
+    /// `fsck` refuses, or one that is not there or not a blob.
+    MalformedBlob,
     /// The stream being read failed; its own reader says why.
     ReadFailed,
 } || delta.Error || odb_mod.Error || Io.File.Reader.Error || Io.File.SetLengthError;
@@ -94,8 +101,17 @@ pub const Options = struct {
     /// Complete a thin pack from the object database. Off, a reference
     /// delta whose base is not in the pack is `error.DeltaBaseMissing`.
     fix_thin: bool = true,
-    /// Check every commit, tree and tag with `fsck.check`.
-    check_objects: bool = true,
+    /// The rules every commit, tree and tag is checked with, and the
+    /// blobs trees name as `.gitmodules` and `.gitattributes`; `null`
+    /// checks nothing. `fsck.forTransfer` gives what a repository's
+    /// configuration asks for.
+    fsck: ?*const fsck.Rules = &fsck.baseline,
+    /// The pack comes from a promisor remote, which promises a found
+    /// `.gitmodules` or `.gitattributes` the pack and the database lack, as
+    /// git takes a promisor object as there.
+    promised: bool = false,
+    /// Where what the rules make warnings goes, as git prints them.
+    warnings: ?*warning.Warnings = null,
     /// How hard the pack and its index are pushed to the disk before they
     /// are renamed into place.
     sync: fs.Sync = .none,
@@ -221,7 +237,9 @@ pub const Links = struct {
 pub const Diagnostic = struct {
     /// The object refused, or the base that was missing, when there is one.
     oid: ?Oid = null,
-    /// What git's `fsck` calls the problem, for a malformed object.
+    /// What git's `fsck` calls the problem, for a malformed object;
+    /// `null` with a malformed commit or tag that git's parser cannot read
+    /// at all.
     problem: ?fsck.Problem = null,
     /// Where in the pack the entry begins.
     offset: ?u64 = null,
@@ -357,6 +375,7 @@ pub fn receive(
         name = try indexer.appendBases(body_end, count);
         appended = @intCast(indexer.thin_bases.items.len);
     }
+    try indexer.checkFound();
 
     // Every name once: the index cannot hold one twice.
     const index_entries = try gpa.alloc(pack.IndexEntry, indexer.entries.items.len);
@@ -586,6 +605,9 @@ const Indexer = struct {
     failed: std.atomic.Value(bool) = .init(false),
     /// The stream, while `parse` reads from it.
     tee: ?*Tee = null,
+    /// The blobs trees name as `.gitmodules` and `.gitattributes`, under
+    /// `lock`.
+    found: fsck.Found = .{},
 
     fn init(gpa: Allocator, io: Io, db: *odb_mod.Odb, file: Io.File, options: Options) Allocator.Error!Indexer {
         const read_buffer = try gpa.alloc(u8, 64 * 1024);
@@ -616,6 +638,7 @@ const Indexer = struct {
         x.gpa.free(x.window);
         x.inflater.deinit();
         x.gpa.free(x.roots);
+        x.found.deinit(x.gpa);
         x.* = undefined;
     }
 
@@ -787,7 +810,7 @@ const Indexer = struct {
     fn inflateWhole(x: *Indexer, entry: *Entry) Error!void {
         var hasher: hash.Hasher = .initOptions(x.kind, x.hashOptions());
         hasher.updateHeader(entry.type.name(), entry.size);
-        if (entry.type == .blob or (!x.options.check_objects and x.options.links == null)) {
+        if (entry.type == .blob or (x.options.fsck == null and x.options.links == null)) {
             try x.inflate(entry.size, .{ .hash = &hasher }, null);
             entry.oid = hasher.final();
         } else {
@@ -808,15 +831,101 @@ const Indexer = struct {
     }
 
     fn checkObject(x: *Indexer, oid: Oid, t: object.Type, bytes: []const u8, offset: u64) Error!void {
-        if (!x.options.check_objects) return;
-        const problem = fsck.check(x.kind, t, bytes) orelse return;
+        const rules = x.options.fsck orelse return;
+        // The found blobs are shared by the threads; a tree's own are
+        // gathered apart and added under the lock.
+        var found: fsck.Found = .{};
+        defer found.deinit(x.gpa);
+        const finding = try fsck.inspect(x.gpa, rules, x.kind, oid, t, bytes, if (t == .tree) &found else null, x.fsckSink());
+        if (t == .tree and (found.modules.count() != 0 or found.attributes.count() != 0)) {
+            x.lock.lockUncancelable(x.io);
+            defer x.lock.unlock(x.io);
+            var it = found.modules.keyIterator();
+            while (it.next()) |k| try x.found.modules.put(x.gpa, k.*, {});
+            it = found.attributes.keyIterator();
+            while (it.next()) |k| try x.found.attributes.put(x.gpa, k.*, {});
+        }
+        const f = finding orelse return;
         const err: Error = switch (t) {
             .commit => error.MalformedCommit,
             .tree => error.MalformedTree,
             .tag => error.MalformedTag,
-            .blob => unreachable,
+            .blob => error.MalformedBlob,
         };
-        return x.fail(err, .{ .oid = oid, .problem = problem, .offset = offset });
+        return x.fail(err, .{ .oid = oid, .problem = f.problem, .offset = offset });
+    }
+
+    fn fsckSink(x: *Indexer) ?fsck.Sink {
+        if (x.options.warnings == null) return null;
+        return .{ .context = x, .warning = noteFinding, .unknown = noteUnknown };
+    }
+
+    fn noteFinding(context: *anyopaque, finding: fsck.Finding) Allocator.Error!void {
+        const x: *Indexer = @ptrCast(@alignCast(context)); // safe: the context is the Indexer the sink was made from
+        x.lock.lockUncancelable(x.io);
+        defer x.lock.unlock(x.io);
+        try fsck.note(x.options.warnings, finding);
+    }
+
+    fn noteUnknown(_: *anyopaque, _: []const u8) Allocator.Error!void {}
+
+    /// Read back and check every blob a tree named as `.gitmodules` or
+    /// `.gitattributes`, from the pack or else the database, as git's
+    /// `fsck_finish` does once the pack is in.
+    fn checkFound(x: *Indexer) Error!void {
+        const rules = x.options.fsck orelse return;
+        if (x.found.modules.count() == 0 and x.found.attributes.count() == 0) return;
+        var by_name: Oid.Map(u32) = .empty;
+        defer by_name.deinit(x.gpa);
+        try by_name.ensureTotalCapacity(x.gpa, @intCast(x.entries.items.len));
+        for (x.entries.items, 0..) |entry, at| by_name.putAssumeCapacity(entry.oid, @intCast(at));
+        var w: Worker = try .init(x);
+        defer w.deinit();
+        for ([_]fsck.Special{ .modules, .attributes }) |as| {
+            const set = switch (as) {
+                .modules => &x.found.modules,
+                .attributes => &x.found.attributes,
+            };
+            var it = set.keyIterator();
+            while (it.next()) |oid_ptr| {
+                const oid = oid_ptr.*;
+                const finding = if (by_name.get(oid)) |at| blk: {
+                    const entry = x.entries.items[at];
+                    if (entry.type != .blob) break :blk try fsck.checkFoundObject(rules, oid, as, false, x.fsckSink());
+                    if (entry.size > x.options.max_object_bytes) break :blk try fsck.checkBlob(x.gpa, rules, oid, as, null, x.fsckSink());
+                    const bytes = try x.readBack(&w, at, by_name);
+                    defer x.gpa.free(bytes);
+                    break :blk try fsck.checkBlob(x.gpa, rules, oid, as, bytes, x.fsckSink());
+                } else if (try x.db.exists(x.io, oid)) blk: {
+                    const found = try x.db.read(x.io, oid);
+                    defer x.db.allocator().free(found.bytes);
+                    if (found.type != .blob) break :blk try fsck.checkFoundObject(rules, oid, as, false, x.fsckSink());
+                    break :blk try fsck.checkBlob(x.gpa, rules, oid, as, found.bytes, x.fsckSink());
+                } else if (x.options.promised) null else try fsck.checkFoundObject(rules, oid, as, true, x.fsckSink());
+                if (finding) |f| return x.fail(error.MalformedBlob, .{ .oid = oid, .problem = f.problem });
+            }
+        }
+    }
+
+    /// The whole object entry `at` holds, read back from the pack: a
+    /// delta's base first, as far down as its chain goes.
+    fn readBack(x: *Indexer, w: *Worker, at: u32, by_name: Oid.Map(u32)) Error![]u8 {
+        const entry = x.entries.items[at];
+        const base_at: u32 = switch (entry.kind) {
+            .whole => return w.load(at),
+            .ofs_delta => x.entryAt(entry.base_offset) orelse return error.BadDeltaOffset,
+            .ref_delta => blk: {
+                for (x.ref_bases.items) |ref| {
+                    if (ref.child == at) break :blk by_name.get(ref.base) orelse return error.DeltaBaseMissing;
+                }
+                return error.DeltaBaseMissing;
+            },
+        };
+        const base = try x.readBack(w, base_at, by_name);
+        defer x.gpa.free(base);
+        const patch = try w.load(at);
+        defer x.gpa.free(patch);
+        return delta.apply(x.gpa, base, patch);
     }
 
     fn crcOf(x: *Indexer, start: u64, end: u64) Error!u32 {
@@ -1693,8 +1802,142 @@ test "a malformed tree is refused by name, and nothing is kept" {
 
     // Asked not to check, the same pack is kept.
     var unchecked: Io.Reader = .fixed(bytes);
-    const kept = try receive(gpa, io, &repo.odb, pack_dir, &unchecked, .{ .check_objects = false });
+    const kept = try receive(gpa, io, &repo.odb, pack_dir, &unchecked, .{ .fsck = null });
     try testing.expectEqual(@as(u32, 2), kept.objects);
+}
+
+test "a pack is refused where git's index-pack --fsck-objects refuses it, at the levels it is given" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    // `.gitattributes` is checked from 2.40 on.
+    try testgit.requireGitVersion(gpa, io, 2, 40);
+    var git = try testgit.Repo.init(gpa, io, &.{"--bare"});
+    defer git.deinit();
+
+    const zero_hex = "0" ** 40;
+    const ident = "A <a@example.com> 1700000000 +0000";
+    const blob_oid = hash.Hasher.object(.sha1, "blob", "x\n");
+    const modules_base = "[submodule \"a\"]\n\tpath = a\n";
+    const modules_text = modules_base ++ "\turl = -u/x\n";
+    const modules_oid = hash.Hasher.object(.sha1, "blob", modules_text);
+    const modules_delta = try appendDelta(gpa, modules_base.len, "\turl = -u/x\n");
+    defer gpa.free(modules_delta);
+    const attributes_text = "a" ** 2100 ++ " text\n";
+    const attributes_oid = hash.Hasher.object(.sha1, "blob", attributes_text);
+
+    var padded: std.ArrayList(u8) = .empty;
+    defer padded.deinit(gpa);
+    try padded.appendSlice(gpa, "0100644 a\x00");
+    try padded.appendSlice(gpa, blob_oid.raw());
+    var with_modules: std.ArrayList(u8) = .empty;
+    defer with_modules.deinit(gpa);
+    try with_modules.appendSlice(gpa, "100644 .gitmodules\x00");
+    try with_modules.appendSlice(gpa, modules_oid.raw());
+    var with_attributes: std.ArrayList(u8) = .empty;
+    defer with_attributes.deinit(gpa);
+    try with_attributes.appendSlice(gpa, "100644 .gitattributes\x00");
+    try with_attributes.appendSlice(gpa, attributes_oid.raw());
+
+    const Case = struct { entries: []const TestEntry, levels: []const u8, problem: ?fsck.Problem };
+    const bad_tz: TestEntry = .{ .whole = .{ .t = .commit, .bytes = "tree " ++ zero_hex ++ "\nauthor " ++ ident ++ "\ncommitter A <a@example.com> 1 +00\n\nm\n" } };
+    const unparsable: TestEntry = .{ .whole = .{ .t = .commit, .bytes = "tree 123\nauthor " ++ ident ++ "\ncommitter " ++ ident ++ "\n\nm\n" } };
+    const no_tagger: TestEntry = .{ .whole = .{ .t = .tag, .bytes = "object " ++ zero_hex ++ "\ntype commit\ntag v1\n\nold\n" } };
+    const blob: TestEntry = .{ .whole = .{ .t = .blob, .bytes = "x\n" } };
+    const modules_entries = [_]TestEntry{
+        .{ .whole = .{ .t = .blob, .bytes = modules_base } },
+        .{ .ofs_delta = .{ .back = 1, .patch = modules_delta } },
+        .{ .whole = .{ .t = .tree, .bytes = with_modules.items } },
+    };
+    const attributes_entries = [_]TestEntry{
+        .{ .whole = .{ .t = .tree, .bytes = with_attributes.items } },
+        .{ .whole = .{ .t = .blob, .bytes = attributes_text } },
+    };
+    const padded_entries = [_]TestEntry{ blob, .{ .whole = .{ .t = .tree, .bytes = padded.items } } };
+    const cases = [_]Case{
+        .{ .entries = &padded_entries, .levels = "", .problem = .zero_padded_filemode },
+        .{ .entries = &padded_entries, .levels = "zeroPaddedFilemode=ignore", .problem = null },
+        .{ .entries = &.{bad_tz}, .levels = "", .problem = .bad_timezone },
+        .{ .entries = &.{bad_tz}, .levels = "badTimezone=warn", .problem = null },
+        // git's parser refuses it before any level is looked at.
+        .{ .entries = &.{unparsable}, .levels = "badTreeSha1=ignore", .problem = null },
+        .{ .entries = &.{no_tagger}, .levels = "", .problem = null },
+        .{ .entries = &.{no_tagger}, .levels = "missingTaggerEntry=error", .problem = .missing_tagger_entry },
+        .{ .entries = &modules_entries, .levels = "", .problem = .gitmodules_url },
+        .{ .entries = &modules_entries, .levels = "gitmodulesUrl=warn", .problem = null },
+        .{ .entries = &attributes_entries, .levels = "", .problem = .gitattributes_line_length },
+    };
+    for (cases, 0..) |case, n| {
+        const bytes = try buildPack(gpa, .sha1, case.entries);
+        defer gpa.free(bytes);
+
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "case{d}.pack", .{n});
+        try git.writeFile(io, name, bytes);
+        var arg_buf: [128]u8 = undefined;
+        const arg = if (case.levels.len == 0) "--fsck-objects" else try std.fmt.bufPrint(&arg_buf, "--fsck-objects={s}", .{case.levels});
+        var said = try git.capture(io, &.{ "index-pack", arg, name });
+        defer said.deinit(gpa);
+        const git_refused = said.code != 0;
+
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+        defer repo.deinit(io);
+        var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
+        defer pack_dir.close(io);
+        var rules: fsck.Rules = .{ .strict = true };
+        defer rules.deinit(gpa);
+        var levels = std.mem.tokenizeScalar(u8, case.levels, ',');
+        while (levels.next()) |pair| {
+            const eq = std.mem.indexOfScalar(u8, pair, '=').?;
+            const lowered = try std.ascii.allocLowerString(gpa, pair[0..eq]);
+            defer gpa.free(lowered);
+            try rules.set(lowered, pair[eq + 1 ..]);
+        }
+        var diagnostic: Diagnostic = .{};
+        var in: Io.Reader = .fixed(bytes);
+        const refused = if (receive(gpa, io, &repo.odb, pack_dir, &in, .{ .fsck = &rules, .diagnostic = &diagnostic })) |_| false else |err| switch (err) {
+            error.MalformedCommit, error.MalformedTree, error.MalformedTag, error.MalformedBlob => true,
+            else => return err,
+        };
+        if (refused != git_refused) {
+            std.debug.print("case {d}: relic refused {}, git refused {} ({s})\n", .{ n, refused, git_refused, said.stderr });
+            return error.TestUnexpectedResult;
+        }
+        if (case.problem) |problem| {
+            try testing.expectEqual(problem, diagnostic.problem.?);
+            try testing.expect(std.mem.indexOf(u8, said.stderr, problem.id()) != null);
+        }
+        if (refused) try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
+    }
+}
+
+test "a .gitmodules a tree names and nobody has is refused unless promised" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    defer repo.deinit(io);
+    var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+
+    var tree: std.ArrayList(u8) = .empty;
+    defer tree.deinit(gpa);
+    try tree.appendSlice(gpa, "100644 .gitmodules\x00");
+    try tree.appendSlice(gpa, hash.Hasher.object(.sha1, "blob", "absent\n").raw());
+    const bytes = try buildPack(gpa, .sha1, &.{.{ .whole = .{ .t = .tree, .bytes = tree.items } }});
+    defer gpa.free(bytes);
+    const strict: fsck.Rules = .{ .strict = true };
+    var diagnostic: Diagnostic = .{};
+    var in: Io.Reader = .fixed(bytes);
+    try testing.expectError(error.MalformedBlob, receive(gpa, io, &repo.odb, pack_dir, &in, .{ .fsck = &strict, .diagnostic = &diagnostic }));
+    try testing.expectEqual(fsck.Problem.gitmodules_missing, diagnostic.problem.?);
+    var promised: Io.Reader = .fixed(bytes);
+    var warnings: warning.Warnings = .init(gpa);
+    defer warnings.deinit();
+    _ = try receive(gpa, io, &repo.odb, pack_dir, &promised, .{ .fsck = &strict, .promised = true, .warnings = &warnings });
+    try testing.expectEqual(@as(usize, 0), warnings.items.items.len);
 }
 
 test "a damaged stream is a named error and leaves nothing behind" {
@@ -1958,7 +2201,7 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     var links: Links = .init(gpa);
     defer links.deinit();
     var in: Io.Reader = .fixed(bytes);
-    const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{ .check_objects = false, .links = &links });
+    const result = try receive(gpa, io, &repo.odb, pack_dir, &in, .{ .fsck = null, .links = &links });
     var hex: [hash.max_hex_len]u8 = undefined;
     var idx_buf: [96]u8 = undefined;
     const idx_name = try std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{result.name.?.hex(&hex)});

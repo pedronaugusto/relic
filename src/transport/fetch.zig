@@ -47,6 +47,7 @@ const progress_mod = @import("progress.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const warning = @import("../repo/warning.zig");
+const fsck = @import("../object/fsck.zig");
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -73,7 +74,7 @@ pub const Error = error{
     /// An object below a fetched ref is not in the repository after the
     /// pack arrived. `Outcome` is not returned; `Options.missing` names it.
     MissingObject,
-} || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
+} || partial.FilterError || transport.Error || remote_mod.Error || refs_mod.TransactionError || objectwalk.Error || fsck.LoadError ||
     revwalk.Error || fs.AtomicWriteError || Io.Dir.OpenError || shallow_mod.Error;
 
 /// How a fetch runs.
@@ -144,8 +145,12 @@ pub const Options = struct {
     /// `warning.Warnings`.
     warnings: ?*warning.Warnings = null,
     progress: ?progress_mod.Progress = null,
-    /// Checks received objects the way git's `fsck` does.
-    check_objects: bool = true,
+    /// Whether received objects are checked as git's `index-pack --strict`
+    /// checks them, with `fetch.fsck.*`: `null` takes `fetch.fsckObjects`,
+    /// or `transfer.fsckObjects`. Neither set, they are still checked,
+    /// with git's levels and a path naming `.git` refused (`fsck.baseline`);
+    /// `false` checks nothing, as git does not.
+    check_objects: ?bool = null,
     /// Where the object behind `error.MissingObject` is written.
     missing: ?*Oid = null,
 };
@@ -255,6 +260,11 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 
     var remote = try remote_mod.Remote.get(gpa, repo.configuration(), remote_name);
     defer remote.deinit();
+
+    var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
+    var rules = try fsck.forTransfer(gpa, io, repo.configuration(), repo.objectFormat(), .fetch, options.check_objects, to_warnings.sink());
+    defer if (rules) |*r| r.deinit(gpa);
+    const checks: ?*const fsck.Rules = if (rules) |*r| r else null;
 
     const rla = options.reflog_action orelse blk: {
         var text: std.ArrayList(u8) = .empty;
@@ -493,7 +503,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     }, .{
         .warnings = options.warnings,
         .progress = options.progress,
-        .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(repo.configuration()), .links = &links, .threads = indexpack.configuredThreads(repo.configuration()) },
+        .receive = .{ .fsck = checks, .promised = promisor, .warnings = options.warnings, .reverse_index = revindex.wanted(repo.configuration()), .links = &links, .threads = indexpack.configuredThreads(repo.configuration()) },
         .shallow_info = &shallow_info,
     });
     outcome.pack = fetched.pack;
@@ -542,7 +552,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
                 .tips = tips.items,
                 .common_tips = common_tips.items,
                 .include_tag = false,
-            }, .{ .progress = options.progress, .receive = .{ .check_objects = options.check_objects, .reverse_index = revindex.wanted(repo.configuration()), .threads = indexpack.configuredThreads(repo.configuration()) } });
+            }, .{ .progress = options.progress, .receive = .{ .fsck = checks, .promised = promisor, .warnings = options.warnings, .reverse_index = revindex.wanted(repo.configuration()), .threads = indexpack.configuredThreads(repo.configuration()) } });
             for (backfill.items) |*entry| if (session.fetchedValue(entry.name)) |oid| {
                 entry.oid = oid;
             };
@@ -1475,6 +1485,50 @@ test "the branch a working tree has checked out is not fetched into" {
     // git refuses the same.
     twins.by_relic.report_failures = false;
     try testing.expectError(error.GitFailed, twins.by_relic.exec(io, &.{ "fetch", "origin", "+main:main" }));
+}
+
+test "fetch.fsckObjects and fetch.fsck.* refuse and allow what they do for git fetch" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    // git fetch sets refs/remotes/<remote>/HEAD, when it is missing, from 2.48 on.
+    try testgit.requireGitVersion(gpa, io, 2, 48);
+    var twins = try Twins.init(gpa, io, 2);
+    defer twins.deinit(gpa);
+    // A url git's fsck refuses, which an older git would have handed to
+    // a submodule clone as an option.
+    try twins.source.writeFile(io, ".gitmodules", "[submodule \"a\"]\n\tpath = a\n\turl = -u/x\n");
+    try twins.source.exec(io, &.{ "add", ".gitmodules" });
+    try twins.source.exec(io, &.{ "commit", "-q", "-m", "modules" });
+    for ([_]*testgit.Repo{ &twins.by_git, &twins.by_relic }) |twin| try twin.exec(io, &.{ "config", "fetch.fsckObjects", "true" });
+
+    twins.by_git.report_failures = false;
+    try testing.expectError(error.GitFailed, twins.by_git.exec(io, &.{ "fetch", "origin" }));
+    {
+        var repo = try Repository.open(gpa, io, twins.by_relic.dir, .{});
+        defer repo.deinit(io);
+        try testing.expectError(error.MalformedBlob, fetch(gpa, io, &repo, "origin", .{ .who = test_who }));
+    }
+
+    // Lowered to a warning, it comes in for both, and is said.
+    for ([_]*testgit.Repo{ &twins.by_git, &twins.by_relic }) |twin| try twin.exec(io, &.{ "config", "fetch.fsck.gitmodulesUrl", "warn" });
+    // (`git fsck` reads `fsck.*`, not `fetch.fsck.*`, so the twins are
+    // compared by their refs alone.)
+    try twins.by_git.exec(io, &.{ "fetch", "origin" });
+    var warnings: warning.Warnings = .init(gpa);
+    defer warnings.deinit();
+    {
+        var repo = try Repository.open(gpa, io, twins.by_relic.dir, .{});
+        defer repo.deinit(io);
+        var outcome = try fetch(gpa, io, &repo, "origin", .{ .who = test_who, .warnings = &warnings });
+        outcome.deinit();
+    }
+    try expectSameRefs(gpa, io, &twins.by_git, &twins.by_relic);
+    var said = false;
+    for (warnings.items.items) |w| switch (w) {
+        .fsck => |f| said = said or std.mem.startsWith(u8, f.message, "gitmodulesUrl: disallowed submodule url: -u/x"),
+        else => {},
+    };
+    try testing.expect(said);
 }
 
 test "unshallowing a whole repository and a filtered fetch are refused by name" {

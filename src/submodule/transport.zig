@@ -47,8 +47,10 @@ pub const Options = struct {
     config: ?*const config_mod.Config = null,
     prompt: ?credential.Prompt = null,
     progress: ?progress_mod.Progress = null,
-    /// Check received objects the way git's `fsck` does.
-    check_objects: bool = true,
+    /// Whether received objects are checked as git's `index-pack --strict`
+    /// checks them: `null` takes `fetch.fsckObjects` or
+    /// `transfer.fsckObjects`; see `fetch.Options.check_objects`.
+    check_objects: ?bool = null,
 };
 
 /// A `submodule.Transport` over relic's clone and fetch.

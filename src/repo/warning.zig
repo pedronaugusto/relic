@@ -37,6 +37,12 @@ pub const Warning = union(enum) {
 
     /// A successful fetch could not update its optional commit-graph.
     commit_graph_write_failed: anyerror,
+    /// What git's fsck found and the rules make a warning: the object's
+    /// name and git's message, `<msg-id>: <text>`.
+    fsck: struct { object: []const u8, message: []const u8 },
+    /// A `fetch.fsck.<msg-id>` or `receive.fsck.<msg-id>` naming no
+    /// message git has, which is left out: the name.
+    fsck_unknown_message: []const u8,
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -50,6 +56,8 @@ pub const Warning = union(enum) {
             .proxy_auth_method_unknown => |name| std.fmt.allocPrint(arena, "unsupported proxy authentication method {s}: using anyauth", .{name}),
             .commit_graph_write_failed => |err| std.fmt.allocPrint(arena, "commit-graph write failed: {s}", .{@errorName(err)}),
             .tag_known_as => |t| std.fmt.allocPrint(arena, "tag '{s}' is externally known as '{s}'", .{ t.path, t.name }),
+            .fsck => |f| std.fmt.allocPrint(arena, "object {s}: {s}", .{ f.object, f.message }),
+            .fsck_unknown_message => |name| std.fmt.allocPrint(arena, "Skipping unknown msg id '{s}'", .{name}),
         };
     }
 };
@@ -82,6 +90,8 @@ pub const Warnings = struct {
             .proxy_auth_method_unknown => |t| .{ .proxy_auth_method_unknown = try a.dupe(u8, t) },
             .commit_graph_write_failed => |err| .{ .commit_graph_write_failed = err },
             .tag_known_as => |t| .{ .tag_known_as = .{ .path = try a.dupe(u8, t.path), .name = try a.dupe(u8, t.name) } },
+            .fsck => |f| .{ .fsck = .{ .object = try a.dupe(u8, f.object), .message = try a.dupe(u8, f.message) } },
+            .fsck_unknown_message => |t| .{ .fsck_unknown_message = try a.dupe(u8, t) },
         };
         try w.items.append(a, owned);
     }

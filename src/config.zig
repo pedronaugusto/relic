@@ -390,6 +390,51 @@ pub const Config = struct {
         return config;
     }
 
+    /// What a parse that stops at the first error has read.
+    pub const Partial = struct {
+        /// Every entry before the error, or every entry when there was
+        /// none.
+        config: Config,
+        /// Why the parse stopped short, or `null` when it did not.
+        failure: ?ParseError,
+    };
+
+    /// Parse `text` as git parses a blob it reads without dying: every
+    /// variable before the first error reaches the reader, as git's
+    /// callback has seen them by the time its parser gives up.
+    pub fn parseTextUntilError(gpa: Allocator, text: []const u8, level: Level) Allocator.Error!Partial {
+        var config: Config = .{ .gpa = gpa };
+        errdefer config.deinit();
+        const owned_text = try gpa.dupe(u8, text);
+        const owned_path = gpa.dupe(u8, "<text>") catch |err| {
+            gpa.free(owned_text);
+            return err;
+        };
+        var file: SourceFile = .{
+            .gpa = gpa,
+            .level = level,
+            .path = owned_path,
+            .text = owned_text,
+            .lines = .empty,
+            .writable = false,
+        };
+        var file_owned = false;
+        errdefer if (!file_owned) file.deinit();
+        var failure: ?ParseError = null;
+        {
+            var names = file.names.promote(gpa);
+            defer file.names = names.state;
+            parseLines(gpa, names.allocator(), owned_text, &file.lines) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => |e| failure = e,
+            };
+        }
+        try config.files.append(gpa, file);
+        file_owned = true;
+        try config.indexFile(0);
+        return .{ .config = config, .failure = failure };
+    }
+
     /// Release everything.
     pub fn deinit(config: *Config) void {
         for (config.files.items) |*f| f.deinit();

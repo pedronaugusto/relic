@@ -31,6 +31,7 @@ const refs_mod = @import("../refs.zig");
 const revparse = @import("../revwalk/revparse.zig");
 const revwalk = @import("../revwalk.zig");
 const objectwalk = @import("objectwalk.zig");
+const fsck = @import("../object/fsck.zig");
 const indexpack = @import("../odb/indexpack.zig");
 const filterspec = @import("filterspec.zig");
 const message = @import("../commit/message.zig");
@@ -353,8 +354,9 @@ pub fn repositoryTips(gpa: Allocator, io: Io, repo: *Repository) (refs_mod.ReadE
 
 /// How `unbundle` indexes the pack.
 pub const UnbundleOptions = struct {
-    /// `--fsck-objects`: check every object as it arrives, which a fetch
-    /// with `fetch.fsckObjects` asks for. Off, as `git bundle unbundle` is.
+    /// `--fsck-objects`: check every object as it arrives, with git's
+    /// strict levels. Off, as `git bundle unbundle` is; a fetch from a
+    /// bundle checks as the fetch's `fsck.Rules` say.
     check_objects: bool = false,
     progress: ?@import("progress.zig").Progress = null,
 };
@@ -367,9 +369,10 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
     defer pack_dir.close(io);
     const tips = try repositoryTips(gpa, io, repo);
     defer gpa.free(tips);
+    const strict: fsck.Rules = .{ .strict = true };
     return receive(gpa, io, &repo.odb, pack_dir, bundle, tips, .{
         .fix_thin = true,
-        .check_objects = options.check_objects,
+        .fsck = if (options.check_objects) &strict else null,
         .progress = options.progress,
         .reverse_index = @import("../odb/revindex.zig").wanted(repo.configuration()),
         .threads = indexpack.configuredThreads(repo.configuration()),

@@ -33,6 +33,7 @@ const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const transport = @import("../transport.zig");
 const repo_mod = @import("../repo.zig");
+const fsck = @import("../object/fsck.zig");
 const revindex = @import("../odb/revindex.zig");
 const filterspec = @import("filterspec.zig");
 
@@ -145,8 +146,10 @@ pub const Lazy = struct {
         /// The permission to run `ssh` and credential helpers.
         programs: ?program.Programs = null,
         prompt: ?credential.Prompt = null,
-        /// Check what arrives the way git's `fsck` does.
-        check_objects: bool = true,
+        /// Whether what arrives is checked as a fetch checks it: `null`
+        /// takes `fetch.fsckObjects` or `transfer.fsckObjects`; see
+        /// `fetch.Options.check_objects`.
+        check_objects: ?bool = null,
     };
 
     /// A lazy fetch for `repo`, a partial clone.
@@ -259,12 +262,14 @@ pub const Lazy = struct {
         defer session.close(io);
         var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{});
         defer pack_dir.close(io);
+        var rules = try fsck.forTransfer(l.gpa, io, repo.configuration(), repo.objectFormat(), .fetch, l.options.check_objects, null);
+        defer if (rules) |*r| r.deinit(l.gpa);
         const fetched = try session.fetch(l.gpa, io, &repo.odb, pack_dir, .{
             .wants = oids,
             .tips = &.{},
             .include_tag = false,
             .filter = "blob:none",
-        }, .{ .receive = .{ .check_objects = l.options.check_objects, .reverse_index = revindex.wanted(repo.configuration()) } });
+        }, .{ .receive = .{ .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = revindex.wanted(repo.configuration()) } });
         if (fetched.pack) |pack_name| try writePromisor(io, pack_dir, pack_name, &.{});
     }
 
