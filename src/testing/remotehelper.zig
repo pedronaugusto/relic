@@ -16,6 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const program = @import("program.zig");
 
 const Helper = struct {
     gpa: Allocator,
@@ -33,7 +34,7 @@ const Helper = struct {
     fn git(h: *Helper, git_dir: []const u8, args: []const []const u8, input: ?[]const u8) ![]u8 {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(h.gpa);
-        try argv.append(h.gpa, "git");
+        try argv.append(h.gpa, try program.path(h.gpa, h.io, h.environ, "git"));
         if (git_dir.len != 0) try argv.appendSlice(h.gpa, &.{ "--git-dir", git_dir });
         try argv.appendSlice(h.gpa, args);
         var child = try std.process.spawn(h.io, .{
