@@ -27,6 +27,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
@@ -439,8 +440,15 @@ fn sortRr(rr: *std.array_hash_map.String(?Id)) void {
 /// tab, the path and a NUL.
 fn writeMergeRr(r: *Run, rr: *const std.array_hash_map.String(?Id)) Error!void {
     var out: std.ArrayList(u8) = .empty;
+    const hex_len = r.repo.objectFormat().hexLen();
     for (rr.keys(), rr.values()) |path, slot| {
         const id = slot orelse continue;
+        // What `parseMergeRr` takes back: a name of the format's length, a
+        // variant that is not negative, and a path no NUL ends early.
+        assert(id.hex.len == hex_len);
+        assert(id.variant >= 0);
+        assert(path.len != 0);
+        assert(std.mem.findScalar(u8, path, 0) == null);
         if (id.variant > 0) {
             try out.print(r.arena, "{s}.{d}\t{s}", .{ id.hex, id.variant, path });
         } else try out.print(r.arena, "{s}\t{s}", .{ id.hex, path });

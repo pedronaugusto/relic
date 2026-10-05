@@ -25,6 +25,7 @@ pub const apply = @import("patch/apply.zig");
 pub const rangediff = @import("patch/rangediff.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 const cquote = @import("cquote.zig");
 const binarypatch = @import("patch/binary.zig");
@@ -935,6 +936,11 @@ fn parseFragment(p: *Parser, at: usize, file: *FilePatch, frag: *Fragment) Error
     }
     if (old_lines != 0 or new_lines != 0) return null;
     if (!p.options.recount and deleted == 0 and added == 0) return null;
+    // Every line the header counts was read, so the context on either side
+    // is old lines the hunk keeps: `apply` reduces the context by these.
+    assert(deleted <= frag.old_lines);
+    assert(leading <= frag.old_lines - deleted);
+    assert(trailing <= frag.old_lines - deleted);
     frag.leading = leading;
     frag.trailing = trailing;
     file.lines_added += added;

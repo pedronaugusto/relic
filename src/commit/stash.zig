@@ -29,6 +29,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
@@ -524,6 +525,9 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     var parents: std.ArrayList(Oid) = .empty;
     try parents.appendSlice(arena, &.{ head.oid, index_commit });
     if (untracked_commit) |u| try parents.append(arena, u);
+    // `inspect` reads a stash back by these places: what it was made on,
+    // the index, then the untracked files.
+    assert(parents.items.len == 2 + @as(usize, @intFromBool(untracked_commit != null)));
     const stash_commit = try writeCommit(io, repo, work_tree, parents.items, options.who, message);
 
     // `refs/stash` moves, and its log, which is the list, gains the line.

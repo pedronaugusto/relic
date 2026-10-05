@@ -30,6 +30,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
@@ -1811,9 +1812,15 @@ const Merge = struct {
         var ci = ci_in;
         var df_file_index: usize = 0;
 
+        // As git asserts: three sides matching were resolved while
+        // collecting, and two matching are any two.
+        assert(ci.match_mask == 0 or ci.match_mask == 3 or ci.match_mask == 5 or ci.match_mask == 6);
         if (ci.dirmask != 0) {
             try m.recordEntryForTree(meta, path, ci);
             if (ci.filemask == 0) return;
+            // A file and a directory at one path is a directory/file
+            // conflict.
+            assert(ci.df_conflict);
         }
 
         if (ci.df_conflict and ci.result.mode == 0) {
@@ -1855,6 +1862,7 @@ const Merge = struct {
                 ci.result = ci.stages[1];
             } else {
                 const othermask: u3 = 7 & ~ci.match_mask;
+                assert(othermask == 2 or othermask == 4);
                 const side: usize = if (othermask == 4) 2 else 1;
                 ci.result = ci.stages[side];
                 ci.is_null = ci.result.mode == 0;

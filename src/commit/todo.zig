@@ -14,6 +14,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 const hash = @import("../hash.zig");
 const safepath = @import("../worktree/safepath.zig");
@@ -339,6 +340,10 @@ pub fn format(w: *std.Io.Writer, items: []const Item, options: FormatOptions) st
 
 /// Write one instruction and its newline.
 pub fn formatItem(w: *std.Io.Writer, item: Item, options: FormatOptions) std.Io.Writer.Error!void {
+    // What `parse` reads back: one instruction to a line, and a commit for
+    // every instruction that applies one.
+    assert(std.mem.findScalar(u8, item.arg, '\n') == null);
+    if (item.command.picksCommit()) assert(item.commit != null);
     if (item.command == .comment) {
         try w.writeAll(item.arg);
         try w.writeByte('\n');

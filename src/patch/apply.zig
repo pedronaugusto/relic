@@ -25,6 +25,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const patchparse = @import("../patch.zig");
@@ -397,6 +398,14 @@ const Image = struct {
             try img.addLine(gpa, bytes[at..next], 0);
             at = next;
         }
+    }
+
+    /// The bytes the line table covers: all of `buf` once the table is
+    /// made.
+    fn tableLen(img: *const Image) usize {
+        var n: usize = 0;
+        for (img.lines.items) |l| n += l.len;
+        return n;
     }
 
     fn removeFirstLine(img: *Image) void {
@@ -1051,12 +1060,17 @@ fn findPos(
 
 fn updateImage(st: *State, img: *Image, applied_pos: usize, preimage: *const Image, postimage: *const Image) Allocator.Error!void {
     const gpa = st.gpa;
+    assert(applied_pos <= img.lines.items.len);
+    // The lines replaced and the lines put in their place are each whole.
+    assert(preimage.tableLen() == preimage.buf.items.len);
+    assert(postimage.tableLen() == postimage.buf.items.len);
     var preimage_limit = preimage.lines.items.len;
     if (preimage_limit > img.lines.items.len - applied_pos) preimage_limit = img.lines.items.len - applied_pos;
     var applied_at: usize = 0;
     for (img.lines.items[0..applied_pos]) |l| applied_at += l.len;
     var remove_count: usize = 0;
     for (img.lines.items[applied_pos .. applied_pos + preimage_limit]) |l| remove_count += l.len;
+    assert(applied_at + remove_count <= img.buf.items.len);
     try img.buf.replaceRange(gpa, applied_at, remove_count, postimage.buf.items);
     try img.lines.replaceRange(gpa, applied_pos, preimage_limit, postimage.lines.items);
     if (!st.options.allow_overlap) {
@@ -1142,6 +1156,10 @@ fn hunkImages(st: *State, frag: patchparse.Fragment, inaccurate_eof: bool, ws_ru
         pre.lines.items[pre.lines.items.len - 1].len -= 1;
         post.lines.items[post.lines.items.len - 1].len -= 1;
     }
+    // Each line's bytes are in the image's buffer, and nothing else is:
+    // `updateImage` splices by these lengths.
+    assert(pre.tableLen() == pre.buf.items.len);
+    assert(post.tableLen() == post.buf.items.len);
     return .{ .count = new_blank_lines_at_end, .first_line = found_new_blank_lines_at_end };
 }
 

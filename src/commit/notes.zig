@@ -25,6 +25,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
@@ -505,6 +506,10 @@ pub const Notes = struct {
         var hex_buf: [hash.max_hex_len]u8 = undefined;
         // unreachable: a raw name of the format's length is at most max_hex_len hex digits
         const hex = std.fmt.bufPrint(&hex_buf, "{x}", .{key[0..t.rawLen()]}) catch unreachable;
+        // Each fanout level is two of the name's digits and a slash, and
+        // some of the name is left for the file.
+        assert(2 * fanout < hex.len);
+        assert(buf.len >= hex.len + fanout);
         var i: usize = 0;
         var j: usize = 0;
         var f = fanout;

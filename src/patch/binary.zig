@@ -19,6 +19,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 const flate = std.compress.flate;
 
@@ -29,6 +30,12 @@ const inflate_mod = @import("../odb/inflate.zig");
 pub const Method = enum { literal, delta };
 
 const en85 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
+
+comptime {
+    // Every digit a value below 85, and every value one digit, which `de85`
+    // keeps one above it so that zero is no digit.
+    assert(en85.len == 85);
+}
 
 const de85: [256]u8 = blk: {
     var t: [256]u8 = @splat(0);
