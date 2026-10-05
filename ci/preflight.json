@@ -49,20 +49,8 @@
       "lines": 159,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/commit/rebase.zig:doPickCommit": {
-      "lines": 210,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
     "src/diff/rename.zig:GitMap": {
       "lines": 121,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
-    "src/commit/reset.zig:toTree": {
-      "lines": 136,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
-    "src/commit/sequencer.zig:pickOne": {
-      "lines": 192,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
     "src/hash/sha1.zig:compressAarch64": {
@@ -75,14 +63,6 @@
     },
     "src/hash/sha1dc.zig:ubcCheck": {
       "lines": 153,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
-    "src/commit/stash.zig:push": {
-      "lines": 140,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
-    "src/commit/stash.zig:applyStash": {
-      "lines": 127,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
     "src/testing/lfs.zig:handle": {
@@ -132,10 +112,6 @@
     "src/patch/format.zig:format": {
       "lines": 145,
       "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
-    },
-    "src/commit/rebase.zig:doMerge": {
-      "lines": 123,
-      "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
     },
     "src/merge/threeway.zig:carry": {
       "lines": 194,

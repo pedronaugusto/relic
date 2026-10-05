@@ -480,15 +480,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
 
     const picked = try readCommit(r, oid);
     const commit = picked.commit;
-    var parent: ?Oid = null;
-    if (commit.parents.len > 1) {
-        const m = r.options.mainline orelse return error.MergeWithoutMainline;
-        if (m == 0 or m > commit.parents.len) return error.NoSuchParent;
-        parent = commit.parents[m - 1];
-    } else if (r.options.mainline) |m| {
-        if (m > 1) return error.NoSuchParent;
-        if (commit.parents.len == 1) parent = commit.parents[0];
-    } else if (commit.parents.len == 1) parent = commit.parents[0];
+    const parent = try mainlineParent(commit.parents, r.options.mainline);
 
     const subject = message.subjectLine(commit.message);
     const short_name = try r.short(oid);
@@ -557,20 +549,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     try repo.writeIndex(io, &index);
     try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
 
-    if (!outcome.isClean()) {
-        try msg.append(arena, '\n');
-        try msg.appendSlice(arena, r.comment);
-        try msg.appendSlice(arena, " Conflicts:\n");
-        for (outcome.conflicts) |conflict| {
-            try msg.appendSlice(arena, r.comment);
-            try msg.append(arena, '\t');
-            try msg.appendSlice(arena, conflict.path);
-            try msg.append(arena, '\n');
-        }
-        const copied = try arena.dupe(threeway.Conflict, outcome.conflicts);
-        for (copied) |*c| c.path = try arena.dupe(u8, c.path);
-        r.conflicts = copied;
-    }
+    if (!outcome.isClean()) try noteConflicts(r, &msg, outcome.conflicts);
     try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", msg.items);
 
     // The pseudo-ref a continuation reads the commit back from.
@@ -586,10 +565,50 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         return .conflicted;
     }
 
+    return finishPick(r, head, commit, outcome.tree.?, msg.items, author);
+}
+
+/// The parent a pick or revert is against: the `mainline` one of a merge,
+/// the only one, or none for a root commit.
+fn mainlineParent(parents: []const Oid, mainline: ?u32) Error!?Oid {
+    if (parents.len > 1) {
+        const m = mainline orelse return error.MergeWithoutMainline;
+        if (m == 0 or m > parents.len) return error.NoSuchParent;
+        return parents[m - 1];
+    }
+    if (mainline) |m| if (m > 1) return error.NoSuchParent;
+    return if (parents.len == 1) parents[0] else null;
+}
+
+/// Leave a stopped pick's conflicts at the foot of its message, commented,
+/// and in the run.
+fn noteConflicts(r: *Replay, msg: *std.ArrayList(u8), conflicts: []const threeway.Conflict) Error!void {
+    const arena = r.arena;
+    try msg.append(arena, '\n');
+    try msg.appendSlice(arena, r.comment);
+    try msg.appendSlice(arena, " Conflicts:\n");
+    for (conflicts) |conflict| {
+        try msg.appendSlice(arena, r.comment);
+        try msg.append(arena, '\t');
+        try msg.appendSlice(arena, conflict.path);
+        try msg.append(arena, '\n');
+    }
+    const copied = try arena.dupe(threeway.Conflict, conflicts);
+    for (copied) |*c| c.path = try arena.dupe(u8, c.path);
+    r.conflicts = copied;
+}
+
+/// A clean pick's end: dropped or kept when it changes nothing, staged
+/// under `--no-commit`, or committed with `msg` through the commit hooks.
+fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid, msg: []const u8, author: ?object.Signature) Error!Picked {
+    const gpa = r.gpa;
+    const io = r.io;
+    const repo = r.repo;
+    const arena = r.arena;
     // Whether the result changes anything, and what to do if not.
     var allow_empty_commit = false;
     const head_commit_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(io, repo);
-    if (outcome.tree.?.eql(head_commit_tree)) {
+    if (tree.eql(head_commit_tree)) {
         const parent_tree = if (commit.parents.len != 0) try repo.commitTree(io, commit.parents[0]) else try emptyTree(io, repo);
         const originally_empty = parent_tree.eql(commit.tree);
         if (originally_empty) {
@@ -610,7 +629,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
         try updateAbortSafety(gpa, io, repo);
         return .staged;
     }
-    if (outcome.tree.?.eql(head_commit_tree) and !allow_empty_commit) {
+    if (tree.eql(head_commit_tree) and !allow_empty_commit) {
         try updateAbortSafety(gpa, io, repo);
         return .empty;
     }
@@ -620,7 +639,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     // `try_to_commit`: `prepare-commit-msg` sees the message before it is
     // cleaned, in `COMMIT_EDITMSG`, when the hook is there at all.
     const commit_hooks = try commithooks.Hooks.init(arena, io, repo, r.options.hooks, r.options.verify);
-    var text: []const u8 = msg.items;
+    var text: []const u8 = msg;
     if (commit_hooks.exists(io, "prepare-commit-msg")) {
         try head_mod.writeState(io, repo.git_dir, "COMMIT_EDITMSG", text);
         _ = try commit_hooks.runner.?.prepareCommitMsg(io, try commit_hooks.env(arena, null), try commit_hooks.path(arena, "COMMIT_EDITMSG"), .message, null);
@@ -629,7 +648,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     const cleaned = try message.cleanup(arena, text, cleanup, r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
     const made = try repo.writeCommit(io, .{
-        .tree = outcome.tree.?,
+        .tree = tree,
         .parents = if (head.oid) |h| &.{h} else &.{},
         .author = author orelse r.options.who,
         .committer = r.options.who,

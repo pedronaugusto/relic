@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
@@ -65,20 +66,9 @@ pub fn toTree(
 
     var wanted = try worktree.flatten(arena, io, db, tree);
 
-    // Every path the index has, at any stage, and whether it is conflicted.
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
     var current: std.array_hash_map.String(?index_mod.Entry) = .empty;
-    for (index.entries.items) |entry| {
-        const path = try arena.dupe(u8, entry.path);
-        if (entry.stage != 0) {
-            try conflicted.put(arena, path, {});
-            if (!current.contains(path)) try current.put(arena, path, null);
-            continue;
-        }
-        var copy = entry;
-        copy.path = path;
-        try current.put(arena, path, copy);
-    }
+    try readCurrent(arena, index, &current, &conflicted);
 
     // Paths to rewrite, remove, or leave as the index has them.
     var rewrite: std.ArrayList([]const u8) = .empty;
@@ -151,8 +141,40 @@ pub fn toTree(
         try stats.put(arena, path, written.stat);
     }
 
-    // The index is the tree, keeping what it knew of paths it already had
-    // right.
+    try install(arena, index, tree, &wanted, &current, &stats);
+}
+
+/// Every path the index has, at any stage, into `current`, `null` for a
+/// conflicted one, which `conflicted` also names.
+fn readCurrent(
+    arena: Allocator,
+    index: *const Index,
+    current: *std.array_hash_map.String(?index_mod.Entry),
+    conflicted: *std.StringHashMapUnmanaged(void),
+) Allocator.Error!void {
+    for (index.entries.items) |entry| {
+        const path = try arena.dupe(u8, entry.path);
+        if (entry.stage != 0) {
+            try conflicted.put(arena, path, {});
+            if (!current.contains(path)) try current.put(arena, path, null);
+            continue;
+        }
+        var copy = entry;
+        copy.path = path;
+        try current.put(arena, path, copy);
+    }
+}
+
+/// Make the index `tree`, keeping what it knew of paths it already had
+/// right and the stat of every file just written.
+fn install(
+    arena: Allocator,
+    index: *Index,
+    tree: Oid,
+    wanted: *const std.StringHashMapUnmanaged(worktree.TreeEntry),
+    current: *const std.array_hash_map.String(?index_mod.Entry),
+    stats: *const std.StringHashMapUnmanaged(fs.Stat),
+) Error!void {
     var fresh: std.ArrayList(index_mod.Entry) = .empty;
     var it = wanted.iterator();
     while (it.next()) |pair| {
@@ -171,6 +193,8 @@ pub fn toTree(
     }
     index.clear();
     try index.addMany(fresh.items);
+    // One entry for each path of the tree, at stage 0.
+    assert(index.entries.items.len == wanted.count());
     const cache_tree = try index.cacheTree();
     cache_tree.invalidateAll();
     cache_tree.root.entry_count = @intCast(index.entries.items.len);

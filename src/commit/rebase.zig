@@ -28,6 +28,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
@@ -1417,7 +1418,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
 
     try r.msg.appendSlice(arena, message.fromSubject(commit.message));
     r.have_message = true;
-    var msg_source: enum { merge_msg, squash, fixup, squash_edit } = .merge_msg;
+    var msg_source: MessageSource = .merge_msg;
     if (is_fixup) {
         try updateSquashMessages(r, item, commit.message);
         if (!final_fixup) {
@@ -1447,20 +1448,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     defer outcome.deinit();
     try repo.writeIndex(io, &index);
     try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
-    if (!outcome.isClean()) {
-        try r.msg.append(arena, '\n');
-        try r.msg.appendSlice(arena, r.comment);
-        try r.msg.appendSlice(arena, " Conflicts:\n");
-        for (outcome.conflicts) |conflict| {
-            try r.msg.appendSlice(arena, r.comment);
-            try r.msg.append(arena, '\t');
-            try r.msg.appendSlice(arena, conflict.path);
-            try r.msg.append(arena, '\n');
-        }
-        const copied = try arena.dupe(threeway.Conflict, outcome.conflicts);
-        for (copied) |*c| c.path = try arena.dupe(u8, c.path);
-        r.conflicts = copied;
-    }
+    if (!outcome.isClean()) try noteConflicts(r, outcome.conflicts);
     try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", r.msg.items);
     // A rebase takes care of the commit itself, so a conflict leaves no
     // `CHERRY_PICK_HEAD`, as git's leaves none. rerere runs on the stop.
@@ -1490,12 +1478,48 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         }
     }
 
+    return commitPick(r, item, final_fixup, .{
+        .head = head,
+        .tree = outcome.tree.?,
+        .author = commit.author,
+        .source = msg_source,
+        .allow_empty = allow_empty,
+        .reflog_action = reflog_action,
+    });
+}
+
+/// What `doPickCommit` applied, for `commitPick` to commit.
+const Applied = struct {
+    head: head_mod.Head,
+    tree: Oid,
+    author: object.Signature,
+    source: MessageSource,
+    allow_empty: bool,
+    reflog_action: []const u8,
+};
+
+/// Where a pick's message comes from: `MERGE_MSG`, the squash message so
+/// far, the fixup's, or the squash message edited at the chain's end.
+const MessageSource = enum { merge_msg, squash, fixup, squash_edit };
+
+/// The commit of a pick, or the amended one of a fixup chain, and what
+/// follows it: hooks, state and the end of a chain.
+fn commitPick(r: *Run, item: todo.Item, final_fixup: bool, applied: Applied) Error!Picked {
+    const io = r.io;
+    const repo = r.repo;
+    const arena = r.arena;
+    const command = item.command;
+    const head = applied.head;
+    // `doPickCommit` refused an unborn branch already.
+    const head_oid = head.oid.?;
+    const msg_source = applied.source;
+    const reflog_action = applied.reflog_action;
     // The commit, or the amended one of a fixup chain.
-    const amending = is_fixup;
+    const amending = command.isFixup();
     const parents: []const Oid = if (amending) try parentsOf(r, head_oid) else &.{head_oid};
     const first_parent_tree = if (parents.len != 0) try repo.commitTree(io, parents[0]) else try repo.odb.write(io, .tree, "");
-    if (!allow_empty and outcome.tree.?.eql(first_parent_tree)) return .empty;
-    const author = if (amending) (try readSource(r, head_oid)).commit.author else commit.author;
+    if (!applied.allow_empty and applied.tree.eql(first_parent_tree)) return .empty;
+    const author = if (amending) (try readSource(r, head_oid)).commit.author else applied.author;
 
     // `try_to_commit` cleans nothing but whitespace, and that only with a
     // sign-off, unless `commit.cleanup` says otherwise; an edited message
@@ -1544,7 +1568,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
     }
     const extra: []const object.ExtraHeader = if (amending) try extraHeadersOf(r, head_oid) else &.{};
     const made = try repo.writeCommit(io, .{
-        .tree = outcome.tree.?,
+        .tree = applied.tree,
         .parents = parents,
         .author = author,
         .committer = r.options.who,
@@ -1585,6 +1609,24 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         r.fixup_count = 0;
     }
     return .ok;
+}
+
+/// Leave a stopped pick's conflicts at the foot of its message, commented,
+/// and in the run.
+fn noteConflicts(r: *Run, conflicts: []const threeway.Conflict) Error!void {
+    const arena = r.arena;
+    try r.msg.append(arena, '\n');
+    try r.msg.appendSlice(arena, r.comment);
+    try r.msg.appendSlice(arena, " Conflicts:\n");
+    for (conflicts) |conflict| {
+        try r.msg.appendSlice(arena, r.comment);
+        try r.msg.append(arena, '\t');
+        try r.msg.appendSlice(arena, conflict.path);
+        try r.msg.append(arena, '\n');
+    }
+    const copied = try arena.dupe(threeway.Conflict, conflicts);
+    for (copied) |*c| c.path = try arena.dupe(u8, c.path);
+    r.conflicts = copied;
 }
 
 fn parentsOf(r: *Run, oid: Oid) Error![]const Oid {
@@ -2158,21 +2200,8 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     while (names.next()) |more| try merge_heads.append(r.arena, try lookupLabel(r, more));
     const merge_head = merge_heads.items[0];
 
-    // The original merge's parents are exactly these: reuse it.
     if (item.commit) |original| {
-        const source = try readSource(r, original);
-        const parents = source.commit.parents;
-        if (r.allow_ff and parents.len == 1 + merge_heads.items.len and parents[0].eql(head_oid) and sameOids(parents[1..], merge_heads.items)) {
-            var index = try repo.openIndex(io);
-            defer index.deinit();
-            const head_tree = try repo.commitTree(io, head_oid);
-            var outcome = try threeway.apply(gpa, io, repo, &index, head_tree, head_tree, source.commit.tree, .{ .blocked = r.options.blocked });
-            outcome.deinit();
-            try repo.writeIndex(io, &index);
-            try head_mod.advance(io, repo, h, original, .{ .who = r.options.who, .message = "rebase: fast-forward" });
-            try recordInRewritten(r, original, peekCommand(r, 1));
-            return null;
-        }
+        if (try reuseMerge(r, h, original, merge_heads.items)) return null;
     }
 
     var author = r.options.who;
@@ -2180,12 +2209,8 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         const source = try readSource(r, original);
         author = source.commit.author;
         try r.msg.appendSlice(r.arena, message.fromSubject(source.commit.message));
-    } else if (oneline) |text| {
-        try r.msg.appendSlice(r.arena, text);
-    } else if (merge_heads.items.len > 1) {
-        try r.msg.appendSlice(r.arena, try std.fmt.allocPrint(r.arena, "Merge branches '{s}'", .{std.mem.trim(u8, arg, " \t")}));
     } else {
-        try r.msg.appendSlice(r.arena, try std.fmt.allocPrint(r.arena, "Merge branch '{s}'", .{name}));
+        try r.msg.appendSlice(r.arena, oneline orelse try mergeSubject(r.arena, arg, merge_heads.items.len));
     }
     r.have_message = true;
     try writeAuthorScript(r, author);
@@ -2255,6 +2280,38 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     try rerere.afterCommit(gpa, io, repo);
     if (item.commit) |original| try recordInRewritten(r, original, peekCommand(r, 1));
     return null;
+}
+
+/// The original merge, reused as it is when its parents are exactly `HEAD`
+/// and `merge_heads`: `HEAD` fast-forwards to it. Whether it was.
+fn reuseMerge(r: *Run, h: head_mod.Head, original: Oid, merge_heads: []const Oid) Error!bool {
+    const io = r.io;
+    const repo = r.repo;
+    // `doMerge` refused an unborn branch already.
+    const head_oid = h.oid.?;
+    const source = try readSource(r, original);
+    const parents = source.commit.parents;
+    if (!r.allow_ff or parents.len != 1 + merge_heads.len or !parents[0].eql(head_oid) or !sameOids(parents[1..], merge_heads)) return false;
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+    const head_tree = try repo.commitTree(io, head_oid);
+    var outcome = try threeway.apply(r.gpa, io, repo, &index, head_tree, head_tree, source.commit.tree, .{ .blocked = r.options.blocked });
+    outcome.deinit();
+    try repo.writeIndex(io, &index);
+    try head_mod.advance(io, repo, h, original, .{ .who = r.options.who, .message = "rebase: fast-forward" });
+    try recordInRewritten(r, original, peekCommand(r, 1));
+    return true;
+}
+
+/// The subject git gives a merge with no original and no oneline: of the
+/// branch, or the branches, `labels` names.
+fn mergeSubject(arena: Allocator, labels: []const u8, count: usize) Allocator.Error![]const u8 {
+    assert(count != 0);
+    const names = std.mem.trim(u8, labels, " \t");
+    if (count > 1) return std.fmt.allocPrint(arena, "Merge branches '{s}'", .{names});
+    var first = std.mem.tokenizeAny(u8, names, " \t");
+    // A count of one is one label, there to take.
+    return std.fmt.allocPrint(arena, "Merge branch '{s}'", .{first.next().?});
 }
 
 /// `do_merge` with a strategy: the merge `git merge` makes of it.

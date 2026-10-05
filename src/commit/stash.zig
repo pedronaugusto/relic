@@ -456,19 +456,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     const head_commit = try object.Commit.parse(arena, repo.objectFormat(), try arena.dupe(u8, head_bytes.bytes));
     var head_map = try worktree.flatten(arena, io, &repo.odb, head_commit.tree);
 
-    // Every pathspec must name something the index tracks, unless untracked
-    // files are being taken too.
-    if (options.untracked == .none) {
-        for (options.paths) |spec| {
-            const hit = for (ctx.index.entries.items) |e| {
-                if (matchesAny(&.{spec}, e.path)) break true;
-            } else false;
-            if (!hit) {
-                if (options.refusal) |r| r.set(spec);
-                return error.PathspecMatchesNothing;
-            }
-        }
-    }
+    if (options.untracked == .none) try requireTracked(&ctx.index, options.paths, options.refusal);
 
     // What differs, and what the working-tree commit takes from the disk:
     // every tracked path whose file is not what `HEAD` has.
@@ -480,7 +468,6 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     for (ctx.index.entries.items) |e| {
         if (matchesAny(options.paths, e.path)) try candidates.put(arena, e.path, {});
     }
-    const Update = struct { path: []const u8, side: ?merge.Side };
     var updates: std.ArrayList(Update) = .empty;
     var changed = false;
     for (candidates.keys()) |path| {
@@ -526,32 +513,10 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     // `U`: the untracked files, in a tree of their own.
     var untracked_commit: ?Oid = null;
     if (untracked_files.items.len != 0) {
-        var temp: Index = .initEmpty(gpa, repo.objectFormat());
-        defer temp.deinit();
-        for (untracked_files.items) |path| {
-            const s = (try ctx.side(path, null, true)) orelse continue;
-            try temp.add(.{ .path = path, .oid = s.oid, .mode = s.mode });
-        }
-        const tree = try worktree.writeTree(gpa, io, &temp, &repo.odb);
+        const tree = try untrackedTree(&ctx, untracked_files.items);
         untracked_commit = try writeCommit(io, repo, tree, &.{}, options.who, try std.fmt.allocPrint(arena, "untracked files on {s}\n", .{label}));
     }
-
-    // `W`: the index, with every tracked file whose content differs from
-    // `HEAD` taken from the disk.
-    const work_tree = blk: {
-        var temp: Index = .initEmpty(gpa, repo.objectFormat());
-        defer temp.deinit();
-        try temp.addMany(ctx.index.entries.items);
-        for (updates.items) |u| {
-            if (u.side == null) {
-                _ = temp.remove(u.path);
-                continue;
-            }
-            const s = (try ctx.side(u.path, ctx.stage0(u.path), true)).?;
-            try temp.add(.{ .path = u.path, .oid = s.oid, .mode = s.mode });
-        }
-        break :blk try worktree.writeTree(gpa, io, &temp, &repo.odb);
-    };
+    const work_tree = try workTree(&ctx, updates.items);
     const message = if (options.message) |m|
         try std.fmt.allocPrint(arena, "On {s}: {s}", .{ branch, m })
     else
@@ -577,6 +542,51 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     try resetAfterPush(&ctx, &head_map, head_commit.tree, index_tree, untracked_files.items, options);
     try ctx.index.write(io, repo.git_dir, "index", .{ .lock = .{ .shared = repo.shared } });
     return stash_commit;
+}
+
+/// A path whose file `push` takes from the disk: `null` where it is gone.
+const Update = struct { path: []const u8, side: ?merge.Side };
+
+/// Refuse a pathspec that names nothing the index tracks.
+fn requireTracked(index: *const Index, paths: []const []const u8, refusal: ?*Refusal) Error!void {
+    for (paths) |spec| {
+        const hit = for (index.entries.items) |e| {
+            if (matchesAny(&.{spec}, e.path)) break true;
+        } else false;
+        if (!hit) {
+            if (refusal) |r| r.set(spec);
+            return error.PathspecMatchesNothing;
+        }
+    }
+}
+
+/// The tree of a stash's `U` commit: the untracked files as they are.
+fn untrackedTree(ctx: *Ctx, paths: []const []const u8) Error!Oid {
+    var temp: Index = .initEmpty(ctx.gpa, ctx.repo.objectFormat());
+    defer temp.deinit();
+    for (paths) |path| {
+        const s = (try ctx.side(path, null, true)) orelse continue;
+        try temp.add(.{ .path = path, .oid = s.oid, .mode = s.mode });
+    }
+    return worktree.writeTree(ctx.gpa, ctx.io, &temp, &ctx.repo.odb);
+}
+
+/// The tree of a stash's `W` commit: the index, with every tracked file
+/// whose content differs from `HEAD` taken from the disk.
+fn workTree(ctx: *Ctx, updates: []const Update) Error!Oid {
+    var temp: Index = .initEmpty(ctx.gpa, ctx.repo.objectFormat());
+    defer temp.deinit();
+    try temp.addMany(ctx.index.entries.items);
+    for (updates) |u| {
+        if (u.side == null) {
+            _ = temp.remove(u.path);
+            continue;
+        }
+        // A file `push` found on the disk is still there to read.
+        const s = (try ctx.side(u.path, ctx.stage0(u.path), true)).?;
+        try temp.add(.{ .path = u.path, .oid = s.oid, .mode = s.mode });
+    }
+    return worktree.writeTree(ctx.gpa, ctx.io, &temp, &ctx.repo.odb);
 }
 
 fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const u8)) Error!void {
@@ -796,17 +806,7 @@ pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
 
     // `--index`: the stash's staged changes, merged onto the index as it is.
     const use_index = options.index orelse (repo.configuration().getBool("stash.index", false) catch false);
-    var restored_index: ?Oid = null;
-    if (use_index and !stash.base_tree.eql(stash.index_tree) and !current_tree.eql(stash.index_tree)) {
-        if (!try patchApplies(gpa, io, db, stash.base_tree, current_tree, stash.index_tree)) return error.IndexConflict;
-        var staged = try merge.treesWithOptions(gpa, io, db, stash.base_tree, current_tree, stash.index_tree, .{ .content_merge = true });
-        defer staged.deinit();
-        if (!staged.isClean()) return error.IndexConflict;
-        restored_index = merge.tree(io, db, &staged) catch |err| switch (err) {
-            error.MergeConflict => unreachable,
-            else => |e| return e,
-        };
-    }
+    const restored_index = if (use_index) try stagedTree(gpa, io, db, stash, current_tree) else null;
 
     const labels: merge.Labels = .{
         .ours = if (stash.base_tree.eql(current_tree)) "Version stash was based on" else "Updated upstream",
@@ -851,23 +851,8 @@ pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
         try writes.append(arena, .{ .path = key.*, .blob = null });
     }
 
-    // The untracked files come back only where nothing is.
     var untracked_writes: std.ArrayList(worktree.PathWrite) = .empty;
-    if (stash.untracked_tree) |tree| {
-        var untracked_map = try worktree.flatten(arena, io, db, tree);
-        var it = untracked_map.iterator();
-        while (it.next()) |pair| {
-            if (try fs.statAt(io, ctx.wt, pair.key_ptr.*)) |_| {
-                if (options.refusal) |r| r.set(pair.key_ptr.*);
-                return error.UntrackedWouldBeOverwritten;
-            }
-            try untracked_writes.append(arena, .{
-                .path = pair.key_ptr.*,
-                .blob = .{ .mode = pair.value_ptr.mode, .oid = pair.value_ptr.oid },
-                .index = false,
-            });
-        }
-    }
+    if (stash.untracked_tree) |tree| try untrackedWrites(arena, io, ctx.wt, db, tree, options.refusal, &untracked_writes);
 
     const checkout_options = ctx.checkoutOptions();
     _ = try worktree.writePaths(gpa, io, ctx.wt, &ctx.index, db, writes.items, checkout_options);
@@ -905,6 +890,47 @@ pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
         .conflicts = conflicts.items,
         .index_restored = applied_index,
     };
+}
+
+/// The index with the stash's staged changes merged onto it, as `--index`
+/// restores it: `null` when there is nothing to restore.
+fn stagedTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, stash: Stash, current_tree: Oid) Error!?Oid {
+    if (stash.base_tree.eql(stash.index_tree) or current_tree.eql(stash.index_tree)) return null;
+    if (!try patchApplies(gpa, io, db, stash.base_tree, current_tree, stash.index_tree)) return error.IndexConflict;
+    var staged = try merge.treesWithOptions(gpa, io, db, stash.base_tree, current_tree, stash.index_tree, .{ .content_merge = true });
+    defer staged.deinit();
+    if (!staged.isClean()) return error.IndexConflict;
+    // unreachable: a clean merge has no conflict to refuse
+    const tree = merge.tree(io, db, &staged) catch |err| switch (err) {
+        error.MergeConflict => unreachable,
+        else => |e| return e,
+    };
+    return tree;
+}
+
+/// The stash's untracked files, to come back only where nothing is.
+fn untrackedWrites(
+    arena: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    db: *odb_mod.Odb,
+    tree: Oid,
+    refusal: ?*Refusal,
+    out: *std.ArrayList(worktree.PathWrite),
+) Error!void {
+    var untracked_map = try worktree.flatten(arena, io, db, tree);
+    var it = untracked_map.iterator();
+    while (it.next()) |pair| {
+        if (try fs.statAt(io, wt, pair.key_ptr.*)) |_| {
+            if (refusal) |r| r.set(pair.key_ptr.*);
+            return error.UntrackedWouldBeOverwritten;
+        }
+        try out.append(arena, .{
+            .path = pair.key_ptr.*,
+            .blob = .{ .mode = pair.value_ptr.mode, .oid = pair.value_ptr.oid },
+            .index = false,
+        });
+    }
 }
 
 /// Whether the stash's index changes, as a patch with three lines of context,
