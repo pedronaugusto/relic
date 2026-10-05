@@ -11814,5 +11814,642 @@
     "source": "var selected: std.array_list.Managed([]const u8) = .init(b.allocator);",
     "detail": "'Managed' is deprecated: Deprecated.",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/commit/merging.zig",
+    "source": "pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error![]const Target {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/commit/merging.zig",
+    "source": "pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator) Error![]const Target {",
+    "detail": "'Allocator' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/commit/merging.zig",
+    "source": "pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Target, options: Options) Error!Outcome {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/commit/merging.zig",
+    "source": "fn reduceParents(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, ours: Oid, targets: []const Target) Error!Reduced {",
+    "detail": "'Allocator' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/commit/merging.zig",
+    "source": "fn reduceHeads(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, oids: []const Oid) Error![]const Oid {",
+    "detail": "'Allocator' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/commit/merging.zig",
+    "source": "fn shareHistory(gpa: Allocator, io: Io, repo: *Repository, arena: Allocator, ours: Oid, heads: []const Oid) Error!bool {",
+    "detail": "'Allocator' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z017",
+    "path": "src/grep.zig",
+    "source": "return try p.new(.{ .@\"or\" = .{ x, y } });",
+    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try p.new(.{ .@\"or\" = .{ x, y } }); return value;`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z017",
+    "path": "src/grep.zig",
+    "source": "return try p.new(.{ .@\"and\" = .{ left, y } });",
+    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try p.new(.{; return value;`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z017",
+    "path": "src/grep.zig",
+    "source": "return try p.new(.{ .not = x });",
+    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try p.new(.{ .not = x }); return value;`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/grep.zig",
+    "source": "var rules: std.StringArrayHashMapUnmanaged(*userdiff.Rule) = .empty;",
+    "detail": "'StringArrayHashMapUnmanaged' is deprecated: Deprecated; use `array_hash_map.String`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z007",
+    "path": "src/config.zig",
+    "source": "const wildmatch = @import(\"worktree/wildmatch.zig\");",
+    "detail": "duplicate import '\"worktree/wildmatch.zig\"'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z030",
+    "path": "src/transport/remotehelper_test.zig",
+    "source": "fn deinit(h: *Helpers) void {",
+    "detail": "deinit should set h.* = undefined",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z013",
+    "path": "src/transport/remotehelper_test.zig",
+    "source": "const hash = @import(\"../hash.zig\");",
+    "detail": "unused import 'hash'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z028",
+    "path": "src/transport/remotehelper_test.zig",
+    "source": "try Io.Dir.cwd().copyFile(@import(\"build_options\").remote_helper_path, bin.dir, exe, io, .{});",
+    "detail": "inline @import; assign to a top-level const",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z028",
+    "path": "src/transport/remotehelper_test.zig",
+    "source": "fn programs(h: *const Helpers) @import(\"../repo/program.zig\").Programs {",
+    "detail": "inline @import; assign to a top-level const",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/transport/remotehelper.zig",
+    "source": "pub fn start(gpa: Allocator, io: Io, spec: Spec, options: StartOptions) Error!*Helper {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/transport/remotehelper.zig",
+    "source": "pub fn option(h: *Helper, name: []const u8, value: []const u8, form: OptionValue) Error!Answer {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z012",
+    "path": "src/transport/remotehelper.zig",
+    "source": "pub fn option(h: *Helper, name: []const u8, value: []const u8, form: OptionValue) Error!Answer {",
+    "detail": "public function exposes private type 'Answer'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z012",
+    "path": "src/transport/remotehelper.zig",
+    "source": "pub fn option(h: *Helper, name: []const u8, value: []const u8, form: OptionValue) Error!Answer {",
+    "detail": "public function exposes private type 'OptionValue'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/transport/remotehelper.zig",
+    "source": "pub fn connect(h: *Helper, service: connection.Service, service_program: ?[]const u8) Error!bool {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/transport/remotehelper.zig",
+    "source": "pub fn list(h: *Helper, gpa: Allocator, repo: ?*Repository, for_push: bool) Error!protocol.RefList {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/transport/remotehelper.zig",
+    "source": "const eon = std.mem.indexOfScalar(u8, rest, ' ');",
+    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/transport/remotehelper.zig",
+    "source": "pub fn fetch(h: *Helper, wants_in: []const Want, options: FetchOptions) Error!void {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z017",
+    "path": "src/transport/remotehelper.zig",
+    "source": "if (h.refspecs.items.len == 0) return try h.gpa.dupe(u8, name);",
+    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try h.gpa.dupe(u8, name); return value;`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/transport/remotehelper.zig",
+    "source": "pub fn push(h: *Helper, gpa: Allocator, commands: []const PushCommand, options: PushOptions) Error!sendpack.Report {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/transport/remotehelper.zig",
+    "source": "const space = std.mem.indexOfScalar(u8, rest, ' ');",
+    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z013",
+    "path": "src/transport/remotehelper.zig",
+    "source": "const refs_mod = @import(\"../refs.zig\");",
+    "detail": "unused import 'refs_mod'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z026",
+    "path": "src/transport/remotehelper.zig",
+    "source": "w.writeByte('\\n') catch {};",
+    "detail": "empty catch block suppresses errors: `catch {}`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z026",
+    "path": "src/transport/remotehelper.zig",
+    "source": "w.flush() catch {};",
+    "detail": "empty catch block suppresses errors: `catch {}`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z026",
+    "path": "src/transport/remotehelper.zig",
+    "source": "for (h.locks.items) |path| Io.Dir.cwd().deleteFile(io, path) catch {};",
+    "detail": "empty catch block suppresses errors: `catch {}`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z026",
+    "path": "src/transport/remotehelper.zig",
+    "source": "if (export_tmp) |tmp| Io.Dir.rename(Io.Dir.cwd(), tmp, Io.Dir.cwd(), h.export_marks.?, h.io) catch {};",
+    "detail": "empty catch block suppresses errors: `catch {}`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z030",
+    "path": "src/fastimport_test.zig",
+    "source": "fn deinit(p: *Pair) void {",
+    "detail": "deinit should set p.* = undefined",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/merge/threeway.zig",
+    "source": "pub fn applyOctopus(",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/merge/octopus.zig",
+    "source": "pub fn mergeCommits(gpa: Allocator, io: Io, db: *Odb, head: Oid, heads: []const Oid, options: Options) Error!Result {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/merge/octopus.zig",
+    "source": "var paths: std.StringArrayHashMapUnmanaged(void) = .empty;",
+    "detail": "'StringArrayHashMapUnmanaged' is deprecated: Deprecated; use `array_hash_map.String`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/merge/octopus.zig",
+    "source": "while (std.mem.indexOfScalarPos(u8, p.*, at, '/')) |slash| : (at = slash + 1) {",
+    "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z030",
+    "path": "src/archive.zig",
+    "source": "fn deinit(wk: *Walk) void {",
+    "detail": "deinit should set wk.* = undefined",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/archive.zig",
+    "source": "while (std.mem.indexOfScalarPos(u8, format, i, '%')) |pct| {",
+    "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/worktree/encoding.zig",
+    "source": "pub fn toUtf8(a: Allocator, e: Encoding, src: []const u8) Error![]const u8 {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/worktree/encoding.zig",
+    "source": "pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Error![]const u8 {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/worktree/encoding.zig",
+    "source": "fn appendInt(a: Allocator, out: *std.ArrayList(u8), comptime T: type, value: T, endian: std.builtin.Endian) Allocator.Error!void {",
+    "detail": "'type' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z030",
+    "path": "src/worktree/fsmonitor_test.zig",
+    "source": "fn deinit(pair: *Pair) void {",
+    "detail": "deinit should set pair.* = undefined",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z017",
+    "path": "src/worktree/fsmonitor_test.zig",
+    "source": "return try gpa.dupe(u8, t);",
+    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try gpa.dupe(u8, t); return value;`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/worktree/fsmonitor_test.zig",
+    "source": "fn query(context: *anyopaque, arena: Allocator, since: []const u8) Allocator.Error!?fsmonitor.Changes {",
+    "detail": "'Allocator' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/worktree/fsmonitor.zig",
+    "source": "pub fn configured(config: *const config_mod.Config, programs: program.Programs) Error!?Source {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/worktree/fsmonitor.zig",
+    "source": "pub fn refresh(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, source: Source) Error!void {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z028",
+    "path": "src/worktree/fsmonitor.zig",
+    "source": "const z: @import(\"../hash.zig\").Oid = .zero(.sha1);",
+    "detail": "inline @import; assign to a top-level const",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/diff/userdiff.zig",
+    "source": "pub fn init(gpa: Allocator, config: *const config_mod.Config, driver: ?[]const u8) Error!Rule {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/testing/history.zig",
+    "source": "fn octopusScript(repo: *testgit.Repo, io: Io) anyerror!void {",
+    "detail": "'Io' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/testing/history.zig",
+    "source": "while (std.mem.indexOfPos(u8, text, at, \".merge_file_\")) |found| {",
+    "detail": "'indexOfPos' is deprecated: Deprecated in favor of `findPos`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/revwalk/revparse.zig",
+    "source": "pub fn resolveAt(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, clock: Clock) Error!Oid {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/revwalk/simplify.zig",
+    "source": "pub fn sameWithin(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: ?Oid, b: ?Oid, paths: *const pathspec.Pathspec) Error!bool {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z017",
+    "path": "src/revwalk/simplify.zig",
+    "source": "return try gpa.dupe(u8, found.bytes);",
+    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try gpa.dupe(u8, found.bytes); return value;`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/patch/rangediff.zig",
+    "source": "pub fn compute(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options) Error!RangeDiff {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/patch/rangediff.zig",
+    "source": "pub fn write(gpa: Allocator, io: Io, repo: *Repository, old: Range, new: Range, options: Options, w: *Io.Writer) Error!void {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/patch/rangediff.zig",
+    "source": "fn init(gpa: Allocator, io: Io, repo: *Repository, a: Allocator, options: Options) Error!Reader {",
+    "detail": "'Allocator' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z030",
+    "path": "src/patch/rangediff.zig",
+    "source": "fn deinit(r: *Reader) void {",
+    "detail": "deinit should set r.* = undefined",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/patch/rangediff.zig",
+    "source": "while (std.mem.indexOfScalar(u8, line, '\\t')) |tab| {",
+    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z013",
+    "path": "src/patch/rangediff.zig",
+    "source": "const odb_mod = @import(\"../odb.zig\");",
+    "detail": "unused import 'odb_mod'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z020",
+    "path": "src/patch/rangediff.zig",
+    "source": "fn at(s: @This(), column: i32, row: i32) i32 {",
+    "detail": "inline @This(); assign it to `const Self = @This();`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z026",
+    "path": "src/patch/rangediff.zig",
+    "source": "if (r.repo.work_dir) |wt| attrs.enter(r.io, wt, path) catch {};",
+    "detail": "empty catch block suppresses errors: `catch {}`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/fastexport.zig",
+    "source": "pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, options: Options) Error!void {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z030",
+    "path": "src/fastexport.zig",
+    "source": "fn deinit(ex: *Exporter) void {",
+    "detail": "deinit should set ex.* = undefined",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/fastexport.zig",
+    "source": "if (std.mem.indexOfPos(u8, buf, cursor, \"\\n\\n\")) |m| {",
+    "detail": "'indexOfPos' is deprecated: Deprecated in favor of `findPos`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/fastexport.zig",
+    "source": "if (std.mem.indexOfScalar(u8, message, 0)) |nul| message = message[0..nul];",
+    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/fastexport.zig",
+    "source": "const message_at = std.mem.indexOf(u8, buf, \"\\n\\n\");",
+    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/fastexport.zig",
+    "source": "if (std.mem.indexOfScalar(u8, rest, 0)) |nul| rest = rest[0..nul];",
+    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/fastexport.zig",
+    "source": "if (std.mem.indexOf(u8, head, \"\\ntagger \")) |t| {",
+    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/lfs/transfer.zig",
+    "source": "fn standaloneAgent(server: *lfsapi.Server, arena: Allocator, endpoint: lfsapi.Endpoint) Error!?[]const u8 {",
+    "detail": "'Allocator' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z020",
+    "path": "src/lfs/transfer.zig",
+    "source": "pub fn bytes(p: @This(), n: u64) void {",
+    "detail": "inline @This(); assign it to `const Self = @This();`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z030",
+    "path": "src/lfs/custom_test.zig",
+    "source": "fn deinit(fx: *Fixture) void {",
+    "detail": "deinit should set fx.* = undefined",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z013",
+    "path": "src/lfs/custom_test.zig",
+    "source": "const builtin = @import(\"builtin\");",
+    "detail": "unused import 'builtin'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z028",
+    "path": "src/lfs/custom_test.zig",
+    "source": "const agent = @import(\"build_options\").lfs_agent_path;",
+    "detail": "inline @import; assign to a top-level const",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z026",
+    "path": "src/lfs/custom_test.zig",
+    "source": "for ([_]Io.Dir{ theirs, ours }) |d| d.deleteTree(io, \".git/lfs/objects\") catch {};",
+    "detail": "empty catch block suppresses errors: `catch {}`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/lfs/custom.zig",
+    "source": "pub fn start(gpa: Allocator, io: Io, programs: program.Programs, cwd: ?[]const u8, adapter: Adapter, init: Init) Error!*Agent {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/lfs/custom.zig",
+    "source": "pub fn transfer(a: *Agent, request: Request, progress: anytype) Error!Completion {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/lfs/custom.zig",
+    "source": "const cp = std.unicode.utf8Decode(s[i .. i + len]) catch {",
+    "detail": "'utf8Decode' is deprecated: Deprecated. This function has an awkward API that is too easy to use incorrectly.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z026",
+    "path": "src/lfs/custom.zig",
+    "source": "a.send(\"{\\\"event\\\":\\\"terminate\\\"}\\n\") catch {};",
+    "detail": "empty catch block suppresses errors: `catch {}`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z028",
+    "path": "src/lfs/transfer_test.zig",
+    "source": "try fx.gitIn(dirs[i], &.{ \"config\", \"lfs.customtransfer.agent.path\", @import(\"build_options\").lfs_agent_path });",
+    "detail": "inline @import; assign to a top-level const",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/index/sparseindex.zig",
+    "source": "while (std.mem.indexOfScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {",
+    "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/worktree.zig",
+    "source": "while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| : (at = slash + 1) {",
+    "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z015",
+    "path": "src/fastimport.zig",
+    "source": "pub fn import(gpa: Allocator, io: Io, repo: *Repository, input: *Io.Reader, options: Options) Error!Report {",
+    "detail": "public function exposes private error set 'Error'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z030",
+    "path": "src/fastimport.zig",
+    "source": "fn deinit(imp: *Importer) void {",
+    "detail": "deinit should set imp.* = undefined",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/fastimport.zig",
+    "source": "const slash = std.mem.indexOfScalar(u8, path, '/');",
+    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/fastimport.zig",
+    "source": "const nl = std.mem.indexOfScalarPos(u8, message, at, '\\n');",
+    "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z023",
+    "path": "src/fastexport_test.zig",
+    "source": "fn allTips(gpa: Allocator, io: Io, git: *testgit.Repo, arena: Allocator) ![]fastexport.Tip {",
+    "detail": "'Allocator' parameter should come before 'other'",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z017",
+    "path": "src/transport.zig",
+    "source": "return try fromConnection(gpa, conn, service, kind);",
+    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try fromConnection(gpa, conn, servic; return value;`",
+    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
+  },
+  {
+    "rule": "Z028",
+    "path": "src/config.zig",
+    "source": "const wildmatch = @import(\"worktree/wildmatch.zig\");",
+    "detail": "inline @import; assign to a top-level const",
+    "reason": "Existing finish declaration before adopting preflight; this additional occurrence is retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/object/gitdate.zig",
+    "source": "const text = if (std.mem.indexOfScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;",
+    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
+    "reason": "Existing finish declaration before adopting preflight; this additional occurrence is retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/fastimport.zig",
+    "source": "const slash = std.mem.indexOfScalar(u8, path, '/');",
+    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
+    "reason": "Existing finish declaration before adopting preflight; this additional occurrence is retained through the CI rebase."
+  },
+  {
+    "rule": "Z011",
+    "path": "src/fastimport.zig",
+    "source": "const slash = std.mem.indexOfScalar(u8, path, '/');",
+    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
+    "reason": "Existing finish declaration before adopting preflight; this additional occurrence is retained through the CI rebase."
   }
 ]
