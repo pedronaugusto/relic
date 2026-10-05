@@ -112,6 +112,7 @@ test {
         _ = @import("patch/rangediff_test.zig");
         _ = @import("refs/filter_test.zig");
         _ = @import("commit/trailer_test.zig");
+        _ = @import("repo/safe_test.zig");
     }
 }
 

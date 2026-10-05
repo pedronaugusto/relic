@@ -9,6 +9,7 @@ pub const hooks = @import("repo/hooks.zig");
 pub const program = @import("repo/program.zig");
 
 pub const fs = @import("repo/fs.zig");
+pub const safe = @import("repo/safe.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -73,6 +74,13 @@ pub const Error = error{
     /// An in-memory edit changes which configuration files apply. Write
     /// that change with a standalone Config and refresh the repository.
     WorktreeConfigChanged,
+    /// The repository discovered belongs to another user and
+    /// `safe.directory` does not name it: git's "detected dubious
+    /// ownership".
+    DubiousOwnership,
+    /// A bare repository discovered where `safe.bareRepository` is
+    /// `explicit`: git's "cannot use bare repository".
+    ImplicitBareRepository,
 } || object.ParseError || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
@@ -234,6 +242,15 @@ pub const Repository = struct {
         /// Values that beat every file, after `config_overrides`, with the
         /// name and value apart: what `userconfig.Locations.pairs` holds.
         config_pairs: []const config_mod.Sources.Pair = &.{},
+        /// What is checked of who owns the repository found: git's own
+        /// check unless asked otherwise. `safe.directory` is read from the
+        /// system, global and command-line settings for a repository that is
+        /// not the current user's.
+        ownership: safe.Ownership = .check,
+        /// The directory is the git directory, as git's `GIT_DIR` and
+        /// `--git-dir` name one: git checks neither `safe.bareRepository`
+        /// nor ownership for it.
+        explicit: bool = false,
     };
 
     const Discovered = struct {
@@ -262,6 +279,7 @@ pub const Repository = struct {
                 errdefer git_dir.close(io);
                 const work = try current.openDir(io, ".", .{ .iterate = true });
                 errdefer work.close(io);
+                try checkOwnership(gpa, io, options, null, work, git_dir);
                 return try withCommon(gpa, io, git_dir, work);
             } else |_| {}
 
@@ -278,6 +296,7 @@ pub const Repository = struct {
                 errdefer git_dir.close(io);
                 const work = try current.openDir(io, ".", .{ .iterate = true });
                 errdefer work.close(io);
+                try checkOwnership(gpa, io, options, work, work, git_dir);
                 return try withCommon(gpa, io, git_dir, work);
             }
 
@@ -286,6 +305,8 @@ pub const Repository = struct {
             if (looksLikeGitDir(io, current)) {
                 const git_dir = try current.openDir(io, ".", .{ .iterate = true });
                 errdefer git_dir.close(io);
+                try checkBare(gpa, io, options, git_dir);
+                try checkOwnership(gpa, io, options, null, null, git_dir);
                 return try withCommon(gpa, io, git_dir, null);
             }
 
@@ -302,6 +323,59 @@ pub const Repository = struct {
             current_owned = true;
         }
         return error.NotARepository;
+    }
+
+    /// The settings a repository cannot write itself: the system, global
+    /// and command-line ones, which git's `git_protected_config` reads.
+    fn protectedConfig(gpa: Allocator, io: Io, options: OpenOptions) Error!config_mod.Config {
+        return config_mod.Config.open(gpa, io, .{
+            .system = options.system_config,
+            .xdg = options.xdg_config,
+            .global = options.global_config,
+            .command = options.config_overrides,
+            .pairs = options.config_pairs,
+        }, .{ .home = options.home });
+    }
+
+    /// git's `ensure_valid_ownership` for a repository found by discovery:
+    /// the `.git` file's directory (`gitfile_in`), the working tree and the
+    /// git directory are the current user's, or `safe.directory` names the
+    /// working tree, or the git directory where there is none.
+    fn checkOwnership(gpa: Allocator, io: Io, options: OpenOptions, gitfile_in: ?Io.Dir, work: ?Io.Dir, git_dir: Io.Dir) Error!void {
+        if (options.explicit or options.ownership == .trust) return;
+        if (options.ownership == .check) {
+            const owned = (if (gitfile_in) |d| fs.ownedByCurrentUser(io, d, ".git", options.home) else true) and
+                (if (work) |w| fs.ownedByCurrentUser(io, w, ".", options.home) else true) and
+                fs.ownedByCurrentUser(io, git_dir, ".", options.home);
+            if (owned) return;
+        }
+        const real = (work orelse git_dir).realPathFileAlloc(io, ".", gpa) catch return error.DubiousOwnership;
+        defer gpa.free(real);
+        const path = try safe.normalize(gpa, real);
+        defer gpa.free(path);
+        var protected = try protectedConfig(gpa, io, options);
+        defer protected.deinit();
+        if (!try safe.directoryIsSafe(gpa, io, &protected, path, options.home)) {
+            try refuseSetting(options.diagnostic, "safe.directory");
+            return error.DubiousOwnership;
+        }
+    }
+
+    /// git's refusal of a bare repository found by discovery under
+    /// `safe.bareRepository=explicit`.
+    fn checkBare(gpa: Allocator, io: Io, options: OpenOptions, git_dir: Io.Dir) Error!void {
+        if (options.explicit) return;
+        var protected = try protectedConfig(gpa, io, options);
+        defer protected.deinit();
+        if (safe.bareRepositories(&protected) == .all) return;
+        const real = git_dir.realPathFileAlloc(io, ".", gpa) catch return error.ImplicitBareRepository;
+        defer gpa.free(real);
+        const path = try safe.normalize(gpa, real);
+        defer gpa.free(path);
+        if (!safe.isImplicitBare(path)) {
+            try refuseSetting(options.diagnostic, "safe.bareRepository");
+            return error.ImplicitBareRepository;
+        }
     }
 
     fn withCommon(gpa: Allocator, io: Io, git_dir: Io.Dir, work_dir: ?Io.Dir) Error!Discovered {
@@ -326,8 +400,21 @@ pub const Repository = struct {
         };
     }
 
+    /// git's `is_git_directory`: a `HEAD`, and `objects` and `refs` here
+    /// or in the directory `commondir` names, as a linked worktree's git
+    /// directory has them.
     fn looksLikeGitDir(io: Io, dir: Io.Dir) bool {
         dir.access(io, "HEAD", .{}) catch return false;
+        var buf: [4096]u8 = undefined;
+        if (dir.readFile(io, "commondir", &buf)) |text| {
+            const target = std.mem.trim(u8, text, " \t\r\n");
+            // one that does not open is reported by the open that follows
+            var common = dir.openDir(io, target, .{}) catch return true;
+            defer common.close(io);
+            common.access(io, "objects", .{}) catch return false;
+            common.access(io, "refs", .{}) catch return false;
+            return true;
+        } else |_| {}
         dir.access(io, "objects", .{}) catch return false;
         dir.access(io, "refs", .{}) catch return false;
         return true;

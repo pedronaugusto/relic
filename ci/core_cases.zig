@@ -18,6 +18,8 @@ pub const families = [_]Family{
         "transport.fetchpack.test",
         "transport.filterspec.test",
         "repo.fs.test",
+        "repo.safe.test",
+        "repo.safe_test.test",
         "object.fsck.test",
         "object.gitdate.test",
         "hash.test",

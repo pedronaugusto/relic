@@ -102,6 +102,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/transport/tls/auth_wire.zig",
     } },
     .{ .name = "repository policy", .patterns = &.{
+        "src/repo/safe.zig",
         "src/diff/userdiff.zig",
         "src/config/state.zig",
         "src/transport/credential.zig",
@@ -212,6 +213,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/testing/refs_ownership.zig",
         "src/refs/reftablestack_test.zig",
         "src/repo_test.zig",
+        "src/repo/safe_test.zig",
         "src/odb/revindex_test.zig",
         "src/revwalk/mailmap.zig",
         "src/revwalk/revparse.zig",

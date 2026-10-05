@@ -695,6 +695,93 @@ pub fn hardLink(io: Io, dir: Io.Dir, old_path: []const u8, new_path: []const u8)
 
 extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]const u16, security_attributes: ?*anyopaque) callconv(.winapi) std.os.windows.BOOL;
 
+/// Whether `sub_path` in `dir` is the current user's: git's
+/// `is_path_owned_by_current_user`. On POSIX its owner, not following a
+/// symbolic link, is the effective user; on Windows its owner is the
+/// user's SID, or the Administrators group when the user is one, and the
+/// user's home (`home`, as git reads `HOME`) is always theirs. A path that
+/// cannot be asked about is not owned.
+pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
+    switch (builtin.os.tag) {
+        .windows => return ownedWindows(io, dir, sub_path, home),
+        .wasi => return true,
+        else => {
+            const found = switch (platstat.full(dir, sub_path)) {
+                .found => |f| f,
+                .absent => return false,
+                // a platform that cannot say whose a file is owns nothing
+                // of it to doubt
+                .unavailable => return true,
+            };
+            const euid: u32 = switch (builtin.os.tag) {
+                .linux => std.os.linux.geteuid(),
+                else => if (builtin.link_libc) std.c.geteuid() else return true,
+            };
+            return found.extra.uid == euid;
+        },
+    }
+}
+
+const SE_FILE_OBJECT: c_int = 1;
+const OWNER_SECURITY_INFORMATION: u32 = 0x1;
+const DACL_SECURITY_INFORMATION: u32 = 0x4;
+const TOKEN_QUERY: u32 = 0x8;
+const TokenUser: c_int = 1;
+const TokenLinkedToken: c_int = 19;
+const WinBuiltinAdministratorsSid: c_int = 26;
+
+extern "advapi32" fn GetNamedSecurityInfoW(object_name: [*:0]const u16, object_type: c_int, info: u32, owner: ?*?*anyopaque, group: ?*?*anyopaque, dacl: ?*?*anyopaque, sacl: ?*?*anyopaque, descriptor: ?*?*anyopaque) callconv(.winapi) u32;
+extern "advapi32" fn OpenProcessToken(process: std.os.windows.HANDLE, access: u32, token: *std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
+extern "advapi32" fn GetTokenInformation(token: std.os.windows.HANDLE, class: c_int, info: ?*anyopaque, length: u32, returned: *u32) callconv(.winapi) std.os.windows.BOOL;
+extern "advapi32" fn IsValidSid(sid: *anyopaque) callconv(.winapi) std.os.windows.BOOL;
+extern "advapi32" fn EqualSid(a: *anyopaque, b: *anyopaque) callconv(.winapi) std.os.windows.BOOL;
+extern "advapi32" fn IsWellKnownSid(sid: *anyopaque, kind: c_int) callconv(.winapi) std.os.windows.BOOL;
+extern "advapi32" fn CheckTokenMembership(token: ?std.os.windows.HANDLE, sid: *anyopaque, member: *std.os.windows.BOOL) callconv(.winapi) std.os.windows.BOOL;
+extern "kernel32" fn LocalFree(memory: ?*anyopaque) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn GetCurrentProcess() callconv(.winapi) std.os.windows.HANDLE;
+extern "kernel32" fn CloseHandle(handle: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
+
+fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
+    var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = dir.realPath(io, &root_buf) catch return false;
+    var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const path = if (std.mem.eql(u8, sub_path, "."))
+        root_buf[0..root_len]
+    else
+        std.fmt.bufPrint(&path_buf, "{s}\\{s}", .{ root_buf[0..root_len], sub_path }) catch return false;
+    if (home) |h| if (std.ascii.eqlIgnoreCase(h, path)) return true;
+    var wide_buf: [Io.Dir.max_path_bytes]u16 = undefined;
+    const wide_len = std.unicode.wtf8ToWtf16Le(&wide_buf, path) catch return false;
+    if (wide_len + 1 > wide_buf.len) return false;
+    wide_buf[wide_len] = 0;
+    var owner: ?*anyopaque = null;
+    var descriptor: ?*anyopaque = null;
+    if (GetNamedSecurityInfoW(wide_buf[0..wide_len :0].ptr, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, null, null, null, &descriptor) != 0) return false;
+    defer _ = LocalFree(descriptor);
+    const sid = owner orelse return false;
+    if (!IsValidSid(sid).toBool()) return false;
+    var token: std.os.windows.HANDLE = undefined;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token).toBool()) return false;
+    defer _ = CloseHandle(token);
+    var user_buf: [256]u8 align(@alignOf(usize)) = undefined;
+    var size: u32 = 0;
+    if (GetTokenInformation(token, TokenUser, &user_buf, user_buf.len, &size).toBool()) {
+        // TOKEN_USER begins with the user's SID
+        const user_sid: *anyopaque = @as(*const *anyopaque, @ptrCast(&user_buf)).*; // safe: TOKEN_USER's first field is a SID pointer, and the buffer is aligned for it
+        if (IsValidSid(user_sid).toBool() and EqualSid(sid, user_sid).toBool()) return true;
+    }
+    if (IsWellKnownSid(sid, WinBuiltinAdministratorsSid).toBool()) {
+        var member: std.os.windows.BOOL = .FALSE;
+        if (CheckTokenMembership(null, sid, &member).toBool() and member.toBool()) return true;
+        var linked: std.os.windows.HANDLE = undefined;
+        if (GetTokenInformation(token, TokenLinkedToken, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // safe: TOKEN_LINKED_TOKEN is one handle, which this receives
+            defer _ = CloseHandle(linked);
+            if (CheckTokenMembership(linked, sid, &member).toBool() and member.toBool()) return true;
+        }
+    }
+    return false;
+}
+
 /// A handle to `sub_path`, a file or a directory, that may read and write
 /// its attributes and times and do nothing else.
 fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameError || Io.Cancelable || error{ FileNotFound, AccessDenied, Unexpected })!Io.File {

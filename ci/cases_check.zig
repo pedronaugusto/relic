@@ -77,8 +77,8 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.indexOf(u8, text, selection) == null) return error.MissingExactSelection;
         }
     }
-    if (count != 1371 or comparisons.count() != 180) {
-        std.debug.print("Windows coverage: {d} source tests, {d} comparisons; expected 1371 and 180\n", .{ count, comparisons.count() });
+    if (count != 1374 or comparisons.count() != 180) {
+        std.debug.print("Windows coverage: {d} source tests, {d} comparisons; expected 1374 and 180\n", .{ count, comparisons.count() });
         return error.ChangedTestCount;
     }
     var filters = std.StringHashMap(void).init(a);
@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
     while (iterator.next()) |name| if (named(full, name.*) != 1) return error.MissingComparisonOwner;
     const timeout = config.object.get("test_timeout") orelse return error.MissingTimeout;
     if (timeout != .string or !std.mem.eql(u8, timeout.string, "--test-timeout 60s")) return error.ChangedTestBudget;
-    std.debug.print("Windows cases: 1371 source tests and 180 comparisons each have one owner\n", .{});
+    std.debug.print("Windows cases: 1374 source tests and 180 comparisons each have one owner\n", .{});
 }
 
 test "comparison assignment uses complete seeds rather than substring matches" {
