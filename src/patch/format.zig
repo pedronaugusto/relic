@@ -945,7 +945,7 @@ fn loadSide(ctx: *Ctx, e: diff.Entry) Error!Side {
 /// NUL in the first 8000 bytes.
 fn isBinaryPath(ctx: *Ctx, path: []const u8, bytes: []const u8) Error!bool {
     if (ctx.attrs) |attrs| {
-        if (ctx.repo.work_dir) |wt| attrs.enter(ctx.io, wt, path) catch {};
+        if (ctx.repo.work_dir) |wt| try attrs.enter(ctx.io, wt, path);
         const applied = try attrs.lookup(ctx.a, path, false);
         if (applied.get("diff")) |state| switch (state) {
             .unset => return true,

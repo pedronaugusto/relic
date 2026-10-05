@@ -1061,7 +1061,7 @@ fn removeState(r: *Run) Error!void {
     if (try r.readState("refs-to-delete")) |text| {
         var lines = std.mem.tokenizeScalar(u8, text, '\n');
         while (lines.next()) |name| {
-            r.repo.refStore().dirFor(name).deleteFile(r.io, name) catch {};
+            r.repo.refStore().dirFor(name).deleteFile(r.io, name) catch |err| if (err != error.FileNotFound) return err;
         }
     }
     try r.repo.git_dir.deleteTree(r.io, state_dir);

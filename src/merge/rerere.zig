@@ -304,7 +304,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
     }
     const wt = repo.work_dir orelse return error.BareRepository;
     // `rerere.enabled` true makes the directory.
-    repo.common_dir.createDirPath(io, "rr-cache") catch {};
+    try repo.common_dir.createDirPath(io, "rr-cache");
 
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
@@ -350,7 +350,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
         try rr.put(arena, path, .{ .hex = n.id.? });
         _ = try r.status(n.id.?);
         const sub = try std.fmt.allocPrint(arena, "rr-cache/{s}", .{n.id.?});
-        repo.common_dir.createDirPath(io, sub) catch {};
+        try repo.common_dir.createDirPath(io, sub);
     }
     sortRr(&rr);
 
@@ -619,7 +619,10 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Error!void {
             try r.removeFile(try r.pathOf(id, "preimage"));
             try r.removeFile(try r.pathOf(id, "postimage"));
             const sub = try std.fmt.allocPrint(arena, "rr-cache/{s}", .{hex});
-            repo.common_dir.deleteDir(io, sub) catch {};
+            repo.common_dir.deleteDir(io, sub) catch |err| switch (err) {
+                error.DirNotEmpty, error.FileNotFound => {},
+                else => return err,
+            };
         }
     }
     try head_mod.removeState(io, repo.git_dir, "MERGE_RR");
@@ -976,7 +979,10 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now: i64) Error!void {
     }
     for (to_remove.items) |hex| {
         const sub = try std.fmt.allocPrint(arena, "rr-cache/{s}", .{hex});
-        repo.common_dir.deleteDir(io, sub) catch {};
+        repo.common_dir.deleteDir(io, sub) catch |err| switch (err) {
+            error.DirNotEmpty, error.FileNotFound => {},
+            else => return err,
+        };
     }
 }
 

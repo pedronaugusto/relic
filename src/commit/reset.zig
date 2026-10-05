@@ -142,7 +142,7 @@ pub fn toTree(
     for (rewrite.items) |path| {
         const want = wanted.get(path).?;
         if (try fs.statAt(io, wt, path)) |found| {
-            if (found.kind == .directory) wt.deleteTree(io, path) catch {};
+            if (found.kind == .directory) try wt.deleteTree(io, path);
         }
         // Validate before `enter` consults a directory in the working tree.
         if (worktree.safepath.check(path, .worktree) != null) return error.UnsafePath;

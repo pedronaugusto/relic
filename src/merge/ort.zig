@@ -1298,11 +1298,11 @@ const Merge = struct {
 
     /// `handle_directory_level_conflicts`: a directory both sides renamed
     /// is renamed by neither's additions.
-    fn handleDirectoryLevelConflicts(m: *Merge) void {
+    fn handleDirectoryLevelConflicts(m: *Merge) Allocator.Error!void {
         var duplicated: std.ArrayList([]const u8) = .empty;
         var it = m.dir_renames[1].keyIterator();
         while (it.next()) |key| {
-            if (m.dir_renames[2].contains(key.*)) duplicated.append(m.arena, key.*) catch {};
+            if (m.dir_renames[2].contains(key.*)) try duplicated.append(m.arena, key.*);
         }
         for (duplicated.items) |key| {
             _ = m.dir_renames[1].remove(key);
@@ -1598,7 +1598,7 @@ const Merge = struct {
         if (need_dir_renames) {
             try m.getProvisionalDirectoryRenames(1, &clean);
             try m.getProvisionalDirectoryRenames(2, &clean);
-            m.handleDirectoryLevelConflicts();
+            try m.handleDirectoryLevelConflicts();
         }
 
         var collisions: [3]std.StringHashMapUnmanaged(*CollisionInfo) = .{ .empty, .empty, .empty };

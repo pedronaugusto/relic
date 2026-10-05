@@ -432,6 +432,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     var count: usize = 0;
     for (mailboxes) |box| {
         var cut = mailinfo.split(gpa, box, .{ .keep_cr = keep_cr, .mboxrd = format == .mboxrd, .allow_bare = true }) catch |err| {
+            // ziglint-ignore: Z026 the split's error is the one to report; a state directory left behind is what `am --abort` removes
             destroy(io, repo) catch {};
             return err;
         };

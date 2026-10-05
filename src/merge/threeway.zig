@@ -309,6 +309,16 @@ const Merged = struct {
     merged_attributes_blob: ?Oid = null,
 };
 
+/// Remove the directory at `path` if it is empty, as git's `rmdir` for a
+/// submodule's checkout: one with files in it, or already gone, stays as
+/// it is.
+fn removeIfEmpty(io: Io, wt: Io.Dir, path: []const u8) Io.Dir.DeleteDirError!void {
+    wt.deleteDir(io, path) catch |err| switch (err) {
+        error.DirNotEmpty, error.FileNotFound, error.NotDir => {},
+        else => return err,
+    };
+}
+
 /// Carry a merge from `ours` to `merged` into the index and the working
 /// tree, everything it would overwrite checked first. The outcome takes
 /// over `arena_instance`.
@@ -374,7 +384,7 @@ fn carry(
         if (entry.skip_worktree) continue;
         if (entry.mode == .gitlink) {
             // Only an empty submodule directory goes, as with git.
-            wt.deleteDir(io, path) catch {};
+            try removeIfEmpty(io, wt, path);
             outcome_removed += 1;
             continue;
         }
@@ -436,7 +446,7 @@ fn carry(
                         if (old.mode == .gitlink) continue;
                     }
                 }
-                wt.deleteTree(io, path) catch {};
+                try wt.deleteTree(io, path);
             }
         }
         try write_attrs.enter(io, wt, path);

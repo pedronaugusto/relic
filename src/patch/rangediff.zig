@@ -266,7 +266,7 @@ const Reader = struct {
     /// NUL in the first 8000 bytes.
     fn isBinary(r: *Reader, path: []const u8, bytes: []const u8) Error!bool {
         if (r.attrs) |*attrs| {
-            if (r.repo.work_dir) |wt| attrs.enter(r.io, wt, path) catch {};
+            if (r.repo.work_dir) |wt| try attrs.enter(r.io, wt, path);
             const applied = try attrs.lookup(r.a, path, false);
             if (applied.get("diff")) |state| switch (state) {
                 .unset => return true,

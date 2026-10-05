@@ -215,7 +215,9 @@ test "fuzz: any base 85 line and any deflated hunk decode or are refused by name
             const input = buf[0..len];
             var dst: [52]u8 = undefined;
             const want = @min(dst.len, input.len / 5 * 4);
-            decode85(dst[0..want], input[0 .. want / 4 * 5]) catch {};
+            decode85(dst[0..want], input[0 .. want / 4 * 5]) catch |err| switch (err) {
+                error.InvalidBase85 => {},
+            };
             const size = smith.value(u16) % 4096;
             const out = inflate(gpa, input, size) catch |err| switch (err) {
                 error.OutOfMemory => return err,

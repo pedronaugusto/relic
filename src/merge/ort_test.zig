@@ -349,7 +349,7 @@ const Scenario = struct {
     }
 
     fn remove(s: *Scenario, path: []const u8) !void {
-        s.repo.dir.deleteFile(s.io, path) catch {};
+        s.repo.dir.deleteFile(s.io, path) catch |err| if (err != error.FileNotFound) return err;
     }
 
     fn write(s: *Scenario, path: []const u8, bytes: []const u8) !void {
@@ -359,10 +359,10 @@ const Scenario = struct {
         var at: usize = 0;
         while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| {
             const prefix = path[0..slash];
-            if (!try isDirectory(s, prefix)) s.repo.dir.deleteFile(s.io, prefix) catch {};
+            if (!try isDirectory(s, prefix)) s.repo.dir.deleteFile(s.io, prefix) catch |err| if (err != error.FileNotFound) return err;
             at = slash + 1;
         }
-        s.repo.dir.deleteFile(s.io, path) catch {};
+        s.repo.dir.deleteFile(s.io, path) catch |err| if (err != error.FileNotFound) return err;
         try s.repo.writeFile(s.io, path, bytes);
     }
 
@@ -431,7 +431,7 @@ const Scenario = struct {
                 9 => {
                     if (builtin.os.tag == .windows) continue;
                     try s.remove(path);
-                    s.repo.dir.symLink(s.io, "target", path, .{}) catch {};
+                    try s.repo.dir.symLink(s.io, "target", path, .{});
                 },
                 10 => {
                     // A directory where a file was.

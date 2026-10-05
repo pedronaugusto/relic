@@ -875,6 +875,7 @@ const TempFile = struct {
     }
 
     fn remove(f: *TempFile, io: Io) void {
+        // ziglint-ignore: Z026 as git's delete_tempfile: the signature is already read, and a temporary file left behind holds only what was signed or verified
         Io.Dir.deleteFileAbsolute(io, f.path) catch {};
     }
 };

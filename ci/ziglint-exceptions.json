@@ -56,13 +56,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/commit/reset.zig",
-    "source": "if (found.kind == .directory) wt.deleteTree(io, path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/commit/notes.zig",
     "source": "pub fn open(gpa: Allocator, io: Io, repo: *Repository, ref: []const u8, combine: Combine) Error!Notes {",
@@ -364,13 +357,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/commit/rebase.zig",
-    "source": "r.repo.refStore().dirFor(name).deleteFile(r.io, name) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/commit/cache.zig",
     "source": "pub fn get(c: *Cache, gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, out: ?Allocator) Error!Info {",
@@ -445,13 +431,6 @@
     "path": "src/commit/signing.zig",
     "source": "const nl = std.mem.indexOfScalarPos(u8, bytes, at, '\\n');",
     "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/commit/signing.zig",
-    "source": "Io.Dir.deleteFileAbsolute(io, f.path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -851,13 +830,6 @@
     "path": "src/commit/signing_test.zig",
     "source": "fn deinit(k: *Keyed, io: Io) void {",
     "detail": "deinit should set k.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/commit/signing_test.zig",
-    "source": "_ = k.run(io, &.{ \"gpgconf\", \"--kill\", \"all\" }) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -1785,20 +1757,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/merge/threeway.zig",
-    "source": "wt.deleteDir(io, path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/merge/threeway.zig",
-    "source": "wt.deleteTree(io, path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/merge/strategy.zig",
     "source": "pub fn split(arena: Allocator, line_in: []const u8) SplitError![]const []const u8 {",
@@ -1915,34 +1873,6 @@
     "path": "src/merge/rerere.zig",
     "source": "pub fn lessThan(c: @This(), a: usize, b: usize) bool {",
     "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/merge/rerere.zig",
-    "source": "repo.common_dir.createDirPath(io, \"rr-cache\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/merge/rerere.zig",
-    "source": "repo.common_dir.createDirPath(io, sub) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/merge/rerere.zig",
-    "source": "repo.common_dir.deleteDir(io, sub) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/merge/rerere.zig",
-    "source": "repo.common_dir.deleteDir(io, sub) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2072,13 +2002,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/merge/ort.zig",
-    "source": "if (m.dir_renames[2].contains(key.*)) duplicated.append(m.arena, key.*) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z030",
     "path": "src/merge/ort_test.zig",
     "source": "fn deinit(o: *SubOpener) void {",
@@ -2090,34 +2013,6 @@
     "path": "src/merge/ort_test.zig",
     "source": "while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| {",
     "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/merge/ort_test.zig",
-    "source": "s.repo.dir.deleteFile(s.io, path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/merge/ort_test.zig",
-    "source": "if (!try isDirectory(s, prefix)) s.repo.dir.deleteFile(s.io, prefix) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/merge/ort_test.zig",
-    "source": "s.repo.dir.deleteFile(s.io, path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/merge/ort_test.zig",
-    "source": "s.repo.dir.symLink(s.io, \"target\", path, .{}) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -4389,27 +4284,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/patch/apply.zig",
-    "source": "st.removed_symlinks.put(st.a, p.old_name.?, {}) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/patch/apply.zig",
-    "source": "if (p.new_name != null and patchparse.isSymlink(p.new_mode)) st.kept_symlinks.put(st.a, p.new_name.?, {}) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/patch/apply.zig",
-    "source": "wt.deleteDir(st.io, old) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/patch/mail/format.zig",
     "source": "const text = if (std.mem.indexOfScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;",
@@ -4515,13 +4389,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/patch/format.zig",
-    "source": "if (ctx.repo.work_dir) |wt| attrs.enter(ctx.io, wt, path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/patch/am.zig",
     "source": "pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []const u8, options: Options) Error!Outcome {",
@@ -4571,13 +4438,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/patch/am.zig",
-    "source": "destroy(io, repo) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z030",
     "path": "src/patch/apply_test.zig",
     "source": "fn deinit(p: *Pair) void {",
@@ -4589,13 +4449,6 @@
     "path": "src/patch/binary.zig",
     "source": "pub fn inflate(gpa: Allocator, data: []const u8, size: usize) InflateError![]u8 {",
     "detail": "public function exposes private error set 'InflateError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/patch/binary.zig",
-    "source": "decode85(dst[0..want], input[0 .. want / 4 * 5]) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -7893,13 +7746,6 @@
     "path": "src/patch/rangediff.zig",
     "source": "fn at(s: @This(), column: i32, row: i32) i32 {",
     "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/patch/rangediff.zig",
-    "source": "if (r.repo.work_dir) |wt| attrs.enter(r.io, wt, path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {

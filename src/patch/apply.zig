@@ -620,7 +620,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     if (!options.check and !st.apply and st.ws_action == .die) {
         // refused for whitespace: nothing is checked or written
     } else if (st.apply or options.check) {
-        prepareSymlinkChanges(&st, list.items);
+        try prepareSymlinkChanges(&st, list.items);
         try prepareFnTable(&st, list.items);
         for (list.items) |entry| {
             if (!try checkPatch(&st, entry)) any_failed = true;
@@ -1463,13 +1463,13 @@ fn prepareFnTable(st: *State, list: []const *Entry) Allocator.Error!void {
     }
 }
 
-fn prepareSymlinkChanges(st: *State, list: []const *Entry) void {
+fn prepareSymlinkChanges(st: *State, list: []const *Entry) Allocator.Error!void {
     for (list) |entry| {
         const p = &entry.p;
         if (p.old_name != null and patchparse.isSymlink(p.old_mode) and (p.is_rename or p.is_delete == .yes)) {
-            st.removed_symlinks.put(st.a, p.old_name.?, {}) catch {};
+            try st.removed_symlinks.put(st.a, p.old_name.?, {});
         }
-        if (p.new_name != null and patchparse.isSymlink(p.new_mode)) st.kept_symlinks.put(st.a, p.new_name.?, {}) catch {};
+        if (p.new_name != null and patchparse.isSymlink(p.new_mode)) try st.kept_symlinks.put(st.a, p.new_name.?, {});
     }
 }
 
@@ -1688,7 +1688,10 @@ fn removeFile(st: *State, entry: *Entry, rmdir_empty: bool) Error!void {
     if (!st.cached) {
         const wt = st.wt.?;
         if (patchparse.isGitlink(entry.p.old_mode)) {
-            wt.deleteDir(st.io, old) catch {};
+            wt.deleteDir(st.io, old) catch |err| switch (err) {
+                error.DirNotEmpty, error.FileNotFound, error.NotDir => {},
+                else => return err,
+            };
         } else {
             wt.deleteFile(st.io, old) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => {},
