@@ -163,21 +163,7 @@
   {
     "rule": "debug-print",
     "path": "ci/cases_check.zig",
-    "source": "std.debug.print(\"Windows coverage: {d} source tests, {d} comparisons; expected 1397 and 180\\n\", .{ count, comparisons.count() });",
-    "detail": "std.debug.print outside tests and src/testing/",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "debug-print",
-    "path": "ci/cases_check.zig",
     "source": "std.debug.print(\"Windows family: stale module {s}\\n\", .{module});",
-    "detail": "std.debug.print outside tests and src/testing/",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "debug-print",
-    "path": "ci/cases_check.zig",
-    "source": "std.debug.print(\"Windows cases: 1397 source tests and 180 comparisons each have one owner\\n\", .{});",
     "detail": "std.debug.print outside tests and src/testing/",
     "reason": "existing at gate adoption; burned down in the cleanup pass"
   },

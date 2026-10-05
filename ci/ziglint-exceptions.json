@@ -5985,13 +5985,6 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z007",
-    "path": "src/transport_test.zig",
-    "source": "const httpclient = @import(\"transport/httpclient.zig\");",
-    "detail": "duplicate import '\"transport/httpclient.zig\"'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z020",
     "path": "src/transport_test.zig",
     "source": "const self_: *@This() = @ptrCast(@alignCast(context.?));",

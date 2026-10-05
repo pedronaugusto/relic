@@ -27,6 +27,13 @@ fn named(values: std.json.Value, wanted: []const u8) usize {
     return count;
 }
 
+fn report(comptime format: []const u8, io: std.Io, args: anytype) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stderr().writer(io, &buffer);
+    try writer.interface.print(format, args);
+    try writer.interface.flush();
+}
+
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
@@ -77,8 +84,8 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.indexOf(u8, text, selection) == null) return error.MissingExactSelection;
         }
     }
-    if (count != 1397 or comparisons.count() != 180) {
-        std.debug.print("Windows coverage: {d} source tests, {d} comparisons; expected 1397 and 180\n", .{ count, comparisons.count() });
+    if (count != 1398 or comparisons.count() != 180) {
+        try report("Windows coverage: {d} source tests, {d} comparisons; expected 1398 and 180\n", io, .{ count, comparisons.count() });
         return error.ChangedTestCount;
     }
     var filters = std.StringHashMap(void).init(a);
@@ -121,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
     while (iterator.next()) |name| if (named(full, name.*) != 1) return error.MissingComparisonOwner;
     const timeout = config.object.get("test_timeout") orelse return error.MissingTimeout;
     if (timeout != .string or !std.mem.eql(u8, timeout.string, "--test-timeout 60s")) return error.ChangedTestBudget;
-    std.debug.print("Windows cases: 1397 source tests and 180 comparisons each have one owner\n", .{});
+    try report("Windows cases: 1398 source tests and 180 comparisons each have one owner\n", io, .{});
 }
 
 test "comparison assignment uses complete seeds rather than substring matches" {

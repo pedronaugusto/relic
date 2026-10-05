@@ -18,7 +18,7 @@ const repo_mod = @import("repo.zig");
 const fetch_mod = @import("transport/fetch.zig");
 const clone_mod = @import("transport/clone.zig");
 const transport = @import("transport.zig");
-const http_client = @import("transport/httpclient.zig");
+const httpclient = @import("transport/httpclient.zig");
 const testgit = @import("testing/git.zig");
 const testremote = @import("testing/remote.zig");
 const testlfs = @import("testing/lfs.zig");
@@ -858,26 +858,14 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
     defer root.cleanup();
-    std.debug.print("https fixture: history\n", .{});
     try servedRepo(gpa, io, &root, 2);
-    std.debug.print("https fixture: HTTP start\n", .{});
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
-    defer {
-        std.debug.print("https fixture: HTTP stop\n", .{});
-        server.stop();
-        std.debug.print("https fixture: HTTP stopped\n", .{});
-    }
-    std.debug.print("https fixture: TLS start\n", .{});
+    defer server.stop();
     const front = try testremote.TlsFront.start(gpa, io, server.port);
-    defer {
-        std.debug.print("https fixture: TLS stop\n", .{});
-        front.stop(io);
-        std.debug.print("https fixture: TLS stopped\n", .{});
-    }
+    defer front.stop(io);
     const url = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(url);
     for ([_]bool{ false, true }) |through_env| {
-        std.debug.print("https fixture: variant {any}\n", .{through_env});
         var env = try testremote.environ(gpa);
         defer env.deinit();
         if (through_env) try env.put("GIT_SSL_NO_VERIFY", "1");
@@ -889,17 +877,13 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
             try r.exec(io, &.{ "remote", "add", "origin", url });
             if (!through_env) try r.exec(io, &.{ "config", "http.sslVerify", "false" });
         }
-        std.debug.print("https fixture: git fetch\n", .{});
         const fetched = try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true);
         gpa.free(fetched);
-        std.debug.print("https fixture: git fetched; open relic\n", .{});
         var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
         defer repo.deinit(io);
         var warnings: @import("repo/warning.zig").Warnings = .init(gpa);
         defer warnings.deinit();
-        std.debug.print("https fixture: relic fetch\n", .{});
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
-        std.debug.print("https fixture: relic fetched\n", .{});
         outcome.deinit();
         try expectSameFetch(gpa, io, &by_git, &by_relic);
         try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
@@ -913,11 +897,12 @@ test "an idle HTTPS connection does not block another client" {
     var root = testing.tmpDir(.{ .iterate = true });
     defer root.cleanup();
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .keep_alive = true, .redirect = true });
-    defer server.stop();
+    var stopped = false;
+    defer if (!stopped) server.stop();
     const front = try testremote.TlsFront.start(gpa, io, server.port);
     defer front.stop(io);
-    const target: http_client.Target = .{ .tls = true, .host = "127.0.0.1", .port = front.port };
-    var idle: http_client.Client = .init(gpa, io);
+    const target: httpclient.Target = .{ .tls = true, .host = "127.0.0.1", .port = front.port };
+    var idle: httpclient.Client = .init(gpa, io);
     defer idle.deinit();
     idle.verify = false;
     idle.timeouts = .{ .handshake = .fromSeconds(10), .activity = .fromSeconds(10) };
@@ -929,16 +914,21 @@ test "an idle HTTPS connection does not block another client" {
     }
     // The first client's connection stays pooled while the second makes a
     // request. Closing it before this request would hide a serialized server.
-    var active: http_client.Client = .init(gpa, io);
+    var active: httpclient.Client = .init(gpa, io);
     defer active.deinit();
     active.verify = false;
     active.timeouts = .{ .handshake = .fromSeconds(10), .activity = .fromSeconds(10) };
-    var response = try active.send(.GET, target, "/moved/second", &.{}, null, null);
-    defer response.deinit();
-    try testing.expectEqual(std.http.Status.found, response.head.status);
-    _ = try response.reader().discardRemaining();
+    {
+        var response = try active.send(.GET, target, "/moved/second", &.{}, null, null);
+        defer response.deinit();
+        try testing.expectEqual(std.http.Status.found, response.head.status);
+        _ = try response.reader().discardRemaining();
+    }
     try testing.expectEqual(@as(u32, 1), idle.connections);
     try testing.expectEqual(@as(u32, 1), active.connections);
+    // Shutdown must also release handlers waiting on pooled connections.
+    server.stop();
+    stopped = true;
 }
 
 test "requests share one connection and a large upload-pack request is gzipped, as git's are" {
@@ -963,7 +953,7 @@ test "requests share one connection and a large upload-pack request is gzipped, 
             defer r.deinit();
             try testremote.addCommits(gpa, io, &r, 100, 40);
             try r.exec(io, &.{ "remote", "add", "origin", url });
-            const before = server.connections;
+            const before = server.connectionCount();
             const log_before = try server.requests(gpa);
             defer gpa.free(log_before);
             if (who == 0) {
@@ -973,7 +963,7 @@ test "requests share one connection and a large upload-pack request is gzipped, 
             const log_after = try server.requests(gpa);
             defer gpa.free(log_after);
             logs[who] = try gpa.dupe(u8, log_after[log_before.len..]);
-            connections[who] = server.connections - before;
+            connections[who] = server.connectionCount() - before;
         }
         defer for (logs) |l| gpa.free(l);
         try testing.expectEqualStrings(logs[0], logs[1]);
@@ -1288,7 +1278,6 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
 test "SOCKS authentication failures, refused commands and unreachable hosts keep their names" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const httpclient = @import("transport/httpclient.zig");
     const target: httpclient.Target = .{ .tls = false, .host = "remote.invalid", .port = 80 };
     for ([_][]const u8{ "socks4a", "socks5h" }) |scheme| {
         const proxy = try testremote.SocksProxy.start(gpa, io, .{ .credential = .{ .user = "ada", .password = "secret" } });
@@ -1322,7 +1311,6 @@ test "SOCKS authentication failures, refused commands and unreachable hosts keep
 test "a stalled SOCKS negotiation is bounded by connect and handshake timeouts" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const httpclient = @import("transport/httpclient.zig");
     for ([_]httpclient.Timeouts{
         .{ .connect = .fromMilliseconds(20) },
         .{ .handshake = .fromMilliseconds(20) },

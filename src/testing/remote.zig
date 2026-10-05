@@ -153,8 +153,8 @@ pub fn capturingSsh(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
 
 /// An HTTP server on 127.0.0.1 that hands every request to
 /// `git http-backend` as a CGI program, which is git's own smart HTTP
-/// server. Every response closes its connection, so the server takes one
-/// connection at a time and never waits on an idle one.
+/// server. Connections are served independently so an idle client cannot
+/// hold up another, including when the TLS front connects before a request.
 pub const HttpServer = struct {
     gpa: Allocator,
     io: Io,
@@ -165,6 +165,7 @@ pub const HttpServer = struct {
     env: Environ.Map,
     options: HttpOptions,
     task: Io.Future(void) = undefined,
+    handlers: Io.Group = .init,
     stopping: std.atomic.Value(bool) = .init(false),
     /// One line per request: `<method> <target> <auth>`, where `<auth>` is
     /// `auth` when an `Authorization` header came and `-` when not.
@@ -229,6 +230,7 @@ pub const HttpServer = struct {
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         s.task.await(io);
         s.listener.deinit(io);
+        s.handlers.cancel(io);
         s.env.deinit();
         s.gpa.free(s.root);
         s.log.deinit(s.gpa);
@@ -247,13 +249,23 @@ pub const HttpServer = struct {
         return gpa.dupe(u8, s.log.items);
     }
 
+    pub fn connectionCount(s: *HttpServer) u32 {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        return s.connections;
+    }
+
     fn serve(s: *HttpServer) void {
         while (!s.stopping.load(.acquire)) {
             const stream = s.listener.accept(s.io) catch return;
-            defer stream.close(s.io);
-            if (s.stopping.load(.acquire)) return;
-            s.handle(stream) catch {};
+            if (s.stopping.load(.acquire)) return stream.close(s.io);
+            s.handlers.concurrent(s.io, serveConnection, .{ s, stream }) catch stream.close(s.io);
         }
+    }
+
+    fn serveConnection(s: *HttpServer, stream: Io.net.Stream) void {
+        defer stream.close(s.io);
+        s.handle(stream) catch {};
     }
 
     fn handle(s: *HttpServer, stream: Io.net.Stream) !void {
