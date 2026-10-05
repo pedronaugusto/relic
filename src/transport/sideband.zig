@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 
 const pktline = @import("pktline.zig");
 const progress_mod = @import("progress.zig");
@@ -44,6 +45,8 @@ pub const Demux = struct {
     /// A demultiplexer over `in`, whose buffer must hold a whole pkt-line.
     /// `buffer` is the data stream's own, and may be empty.
     pub fn init(in: *Io.Reader, buffer: []u8, progress: ?progress_mod.Progress) Demux {
+        // `pending` is a view of `in`'s buffer: a whole line must fit.
+        assert(in.buffer.len >= pktline.max_line);
         return .{
             .in = in,
             .progress = progress,

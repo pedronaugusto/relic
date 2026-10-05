@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const program = @import("../repo/program.zig");
@@ -189,6 +190,7 @@ const Tail = struct {
         }
         @memcpy(tail.buffer[tail.len..][0..bytes.len], bytes);
         tail.len += bytes.len;
+        assert(tail.len <= tail.buffer.len);
     }
 };
 

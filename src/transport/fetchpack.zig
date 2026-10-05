@@ -20,6 +20,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const assert = std.debug.assert;
 
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
@@ -543,6 +544,8 @@ fn fetchV0(
                 },
             }
         }
+        // This round's flush added one before its answers were read.
+        assert(flushes > 0);
         flushes -= 1;
         if (got_continue and in_vain > max_in_vain) break;
         if (got_ready) break;
@@ -631,6 +634,10 @@ fn drainAcksV0(conn: *Connection, in: *Io.Reader, kind: hash.Kind, flushes: usiz
             if (ack == .ack) break;
             multi = 1;
             continue;
+        }
+        if (pending == 0) {
+            conn.setMessage("the server said NAK to a flush that was not sent");
+            return error.ProtocolError;
         }
         pending -= 1;
     }

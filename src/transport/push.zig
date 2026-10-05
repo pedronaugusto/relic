@@ -417,6 +417,9 @@ fn send(
     outcome: *Outcome,
 ) Error!void {
     assert(request.commands.len != 0);
+    // A helper is told each command's source and `+` by position.
+    assert(request.sources.len == request.commands.len);
+    assert(request.force.len == request.commands.len);
     var include: std.ArrayList(Oid) = .empty;
     for (request.commands) |c| {
         if (!c.new.isZero()) try include.append(arena, c.new);

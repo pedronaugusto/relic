@@ -715,6 +715,8 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
         try batchChunk(&state, chunk, outcome.results, missing_here.items, adapters, &chosen, &jobs);
     }
     if (jobs.items.len == 0) return outcome;
+    // Each job settles one pending object's result, once.
+    assert(jobs.items.len <= pending.items.len);
     state.jobs = jobs.items;
     state.total_objects = jobs.items.len;
     for (jobs.items) |j| state.total_bytes += j.result.size;
@@ -1407,6 +1409,8 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
     while (true) {
         var all: std.ArrayList(http.Header) = .empty;
         try all.appendSlice(scratch, req.headers);
+        // `hashResumed` starts again from a file as long as the object.
+        if (attempt_range) assert(partial.from < req.size);
         if (attempt_range) try all.append(scratch, .{ .name = "Range", .value = try std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ partial.from, req.size - 1 }) });
         const sent = server.client.send(.{
             .method = .GET,

@@ -22,6 +22,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const assert = std.debug.assert;
 
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
@@ -169,6 +170,11 @@ pub const Header = struct {
         }
         h.prerequisites = prerequisites.items;
         h.references = references.items;
+        // Only v3 says anything but SHA-1 and no filter, as `write` writes.
+        if (h.version == .v2) {
+            assert(h.object_format == .sha1);
+            assert(h.filter == null);
+        }
         return h;
     }
 
@@ -477,6 +483,8 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     const min: Version = if (kind != .sha1 or request.filter != null) .v3 else .v2;
     const version = request.version orelse min;
     if (@intFromEnum(version) < @intFromEnum(min)) return error.VersionTooLow;
+    // A v2 header cannot say its format or filter: `read` takes SHA-1 and none.
+    assert(version == .v3 or (kind == .sha1 and filter_text == null));
 
     // The revisions, as the pending list git's revision parser makes.
     const Pending = struct { oid: Oid, name: []const u8, negative: bool, commit: ?Oid };

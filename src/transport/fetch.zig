@@ -954,6 +954,9 @@ fn planUpdates(
                     });
                 }
                 const dst = entry.dst orelse continue;
+                // `fetchMap` keeps only destinations under `refs/` with a
+                // well-formed name.
+                assert(validLocal(dst));
                 const decision = try decide(gpa, io, repo, entry.*, dst, options.force, local);
                 try updates.append(arena, .{
                     .remote_ref = entry.name,
@@ -1314,6 +1317,7 @@ fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const
         try wants.append(arena, entry.oid);
         try want_names.append(arena, entry.name);
     }
+    assert(wants.items.len == want_names.items.len);
     return .{ .oids = wants.items, .names = want_names.items };
 }
 

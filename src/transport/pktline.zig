@@ -14,11 +14,17 @@
 
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 
 /// The longest line, its four length digits included.
 pub const max_line: usize = 65520;
 /// The most data one line carries.
 pub const max_data: usize = max_line - 4;
+
+comptime {
+    // Four hexadecimal digits say every length a line can have.
+    assert(max_line <= 0xffff);
+}
 
 pub const Packet = union(enum) {
     /// `0000`: the end of a message.
@@ -42,7 +48,7 @@ pub const ReadError = error{
 /// and asserts. The end of the stream before a whole line is
 /// `error.EndOfStream`.
 pub fn read(r: *Io.Reader) ReadError!Packet {
-    std.debug.assert(r.buffer.len >= max_line);
+    assert(r.buffer.len >= max_line);
     const head = try r.takeArray(4);
     const len = parseLength(head) orelse return error.BadPacket;
     return switch (len) {
@@ -107,6 +113,10 @@ pub fn responseEnd(w: *Io.Writer) Io.Writer.Error!void {
 }
 
 fn writeLength(w: *Io.Writer, len: usize) Io.Writer.Error!void {
+    // A data line, which `read` takes back: the special lengths below four
+    // are written whole by their own functions.
+    assert(len >= 4);
+    assert(len <= max_line);
     const digits = "0123456789abcdef";
     const head = [4]u8{
         digits[(len >> 12) & 0xf],

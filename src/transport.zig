@@ -60,6 +60,7 @@ pub const remotehelper = @import("transport/remotehelper.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const assert = std.debug.assert;
 
 const hash = @import("hash.zig");
 const odb_mod = @import("odb.zig");
@@ -470,7 +471,10 @@ pub const Session = struct {
     /// Send a push, reading the objects from `db`, and return the remote's
     /// report of each command.
     pub fn push(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: PushRequest) Error!sendpack.Report {
-        std.debug.assert(s.service == .receive_pack);
+        assert(s.service == .receive_pack);
+        // A helper's sources and `+`s go with the commands by position.
+        assert(request.sources.len == 0 or request.sources.len == request.commands.len);
+        assert(request.force.len == 0 or request.force.len == request.commands.len);
         switch (s.impl) {
             .local => |here| {
                 // A repository on this machine runs no hooks for relic, and
@@ -546,7 +550,9 @@ pub const Session = struct {
         request: FetchRequest,
         options: fetchpack.Options,
     ) Error!Fetched {
-        std.debug.assert(s.service == .upload_pack);
+        assert(s.service == .upload_pack);
+        // The names go with the wants by position, or are not given.
+        assert(request.want_names.len == 0 or request.want_names.len == request.wants.len);
         if (request.wants.len == 0) return .{ .pack = null, .objects = 0 };
         switch (s.impl) {
             .local => |here| {

@@ -43,6 +43,7 @@ pub const lfsapi = @import("lfs/api.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const assert = std.debug.assert;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const config_mod = @import("config.zig");
@@ -195,8 +196,9 @@ pub const Pointer = struct {
 
     /// `encode` into a buffer of the caller's.
     pub fn encodeBuf(p: *const Pointer, buf: *[max_encoded_len]u8) []const u8 {
+        assert(p.extension_count <= max_extensions);
         var w: Io.Writer = .fixed(buf);
-        // unreachable: max_encoded_len holds the version line, every extension line and the oid and size lines
+        // unreachable: extensions come only from `decode`, out of at most 1024 bytes, and their lines encode no longer than they were read; with the version, oid and size lines that is under max_encoded_len
         p.encode(&w) catch unreachable;
         return w.buffered();
     }
