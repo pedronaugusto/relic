@@ -857,14 +857,26 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
     defer root.cleanup();
+    std.debug.print("https fixture: history\n", .{});
     try servedRepo(gpa, io, &root, 2);
+    std.debug.print("https fixture: HTTP start\n", .{});
     const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
-    defer server.stop();
+    defer {
+        std.debug.print("https fixture: HTTP stop\n", .{});
+        server.stop();
+        std.debug.print("https fixture: HTTP stopped\n", .{});
+    }
+    std.debug.print("https fixture: TLS start\n", .{});
     const front = try testremote.TlsFront.start(gpa, io, server.port);
-    defer front.stop(io);
+    defer {
+        std.debug.print("https fixture: TLS stop\n", .{});
+        front.stop(io);
+        std.debug.print("https fixture: TLS stopped\n", .{});
+    }
     const url = try std.fmt.allocPrint(gpa, "https://127.0.0.1:{d}/repo.git", .{front.port});
     defer gpa.free(url);
     for ([_]bool{ false, true }) |through_env| {
+        std.debug.print("https fixture: variant {any}\n", .{through_env});
         var env = try testremote.environ(gpa);
         defer env.deinit();
         if (through_env) try env.put("GIT_SSL_NO_VERIFY", "1");
@@ -876,13 +888,17 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
             try r.exec(io, &.{ "remote", "add", "origin", url });
             if (!through_env) try r.exec(io, &.{ "config", "http.sslVerify", "false" });
         }
+        std.debug.print("https fixture: git fetch\n", .{});
         const fetched = try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true);
         gpa.free(fetched);
+        std.debug.print("https fixture: git fetched; open relic\n", .{});
         var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
         defer repo.deinit(io);
         var warnings: @import("repo/warning.zig").Warnings = .init(gpa);
         defer warnings.deinit();
+        std.debug.print("https fixture: relic fetch\n", .{});
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
+        std.debug.print("https fixture: relic fetched\n", .{});
         outcome.deinit();
         try expectSameFetch(gpa, io, &by_git, &by_relic);
         try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
