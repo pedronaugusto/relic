@@ -67,7 +67,7 @@ pub fn toTree(
 
     // Every path the index has, at any stage, and whether it is conflicted.
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
-    var current: std.StringArrayHashMapUnmanaged(?index_mod.Entry) = .empty;
+    var current: std.array_hash_map.String(?index_mod.Entry) = .empty;
     for (index.entries.items) |entry| {
         const path = try arena.dupe(u8, entry.path);
         if (entry.stage != 0) {

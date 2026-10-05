@@ -427,7 +427,7 @@ fn matchesAny(specs: []const []const u8, path: []const u8) bool {
         if (spec.len == 0 or std.mem.eql(u8, spec, ".")) return true;
         if (std.mem.eql(u8, spec, path)) return true;
         if (std.mem.startsWith(u8, path, spec) and path.len > spec.len and path[spec.len] == '/') return true;
-        if (std.mem.indexOfAny(u8, spec, "*?[") != null) {
+        if (std.mem.findAny(u8, spec, "*?[") != null) {
             if (wildmatch.match(spec, path, .{ .pathname = false }) catch false) return true;
         }
     }
@@ -472,7 +472,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
 
     // What differs, and what the working-tree commit takes from the disk:
     // every tracked path whose file is not what `HEAD` has.
-    var candidates: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var candidates: std.array_hash_map.String(void) = .empty;
     var head_it = head_map.keyIterator();
     while (head_it.next()) |key| {
         if (matchesAny(options.paths, key.*)) try candidates.put(arena, key.*, {});
@@ -659,7 +659,7 @@ fn resetAfterPush(
     }
 
     // Only the named paths go back to `HEAD`.
-    var paths: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var paths: std.array_hash_map.String(void) = .empty;
     var head_it = head_map.keyIterator();
     while (head_it.next()) |key| if (matchesAny(options.paths, key.*)) try paths.put(ctx.arena, key.*, {});
     for (ctx.index.entries.items) |e| if (matchesAny(options.paths, e.path)) try paths.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
@@ -676,7 +676,7 @@ fn resetAfterPush(
 
     if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
         var index_map = try worktree.flatten(ctx.arena, io, db, index_tree);
-        var keep: std.StringArrayHashMapUnmanaged(void) = .empty;
+        var keep: std.array_hash_map.String(void) = .empty;
         var it = index_map.keyIterator();
         while (it.next()) |key| if (matchesAny(options.paths, key.*)) try keep.put(ctx.arena, key.*, {});
         for (ctx.index.entries.items) |e| if (matchesAny(options.paths, e.path)) try keep.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
@@ -922,7 +922,7 @@ fn patchApplies(gpa: Allocator, io: Io, db: *odb_mod.Odb, base: Oid, current: Oi
     var current_map = try worktree.flatten(arena, io, db, current);
     var staged_map = try worktree.flatten(arena, io, db, staged);
 
-    var paths: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var paths: std.array_hash_map.String(void) = .empty;
     inline for (.{ &base_map, &staged_map }) |map| {
         var it = map.keyIterator();
         while (it.next()) |key| try paths.put(arena, key.*, {});

@@ -92,9 +92,9 @@ const SubOpener = struct {
 /// on "Assertion failed: ..., file merge-ort.c, line n", which names no
 /// function; there the expression alone says which assertion it was.
 fn gitAsserted(stderr: []const u8, function: []const u8, expression: []const u8) bool {
-    if (std.mem.indexOf(u8, stderr, "ssertion") == null) return false;
-    if (std.mem.indexOf(u8, stderr, expression) == null) return false;
-    return builtin.os.tag == .windows or std.mem.indexOf(u8, stderr, function) != null;
+    if (std.mem.find(u8, stderr, "ssertion") == null) return false;
+    if (std.mem.find(u8, stderr, expression) == null) return false;
+    return builtin.os.tag == .windows or std.mem.find(u8, stderr, function) != null;
 }
 
 fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8, theirs: []const u8, options: ort.Options) !void {
@@ -299,7 +299,7 @@ const Scenario = struct {
     io: Io,
     repo: *testgit.Repo,
     random: std.Random,
-    files: std.StringArrayHashMapUnmanaged(void) = .empty,
+    files: std.array_hash_map.String(void) = .empty,
     arena: std.heap.ArenaAllocator,
     /// Fewer names and more duplication: renames that tie, basenames
     /// shared across directories, identical files, empty ones.
@@ -358,7 +358,7 @@ const Scenario = struct {
         // way round.
         if (try isDirectory(s, path)) try s.repo.dir.deleteTree(s.io, path);
         var at: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| {
+        while (std.mem.findScalarPos(u8, path, at, '/')) |slash| {
             const prefix = path[0..slash];
             if (!try isDirectory(s, prefix)) s.repo.dir.deleteFile(s.io, prefix) catch |err| if (err != error.FileNotFound) return err;
             at = slash + 1;

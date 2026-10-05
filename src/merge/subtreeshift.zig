@@ -44,16 +44,16 @@ pub fn shift(gpa: Allocator, io: Io, db: *odb_mod.Odb, one: Oid, two: Oid, prefi
     return s.shiftTreeBy(one, two, prefix);
 }
 
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFLNK: u32 = 0o120000;
+const s_ifmt: u32 = 0o170000;
+const s_ifdir: u32 = 0o040000;
+const s_iflnk: u32 = 0o120000;
 
 fn isDir(mode: u32) bool {
-    return mode & S_IFMT == S_IFDIR;
+    return mode & s_ifmt == s_ifdir;
 }
 
 fn isLink(mode: u32) bool {
-    return mode & S_IFMT == S_IFLNK;
+    return mode & s_ifmt == s_iflnk;
 }
 
 /// A path one tree has and the other lacks.
@@ -169,7 +169,7 @@ const Shifter = struct {
     /// `splice_tree`: `oid1` with the directory at `prefix` replaced by
     /// `oid2`, each tree on the way written anew.
     fn spliceTree(s: Shifter, oid1: Oid, prefix: []const u8, oid2: Oid) Error!Oid {
-        const slash = std.mem.indexOfScalar(u8, prefix, '/');
+        const slash = std.mem.findScalar(u8, prefix, '/');
         const top = prefix[0 .. slash orelse prefix.len];
         const rest = if (slash) |at| prefix[at + 1 ..] else "";
         const bytes = try s.arena.dupe(u8, try s.treeBytes(oid1));
@@ -189,7 +189,7 @@ const Shifter = struct {
     /// `get_tree_entry`: the object at `path` in `tree` and its mode, or
     /// `null`. An empty path is the tree itself.
     fn treeEntry(s: Shifter, tree: Oid, path: []const u8) Error!?Entry {
-        if (path.len == 0) return .{ .name = "", .mode = S_IFDIR, .oid = tree };
+        if (path.len == 0) return .{ .name = "", .mode = s_ifdir, .oid = tree };
         for (try s.entries(tree)) |e| {
             if (e.name.len > path.len) continue;
             switch (std.mem.order(u8, path[0..e.name.len], e.name)) {

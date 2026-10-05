@@ -21,8 +21,6 @@ const hash = @import("../hash.zig");
 const index_mod = @import("../index.zig");
 const merge = @import("../merge.zig");
 const worktree = @import("../worktree.zig");
-const attributes = @import("../worktree/attributes.zig");
-const ignore = @import("../worktree/ignore.zig");
 const fs = @import("../repo/fs.zig");
 const repo_mod = @import("../repo.zig");
 const ort = @import("ort.zig");
@@ -342,18 +340,18 @@ fn carry(
     // every subtree the two share, so a pick costs what it changes.
     var tree_changes = try diff.tree(gpa, io, db, ours, merged.tree, .{});
     defer tree_changes.deinit();
-    var desired: std.StringArrayHashMapUnmanaged(?TreeEntry) = .empty;
+    var desired: std.array_hash_map.String(?TreeEntry) = .empty;
     for (tree_changes.items) |change| {
         const path = try arena.dupe(u8, change.path());
         try desired.put(arena, path, if (change.new) |e| .{ .mode = e.mode, .oid = e.oid } else null);
     }
     const messages = try ort.dupeMessages(arena, merged.messages);
     // A conflict's stages, by path.
-    var conflicted: std.StringArrayHashMapUnmanaged(ort.Conflicted) = .empty;
+    var conflicted: std.array_hash_map.String(ort.Conflicted) = .empty;
     for (merged.conflicted) |c| try conflicted.put(arena, try arena.dupe(u8, c.path), c);
 
     var changes: std.ArrayList([]const u8) = .empty;
-    var updates: std.StringArrayHashMapUnmanaged(?TreeEntry) = .empty;
+    var updates: std.array_hash_map.String(?TreeEntry) = .empty;
     for (desired.keys(), desired.values()) |path, want| {
         try changes.append(arena, path);
         try updates.put(arena, path, want);
@@ -655,7 +653,7 @@ fn attributesAbove(arena: Allocator, io: Io, db: *odb_mod.Odb, tree: Oid, paths:
                 const file = if (folder.len == 0) ".gitattributes" else try std.fmt.allocPrint(arena, "{s}/.gitattributes", .{folder});
                 if (try entryAt(io, db, tree, file)) |found| try out.put(arena, file, found);
             }
-            const slash = std.mem.indexOfScalarPos(u8, path, if (end == 0) 0 else end + 1, '/') orelse break;
+            const slash = std.mem.findScalarPos(u8, path, if (end == 0) 0 else end + 1, '/') orelse break;
             end = slash;
         }
     }

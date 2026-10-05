@@ -355,18 +355,18 @@ const GitMap = rename.GitMap;
 
 /// A mode as git keeps it, 0 for none.
 const Mode = u32;
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
-const S_IFLNK: u32 = 0o120000;
-const S_IFGITLINK: u32 = 0o160000;
+const s_ifmt: u32 = 0o170000;
+const s_ifdir: u32 = 0o040000;
+const s_ifreg: u32 = 0o100000;
+const s_iflnk: u32 = 0o120000;
+const s_ifgitlink: u32 = 0o160000;
 
 fn isReg(mode: Mode) bool {
-    return mode & S_IFMT == S_IFREG;
+    return mode & s_ifmt == s_ifreg;
 }
 
 fn isDir(mode: Mode) bool {
-    return mode & S_IFMT == S_IFDIR;
+    return mode & s_ifmt == s_ifdir;
 }
 
 const Version = struct {
@@ -428,6 +428,14 @@ const CommitRef = union(enum) {
 
 const Outcome = struct {
     tree: Oid,
+};
+
+/// Keys in byte order, as git's `string_list` sorts them.
+pub const KeyOrder = struct {
+    keys: []const []const u8,
+    pub fn lessThan(o: KeyOrder, a: usize, b: usize) bool {
+        return std.mem.order(u8, o.keys[a], o.keys[b]) == .lt;
+    }
 };
 
 const Merge = struct {
@@ -586,7 +594,7 @@ const Merge = struct {
         if (depth > 4096) return error.TreeTooDeep;
         var lists: [3][]TreeItem = undefined;
         for (0..3) |i| lists[i] = try m.readTree(trees[i]);
-        var names: std.StringArrayHashMapUnmanaged(Names) = .empty;
+        var names: std.array_hash_map.String(Names) = .empty;
         for (lists, 0..) |list, i| {
             for (list) |item| {
                 const slot = try names.getOrPut(m.arena, item.name);
@@ -596,13 +604,7 @@ const Merge = struct {
                 slot.value_ptr[i] = .{ .mode = item.mode, .oid = item.oid, .name = item.name };
             }
         }
-        const Sorter = struct {
-            keys: []const []const u8,
-            pub fn lessThan(s: @This(), a: usize, b: usize) bool {
-                return std.mem.order(u8, s.keys[a], s.keys[b]) == .lt;
-            }
-        };
-        names.sort(Sorter{ .keys = names.keys() });
+        names.sort(KeyOrder{ .keys = names.keys() });
 
         // `traverse_trees_wrapper`: a directory one side removed is read
         // whole first, and a file the other side added anywhere in it means
@@ -828,7 +830,7 @@ const Merge = struct {
                 const target = m.cached_pairs[side].get(key.*).? orelse continue;
                 if (m.paths.contains(target)) continue;
                 var end = target.len;
-                while (std.mem.lastIndexOfScalar(u8, target[0..end], '/')) |slash| {
+                while (std.mem.findScalarLast(u8, target[0..end], '/')) |slash| {
                     end = slash;
                     if (m.deferred[side].target_dirs.contains(target[0..end])) break;
                     try m.deferred[side].target_dirs.put(m.arena, target[0..end], {});
@@ -908,7 +910,7 @@ const Merge = struct {
                         try m.addMergedAttributes(attrs);
                     } else try attrs.addDirectory(m.io, dir, base, depth);
                 }
-                const slash = std.mem.indexOfScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
+                const slash = std.mem.findScalarPos(u8, path, if (at == 0) 0 else at + 1, '/') orelse break;
                 at = slash;
             }
         }
@@ -1074,7 +1076,7 @@ const Merge = struct {
         extra_marker_size: u32,
         result: *Version,
     ) Error!bool {
-        if ((a.mode & S_IFMT) != (b.mode & S_IFMT)) return error.DirectoryRenameLostStage;
+        if ((a.mode & s_ifmt) != (b.mode & s_ifmt)) return error.DirectoryRenameLostStage;
         var clean = true;
         if (a.mode == b.mode or a.mode == o.mode) {
             result.mode = b.mode;
@@ -1088,19 +1090,19 @@ const Merge = struct {
         } else if (b.oid.eql(o.oid)) {
             result.oid = a.oid;
         } else if (isReg(a.mode)) {
-            const two_way = (o.mode & S_IFMT) != (a.mode & S_IFMT);
+            const two_way = (o.mode & s_ifmt) != (a.mode & s_ifmt);
             const merged = try m.merge3Way(path, if (two_way) m.zero() else o.oid, a.oid, b.oid, pathnames, extra_marker_size);
             result.oid = try m.db.write(m.io, .blob, merged.bytes);
             if (merged.status != .ok) clean = false;
             try m.pathMsg("Auto-merging {s}", .auto_merging, path, null, null, &.{}, .{path});
-        } else if (a.mode & S_IFMT == S_IFGITLINK) {
-            const two_way = (o.mode & S_IFMT) != (a.mode & S_IFMT);
+        } else if (a.mode & s_ifmt == s_ifgitlink) {
+            const two_way = (o.mode & s_ifmt) != (a.mode & s_ifmt);
             clean = try m.mergeSubmodule(pathnames[0], if (two_way) m.zero() else o.oid, a.oid, b.oid, &result.oid);
             if (m.call_depth > 0 and two_way and !clean) {
                 result.mode = o.mode;
                 result.oid = o.oid;
             }
-        } else if (a.mode & S_IFMT == S_IFLNK) {
+        } else if (a.mode & s_ifmt == s_iflnk) {
             if (m.call_depth > 0) {
                 clean = false;
                 result.mode = o.mode;
@@ -1316,7 +1318,7 @@ const Merge = struct {
     /// `check_dir_renamed`: the deepest renamed directory above `path`.
     fn checkDirRenamed(path: []const u8, dir_renames: *const std.StringHashMapUnmanaged([]const u8)) ?struct { old: []const u8, new: []const u8 } {
         var end = path.len;
-        while (std.mem.lastIndexOfScalar(u8, path[0..end], '/')) |slash| {
+        while (std.mem.findScalarLast(u8, path[0..end], '/')) |slash| {
             end = slash;
             if (dir_renames.getEntry(path[0..end])) |e| return .{ .old = e.key_ptr.*, .new = e.value_ptr.* };
         }
@@ -1385,7 +1387,7 @@ const Merge = struct {
         var cur_path = new_path_in;
         var parent_name: []const u8 = "";
         while (true) {
-            const slash = std.mem.lastIndexOfScalar(u8, cur_path, '/') orelse {
+            const slash = std.mem.findScalarLast(u8, cur_path, '/') orelse {
                 parent_name = "";
                 break;
             };
@@ -1791,7 +1793,7 @@ const Merge = struct {
             dir_info.is_null = true;
         } else {
             dir_info.is_null = false;
-            dir_info.result.mode = S_IFDIR;
+            dir_info.result.mode = s_ifdir;
             dir_info.result.oid = try m.writeTree(info.versions.items[offset..]);
         }
         info.offsets.items.len -= 1;
@@ -1859,7 +1861,7 @@ const Merge = struct {
                 if (ci.is_null) ci.clean = true;
                 if (ci.is_null != (ci.filemask == ci.match_mask)) return error.DirectoryRenameLostStage;
             }
-        } else if (ci.filemask >= 6 and (ci.stages[1].mode & S_IFMT) != (ci.stages[2].mode & S_IFMT)) {
+        } else if (ci.filemask >= 6 and (ci.stages[1].mode & s_ifmt) != (ci.stages[2].mode & s_ifmt)) {
             if (m.call_depth > 0) {
                 ci.clean = false;
                 ci.result = ci.stages[0];
@@ -1893,14 +1895,14 @@ const Merge = struct {
                 new_ci.result = ci.stages[2];
                 new_ci.stages[1] = .{ .oid = m.zero() };
                 new_ci.filemask = 5;
-                if ((b_mode & S_IFMT) != (o_mode & S_IFMT)) {
+                if ((b_mode & s_ifmt) != (o_mode & s_ifmt)) {
                     new_ci.stages[0] = .{ .oid = m.zero() };
                     new_ci.filemask = 4;
                 }
                 ci.result = ci.stages[1];
                 ci.stages[2] = .{ .oid = m.zero() };
                 ci.filemask = 3;
-                if ((a_mode & S_IFMT) != (o_mode & S_IFMT)) {
+                if ((a_mode & s_ifmt) != (o_mode & s_ifmt)) {
                     ci.stages[0] = .{ .oid = m.zero() };
                     ci.filemask = 2;
                 }
@@ -1925,7 +1927,7 @@ const Merge = struct {
             if (!clean_merge) {
                 var reason: []const u8 = "content";
                 if (ci.filemask == 6) reason = "add/add";
-                if (merged_file.mode & S_IFMT == S_IFGITLINK) reason = "submodule";
+                if (merged_file.mode & s_ifmt == s_ifgitlink) reason = "submodule";
                 try m.pathMsg("CONFLICT ({s}): Merge conflict in {s}", .contents, path, null, null, &.{}, .{ reason, path });
             }
         } else if (ci.filemask == 3 or ci.filemask == 5) {

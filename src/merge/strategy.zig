@@ -104,7 +104,7 @@ pub const Settings = struct {
             s.renames = true;
             s.rename_score = 0;
         } else if (std.mem.startsWith(u8, word, "find-renames=") or std.mem.startsWith(u8, word, "rename-threshold=")) {
-            const value = word[std.mem.indexOfScalar(u8, word, '=').? + 1 ..];
+            const value = word[std.mem.findScalar(u8, word, '=').? + 1 ..];
             const parsed = parseRenameScore(value);
             if (parsed.rest.len != 0) return error.UnknownStrategyOption;
             s.rename_score = parsed.score;

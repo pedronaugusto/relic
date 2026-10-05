@@ -39,8 +39,6 @@ const diff = @import("../diff.zig");
 const blobmerge = @import("../merge/blobmerge.zig");
 const head_mod = @import("head.zig");
 const config_mod = @import("../config.zig");
-const fs = @import("../repo/fs.zig");
-const signing = @import("signing.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -468,19 +466,21 @@ pub const Notes = struct {
     /// One note: the object it is on and the blob it is.
     pub const Entry = struct { object: Oid, note: Oid };
 
+    /// What `list` gathers, note by note.
+    const Collect = struct {
+        out: *std.ArrayList(Entry),
+        gpa: Allocator,
+        fn each(c: Collect, t2: *Notes, key: []const u8, val: Oid, path: []const u8) Error!void {
+            _ = path;
+            try c.out.append(c.gpa, .{ .object = Oid.fromRaw(t2.repo.objectFormat(), key[0..t2.rawLen()]) catch unreachable, .note = val });
+        }
+    };
+
     /// Every note, in the order `git notes list` prints them. Reads the
     /// whole tree. The result is the caller's.
     pub fn list(t: *Notes, gpa: Allocator, io: Io) Self.Error![]Entry {
         var out: std.ArrayList(Entry) = .empty;
         errdefer out.deinit(gpa);
-        const Collect = struct {
-            out: *std.ArrayList(Entry),
-            gpa: Allocator,
-            fn each(c: @This(), t2: *Notes, key: []const u8, val: Oid, path: []const u8) Error!void {
-                _ = path;
-                try c.out.append(c.gpa, .{ .object = Oid.fromRaw(t2.repo.objectFormat(), key[0..t2.rawLen()]) catch unreachable, .note = val });
-            }
-        };
         try t.forEach(io, t.root, 0, 0, .{}, Collect{ .out = &out, .gpa = gpa });
         return out.toOwnedSlice(gpa);
     }
@@ -554,6 +554,23 @@ pub const Notes = struct {
         }
     }
 
+    /// What `writeTree` writes, note by note.
+    const TreeWriter = struct {
+        root: *Stack,
+        io: Io,
+        fn each(w: TreeWriter, t2: *Notes, key: []const u8, val: Oid, path_in: []const u8) Error!void {
+            _ = key;
+            var path = path_in;
+            var mode: u32 = 0o100644;
+            if (path[path.len - 1] == '/') {
+                path = path[0 .. path.len - 1];
+                mode = 0o040000;
+            }
+            try t2.writeNonNotesUntil(w.io, w.root, path);
+            try w.root.add(w.io, t2, path, mode, val);
+        }
+    };
+
     /// `write_notes_tree`: write the tree objects and return the root's
     /// name. Parts never read are written as they were.
     pub fn writeTree(t: *Notes, io: Io) Self.Error!Oid {
@@ -561,22 +578,7 @@ pub const Notes = struct {
         defer root.deinit(t.gpa);
         t.writing = .{};
         defer t.writing = null;
-        const Writer = struct {
-            root: *Stack,
-            io: Io,
-            fn each(w: @This(), t2: *Notes, key: []const u8, val: Oid, path_in: []const u8) Error!void {
-                _ = key;
-                var path = path_in;
-                var mode: u32 = 0o100644;
-                if (path[path.len - 1] == '/') {
-                    path = path[0 .. path.len - 1];
-                    mode = 0o040000;
-                }
-                try t2.writeNonNotesUntil(w.io, w.root, path);
-                try w.root.add(w.io, t2, path, mode, val);
-            }
-        };
-        try t.forEach(io, t.root, 0, 0, .{ .yield_subtrees = true, .dont_unpack_subtrees = true }, Writer{ .root = &root, .io = io });
+        try t.forEach(io, t.root, 0, 0, .{ .yield_subtrees = true, .dont_unpack_subtrees = true }, TreeWriter{ .root = &root, .io = io });
         try t.writeNonNotesUntil(io, &root, null);
         try root.finishSubtree(io, t);
         return t.repo.odb.write(io, .tree, root.buf.items);
@@ -1019,7 +1021,7 @@ pub fn formatNote(t: *Notes, io: Io, obj: Oid, w: *Io.Writer, raw: bool) (Error 
     }
     var at: usize = 0;
     while (at < msg.len) {
-        const end = std.mem.indexOfScalarPos(u8, msg, at, '\n') orelse msg.len;
+        const end = std.mem.findScalarPos(u8, msg, at, '\n') orelse msg.len;
         if (!raw) try w.writeAll("    ");
         try w.writeAll(msg[at..end]);
         try w.writeByte('\n');

@@ -247,7 +247,7 @@ fn parseLine(line_in: []const u8, number: usize, resolver: Resolver, options: Pa
         },
         .update_ref => {
             // A full ref name: more than one level.
-            if (!safepath.isValidRefName(rest) or std.mem.indexOfScalar(u8, rest, '/') == null) {
+            if (!safepath.isValidRefName(rest) or std.mem.findScalar(u8, rest, '/') == null) {
                 return fail(options, number, .invalid_ref);
             }
             return .{ .command = cmd, .arg = rest };
@@ -278,7 +278,7 @@ fn parseLine(line_in: []const u8, number: usize, resolver: Resolver, options: Pa
         }
     }
 
-    const end = std.mem.indexOfAny(u8, rest, " \t\n") orelse rest.len;
+    const end = std.mem.findAny(u8, rest, " \t\n") orelse rest.len;
     const named = rest[0..end];
     item.arg = skipBlanks(rest[end..]);
     const resolved = resolver.resolve(named) orelse return fail(options, number, .unknown_commit);
@@ -300,7 +300,7 @@ pub fn parse(gpa: Allocator, bytes: []const u8, resolver: Resolver, options: Par
     var at: usize = 0;
     var number: usize = 1;
     while (at < buf.len) : (number += 1) {
-        const nl = std.mem.indexOfScalarPos(u8, buf, at, '\n');
+        const nl = std.mem.findScalarPos(u8, buf, at, '\n');
         var line = buf[at .. nl orelse buf.len];
         at = if (nl) |n| n + 1 else buf.len;
         if (line.len != 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
@@ -421,7 +421,7 @@ pub fn writeHelp(w: *std.Io.Writer, command_count: usize, revisions: []const u8,
 pub fn writeCommented(w: *std.Io.Writer, text: []const u8, comment: []const u8) std.Io.Writer.Error!void {
     var at: usize = 0;
     while (at < text.len) {
-        const nl = std.mem.indexOfScalarPos(u8, text, at, '\n');
+        const nl = std.mem.findScalarPos(u8, text, at, '\n');
         const line = text[at .. nl orelse text.len];
         at = if (nl) |n| n + 1 else text.len;
         try w.writeAll(comment);

@@ -39,7 +39,6 @@ const worktree = @import("../worktree.zig");
 const attributes = @import("../worktree/attributes.zig");
 const convert = @import("../worktree/convert.zig");
 const blobmerge = @import("../merge/blobmerge.zig");
-const delta = @import("../odb/delta.zig");
 const fs = @import("../repo/fs.zig");
 const safepath = @import("../worktree/safepath.zig");
 const wildmatch = @import("../worktree/wildmatch.zig");
@@ -393,7 +392,7 @@ const Image = struct {
         if (!lines) return;
         var at: usize = 0;
         while (at < bytes.len) {
-            var next = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse bytes.len;
+            var next = std.mem.findScalarPos(u8, bytes, at, '\n') orelse bytes.len;
             if (next < bytes.len) next += 1;
             try img.addLine(gpa, bytes[at..next], 0);
             at = next;
@@ -402,7 +401,7 @@ const Image = struct {
 
     fn removeFirstLine(img: *Image) void {
         const n = img.lines.items[0].len;
-        std.mem.copyForwards(u8, img.buf.items, img.buf.items[n..]);
+        @memmove(img.buf.items[0 .. img.buf.items.len - n], img.buf.items[n..]);
         img.buf.shrinkRetainingCapacity(img.buf.items.len - n);
         _ = img.lines.orderedRemove(0);
     }
@@ -733,7 +732,7 @@ fn wsRuleFor(st: *State, path: []const u8, configured: whitespace.Rule) Error!wh
 }
 
 fn linelen(buf: []const u8) usize {
-    if (std.mem.indexOfScalar(u8, buf, '\n')) |i| return i + 1;
+    if (std.mem.findScalar(u8, buf, '\n')) |i| return i + 1;
     return buf.len;
 }
 
@@ -1604,7 +1603,7 @@ fn checkToCreate(st: *State, new_name: []const u8, ok_if_exists: bool) Error!Cre
 
 fn hasSymlinkLeadingPath(st: *State, name: []const u8) Error!bool {
     var at: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, name, at, '/')) |slash| {
+    while (std.mem.findScalarPos(u8, name, at, '/')) |slash| {
         if (try fs.statAt(st.io, st.wt.?, name[0..slash])) |f| {
             if (f.kind == .sym_link) return true;
         }

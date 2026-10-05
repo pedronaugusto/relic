@@ -164,7 +164,7 @@ const Octopus = struct {
     /// `read-tree -m --aggressive <bases> MRT <head>`, then `merge-index -o
     /// git-merge-one-file -a` over what is left unmerged.
     fn step(o: *Octopus, bases: []const Map, ours: *const Map, theirs: *const Map) Error!Step {
-        var paths: std.StringArrayHashMapUnmanaged(void) = .empty;
+        var paths: std.array_hash_map.String(void) = .empty;
         for (bases) |*base| {
             var it = base.keyIterator();
             while (it.next()) |p| try paths.put(o.arena, p.*, {});
@@ -361,7 +361,7 @@ fn requireNoFileOverDirectory(arena: Allocator, view: *const Map, unmerged: []co
     var paths = all.keyIterator();
     while (paths.next()) |p| {
         var at: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, p.*, at, '/')) |slash| : (at = slash + 1) {
+        while (std.mem.findScalarPos(u8, p.*, at, '/')) |slash| : (at = slash + 1) {
             if (all.contains(p.*[0..slash])) return error.OctopusFailed;
         }
     }

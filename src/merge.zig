@@ -780,7 +780,7 @@ test "markers take a carriage return where both sides end their lines with one" 
         var got = try blobs(gpa, ancestor, ours, theirs, .{ .conflict_style = style });
         defer got.deinit();
         try std.testing.expectEqualStrings(expected, got.bytes);
-        try std.testing.expect(std.mem.indexOf(u8, got.bytes, "=======\r\n") != null);
+        try std.testing.expect(std.mem.find(u8, got.bytes, "=======\r\n") != null);
     }
 }
 

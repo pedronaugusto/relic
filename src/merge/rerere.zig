@@ -206,7 +206,7 @@ const Lines = struct {
 
     fn next(l: *Lines) ?[]const u8 {
         if (l.at >= l.bytes.len) return null;
-        const end = if (std.mem.indexOfScalarPos(u8, l.bytes, l.at, '\n')) |nl| nl + 1 else l.bytes.len;
+        const end = if (std.mem.findScalarPos(u8, l.bytes, l.at, '\n')) |nl| nl + 1 else l.bytes.len;
         const line = l.bytes[l.at..end];
         l.at = end;
         return line;
@@ -386,7 +386,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
 
 /// `read_rr`: `MERGE_RR`'s records, by path, each conflict's directory
 /// scanned on the way.
-fn readMergeRr(r: *Run) Error!std.StringArrayHashMapUnmanaged(?Id) {
+fn readMergeRr(r: *Run) Error!std.array_hash_map.String(?Id) {
     const text = (try head_mod.readState(r.arena, r.io, r.repo.git_dir, "MERGE_RR")) orelse return .empty;
     var rr = try parseMergeRr(r.arena, text, r.repo.objectFormat());
     for (rr.values()) |slot| {
@@ -399,8 +399,8 @@ fn readMergeRr(r: *Run) Error!std.StringArrayHashMapUnmanaged(?Id) {
 
 /// The records of a `MERGE_RR`: `<id>[.<variant>]`, a tab and a path,
 /// each ended by a NUL.
-fn parseMergeRr(arena: Allocator, text: []const u8, kind: hash.Kind) (Allocator.Error || error{MalformedMergeRr})!std.StringArrayHashMapUnmanaged(?Id) {
-    var rr: std.StringArrayHashMapUnmanaged(?Id) = .empty;
+fn parseMergeRr(arena: Allocator, text: []const u8, kind: hash.Kind) (Allocator.Error || error{MalformedMergeRr})!std.array_hash_map.String(?Id) {
+    var rr: std.array_hash_map.String(?Id) = .empty;
     const hex_len = kind.hexLen();
     var records = std.mem.splitScalar(u8, text, 0);
     while (records.next()) |record| {
@@ -411,7 +411,7 @@ fn parseMergeRr(arena: Allocator, text: []const u8, kind: hash.Kind) (Allocator.
         var rest = record[hex_len..];
         var variant: i32 = 0;
         if (rest[0] == '.') {
-            const tab = std.mem.indexOfScalar(u8, rest, '\t') orelse return error.MalformedMergeRr;
+            const tab = std.mem.findScalar(u8, rest, '\t') orelse return error.MalformedMergeRr;
             variant = std.fmt.parseInt(i32, rest[1..tab], 10) catch return error.MalformedMergeRr;
             if (variant < 0) return error.MalformedMergeRr;
             rest = rest[tab..];
@@ -422,20 +422,22 @@ fn parseMergeRr(arena: Allocator, text: []const u8, kind: hash.Kind) (Allocator.
     return rr;
 }
 
+/// Keys in byte order, as git's `string_list` sorts them.
+pub const KeyOrder = struct {
+    keys: []const []const u8,
+    pub fn lessThan(o: KeyOrder, a: usize, b: usize) bool {
+        return std.mem.order(u8, o.keys[a], o.keys[b]) == .lt;
+    }
+};
+
 /// The records in path order, as git's `string_list` keeps them.
-fn sortRr(rr: *std.StringArrayHashMapUnmanaged(?Id)) void {
-    const Sorter = struct {
-        keys: []const []const u8,
-        pub fn lessThan(s: @This(), a: usize, b: usize) bool {
-            return std.mem.order(u8, s.keys[a], s.keys[b]) == .lt;
-        }
-    };
-    rr.sort(Sorter{ .keys = rr.keys() });
+fn sortRr(rr: *std.array_hash_map.String(?Id)) void {
+    rr.sort(KeyOrder{ .keys = rr.keys() });
 }
 
 /// `write_rr`: every record with a conflict name, `<id>[.<variant>]`, a
 /// tab, the path and a NUL.
-fn writeMergeRr(r: *Run, rr: *const std.StringArrayHashMapUnmanaged(?Id)) Error!void {
+fn writeMergeRr(r: *Run, rr: *const std.array_hash_map.String(?Id)) Error!void {
     var out: std.ArrayList(u8) = .empty;
     for (rr.keys(), rr.values()) |path, slot| {
         const id = slot orelse continue;
@@ -607,7 +609,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
             const hex = record[0..hex_len];
             var variant: i32 = 0;
             if (record[hex_len] == '.') {
-                const tab = std.mem.indexOfScalarPos(u8, record, hex_len, '\t') orelse continue;
+                const tab = std.mem.findScalarPos(u8, record, hex_len, '\t') orelse continue;
                 variant = std.fmt.parseInt(i32, record[hex_len + 1 .. tab], 10) catch continue;
             }
             const st = try r.status(hex);
@@ -822,7 +824,7 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
     defer index.deinit();
 
     // `unmerge_index`, then `find_conflict`.
-    var conflicts: std.StringArrayHashMapUnmanaged(Stages) = .empty;
+    var conflicts: std.array_hash_map.String(Stages) = .empty;
     for (index.entries.items) |e| {
         if (e.stage == 0) continue;
         const slot = try conflicts.getOrPut(arena, e.path);
@@ -840,13 +842,7 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
             try conflicts.put(arena, try arena.dupe(u8, item.path), stages);
         }
     }
-    const Sorter = struct {
-        keys: []const []const u8,
-        pub fn lessThan(c: @This(), a: usize, b: usize) bool {
-            return std.mem.order(u8, c.keys[a], c.keys[b]) == .lt;
-        }
-    };
-    conflicts.sort(Sorter{ .keys = conflicts.keys() });
+    conflicts.sort(KeyOrder{ .keys = conflicts.keys() });
 
     var forgotten: std.ArrayList([]const u8) = .empty;
     var unparsable: std.ArrayList([]const u8) = .empty;
@@ -876,7 +872,7 @@ fn isRegRaw(mode: u32) bool {
 }
 
 /// `rerere_forget_one_path`.
-fn forgetOne(r: *Run, rr: *std.StringArrayHashMapUnmanaged(?Id), path: []const u8, stages: Stages) Error!enum { forgotten, unparsable, unremembered } {
+fn forgetOne(r: *Run, rr: *std.array_hash_map.String(?Id), path: []const u8, stages: Stages) Error!enum { forgotten, unparsable, unremembered } {
     const size = try r.markerSize(path);
     const n = try handleCache(r, path, stages, size);
     if (n.conflicts < 1) return .unparsable;
@@ -926,7 +922,7 @@ fn pathspecMatches(items: []const []const u8, path: []const u8) Error!bool {
         var item = item_in;
         if (std.mem.eql(u8, item, ".") or item.len == 0) return true;
         if (std.mem.startsWith(u8, item, "./")) item = item[2..];
-        const literal_len = std.mem.indexOfAny(u8, item, "*?[\\") orelse item.len;
+        const literal_len = std.mem.findAny(u8, item, "*?[\\") orelse item.len;
         const literal = item[0..literal_len];
         if (literal_len == item.len) {
             if (std.mem.eql(u8, item, path)) return true;

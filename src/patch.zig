@@ -258,7 +258,7 @@ pub fn parse(gpa: Allocator, text: []const u8, options: Options) Self.Error!Patc
 }
 
 fn linelen(buf: []const u8) usize {
-    if (std.mem.indexOfScalar(u8, buf, '\n')) |i| return i + 1;
+    if (std.mem.findScalar(u8, buf, '\n')) |i| return i + 1;
     return buf.len;
 }
 
@@ -291,7 +291,7 @@ fn nameTerminate(c: u8, terminate: u2) bool {
 
 /// Runs of slashes made one, which is what lets `--index` find the name.
 fn squashSlash(a: Allocator, name: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.indexOf(u8, name, "//") == null) return name;
+    if (std.mem.find(u8, name, "//") == null) return name;
     var out = try a.alloc(u8, name.len);
     var j: usize = 0;
     var i: usize = 0;
@@ -317,7 +317,7 @@ fn findNameGnu(p: *Parser, line: []const u8, p_value: usize) Allocator.Error!?[]
     var cp: []const u8 = got.name;
     var n = p_value;
     while (n > 0) : (n -= 1) {
-        const slash = std.mem.indexOfScalar(u8, cp, '/') orelse return null;
+        const slash = std.mem.findScalar(u8, cp, '/') orelse return null;
         cp = cp[slash + 1 ..];
     }
     const name = try withRoot(p, cp);
@@ -448,7 +448,7 @@ fn findNameTraditional(p: *Parser, line: []const u8, def: ?[]const u8, p_value: 
     if (line.len > 0 and line[0] == '"') {
         if (try findNameGnu(p, line, p_value)) |n| return n;
     }
-    const len = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
+    const len = std.mem.findScalar(u8, line, '\n') orelse line.len;
     const date_len = diffTimestampLen(line[0..len]);
     if (date_len == 0) return findNameCommon(p, line, def, p_value, null, term_tab);
     return findNameCommon(p, line, def, p_value, len - date_len, 0);
@@ -459,16 +459,16 @@ fn guessPValue(p: *Parser, nameline: []const u8) Allocator.Error!?usize {
     const name = (try findNameTraditional(p, nameline, null, 0)) orelse return null;
     // no prefix is given to the parser, so a name with a slash is not
     // guessed and one without is at depth zero
-    if (std.mem.indexOfScalar(u8, name, '/') == null) return 0;
+    if (std.mem.findScalar(u8, name, '/') == null) return 0;
     return null;
 }
 
 /// Whether a `---`/`+++` line carries GNU diff's epoch timestamp, which is
 /// how it says the file was created or deleted.
 fn hasEpochTimestamp(nameline: []const u8) bool {
-    const eol = std.mem.indexOfScalar(u8, nameline, '\n') orelse nameline.len;
+    const eol = std.mem.findScalar(u8, nameline, '\n') orelse nameline.len;
     const line = nameline[0..eol];
-    const tab = std.mem.lastIndexOfScalar(u8, line, '\t') orelse return false;
+    const tab = std.mem.findScalarLast(u8, line, '\t') orelse return false;
     var ts = line[tab + 1 ..];
     var epoch_hour: i32 = undefined;
     if (startsWith(ts, "1969-12-31 ")) {
@@ -597,13 +597,13 @@ fn gitHeaderName(p: *Parser, full_line: []const u8) Allocator.Error!?[]const u8 
     }
     const name = skipTreePrefix(p.p_value, line) orelse return null;
     // a quote in an unquoted first name begins the second name
-    if (std.mem.indexOfScalar(u8, name, '"')) |q| {
+    if (std.mem.findScalar(u8, name, '"')) |q| {
         const sp = (try cquote.unquote(p.a, name[q..])) orelse return null;
         const np = skipTreePrefix(p.p_value, sp.name) orelse return null;
         if (np.len < q and std.mem.startsWith(u8, name, np) and isSpace(name[np.len])) return np;
         return null;
     }
-    const eol = std.mem.indexOfScalar(u8, name, '\n') orelse return null;
+    const eol = std.mem.findScalar(u8, name, '\n') orelse return null;
     const line_len = eol;
     var len: usize = 0;
     while (true) : (len += 1) {
@@ -783,12 +783,12 @@ fn verifyName(p: *Parser, line: []const u8, isnull: bool, name: *?[]const u8, si
 const max_hex = 64;
 
 fn parseIndexLine(p: *Parser, line: []const u8, file: *FilePatch) Error!void {
-    const dot = std.mem.indexOfScalar(u8, line, '.') orelse return;
+    const dot = std.mem.findScalar(u8, line, '.') orelse return;
     if (dot + 1 >= line.len or line[dot + 1] != '.' or dot > max_hex) return;
     const old = line[0..dot];
     const rest = line[dot + 2 ..];
-    const eol = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
-    var end = std.mem.indexOfScalar(u8, rest, ' ') orelse eol;
+    const eol = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
+    var end = std.mem.findScalar(u8, rest, ' ') orelse eol;
     if (end > eol) end = eol;
     if (end > max_hex) return;
     file.old_oid_prefix = old;

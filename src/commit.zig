@@ -240,7 +240,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
         "commit (amend)"
     else
         "commit";
-    const subject_end = std.mem.indexOfScalar(u8, cleaned, '\n') orelse cleaned.len;
+    const subject_end = std.mem.findScalar(u8, cleaned, '\n') orelse cleaned.len;
     const log_message = try std.fmt.allocPrint(arena, "{s}: {s}", .{ action, cleaned[0..subject_end] });
     const policy = repo.reflogPolicy();
     {
@@ -326,7 +326,7 @@ fn restIsEmpty(text: []const u8, start: usize) bool {
     const sign_off = "Signed-off-by: ";
     var i = start;
     while (i < text.len) {
-        const eol = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+        const eol = std.mem.findScalarPos(u8, text, i, '\n') orelse text.len;
         if (eol - i >= sign_off.len and std.mem.startsWith(u8, text[i..], sign_off)) {
             i = eol + 1;
             continue;
@@ -392,7 +392,7 @@ pub fn stripspace(gpa: Allocator, text: []const u8, comment: ?[]const u8) Alloca
     var empties: usize = 0;
     var i: usize = 0;
     while (i < text.len) {
-        const eol = std.mem.indexOfScalarPos(u8, text, i, '\n');
+        const eol = std.mem.findScalarPos(u8, text, i, '\n');
         const len = if (eol) |e| e - i + 1 else text.len - i;
         const line = text[i .. i + len];
         i += len;
@@ -556,7 +556,7 @@ test "a commit runs git's hooks in git's order with what git gives them, and wri
     const b = try twin.relic.readFile(io, ".git/hook.log");
     defer gpa.free(b);
     try testing.expectEqualStrings(a, b);
-    try testing.expect(std.mem.indexOf(u8, a, "prepare-commit-msg 2 [COMMIT_EDITMSG] message top index editor=:") != null);
+    try testing.expect(std.mem.find(u8, a, "prepare-commit-msg 2 [COMMIT_EDITMSG] message top index editor=:") != null);
 }
 
 test "a refusing pre-commit or commit-msg hook writes nothing, and --no-verify skips both" {
@@ -670,7 +670,7 @@ test "a message that is commit.template unedited is refused, as git commit refus
             defer theirs.deinit(gpa);
             errdefer std.debug.print("{s} {}: git {d}: {s}\n", .{ cleanup, signoff, theirs.code, theirs.stderr });
             try testing.expect(theirs.code != 0);
-            try testing.expect(std.mem.indexOf(u8, theirs.stderr, "you did not edit the message") != null);
+            try testing.expect(std.mem.find(u8, theirs.stderr, "you did not edit the message") != null);
             const edited_message = if (signoff) template_text ++ "\nSigned-off-by: Fixture <fixture@example.com>\n" else template_text;
             try twin.relic.exec(io, &.{ "config", "commit.cleanup", cleanup });
             _ = try repo.refreshConfig(io, null);

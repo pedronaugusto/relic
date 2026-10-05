@@ -486,7 +486,7 @@ test "mode changes, symlinks and copies apply as git applies them" {
     try setupBase(&p, io);
     const patch = try makePatch(&p, io, &.{ "-C", "--find-copies-harder" }, changeModesAndLinks);
     defer gpa.free(patch);
-    try std.testing.expect(std.mem.indexOf(u8, patch, "copy from a.txt") != null);
+    try std.testing.expect(std.mem.find(u8, patch, "copy from a.txt") != null);
     try compare(&p, io, patch, &.{}, .{});
     try reset(&p, io);
     try compare(&p, io, patch, &.{"--index"}, .{ .target = .index });

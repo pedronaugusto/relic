@@ -273,7 +273,7 @@ pub fn findSeparator(line: []const u8, separators: []const u8) ?usize {
     var whitespace_found = false;
     for (line, 0..) |c, i| {
         if (c == 0) break;
-        if (std.mem.indexOfScalar(u8, separators, c) != null) {
+        if (std.mem.findScalar(u8, separators, c) != null) {
             if (!whitespace_found and std.mem.startsWith(u8, line[i..], "://")) return null;
             return i;
         }
@@ -294,7 +294,7 @@ fn tokenMatchesRule(token: []const u8, rule: Rule, len: usize) bool {
 }
 
 fn nextLine(buf: []const u8, at: usize) usize {
-    const nl = std.mem.indexOfScalarPos(u8, buf, at, '\n') orelse return buf.len;
+    const nl = std.mem.findScalarPos(u8, buf, at, '\n') orelse return buf.len;
     return nl + 1;
 }
 
@@ -382,7 +382,7 @@ fn endOfLogMessage(input_in: []const u8, no_divider: bool, comment: []const u8) 
 }
 
 fn cStr(s: []const u8) []const u8 {
-    return if (std.mem.indexOfScalar(u8, s, 0)) |z| s[0..z] else s;
+    return if (std.mem.findScalar(u8, s, 0)) |z| s[0..z] else s;
 }
 
 /// git's `find_trailer_block_start`: where the trailers of `buf[0..len]`
@@ -618,7 +618,7 @@ fn formatItems(gpa: Allocator, settings: Settings, options: Options, items: []co
                     try out.appendSlice(gpa, kv);
                 } else {
                     const c = lastNonSpace(token);
-                    if (c != 0 and std.mem.indexOfScalar(u8, settings.separators, c) == null) {
+                    if (c != 0 and std.mem.findScalar(u8, settings.separators, c) == null) {
                         try out.append(gpa, settings.separators[0]);
                         try out.append(gpa, ' ');
                     }
@@ -930,7 +930,7 @@ fn matchArg(text: []const u8, name: []const u8) ?struct { value: ?[]const u8, le
     var value: ?[]const u8 = null;
     if (p < text.len and text[p] == '=') {
         const start = p + 1;
-        p = std.mem.indexOfAnyPos(u8, text, start, ",)") orelse text.len;
+        p = std.mem.findAnyPos(u8, text, start, ",)") orelse text.len;
         value = text[start..p];
     } else if (p >= text.len or (text[p] != ',' and text[p] != ')')) return null;
     if (p < text.len and text[p] == ',') return .{ .value = value, .len = p + 1 };

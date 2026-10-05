@@ -28,7 +28,6 @@ const odb_mod = @import("../odb.zig");
 const repo_mod = @import("../repo.zig");
 const config_mod = @import("../config.zig");
 const diff = @import("../diff.zig");
-const textdiff = @import("../diff/textdiff.zig");
 const patchid = @import("../diff/patchid.zig");
 const revwalk = @import("../revwalk.zig");
 const abbrev = @import("../odb/abbrev.zig");
@@ -651,7 +650,7 @@ fn emailSubjectLead(ctx: *Ctx, out: *std.ArrayList(u8)) Allocator.Error!void {
 }
 
 fn lastLineLength(buf: []const u8) usize {
-    const nl = std.mem.lastIndexOfScalar(u8, buf, '\n') orelse return buf.len;
+    const nl = std.mem.findScalarLast(u8, buf, '\n') orelse return buf.len;
     return buf.len - (nl + 1);
 }
 
@@ -1143,8 +1142,8 @@ fn writePair(ctx: *Ctx, out: *std.ArrayList(u8), c: diff.Change, old: ?Side, new
     if (body.written().len == 0) return;
     // a name with a space gets a tab after it, for GNU patch
     try out.print(a, "--- {s}{s}\n+++ {s}{s}\n", .{
-        lbl0, if (std.mem.indexOfScalar(u8, lbl0, ' ') != null) "\t" else "",
-        lbl1, if (std.mem.indexOfScalar(u8, lbl1, ' ') != null) "\t" else "",
+        lbl0, if (std.mem.findScalar(u8, lbl0, ' ') != null) "\t" else "",
+        lbl1, if (std.mem.findScalar(u8, lbl1, ' ') != null) "\t" else "",
     });
     try out.appendSlice(a, body.written());
 }
@@ -1267,7 +1266,7 @@ fn showStats(ctx: *Ctx, out: *std.ArrayList(u8), files: []StatFile) Allocator.Er
                 name_len -= cp_width;
                 name = name[step..];
             }
-            if (std.mem.indexOfScalar(u8, name, '/')) |slash| name = name[slash..];
+            if (std.mem.findScalar(u8, name, '/')) |slash| name = name[slash..];
         }
         const name_w: isize = @intCast(unicodewidth.strWidth(name));
         const padding: usize = if (len - name_w < 0) 0 else @intCast(len - name_w);
@@ -1446,7 +1445,7 @@ fn coverShortlog(ctx: *Ctx, out: *std.ArrayList(u8), list: []const Oid) Error!vo
         var s: []const u8 = if (oneline.items.len > 0) oneline.items else "<none>";
         while (s.len > 0 and isSpace(s[0])) s = s[1..];
         if (std.mem.startsWith(u8, s, "[PATCH")) {
-            if (std.mem.indexOfScalar(u8, s, ']')) |eob| s = s[eob + 1 ..];
+            if (std.mem.findScalar(u8, s, ']')) |eob| s = s[eob + 1 ..];
         }
         while (s.len > 0 and isSpace(s[0]) and s[0] != '\n') s = s[1..];
         var subject: std.ArrayList(u8) = .empty;

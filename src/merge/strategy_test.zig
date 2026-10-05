@@ -46,11 +46,11 @@ fn splitMerges(arena: Allocator, out: []const u8) ![]const []const u8 {
     var at: usize = 0;
     while (at < out.len) {
         // The status, 0 or 1.
-        const status_end = std.mem.indexOfScalarPos(u8, out, at, 0) orelse return error.MalformedOutput;
+        const status_end = std.mem.findScalarPos(u8, out, at, 0) orelse return error.MalformedOutput;
         const start = status_end + 1;
         var end = start;
         while (true) {
-            const nul = std.mem.indexOfScalarPos(u8, out, end, 0) orelse return error.MalformedOutput;
+            const nul = std.mem.findScalarPos(u8, out, end, 0) orelse return error.MalformedOutput;
             if (nul == end) break;
             end = nul + 1;
         }
@@ -101,7 +101,7 @@ fn expectSameMerges(
     defer gpa.free(listing);
     var lines = std.mem.tokenizeScalar(u8, listing, '\n');
     while (lines.next()) |line| {
-        const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.MalformedOutput;
+        const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedOutput;
         try tips.put(arena, line[0..space], try Oid.parse(.sha1, line[space + 1 ..]));
     }
 
@@ -318,7 +318,7 @@ const Trees = struct {
     const names = [_][]const u8{ "a", "b", "README", "main.c", "x.h" };
 
     fn files(t: Trees, n: usize) ![]const [2][]const u8 {
-        var out: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+        var out: std.array_hash_map.String([]const u8) = .empty;
         for (0..n) |i| {
             const path = try std.fmt.allocPrint(t.arena, "{s}{s}", .{ dirs[t.random.uintLessThan(usize, dirs.len)], names[t.random.uintLessThan(usize, names.len)] });
             try out.put(t.arena, path, try std.fmt.allocPrint(t.arena, "{s}\nline {d}\nend\n", .{ path, i % 3 }));
@@ -326,7 +326,7 @@ const Trees = struct {
         return pairs(t.arena, out);
     }
 
-    fn pairs(arena: Allocator, map: std.StringArrayHashMapUnmanaged([]const u8)) ![]const [2][]const u8 {
+    fn pairs(arena: Allocator, map: std.array_hash_map.String([]const u8)) ![]const [2][]const u8 {
         const out = try arena.alloc([2][]const u8, map.count());
         for (map.keys(), map.values(), out) |k, v, *p| p.* = .{ k, v };
         return out;
@@ -335,7 +335,7 @@ const Trees = struct {
     /// `from` with a line of some files changed, a file added, a file
     /// dropped.
     fn edit(t: Trees, from: []const [2][]const u8, tag: []const u8) ![]const [2][]const u8 {
-        var map: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+        var map: std.array_hash_map.String([]const u8) = .empty;
         for (from) |f| try map.put(t.arena, f[0], f[1]);
         for (map.values()) |*v| {
             if (t.random.uintLessThan(u8, 3) == 0) v.* = try std.fmt.allocPrint(t.arena, "{s}{s} edit\n", .{ v.*, tag });
@@ -347,7 +347,7 @@ const Trees = struct {
 
     /// `inner` under `prefix`, beside `outer`.
     fn nest(t: Trees, outer: []const [2][]const u8, prefix: []const u8, inner: []const [2][]const u8) ![]const [2][]const u8 {
-        var map: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+        var map: std.array_hash_map.String([]const u8) = .empty;
         for (outer) |f| {
             if (std.mem.startsWith(u8, f[0], prefix)) continue;
             try map.put(t.arena, f[0], f[1]);

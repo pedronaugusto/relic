@@ -604,7 +604,7 @@ fn rearrangeSquash(r: *Run, items: []todo.Item) Error![]todo.Item {
             }
             if (by_subject.get(p)) |at| {
                 target = at;
-            } else if (std.mem.indexOfScalar(u8, p, ' ') == null) found_name: {
+            } else if (std.mem.findScalar(u8, p, ' ') == null) found_name: {
                 var context: sequencer.ResolverContext = .{ .repo = r.repo, .io = r.io };
                 const resolved = context.resolver().resolveFn(&context, p) orelse break :found_name;
                 if (by_commit.get(resolved.oid.bytes)) |at| target = at;
@@ -1190,7 +1190,7 @@ pub fn parseAuthorScript(text: []const u8, buf: []u8) error{MalformedState}!obje
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse return error.MalformedState;
+        const eq = std.mem.findScalar(u8, line, '=') orelse return error.MalformedState;
         const key = line[0..eq];
         const value = try unquote(line[eq + 1 ..], buf[used..]);
         used += value.len;
@@ -1204,7 +1204,7 @@ pub fn parseAuthorScript(text: []const u8, buf: []u8) error{MalformedState}!obje
     }
     const d = date orelse return error.MalformedState;
     if (d.len < 2 or d[0] != '@') return error.MalformedState;
-    const space = std.mem.indexOfScalar(u8, d, ' ') orelse return error.MalformedState;
+    const space = std.mem.findScalar(u8, d, ' ') orelse return error.MalformedState;
     const secs = std.fmt.parseInt(i64, d[1..space], 10) catch return error.MalformedState;
     const zone = d[space + 1 ..];
     if (zone.len != 5 or (zone[0] != '+' and zone[0] != '-')) return error.MalformedState;
@@ -1604,7 +1604,7 @@ fn extraHeadersOf(r: *Run, oid: Oid) Error![]const object.ExtraHeader {
 }
 
 fn firstLine(text: []const u8) []const u8 {
-    return text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+    return text[0 .. std.mem.findScalar(u8, text, '\n') orelse text.len];
 }
 
 fn configuredCleanup(repo: *Repository) message.Cleanup {
@@ -1680,14 +1680,14 @@ fn isFixupFlag(item: todo.Item) bool {
 }
 
 fn seenSquash(r: *Run) bool {
-    return std.mem.startsWith(u8, r.fixups.items, "squash") or std.mem.indexOf(u8, r.fixups.items, "\nsquash") != null;
+    return std.mem.startsWith(u8, r.fixups.items, "squash") or std.mem.find(u8, r.fixups.items, "\nsquash") != null;
 }
 
 /// `strbuf_add_commented_lines`, into a list.
 fn addCommented(r: *Run, out: *std.ArrayList(u8), text: []const u8) Error!void {
     var at: usize = 0;
     while (at < text.len) {
-        const next = if (std.mem.indexOfScalarPos(u8, text, at, '\n')) |nl| nl + 1 else text.len;
+        const next = if (std.mem.findScalarPos(u8, text, at, '\n')) |nl| nl + 1 else text.len;
         try out.appendSlice(r.arena, r.comment);
         if (text[at] != '\n' and text[at] != '\t') try out.append(r.arena, ' ');
         try out.appendSlice(r.arena, text[at..next]);
@@ -1701,7 +1701,7 @@ fn addCommented(r: *Run, out: *std.ArrayList(u8), text: []const u8) Error!void {
 fn addCommentedKeepingComments(r: *Run, out: *std.ArrayList(u8), text_in: []const u8) Error!void {
     var text = text_in;
     while (std.mem.startsWith(u8, text, r.comment)) {
-        const next = if (std.mem.indexOfScalar(u8, text, '\n')) |nl| nl + 1 else text.len;
+        const next = if (std.mem.findScalar(u8, text, '\n')) |nl| nl + 1 else text.len;
         try out.appendSlice(r.arena, text[0..next]);
         text = text[next..];
     }
@@ -1713,7 +1713,7 @@ fn addCommentedKeepingComments(r: *Run, out: *std.ArrayList(u8), text_in: []cons
 fn subjectLength(body: []const u8) usize {
     var at: usize = 0;
     while (at < body.len) {
-        const end = std.mem.indexOfScalarPos(u8, body, at, '\n') orelse body.len;
+        const end = std.mem.findScalarPos(u8, body, at, '\n') orelse body.len;
         var blank = true;
         for (body[at..end]) |c| {
             if (c != ' ' and c != '\t' and c != '\r') blank = false;
@@ -1731,7 +1731,7 @@ fn updateSquashMessages(r: *Run, item: todo.Item, commit_message: []const u8) Er
     var buf: std.ArrayList(u8) = .empty;
     if (r.fixup_count > 0) {
         const old = (try r.readState("message-squash")) orelse return error.MalformedState;
-        const eol = if (!std.mem.startsWith(u8, old, r.comment)) 0 else (std.mem.indexOfScalar(u8, old, '\n') orelse old.len);
+        const eol = if (!std.mem.startsWith(u8, old, r.comment)) 0 else (std.mem.findScalar(u8, old, '\n') orelse old.len);
         try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "{s} This is a combination of {d} commits.", .{ r.comment, r.fixup_count + 2 }));
         try buf.appendSlice(arena, old[eol..]);
         if (isFixupFlag(item) and !seenSquash(r)) buf = try updateSquashMessageForFixup(r, buf.items);
@@ -1781,7 +1781,7 @@ fn appendSquashMessage(r: *Run, buf: *std.ArrayList(u8), body: []const u8, item:
         if (item.replace_message and (r.hasState("message-fixup") or !r.hasState("message-squash"))) {
             var rest = buf.items[fixup_off..];
             while (rest.len != 0) {
-                const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse break;
+                const nl = std.mem.findScalar(u8, rest, '\n') orelse break;
                 if (std.mem.trim(u8, rest[0..nl], " \t\r").len != 0) break;
                 rest = rest[nl + 1 ..];
             }
@@ -1829,7 +1829,7 @@ fn updateSquashMessageForFixup(r: *Run, orig: []const u8) Error!std.ArrayList(u8
             buf1 = try std.fmt.allocPrint(arena, "{s} This is the commit message #{d}:\n", .{ r.comment, n });
             buf2 = try std.fmt.allocPrint(arena, "{s} The commit message #{d} will be skipped:\n", .{ r.comment, n });
         } else {
-            s = if (std.mem.indexOfScalarPos(u8, orig, at, '\n')) |nl| nl + 1 else null;
+            s = if (std.mem.findScalarPos(u8, orig, at, '\n')) |nl| nl + 1 else null;
             if (s != null and s.? >= orig.len) s = null;
         }
     }
@@ -1908,7 +1908,7 @@ fn lookupLabel(r: *Run, name: []const u8) Error!Oid {
 
 /// `reset`: `HEAD`, the index and the working tree to a label.
 fn doReset(r: *Run, arg: []const u8) Error!void {
-    const end = std.mem.indexOfAny(u8, arg, " \t\n\r") orelse arg.len;
+    const end = std.mem.findAny(u8, arg, " \t\n\r") orelse arg.len;
     const name = arg[0..end];
     const target = try lookupLabel(r, name);
     var index = try r.repo.openIndex(r.io);
@@ -2144,7 +2144,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     // The labels, then optionally `#` and the oneline.
     var arg = item.arg;
     var oneline: ?[]const u8 = null;
-    if (std.mem.indexOf(u8, arg, " #")) |at| {
+    if (std.mem.find(u8, arg, " #")) |at| {
         oneline = std.mem.trim(u8, arg[at + 2 ..], " \t");
         arg = arg[0..at];
     } else if (std.mem.startsWith(u8, arg, "#")) {
@@ -2334,7 +2334,7 @@ fn finish(r: *Run) Error!Outcome {
     if (try r.readState("rewritten-list")) |text| {
         var lines = std.mem.tokenizeScalar(u8, text, '\n');
         while (lines.next()) |line| {
-            const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.MalformedState;
+            const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedState;
             try rewritten.append(r.arena, .{
                 .old = Oid.parse(repo.objectFormat(), line[0..space]) catch return error.MalformedState,
                 .new = Oid.parse(repo.objectFormat(), line[space + 1 ..]) catch return error.MalformedState,

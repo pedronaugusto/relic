@@ -58,7 +58,7 @@ pub fn parse(text: []const u8) ParseError!Rule {
         var start: usize = 0;
         while (start < rest.len and (rest[start] == ',' or rest[start] == ' ' or rest[start] == '\t' or rest[start] == '\n' or rest[start] == '\r')) start += 1;
         rest = rest[start..];
-        const ep = std.mem.indexOfScalar(u8, rest, ',') orelse rest.len;
+        const ep = std.mem.findScalar(u8, rest, ',') orelse rest.len;
         var word = rest[0..ep];
         var negated = false;
         if (word.len > 0 and word[0] == '-') {

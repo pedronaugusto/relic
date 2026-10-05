@@ -34,14 +34,12 @@ const mailinfo = @import("mail.zig");
 const apply_mod = @import("apply.zig");
 const patchparse = @import("../patch.zig");
 const threeway = @import("../merge/threeway.zig");
-const merge = @import("../merge.zig");
 const reset = @import("../commit/reset.zig");
 const rerere = @import("../merge/rerere.zig");
 const hooks_mod = @import("../repo/hooks.zig");
 const signing = @import("../commit/signing.zig");
 const gitdate = @import("../object/gitdate.zig");
 const fs = @import("../repo/fs.zig");
-const ort = @import("../merge/ort.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -274,7 +272,7 @@ fn firstLines(text: []const u8) [3][]const u8 {
     var n: usize = 0;
     var found_first = false;
     while (at < text.len and n < 3) {
-        const end = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
+        const end = std.mem.findScalarPos(u8, text, at, '\n') orelse text.len;
         var line = text[at..end];
         if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
         at = end + 1;
@@ -542,7 +540,7 @@ fn parseAuthorScript(a: Allocator, text: []const u8) Error![3][]const u8 {
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
         if (line.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse return error.MalformedState;
+        const eq = std.mem.findScalar(u8, line, '=') orelse return error.MalformedState;
         const key = line[0..eq];
         const words = (try sqDequoteWords(a, line[eq + 1 ..])) orelse return error.MalformedState;
         if (words.len != 1) return error.MalformedState;
@@ -621,7 +619,7 @@ fn parseMail(s: *Session, name: []const u8) Error!bool {
 }
 
 fn subjectOf(msg: []const u8) []const u8 {
-    const end = std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len;
+    const end = std.mem.findScalar(u8, msg, '\n') orelse msg.len;
     return msg[0..end];
 }
 

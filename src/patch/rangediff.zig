@@ -17,7 +17,6 @@ const Io = std.Io;
 
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
-const odb_mod = @import("../odb.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const repo_mod = @import("../repo.zig");
 const diff = @import("../diff.zig");
@@ -320,7 +319,7 @@ const Reader = struct {
         while (lines.next()) |line| {
             if (line.len == 0) continue;
             if (std.mem.startsWith(u8, line, "@@ ")) {
-                const rest = line[(std.mem.indexOfPos(u8, line, 3, "@@") orelse line.len - 2) + 2 ..];
+                const rest = line[(std.mem.findPos(u8, line, 3, "@@") orelse line.len - 2) + 2 ..];
                 try text.appendSlice(a, "@@");
                 if (rest.len != 0) try text.print(a, " {s}:", .{file_name});
                 try text.appendSlice(a, rest);
@@ -369,7 +368,7 @@ fn appendMessage(a: Allocator, text: *std.ArrayList(u8), message: []const u8) Al
 /// stop, counted in display columns, until a stretch is not UTF-8.
 fn appendTabExpanded(a: Allocator, text: *std.ArrayList(u8), line_in: []const u8) Allocator.Error!void {
     var line = line_in;
-    while (std.mem.indexOfScalar(u8, line, '\t')) |tab| {
+    while (std.mem.findScalar(u8, line, '\t')) |tab| {
         const columns = utf8Width(line[0..tab]) orelse break;
         try text.appendSlice(a, line[0..tab]);
         try text.appendNTimes(a, ' ', 8 - columns % 8);
@@ -527,20 +526,22 @@ fn diffSize(gpa: Allocator, a: []const u8, b: []const u8) Allocator.Error!i32 {
     return @intCast(@min(count, std.math.maxInt(i32)));
 }
 
+/// `cost[column + n * row]`, as `computeAssignment` reads it.
+const Costs = struct {
+    cost: []const i32,
+    n: usize,
+    fn at(s: Costs, column: i32, row: i32) i32 {
+        return s.cost[@as(usize, @intCast(column)) + s.n * @as(usize, @intCast(row))];
+    }
+};
+
 /// git's `compute_assignment`, after Jonker and Volgenant (1987): the
 /// assignment of columns to rows of least total cost, `cost[column +
 /// column_count * row]`. Ported line for line, ties included.
 fn computeAssignment(gpa: Allocator, column_count: usize, row_count: usize, cost: []const i32, column2row: []i32, row2column: []i32) Allocator.Error!void {
     const cc: i32 = @intCast(column_count);
     const rc: i32 = @intCast(row_count);
-    const C = struct {
-        cost: []const i32,
-        n: usize,
-        fn at(s: @This(), column: i32, row: i32) i32 {
-            return s.cost[@as(usize, @intCast(column)) + s.n * @as(usize, @intCast(row))];
-        }
-    };
-    const m: C = .{ .cost = cost, .n = column_count };
+    const m: Costs = .{ .cost = cost, .n = column_count };
 
     if (column_count < 2) {
         @memset(column2row, 0);
@@ -803,7 +804,7 @@ const Writer = struct {
             if (line.len == 0) continue;
             try s.w.writeAll("    ");
             if (std.mem.startsWith(u8, line, "@@ ")) {
-                const end = std.mem.indexOfPos(u8, line, 3, "@@") orelse line.len - 2;
+                const end = std.mem.findPos(u8, line, 3, "@@") orelse line.len - 2;
                 try s.w.writeAll("@@");
                 try s.w.writeAll(line[end + 2 ..]);
             } else try s.w.writeAll(line);

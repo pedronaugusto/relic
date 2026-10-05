@@ -129,7 +129,7 @@ fn isRfc2047Special(c: u8, kind: Rfc2047Kind) bool {
 }
 
 fn lastLineLength(buf: []const u8) usize {
-    const nl = std.mem.lastIndexOfScalar(u8, buf, '\n') orelse return buf.len;
+    const nl = std.mem.findScalarLast(u8, buf, '\n') orelse return buf.len;
     return buf.len - (nl + 1);
 }
 
@@ -165,7 +165,7 @@ pub fn appendRfc2047(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8, 
 /// already used) and the rest by `indent2`. A zero `width` indents only.
 pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u8, indent1: i32, indent2: i32, width: i32) Allocator.Error!void {
     // the text as git sees it: up to its first NUL
-    const text = if (std.mem.indexOfScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
+    const text = if (std.mem.findScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
     if (width <= 0) {
         try appendIndented(gpa, out, text, indent1, indent2);
         return;
@@ -265,7 +265,7 @@ fn appendIndented(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u8, 
     var indent: i32 = if (indent_in < 0) 0 else indent_in;
     var text = text_in;
     while (text.len > 0) {
-        const eol = std.mem.indexOfScalar(u8, text, '\n');
+        const eol = std.mem.findScalar(u8, text, '\n');
         const len = if (eol) |e| e + 1 else text.len;
         try out.appendNTimes(gpa, ' ', @intCast(indent));
         try out.appendSlice(gpa, text[0..len]);

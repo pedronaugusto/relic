@@ -332,7 +332,7 @@ pub const Signer = struct {
         defer outcome.deinit(signer.gpa);
         // A signature was made only if gpg says so on a line of its own.
         const created = std.mem.startsWith(u8, outcome.stderr, "[GNUPG:] SIG_CREATED ") or
-            std.mem.indexOf(u8, outcome.stderr, "\n[GNUPG:] SIG_CREATED ") != null;
+            std.mem.find(u8, outcome.stderr, "\n[GNUPG:] SIG_CREATED ") != null;
         if (!outcome.succeeded() or !created) {
             try signer.diagnostics.appendSlice(signer.gpa, outcome.stderr);
             return error.SigningFailed;
@@ -372,7 +372,7 @@ pub const Signer = struct {
         var outcome = try program.run(signer.programs, signer.gpa, io, .{ .argv = argv }, "", .{});
         defer outcome.deinit(signer.gpa);
         if (!outcome.succeeded()) return error.NoSigningKey;
-        const end = std.mem.indexOfScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
+        const end = std.mem.findScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
         const first = outcome.stdout[0..end];
         if (literalSshKey(first) == null) return error.NoSigningKey;
         return arena.dupe(u8, first);
@@ -418,8 +418,8 @@ pub const Signer = struct {
         verdict.output = try arena.dupe(u8, outcome.stderr);
         verdict.status = try arena.dupe(u8, outcome.stdout);
         verdict.accepted = outcome.succeeded() and
-            (std.mem.indexOf(u8, outcome.stdout, "\n[GNUPG:] GOODSIG ") != null or
-                std.mem.indexOf(u8, outcome.stdout, "\n[GNUPG:] EXPKEYSIG ") != null);
+            (std.mem.find(u8, outcome.stdout, "\n[GNUPG:] GOODSIG ") != null or
+                std.mem.find(u8, outcome.stdout, "\n[GNUPG:] EXPKEYSIG ") != null);
         parseGpgStatus(verdict);
     }
 
@@ -538,7 +538,7 @@ fn parseGpgStatus(v: *Verdict) void {
             }
             v.result = entry.result.?;
             const rest = line[entry.prefix.len..];
-            const space = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+            const space = std.mem.findScalar(u8, rest, ' ') orelse rest.len;
             v.key = rest[0..space];
             if (entry.uid and space < rest.len) v.signer = rest[space + 1 ..];
             break;
@@ -554,7 +554,7 @@ fn parseGpgStatus(v: *Verdict) void {
             }
         } else if (std.mem.startsWith(u8, line, "TRUST_")) {
             const rest = line["TRUST_".len..];
-            const end = std.mem.indexOfAny(u8, rest, " \n") orelse rest.len;
+            const end = std.mem.findAny(u8, rest, " \n") orelse rest.len;
             v.trust = Trust.parse(rest[0..end]) orelse return fail(v);
         }
     }
@@ -576,14 +576,14 @@ fn fail(v: *Verdict) void {
 fn parseSshOutput(v: *Verdict) void {
     v.result = .bad;
     v.trust = .never;
-    const end = std.mem.indexOfScalar(u8, v.output, '\n') orelse v.output.len;
+    const end = std.mem.findScalar(u8, v.output, '\n') orelse v.output.len;
     var line = v.output[0..end];
     const for_prefix = "Good \"git\" signature for ";
     const with_prefix = "Good \"git\" signature with ";
     if (std.mem.startsWith(u8, line, for_prefix)) {
         const principal_start = line[for_prefix.len..];
         // The principal may itself hold " with ", so the last one ends it.
-        const last = std.mem.lastIndexOf(u8, principal_start, " with ") orelse return;
+        const last = std.mem.findLast(u8, principal_start, " with ") orelse return;
         v.result = .good;
         v.trust = .fully;
         v.signer = principal_start[0..last];
@@ -593,7 +593,7 @@ fn parseSshOutput(v: *Verdict) void {
         v.trust = .undefined;
         line = line[with_prefix.len..];
     } else return;
-    const key_at = std.mem.indexOf(u8, line, "key ") orelse {
+    const key_at = std.mem.find(u8, line, "key ") orelse {
         v.result = .bad;
         return;
     };
@@ -637,7 +637,7 @@ pub fn splitCommit(gpa: Allocator, kind: hash.Kind, bytes: []const u8) Allocator
     var saw = false;
     var at: usize = 0;
     while (at < bytes.len) {
-        const nl = std.mem.indexOfScalarPos(u8, bytes, at, '\n');
+        const nl = std.mem.findScalarPos(u8, bytes, at, '\n');
         var next = if (nl) |n| n + 1 else bytes.len;
         const line = bytes[at..next];
         var sig: ?[]const u8 = null;
@@ -679,7 +679,7 @@ pub fn splitTag(gpa: Allocator, bytes: []const u8) Allocator.Error!?Signed {
     var at: usize = 0;
     while (at < bytes.len) {
         if (Format.of(bytes[at..]) != null) match = at;
-        const nl = std.mem.indexOfScalarPos(u8, bytes, at, '\n');
+        const nl = std.mem.findScalarPos(u8, bytes, at, '\n');
         at = if (nl) |n| n + 1 else bytes.len;
     }
     if (match == bytes.len) return null;
@@ -694,7 +694,7 @@ fn removeHeaderSignatures(gpa: Allocator, bytes: []const u8) Allocator.Error![]u
     var in_signature = false;
     var at: usize = 0;
     while (at < bytes.len) {
-        const nl = std.mem.indexOfScalarPos(u8, bytes, at, '\n');
+        const nl = std.mem.findScalarPos(u8, bytes, at, '\n');
         var next = if (nl) |n| n + 1 else bytes.len;
         const line = bytes[at..next];
         if (in_signature and line[0] == ' ') {

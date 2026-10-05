@@ -297,7 +297,7 @@ test "ssh signatures in a SHA-256 repository ride in gpgsig-sha256" {
     try k.repo.exec(io, &.{ "verify-commit", mine.hex(&hex) });
     const raw = try k.repo.run(io, &.{ "cat-file", "commit", mine.hex(&hex) });
     defer gpa.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\ngpgsig-sha256 -----BEGIN SSH SIGNATURE-----\n") != null);
+    try testing.expect(std.mem.find(u8, raw, "\ngpgsig-sha256 -----BEGIN SSH SIGNATURE-----\n") != null);
 }
 
 test "export-subst's signature placeholders check the commit as git archive does" {

@@ -150,7 +150,7 @@ pub fn split(gpa: Allocator, mbox: []const u8, options: SplitOptions) Self.Error
 fn nextWholeLine(text: []const u8, at: *usize) ?[]const u8 {
     if (at.* >= text.len) return null;
     const start = at.*;
-    const end = if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |nl| nl + 1 else text.len;
+    const end = if (std.mem.findScalarPos(u8, text, start, '\n')) |nl| nl + 1 else text.len;
     at.* = end;
     return text[start..end];
 }
@@ -247,7 +247,7 @@ const State = struct {
     fn getLineLf(s: *State) ?[]const u8 {
         if (s.pos >= s.input.len) return null;
         const start = s.pos;
-        if (std.mem.indexOfScalarPos(u8, s.input, start, '\n')) |nl| {
+        if (std.mem.findScalarPos(u8, s.input, start, '\n')) |nl| {
             s.pos = nl + 1;
             return s.input[start..nl];
         }
@@ -279,7 +279,7 @@ fn trim(s: []const u8) []const u8 {
 
 fn cstr(s: []const u8) []const u8 {
     // the C string git's code sees ends at a NUL
-    return if (std.mem.indexOfScalar(u8, s, 0)) |z| s[0..z] else s;
+    return if (std.mem.findScalar(u8, s, 0)) |z| s[0..z] else s;
 }
 
 /// Runs of whitespace made one space.
@@ -449,7 +449,7 @@ fn decodeHeader(s: *State, it: []const u8) Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var in: usize = 0;
     while (in <= it.len) {
-        const ep_rel = std.mem.indexOf(u8, it[in..], "=?") orelse break;
+        const ep_rel = std.mem.find(u8, it[in..], "=?") orelse break;
         var ep = in + ep_rel;
         if (in != ep) {
             var scan = in;
@@ -458,12 +458,12 @@ fn decodeHeader(s: *State, it: []const u8) Error![]const u8 {
         }
         ep += 2;
         if (ep >= it.len) return error.MalformedEncodedWord;
-        const cp = std.mem.indexOfScalarPos(u8, it, ep, '?') orelse return error.MalformedEncodedWord;
+        const cp = std.mem.findScalarPos(u8, it, ep, '?') orelse return error.MalformedEncodedWord;
         if (cp + 3 > it.len) return error.MalformedEncodedWord;
         const charset = it[ep..cp];
         const encoding = it[cp + 1];
         if (it[cp + 2] != '?') return error.MalformedEncodedWord;
-        const end = std.mem.indexOfPos(u8, it, cp + 3, "?=") orelse return error.MalformedEncodedWord;
+        const end = std.mem.findPos(u8, it, cp + 3, "?=") orelse return error.MalformedEncodedWord;
         const piece = it[cp + 3 .. end];
         var dec: std.ArrayList(u8) = .empty;
         switch (std.ascii.toLower(encoding)) {
@@ -493,7 +493,7 @@ fn slurpAttr(line: []const u8, name: []const u8) ?[]const u8 {
         ends = "\"";
     }
     var end = ap;
-    while (end < line.len and std.mem.indexOfScalar(u8, ends, line[end]) == null) end += 1;
+    while (end < line.len and std.mem.findScalar(u8, ends, line[end]) == null) end += 1;
     return line[ap..end];
 }
 
@@ -810,7 +810,7 @@ fn handleBody(s: *State, first_line: []const u8) Error!void {
                 prev.clearRetainingCapacity();
                 var rest = joined;
                 while (rest.len > 0) {
-                    const nl = std.mem.indexOfScalar(u8, rest, '\n');
+                    const nl = std.mem.findScalar(u8, rest, '\n');
                     if (nl == null) {
                         try prev.appendSlice(s.a, rest);
                         break;
@@ -850,9 +850,9 @@ fn cleanupSubject(a: Allocator, subject_in: []const u8, keep_non_patch: bool) Al
                 continue;
             },
             '[' => {
-                const close = std.mem.indexOfScalarPos(u8, subject.items, at, ']') orelse break;
+                const close = std.mem.findScalarPos(u8, subject.items, at, ']') orelse break;
                 const remove = close - at + 1;
-                if (!keep_non_patch or (7 <= remove and std.mem.indexOf(u8, subject.items[at .. at + remove], "PATCH") != null)) {
+                if (!keep_non_patch or (7 <= remove and std.mem.find(u8, subject.items[at .. at + remove], "PATCH") != null)) {
                     subject.replaceRangeAssumeCapacity(at, remove, "");
                 } else {
                     at += remove;
@@ -870,13 +870,13 @@ fn handleFrom(s: *State, from: []const u8) Error!void {
     const a = s.a;
     var f: std.ArrayList(u8) = .empty;
     try unquoteQuotedPair(a, &f, cstr(from));
-    const at_opt = std.mem.indexOfScalar(u8, f.items, '@');
+    const at_opt = std.mem.findScalar(u8, f.items, '@');
     if (at_opt == null) {
         // "John Doe <johndoe>"
         if (s.email.items.len != 0) return;
         const line = cstr(from);
-        const bra = std.mem.indexOfScalar(u8, line, '<') orelse return;
-        const ket = std.mem.indexOfScalarPos(u8, line, bra, '>') orelse return;
+        const bra = std.mem.findScalar(u8, line, '<') orelse return;
+        const ket = std.mem.findScalarPos(u8, line, bra, '>') orelse return;
         s.email.clearRetainingCapacity();
         try s.email.appendSlice(a, line[bra + 1 .. ket]);
         s.name.clearRetainingCapacity();
@@ -885,7 +885,7 @@ fn handleFrom(s: *State, from: []const u8) Error!void {
         return;
     }
     var at = at_opt.?;
-    if (s.email.items.len != 0 and std.mem.indexOfScalarPos(u8, f.items, at + 1, '@') != null) return;
+    if (s.email.items.len != 0 and std.mem.findScalarPos(u8, f.items, at + 1, '@') != null) return;
     while (at > 0) {
         const c = f.items[at - 1];
         if (isSpace(c)) break;
@@ -896,7 +896,7 @@ fn handleFrom(s: *State, from: []const u8) Error!void {
         at -= 1;
     }
     var el: usize = 0;
-    while (at + el < f.items.len and std.mem.indexOfScalar(u8, " \n\t\r\x0b\x0c>", f.items[at + el]) == null) el += 1;
+    while (at + el < f.items.len and std.mem.findScalar(u8, " \n\t\r\x0b\x0c>", f.items[at + el]) == null) el += 1;
     s.email.clearRetainingCapacity();
     try s.email.appendSlice(a, f.items[at .. at + el]);
     const remove = el + @intFromBool(at + el < f.items.len);
@@ -907,7 +907,7 @@ fn handleFrom(s: *State, from: []const u8) Error!void {
 }
 
 fn saneName(s: *State, name: []const u8) Allocator.Error!void {
-    const src = if (name.len == 0 or name.len > 60 or std.mem.indexOfAny(u8, name, "@<>") != null) s.email.items else name;
+    const src = if (name.len == 0 or name.len > 60 or std.mem.findAny(u8, name, "@<>") != null) s.email.items else name;
     const copy = try s.a.dupe(u8, src);
     s.name.clearRetainingCapacity();
     try s.name.appendSlice(s.a, copy);
@@ -989,7 +989,7 @@ pub fn info(gpa: Allocator, mail: []const u8, options: InfoOptions) Self.Error!I
     var out: std.ArrayList(u8) = .empty;
     for (header_names, 0..) |name, i| {
         const hdr = if (s.patch_lines != 0 and s.s_hdr[i] != null) s.s_hdr[i].? else s.p_hdr[i] orelse continue;
-        if (std.mem.indexOfScalar(u8, hdr, 0) != null) return error.NulInHeader;
+        if (std.mem.findScalar(u8, hdr, 0) != null) return error.NulInHeader;
         if (std.mem.eql(u8, name, "Subject")) {
             var subject = hdr;
             if (!options.keep_subject) subject = try cleanupSpace(a, try cleanupSubject(a, hdr, options.keep_non_patch_brackets));

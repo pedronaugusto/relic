@@ -219,7 +219,7 @@ test "a binary change goes out as a GIT binary patch git applies to the same fil
     const want = try git.run(io, &.{ "rev-parse", "HEAD^{tree}" });
     defer gpa.free(want);
     const text = series.mails[0].text;
-    try std.testing.expect(std.mem.indexOf(u8, text, "GIT binary patch\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "GIT binary patch\n") != null);
 
     // a repository without the new blobs: git must decode the hunks
     var theirs = try testgit.Repo.init(gpa, io, &.{});

@@ -63,7 +63,7 @@ pub fn stripSpace(gpa: Allocator, text: []const u8, comment: ?[]const u8) Alloca
     var empties: usize = 0;
     var at: usize = 0;
     while (at < text.len) {
-        const end = if (std.mem.indexOfScalarPos(u8, text, at, '\n')) |nl| nl + 1 else text.len;
+        const end = if (std.mem.findScalarPos(u8, text, at, '\n')) |nl| nl + 1 else text.len;
         const line = text[at..end];
         at = end;
         if (comment) |prefix| {
@@ -102,7 +102,7 @@ fn isBlankLine(line: []const u8) bool {
 }
 
 fn nextLine(buf: []const u8, at: usize) usize {
-    return if (std.mem.indexOfScalarPos(u8, buf, at, '\n')) |nl| nl + 1 else buf.len;
+    return if (std.mem.findScalarPos(u8, buf, at, '\n')) |nl| nl + 1 else buf.len;
 }
 
 /// How a repository reads trailers: its `trailer.*` settings, with the
@@ -192,7 +192,7 @@ pub fn fromSubject(msg: []const u8) []const u8 {
 /// newline.
 pub fn subjectLine(msg: []const u8) []const u8 {
     const from = fromSubject(msg);
-    const end = std.mem.indexOfScalar(u8, from, '\n') orelse from.len;
+    const end = std.mem.findScalar(u8, from, '\n') orelse from.len;
     return from[0..end];
 }
 

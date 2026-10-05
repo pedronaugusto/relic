@@ -647,7 +647,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
 
 /// The subject a reflog line quotes: up to the first newline.
 fn firstLine(text: []const u8) []const u8 {
-    const end = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    const end = std.mem.findScalar(u8, text, '\n') orelse text.len;
     return text[0..end];
 }
 
