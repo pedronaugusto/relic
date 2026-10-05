@@ -146,11 +146,34 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, args: []const []const u8,
     var opts = options;
     opts.cwd = git.dir;
     try fastexport.write(gpa, io, &repo, &mine.writer, opts);
-    std.testing.expectEqualStrings(theirs, mine.written()) catch |err| {
+    // Git 2.35 fixed fast-export revision ordering. An older oracle may
+    // visit independent histories in another order and number their marks
+    // differently; both streams must still reconstruct identical objects.
+    if (!std.mem.eql(u8, theirs, mine.written()) and !try testgit.gitAtLeast(gpa, io, 2, 35)) {
+        const a = try importedRefs(gpa, io, git, theirs);
+        defer gpa.free(a);
+        const b = try importedRefs(gpa, io, git, mine.written());
+        defer gpa.free(b);
+        try std.testing.expectEqualStrings(a, b);
+    } else std.testing.expectEqualStrings(theirs, mine.written()) catch |err| {
         std.debug.print("git fast-export {any}\n", .{args});
         return err;
     };
     return mine.toOwnedSlice();
+}
+
+/// Import with the source's objects available for no-data streams and
+/// excluded parents, then compare every ref's exact object ID.
+fn importedRefs(gpa: Allocator, io: Io, source: *testgit.Repo, stream: []const u8) ![]u8 {
+    var imported = try testgit.Repo.init(gpa, io, &.{});
+    defer imported.deinit();
+    const objects = try source.dir.realPathFileAlloc(io, ".git/objects", gpa);
+    defer gpa.free(objects);
+    const alternate = try std.fmt.allocPrint(gpa, "{s}\n", .{objects});
+    defer gpa.free(alternate);
+    try imported.writeFile(io, ".git/objects/info/alternates", alternate);
+    gpa.free(try imported.runInput(io, &.{ "fast-import", "--quiet" }, stream));
+    return imported.run(io, &.{ "for-each-ref", "--format=%(refname) %(objectname)" });
 }
 
 test "every ref exports as git exports it, and imports back to the same objects" {
