@@ -119,7 +119,7 @@ pub const Header = struct {
             // takes whitespace off the end of the whole line.
             var text = line.items;
             while (text.len > 0 and isSpace(text[text.len - 1])) text = text[0 .. text.len - 1];
-            if (std.mem.indexOfScalar(u8, text, 0)) |nul| text = text[0..nul];
+            if (std.mem.findScalar(u8, text, 0)) |nul| text = text[0..nul];
 
             if (h.version == .v3 and text.len > 0 and text[0] == '@') {
                 const capability = text[1..];

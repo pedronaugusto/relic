@@ -323,7 +323,7 @@ fn parseOne(arena: Allocator, text: []const u8, warnings: ?*warning.Warnings) Al
     var token: ?[]const u8 = null;
     var it = std.mem.splitScalar(u8, text, ',');
     while (it.next()) |elem| {
-        const eq = std.mem.indexOfScalar(u8, elem, '=') orelse {
+        const eq = std.mem.findScalar(u8, elem, '=') orelse {
             if (warnings) |w| try w.add(.{ .promisor = try std.fmt.allocPrint(w.arena.allocator(), "invalid element '{s}' from remote info", .{elem}) });
             continue;
         };

@@ -81,7 +81,7 @@ pub const Url = struct {
                 }
                 // git for Windows keeps an authority as a UNC path.
                 // On Unix only the path after the authority is used.
-                const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+                const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
                 const host = rest[0..slash];
                 if (slash == rest.len) return error.MalformedUrl;
                 if (builtin.os.tag == .windows and host.len != 0) {
@@ -90,7 +90,7 @@ pub const Url = struct {
                 return .{ .scheme = .file, .path = rest[slash..], .raw = text };
             }
             var url: Url = .{ .scheme = scheme, .path = "", .raw = text };
-            const path_at = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+            const path_at = std.mem.findScalar(u8, rest, '/') orelse rest.len;
             try splitAuthority(&url, rest[0..path_at], true);
             if (url.host.len == 0) return error.MalformedUrl;
             url.path = rest[path_at..];
@@ -114,12 +114,12 @@ pub const Url = struct {
         if (std.mem.startsWith(u8, text[helper_end..], "::")) return error.UnsupportedTransport;
 
         var url: Url = .{ .scheme = .ssh, .path = "", .raw = text };
-        const bracket = if (std.mem.indexOf(u8, text, "@[")) |at| at + 1 else @as(usize, 0);
+        const bracket = if (std.mem.find(u8, text, "@[")) |at| at + 1 else @as(usize, 0);
         const host_end = if (text[bracket] == '[') blk: {
-            const close = std.mem.indexOfScalarPos(u8, text, bracket + 1, ']') orelse return error.MalformedUrl;
+            const close = std.mem.findScalarPos(u8, text, bracket + 1, ']') orelse return error.MalformedUrl;
             if (close + 1 >= text.len or text[close + 1] != ':') return error.MalformedUrl;
             break :blk close + 1;
-        } else std.mem.indexOfScalar(u8, text, ':').?;
+        } else std.mem.findScalar(u8, text, ':').?;
         try splitAuthority(&url, text[0..host_end], false);
         if (url.host.len == 0) return error.MalformedUrl;
         url.path = text[host_end + 1 ..];
@@ -252,31 +252,31 @@ fn splitAuthority(url: *Url, text: []const u8, password: bool) ParseError!void {
     // git accepts [user@host] as well as user@[host]. Unwrap the former
     // before finding the user, so its closing bracket cannot enter the host.
     if (authority.len != 0 and authority[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return error.MalformedUrl;
+        const close = std.mem.findScalar(u8, authority, ']') orelse return error.MalformedUrl;
         try splitAuthority(url, authority[1..close], password);
         try splitPort(url, authority[close + 1 ..]);
         return;
     }
-    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+    if (std.mem.findScalarLast(u8, authority, '@')) |at| {
         const userinfo = authority[0..at];
         authority = authority[at + 1 ..];
         if (password) {
-            if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+            if (std.mem.findScalar(u8, userinfo, ':')) |colon| {
                 url.user = userinfo[0..colon];
                 url.password = userinfo[colon + 1 ..];
             } else url.user = userinfo;
         } else url.user = userinfo;
     }
     if (authority.len != 0 and authority[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return error.MalformedUrl;
+        const close = std.mem.findScalar(u8, authority, ']') orelse return error.MalformedUrl;
         try splitAuthority(url, authority[1..close], false);
         try splitPort(url, authority[close + 1 ..]);
         return;
     }
     // An unbracketed IPv6 address has several colons and no port. git's
     // get_host_and_port and get_port leave it whole too.
-    if (std.mem.indexOfScalar(u8, authority, ':')) |colon| {
-        if (std.mem.indexOfScalarPos(u8, authority, colon + 1, ':') == null) {
+    if (std.mem.findScalar(u8, authority, ':')) |colon| {
+        if (std.mem.findScalarPos(u8, authority, colon + 1, ':') == null) {
             url.host = authority[0..colon];
             return splitPort(url, authority[colon..]);
         }
@@ -294,8 +294,8 @@ fn splitPort(url: *Url, suffix: []const u8) ParseError!void {
 /// git's `url_is_local_not_ssh`: no colon, or a slash before the first
 /// colon, or a DOS drive letter on Windows.
 pub fn isLocal(text: []const u8) bool {
-    const colon = std.mem.indexOfScalar(u8, text, ':') orelse return true;
-    if (std.mem.indexOfScalar(u8, text, '/')) |slash| {
+    const colon = std.mem.findScalar(u8, text, ':') orelse return true;
+    if (std.mem.findScalar(u8, text, '/')) |slash| {
         if (slash < colon) return true;
     }
     return builtin.os.tag == .windows and text.len >= 2 and
@@ -312,15 +312,15 @@ pub fn isLocal(text: []const u8) bool {
 pub fn anonymize(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
     if (schemeEnd(text)) |sep| {
         const start = sep + 3;
-        const path_at = std.mem.indexOfScalarPos(u8, text, start, '/') orelse text.len;
-        if (std.mem.lastIndexOfScalar(u8, text[start..path_at], '@')) |at| {
+        const path_at = std.mem.findScalarPos(u8, text, start, '/') orelse text.len;
+        if (std.mem.findScalarLast(u8, text[start..path_at], '@')) |at| {
             return std.mem.concat(gpa, u8, &.{ text[0..start], text[start + at + 1 ..] });
         }
         return gpa.dupe(u8, text);
     }
     if (isLocal(text)) return gpa.dupe(u8, text);
-    const colon = std.mem.indexOfScalar(u8, text, ':').?;
-    if (std.mem.indexOfScalar(u8, text[0..colon], '@')) |at| {
+    const colon = std.mem.findScalar(u8, text, ':').?;
+    if (std.mem.findScalar(u8, text[0..colon], '@')) |at| {
         return gpa.dupe(u8, text[at + 1 ..]);
     }
     return gpa.dupe(u8, text);

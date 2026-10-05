@@ -200,14 +200,14 @@ pub fn explain(gpa: Allocator, conn: *Connection, io: Io, err: anyerror, url: ur
     const ended = connection.Process.diagnose(conn, io) catch return error.Canceled;
     const said = std.mem.trim(u8, ended.stderr, " \t\r\n");
     const refusal: ?struct { e: Error, reason: auth.Failure.Reason } =
-        if (std.mem.indexOf(u8, said, "Host key verification failed") != null or
-        std.mem.indexOf(u8, said, "REMOTE HOST IDENTIFICATION HAS CHANGED") != null)
+        if (std.mem.find(u8, said, "Host key verification failed") != null or
+        std.mem.find(u8, said, "REMOTE HOST IDENTIFICATION HAS CHANGED") != null)
             .{ .e = error.HostKeyVerificationFailed, .reason = .host_key }
-        else if (std.mem.indexOf(u8, said, "Permission denied") != null)
+        else if (std.mem.find(u8, said, "Permission denied") != null)
             .{ .e = error.AuthenticationFailed, .reason = .refused }
         else
             null;
-    if (said.len != 0) conn.setMessage(said[if (std.mem.lastIndexOfScalar(u8, said, '\n')) |nl| nl + 1 else 0..]);
+    if (said.len != 0) conn.setMessage(said[if (std.mem.findScalarLast(u8, said, '\n')) |nl| nl + 1 else 0..]);
     if (refusal) |r| {
         if (failure) |f| describe: {
             f.begin(gpa, r.reason, url.scheme, url.raw) catch break :describe;
@@ -242,10 +242,10 @@ fn variantOf(arena: Allocator, programs: program.Programs, config: ?*const confi
     var first = command;
     if (shell) {
         const trimmed = std.mem.trim(u8, command, " \t");
-        const end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
+        const end = std.mem.findAny(u8, trimmed, " \t") orelse trimmed.len;
         first = std.mem.trim(u8, trimmed[0..end], "'\"");
     }
-    const base_start = if (std.mem.lastIndexOfAny(u8, first, "/\\")) |slash| slash + 1 else 0;
+    const base_start = if (std.mem.findLastAny(u8, first, "/\\")) |slash| slash + 1 else 0;
     const base = first[base_start..];
     if (std.ascii.eqlIgnoreCase(base, "ssh") or std.ascii.eqlIgnoreCase(base, "ssh.exe")) return .ssh;
     if (std.ascii.eqlIgnoreCase(base, "plink") or std.ascii.eqlIgnoreCase(base, "plink.exe")) return .plink;

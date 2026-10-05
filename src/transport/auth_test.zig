@@ -446,7 +446,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         defer gpa.free(question);
         const filled = try testremote.gitInputEnv(gpa, io, r.dir, &person.env, &.{ "credential", "fill" }, question, true);
         defer gpa.free(filled);
-        try testing.expect(std.mem.indexOf(u8, filled, "password=secret\n") != null);
+        try testing.expect(std.mem.find(u8, filled, "password=secret\n") != null);
         var second = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
         second.deinit();
     }
@@ -588,7 +588,7 @@ test "a helper's bearer token is sent as git sends it, and handed back with its 
     const ours = try person.log(io, "helper");
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
-    try testing.expect(std.mem.indexOf(u8, ours, "state[]=helper:one") != null);
+    try testing.expect(std.mem.find(u8, ours, "state[]=helper:one") != null);
 }
 
 test "a helper's password past its password_expiry_utc is passed over for the next helper's, and not stored, as git passes it over" {
@@ -838,10 +838,10 @@ test "ssh gets the person's host alias, agent and command line untouched, as git
         const ours = try person.tools.dir.readFileAlloc(io, "ssh.log", gpa, .unlimited);
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
-        try testing.expect(std.mem.indexOf(u8, ours, "work-github]") != null);
+        try testing.expect(std.mem.find(u8, ours, "work-github]") != null);
         const agent_entry = try std.fmt.allocPrint(gpa, "agent={s}", .{agent});
         defer gpa.free(agent_entry);
-        try testing.expect(std.mem.indexOf(u8, ours, agent_entry) != null);
+        try testing.expect(std.mem.find(u8, ours, agent_entry) != null);
     }
 }
 
@@ -866,7 +866,7 @@ test "ssh's refusal of a key or a host is named, with what ssh said" {
         defer theirs.deinit(gpa);
         try testing.expect(!theirs.succeeded());
         // git passes ssh's words through to the person.
-        try testing.expect(std.mem.indexOf(u8, theirs.stderr, case.said) != null);
+        try testing.expect(std.mem.find(u8, theirs.stderr, case.said) != null);
 
         var locations: userconfig.Locations = undefined;
         var repo = try person.open(io, r.dir, &locations);

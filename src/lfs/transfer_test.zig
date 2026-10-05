@@ -358,11 +358,11 @@ test "ssh is started for git-lfs-authenticate as git-lfs starts it, and its toke
         logs[i] = try fx.tools.readFileAlloc(io, "fake-ssh.log", gpa, .unlimited);
     }
     try testing.expectEqualStrings(logs[0], logs[1]);
-    try testing.expect(std.mem.indexOf(u8, logs[1], "[git-lfs-authenticate /org/repo.git download]") != null);
+    try testing.expect(std.mem.find(u8, logs[1], "[git-lfs-authenticate /org/repo.git download]") != null);
     // No request went out without the token.
     const seen = try fx.server.requests(gpa);
     defer gpa.free(seen);
-    try testing.expect(std.mem.indexOf(u8, seen, " ?\n") == null);
+    try testing.expect(std.mem.find(u8, seen, " ?\n") == null);
 }
 
 test "a failed transfer is retried with a fresh batch, a 429 is waited out, and one that keeps failing is named" {
@@ -411,7 +411,7 @@ test "a failed transfer is retried with a fresh batch, a 429 is waited out, and 
         failed = r;
     };
     try testing.expectEqual(lfstransfer.Result.Status.failed, failed.?.status);
-    try testing.expect(std.mem.indexOf(u8, failed.?.message.?, "HTTP 500") != null);
+    try testing.expect(std.mem.find(u8, failed.?.message.?, "HTTP 500") != null);
 
     // An object the server does not have is refused by the server's words.
     try fx.server.putObject(&testlfs.sha256Hex("x"), "y");
@@ -584,8 +584,8 @@ test "the endpoint and its access are the ones git lfs env names" {
         if (case.lfsconfig) |text| try d.writeFile(io, .{ .sub_path = ".lfsconfig", .data = text });
         const env = try fx.gitOut(d, &.{ "lfs", "env" });
         defer gpa.free(env);
-        const line_start = (std.mem.indexOf(u8, env, "\nEndpoint=") orelse return error.TestUnexpectedResult) + 1;
-        const line = env[line_start .. std.mem.indexOfScalarPos(u8, env, line_start, '\n') orelse env.len];
+        const line_start = (std.mem.find(u8, env, "\nEndpoint=") orelse return error.TestUnexpectedResult) + 1;
+        const line = env[line_start .. std.mem.findScalarPos(u8, env, line_start, '\n') orelse env.len];
 
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
@@ -601,7 +601,7 @@ test "the endpoint and its access are the ones git lfs env names" {
         if (e.ssh) |ssh| {
             const ssh_line = try std.fmt.allocPrint(gpa, "\n  SSH={s}:{s}\n", .{ ssh.user_and_host, ssh.path });
             defer gpa.free(ssh_line);
-            try testing.expect(std.mem.indexOf(u8, env, ssh_line) != null);
+            try testing.expect(std.mem.find(u8, env, ssh_line) != null);
         }
     }
 }
@@ -719,7 +719,7 @@ test "an .lfsconfig missing from the working tree is read from the index, then f
         defer gpa.free(env);
         var want_buf: [128]u8 = undefined;
         const want = try std.fmt.bufPrint(&want_buf, "\nEndpoint={s} (auth=none)\n", .{stage.want});
-        try testing.expect(std.mem.indexOf(u8, env, want) != null);
+        try testing.expect(std.mem.find(u8, env, want) != null);
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
         const server = try openServer(fx, &repo);
@@ -810,8 +810,8 @@ test "with no remote named, the remote and the endpoint are the ones git-lfs pic
         for (case.setup) |args| try fx.gitIn(d, args);
         const env = try fx.gitOut(d, &.{ "lfs", "env" });
         defer gpa.free(env);
-        const line_start = (std.mem.indexOf(u8, env, "\nEndpoint=") orelse return error.TestUnexpectedResult) + "\nEndpoint=".len;
-        const line = env[line_start .. std.mem.indexOfScalarPos(u8, env, line_start, ' ') orelse env.len];
+        const line_start = (std.mem.find(u8, env, "\nEndpoint=") orelse return error.TestUnexpectedResult) + "\nEndpoint=".len;
+        const line = env[line_start .. std.mem.findScalarPos(u8, env, line_start, ' ') orelse env.len];
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
         const server = try lfsapi.Server.open(gpa, io, &repo, null, .{ .programs = fx.programs() });
@@ -915,8 +915,8 @@ test "a download that breaks off goes on from where it stopped, as git-lfs's doe
         try expectFile(fx, d, try std.fmt.bufPrint(&path_buf, ".git/lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], &oid }), content);
         const seen = try fx.server.requests(gpa);
         defer gpa.free(seen);
-        const at = std.mem.indexOf(u8, seen, "range=") orelse return error.TestUnexpectedResult;
-        logs[i] = try gpa.dupe(u8, seen[at..std.mem.indexOfScalarPos(u8, seen, at, '\n').?]);
+        const at = std.mem.find(u8, seen, "range=") orelse return error.TestUnexpectedResult;
+        logs[i] = try gpa.dupe(u8, seen[at..std.mem.findScalarPos(u8, seen, at, '\n').?]);
     }
     try testing.expectEqualStrings(logs[0], logs[1]);
     try testing.expectEqualStrings("range=bytes=153600-307199", logs[1]);
@@ -1028,10 +1028,10 @@ test "a recent fetch brings what git lfs fetch --recent brings, counted from the
     // The tips of main and of the recent branch, and the two versions the
     // last five days' commits replaced; nothing older.
     for ([_][]const u8{ "version four\n", "a recent branch's\n", "version three\n", "version two\n" }) |c| {
-        try testing.expect(std.mem.indexOf(u8, listings[1], &testlfs.sha256Hex(c)) != null);
+        try testing.expect(std.mem.find(u8, listings[1], &testlfs.sha256Hex(c)) != null);
     }
     for ([_][]const u8{ "version one\n", "an old branch's\n" }) |c| {
-        try testing.expect(std.mem.indexOf(u8, listings[1], &testlfs.sha256Hex(c)) == null);
+        try testing.expect(std.mem.find(u8, listings[1], &testlfs.sha256Hex(c)) == null);
     }
 }
 
@@ -1090,8 +1090,8 @@ test "a clone made with --shared takes its objects from the other repository's s
     // relic too; on a platform where Git LFS copies, relic copies too.
     try testing.expectEqual(linked[0], linked[1]);
     try testing.expectEqualStrings(listings[0], listings[1]);
-    try testing.expect(std.mem.indexOf(u8, listings[1], &oid) != null);
-    try testing.expect(std.mem.indexOf(u8, listings[1], &testlfs.sha256Hex("shared twice\n")) != null);
+    try testing.expect(std.mem.find(u8, listings[1], &oid) != null);
+    try testing.expect(std.mem.find(u8, listings[1], &testlfs.sha256Hex("shared twice\n")) != null);
 }
 
 test "an upload is sent as the type its first bytes name, as git-lfs sends it, unless lfs.contenttype is false" {
@@ -1134,7 +1134,7 @@ test "an upload is sent as the type its first bytes name, as git-lfs sends it, u
             &.{"application/octet-stream"};
         for (want) |t| {
             var buf: [64]u8 = undefined;
-            try testing.expect(std.mem.indexOf(u8, logs[1], try std.fmt.bufPrint(&buf, "content-type={s}\n", .{t})) != null);
+            try testing.expect(std.mem.find(u8, logs[1], try std.fmt.bufPrint(&buf, "content-type={s}\n", .{t})) != null);
         }
     }
 }
@@ -1182,8 +1182,8 @@ test "a download asks for gzip, or for zstd when lfs.transfer.httpDownloadEncodi
             logs[i] = try fx.server.objectHeaders(gpa);
         }
         try testing.expectEqualStrings(logs[0], logs[1]);
-        if (setting == null) try testing.expect(std.mem.indexOf(u8, logs[1], "accept-encoding=gzip\n") != null);
-        if (setting != null and std.mem.eql(u8, setting.?, "zstd")) try testing.expect(std.mem.indexOf(u8, logs[1], "accept-encoding=zstd\n") != null);
+        if (setting == null) try testing.expect(std.mem.find(u8, logs[1], "accept-encoding=gzip\n") != null);
+        if (setting != null and std.mem.eql(u8, setting.?, "zstd")) try testing.expect(std.mem.find(u8, logs[1], "accept-encoding=zstd\n") != null);
     }
 }
 
@@ -1326,8 +1326,8 @@ test "an upload whose action asks for chunks is sent in chunks, as git-lfs sends
         logs[i] = try fx.server.objectHeaders(gpa);
     }
     try testing.expectEqualStrings(logs[0], logs[1]);
-    try testing.expect(std.mem.indexOf(u8, logs[1], "transfer-encoding=chunked\n") != null);
-    try testing.expect(std.mem.indexOf(u8, logs[1], "content-length=-\n") != null);
+    try testing.expect(std.mem.find(u8, logs[1], "transfer-encoding=chunked\n") != null);
+    try testing.expect(std.mem.find(u8, logs[1], "content-length=-\n") != null);
 }
 
 test "a proxy is chosen by git-lfs's rules, HTTP_PROXY included, and never for a loopback address" {
@@ -1368,8 +1368,8 @@ test "a proxy is chosen by git-lfs's rules, HTTP_PROXY included, and never for a
         logs[i] = try fx.server.requests(gpa);
     }
     try testing.expectEqualStrings(logs[0], logs[1]);
-    try testing.expect(std.mem.indexOf(u8, logs[1], "POST /objects/batch anonymous proxied-for=lfs.example.invalid\n") != null);
-    try testing.expect(std.mem.indexOf(u8, logs[1], "proxied-for=127.0.0.1") == null);
+    try testing.expect(std.mem.find(u8, logs[1], "POST /objects/batch anonymous proxied-for=lfs.example.invalid\n") != null);
+    try testing.expect(std.mem.find(u8, logs[1], "proxied-for=127.0.0.1") == null);
 }
 
 test "an unreadable client certificate, unreadable authorities and an unsupported proxy scheme are refused by name before anything is sent" {
@@ -1633,7 +1633,7 @@ test "a refused credential is described as git-lfs's helpers hear it, with the s
         logs[i] = try gets.toOwnedSlice(gpa);
     }
     try testing.expectEqualStrings(logs[0], logs[1]);
-    try testing.expect(std.mem.indexOf(u8, logs[1], "wwwauth[]=Basic realm=\"relic-lfs\"\n") != null);
+    try testing.expect(std.mem.find(u8, logs[1], "wwwauth[]=Basic realm=\"relic-lfs\"\n") != null);
 }
 
 test "a zstd body is decoded with the window its frame asks for, up to git-lfs's limit, as git-lfs decodes it" {
@@ -1971,7 +1971,7 @@ test "LFS uploads and downloads through each SOCKS scheme, with TLS inside secur
             }
             const log = try proxy.take(gpa);
             defer gpa.free(log);
-            try testing.expect(std.mem.indexOf(u8, log, if (remote_dns) " name lfs.example.invalid:" else " ipv") != null);
+            try testing.expect(std.mem.find(u8, log, if (remote_dns) " name lfs.example.invalid:" else " ipv") != null);
         }
     }
     const counts = proxy.tunnelCounts();
@@ -2057,5 +2057,5 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
     const ours = try agentLines(fx, "logs-ours");
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
-    try testing.expect(std.mem.indexOf(u8, ours, "\"action\":{\"href\":\"http://") != null);
+    try testing.expect(std.mem.find(u8, ours, "\"action\":{\"href\":\"http://") != null);
 }

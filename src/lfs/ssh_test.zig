@@ -102,7 +102,7 @@ const Ssh = struct {
         defer lfs_only.deinit(gpa);
         var lines = std.mem.splitScalar(u8, raw, '\n');
         while (lines.next()) |line| {
-            if (std.mem.indexOf(u8, line, "[git-lfs-") == null) continue;
+            if (std.mem.find(u8, line, "[git-lfs-") == null) continue;
             try lfs_only.appendSlice(gpa, line);
             try lfs_only.append(gpa, '\n');
         }
@@ -115,7 +115,7 @@ fn sockNamed(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     var at: usize = 0;
-    while (std.mem.indexOfPos(u8, text, at, "sock-")) |i| {
+    while (std.mem.findPos(u8, text, at, "sock-")) |i| {
         try out.appendSlice(gpa, text[at..i]);
         try out.appendSlice(gpa, "sock-X");
         at = i;
@@ -176,14 +176,14 @@ test "objects go up and come down over git-lfs-transfer, asked for as git-lfs as
     }
     defer for (up) |p| free(p);
     try expectSame(up[0], up[1]);
-    try testing.expect(std.mem.indexOf(u8, up[1][0], "> put-object ") != null);
-    try testing.expect(std.mem.indexOf(u8, up[1][0], "> verify-object ") != null);
+    try testing.expect(std.mem.find(u8, up[1][0], "> put-object ") != null);
+    try testing.expect(std.mem.find(u8, up[1][0], "> verify-object ") != null);
     if (@import("builtin").os.tag == .windows) {
         // Git LFS leaves SSH multiplexing off by default on Windows.
-        try testing.expect(std.mem.indexOf(u8, up[1][1], "[-oControlMaster=") == null);
+        try testing.expect(std.mem.find(u8, up[1][1], "[-oControlMaster=") == null);
     } else {
-        try testing.expect(std.mem.indexOf(u8, up[1][1], "[-oControlMaster=yes][-oControlPath=") != null);
-        try testing.expect(std.mem.indexOf(u8, up[1][1], "/home/sock-X/lfs.sock]") != null);
+        try testing.expect(std.mem.find(u8, up[1][1], "[-oControlMaster=yes][-oControlPath=") != null);
+        try testing.expect(std.mem.find(u8, up[1][1], "/home/sock-X/lfs.sock]") != null);
     }
 
     // Down: each fetches what relic put there.
@@ -205,13 +205,13 @@ test "objects go up and come down over git-lfs-transfer, asked for as git-lfs as
         }
         const listing = try t.storeListing(s.fx, d);
         defer gpa.free(listing);
-        try testing.expect(std.mem.indexOf(u8, listing, &testlfs.sha256Hex(big)) != null);
+        try testing.expect(std.mem.find(u8, listing, &testlfs.sha256Hex(big)) != null);
         down[i] = try s.take();
     }
     defer for (down) |p| free(p);
     try expectSame(down[0], down[1]);
-    try testing.expect(std.mem.indexOf(u8, down[1][0], "> get-object ") != null);
-    try testing.expect(std.mem.indexOf(u8, down[1][0], "refname=refs/heads/main") != null);
+    try testing.expect(std.mem.find(u8, down[1][0], "> get-object ") != null);
+    try testing.expect(std.mem.find(u8, down[1][0], "refname=refs/heads/main") != null);
 }
 
 test "without git-lfs-transfer, or with one that will not speak version 1, git-lfs-authenticate and HTTP are used, as git-lfs falls back" {
@@ -247,8 +247,8 @@ test "without git-lfs-transfer, or with one that will not speak version 1, git-l
         defer for (logs) |p| free(p);
         try expectSame(logs[0], logs[1]);
         // Tried, then git-lfs-authenticate.
-        try testing.expect(std.mem.indexOf(u8, logs[1][1], "[git-lfs-transfer /org/repo.git download]\n") != null);
-        try testing.expect(std.mem.indexOf(u8, logs[1][1], "[git-lfs-authenticate /org/repo.git download]\n") != null);
+        try testing.expect(std.mem.find(u8, logs[1][1], "[git-lfs-transfer /org/repo.git download]\n") != null);
+        try testing.expect(std.mem.find(u8, logs[1][1], "[git-lfs-authenticate /org/repo.git download]\n") != null);
     }
 }
 
@@ -363,8 +363,8 @@ test "locks are taken, listed, verified and given back over git-lfs-transfer, as
     }
     defer for (logs) |p| free(p);
     try expectSame(logs[0], logs[1]);
-    try testing.expect(std.mem.indexOf(u8, logs[1][0], "> lock\n") != null);
-    try testing.expect(std.mem.indexOf(u8, logs[1][0], "> unlock 8\n") != null);
+    try testing.expect(std.mem.find(u8, logs[1][0], "> lock\n") != null);
+    try testing.expect(std.mem.find(u8, logs[1][0], "> unlock 8\n") != null);
 }
 
 test "each transfer worker has its own git-lfs-transfer, sharing the first's ssh session, as git-lfs's do" {
@@ -505,7 +505,7 @@ test "against a real git-lfs-transfer server, what git-lfs puts there relic gets
     }
     const listed = try fx.gitOut(d, &.{ "lfs", "locks" });
     defer gpa.free(listed);
-    try testing.expect(std.mem.indexOf(u8, listed, "a.bin") != null);
+    try testing.expect(std.mem.find(u8, listed, "a.bin") != null);
     try fx.gitIn(d, &.{ "lfs", "lock", "b.bin" });
     {
         const server = try t.openServer(fx, &repo);

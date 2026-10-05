@@ -55,7 +55,7 @@ fn history(gpa: Allocator, io: Io, env: *std.process.Environ.Map) !testgit.Repo 
 }
 
 fn headerOf(bytes: []const u8) []const u8 {
-    const end = std.mem.indexOf(u8, bytes, "\n\n").? + 2;
+    const end = std.mem.find(u8, bytes, "\n\n").? + 2;
     return bytes[0..end];
 }
 

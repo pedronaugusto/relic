@@ -767,7 +767,7 @@ const rev_parse_rules = [_][]const u8{
 /// rules from the end of the list; zero when it does not.
 fn refnameMatch(abbrev: []const u8, full: []const u8) usize {
     for (rev_parse_rules, 0..) |rule, i| {
-        const star = std.mem.indexOf(u8, rule, "{s}").?;
+        const star = std.mem.find(u8, rule, "{s}").?;
         const before = rule[0..star];
         const after = rule[star + 3 ..];
         if (full.len != before.len + abbrev.len + after.len) continue;
@@ -781,7 +781,7 @@ fn refnameMatch(abbrev: []const u8, full: []const u8) usize {
 
 fn expandPrefix(arena: Allocator, prefixes: *std.ArrayList([]const u8), name: []const u8) Allocator.Error!void {
     for (rev_parse_rules) |rule| {
-        const star = std.mem.indexOf(u8, rule, "{s}").?;
+        const star = std.mem.find(u8, rule, "{s}").?;
         try prefixes.append(arena, try std.mem.concat(arena, u8, &.{ rule[0..star], name, rule[star + 3 ..] }));
     }
 }
@@ -791,7 +791,7 @@ fn addPrefixes(arena: Allocator, prefixes: *std.ArrayList([]const u8), spec: Ref
     if (spec.exact_oid or spec.negative) return;
     const src = if (spec.src.len == 0) "HEAD" else spec.src;
     if (spec.pattern) {
-        const star = std.mem.indexOfScalar(u8, src, '*').?;
+        const star = std.mem.findScalar(u8, src, '*').?;
         try prefixes.append(arena, src[0..star]);
     } else try expandPrefix(arena, prefixes, src);
 }
@@ -809,7 +809,7 @@ fn fetchMap(
     if (spec.pattern) {
         for (remote_refs) |ref| {
             if (ref.unborn) continue;
-            if (std.mem.indexOfScalar(u8, ref.name, '^') != null) continue;
+            if (std.mem.findScalar(u8, ref.name, '^') != null) continue;
             const dst = (try spec.mapSource(arena, ref.name)) orelse continue;
             if (!validLocal(dst)) continue;
             try map.append(arena, .{ .name = try arena.dupe(u8, ref.name), .oid = ref.oid, .dst = dst, .force = spec.force, .status = status });
@@ -1346,7 +1346,7 @@ fn expectSameRefs(gpa: Allocator, io: Io, a: *testgit.Repo, b: *testgit.Repo) !v
 
     var lines = std.mem.tokenizeScalar(u8, refs_a, '\n');
     while (lines.next()) |line| {
-        const name = line[0..std.mem.indexOfScalar(u8, line, ' ').?];
+        const name = line[0..std.mem.findScalar(u8, line, ' ').?];
         const log_path = try std.fmt.allocPrint(gpa, ".git/logs/{s}", .{name});
         defer gpa.free(log_path);
         const log_a = a.readFile(io, log_path) catch try gpa.dupe(u8, "");
@@ -1366,8 +1366,8 @@ fn expectSameRefs(gpa: Allocator, io: Io, a: *testgit.Repo, b: *testgit.Repo) !v
                 return error.TestUnexpectedResult;
             }
             try testing.expectEqualStrings(ea.?[0..81], eb.?[0..81]);
-            const tab_a = std.mem.indexOfScalar(u8, ea.?, '\t') orelse ea.?.len;
-            const tab_b = std.mem.indexOfScalar(u8, eb.?, '\t') orelse eb.?.len;
+            const tab_a = std.mem.findScalar(u8, ea.?, '\t') orelse ea.?.len;
+            const tab_b = std.mem.findScalar(u8, eb.?, '\t') orelse eb.?.len;
             try testing.expectEqualStrings(ea.?[tab_a..], eb.?[tab_b..]);
         }
     }

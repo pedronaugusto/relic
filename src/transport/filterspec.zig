@@ -62,7 +62,7 @@ pub fn parse(arena: Allocator, text: []const u8) Error!Spec {
             if (encoded.len == 0) continue;
             // A character git reserves is written as `%XX`.
             for (encoded) |c| {
-                if (std.mem.indexOfScalar(u8, reserved, c) != null or std.ascii.isWhitespace(c)) return error.InvalidFilter;
+                if (std.mem.findScalar(u8, reserved, c) != null or std.ascii.isWhitespace(c)) return error.InvalidFilter;
             }
             try parts.append(arena, try parse(arena, try percentDecode(arena, encoded)));
         }
@@ -92,7 +92,7 @@ const reserved = "~`!@#$^&*()[]{}\\;'\",<>?";
 /// on Linux and macOS, 32 on Windows, where git for Windows refuses a
 /// `blob:limit` of 4 GiB.
 fn parseUlong(text: []const u8) Error!u64 {
-    if (std.mem.indexOfScalar(u8, text, '-') != null) return error.InvalidFilter;
+    if (std.mem.findScalar(u8, text, '-') != null) return error.InvalidFilter;
     var i: usize = 0;
     while (i < text.len and isCSpace(text[i])) i += 1;
     if (i < text.len and text[i] == '+') i += 1;
@@ -134,7 +134,7 @@ fn isCSpace(c: u8) bool {
 /// git's `url_percent_decode`: `%XX` is the byte, and a `%` not followed by
 /// two hexadecimal digits is itself.
 fn percentDecode(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.indexOfScalar(u8, text, '%') == null) return text;
+    if (std.mem.findScalar(u8, text, '%') == null) return text;
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < text.len) : (i += 1) {

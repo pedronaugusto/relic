@@ -292,7 +292,7 @@ pub const Settings = struct {
     /// start of the subsection the URL follows.
     pub fn urlGetAll(s: *const Settings, a: Allocator, full_section: []const u8, url: []const u8, key: []const u8) Error![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
-        const dot = std.mem.indexOfScalar(u8, full_section, '.');
+        const dot = std.mem.findScalar(u8, full_section, '.');
         const section = full_section[0 .. dot orelse full_section.len];
         const prefix: ?[]const u8 = if (dot) |d| full_section[d + 1 ..] else null;
         const sources = [_]?*const Config{ s.config, if (s.file) |*f| f else null };
@@ -357,35 +357,35 @@ pub const UrlParts = struct {
 
     /// Split `text`, or `null` when it has no scheme.
     pub fn parse(text: []const u8) ?UrlParts {
-        const sep = std.mem.indexOf(u8, text, "://") orelse return null;
+        const sep = std.mem.find(u8, text, "://") orelse return null;
         if (sep == 0) return null;
         for (text[0..sep]) |c| {
             if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return null;
         }
         var parts: UrlParts = .{ .scheme = text[0..sep], .authority = "", .host = "", .path = "" };
         const rest = text[sep + 3 ..];
-        const path_at = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+        const path_at = std.mem.findAny(u8, rest, "/?#") orelse rest.len;
         var authority = rest[0..path_at];
-        if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+        if (std.mem.findScalarLast(u8, authority, '@')) |at| {
             const userinfo = authority[0..at];
             authority = authority[at + 1 ..];
-            if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+            if (std.mem.findScalar(u8, userinfo, ':')) |colon| {
                 parts.user = userinfo[0..colon];
                 parts.password = userinfo[colon + 1 ..];
             } else parts.user = userinfo;
         }
         parts.authority = authority;
         if (authority.len != 0 and authority[0] == '[') {
-            const close = std.mem.indexOfScalar(u8, authority, ']') orelse return null;
+            const close = std.mem.findScalar(u8, authority, ']') orelse return null;
             parts.host = authority[1..close];
             const after = authority[close + 1 ..];
             if (after.len > 1 and after[0] == ':') parts.port = after[1..];
-        } else if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+        } else if (std.mem.findScalarLast(u8, authority, ':')) |colon| {
             parts.host = authority[0..colon];
             if (colon + 1 < authority.len) parts.port = authority[colon + 1 ..];
         } else parts.host = authority;
         const tail = rest[path_at..];
-        const end = std.mem.indexOfAny(u8, tail, "?#") orelse tail.len;
+        const end = std.mem.findAny(u8, tail, "?#") orelse tail.len;
         parts.path = tail[0..end];
         return parts;
     }
@@ -577,7 +577,7 @@ pub fn findEndpoint(
 /// an object name, an optional `not-for-merge`, and `'<ref>' of <url>` after
 /// an optional `branch ` or `tag `; a URL of letters, digits and `/.-:_`.
 pub fn fetchHeadUrl(text: []const u8) ?[]const u8 {
-    const line = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+    const line = text[0 .. std.mem.findScalar(u8, text, '\n') orelse text.len];
     var fields = std.mem.splitScalar(u8, line, '\t');
     const oid = fields.next() orelse return null;
     if (oid.len < 40 or oid.len > 64) return null;
@@ -590,11 +590,11 @@ pub fn fetchHeadUrl(text: []const u8) ?[]const u8 {
     var rest = fields.rest();
     if (std.mem.startsWith(u8, rest, "branch ")) rest = rest["branch ".len..] else if (std.mem.startsWith(u8, rest, "tag ")) rest = rest["tag ".len..];
     if (rest.len == 0 or rest[0] != '\'') return null;
-    const at = std.mem.lastIndexOf(u8, rest, "' of ") orelse return null;
+    const at = std.mem.findLast(u8, rest, "' of ") orelse return null;
     const url = std.mem.trim(u8, rest[at + "' of ".len ..], " \t\r");
     if (url.len == 0) return null;
     for (url) |c| {
-        if (!std.ascii.isAlphanumeric(c) and std.mem.indexOfScalar(u8, "/.-:_", c) == null) return null;
+        if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "/.-:_", c) == null) return null;
     }
     return url;
 }
@@ -643,9 +643,9 @@ pub fn gitRemoteUrl(arena: Allocator, settings: *const Settings, remote: []const
     if (try settings.get(arena, key)) |u| return u;
     // A name with a scheme, or with a colon as the scp-like form has one,
     // is a URL git-lfs takes as given.
-    if (std.mem.indexOf(u8, remote, "://") != null) return remote;
-    if (std.mem.indexOfScalar(u8, remote, ':') != null) return remote;
-    if (std.mem.indexOfScalar(u8, remote, '/') != null) return remote;
+    if (std.mem.find(u8, remote, "://") != null) return remote;
+    if (std.mem.findScalar(u8, remote, ':') != null) return remote;
+    if (std.mem.findScalar(u8, remote, '/') != null) return remote;
     return null;
 }
 
@@ -659,8 +659,8 @@ fn endpointFromCloneUrl(arena: Allocator, settings: *const Settings, operation: 
         e.url = u;
         return e;
     }
-    const last_slash = std.mem.lastIndexOfScalar(u8, u, '/') orelse 0;
-    const ext_start = std.mem.lastIndexOfScalar(u8, u, '.');
+    const last_slash = std.mem.findScalarLast(u8, u, '/') orelse 0;
+    const ext_start = std.mem.findScalarLast(u8, u, '.');
     const ends_git = if (ext_start) |dot| dot > last_slash and std.mem.eql(u8, u[dot..], ".git") else false;
     e.url = try std.fmt.allocPrint(arena, "{s}{s}", .{ u, if (ends_git) "/info/lfs" else ".git/info/lfs" });
     return e;
@@ -732,7 +732,7 @@ fn rewriteUrl(arena: Allocator, settings: *const Settings, url: []const u8, whic
 fn sshEndpoint(arena: Allocator, raw: []const u8, parts: UrlParts) Error!Endpoint {
     // git-lfs reads the host as `name[:digits]` and gives up on anything
     // else, an IPv6 literal included.
-    if (parts.host.len == 0 or std.mem.indexOfScalar(u8, parts.authority, '[') != null) return error.LfsEndpointUnknown;
+    if (parts.host.len == 0 or std.mem.findScalar(u8, parts.authority, '[') != null) return error.LfsEndpointUnknown;
     if (parts.port) |p| {
         for (p) |c| if (!std.ascii.isDigit(c)) return error.LfsEndpointUnknown;
     }
@@ -757,7 +757,7 @@ fn localFileUrl(arena: Allocator, path: []const u8) Allocator.Error![]const u8 {
 }
 
 fn percentDecode(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.indexOfScalar(u8, text, '%') == null) return text;
+    if (std.mem.findScalar(u8, text, '%') == null) return text;
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
@@ -875,9 +875,9 @@ pub fn sshProgram(arena: Allocator, environ: *const std.process.Environ.Map, set
         }
     }
     if (autodetect) {
-        var base = program_name[if (std.mem.lastIndexOfAny(u8, program_name, "/\\")) |sep| sep + 1 else 0..];
+        var base = program_name[if (std.mem.findLastAny(u8, program_name, "/\\")) |sep| sep + 1 else 0..];
         if (!std.mem.eql(u8, base, "ssh")) {
-            if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot| base = base[0..dot];
+            if (std.mem.findScalarLast(u8, base, '.')) |dot| base = base[0..dot];
         }
         if (std.ascii.eqlIgnoreCase(base, "plink")) out.variant = .putty;
         if (std.ascii.eqlIgnoreCase(base, "tortoiseplink")) out.variant = .tortoise;
@@ -933,9 +933,9 @@ fn firstField(line: []const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, line, " \t\r\n");
     if (trimmed.len == 0) return null;
     if (trimmed[0] == '\'' or trimmed[0] == '"') {
-        if (std.mem.indexOfScalarPos(u8, trimmed, 1, trimmed[0])) |close| return trimmed[1..close];
+        if (std.mem.findScalarPos(u8, trimmed, 1, trimmed[0])) |close| return trimmed[1..close];
     }
-    const end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
+    const end = std.mem.findAny(u8, trimmed, " \t") orelse trimmed.len;
     return trimmed[0..end];
 }
 
@@ -983,8 +983,8 @@ pub fn parseAuthenticate(arena: Allocator, bytes: []const u8) Error!SshAuth {
 /// line break, a value with no line break.
 pub fn checkHeader(name: []const u8, value: []const u8) error{InvalidHttpHeader}!void {
     if (name.len == 0) return error.InvalidHttpHeader;
-    if (std.mem.indexOfAny(u8, name, ":\r\n") != null) return error.InvalidHttpHeader;
-    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return error.InvalidHttpHeader;
+    if (std.mem.findAny(u8, name, ":\r\n") != null) return error.InvalidHttpHeader;
+    if (std.mem.findAny(u8, value, "\r\n") != null) return error.InvalidHttpHeader;
 }
 
 //=====================================================================
@@ -1274,7 +1274,7 @@ pub const Client = struct {
                     var lower_buf: [1024]u8 = undefined;
                     const lower = std.ascii.lowerString(lower_buf[0..@min(said.len, lower_buf.len)], said[0..@min(said.len, lower_buf.len)]);
                     for (authenticate_missing) |needle| {
-                        if (std.mem.indexOf(u8, lower, needle) != null) break :blk true;
+                        if (std.mem.find(u8, lower, needle) != null) break :blk true;
                     }
                     break :blk false;
                 },
@@ -1655,7 +1655,7 @@ pub const Client = struct {
             .port = parsed.port orelse if (parsed.scheme == .https) 443 else 80,
         };
         const path = blk: {
-            const p = parsed.path[0 .. std.mem.indexOfScalar(u8, parsed.path, '#') orelse parsed.path.len];
+            const p = parsed.path[0 .. std.mem.findScalar(u8, parsed.path, '#') orelse parsed.path.len];
             break :blk if (p.len == 0 or p[0] == '?') try std.mem.concat(a, u8, &.{ "/", p }) else p;
         };
 
@@ -1783,7 +1783,7 @@ pub const Client = struct {
         const values = try c.settings.urlGetAll(a, "http", url, "extraheader");
         var out: std.ArrayList(http.Header) = .empty;
         for (values) |text| {
-            const colon = std.mem.indexOfScalar(u8, text, ':') orelse continue;
+            const colon = std.mem.findScalar(u8, text, ':') orelse continue;
             const name = std.mem.trim(u8, text[0..colon], " \t");
             const value = std.mem.trim(u8, text[colon + 1 ..], " \t");
             try checkHeader(name, value);
@@ -2114,7 +2114,7 @@ pub const Exchange = struct {
         const content_type = ex.header("content-type") orelse return "";
         const body = ex.readAll(4096) catch return "";
         if (std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return a.dupe(u8, body) catch "";
-        if (std.ascii.indexOfIgnoreCase(content_type, "json") == null) return "";
+        if (std.ascii.findIgnoreCase(content_type, "json") == null) return "";
         const Reason = struct { message: ?[]const u8 = null };
         const reason = std.json.parseFromSliceLeaky(Reason, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return "";
         return reason.message orelse "";
@@ -2126,7 +2126,7 @@ pub const Exchange = struct {
         while (it.next()) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "www-authenticate") and !std.ascii.eqlIgnoreCase(h.name, "lfs-authenticate")) continue;
             const value = std.mem.trim(u8, h.value, " \t");
-            const end = std.mem.indexOfAny(u8, value, " \t") orelse value.len;
+            const end = std.mem.findAny(u8, value, " \t") orelse value.len;
             if (std.ascii.eqlIgnoreCase(value[0..end], "basic")) offers.basic = true else offers.other = true;
         }
         return offers;
@@ -2358,7 +2358,7 @@ pub fn goProxyAllowed(raw_host: []const u8, port: u16, no_proxy: []const u8) boo
         const entry = std.mem.trim(u8, raw, " \t\r\n");
         if (entry.len == 0) continue;
         if (std.mem.eql(u8, entry, "*")) return false;
-        if (std.mem.indexOfScalar(u8, entry, '/')) |slash| {
+        if (std.mem.findScalar(u8, entry, '/')) |slash| {
             // A range: `10.0.0.0/8`, `fd00::/8`.
             const base = Io.net.IpAddress.parse(entry[0..slash], 0) catch continue;
             const bits = std.fmt.parseInt(u8, entry[slash + 1 ..], 10) catch continue;
@@ -2393,13 +2393,13 @@ pub fn goProxyAllowed(raw_host: []const u8, port: u16, no_proxy: []const u8) boo
 
 fn splitHostPort(text: []const u8) ?struct { host: []const u8, port: []const u8 } {
     if (text.len != 0 and text[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, text, ']') orelse return null;
+        const close = std.mem.findScalar(u8, text, ']') orelse return null;
         if (close + 1 >= text.len or text[close + 1] != ':') return null;
         return .{ .host = text[1..close], .port = text[close + 2 ..] };
     }
-    const colon = std.mem.indexOfScalar(u8, text, ':') orelse return null;
+    const colon = std.mem.findScalar(u8, text, ':') orelse return null;
     // More than one colon is an IPv6 address with no port.
-    if (std.mem.indexOfScalarPos(u8, text, colon + 1, ':') != null) return null;
+    if (std.mem.findScalarPos(u8, text, colon + 1, ':') != null) return null;
     return .{ .host = text[0..colon], .port = text[colon + 1 ..] };
 }
 
@@ -2515,16 +2515,16 @@ fn basicHeader(a: Allocator, user: []const u8, password: []const u8) Allocator.E
 /// The URL without `user[:password]@`, in `a` when there was one to take
 /// out.
 pub fn stripUserinfo(a: Allocator, url: []const u8) Allocator.Error![]const u8 {
-    const sep = std.mem.indexOf(u8, url, "://") orelse return url;
+    const sep = std.mem.find(u8, url, "://") orelse return url;
     const start = sep + 3;
-    const path_at = std.mem.indexOfAnyPos(u8, url, start, "/?#") orelse url.len;
-    const at = std.mem.lastIndexOfScalar(u8, url[start..path_at], '@') orelse return url;
+    const path_at = std.mem.findAnyPos(u8, url, start, "/?#") orelse url.len;
+    const at = std.mem.findScalarLast(u8, url[start..path_at], '@') orelse return url;
     return std.mem.concat(a, u8, &.{ url[0..start], url[start + at + 1 ..] });
 }
 
 /// The URL without its query, which may hold a token, for a message.
 pub fn stripQuery(url: []const u8) []const u8 {
-    return url[0 .. std.mem.indexOfScalar(u8, url, '?') orelse url.len];
+    return url[0 .. std.mem.findScalar(u8, url, '?') orelse url.len];
 }
 
 /// `prefix` and `suffix` with one slash between them, as git-lfs joins
@@ -2537,11 +2537,11 @@ pub fn joinUrl(a: Allocator, prefix: []const u8, suffix: []const u8) Allocator.E
 /// `location` taken against `base`, as a redirect is.
 fn resolveLocation(a: Allocator, base: []const u8, location: []const u8) Error![]const u8 {
     if (UrlParts.parse(location) != null) return a.dupe(u8, location);
-    const sep = std.mem.indexOf(u8, base, "://") orelse return error.MalformedUrl;
-    const origin_end = std.mem.indexOfAnyPos(u8, base, sep + 3, "/?#") orelse base.len;
+    const sep = std.mem.find(u8, base, "://") orelse return error.MalformedUrl;
+    const origin_end = std.mem.findAnyPos(u8, base, sep + 3, "/?#") orelse base.len;
     if (location.len != 0 and location[0] == '/') return std.fmt.allocPrint(a, "{s}{s}", .{ base[0..origin_end], location });
-    const path_end = std.mem.indexOfAnyPos(u8, base, origin_end, "?#") orelse base.len;
-    const dir_end = std.mem.lastIndexOfScalar(u8, base[origin_end..path_end], '/') orelse 0;
+    const path_end = std.mem.findAnyPos(u8, base, origin_end, "?#") orelse base.len;
+    const dir_end = std.mem.findScalarLast(u8, base[origin_end..path_end], '/') orelse 0;
     return std.fmt.allocPrint(a, "{s}/{s}", .{ base[0 .. origin_end + dir_end], location });
 }
 

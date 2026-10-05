@@ -318,7 +318,7 @@ pub const Helper = struct {
         const conn = h.conn.?;
         const ended = connection.Process.diagnose(conn, h.io) catch return error.Canceled;
         const said = std.mem.trim(u8, ended.stderr, " \t\r\n");
-        if (said.len != 0) conn.setMessage(said[if (std.mem.lastIndexOfScalar(u8, said, '\n')) |nl| nl + 1 else 0..]);
+        if (said.len != 0) conn.setMessage(said[if (std.mem.findScalarLast(u8, said, '\n')) |nl| nl + 1 else 0..]);
         return error.HelperAborted;
     }
 
@@ -431,9 +431,9 @@ pub const Helper = struct {
                 }
                 continue;
             }
-            const eov = std.mem.indexOfScalar(u8, line, ' ') orelse return error.HelperProtocolError;
+            const eov = std.mem.findScalar(u8, line, ' ') orelse return error.HelperProtocolError;
             const rest = line[eov + 1 ..];
-            const eon = std.mem.indexOfScalar(u8, rest, ' ');
+            const eon = std.mem.findScalar(u8, rest, ' ');
             const name = try a.dupe(u8, rest[0 .. eon orelse rest.len]);
             const value = line[0..eov];
             var ref: protocol.RemoteRef = .{ .name = name, .oid = Oid.zero(h.kind) };
@@ -683,7 +683,7 @@ pub const Helper = struct {
                 ok = false;
                 rest = line["error ".len..];
             } else return error.HelperProtocolError;
-            const space = std.mem.indexOfScalar(u8, rest, ' ');
+            const space = std.mem.findScalar(u8, rest, ' ');
             const name = try a.dupe(u8, rest[0 .. space orelse rest.len]);
             var message: ?[]const u8 = null;
             if (space) |s| {

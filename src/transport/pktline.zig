@@ -198,7 +198,7 @@ test "git's own advertisement reads as lines, then a flush" {
             .data => |data| {
                 // `<oid> <name>`, the first with its capabilities after a NUL
                 const line = std.mem.trimEnd(u8, data, "\n");
-                const end = std.mem.indexOfScalar(u8, line, 0) orelse line.len;
+                const end = std.mem.findScalar(u8, line, 0) orelse line.len;
                 try testing.expectEqualStrings(head, line[0..40]);
                 try names.append(gpa, try gpa.dupe(u8, line[41..end]));
             },

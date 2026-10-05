@@ -89,10 +89,10 @@ pub fn authenticate(r: *Io.Reader, w: *Io.Writer, credential: ?Credential) WireE
 pub fn request(w: *Io.Writer, version: Version, host: []const u8, port: u16, address: ?Io.net.IpAddress, credential: ?Credential) WireError!void {
     const port_bytes = std.mem.toBytes(std.mem.nativeToBig(u16, port));
     if (version == .socks4 or version == .socks4a) {
-        if (std.mem.indexOfScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
+        if (std.mem.findScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
         const user = if (credential) |c| c.user else "";
-        if (user.len > 255 or std.mem.indexOfScalar(u8, user, 0) != null) return error.ProxyAuthenticationRequired;
-        if (version == .socks4a and (host.len == 0 or host.len > 254 or std.mem.indexOfScalar(u8, host, 0) != null)) return error.ProxyAddressUnsupported;
+        if (user.len > 255 or std.mem.findScalar(u8, user, 0) != null) return error.ProxyAuthenticationRequired;
+        if (version == .socks4a and (host.len == 0 or host.len > 254 or std.mem.findScalar(u8, host, 0) != null)) return error.ProxyAddressUnsupported;
         try w.writeAll(&.{ 4, 1 });
         try w.writeAll(&port_bytes);
         if (version == .socks4a) {
@@ -120,7 +120,7 @@ pub fn request(w: *Io.Writer, version: Version, host: []const u8, port: u16, add
             },
         } else {
             if (version != .socks5h) return error.ProxyHostUnreachable;
-            if (host.len == 0 or host.len > 255 or std.mem.indexOfScalar(u8, host, 0) != null) return error.ProxyAddressUnsupported;
+            if (host.len == 0 or host.len > 255 or std.mem.findScalar(u8, host, 0) != null) return error.ProxyAddressUnsupported;
             try w.writeAll(&.{ 3, @intCast(host.len) });
             try w.writeAll(host);
         }

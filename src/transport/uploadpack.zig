@@ -468,7 +468,7 @@ pub const Server = struct {
 
     fn refuse(s: *Server, out: *Io.Writer, text: []const u8) Error {
         try s.sendError(out, text);
-        return if (std.mem.indexOf(u8, text, "filter") != null) error.FilterRefused else error.ProtocolError;
+        return if (std.mem.find(u8, text, "filter") != null) error.FilterRefused else error.ProtocolError;
     }
 
     fn notOurRef(s: *Server, out: *Io.Writer, oid: Oid) Error {

@@ -71,7 +71,7 @@ pub fn load(gpa: Allocator, arena: Allocator, io: Io, files: Files, passphrase: 
         error.Canceled => return error.Canceled,
         else => return error.SslClientCertificateUnreadable,
     };
-    if (cert_der and std.mem.indexOf(u8, cert_bytes, "-----BEGIN ") != null) return error.SslClientCertificateUnreadable;
+    if (cert_der and std.mem.find(u8, cert_bytes, "-----BEGIN ") != null) return error.SslClientCertificateUnreadable;
     const chain = tls.key.certificates(arena, cert_bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.SslClientCertificateUnreadable,
@@ -81,7 +81,7 @@ pub fn load(gpa: Allocator, arena: Allocator, io: Io, files: Files, passphrase: 
         error.Canceled => return error.Canceled,
         else => return error.SslClientKeyUnreadable,
     } else cert_bytes;
-    if (key_der and std.mem.indexOf(u8, key_bytes, "-----BEGIN ") != null) return error.SslClientKeyUnreadable;
+    if (key_der and std.mem.find(u8, key_bytes, "-----BEGIN ") != null) return error.SslClientKeyUnreadable;
     const key = tls.key.PrivateKey.parse(arena, key_bytes, passphrase) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.KeyPassphraseRequired => error.SslClientKeyPassphraseRequired,

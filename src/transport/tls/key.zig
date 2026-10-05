@@ -48,7 +48,7 @@ pub const PrivateKey = union(enum) {
     /// `passphrase` when it is encrypted. Slices of the result are
     /// `arena`'s.
     pub fn parse(arena: Allocator, bytes: []const u8, passphrase: ?[]const u8) Error!PrivateKey {
-        if (std.mem.indexOf(u8, bytes, "-----BEGIN ")) |_| {
+        if (std.mem.find(u8, bytes, "-----BEGIN ")) |_| {
             var blocks = pemBlocks(bytes);
             while (try blocks.next(arena)) |block| {
                 if (std.mem.eql(u8, block.label, "PRIVATE KEY")) return fromPkcs8(arena, block.der);
@@ -84,8 +84,8 @@ pub const PrivateKey = union(enum) {
 
     /// Whether `bytes` holds an encrypted key.
     pub fn isEncrypted(bytes: []const u8) bool {
-        return std.mem.indexOf(u8, bytes, "-----BEGIN ENCRYPTED PRIVATE KEY-----") != null or
-            std.mem.indexOf(u8, bytes, "Proc-Type: 4,ENCRYPTED") != null;
+        return std.mem.find(u8, bytes, "-----BEGIN ENCRYPTED PRIVATE KEY-----") != null or
+            std.mem.find(u8, bytes, "Proc-Type: 4,ENCRYPTED") != null;
     }
 
     /// Whether this key is the one `cert`'s public key belongs to.
@@ -180,7 +180,7 @@ pub const PrivateKey = union(enum) {
 /// first as the file has them — or one in DER. Slices are `arena`'s or
 /// `bytes`'.
 pub fn certificates(arena: Allocator, bytes: []const u8) Error![]const []const u8 {
-    if (std.mem.indexOf(u8, bytes, "-----BEGIN ") == null) {
+    if (std.mem.find(u8, bytes, "-----BEGIN ") == null) {
         // DER: one certificate, which must read as one.
         var r: der.Reader = .{ .bytes = bytes };
         _ = try r.expect(der.Tag.sequence);
@@ -210,7 +210,7 @@ const Pem = struct {
 fn openLegacy(arena: Allocator, block: Pem, passphrase: ?[]const u8) Error![]const u8 {
     if (!block.legacy_encrypted) return block.der;
     const info = block.dek_info orelse return error.MalformedKey;
-    const comma = std.mem.indexOfScalar(u8, info, ',') orelse return error.MalformedKey;
+    const comma = std.mem.findScalar(u8, info, ',') orelse return error.MalformedKey;
     const cipher = std.mem.trim(u8, info[0..comma], " \t");
     const key_len: usize = if (std.ascii.eqlIgnoreCase(cipher, "AES-128-CBC"))
         16
@@ -271,13 +271,13 @@ const PemIterator = struct {
 
     fn next(it: *PemIterator, arena: Allocator) Error!?Pem {
         const begin_mark = "-----BEGIN ";
-        const start = std.mem.indexOfPos(u8, it.text, it.at, begin_mark) orelse return null;
+        const start = std.mem.findPos(u8, it.text, it.at, begin_mark) orelse return null;
         const label_start = start + begin_mark.len;
-        const label_end = std.mem.indexOfPos(u8, it.text, label_start, "-----") orelse return error.MalformedKey;
+        const label_end = std.mem.findPos(u8, it.text, label_start, "-----") orelse return error.MalformedKey;
         const label = it.text[label_start..label_end];
         const end_mark = try std.fmt.allocPrint(arena, "-----END {s}-----", .{label});
         const body_start = label_end + 5;
-        const end = std.mem.indexOfPos(u8, it.text, body_start, end_mark) orelse return error.MalformedKey;
+        const end = std.mem.findPos(u8, it.text, body_start, end_mark) orelse return error.MalformedKey;
         it.at = end + end_mark.len;
         const body = it.text[body_start..end];
         var legacy = false;
@@ -287,8 +287,8 @@ const PemIterator = struct {
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
             if (line.len == 0) continue;
-            if (std.mem.indexOfScalar(u8, line, ':')) |_| {
-                if (std.mem.startsWith(u8, line, "Proc-Type:") and std.mem.indexOf(u8, line, "ENCRYPTED") != null) legacy = true;
+            if (std.mem.findScalar(u8, line, ':')) |_| {
+                if (std.mem.startsWith(u8, line, "Proc-Type:") and std.mem.find(u8, line, "ENCRYPTED") != null) legacy = true;
                 if (std.mem.startsWith(u8, line, "DEK-Info:")) dek_info = std.mem.trim(u8, line["DEK-Info:".len..], " \t");
                 continue;
             }

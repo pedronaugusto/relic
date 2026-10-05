@@ -64,7 +64,7 @@ test "a repository on this machine lists what git ls-remote lists of it, hidden 
         var it = std.mem.tokenizeScalar(u8, out, '\n');
         while (it.next()) |line| {
             if (std.mem.endsWith(u8, line, "^{}")) continue;
-            const tab = std.mem.indexOfScalar(u8, line, '\t').?;
+            const tab = std.mem.findScalar(u8, line, '\t').?;
             try theirs.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s}", .{ line[0..tab], line[tab + 1 ..] }));
         }
 
@@ -87,9 +87,9 @@ test "a repository on this machine lists what git ls-remote lists of it, hidden 
         for (theirs.items, ours.items) |a, b| try testing.expectEqualStrings(a, b);
         var saw_shown = false;
         for (ours.items) |l| {
-            try testing.expect(std.mem.indexOf(u8, l, "refs/hidden/a") == null);
-            try testing.expect(std.mem.indexOf(u8, l, "refs/pull/") == null);
-            if (std.mem.indexOf(u8, l, "refs/hidden/shown/b") != null) saw_shown = true;
+            try testing.expect(std.mem.find(u8, l, "refs/hidden/a") == null);
+            try testing.expect(std.mem.find(u8, l, "refs/pull/") == null);
+            if (std.mem.find(u8, l, "refs/hidden/shown/b") != null) saw_shown = true;
         }
         try testing.expect(saw_shown);
     }
@@ -151,7 +151,7 @@ test "a push to a hidden ref is refused as git's receive-pack refuses it" {
     var said = try here.capture(io, &.{ "push", "--porcelain", "origin", "work:refs/heads/locked" });
     defer said.deinit(gpa);
     try testing.expect(said.code != 0);
-    try testing.expect(std.mem.indexOf(u8, said.stdout, "deny updating a hidden ref") != null);
+    try testing.expect(std.mem.find(u8, said.stdout, "deny updating a hidden ref") != null);
 
     var repo = try Repository.open(gpa, io, here.dir, .{});
     defer repo.deinit(io);

@@ -130,7 +130,7 @@ const Words = struct {
         while (w.at < w.text.len and w.text[w.at] != '\n') w.at += 1;
         while (w.at < w.text.len) {
             w.at += 1;
-            const line_end = std.mem.indexOfScalarPos(u8, w.text, w.at, '\n') orelse w.text.len;
+            const line_end = std.mem.findScalarPos(u8, w.text, w.at, '\n') orelse w.text.len;
             if (std.mem.trim(u8, w.text[w.at..line_end], " \t\r").len == 0) {
                 w.at = line_end;
                 return;

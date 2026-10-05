@@ -185,14 +185,14 @@ pub const Proxy = struct {
     /// Parse HTTP(S) and SOCKS proxy URLs. Every string belongs to `arena`.
     /// Callers retain their HTTP default port; every SOCKS scheme uses 1080.
     pub fn parse(arena: Allocator, raw: []const u8, http_port: u16) (Allocator.Error || error{InvalidProxy})!Proxy {
-        const text = if (std.mem.indexOf(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else try arena.dupe(u8, raw);
+        const text = if (std.mem.find(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else try arena.dupe(u8, raw);
         const uri = std.Uri.parse(text) catch return error.InvalidProxy;
         const version: ?socks.Version = if (std.ascii.eqlIgnoreCase(uri.scheme, "socks4")) .socks4 else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks4a")) .socks4a else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks5")) .socks5 else if (std.ascii.eqlIgnoreCase(uri.scheme, "socks5h")) .socks5h else null;
         const secure = std.ascii.eqlIgnoreCase(uri.scheme, "https");
         if (version == null and !secure and !std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.InvalidProxy;
         const host = if (uri.host) |h| try h.toRawMaybeAlloc(arena) else return error.InvalidProxy;
         const unbracketed = if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host[1 .. host.len - 1] else host;
-        if (unbracketed.len == 0 or std.mem.indexOfAny(u8, unbracketed, "\x00\r\n") != null) return error.InvalidProxy;
+        if (unbracketed.len == 0 or std.mem.findAny(u8, unbracketed, "\x00\r\n") != null) return error.InvalidProxy;
         var proxy: Proxy = .{
             .host = unbracketed,
             .port = uri.port orelse if (version != null) 1080 else if (secure) 443 else http_port,
@@ -635,7 +635,7 @@ pub const Head = struct {
         while (lines.next()) |line| {
             if (line.len == 0) return head;
             if (line[0] == ' ' or line[0] == '\t') return error.MalformedHead;
-            const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MalformedHead;
+            const colon = std.mem.findScalar(u8, line, ':') orelse return error.MalformedHead;
             const name = line[0..colon];
             const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
             if (name.len == 0) return error.MalformedHead;
@@ -1261,7 +1261,7 @@ pub const Connection = struct {
     fn socksHandshake(conn: *Connection, proxy: Proxy, version: socks.Version, target: Target) Error!void {
         const credential: ?socks.Credential = if (proxy.credential) |c| .{ .user = c.user, .password = c.password } else null;
         const host = if (target.host.len >= 2 and target.host[0] == '[' and target.host[target.host.len - 1] == ']') target.host[1 .. target.host.len - 1] else target.host;
-        if ((version == .socks4 or version == .socks4a) and std.mem.indexOfScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
+        if ((version == .socks4 or version == .socks4a) and std.mem.findScalar(u8, host, ':') != null) return error.ProxyAddressUnsupported;
         if (version == .socks5 or version == .socks5h) socks.authenticate(conn.reader(), conn.writer(), credential) catch |err| return conn.socksFailed(err);
         const literal = Io.net.IpAddress.parse(host, target.port) catch null;
         const address: ?Io.net.IpAddress = if (version == .socks4a) null else if (literal) |a| a else if (version == .socks5h) null else try resolveSocks(conn.client.io, host, target.port, version == .socks4);
@@ -1351,7 +1351,7 @@ pub const Connection = struct {
 
     /// URL authorities bracket IPv6; the SOCKS wire uses its address bytes.
     fn authorityHost(host: []const u8, buffer: []u8) Error![]const u8 {
-        if (std.mem.indexOfScalar(u8, host, ':') != null and host[0] != '[') {
+        if (std.mem.findScalar(u8, host, ':') != null and host[0] != '[') {
             return std.fmt.bufPrint(buffer, "[{s}]", .{host}) catch error.HttpProtocolError;
         }
         return host;
@@ -1529,10 +1529,10 @@ const TestServer = struct {
         var w = stream.writer(s.io, &write_buffer);
         while (true) {
             // One request's head, then the answer, unless silent.
-            while (std.mem.indexOf(u8, r.interface.buffered(), "\r\n\r\n") == null) {
+            while (std.mem.find(u8, r.interface.buffered(), "\r\n\r\n") == null) {
                 r.interface.fillMore() catch return;
             }
-            const end = std.mem.indexOf(u8, r.interface.buffered(), "\r\n\r\n").? + 4;
+            const end = std.mem.find(u8, r.interface.buffered(), "\r\n\r\n").? + 4;
             const answer = if (s.answerFor) |choose| choose(r.interface.buffered()[0..end]) else s.answer;
             r.interface.toss(end);
             if (s.silent) {
@@ -1906,7 +1906,7 @@ test "nothing in relic names the standard library's HTTP client, whose CONNECT t
         const text = try entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(16 << 20));
         defer gpa.free(text);
         files += 1;
-        if (std.mem.indexOf(u8, text, needle)) |at| {
+        if (std.mem.find(u8, text, needle)) |at| {
             std.debug.print("{s} names the standard library's HTTP client at byte {d}\n", .{ entry.path, at });
             return error.TestUnexpectedResult;
         }
@@ -1931,7 +1931,7 @@ test "every TLS connection is relic's own client: nothing outside src/tls names 
         const text = try entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(16 << 20));
         defer gpa.free(text);
         files += 1;
-        for (needles) |needle| if (std.mem.indexOf(u8, text, needle)) |at| {
+        for (needles) |needle| if (std.mem.find(u8, text, needle)) |at| {
             std.debug.print("{s} names the standard library's TLS client at byte {d}\n", .{ entry.path, at });
             return error.TestUnexpectedResult;
         };
@@ -2041,9 +2041,9 @@ test "new TLS connections check certificate validity at their own time" {
 test "overlapping proxy failures keep their own offered schemes and status" {
     const Fixture = struct {
         fn answer(request: []const u8) []const u8 {
-            if (std.mem.indexOf(u8, request, "first.invalid") != null)
+            if (std.mem.find(u8, request, "first.invalid") != null)
                 return "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n";
-            if (std.mem.indexOf(u8, request, "second.invalid") != null)
+            if (std.mem.find(u8, request, "second.invalid") != null)
                 return "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: NTLM\r\nContent-Length: 0\r\n\r\n";
             return "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
         }

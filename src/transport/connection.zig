@@ -214,7 +214,7 @@ pub const Process = struct {
             const room = tail.buffer.len - tail.len;
             if (bytes.len > room) {
                 const drop = bytes.len - room;
-                std.mem.copyForwards(u8, tail.buffer[0 .. tail.len - drop], tail.buffer[drop..tail.len]);
+                @memmove(tail.buffer[0 .. tail.len - drop], tail.buffer[drop..tail.len]);
                 tail.len -= drop;
             }
             @memcpy(tail.buffer[tail.len..][0..bytes.len], bytes);

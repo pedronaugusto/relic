@@ -224,7 +224,7 @@ fn readReport(gpa: Allocator, report: *Report, r: *Io.Reader) ReportError!void {
             try refs.append(arena, .{ .name = try arena.dupe(u8, line[3..]), .ok = true });
         } else if (std.mem.startsWith(u8, line, "ng ")) {
             const rest = line[3..];
-            const space = std.mem.indexOfScalar(u8, rest, ' ');
+            const space = std.mem.findScalar(u8, rest, ' ');
             try refs.append(arena, .{
                 .name = try arena.dupe(u8, rest[0 .. space orelse rest.len]),
                 .ok = false,

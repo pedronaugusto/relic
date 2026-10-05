@@ -110,7 +110,7 @@ pub const Advertisement = struct {
     fn symrefTarget(adv: *const Advertisement, name: []const u8) ?[]const u8 {
         for (adv.capabilities) |cap| {
             const rest = if (std.mem.startsWith(u8, cap, "symref=")) cap["symref=".len..] else continue;
-            const colon = std.mem.indexOfScalar(u8, rest, ':') orelse continue;
+            const colon = std.mem.findScalar(u8, rest, ':') orelse continue;
             if (std.mem.eql(u8, rest[0..colon], name)) return rest[colon + 1 ..];
         }
         return null;
@@ -167,7 +167,7 @@ pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Er
         // a NUL.
         var line = data;
         if (first or (refs.items.len == 0 and capabilities.items.len == 0)) {
-            if (std.mem.indexOfScalar(u8, line, 0)) |nul| {
+            if (std.mem.findScalar(u8, line, 0)) |nul| {
                 var it = std.mem.tokenizeScalar(u8, line[nul + 1 ..], ' ');
                 while (it.next()) |cap| try capabilities.append(arena, try arena.dupe(u8, cap));
                 line = line[0..nul];
@@ -185,7 +185,7 @@ pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Er
             try shallow.append(arena, Oid.parse(adv.kind, line["shallow ".len..]) catch return error.ProtocolError);
             continue;
         }
-        const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.ProtocolError;
+        const space = std.mem.findScalar(u8, line, ' ') orelse return error.ProtocolError;
         const oid = Oid.parse(adv.kind, line[0..space]) catch return error.ProtocolError;
         const name = line[space + 1 ..];
         if (std.mem.eql(u8, name, "capabilities^{}")) continue;

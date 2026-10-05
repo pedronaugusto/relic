@@ -104,7 +104,7 @@ pub fn parse(arena: Allocator, value: []const u8) Error![]const Challenge {
 }
 
 fn looksLikeParam(text: []const u8) bool {
-    const eq = std.mem.indexOfScalar(u8, text, '=') orelse return false;
+    const eq = std.mem.findScalar(u8, text, '=') orelse return false;
     if (eq == 0) return false;
     for (text[0..eq]) |c| if (!isTokenChar(c)) return false;
     return eq + 1 < text.len and text[eq + 1] != '=';
@@ -124,7 +124,7 @@ fn finish(arena: Allocator, name: []const u8, params: *std.ArrayList(Param)) All
 
 fn skip(text: []const u8, from: usize, set: []const u8) usize {
     var i = from;
-    while (i < text.len and std.mem.indexOfScalar(u8, set, text[i]) != null) i += 1;
+    while (i < text.len and std.mem.findScalar(u8, set, text[i]) != null) i += 1;
     return i;
 }
 
@@ -375,11 +375,11 @@ test "a Digest answer is RFC 7616's, for its worked examples" {
         const value = try d.answer(gpa, "Mufasa", "Circle of Life", "GET", "/dir/index.html");
         defer gpa.free(value);
         const want = try std.fmt.allocPrint(arena.allocator(), "response=\"{s}\"", .{case.response});
-        testing.expect(std.mem.indexOf(u8, value, want) != null) catch |err| {
+        testing.expect(std.mem.find(u8, value, want) != null) catch |err| {
             std.debug.print("{s}\n", .{value});
             return err;
         };
-        try testing.expect(std.mem.indexOf(u8, value, "nc=00000001, qop=auth") != null);
+        try testing.expect(std.mem.find(u8, value, "nc=00000001, qop=auth") != null);
     }
 }
 
@@ -393,7 +393,7 @@ test "Digest session answers release intermediate hashes when allocation stops" 
             defer digest.deinit(gpa);
             const answer = try digest.answer(gpa, "a", "b", "CONNECT", "git.example.com:443");
             defer gpa.free(answer);
-            try testing.expect(std.mem.indexOf(u8, answer, "algorithm=SHA-256-sess") != null);
+            try testing.expect(std.mem.find(u8, answer, "algorithm=SHA-256-sess") != null);
         }
     };
     try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});

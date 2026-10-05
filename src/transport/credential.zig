@@ -492,7 +492,7 @@ pub const Session = struct {
         while (lines.next()) |raw| {
             const line = std.mem.trimEnd(u8, raw, "\r");
             if (line.len == 0) break;
-            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            const eq = std.mem.findScalar(u8, line, '=') orelse continue;
             const key = line[0..eq];
             const value = line[eq + 1 ..];
             if (std.mem.eql(u8, key, "username")) {
@@ -584,7 +584,7 @@ pub const Session = struct {
             outcome.deinit(s.gpa);
         }
         if (!outcome.succeeded()) return null;
-        const end = std.mem.indexOfAny(u8, outcome.stdout, "\r\n") orelse outcome.stdout.len;
+        const end = std.mem.findAny(u8, outcome.stdout, "\r\n") orelse outcome.stdout.len;
         return try s.gpa.dupe(u8, outcome.stdout[0..end]);
     }
 };
@@ -637,7 +637,7 @@ fn settingsFor(arena: Allocator, config: ?*const config_mod.Config, url: ?url_mo
 /// git's partial match, which compares the parts the pattern has and no
 /// others.
 pub fn urlMatches(pattern: []const u8, url: url_mod.Url) bool {
-    if (std.mem.indexOf(u8, pattern, "://") == null) return partialMatches(pattern, url);
+    if (std.mem.find(u8, pattern, "://") == null) return partialMatches(pattern, url);
     const parsed = url_mod.Url.parse(pattern) catch return false;
     if (parsed.scheme != url.scheme) return false;
     if (parsed.user) |user| {
@@ -658,13 +658,13 @@ pub fn urlMatches(pattern: []const u8, url: url_mod.Url) bool {
 /// is there compared exactly.
 fn partialMatches(pattern: []const u8, url: url_mod.Url) bool {
     var rest = pattern;
-    if (std.mem.indexOfScalar(u8, rest, '@')) |at| {
+    if (std.mem.findScalar(u8, rest, '@')) |at| {
         const user = rest[0..at];
         const theirs = url.user orelse return false;
         if (!std.mem.eql(u8, user, theirs)) return false;
         rest = rest[at + 1 ..];
     }
-    const slash = std.mem.indexOfScalar(u8, rest, '/');
+    const slash = std.mem.findScalar(u8, rest, '/');
     const host = rest[0 .. slash orelse rest.len];
     if (host.len != 0) {
         var buf: [300]u8 = undefined;

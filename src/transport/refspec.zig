@@ -64,7 +64,7 @@ pub const Refspec = struct {
             lhs = lhs[1..];
         }
 
-        const colon = std.mem.lastIndexOfScalar(u8, lhs, ':');
+        const colon = std.mem.findScalarLast(u8, lhs, ':');
         if (spec.negative and colon != null) return error.InvalidRefspec;
 
         // A push's lone `:` pushes the branches both sides share.
@@ -76,12 +76,12 @@ pub const Refspec = struct {
         var dst_glob = false;
         if (colon) |at| {
             const rhs = lhs[at + 1 ..];
-            dst_glob = std.mem.indexOfScalar(u8, rhs, '*') != null;
+            dst_glob = std.mem.findScalar(u8, rhs, '*') != null;
             spec.dst = rhs;
         }
         const src = if (colon) |at| lhs[0..at] else lhs;
         var glob = dst_glob;
-        if (std.mem.indexOfScalar(u8, src, '*') != null) {
+        if (std.mem.findScalar(u8, src, '*') != null) {
             // A pattern on the source must have one on the destination, and
             // a fetch pattern must have a destination at all.
             if ((colon != null and !dst_glob) or (colon == null and !spec.negative and direction == .fetch)) {
@@ -190,7 +190,7 @@ pub fn excluded(specs: []const Refspec, name: []const u8) bool {
 /// git's `match_name_with_pattern`: the text before the star is a prefix,
 /// the text after it a suffix, and the two may not overlap.
 pub fn matchPattern(pattern: []const u8, name: []const u8) ?[]const u8 {
-    const star = std.mem.indexOfScalar(u8, pattern, '*') orelse return null;
+    const star = std.mem.findScalar(u8, pattern, '*') orelse return null;
     const prefix = pattern[0..star];
     const suffix = pattern[star + 1 ..];
     if (name.len < prefix.len + suffix.len) return null;
@@ -200,7 +200,7 @@ pub fn matchPattern(pattern: []const u8, name: []const u8) ?[]const u8 {
 }
 
 fn substitute(gpa: Allocator, pattern: []const u8, middle: []const u8) Allocator.Error![]u8 {
-    const star = std.mem.indexOfScalar(u8, pattern, '*') orelse return gpa.dupe(u8, pattern);
+    const star = std.mem.findScalar(u8, pattern, '*') orelse return gpa.dupe(u8, pattern);
     return std.mem.concat(gpa, u8, &.{ pattern[0..star], middle, pattern[star + 1 ..] });
 }
 

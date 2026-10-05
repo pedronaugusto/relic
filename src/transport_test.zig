@@ -125,8 +125,8 @@ test "the first request's redirect is followed, and the requests after it go whe
     try testing.expect(refs.find("refs/heads/main") != null);
     const log = try server.requests(gpa);
     defer gpa.free(log);
-    try testing.expect(std.mem.indexOf(u8, log, "GET /moved/repo.git/info/refs?service=git-upload-pack") != null);
-    try testing.expect(std.mem.indexOf(u8, log, "POST /repo.git/git-upload-pack") != null);
+    try testing.expect(std.mem.find(u8, log, "GET /moved/repo.git/info/refs?service=git-upload-pack") != null);
+    try testing.expect(std.mem.find(u8, log, "POST /repo.git/git-upload-pack") != null);
 }
 
 test "a missing repository, a dumb setting and a header that is not one are refused by name" {
@@ -767,7 +767,7 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
             var expected_buf: [32]u8 = undefined;
             const expected = try std.fmt.bufPrint(&expected_buf, "{s} none refused\n", .{request});
             try testing.expectEqualStrings(expected, logs[0]);
-            try testing.expect(std.mem.indexOf(u8, logs[1], "digest taken\n") != null);
+            try testing.expect(std.mem.find(u8, logs[1], "digest taken\n") != null);
         } else {
             testing.expectEqualStrings(logs[0], logs[1]) catch |err| {
                 std.debug.print("{s} {?s} {s}\n", .{ @tagName(case.scheme), case.method, url });
@@ -967,7 +967,7 @@ test "requests share one connection and a large upload-pack request is gzipped, 
         }
         defer for (logs) |l| gpa.free(l);
         try testing.expectEqualStrings(logs[0], logs[1]);
-        try testing.expect(std.mem.indexOf(u8, logs[1], " gzip") != null);
+        try testing.expect(std.mem.find(u8, logs[1], " gzip") != null);
         try testing.expectEqual(connections[0], connections[1]);
     }
 }
@@ -1067,11 +1067,11 @@ fn withoutAgent(gpa: Allocator, bytes: []const u8) ![]u8 {
         if (len > rest.len) break;
         const payload = rest[4..len];
         rest = rest[len..];
-        if (std.mem.indexOf(u8, payload, "agent=")) |at| {
-            const value_end = std.mem.indexOfAnyPos(u8, payload, at + "agent=".len, " \n") orelse payload.len;
+        if (std.mem.find(u8, payload, "agent=")) |at| {
+            const value_end = std.mem.findAnyPos(u8, payload, at + "agent=".len, " \n") orelse payload.len;
             try out.print(gpa, "????{s}{s}", .{ payload[0 .. at + "agent=".len], payload[value_end..] });
         } else try out.print(gpa, "{s}{s}", .{ rest[0..0], payload });
-        try out.print(gpa, "|{d}\n", .{if (std.mem.indexOf(u8, payload, "agent=") == null) len else 0});
+        try out.print(gpa, "|{d}\n", .{if (std.mem.find(u8, payload, "agent=") == null) len else 0});
     }
     try out.appendSlice(gpa, rest);
     return out.toOwnedSlice(gpa);
@@ -1229,8 +1229,8 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
             defer gpa.free(our_log);
             try testing.expect(theirs.len != 0 and our_log.len != 0);
             const expected_kind = if (std.mem.eql(u8, scheme, "socks4a") or std.mem.eql(u8, scheme, "socks5h")) " name localhost:" else if (std.mem.eql(u8, scheme, "socks4")) " ipv4 127.0.0.1:" else " ipv";
-            try testing.expect(std.mem.indexOf(u8, theirs, expected_kind) != null);
-            try testing.expect(std.mem.indexOf(u8, our_log, expected_kind) != null);
+            try testing.expect(std.mem.find(u8, theirs, expected_kind) != null);
+            try testing.expect(std.mem.find(u8, our_log, expected_kind) != null);
             var by_git = try git_work.dir.openDir(io, "clone", .{});
             defer by_git.close(io);
             try repo.editConfig(&.{ .{ .set = .{ .name = "http.proxy", .value = "http://127.0.0.1:9" } }, .{ .set = .{ .name = "remote.origin.proxy", .value = proxy_url } }, .{ .set = .{ .name = "http.sslVerify", .value = "false" } } }, null);

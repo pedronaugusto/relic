@@ -84,7 +84,7 @@ pub fn configured(arena: Allocator, config: *const config_mod.Config) (Allocator
         if (entry.subsection.len <= "customtransfer.".len) continue;
         if (!std.ascii.eqlIgnoreCase(entry.subsection[0.."customtransfer.".len], "customtransfer.")) continue;
         const name = entry.subsection["customtransfer.".len..];
-        if (std.mem.indexOfScalar(u8, name, '.') != null) continue;
+        if (std.mem.findScalar(u8, name, '.') != null) continue;
         const seen = for (out.items) |a| {
             if (std.mem.eql(u8, a.name, name)) break true;
         } else false;
@@ -368,11 +368,13 @@ pub fn writeString(w: *Io.Writer, s: []const u8) Io.Writer.Error!void {
             i += 1;
             continue;
         }
-        const cp = std.unicode.utf8Decode(s[i .. i + len]) catch {
+        const view = std.unicode.Utf8View.init(s[i .. i + len]) catch {
             try w.writeAll("\\ufffd");
             i += 1;
             continue;
         };
+        var it = view.iterator();
+        const cp = it.nextCodepoint().?; // the view holds one whole sequence
         if (cp == 0x2028 or cp == 0x2029) try w.print("\\u{x}", .{cp}) else try w.writeAll(s[i .. i + len]);
         i += len;
     }

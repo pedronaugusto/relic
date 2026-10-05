@@ -127,9 +127,9 @@ test "relic's TLS client answers OpenSSL's demand for a certificate in TLS 1.3 a
                 defer auth.deinit();
                 const page = try relicGet(gpa, io, pki, server.port, &auth);
                 defer gpa.free(page);
-                try testing.expect(std.mem.indexOf(u8, page, protocol) != null);
+                try testing.expect(std.mem.find(u8, page, protocol) != null);
                 try testing.expect(signed_with.on(page));
-                try testing.expect(std.mem.indexOf(u8, page, "Verify return code: 0 (ok)") != null);
+                try testing.expect(std.mem.find(u8, page, "Verify return code: 0 (ok)") != null);
             }
         }
         // No certificate, and one from an authority the server does not

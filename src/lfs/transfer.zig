@@ -517,7 +517,7 @@ fn referenceDirs(arena: Allocator, io: Io, store: *const lfs.Store) Allocator.Er
         var line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
         if (line[0] == '"') {
-            const close = std.mem.lastIndexOfScalar(u8, line, '"').?;
+            const close = std.mem.findScalarLast(u8, line, '"').?;
             if (close == 0) continue;
             var unquoted: std.ArrayList(u8) = .empty;
             var i: usize = 1;
@@ -1174,7 +1174,7 @@ fn rewriteHref(state: *Run, scratch: Allocator, href: []const u8) Error![]const 
 /// The URL whose access mode a transfer uses, as git-lfs finds it: the
 /// action's up to the object's name.
 fn accessUrl(href: []const u8, oid: []const u8) []const u8 {
-    const at = std.mem.indexOf(u8, href, oid) orelse return href;
+    const at = std.mem.find(u8, href, oid) orelse return href;
     return href[0..at];
 }
 

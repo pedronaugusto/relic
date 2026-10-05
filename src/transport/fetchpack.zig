@@ -897,7 +897,7 @@ test "the server's refusal comes back by name, with its words" {
     // An object the server does not have.
     const nowhere = hash.Hasher.object(.sha1, "blob", "not on the server");
     try testing.expectError(error.RemoteError, fetch(gpa, io, conn, &adv, &repo.odb, pack_dir, .{ .wants = &.{nowhere}, .tips = &.{} }, .{}));
-    try testing.expect(std.mem.indexOf(u8, conn.message(), "not our ref") != null);
+    try testing.expect(std.mem.find(u8, conn.message(), "not our ref") != null);
 }
 
 test "fuzz: a shallow-info line is a boundary commit or a named failure" {

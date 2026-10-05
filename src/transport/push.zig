@@ -467,7 +467,7 @@ const rev_parse_rules = [_][]const u8{
 
 fn refnameMatch(abbrev: []const u8, full: []const u8) usize {
     for (rev_parse_rules, 0..) |rule, i| {
-        const star = std.mem.indexOf(u8, rule, "{s}").?;
+        const star = std.mem.find(u8, rule, "{s}").?;
         const before = rule[0..star];
         const after = rule[star + 3 ..];
         if (full.len != before.len + abbrev.len + after.len) continue;

@@ -1029,20 +1029,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/lfs.zig",
-    "source": "const cp = std.unicode.utf8Decode(bytes[0..len]) catch return 0;",
-    "detail": "'utf8Decode' is deprecated: Deprecated. This function has an awkward API that is too easy to use incorrectly.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/lfs.zig",
-    "source": "const cp = std.unicode.utf8Decode(seq) catch return 0;",
-    "detail": "'utf8Decode' is deprecated: Deprecated. This function has an awkward API that is too easy to use incorrectly.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/lfs.zig",
     "source": "pub fn fetch(f: Fetcher, io: Io, store: *const Store, settings: *const Settings, wanted: []const Wanted) FetchError!void {",
@@ -1729,13 +1715,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/transport/bundle.zig",
-    "source": "if (std.mem.indexOfScalar(u8, text, 0)) |nul| text = text[0..nul];",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/bundle.zig",
     "source": "pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) OpenError!*File {",
@@ -1866,20 +1845,6 @@
     "path": "src/transport/httpclient.zig",
     "source": "pub fn deinit(r: *Response) void {",
     "detail": "deinit should set r.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/httpclient.zig",
-    "source": "if (std.mem.indexOf(u8, text, needle)) |at| {",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/httpclient.zig",
-    "source": "for (needles) |needle| if (std.mem.indexOf(u8, text, needle)) |at| {",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2037,20 +2002,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/transport/credential.zig",
-    "source": "if (std.mem.indexOfScalar(u8, rest, '@')) |at| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/credential.zig",
-    "source": "const slash = std.mem.indexOfScalar(u8, rest, '/');",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/uploadpack.zig",
     "source": "pub fn advertise(s: *Server, w: *Io.Writer) Error!void {",
@@ -2107,24 +2058,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/transport/sendpack.zig",
-    "source": "const space = std.mem.indexOfScalar(u8, rest, ' ');",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/clientcert.zig",
     "source": "pub fn load(gpa: Allocator, arena: Allocator, io: Io, files: Files, passphrase: ?[]const u8) Error!tls.ClientAuth {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/tls.zig",
-    "source": "while (std.mem.indexOfPos(u8, text, at, \"@import(\\\"\")) |start| {",
-    "detail": "'indexOfPos' is deprecated: Deprecated in favor of `findPos`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2408,13 +2345,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/transport/connection.zig",
-    "source": "std.mem.copyForwards(u8, tail.buffer[0 .. tail.len - drop], tail.buffer[drop..tail.len]);",
-    "detail": "'copyForwards' is deprecated: Copy all of source into dest at position 0.\ndest.len must be >= source.len.\nIf the slices overlap, dest.ptr must be <= src.ptr.\nThis function is deprecated; use @memmove instead.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z023",
     "path": "src/transport/connection.zig",
     "source": "fn close(context: *anyopaque, io: Io) void {",
@@ -2482,13 +2412,6 @@
     "path": "src/transport/protocol.zig",
     "source": "pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Error!Advertisement {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/protocol.zig",
-    "source": "if (std.mem.indexOfScalar(u8, line, 0)) |nul| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2562,24 +2485,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/transport/tls/key.zig",
-    "source": "if (std.mem.indexOf(u8, bytes, \"-----BEGIN \")) |_| {",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/tls/key.zig",
     "source": "pub fn certificates(arena: Allocator, bytes: []const u8) Error![]const []const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/tls/key.zig",
-    "source": "if (std.mem.indexOfScalar(u8, line, ':')) |_| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2723,13 +2632,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/transport/ssh.zig",
-    "source": "const base_start = if (std.mem.lastIndexOfAny(u8, first, \"/\\\\\")) |slash| slash + 1 else 0;",
-    "detail": "'lastIndexOfAny' is deprecated: Deprecated in favor of `findLastAny`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z028",
     "path": "src/transport/ssh.zig",
     "source": "var config = try @import(\"../config.zig\").Config.parseText(gpa, \"[ssh]\\nvariant = simple\\n\", .local);",
@@ -2818,13 +2720,6 @@
     "path": "src/transport/objectwalk/filter.zig",
     "source": "const pack = @import(\"../../odb/pack.zig\");",
     "detail": "unused import 'pack'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/refspec.zig",
-    "source": "const colon = std.mem.lastIndexOfScalar(u8, lhs, ':');",
-    "detail": "'lastIndexOfScalar' is deprecated: Deprecated in favor of `findScalarLast`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -3007,55 +2902,6 @@
     "path": "src/transport/push.zig",
     "source": "repo.refStore().dirFor(name).deleteFile(io, path) catch {};",
     "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/url.zig",
-    "source": "const bracket = if (std.mem.indexOf(u8, text, \"@[\")) |at| at + 1 else @as(usize, 0);",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/url.zig",
-    "source": "if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {",
-    "detail": "'lastIndexOfScalar' is deprecated: Deprecated in favor of `findScalarLast`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/url.zig",
-    "source": "if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/url.zig",
-    "source": "if (std.mem.indexOfScalar(u8, authority, ':')) |colon| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/url.zig",
-    "source": "if (std.mem.indexOfScalar(u8, text, '/')) |slash| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/url.zig",
-    "source": "if (std.mem.lastIndexOfScalar(u8, text[start..path_at], '@')) |at| {",
-    "detail": "'lastIndexOfScalar' is deprecated: Deprecated in favor of `findScalarLast`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/url.zig",
-    "source": "if (std.mem.indexOfScalar(u8, text[0..colon], '@')) |at| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -5954,13 +5800,6 @@
     "path": "src/transport_test.zig",
     "source": "const Scheme = @FieldType(testremote.Proxy, \"scheme\");",
     "detail": "variable 'Scheme' should be snake_case",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport_test.zig",
-    "source": "if (std.mem.indexOf(u8, payload, \"agent=\")) |at| {",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
@@ -10122,38 +9961,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/lfs/api.zig",
-    "source": "const dot = std.mem.indexOfScalar(u8, full_section, '.');",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn urlGet(s: *const Settings, a: Allocator, section: []const u8, url: []const u8, key: []const u8) Error!?[]const u8 {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/lfs/api.zig",
-    "source": "if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {",
-    "detail": "'lastIndexOfScalar' is deprecated: Deprecated in favor of `findScalarLast`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/lfs/api.zig",
-    "source": "if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/lfs/api.zig",
-    "source": "} else if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {",
-    "detail": "'lastIndexOfScalar' is deprecated: Deprecated in favor of `findScalarLast`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -10199,13 +10010,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/lfs/api.zig",
-    "source": "const ext_start = std.mem.lastIndexOfScalar(u8, u, '.');",
-    "detail": "'lastIndexOfScalar' is deprecated: Deprecated in favor of `findScalarLast`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn sshArguments(",
@@ -10220,24 +10024,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/lfs/api.zig",
-    "source": "if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot| base = base[0..dot];",
-    "detail": "'lastIndexOfScalar' is deprecated: Deprecated in favor of `findScalarLast`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/lfs/api.zig",
     "source": "pub fn sshInvocation(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/lfs/api.zig",
-    "source": "if (std.mem.indexOfScalarPos(u8, trimmed, 1, trimmed[0])) |close| return trimmed[1..close];",
-    "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -10343,13 +10133,6 @@
     "path": "src/lfs/api.zig",
     "source": "pub fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) Error!httpclient.Timeouts {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/lfs/api.zig",
-    "source": "if (std.mem.indexOfScalar(u8, entry, '/')) |slash| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -10560,13 +10343,6 @@
     "path": "src/lfs/ssh_test.zig",
     "source": "fn deinit(s: *Ssh) void {",
     "detail": "deinit should set s.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/lfs/ssh_test.zig",
-    "source": "while (std.mem.indexOfPos(u8, text, at, \"sock-\")) |i| {",
-    "detail": "'indexOfPos' is deprecated: Deprecated in favor of `findPos`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -11774,13 +11550,6 @@
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {
-    "rule": "Z011",
-    "path": "src/transport/remotehelper.zig",
-    "source": "const eon = std.mem.indexOfScalar(u8, rest, ' ');",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn fetch(h: *Helper, wants_in: []const Want, options: FetchOptions) Error!void {",
@@ -11799,13 +11568,6 @@
     "path": "src/transport/remotehelper.zig",
     "source": "pub fn push(h: *Helper, gpa: Allocator, commands: []const PushCommand, options: PushOptions) Error!sendpack.Report {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/transport/remotehelper.zig",
-    "source": "const space = std.mem.indexOfScalar(u8, rest, ' ');",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {
@@ -12149,13 +11911,6 @@
     "path": "src/lfs/custom.zig",
     "source": "pub fn transfer(a: *Agent, request: Request, progress: anytype) Error!Completion {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/lfs/custom.zig",
-    "source": "const cp = std.unicode.utf8Decode(s[i .. i + len]) catch {",
-    "detail": "'utf8Decode' is deprecated: Deprecated. This function has an awkward API that is too easy to use incorrectly.",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {

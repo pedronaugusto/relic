@@ -98,8 +98,8 @@ test "locks relic takes git lfs locks lists, and the other way round, with the o
     // git-lfs lists both, with their owners.
     const listed = try fx.gitOut(pair.theirs, &.{ "lfs", "locks" });
     defer gpa.free(listed);
-    try testing.expect(std.mem.indexOf(u8, listed, "x.bin\tada\tID:1") != null);
-    try testing.expect(std.mem.indexOf(u8, listed, "y.bin\tbob\tID:2") != null);
+    try testing.expect(std.mem.find(u8, listed, "x.bin\tada\tID:1") != null);
+    try testing.expect(std.mem.find(u8, listed, "y.bin\tbob\tID:2") != null);
 
     // relic lists both, and the server's split says whose is whose.
     var all = try lfslocks.list(server, &repo, .{}, .{});
@@ -298,7 +298,7 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
         defer runner.deinit();
         const ran = try runner.postCheckout(io, zero, head.oid, .branch);
         try testing.expectEqual(@as(?u8, 2), ran.failure.?.status());
-        try testing.expect(std.mem.indexOf(u8, runner.captured.items, "'git-lfs' was not found") != null);
+        try testing.expect(std.mem.find(u8, runner.captured.items, "'git-lfs' was not found") != null);
     }
     // Handed to relic, they do git-lfs's work and succeed.
     var native: lfshooks.Native = .{ .gpa = gpa, .repo = &repo };

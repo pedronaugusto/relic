@@ -24,13 +24,13 @@ test "nothing here imports anything but the standard library and its own files" 
         const text = try dir.readFileAlloc(io, entry.name, gpa, .limited(1 << 20));
         defer gpa.free(text);
         var at: usize = 0;
-        while (std.mem.indexOfPos(u8, text, at, "@import(\"")) |start| {
+        while (std.mem.findPos(u8, text, at, "@import(\"")) |start| {
             const name_start = start + "@import(\"".len;
-            const end = std.mem.indexOfScalarPos(u8, text, name_start, '"') orelse return error.TestUnexpectedResult;
+            const end = std.mem.findScalarPos(u8, text, name_start, '"') orelse return error.TestUnexpectedResult;
             const name = text[name_start..end];
             at = end;
             if (std.mem.eql(u8, name, "std") or std.mem.eql(u8, name, "builtin")) continue;
-            if (std.mem.indexOfScalar(u8, name, '/') == null and std.mem.endsWith(u8, name, ".zig")) {
+            if (std.mem.findScalar(u8, name, '/') == null and std.mem.endsWith(u8, name, ".zig")) {
                 dir.access(io, name, .{}) catch return error.TestUnexpectedResult;
                 continue;
             }

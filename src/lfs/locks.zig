@@ -676,7 +676,7 @@ fn percentEncode(a: Allocator, out: *std.ArrayList(u8), text: []const u8) Alloca
 
 /// A lock path must be a relative, `/`-separated path inside the tree.
 fn checkPath(path: []const u8) Error!void {
-    if (path.len == 0 or path[0] == '/' or std.mem.indexOfScalar(u8, path, '\\') != null) return error.InvalidLockPath;
+    if (path.len == 0 or path[0] == '/' or std.mem.findScalar(u8, path, '\\') != null) return error.InvalidLockPath;
     var parts = std.mem.splitScalar(u8, path, '/');
     while (parts.next()) |part| {
         if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return error.InvalidLockPath;

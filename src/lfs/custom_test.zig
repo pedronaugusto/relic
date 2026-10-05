@@ -192,7 +192,7 @@ test "a standalone agent is sent what git-lfs sends it, an upload and a download
         const b = try fx.sent("logs-ours-up", ours);
         defer gpa.free(b);
         try testing.expectEqualStrings(a, b);
-        try testing.expect(std.mem.indexOf(u8, b, "\"event\":\"upload\"") != null);
+        try testing.expect(std.mem.find(u8, b, "\"event\":\"upload\"") != null);
     }
 
     // Both stores emptied, each fetches its objects back through the agent.
@@ -265,7 +265,7 @@ test "concurrent agents start as many as git-lfs starts, one when not concurrent
     try testing.expectEqual(@as(usize, 1), try fx.processes("logs-single"));
     const sent = try fx.sent("logs-single", single);
     defer gpa.free(sent);
-    try testing.expect(std.mem.indexOf(u8, sent, "{\"event\":\"init\",\"operation\":\"upload\",\"remote\":\"origin\",\"concurrent\":false,\"concurrenttransfers\":3}") != null);
+    try testing.expect(std.mem.find(u8, sent, "{\"event\":\"init\",\"operation\":\"upload\",\"remote\":\"origin\",\"concurrent\":false,\"concurrenttransfers\":3}") != null);
 
     var refusing = try fx.repo("refusing", "logs-refusing", &.{});
     defer refusing.close(io);

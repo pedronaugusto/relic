@@ -255,8 +255,8 @@ const Http = struct {
 
         var extra: std.ArrayList(http.Header) = .empty;
         for (settings.extra_headers) |text| {
-            if (std.mem.indexOfAny(u8, text, "\r\n") != null) return error.InvalidHttpHeader;
-            const colon = std.mem.indexOfScalar(u8, text, ':') orelse return error.InvalidHttpHeader;
+            if (std.mem.findAny(u8, text, "\r\n") != null) return error.InvalidHttpHeader;
+            const colon = std.mem.findScalar(u8, text, ':') orelse return error.InvalidHttpHeader;
             const name = std.mem.trim(u8, text[0..colon], " \t");
             if (name.len == 0) return error.InvalidHttpHeader;
             try extra.append(arena, .{ .name = name, .value = std.mem.trim(u8, text[colon + 1 ..], " \t") });
@@ -396,7 +396,7 @@ const Http = struct {
             try warning.note(h.options.warnings, .{ .proxy_auth_method_unknown = method_name });
             break :blk .any;
         };
-        const text = if (std.mem.indexOf(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else raw;
+        const text = if (std.mem.find(u8, raw, "://") == null) try std.fmt.allocPrint(arena, "http://{s}", .{raw}) else raw;
         const proxy_url = url_mod.Url.parse(text) catch return error.InvalidProxy;
         if (proxy_url.user != null) {
             h.proxy_credentials = .{ .gpa = h.gpa, .url = proxy_url };
@@ -583,7 +583,7 @@ const Http = struct {
     /// `Location` that is a whole URL or a path.
     fn follow(h: *Http, location: []const u8, from: []const u8) Error![]const u8 {
         const arena = h.arena.allocator();
-        if (std.mem.indexOf(u8, location, "://") != null) {
+        if (std.mem.find(u8, location, "://") != null) {
             const text = try arena.dupe(u8, location);
             const to = url_mod.Url.parse(text) catch return h.fail(error.HttpStatus, "a redirect to a URL that does not parse");
             if (to.scheme != .http and to.scheme != .https) return h.fail(error.HttpStatus, "a redirect to another protocol");
@@ -598,7 +598,7 @@ const Http = struct {
         }
         if (location.len != 0 and location[0] == '/') return arena.dupe(u8, location);
         // Relative to the directory of the request that was redirected.
-        const dir_end = (std.mem.lastIndexOfScalar(u8, from[0 .. std.mem.indexOfScalar(u8, from, '?') orelse from.len], '/') orelse 0) + 1;
+        const dir_end = (std.mem.findScalarLast(u8, from[0 .. std.mem.findScalar(u8, from, '?') orelse from.len], '/') orelse 0) + 1;
         return std.fmt.allocPrint(arena, "{s}{s}", .{ from[0..dir_end], location });
     }
 
@@ -707,7 +707,7 @@ const Http = struct {
     /// once `/info/refs` and the query are off it. `RedirectMismatch` when
     /// it does not end so.
     fn rebase(h: *Http, final_path: []const u8) Error!void {
-        const without_query = final_path[0 .. std.mem.indexOfScalar(u8, final_path, '?') orelse final_path.len];
+        const without_query = final_path[0 .. std.mem.findScalar(u8, final_path, '?') orelse final_path.len];
         if (!std.mem.endsWith(u8, without_query, "/info/refs")) return error.RedirectMismatch;
         h.base_path = without_query[0 .. without_query.len - "/info/refs".len];
     }

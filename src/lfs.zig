@@ -116,9 +116,9 @@ pub const Pointer = struct {
         const head = bytes[0..@min(bytes.len, pointer_size_cutoff)];
         if (head.len == 0) return .{ .oid = empty_oid, .size = 0 };
         const data = trimSpace(head);
-        if (std.mem.indexOf(u8, data, "git-media") == null and
-            std.mem.indexOf(u8, data, "hawser") == null and
-            std.mem.indexOf(u8, data, "git-lfs") == null)
+        if (std.mem.find(u8, data, "git-media") == null and
+            std.mem.find(u8, data, "hawser") == null and
+            std.mem.find(u8, data, "git-lfs") == null)
         {
             return error.NotAPointer;
         }
@@ -135,7 +135,7 @@ pub const Pointer = struct {
             // line, and an empty line is no line at all.
             const text = if (raw.len > 0 and raw[raw.len - 1] == '\r') raw[0 .. raw.len - 1] else raw;
             if (text.len == 0) continue;
-            const space = std.mem.indexOfScalar(u8, text, ' ') orelse return error.NotAPointer;
+            const space = std.mem.findScalar(u8, text, ' ') orelse return error.NotAPointer;
             const key = text[0..space];
             const value = text[space + 1 ..];
             if (line >= keys.len) return error.NotAPointer;
@@ -216,7 +216,7 @@ fn isExtensionKey(key: []const u8) bool {
 }
 
 fn parseOid(value: []const u8) Pointer.DecodeError![64]u8 {
-    const colon = std.mem.indexOfScalar(u8, value, ':') orelse return error.BadPointer;
+    const colon = std.mem.findScalar(u8, value, ':') orelse return error.BadPointer;
     if (!std.mem.eql(u8, value[0..colon], "sha256")) return error.BadPointer;
     const hex = value[colon + 1 ..];
     if (hex.len != 64) return error.BadPointer;
@@ -272,7 +272,7 @@ fn spaceAt(bytes: []const u8) usize {
     if (c < 0x80) return if (isAsciiSpace(c)) 1 else 0;
     const len = std.unicode.utf8ByteSequenceLength(c) catch return 0;
     if (len > bytes.len) return 0;
-    const cp = std.unicode.utf8Decode(bytes[0..len]) catch return 0;
+    const cp = codepoint(bytes[0..len]) orelse return 0;
     return if (isUnicodeSpace(cp)) len else 0;
 }
 
@@ -286,10 +286,19 @@ fn spaceEndingAt(bytes: []const u8) usize {
         const seq = bytes[bytes.len - len ..];
         const want = std.unicode.utf8ByteSequenceLength(seq[0]) catch continue;
         if (want != len) continue;
-        const cp = std.unicode.utf8Decode(seq) catch return 0;
+        const cp = codepoint(seq) orelse return 0;
         return if (isUnicodeSpace(cp)) len else 0;
     }
     return 0;
+}
+
+/// The code point `seq` encodes, or null when it is not exactly one valid
+/// UTF-8 sequence.
+fn codepoint(seq: []const u8) ?u21 {
+    const view = std.unicode.Utf8View.init(seq) catch return null;
+    var it = view.iterator();
+    const cp = it.nextCodepoint() orelse return null;
+    return if (it.i == seq.len) cp else null;
 }
 
 fn isAsciiSpace(c: u8) bool {
@@ -483,7 +492,7 @@ pub fn patternMatches(raw_pattern: []const u8, path: []const u8, case_fold: bool
     while (i < raw_pattern.len) : (i += 1) {
         const c = raw_pattern[i];
         if (c == '\\') {
-            if (i + 1 < raw_pattern.len and std.mem.indexOfScalar(u8, "\\[]*?#", raw_pattern[i + 1]) != null) {
+            if (i + 1 < raw_pattern.len and std.mem.findScalar(u8, "\\[]*?#", raw_pattern[i + 1]) != null) {
                 buf[len] = c;
                 buf[len + 1] = raw_pattern[i + 1];
                 len += 2;
@@ -499,7 +508,7 @@ pub fn patternMatches(raw_pattern: []const u8, path: []const u8, case_fold: bool
     if (pattern.len == 0) return false;
     const options: wildmatch.Options = .{ .pathname = true, .case_fold = case_fold };
 
-    const anchored = pattern[0] == '/' or std.mem.indexOfScalar(u8, pattern, '/') != null;
+    const anchored = pattern[0] == '/' or std.mem.findScalar(u8, pattern, '/') != null;
     if (!anchored) {
         var components = std.mem.splitScalar(u8, path, '/');
         while (components.next()) |component| {
