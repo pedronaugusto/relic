@@ -788,10 +788,13 @@ pub const LocalZone = struct {
 };
 
 /// What showing a date may need from the machine: the time now for
-/// `relative` and `human`, and the local zone for `human` and `-local`.
+/// `relative` and `human`, the local zone for `human` and `-local`, and
+/// the C locale's year width for `%x` (which varies between C libraries).
 pub const Clock = struct {
     now: ?i64 = null,
     local: ?LocalZone = null,
+    /// Whether `%x` uses a four-digit year; `%D` always uses two digits.
+    locale_date_full_year: bool = false,
 };
 
 /// Errors from showing a date.
@@ -910,7 +913,7 @@ pub fn show(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tz_in: i
             try out.print(gpa, "{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} ", .{ short_weekdays[@intCast(tm.wday)], tm.mday, short_months[@intCast(tm.mon)], year, @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
             try printTz(gpa, out, tz);
         },
-        .strftime => try strftime(gpa, out, mode.strftime, secs, tm, tz, if (mode.local) zone_name else null),
+        .strftime => try strftime(gpa, out, mode.strftime, secs, tm, tz, .{ .zone_name = if (mode.local) zone_name else null, .date_full_year = clock.locale_date_full_year }),
         else => try showNormal(gpa, out, secs, tm, tz, human_tm, human_tz, mode.local, clock),
     }
 }
@@ -984,12 +987,19 @@ fn isoWeek(tm: Tm) struct { year: i64, week: i64 } {
     return .{ .year = year, .week = week };
 }
 
+/// C-library details the caller supplies to `strftime`.
+pub const StrftimeContext = struct {
+    /// `%Z`'s text for a local date; `null` writes nothing for it, as git
+    /// does for a date in its own zone.
+    zone_name: ?[]const u8 = null,
+    /// Whether the C locale's `%x` uses four year digits rather than two.
+    date_full_year: bool = false,
+};
+
 /// git's `strbuf_addftime` over the C library's `strftime` in the C
 /// locale: `%z`, `%Z` and `%s` as git rewrites them, every other
-/// conversion the C library's. `zone_name` is `%Z`'s text for a local
-/// date; `null` writes nothing for it, as git does for a date in its own
-/// zone.
-pub fn strftime(gpa: std.mem.Allocator, out: *std.ArrayList(u8), fmt: []const u8, secs: i64, tm: Tm, tz: i32, zone_name: ?[]const u8) std.mem.Allocator.Error!void {
+/// conversion the C library's, with machine details supplied in `context`.
+pub fn strftime(gpa: std.mem.Allocator, out: *std.ArrayList(u8), fmt: []const u8, secs: i64, tm: Tm, tz: i32, context: StrftimeContext) std.mem.Allocator.Error!void {
     var i: usize = 0;
     while (i < fmt.len) {
         const c = fmt[i];
@@ -1039,11 +1049,14 @@ pub fn strftime(gpa: std.mem.Allocator, out: *std.ArrayList(u8), fmt: []const u8
             'V' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(isoWeek(tm).week))}),
             'w' => try out.print(gpa, "{d}", .{tm.wday}),
             'W' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - @mod(tm.wday + 6, 7), 7)))}),
-            'x' => try out.print(gpa, "{d:0>2}/{d:0>2}/{d:0>2}", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(@mod(year, 100))) }),
+            'x' => {
+                try out.print(gpa, "{d:0>2}/{d:0>2}/", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) });
+                if (context.date_full_year) try out.print(gpa, "{d:0>4}", .{year}) else try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))});
+            },
             'y' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))}),
             'Y' => try out.print(gpa, "{d}", .{year}),
             'z' => try printTz(gpa, out, tz),
-            'Z' => if (zone_name) |name| try out.appendSlice(gpa, name),
+            'Z' => if (context.zone_name) |name| try out.appendSlice(gpa, name),
             else => try out.appendSlice(gpa, fmt[i - 2 .. i]),
         }
     }

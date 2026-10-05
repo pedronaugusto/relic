@@ -181,7 +181,8 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
     defer repo.deinit(io);
     var ours: Io.Writer.Allocating = .init(gpa);
     defer ours.deinit();
-    const context: filter.Context = .{ .clock = clock };
+    var context: filter.Context = .{ .clock = clock };
+    context.clock.locale_date_full_year = try localeDateFullYear(gpa, io, git);
     switch (command) {
         .for_each_ref => {
             var keys: std.ArrayList(filter.SortKey) = .empty;
@@ -251,6 +252,16 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
         reportFirstDifference(theirs, ours.written());
         return error.TestExpectedEqual;
     }
+}
+
+/// Git uses the host C library for `%x`; macOS releases disagree on its
+/// year width. Supply that locale property separately from the ref dates.
+fn localeDateFullYear(gpa: Allocator, io: Io, git: *testgit.Repo) !bool {
+    if (builtin.os.tag == .windows) return false;
+    const date = try git.line(io, &.{ "log", "-1", "--format=%cd", "--date=format:%x" });
+    defer gpa.free(date);
+    const slash = std.mem.lastIndexOfScalar(u8, date, '/') orelse return error.TestUnexpectedResult;
+    return date.len - slash - 1 == 4;
 }
 
 /// A repository with every kind of ref the atoms tell apart: branches
