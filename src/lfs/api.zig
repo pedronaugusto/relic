@@ -1862,9 +1862,9 @@ pub const Client = struct {
         t.client.timeouts = timeouts;
         // As many kept as transfers run at once, as git-lfs keeps them.
         t.client.max_idle = @intCast(@max(1, c.settings.getInt("lfs.concurrenttransfers", 8)));
-        if (verify and (ca_info != null or ca_path != null)) try c.trust(&t.client, t.arena.allocator(), settings, environ);
+        if (verify and (ca_info != null or ca_path != null)) try c.trust(t.arena.allocator(), &t.client, settings, environ);
         if (proxy) |text| {
-            try c.useProxy(&t.client, t.arena.allocator(), text);
+            try c.useProxy(t.arena.allocator(), &t.client, text);
             // Go hands an https proxy the same TLS settings as the target,
             // the client certificate included.
             if (t.client_auth) |*a| t.client.proxy.?.client_auth = a;
@@ -1920,7 +1920,7 @@ pub const Client = struct {
 
     /// Trust `http.sslCAInfo` in place of the system's certificates, and
     /// `http.sslCAPath` besides them, as `smarthttp` does for git.
-    fn trust(c: *Client, client: *httpclient.Client, arena: Allocator, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) Error!void {
+    fn trust(c: *Client, arena: Allocator, client: *httpclient.Client, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) Error!void {
         if (settings.ca_info) |raw| {
             const file = try expandHome(arena, raw, environ);
             client.trustFile(file) catch |err| switch (err) {
@@ -1949,7 +1949,7 @@ pub const Client = struct {
     /// sends them: a plain HTTP request whole, with its absolute URL, and an
     /// `https` one through a `CONNECT` tunnel asked for in Go's words, the
     /// proxy's credential from its URL.
-    fn useProxy(c: *Client, client: *httpclient.Client, arena: Allocator, text: []const u8) Error!void {
+    fn useProxy(c: *Client, arena: Allocator, client: *httpclient.Client, text: []const u8) Error!void {
         var proxy = httpclient.Proxy.parse(arena, text, 80) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidProxy => c.fail(error.InvalidProxy, "unsupported proxy URL", .{}),
@@ -2834,7 +2834,7 @@ test "LFS proxy parsing preserves allocation resource failures" {
     client.message_mutex = .init;
     var transport: httpclient.Client = undefined;
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    try testing.expectError(error.OutOfMemory, client.useProxy(&transport, failing.allocator(), "http://pro%78y:3128"));
+    try testing.expectError(error.OutOfMemory, client.useProxy(failing.allocator(), &transport, "http://pro%78y:3128"));
 }
 
 test "LFS accepts each SOCKS proxy scheme and decodes its credentials" {
@@ -2847,7 +2847,7 @@ test "LFS accepts each SOCKS proxy scheme and decodes its credentials" {
     var transport: httpclient.Client = undefined;
     for ([_][]const u8{ "socks4", "socks4a", "socks5", "socks5h" }) |scheme| {
         const text = try std.fmt.allocPrint(arena.allocator(), "{s}://us%65r:p%40ss@127.0.0.1", .{scheme});
-        try client.useProxy(&transport, arena.allocator(), text);
+        try client.useProxy(arena.allocator(), &transport, text);
         try testing.expectEqual(@as(u16, 1080), transport.proxy.?.port);
         try testing.expectEqualStrings("user", transport.proxy.?.credential.?.user);
         try testing.expectEqualStrings("p@ss", transport.proxy.?.credential.?.password);

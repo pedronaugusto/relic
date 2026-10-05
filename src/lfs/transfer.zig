@@ -680,7 +680,7 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
     const adapters = try custom.configured(arena, server.settings.config);
     // A standalone agent moves everything with no API at all; git-lfs's own
     // for a remote on this machine is the store-to-store copy below.
-    if (try standaloneAgent(server, arena, endpoint)) |name| {
+    if (try standaloneAgent(arena, server, endpoint)) |name| {
         if (custom.find(adapters, name, operation)) |adapter| {
             try runStandalone(server, operation, adapter, &outcome, pending.items, missing_here.items, limits, options);
             return outcome;
@@ -802,7 +802,7 @@ fn runTransfers(server: *lfsapi.Server, operation: lfsapi.Operation, objects: []
 
 /// The standalone agent `lfs.<url>.standalonetransferagent` names for the
 /// endpoint, else git-lfs's own for a remote on this machine.
-fn standaloneAgent(server: *lfsapi.Server, arena: Allocator, endpoint: lfsapi.Endpoint) Error!?[]const u8 {
+fn standaloneAgent(arena: Allocator, server: *lfsapi.Server, endpoint: lfsapi.Endpoint) Error!?[]const u8 {
     if (try server.settings.urlGet(arena, "lfs", endpoint.url, "standalonetransferagent")) |name| {
         if (name.len != 0) return name;
     }
@@ -1515,7 +1515,7 @@ fn batchRequest(
     if (!own) arena_state.deinit();
 
     if (try server.client.sshTransfer(operation)) |t| {
-        const response = try sshBatch(server, t, objects, ref, a);
+        const response = try sshBatch(a, server, t, objects, ref);
         if (own) return .{ .arena = arena_state, .response = response };
         return response;
     }
@@ -1565,7 +1565,7 @@ fn batchRequest(
 /// `<oid> <size>` lines; the answer's lines are `<oid> <size> <action>`
 /// with the action's `id`, `token` and expiry, `noop` for an object with
 /// nothing to do.
-fn sshBatch(server: *lfsapi.Server, t: *lfsssh.Transfer, objects: []const Object, ref: ?[]const u8, a: Allocator) Error!BatchResponse {
+fn sshBatch(a: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, objects: []const Object, ref: ?[]const u8) Error!BatchResponse {
     const io = server.io;
     const conn = t.connection(0) catch |err| return sshBatchFailed(server, err, t.message.items);
     try conn.mutex.lock(io);

@@ -254,9 +254,9 @@ pub fn lock(server: *lfsapi.Server, repo: *Repository, path: []const u8, arena: 
     try checkPath(path);
     const ref = try refFor(arena, server.io, repo, options);
     if (try server.client.sshTransfer(.upload)) |t| {
-        const acquired = try sshLock(server, t, path, ref, arena);
+        const acquired = try sshLock(arena, server, t, path, ref);
         switch (acquired) {
-            .locked => |taken| try tookLock(server, repo, taken, ref, arena),
+            .locked => |taken| try tookLock(arena, server, repo, taken, ref),
             .held => {},
         }
         return acquired;
@@ -288,13 +288,13 @@ pub fn lock(server: *lfsapi.Server, repo: *Repository, path: []const u8, arena: 
         return error.LockRefused;
     };
     if (status.class() != .success) return error.LockRefused;
-    try tookLock(server, repo, taken, ref, arena);
+    try tookLock(arena, server, repo, taken, ref);
     return .{ .locked = taken };
 }
 
 /// A lock taken: the caches say it is the person's, and the file is made
 /// writable.
-fn tookLock(server: *lfsapi.Server, repo: *Repository, taken: Lock, ref: ?[]const u8, arena: Allocator) Error!void {
+fn tookLock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, taken: Lock, ref: ?[]const u8) Error!void {
     var cache = try Cache.load(arena, server, ref);
     cache.addOurs(arena, taken) catch return error.OutOfMemory;
     try cache.save(arena, server, ref);
@@ -307,8 +307,8 @@ fn tookLock(server: *lfsapi.Server, repo: *Repository, taken: Lock, ref: ?[]cons
 pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {
     const ref = try refFor(arena, server.io, repo, options);
     if (try server.client.sshTransfer(.upload)) |t| {
-        const released = try sshUnlock(server, t, id, ref, arena);
-        try gaveBack(server, repo, released, id, ref, arena);
+        const released = try sshUnlock(arena, server, t, id, ref);
+        try gaveBack(arena, server, repo, released, id, ref);
         return released;
     }
     var body: Io.Writer.Allocating = .init(arena);
@@ -348,13 +348,13 @@ pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: 
         }
     }
     const released = answer.lock orelse return error.LockRefused;
-    try gaveBack(server, repo, released, id, ref, arena);
+    try gaveBack(arena, server, repo, released, id, ref);
     return released;
 }
 
 /// A lock given back: the caches forget it, and the file is read-only
 /// again when it is lockable.
-fn gaveBack(server: *lfsapi.Server, repo: *Repository, released: Lock, id: []const u8, ref: ?[]const u8, arena: Allocator) Error!void {
+fn gaveBack(arena: Allocator, server: *lfsapi.Server, repo: *Repository, released: Lock, id: []const u8, ref: ?[]const u8) Error!void {
     var cache = try Cache.load(arena, server, ref);
     try cache.remove(arena, id);
     try cache.save(arena, server, ref);
@@ -403,7 +403,7 @@ pub fn list(server: *lfsapi.Server, repo: *Repository, filter: Filter, options: 
     const ssh = try server.client.sshTransfer(.download);
     while (true) {
         if (ssh) |t| {
-            const page = try sshListPage(server, t, arena, .{ .path = filter.path, .id = filter.id, .cursor = cursor, .limit = filter.limit, .refspec = ref, .verify = false });
+            const page = try sshListPage(arena, server, t, .{ .path = filter.path, .id = filter.id, .cursor = cursor, .limit = filter.limit, .refspec = ref, .verify = false });
             for (page.locks) |l| {
                 try locks.append(arena, l.lock);
                 if (filter.limit != 0 and locks.items.len >= filter.limit) break;
@@ -472,7 +472,7 @@ pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Error
     const ssh = try server.client.sshTransfer(.upload);
     while (true) {
         if (ssh) |t| {
-            const page = try sshListPage(server, t, arena, .{ .cursor = cursor, .refspec = ref, .verify = true });
+            const page = try sshListPage(arena, server, t, .{ .cursor = cursor, .refspec = ref, .verify = true });
             for (page.locks) |l| switch (l.who) {
                 .ours => try ours.append(arena, l.lock),
                 .theirs => try theirs.append(arena, l.lock),
@@ -554,7 +554,7 @@ fn sshLockOf(arena: Allocator, status: lfsssh.Status) Error!Lock {
     return .{ .id = try arena.dupe(u8, id), .path = try arena.dupe(u8, path), .owner = try arena.dupe(u8, owner), .locked_at = try arena.dupe(u8, at) };
 }
 
-fn sshLock(server: *lfsapi.Server, t: *lfsssh.Transfer, path: []const u8, ref: ?[]const u8, arena: Allocator) Error!Acquired {
+fn sshLock(arena: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, path: []const u8, ref: ?[]const u8) Error!Acquired {
     const conn = try t.connection(0);
     try conn.mutex.lock(server.io);
     defer conn.mutex.unlock(server.io);
@@ -572,7 +572,7 @@ fn sshLock(server: *lfsapi.Server, t: *lfsssh.Transfer, path: []const u8, ref: ?
 /// no different there, and the server decides — and names the ref as its
 /// `Ref.Name` does, `main` for `refs/heads/main`, where every other request
 /// names it in full.
-fn sshUnlock(server: *lfsapi.Server, t: *lfsssh.Transfer, id: []const u8, ref: ?[]const u8, arena: Allocator) Error!Lock {
+fn sshUnlock(arena: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, id: []const u8, ref: ?[]const u8) Error!Lock {
     const conn = try t.connection(0);
     try conn.mutex.lock(server.io);
     defer conn.mutex.unlock(server.io);
@@ -615,7 +615,7 @@ const SshQuery = struct {
 /// One page of `list-lock`: the locks, each declared by a `lock <id>` line
 /// and described by `path`, `locked-at`, `ownername` and `owner` lines
 /// naming the same id.
-fn sshListPage(server: *lfsapi.Server, t: *lfsssh.Transfer, arena: Allocator, q: SshQuery) Error!struct { locks: []const SshListed, next_cursor: ?[]const u8 } {
+fn sshListPage(arena: Allocator, server: *lfsapi.Server, t: *lfsssh.Transfer, q: SshQuery) Error!struct { locks: []const SshListed, next_cursor: ?[]const u8 } {
     const conn = try t.connection(0);
     try conn.mutex.lock(server.io);
     defer conn.mutex.unlock(server.io);

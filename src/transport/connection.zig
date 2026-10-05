@@ -137,6 +137,61 @@ pub const Connection = struct {
     }
 };
 
+/// The last four kilobytes a program wrote on its standard error, read by
+/// a task beside the conversation.
+const Tail = struct {
+    buffer: [4096]u8 = undefined,
+    len: usize = 0,
+    task: ?Io.Future(void) = null,
+    /// The read end, taken from the child, whose own clean-up would
+    /// close it under the reading task.
+    file: ?Io.File = null,
+
+    /// Read the program's standard error to its end, keeping the last
+    /// of it.
+    fn drain(tail: *Tail, io: Io, file: Io.File) void {
+        var chunk: [1024]u8 = undefined;
+        while (true) {
+            const n = file.readStreaming(io, &.{&chunk}) catch return;
+            tail.keep(chunk[0..n]);
+        }
+    }
+
+    /// Stop reading once the program has ended. All it wrote is in
+    /// the pipe by then, but whatever it started may still hold the
+    /// pipe open — an ssh ControlMaster, a credential daemon — and the
+    /// reading task would wait for that to end too. So the task stops,
+    /// and what it had not reached is read here, without waiting for
+    /// more.
+    fn finish(tail: *Tail, io: Io) void {
+        if (tail.task) |*task| task.cancel(io);
+        tail.task = null;
+        const file = tail.file orelse return;
+        var chunk: [1024]u8 = undefined;
+        while (true) {
+            const n = program.readAvailable(file, io, &chunk) catch return;
+            if (n == 0) return;
+            tail.keep(chunk[0..n]);
+        }
+    }
+
+    fn keep(tail: *Tail, bytes: []const u8) void {
+        if (bytes.len >= tail.buffer.len) {
+            @memcpy(&tail.buffer, bytes[bytes.len - tail.buffer.len ..]);
+            tail.len = tail.buffer.len;
+            return;
+        }
+        const room = tail.buffer.len - tail.len;
+        if (bytes.len > room) {
+            const drop = bytes.len - room;
+            @memmove(tail.buffer[0 .. tail.len - drop], tail.buffer[drop..tail.len]);
+            tail.len -= drop;
+        }
+        @memcpy(tail.buffer[tail.len..][0..bytes.len], bytes);
+        tail.len += bytes.len;
+    }
+};
+
 /// A conversation over a program's standard input and output: `ssh`
 /// running the service on another machine, or the service itself on this
 /// one.
@@ -168,59 +223,6 @@ pub const Process = struct {
     /// Where what the program said goes when the conversation ends without
     /// `diagnose` having been asked: `warning.Warning.ssh_said`.
     said_to: ?*warning.Warnings = null,
-
-    const Tail = struct {
-        buffer: [4096]u8 = undefined,
-        len: usize = 0,
-        task: ?Io.Future(void) = null,
-        /// The read end, taken from the child, whose own clean-up would
-        /// close it under the reading task.
-        file: ?Io.File = null,
-
-        /// Read the program's standard error to its end, keeping the last
-        /// of it.
-        fn drain(tail: *Tail, io: Io, file: Io.File) void {
-            var chunk: [1024]u8 = undefined;
-            while (true) {
-                const n = file.readStreaming(io, &.{&chunk}) catch return;
-                tail.keep(chunk[0..n]);
-            }
-        }
-
-        /// Stop reading once the program has ended. All it wrote is in
-        /// the pipe by then, but whatever it started may still hold the
-        /// pipe open — an ssh ControlMaster, a credential daemon — and the
-        /// reading task would wait for that to end too. So the task stops,
-        /// and what it had not reached is read here, without waiting for
-        /// more.
-        fn finish(tail: *Tail, io: Io) void {
-            if (tail.task) |*task| task.cancel(io);
-            tail.task = null;
-            const file = tail.file orelse return;
-            var chunk: [1024]u8 = undefined;
-            while (true) {
-                const n = program.readAvailable(file, io, &chunk) catch return;
-                if (n == 0) return;
-                tail.keep(chunk[0..n]);
-            }
-        }
-
-        fn keep(tail: *Tail, bytes: []const u8) void {
-            if (bytes.len >= tail.buffer.len) {
-                @memcpy(&tail.buffer, bytes[bytes.len - tail.buffer.len ..]);
-                tail.len = tail.buffer.len;
-                return;
-            }
-            const room = tail.buffer.len - tail.len;
-            if (bytes.len > room) {
-                const drop = bytes.len - room;
-                @memmove(tail.buffer[0 .. tail.len - drop], tail.buffer[drop..tail.len]);
-                tail.len -= drop;
-            }
-            @memcpy(tail.buffer[tail.len..][0..bytes.len], bytes);
-            tail.len += bytes.len;
-        }
-    };
 
     const vtable: Connection.VTable = .{
         .advertisement = advertisement,
@@ -443,7 +445,7 @@ pub const Process = struct {
 };
 
 test "the last of a program's standard error is what is kept" {
-    var tail: Process.Tail = .{};
+    var tail: Tail = .{};
     tail.keep("first line\n");
     try std.testing.expectEqualStrings("first line\n", tail.buffer[0..tail.len]);
     var big: [5000]u8 = undefined;

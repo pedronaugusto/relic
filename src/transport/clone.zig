@@ -244,7 +244,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
             deepen = null;
             send_filter = null;
         }
-        if (reached.ptr == url.ptr and parsed.scheme == .local) recorded = try absolutePathAsGit(io, arena, url);
+        if (reached.ptr == url.ptr and parsed.scheme == .local) recorded = try absolutePathAsGit(arena, io, url);
     }
 
     var session = try transport.Session.open(gpa, io, reached, .upload_pack, null, .{
@@ -649,7 +649,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
 /// absolute path as it was given, links and separators and all, and any
 /// other after the working directory and a slash. git's working directory
 /// on Windows is written with forward slashes.
-fn absolutePathAsGit(io: Io, arena: Allocator, path: []const u8) ![]const u8 {
+fn absolutePathAsGit(arena: Allocator, io: Io, path: []const u8) ![]const u8 {
     if (std.fs.path.isAbsolute(path)) return path;
     const cwd = try Io.Dir.cwd().realPathFileAlloc(io, ".", arena);
     if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, cwd, '\\', '/');

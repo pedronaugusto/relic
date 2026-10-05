@@ -100,20 +100,23 @@ const State = union(enum) {
     }
 };
 
+/// A commit and its tree, as the walk found them.
+pub const CommitTree = struct { oid: Oid, tree: Oid };
+
 /// The objects to send: `commits` in the walk's order, `pending` the
 /// objects asked for by name that are not commits, in the order asked,
 /// `named` every object asked for by name, `had` what the client has.
 pub fn collect(
     gpa: Allocator,
+    out_arena: Allocator,
     io: Io,
     db: *Odb,
     filter: objectwalk.Filter,
-    commits: []const struct { oid: Oid, tree: Oid },
+    commits: []const CommitTree,
     pending: []const Oid,
     named: *const Oid.Set,
     had: *const Oid.Set,
     out: *std.ArrayList(odb_mod.PackEntry),
-    out_arena: Allocator,
 ) objectwalk.Error!void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();

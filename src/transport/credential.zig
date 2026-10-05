@@ -281,7 +281,7 @@ pub const Session = struct {
                 try s.noteAsked(helper, .failed);
                 return error.ProgramsNotGranted;
             };
-            const outcome = try s.runHelper(io, programs, arena, helper, .get, settings.use_http_path);
+            const outcome = try s.runHelper(arena, io, programs, helper, .get, settings.use_http_path);
             s.dropExpired(opts.now);
             const answer: auth.Failure.Answer = switch (outcome) {
                 .failed => .failed,
@@ -337,7 +337,7 @@ pub const Session = struct {
         if (settings.helpers.len == 0) return;
         const programs = opts.programs orelse return error.ProgramsNotGranted;
         for (settings.helpers) |helper| {
-            _ = try s.runHelper(io, programs, arena_state.allocator(), helper, .store, settings.use_http_path);
+            _ = try s.runHelper(arena_state.allocator(), io, programs, helper, .store, settings.use_http_path);
         }
     }
 
@@ -350,7 +350,7 @@ pub const Session = struct {
         if (settings.helpers.len != 0) {
             const programs = opts.programs orelse return error.ProgramsNotGranted;
             for (settings.helpers) |helper| {
-                _ = try s.runHelper(io, programs, arena_state.allocator(), helper, .erase, settings.use_http_path);
+                _ = try s.runHelper(arena_state.allocator(), io, programs, helper, .erase, settings.use_http_path);
             }
         }
         if (s.refused_username) |u| s.gpa.free(u);
@@ -446,9 +446,9 @@ pub const Session = struct {
 
     fn runHelper(
         s: *Session,
+        arena: Allocator,
         io: Io,
         programs: program.Programs,
-        arena: Allocator,
         helper: []const u8,
         operation: Operation,
         use_http_path: bool,

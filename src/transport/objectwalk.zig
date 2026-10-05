@@ -172,15 +172,14 @@ pub fn missingWith(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclu
 
     if (options.filter != .none) {
         // Filtered: object for object as git's filters choose.
-        const Pair = @typeInfo(@typeInfo(@TypeOf(objectfilter.collect)).@"fn".params[4].type.?).pointer.child;
-        var pairs: std.ArrayList(Pair) = .empty;
+        var pairs: std.ArrayList(objectfilter.CommitTree) = .empty;
         defer pairs.deinit(gpa);
         for (commits) |oid| {
             const node = walk.nodes.getPtr(oid).?;
             if (node.flags & flag_uninteresting != 0) continue;
             try pairs.append(gpa, .{ .oid = oid, .tree = node.tree });
         }
-        try objectfilter.collect(gpa, io, db, options.filter, pairs.items, pending.items, &walk.named, &walk.had, &entries, out_arena);
+        try objectfilter.collect(gpa, out_arena, io, db, options.filter, pairs.items, pending.items, &walk.named, &walk.had, &entries);
         collected.entries = try out_arena.dupe(odb_mod.PackEntry, entries.items);
         return collected;
     }
@@ -188,11 +187,11 @@ pub fn missingWith(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, exclu
         const node = walk.nodes.getPtr(oid).?;
         if (node.flags & flag_uninteresting != 0) continue;
         try entries.append(gpa, .{ .oid = oid });
-        try walk.addTree(node.tree, "", &entries, out_arena);
+        try walk.addTree(out_arena, node.tree, "", &entries);
     }
     for (pending.items) |oid| {
         if ((try db.readHeader(io, oid)).type == .tree) {
-            try walk.addTree(oid, "", &entries, out_arena);
+            try walk.addTree(out_arena, oid, "", &entries);
         } else {
             if (walk.had.contains(oid) or walk.added.contains(oid)) continue;
             try walk.added.put(gpa, oid, {});
@@ -369,10 +368,10 @@ const Walk = struct {
     /// List a tree and what is below it, less what is had or listed.
     fn addTree(
         w: *Walk,
+        arena: Allocator,
         root: Oid,
         root_path: []const u8,
         out: *std.ArrayList(odb_mod.PackEntry),
-        arena: Allocator,
     ) Error!void {
         const Item = struct { oid: Oid, path: []const u8 };
         var stack: std.ArrayList(Item) = .empty;

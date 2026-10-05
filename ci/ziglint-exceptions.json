@@ -1659,13 +1659,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/transport/remote.zig",
-    "source": "fn of(a: Allocator, remote_name: []const u8, comptime field: []const u8) Allocator.Error![]u8 {",
-    "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/remote.zig",
     "source": "pub fn rewrite(gpa: Allocator, config: *const Config, url: []const u8, which: Rewrite) Error!?[]u8 {",
@@ -1736,13 +1729,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/transport/bundle.zig",
-    "source": "fn commitOf(repo: *Repository, io: Io, oid: Oid) ?Oid {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/httpclient.zig",
     "source": "pub fn trustSystem(c: *Client) Error!void {",
@@ -1803,13 +1789,6 @@
     "path": "src/transport/credential.zig",
     "source": "pub fn reject(s: *Session, io: Io, opts: Options) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/credential.zig",
-    "source": "arena: Allocator,",
-    "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -1883,13 +1862,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/transport/clone.zig",
-    "source": "fn absolutePathAsGit(io: Io, arena: Allocator, path: []const u8) ![]const u8 {",
-    "detail": "'Allocator' parameter should come before 'Io'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/transport/httpsettings.zig",
     "source": "pub fn resolve(arena: Allocator, config: ?*const config_mod.Config, environ: ?*const Environ.Map, url: url_mod.Url) Error!Settings {",
@@ -1948,20 +1920,6 @@
   {
     "rule": "Z023",
     "path": "src/transport/connection.zig",
-    "source": "fn drain(tail: *Tail, io: Io, file: Io.File) void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/connection.zig",
-    "source": "fn finish(tail: *Tail, io: Io) void {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/connection.zig",
     "source": "fn close(context: *anyopaque, io: Io) void {",
     "detail": "'Io' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
@@ -1971,13 +1929,6 @@
     "path": "src/transport/connection.zig",
     "source": "pub fn finish(c: *Connection, io: Io) Error!void {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/objectfilter.zig",
-    "source": "out_arena: Allocator,",
-    "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2090,13 +2041,6 @@
     "path": "src/transport/fetchpack.zig",
     "source": "pub fn fetch(",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/transport/objectwalk.zig",
-    "source": "arena: Allocator,",
-    "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -8668,13 +8612,6 @@
   {
     "rule": "Z023",
     "path": "src/lfs/transfer.zig",
-    "source": "fn sshBatch(server: *lfsapi.Server, t: *lfsssh.Transfer, objects: []const Object, ref: ?[]const u8, a: Allocator) Error!BatchResponse {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/lfs/transfer.zig",
     "source": "fn fetchFn(context: *anyopaque, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {",
     "detail": "'Io' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
@@ -8722,13 +8659,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/lfs/locks.zig",
-    "source": "fn tookLock(server: *lfsapi.Server, repo: *Repository, taken: Lock, ref: ?[]const u8, arena: Allocator) Error!void {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/lfs/locks.zig",
     "source": "pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {",
@@ -8739,13 +8669,6 @@
     "rule": "Z023",
     "path": "src/lfs/locks.zig",
     "source": "pub fn unlock(server: *lfsapi.Server, repo: *Repository, id: []const u8, force: bool, arena: Allocator, options: Options) Error!Lock {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/lfs/locks.zig",
-    "source": "fn gaveBack(server: *lfsapi.Server, repo: *Repository, released: Lock, id: []const u8, ref: ?[]const u8, arena: Allocator) Error!void {",
     "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
@@ -8775,27 +8698,6 @@
     "path": "src/lfs/locks.zig",
     "source": "pub fn verify(server: *lfsapi.Server, repo: *Repository, options: Options) Error!Verified {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/lfs/locks.zig",
-    "source": "fn sshLock(server: *lfsapi.Server, t: *lfsssh.Transfer, path: []const u8, ref: ?[]const u8, arena: Allocator) Error!Acquired {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/lfs/locks.zig",
-    "source": "fn sshUnlock(server: *lfsapi.Server, t: *lfsssh.Transfer, id: []const u8, ref: ?[]const u8, arena: Allocator) Error!Lock {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/lfs/locks.zig",
-    "source": "fn sshListPage(server: *lfsapi.Server, t: *lfsssh.Transfer, arena: Allocator, q: SshQuery) Error!struct { locks: []const SshListed, next_cursor: ?[]const u8 } {",
-    "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -8957,20 +8859,6 @@
     "path": "src/lfs/api.zig",
     "source": "pub fn send(c: *Client, request: Request) Error!*Exchange {",
     "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/lfs/api.zig",
-    "source": "fn trust(c: *Client, client: *httpclient.Client, arena: Allocator, settings: httpsettings.Settings, environ: ?*const std.process.Environ.Map) Error!void {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/lfs/api.zig",
-    "source": "fn useProxy(c: *Client, client: *httpclient.Client, arena: Allocator, text: []const u8) Error!void {",
-    "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -10469,13 +10357,6 @@
     "path": "src/fastexport.zig",
     "source": "if (std.mem.indexOf(u8, head, \"\\ntagger \")) |t| {",
     "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/lfs/transfer.zig",
-    "source": "fn standaloneAgent(server: *lfsapi.Server, arena: Allocator, endpoint: lfsapi.Endpoint) Error!?[]const u8 {",
-    "detail": "'Allocator' parameter should come before 'other'",
     "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
   },
   {

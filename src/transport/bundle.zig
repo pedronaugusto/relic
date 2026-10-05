@@ -483,11 +483,11 @@ pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: 
     var pending: std.ArrayList(Pending) = .empty;
     for (request.include) |name| {
         const oid = try revparse.resolve(gpa, io, repo, name);
-        try pending.append(a, .{ .oid = oid, .name = name, .negative = false, .commit = commitOf(repo, io, oid) });
+        try pending.append(a, .{ .oid = oid, .name = name, .negative = false, .commit = commitOf(io, repo, oid) });
     }
     for (request.exclude) |name| {
         const oid = try revparse.resolve(gpa, io, repo, name);
-        try pending.append(a, .{ .oid = oid, .name = name, .negative = true, .commit = commitOf(repo, io, oid) });
+        try pending.append(a, .{ .oid = oid, .name = name, .negative = true, .commit = commitOf(io, repo, oid) });
     }
 
     // The walk: what is shown, in order, and the boundary below it.
@@ -607,7 +607,7 @@ fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) Create
 }
 
 /// The commit `oid` is or peels to, or `null`.
-fn commitOf(repo: *Repository, io: Io, oid: Oid) ?Oid {
+fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
     const peeled = repo.peel(io, oid) catch return null;
     const header = repo.odb.readHeader(io, peeled) catch return null;
     return if (header.type == .commit) peeled else null;

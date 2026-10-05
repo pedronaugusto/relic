@@ -102,7 +102,7 @@ pub const Remote = struct {
 
         remote.name = try arena.dupe(u8, name);
         const key = struct {
-            fn of(a: Allocator, remote_name: []const u8, comptime field: []const u8) Allocator.Error![]u8 {
+            fn of(comptime field: []const u8, a: Allocator, remote_name: []const u8) Allocator.Error![]u8 {
                 return std.fmt.allocPrint(a, "remote.{s}." ++ field, .{remote_name});
             }
         }.of;
@@ -111,7 +111,7 @@ pub const Remote = struct {
         for (configured) |raw| try urls.append(arena, try rewrite(arena, config, raw, .fetch) orelse raw);
         remote.urls = urls.items;
 
-        const pushurls = try valuesOf(arena, config, try key(arena, name, "pushurl"));
+        const pushurls = try valuesOf(arena, config, try key("pushurl", arena, name));
         if (pushurls.len != 0) {
             var rewritten: std.ArrayList([]const u8) = .empty;
             for (pushurls) |raw| try rewritten.append(arena, try rewrite(arena, config, raw, .fetch) orelse raw);
@@ -120,18 +120,18 @@ pub const Remote = struct {
             remote.push_urls = try pushUrlsFor(arena, config, configured);
         }
 
-        remote.fetch = try refspecsOf(arena, config, try key(arena, name, "fetch"), .fetch, &remote.invalid);
-        remote.push = try refspecsOf(arena, config, try key(arena, name, "push"), .push, &remote.invalid);
+        remote.fetch = try refspecsOf(arena, config, try key("fetch", arena, name), .fetch, &remote.invalid);
+        remote.push = try refspecsOf(arena, config, try key("push", arena, name), .push, &remote.invalid);
 
-        if (try valueOf(arena, config, try key(arena, name, "tagopt"))) |text| {
+        if (try valueOf(arena, config, try key("tagopt", arena, name))) |text| {
             if (std.mem.eql(u8, text, "--tags")) remote.tags = .all;
             if (std.mem.eql(u8, text, "--no-tags")) remote.tags = .none;
         }
-        remote.prune = boolOf(config, try key(arena, name, "prune")) orelse boolOf(config, "fetch.prune");
-        remote.prune_tags = boolOf(config, try key(arena, name, "prunetags")) orelse boolOf(config, "fetch.prunetags");
-        remote.upload_pack = try valueOf(arena, config, try key(arena, name, "uploadpack"));
-        remote.receive_pack = try valueOf(arena, config, try key(arena, name, "receivepack"));
-        remote.mirror = boolOf(config, try key(arena, name, "mirror")) orelse false;
+        remote.prune = boolOf(config, try key("prune", arena, name)) orelse boolOf(config, "fetch.prune");
+        remote.prune_tags = boolOf(config, try key("prunetags", arena, name)) orelse boolOf(config, "fetch.prunetags");
+        remote.upload_pack = try valueOf(arena, config, try key("uploadpack", arena, name));
+        remote.receive_pack = try valueOf(arena, config, try key("receivepack", arena, name));
+        remote.mirror = boolOf(config, try key("mirror", arena, name)) orelse false;
         return remote;
     }
 
