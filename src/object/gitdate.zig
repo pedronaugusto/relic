@@ -720,6 +720,8 @@ test "approximate dates read as git's t0006 reads them" {
     const Case = struct { text: []const u8, want: []const u8, shift: i64 = 0 };
     const cases = [_]Case{
         .{ .text = "now", .want = "2009-08-30 19:20:00" },
+        // Git recognizes the number word even among otherwise unknown words.
+        .{ .text = "not one word", .want = "2009-08-01 19:20:00" },
         .{ .text = "today", .want = "2009-08-30 00:00:00" },
         .{ .text = "5 seconds ago", .want = "2009-08-30 19:19:55" },
         .{ .text = "5.seconds.ago", .want = "2009-08-30 19:19:55" },
@@ -773,7 +775,7 @@ test "approximate dates read as git's t0006 reads them" {
             return err;
         };
     }
-    try std.testing.expect(approximate("not one word", .{ .now = now }) == null);
+    try std.testing.expect(approximate("unrecognized words", .{ .now = now }) == null);
     for ([_][]const u8{ "2147483647 months ago", "99999999999999999999 years ago", "4294967295.weeks.ago", "last 2147483647 sunday", "-1 days" }) |text| {
         _ = approximate(text, .{ .now = now });
     }
