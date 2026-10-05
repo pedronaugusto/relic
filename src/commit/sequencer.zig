@@ -1033,9 +1033,10 @@ pub fn resetMerge(
     try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, to), .merge, blocked);
     try repo.writeIndex(io, &index);
     try head_mod.writeRef(io, repo, "ORIG_HEAD", current);
-    var buf: [hash.max_hex_len + 16]u8 = undefined;
+    var buf: ["reset: moving to ".len + hash.max_hex_len]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
     const log = if (target) |oid|
+        // unreachable: the buffer is the words and the longest hex name
         std.fmt.bufPrint(&buf, "reset: moving to {s}", .{oid.hex(&hex)}) catch unreachable
     else
         "reset: moving to HEAD";
@@ -1121,4 +1122,26 @@ test "sequencer signing policy refuses malformed values and allocation failures"
     state.get(r._config).gpa = failing.allocator();
     defer state.get(r._config).gpa = gpa;
     try std.testing.expectError(error.OutOfMemory, Read.run(&r, .{}));
+}
+
+test "a reset to a SHA-256 commit records its whole name in the reflog" {
+    const testgit = @import("../testing/git.zig");
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture = try testgit.Repo.init(gpa, io, &.{"--object-format=sha256"});
+    defer fixture.deinit();
+    try fixture.writeFile(io, "f", "a\n");
+    try fixture.exec(io, &.{ "add", "f" });
+    try fixture.exec(io, &.{ "commit", "-qm", "one" });
+    const hex = try fixture.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(hex);
+    var repo = try Repository.open(gpa, io, fixture.dir, .{});
+    defer repo.deinit(io);
+    const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1700000000, .offset_minutes = 0 };
+    try resetMerge(gpa, io, &repo, try Oid.parse(.sha256, hex), who, null);
+    const subject = try fixture.line(io, &.{ "reflog", "-1", "--format=%gs" });
+    defer gpa.free(subject);
+    const expected = try std.fmt.allocPrint(gpa, "reset: moving to {s}", .{hex});
+    defer gpa.free(expected);
+    try std.testing.expectEqualStrings(expected, subject);
 }

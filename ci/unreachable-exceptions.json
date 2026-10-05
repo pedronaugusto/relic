@@ -1,13 +1,6 @@
 [
   {
     "rule": "catch-unreachable",
-    "path": "src/commit/sequencer.zig",
-    "source": "std.fmt.bufPrint(&buf, \"reset: moving to {s}\", .{oid.hex(&hex)}) catch unreachable",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
     "path": "src/config.zig",
     "source": "const parsed = parseVariableLine(replacement) catch unreachable;",
     "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
