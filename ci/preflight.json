@@ -17,10 +17,6 @@
       "lines": 129,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/transport/fetch.zig:fetch": {
-      "lines": 432,
-      "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
-    },
     "src/transport/fetchpack.zig:fetchV0": {
       "lines": 147,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."

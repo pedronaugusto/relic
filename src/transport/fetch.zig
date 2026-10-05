@@ -21,6 +21,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const assert = std.debug.assert;
 
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
@@ -299,39 +300,14 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     const checks: ?*const fsck.Rules = if (rules) |*r| r else null;
 
     const rla = try reflogAction(arena, remote_name, options);
-
-    var cli_specs: std.ArrayList(Refspec) = .empty;
-    for (options.refspecs) |text| {
-        try cli_specs.append(arena, Refspec.parse(try arena.dupe(u8, text), .fetch) catch return error.InvalidRefspec);
-    }
     const tags = options.tags orelse remote.tags;
     const prune = options.prune orelse remote.prune orelse false;
     const prune_tags = options.prune_tags orelse remote.prune_tags orelse false;
-
-    // `pruneTags` is a refspec: fetching every tag is how it knows which
-    // are gone.
-    var configured: std.ArrayList(Refspec) = .empty;
-    try configured.appendSlice(arena, remote.fetch);
-    if (prune and prune_tags and remote.name != null) {
-        try configured.append(arena, try Refspec.parse("refs/tags/*:refs/tags/*", .fetch));
-    }
-    const specs: []const Refspec = if (cli_specs.items.len != 0) cli_specs.items else configured.items;
-
-    // The current branch's merge settings, when it follows this remote.
-    var branch_merge: []const []const u8 = &.{};
-    const current = try repo.refStore().currentBranch(gpa, io);
-    defer if (current) |c| gpa.free(c);
     var branch_config: ?remote_mod.Branch = null;
     defer if (branch_config) |*b| b.deinit();
-    if (current) |name| {
-        branch_config = try remote_mod.Branch.get(gpa, repo.configuration(), name);
-        const b = &branch_config.?;
-        if (b.merge.len != 0 and b.remote != null and remote.name != null and std.mem.eql(u8, b.remote.?, remote.name.?)) {
-            branch_merge = b.merge;
-        }
-    }
+    const asked = try askedRefspecs(arena, gpa, io, repo, &remote, options.refspecs, prune and prune_tags, &branch_config);
 
-    const follow_head = cli_specs.items.len == 0 and remote.name != null and followRemoteHead(repo.configuration(), remote.name.?);
+    const follow_head = asked.cli.len == 0 and remote.name != null and followRemoteHead(repo.configuration(), remote.name.?);
 
     // A promisor remote's packs are filtered as the clone was, and what
     // they leave out is promised rather than missing.
@@ -339,11 +315,316 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     // `auto` is the filter of the promisor remotes taken from the server's
     // advertisement, known once the session is open.
     const selection = try selectFilter(arena, repo.configuration(), options.filter, promisor, remote.name);
-    const auto_filter = selection.auto;
     var filter_spec = selection.spec;
 
     const url = remote.urls[0];
-    var session = try transport.Session.open(gpa, io, url, .upload_pack, repo.objectFormat(), .{
+    var session = try openSession(gpa, io, repo, &remote, url, options);
+    defer session.close(io);
+    try partial.storeAdvertised(io, repo, session.promisorStores(), options.warnings);
+    if (selection.auto) filter_spec = try promisors.autoFilter(arena, repo.configuration(), session.promisorsTaken());
+
+    // Ask for the refs the refspecs can name, as git does.
+    var remote_refs = try session.listRefs(gpa, io, try refPrefixes(arena, asked, tags != .none, follow_head));
+    defer remote_refs.deinit();
+
+    // The local refs, by name.
+    var local_refs = try repo.refStore().list(gpa, io, "refs/");
+    defer local_refs.deinit();
+    var local = try LocalIndex.init(gpa, &local_refs);
+    defer local.deinit(gpa);
+
+    const planned = try refMap(arena, gpa, io, repo, &remote, &remote_refs, asked, tags, &local);
+    const map = planned.map;
+    const autotags = planned.autotags;
+
+    // A working tree's branch is never fetched into.
+    if (!options.update_head_ok) try refuseCheckedOut(arena, gpa, io, repo, map.items, &local);
+
+    // Prune first, as git does, so a ref that moved to a name nested
+    // under a pruned one can be created.
+    const pruned: []const []const u8 = if (prune) try pruneStale(arena, gpa, io, repo, local_refs.entries, map.items, asked.specs) else &.{};
+
+    var boundary_change: BoundaryChange = .{ .old = repo.odb.shallow };
+    defer boundary_change.release(gpa);
+    errdefer boundary_change.restore(gpa, repo);
+    const brought = try bringObjects(arena, gpa, io, repo, &session, &boundary_change, .{
+        .map = map.items,
+        .remote_refs = remote_refs.refs,
+        .local = &local,
+        .local_refs = local_refs.entries,
+        .deepen = deepen,
+        .tags = tags,
+        .autotags = autotags,
+        .filter = filter_spec,
+        .checks = checks,
+        .promisor = promisor,
+        .options = options,
+    });
+    outcome.pack = brought.pack;
+    outcome.objects = brought.objects;
+    const backfill = brought.backfill;
+
+    // The refs, in git's order: those for merging first.
+    const plan = try planUpdates(arena, gpa, io, repo, .{ map.items, backfill }, try url_mod.anonymize(arena, url), rla, options, &local);
+    try writeRefs(io, repo, plan.pending, options, plan.updates);
+
+    if (follow_head) try createRemoteHead(gpa, io, repo, remote.name.?, remote_refs.refs, asked.configured, options.who);
+
+    if (options.write_fetch_head) try writeFetchHead(gpa, io, repo, plan.fetch_head, options.append);
+
+    if (try repo.configuration().getBool("fetch.writecommitgraph", false)) try writeCommitGraph(gpa, io, repo, options.warnings);
+    outcome.updates = plan.updates;
+    outcome.pruned = pruned;
+    outcome.fetch_head = plan.fetch_head;
+    return outcome;
+}
+
+/// What `bringObjects` brings, and what it knows to ask.
+const Bringing = struct {
+    map: []MapEntry,
+    remote_refs: []const protocol.RemoteRef,
+    local: *const LocalIndex,
+    local_refs: []const refs_mod.Named,
+    deepen: ?fetchpack.Deepen,
+    tags: remote_mod.TagMode,
+    /// Whether a refspec that keeps refs asked for tags to follow.
+    autotags: bool,
+    filter: ?[]const u8,
+    checks: ?*const fsck.Rules,
+    promisor: bool,
+    options: Options,
+};
+
+/// What came: the pack, if one did, and the tags that followed.
+const Brought = struct { pack: ?Oid, objects: u32, backfill: []MapEntry };
+
+/// Bring the objects the map names that are not here yet into one new
+/// pack, take the boundary the server drew in `boundary_change`, follow
+/// tags, and check that everything below the fetched refs is here before
+/// the new boundary is written.
+fn bringObjects(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    session: *transport.Session,
+    boundary_change: *BoundaryChange,
+    b: Bringing,
+) Error!Brought {
+    // The objects: everything the map names that is not here yet.
+    // Deepening asks again for what is here: its history is what is
+    // wanted.
+    const wants = try wantsInOrder(arena, io, repo, b.remote_refs, b.map, b.deepen != null);
+    const tips = try negotiationTips(arena, gpa, io, repo, b.local_refs, b.remote_refs);
+
+    var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    const boundary = try shallowList(arena, &repo.odb.shallow);
+    var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
+    defer shallow_info.deinit();
+    // What the pack's objects name, collected as it is indexed, so that
+    // whether it is connected is asked without reading it again.
+    var links: indexpack.Links = .init(gpa);
+    defer links.deinit();
+    const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
+        .wants = wants.oids,
+        .want_names = wants.names,
+        .tips = tips.ours,
+        .common_tips = tips.common,
+        .include_tag = b.tags != .none,
+        .deepen = b.deepen,
+        .shallow = boundary,
+        .filter = b.filter,
+    }, .{
+        .warnings = b.options.warnings,
+        .progress = b.options.progress,
+        .receive = receiveOptions(repo, b.checks, b.promisor, b.options.warnings, &links),
+        .shallow_info = &shallow_info,
+    });
+    // A remote helper's import learns the values as it goes.
+    takeFetchedValues(session, b.map);
+    // A fetch's promisor pack names no refs; git's names none either.
+    if (b.promisor) if (fetched.pack) |name| try partial.writePromisor(io, pack_dir, name, &.{});
+
+    try boundary_change.take(arena, gpa, repo, &shallow_info, session.advertisedShallow(), b.deepen != null);
+
+    // Tags that point at what the fetch brought.
+    const backfill: []MapEntry = if (b.tags == .auto and b.autotags)
+        try followTags(arena, gpa, io, repo, session, pack_dir, .{
+            .remote_refs = b.remote_refs,
+            .local = b.local,
+            .map = b.map,
+            .tips = tips,
+            .progress = b.options.progress,
+            .receive = receiveOptions(repo, b.checks, b.promisor, b.options.warnings, null),
+        })
+    else
+        &.{};
+
+    // Everything below the fetched refs is here: what came in the pack is
+    // walked into, what was here before is taken to be whole.
+    try checkConnected(arena, gpa, io, repo, .{
+        .pack_dir = pack_dir,
+        .pack = fetched.pack,
+        .links = &links,
+        .passes = .{ b.map, backfill },
+        .remote_roots = boundary_change.remote_roots,
+        .old_boundary = &boundary_change.old,
+        .promisor = b.promisor,
+        .update_shallow = b.options.update_shallow,
+        .missing = b.options.missing,
+    });
+
+    if (boundary_change.moved) try shallow_mod.write(gpa, io, repo.common_dir, &repo.odb.shallow);
+    return .{ .pack = fetched.pack, .objects = fetched.objects, .backfill = backfill };
+}
+
+/// The shallow boundary across a fetch: the one before it, put back if
+/// the fetch fails, and the remote's roots the fetch did not ask for.
+const BoundaryChange = struct {
+    old: Oid.Set,
+    /// Whether `repo.odb.shallow` is a new set, `old` kept beside it.
+    moved: bool = false,
+    /// A shallow remote's boundary, on a fetch that did not ask for one:
+    /// walked with for the connectivity check, and kept only as
+    /// `update_shallow` says.
+    remote_roots: []const Oid = &.{},
+
+    /// Take the boundary the server drew. Walks from here on stop at it;
+    /// it is written once everything below the refs is known to be here.
+    fn take(
+        b: *BoundaryChange,
+        arena: Allocator,
+        gpa: Allocator,
+        repo: *Repository,
+        info: *fetchpack.ShallowInfo,
+        advertised: []const Oid,
+        deepened: bool,
+    ) Error!void {
+        assert(!b.moved);
+        if (!deepened) try info.shallow.appendSlice(gpa, advertised);
+        if (info.shallow.items.len == 0 and info.unshallow.items.len == 0) return;
+        if (!deepened) {
+            var roots: std.ArrayList(Oid) = .empty;
+            for (info.shallow.items) |oid| {
+                if (!b.old.contains(oid)) try roots.append(arena, oid);
+            }
+            b.remote_roots = roots.items;
+        }
+        repo.odb.shallow = try shallow_mod.apply(gpa, &b.old, info.shallow.items, info.unshallow.items);
+        b.moved = true;
+    }
+
+    /// Put the old boundary back, after a failure.
+    fn restore(b: *BoundaryChange, gpa: Allocator, repo: *Repository) void {
+        if (!b.moved) return;
+        repo.odb.shallow.deinit(gpa);
+        repo.odb.shallow = b.old;
+        b.moved = false;
+    }
+
+    /// Release the old boundary, once a new one replaced it for good.
+    fn release(b: *BoundaryChange, gpa: Allocator) void {
+        if (b.moved) b.old.deinit(gpa);
+    }
+};
+
+/// What `followTags` asks about.
+const Following = struct {
+    remote_refs: []const protocol.RemoteRef,
+    local: *const LocalIndex,
+    map: []const MapEntry,
+    tips: Tips,
+    progress: ?progress_mod.Progress,
+    receive: indexpack.Options,
+};
+
+/// git's automatic tag following: the remote tags that point at what the
+/// fetch brought, with the objects of those not here yet fetched too.
+fn followTags(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, session: *transport.Session, pack_dir: Io.Dir, f: Following) Error![]MapEntry {
+    var backfill: std.ArrayList(MapEntry) = .empty;
+    try findNonLocalTags(arena, gpa, io, repo, f.remote_refs, f.local, &backfill, f.map);
+    const missing_tags = try wantsInOrder(arena, io, repo, f.remote_refs, backfill.items, false);
+    if (missing_tags.oids.len == 0) return backfill.items;
+    _ = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
+        .wants = missing_tags.oids,
+        .want_names = missing_tags.names,
+        .tips = f.tips.ours,
+        .common_tips = f.tips.common,
+        .include_tag = false,
+    }, .{ .progress = f.progress, .receive = f.receive });
+    takeFetchedValues(session, backfill.items);
+    return backfill.items;
+}
+
+/// Write the commit-graph `fetch.writeCommitGraph` asks for. A failure is
+/// a warning, as git's is: the fetch itself is done.
+fn writeCommitGraph(gpa: Allocator, io: Io, repo: *Repository, warnings: ?*warning.Warnings) Error!void {
+    _ = accelerators.writeConfiguredCommitGraph(gpa, io, repo, .fetch) catch |err| {
+        try warning.note(warnings, .{ .commit_graph_write_failed = err });
+    };
+}
+
+/// The refspecs a fetch follows.
+const Asked = struct {
+    /// The command line's.
+    cli: []const Refspec,
+    /// The remote's, with `refs/tags/*:refs/tags/*` for `pruneTags`.
+    configured: []const Refspec,
+    /// The current branch's `merge` settings, when it follows this remote.
+    branch_merge: []const []const u8,
+    /// `cli` when it names any, else `configured`: what negative refspecs
+    /// and pruning go by.
+    specs: []const Refspec,
+};
+
+/// The refspecs `refspecs` and `remote` ask for, `tags_refspec` adding
+/// the tags `pruneTags` prunes by. The current branch's settings are kept
+/// in `branch_config`, which the merge names point into.
+fn askedRefspecs(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    remote: *const remote_mod.Remote,
+    refspecs: []const []const u8,
+    tags_refspec: bool,
+    branch_config: *?remote_mod.Branch,
+) Error!Asked {
+    var cli: std.ArrayList(Refspec) = .empty;
+    for (refspecs) |text| {
+        try cli.append(arena, Refspec.parse(try arena.dupe(u8, text), .fetch) catch return error.InvalidRefspec);
+    }
+
+    // `pruneTags` is a refspec: fetching every tag is how it knows which
+    // are gone.
+    var configured: std.ArrayList(Refspec) = .empty;
+    try configured.appendSlice(arena, remote.fetch);
+    if (tags_refspec and remote.name != null) {
+        try configured.append(arena, try Refspec.parse("refs/tags/*:refs/tags/*", .fetch));
+    }
+
+    var branch_merge: []const []const u8 = &.{};
+    const current = try repo.refStore().currentBranch(gpa, io);
+    defer if (current) |c| gpa.free(c);
+    if (current) |name| {
+        branch_config.* = try remote_mod.Branch.get(gpa, repo.configuration(), name);
+        const b = &branch_config.*.?;
+        if (b.merge.len != 0 and b.remote != null and remote.name != null and std.mem.eql(u8, b.remote.?, remote.name.?)) {
+            branch_merge = b.merge;
+        }
+    }
+    return .{
+        .cli = cli.items,
+        .configured = configured.items,
+        .branch_merge = branch_merge,
+        .specs = if (cli.items.len != 0) cli.items else configured.items,
+    };
+}
+
+/// The session a fetch from `remote` at `url` talks over.
+fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, url: []const u8, options: Options) Error!transport.Session {
+    const session = try transport.Session.open(gpa, io, url, .upload_pack, repo.objectFormat(), .{
         .programs = options.programs,
         .config = repo.configuration(),
         .remote_name = remote.name,
@@ -358,49 +639,63 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .repository = repo,
         .who = options.who,
     });
-    defer session.close(io);
-    try partial.storeAdvertised(io, repo, session.promisorStores(), options.warnings);
-    if (auto_filter) filter_spec = try promisors.autoFilter(arena, repo.configuration(), session.promisorsTaken());
+    return session;
+}
 
-    // Ask for the refs the refspecs can name, as git does.
+/// The ref prefixes to ask the server for: those the refspecs can name,
+/// as git asks.
+fn refPrefixes(arena: Allocator, asked: Asked, tags: bool, follow_head: bool) Error![]const []const u8 {
     var prefixes: std.ArrayList([]const u8) = .empty;
-    for (specs) |spec| try addPrefixes(arena, &prefixes, spec);
-    if (cli_specs.items.len == 0) {
-        for (branch_merge) |merge| try expandPrefix(arena, &prefixes, merge);
-        if (specs.len == 0) try prefixes.append(arena, "HEAD");
+    for (asked.specs) |spec| try addPrefixes(arena, &prefixes, spec);
+    if (asked.cli.len == 0) {
+        for (asked.branch_merge) |merge| try expandPrefix(arena, &prefixes, merge);
+        if (asked.specs.len == 0) try prefixes.append(arena, "HEAD");
     }
-    if (prefixes.items.len != 0 and tags != .none) try prefixes.append(arena, "refs/tags/");
+    if (prefixes.items.len != 0 and tags) try prefixes.append(arena, "refs/tags/");
     if (prefixes.items.len != 0 and follow_head) try prefixes.append(arena, "HEAD");
-    var remote_refs = try session.listRefs(gpa, io, prefixes.items);
-    defer remote_refs.deinit();
+    return prefixes.items;
+}
 
-    // The local refs, by name.
-    var local_refs = try repo.refStore().list(gpa, io, "refs/");
-    defer local_refs.deinit();
-    var local = try LocalIndex.init(gpa, &local_refs);
-    defer local.deinit(gpa);
+/// The ref map, and whether a refspec that keeps refs asked for tags to
+/// follow.
+const RefMap = struct { map: std.ArrayList(MapEntry), autotags: bool };
 
+/// git's `get_ref_map`: what the command line names, else the configured
+/// refspecs and the branch's merge settings, else the remote's `HEAD`,
+/// with the tags `tags` asks for, negative refspecs applied and duplicates
+/// dropped.
+fn refMap(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    remote: *const remote_mod.Remote,
+    remote_refs: *const protocol.RefList,
+    asked: Asked,
+    tags: remote_mod.TagMode,
+    local: *const LocalIndex,
+) Error!RefMap {
     var map: std.ArrayList(MapEntry) = .empty;
     var autotags = false;
-    if (cli_specs.items.len != 0) {
-        for (cli_specs.items) |spec| {
+    if (asked.cli.len != 0) {
+        for (asked.cli) |spec| {
             try fetchMap(arena, &map, remote_refs.refs, spec, false, .merge);
             if (spec.dst) |dst| {
                 if (dst.len != 0) autotags = true;
             }
         }
-    } else if (configured.items.len != 0 or branch_merge.len != 0) {
-        for (configured.items, 0..) |spec, i| {
+    } else if (asked.configured.len != 0 or asked.branch_merge.len != 0) {
+        for (asked.configured, 0..) |spec, i| {
             const before = map.items.len;
             try fetchMap(arena, &map, remote_refs.refs, spec, false, .not_for_merge);
             if (spec.dst) |dst| {
                 if (dst.len != 0) autotags = true;
             }
-            if (i == 0 and branch_merge.len == 0 and map.items.len > before and !spec.pattern) {
+            if (i == 0 and asked.branch_merge.len == 0 and map.items.len > before and !spec.pattern) {
                 map.items[before].status = .merge;
             }
         }
-        for (branch_merge) |merge| {
+        for (asked.branch_merge) |merge| {
             var found = false;
             for (map.items) |*entry| {
                 if (refnameMatch(merge, entry.name) != 0) {
@@ -422,12 +717,12 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     if (tags == .all) {
         try fetchMap(arena, &map, remote_refs.refs, try Refspec.parse("refs/tags/*:refs/tags/*", .fetch), false, .not_for_merge);
     } else if (tags == .auto and autotags) {
-        try findNonLocalTags(arena, gpa, io, repo, remote_refs.refs, &local, &map, null);
+        try findNonLocalTags(arena, gpa, io, repo, remote_refs.refs, local, &map, null);
     }
 
     // Refs the command line fetched are also kept where the configured
     // refspecs would keep them, without a line in `FETCH_HEAD`.
-    if (cli_specs.items.len != 0 and remote.name != null) {
+    if (asked.cli.len != 0 and remote.name != null) {
         const named = map.items.len;
         for (remote.fetch) |spec| {
             if (spec.negative) continue;
@@ -441,55 +736,69 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         }
     }
 
-    try applyNegative(arena, &map, specs);
+    try applyNegative(arena, &map, asked.specs);
     try removeDuplicates(&map);
+    return .{ .map = map, .autotags = autotags };
+}
 
-    // A working tree's branch is never fetched into.
-    if (!options.update_head_ok) {
-        const checked_out = try checkedOutBranches(arena, gpa, io, repo);
-        for (map.items) |entry| {
-            const dst = entry.dst orelse continue;
-            for (checked_out) |branch| {
-                if (!std.mem.eql(u8, branch, dst)) continue;
-                if (local.names.contains(dst)) return error.WouldUpdateCheckedOutBranch;
-            }
+/// `error.WouldUpdateCheckedOutBranch` when the map would write a branch a
+/// working tree has checked out.
+fn refuseCheckedOut(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, map: []const MapEntry, local: *const LocalIndex) Error!void {
+    const checked_out = try checkedOutBranches(arena, gpa, io, repo);
+    for (map) |entry| {
+        const dst = entry.dst orelse continue;
+        for (checked_out) |branch| {
+            if (!std.mem.eql(u8, branch, dst)) continue;
+            if (local.names.contains(dst)) return error.WouldUpdateCheckedOutBranch;
         }
     }
+}
 
-    // Prune first, as git does, so a ref that moved to a name nested
-    // under a pruned one can be created.
+/// Delete the local refs `specs` keep whose remote ref the map no longer
+/// fetches, with their logs: git's `prune_refs`. The names deleted, in
+/// `arena`.
+fn pruneStale(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    local_refs: []const refs_mod.Named,
+    map: []const MapEntry,
+    specs: []const Refspec,
+) Error![]const []const u8 {
     var pruned: std.ArrayList([]const u8) = .empty;
-    if (prune) {
-        var fetched_names: std.StringHashMapUnmanaged(void) = .empty;
-        defer fetched_names.deinit(gpa);
-        for (map.items) |m| try fetched_names.put(gpa, m.name, {});
-        for (local_refs.entries) |entry| {
-            if (entry.target == .symbolic) continue;
-            var matched = false;
-            var stale = true;
-            for (specs) |spec| {
-                if (spec.negative) continue;
-                const source = (try spec.mapDestination(arena, entry.name)) orelse continue;
-                matched = true;
-                if (fetched_names.contains(source)) stale = false;
-            }
-            if (!matched or !stale) continue;
-            var tx = repo.beginRefs();
-            defer tx.deinit(io);
-            try tx.delete(entry.name, .{ .matches = entry.target.direct });
-            try tx.commit(io, null);
-            try deleteLog(gpa, io, repo, entry.name);
-            try pruned.append(arena, try arena.dupe(u8, entry.name));
+    var fetched_names: std.StringHashMapUnmanaged(void) = .empty;
+    defer fetched_names.deinit(gpa);
+    for (map) |m| try fetched_names.put(gpa, m.name, {});
+    for (local_refs) |entry| {
+        if (entry.target == .symbolic) continue;
+        var matched = false;
+        var stale = true;
+        for (specs) |spec| {
+            if (spec.negative) continue;
+            const source = (try spec.mapDestination(arena, entry.name)) orelse continue;
+            matched = true;
+            if (fetched_names.contains(source)) stale = false;
         }
+        if (!matched or !stale) continue;
+        var tx = repo.beginRefs();
+        defer tx.deinit(io);
+        try tx.delete(entry.name, .{ .matches = entry.target.direct });
+        try tx.commit(io, null);
+        try deleteLog(gpa, io, repo, entry.name);
+        try pruned.append(arena, try arena.dupe(u8, entry.name));
     }
+    return pruned.items;
+}
 
-    // The objects: everything the map names that is not here yet.
-    // Deepening asks again for what is here: its history is what is
-    // wanted.
-    const wants = try wantsInOrder(arena, io, repo, remote_refs.refs, map.items, deepen != null);
+/// What negotiation starts from: every local ref's object and `HEAD`'s,
+/// and those of them the server also advertised.
+const Tips = struct { ours: []const Oid, common: []const Oid };
+
+fn negotiationTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, local_refs: []const refs_mod.Named, remote_refs: []const protocol.RemoteRef) Error!Tips {
     var tips: std.ArrayList(Oid) = .empty;
-    var common_tips: std.ArrayList(Oid) = .empty;
-    for (local_refs.entries) |entry| switch (entry.target) {
+    var common: std.ArrayList(Oid) = .empty;
+    for (local_refs) |entry| switch (entry.target) {
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => {},
     };
@@ -497,154 +806,126 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => |target| gpa.free(target),
     };
-    {
-        var tip_set: Oid.Set = .empty;
-        defer tip_set.deinit(gpa);
-        for (tips.items) |tip| try tip_set.put(gpa, tip, {});
-        for (remote_refs.refs) |ref| {
-            if (tip_set.contains(ref.oid)) try common_tips.append(arena, ref.oid);
-        }
+    var tip_set: Oid.Set = .empty;
+    defer tip_set.deinit(gpa);
+    for (tips.items) |tip| try tip_set.put(gpa, tip, {});
+    for (remote_refs) |ref| {
+        if (tip_set.contains(ref.oid)) try common.append(arena, ref.oid);
     }
+    return .{ .ours = tips.items, .common = common.items };
+}
 
-    var pack_dir = try repo.common_dir.openDir(io, "objects/pack", .{ .iterate = true });
-    defer pack_dir.close(io);
-    const boundary = try shallowList(arena, &repo.odb.shallow);
-    var shallow_info: fetchpack.ShallowInfo = .{ .gpa = gpa };
-    defer shallow_info.deinit();
-    // What the pack's objects name, collected as it is indexed, so that
-    // whether it is connected is asked without reading it again.
-    var links: indexpack.Links = .init(gpa);
-    defer links.deinit();
-    const fetched = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
-        .wants = wants.oids,
-        .want_names = wants.names,
-        .tips = tips.items,
-        .common_tips = common_tips.items,
-        .include_tag = tags != .none,
-        .deepen = deepen,
-        .shallow = boundary,
-        .filter = filter_spec,
-    }, .{
-        .warnings = options.warnings,
-        .progress = options.progress,
-        .receive = .{ .fsck = checks, .promised = promisor, .warnings = options.warnings, .reverse_index = revindex.wanted(repo.configuration()), .links = &links, .threads = indexpack.configuredThreads(repo.configuration()) },
-        .shallow_info = &shallow_info,
-    });
-    outcome.pack = fetched.pack;
-    outcome.objects = fetched.objects;
-    // A remote helper's import learns the values as it goes.
-    for (map.items) |*entry| if (session.fetchedValue(entry.name)) |oid| {
+/// How a fetched pack is received: checked by `checks`, its missing
+/// objects promised when `promisor`, its links kept in `links` when set.
+fn receiveOptions(repo: *Repository, checks: ?*const fsck.Rules, promisor: bool, warnings: ?*warning.Warnings, links: ?*indexpack.Links) indexpack.Options {
+    return .{
+        .fsck = checks,
+        .promised = promisor,
+        .warnings = warnings,
+        .reverse_index = revindex.wanted(repo.configuration()),
+        .links = links,
+        .threads = indexpack.configuredThreads(repo.configuration()),
+    };
+}
+
+/// Take the values a remote helper's import learned for `entries`.
+fn takeFetchedValues(session: *const transport.Session, entries: []MapEntry) void {
+    for (entries) |*entry| if (session.fetchedValue(entry.name)) |oid| {
         entry.oid = oid;
     };
-    // A fetch's promisor pack names no refs; git's names none either.
-    if (promisor) if (fetched.pack) |name| try partial.writePromisor(io, pack_dir, name, &.{});
+}
 
-    // The boundary the server drew. Walks from here on stop at it; it is
-    // written once everything below the refs is known to be here.
-    var old_boundary = repo.odb.shallow;
-    var boundary_moved = false;
-    defer if (boundary_moved) old_boundary.deinit(gpa);
-    errdefer if (boundary_moved) {
-        repo.odb.shallow.deinit(gpa);
-        repo.odb.shallow = old_boundary;
-        boundary_moved = false;
+/// What `checkConnected` walks.
+const Received = struct {
+    pack_dir: Io.Dir,
+    /// The pack that came, if one did.
+    pack: ?Oid,
+    links: *const indexpack.Links,
+    /// The map, then the tags fetched after it.
+    passes: [2][]MapEntry,
+    /// A shallow remote's roots this fetch did not ask for.
+    remote_roots: []const Oid,
+    /// The boundary before the fetch.
+    old_boundary: *const Oid.Set,
+    promisor: bool,
+    update_shallow: bool,
+    missing: ?*Oid,
+};
+
+/// Everything below the fetched refs is here: what came in the pack is
+/// walked into, what was here before is taken to be whole. A shallow
+/// remote's roots are taken, as `update_shallow` says, only where a ref
+/// needs them; a ref that needs one not taken is marked rejected.
+fn checkConnected(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, r: Received) Error!void {
+    var all_tips: std.ArrayList(Oid) = .empty;
+    for (r.passes) |entries| for (entries) |entry| try all_tips.append(arena, entry.oid);
+    var fresh: ?pack.Index = null;
+    defer if (fresh) |*index| index.deinit();
+    if (r.pack) |name| {
+        var hex: [hash.max_hex_len]u8 = undefined;
+        var idx_buf: [96]u8 = undefined;
+        const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
+        fresh = try pack.Index.open(gpa, io, r.pack_dir, idx_name, repo.objectFormat(), 1 << 30);
+    }
+    if (fresh) |*index| {
+        objectwalk.checkReceived(gpa, io, &repo.odb, all_tips.items, index, r.links, r.missing, .{ .promisor = r.promisor }) catch |err| switch (err) {
+            error.MissingObject => return error.MissingObject,
+            else => |e| return e,
+        };
+    } else {
+        // No pack came: every tip was here already, and what was here is
+        // whole below it. Only that each is here is checked, where git's
+        // `--not --all` walk has nothing to walk.
+        for (all_tips.items) |tip| {
+            if (try repo.odb.exists(io, tip)) continue;
+            if (r.missing) |out| out.* = tip;
+            return error.MissingObject;
+        }
+    }
+    if (r.remote_roots.len == 0) return;
+    // Which refs need which of the remote's roots: git's
+    // `assign_shallow_commits_to_refs`, walking what came in the
+    // pack — what was here before is whole below it.
+    var needed: Oid.Set = .empty;
+    var roots: Oid.Set = .empty;
+    for (r.remote_roots) |oid| {
+        const arrived = if (fresh) |*index| (try index.find(oid)) != null else false;
+        if (arrived) try roots.put(arena, oid, {});
+    }
+    for (r.passes) |entries| for (entries) |*entry| {
+        const reached = try rootsReached(arena, io, repo, entry.oid, &roots, if (fresh) |*index| index else null, r.old_boundary);
+        if (reached.len == 0) continue;
+        if (r.update_shallow) {
+            for (reached) |root| try needed.put(arena, root, {});
+        } else entry.rejected_shallow = true;
     };
-    // A shallow remote's boundary, on a fetch that did not ask for one:
-    // walked with for the check below, and kept only as `update_shallow`
-    // says.
-    var remote_roots: std.ArrayList(Oid) = .empty;
-    if (deepen == null) try shallow_info.shallow.appendSlice(gpa, session.advertisedShallow());
-    if (shallow_info.shallow.items.len != 0 or shallow_info.unshallow.items.len != 0) {
-        if (deepen == null) {
-            for (shallow_info.shallow.items) |oid| {
-                if (!old_boundary.contains(oid)) try remote_roots.append(arena, oid);
-            }
-        }
-        repo.odb.shallow = try shallow_mod.apply(gpa, &old_boundary, shallow_info.shallow.items, shallow_info.unshallow.items);
-        boundary_moved = true;
-    }
+    repo.odb.shallow.deinit(gpa);
+    repo.odb.shallow = try r.old_boundary.clone(gpa);
+    var it = needed.keyIterator();
+    while (it.next()) |root| try repo.odb.shallow.put(gpa, root.*, {});
+}
 
-    // Tags that point at what the fetch brought.
-    var backfill: std.ArrayList(MapEntry) = .empty;
-    if (tags == .auto and autotags) {
-        try findNonLocalTags(arena, gpa, io, repo, remote_refs.refs, &local, &backfill, map.items);
-        const missing_tags = try wantsInOrder(arena, io, repo, remote_refs.refs, backfill.items, false);
-        if (missing_tags.oids.len != 0) {
-            _ = try session.fetch(gpa, io, &repo.odb, pack_dir, .{
-                .wants = missing_tags.oids,
-                .want_names = missing_tags.names,
-                .tips = tips.items,
-                .common_tips = common_tips.items,
-                .include_tag = false,
-            }, .{ .progress = options.progress, .receive = .{ .fsck = checks, .promised = promisor, .warnings = options.warnings, .reverse_index = revindex.wanted(repo.configuration()), .threads = indexpack.configuredThreads(repo.configuration()) } });
-            for (backfill.items) |*entry| if (session.fetchedValue(entry.name)) |oid| {
-                entry.oid = oid;
-            };
-        }
-    }
+/// The lines of `FETCH_HEAD`, the updates reported, and the ref writes,
+/// all in `arena`.
+const Plan = struct { fetch_head: []const FetchHeadEntry, updates: []const Update, pending: []const Pending };
 
-    // Everything below the fetched refs is here: what came in the pack is
-    // walked into, what was here before is taken to be whole.
-    {
-        var all_tips: std.ArrayList(Oid) = .empty;
-        for (map.items) |entry| try all_tips.append(arena, entry.oid);
-        for (backfill.items) |entry| try all_tips.append(arena, entry.oid);
-        var fresh: ?pack.Index = null;
-        defer if (fresh) |*index| index.deinit();
-        if (outcome.pack) |name| {
-            var hex: [hash.max_hex_len]u8 = undefined;
-            var idx_buf: [96]u8 = undefined;
-            const idx_name = std.fmt.bufPrint(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
-            fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, repo.objectFormat(), 1 << 30);
-        }
-        if (fresh) |*index| {
-            objectwalk.checkReceived(gpa, io, &repo.odb, all_tips.items, index, &links, options.missing, .{ .promisor = promisor }) catch |err| switch (err) {
-                error.MissingObject => return error.MissingObject,
-                else => |e| return e,
-            };
-        } else {
-            // No pack came: every tip was here already, and what was here is
-            // whole below it. Only that each is here is checked, where git's
-            // `--not --all` walk has nothing to walk.
-            for (all_tips.items) |tip| {
-                if (try repo.odb.exists(io, tip)) continue;
-                if (options.missing) |out| out.* = tip;
-                return error.MissingObject;
-            }
-        }
-        if (remote_roots.items.len != 0) {
-            // Which refs need which of the remote's roots: git's
-            // `assign_shallow_commits_to_refs`, walking what came in the
-            // pack — what was here before is whole below it.
-            var needed: Oid.Set = .empty;
-            var roots: Oid.Set = .empty;
-            for (remote_roots.items) |oid| {
-                const arrived = if (fresh) |*index| (try index.find(oid)) != null else false;
-                if (arrived) try roots.put(arena, oid, {});
-            }
-            for ([_][]MapEntry{ map.items, backfill.items }) |entries| for (entries) |*entry| {
-                const reached = try rootsReached(arena, io, repo, entry.oid, &roots, if (fresh) |*index| index else null, &old_boundary);
-                if (reached.len == 0) continue;
-                if (options.update_shallow) {
-                    for (reached) |r| try needed.put(arena, r, {});
-                } else entry.rejected_shallow = true;
-            };
-            repo.odb.shallow.deinit(gpa);
-            repo.odb.shallow = try old_boundary.clone(gpa);
-            var it = needed.keyIterator();
-            while (it.next()) |r| try repo.odb.shallow.put(gpa, r.*, {});
-        }
-    }
-
-    if (boundary_moved) try shallow_mod.write(gpa, io, repo.common_dir, &repo.odb.shallow);
-
-    // The refs, in git's order: those for merging first.
-    const display_url = try url_mod.anonymize(arena, url);
+/// git's `store_updated_refs`: each pass's refs, those for merging first,
+/// into `FETCH_HEAD` and the refs they are kept in, each decided by
+/// `update_local_ref`'s rules.
+fn planUpdates(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    passes: [2][]MapEntry,
+    display_url: []const u8,
+    rla: []const u8,
+    options: Options,
+    local: *const LocalIndex,
+) Error!Plan {
     var fetch_head: std.ArrayList(FetchHeadEntry) = .empty;
     var updates: std.ArrayList(Update) = .empty;
     var pending: std.ArrayList(Pending) = .empty;
-
-    const passes = [_][]MapEntry{ map.items, backfill.items };
     for (passes) |entries| {
         for ([_]HeadStatus{ .merge, .not_for_merge, .ignore }) |want_status| {
             for (entries) |*entry| {
@@ -673,7 +954,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
                     });
                 }
                 const dst = entry.dst orelse continue;
-                const decision = try decide(gpa, io, repo, entry.*, dst, options.force, &local);
+                const decision = try decide(gpa, io, repo, entry.*, dst, options.force, local);
                 try updates.append(arena, .{
                     .remote_ref = entry.name,
                     .local_ref = dst,
@@ -691,22 +972,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
             }
         }
     }
-    try writeRefs(io, repo, pending.items, options, updates.items);
-
-    if (follow_head) try createRemoteHead(gpa, io, repo, remote.name.?, remote_refs.refs, configured.items, options.who);
-
-    if (options.write_fetch_head) try writeFetchHead(gpa, io, repo, fetch_head.items, options.append);
-
-    if (try repo.configuration().getBool("fetch.writecommitgraph", false)) {
-        _ = accelerators.writeConfiguredCommitGraph(gpa, io, repo, .fetch) catch |err| blk: {
-            try warning.note(options.warnings, .{ .commit_graph_write_failed = err });
-            break :blk null;
-        };
-    }
-    outcome.updates = updates.items;
-    outcome.pruned = pruned.items;
-    outcome.fetch_head = fetch_head.items;
-    return outcome;
+    return .{ .fetch_head = fetch_head.items, .updates = updates.items, .pending = pending.items };
 }
 
 /// A ref to be written, and the reflog line it gets.
@@ -1020,12 +1286,12 @@ fn shallowList(arena: Allocator, set: *const Oid.Set) Allocator.Error![]const Oi
     return list;
 }
 
-/// The objects to ask for, as git's fetch-pack asks: each advertised ref
-/// the map fetches, in the order the server advertised them, whose object
-/// is not here — one line per ref, so two refs at one commit ask twice.
 /// The objects a fetch asks for, and the ref each was advertised as.
 const Wants = struct { oids: []const Oid, names: []const []const u8 };
 
+/// The objects to ask for, as git's fetch-pack asks: each advertised ref
+/// the map fetches, in the order the server advertised them, whose object
+/// is not here — one line per ref, so two refs at one commit ask twice.
 fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const protocol.RemoteRef, entries: []const MapEntry, all: bool) Error!Wants {
     var names: std.StringHashMapUnmanaged(void) = .empty;
     for (entries) |entry| try names.put(arena, entry.name, {});
