@@ -535,7 +535,15 @@ test "shortlog groups, sorts, counts and folds as git shortlog does" {
         .{ .args = &.{ "--group=author", "--group=format:%an", "-s" }, .options = .{ .groups = &.{ .author, .{ .format = "%an" } }, .summary = true } },
         .{ .args = &.{ "--group=format:%ad", "--group=format:%cs", "--group=trailer:co-authored-by", "-s" }, .options = .{ .groups = &.{ .{ .format = "%ad" }, .{ .format = "%cs" }, .{ .trailer = "co-authored-by" } }, .summary = true } },
     };
+    const format_groups = try testgit.gitAtLeast(gpa, io, 2, 39);
     for (cases) |case| {
+        // Git 2.39 introduced format-string shortlog groups.
+        if (!format_groups) {
+            const needs_format = for (case.options.groups) |group| {
+                if (group == .format) break true;
+            } else false;
+            if (needs_format) continue;
+        }
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
         try args.append(gpa, "shortlog");
