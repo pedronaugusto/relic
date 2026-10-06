@@ -2206,9 +2206,9 @@ pub const Writer = struct {
 
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = checksum.hex(&hex);
-        var pack_name_buf: [64]u8 = undefined;
+        var pack_name_buf: [hash.max_hex_len + 16]u8 = undefined;
         const pack_name = std.fmt.bufPrint(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
-        var idx_name_buf: [64]u8 = undefined;
+        var idx_name_buf: [hash.max_hex_len + 16]u8 = undefined;
         const idx_name = std.fmt.bufPrint(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
 
         // The index goes to a temporary of its own, because the order the two
@@ -2238,7 +2238,7 @@ pub const Writer = struct {
         };
         // The reverse index before the index, as git renames them.
         if (rev_temp) |t| {
-            var rev_name_buf: [64]u8 = undefined;
+            var rev_name_buf: [hash.max_hex_len + 16]u8 = undefined;
             const rev_name = std.fmt.bufPrint(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
             try fs.renameWithRetry(io, w.dir, t, rev_name);
         }
@@ -2564,23 +2564,25 @@ test "a pack written to a stream is byte for byte the pack written to a file" {
     try std.testing.expectEqualSlices(u8, on_disk, stream.written());
 }
 
-test "a pack with no objects is still a pack" {
+test "a pack with no objects is still a pack, under either name format" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var w = try Writer.init(gpa, io, tmp.dir, .sha1, 0, .{});
-    defer w.deinit(io);
-    const report = try w.finish(io);
-    try std.testing.expectEqual(@as(u32, 0), report.objects);
-    try std.testing.expectEqual(@as(u64, 12 + 20), report.pack_bytes);
+    for ([_]Kind{ .sha1, .sha256 }) |kind| {
+        var w = try Writer.init(gpa, io, tmp.dir, kind, 0, .{});
+        defer w.deinit(io);
+        const report = try w.finish(io);
+        try std.testing.expectEqual(@as(u32, 0), report.objects);
+        try std.testing.expectEqual(@as(u64, 12 + kind.rawLen()), report.pack_bytes);
 
-    var hex: [hash.max_hex_len]u8 = undefined;
-    var base_buf: [64]u8 = undefined;
-    var p = try Pack.open(gpa, io, tmp.dir, try std.fmt.bufPrint(&base_buf, "pack-{s}", .{report.name.hex(&hex)}), .sha1, .{});
-    defer p.deinit(io);
-    try std.testing.expectEqual(@as(u32, 0), p.index.count);
+        var hex: [hash.max_hex_len]u8 = undefined;
+        var base_buf: [hash.max_hex_len + 8]u8 = undefined;
+        var p = try Pack.open(gpa, io, tmp.dir, try std.fmt.bufPrint(&base_buf, "pack-{s}", .{report.name.hex(&hex)}), kind, .{});
+        defer p.deinit(io);
+        try std.testing.expectEqual(@as(u32, 0), p.index.count);
+    }
 }
 
 test "a writer that is given the wrong count refuses rather than lying in the header" {
