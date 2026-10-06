@@ -68,6 +68,7 @@ pub const Pair = struct {
         pair.ours.deinit();
         pair.git.deinit();
         pair.env.deinit();
+        pair.* = undefined;
     }
 
     /// Open this package's copy.

@@ -256,7 +256,8 @@ pub const Server = struct {
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
         const bytes = s.objects.get(oid) orelse return null;
-        return try gpa.dupe(u8, bytes);
+        const copy = try gpa.dupe(u8, bytes);
+        return copy;
     }
 
     /// How many objects the server holds.

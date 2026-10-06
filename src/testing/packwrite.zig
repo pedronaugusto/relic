@@ -58,6 +58,7 @@ const Corpus = struct {
         c.entries.deinit(gpa);
         c.objects.close(io);
         c.tmp.cleanup();
+        c.* = undefined;
     }
 
     /// Write the corpus as one pack through `io` and say what was written.
@@ -721,6 +722,7 @@ const Entries = struct {
     fn deinit(e: *Entries, gpa: std.mem.Allocator) void {
         e.map.deinit(gpa);
         gpa.free(e.bytes);
+        e.* = undefined;
     }
 };
 

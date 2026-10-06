@@ -223,7 +223,8 @@ fn gitWithHome(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, home: []const u8, ar
         .exited => |code| if (code != 0) return null,
         else => return error.GitFailed,
     }
-    return try gpa.dupe(u8, std.mem.trimEnd(u8, result.stdout, "\n"));
+    const value = try gpa.dupe(u8, std.mem.trimEnd(u8, result.stdout, "\n"));
+    return value;
 }
 
 /// Every `test.*` value git reads in `proj` against what the repository

@@ -267,6 +267,7 @@ pub const Captured = struct {
     pub fn deinit(c: *Captured, gpa: Allocator) void {
         gpa.free(c.stdout);
         gpa.free(c.stderr);
+        c.* = undefined;
     }
 };
 
