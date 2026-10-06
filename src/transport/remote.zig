@@ -267,7 +267,8 @@ pub const Branch = struct {
 
 fn valueOf(arena: Allocator, config: *const Config, key: []const u8) Error!?[]const u8 {
     const value = config.get(key) orelse return null;
-    return try arena.dupe(u8, value);
+    const copy = try arena.dupe(u8, value);
+    return copy;
 }
 
 /// Every value of a multi-valued key, with git's rule that an empty value

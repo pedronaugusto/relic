@@ -39,7 +39,6 @@ const message = @import("message.zig");
 const diff = @import("../diff.zig");
 const blobmerge = @import("../merge/blobmerge.zig");
 const head_mod = @import("head.zig");
-const config_mod = @import("../config.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;

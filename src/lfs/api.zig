@@ -328,7 +328,8 @@ pub const Settings = struct {
 pub const LfsconfigError = repo_mod.Repository.LfsconfigError;
 
 fn unquoteValue(a: Allocator, raw: []const u8) Error![]const u8 {
-    return try a.dupe(u8, raw);
+    const copy = try a.dupe(u8, raw);
+    return copy;
 }
 
 //=====================================================================

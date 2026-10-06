@@ -172,7 +172,8 @@ pub const Settings = struct {
 };
 
 fn decoded(arena: Allocator, value: ?[]const u8) Allocator.Error!?[]const u8 {
-    return try arena.dupe(u8, value orelse return null);
+    const copy = try arena.dupe(u8, value orelse return null);
+    return copy;
 }
 
 /// What `process` and `format` write: git's `process_trailer_options`.

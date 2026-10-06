@@ -285,37 +285,13 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     defer if (own_attrs) |*x| x.leave();
     const binary: diff.BinaryRule = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.work_dir, .config = config };
 
-    // the commits, newest first, then reversed
-    var list: std.ArrayList(Oid) = .empty;
-    var walk = revwalk.Walk.init(gpa, db);
-    defer walk.deinit();
-    try walk.push(range.tip);
-    if (range.upstream) |u| try walk.hide(u);
-    var upstream_ids: std.ArrayList(Oid) = .empty;
-    if (options.ignore_if_in_upstream and range.upstream != null) {
-        if (range.upstream.?.eql(range.tip)) return emptySeries(gpa, &arena_instance);
-        try upstreamPatchIds(gpa, a, io, db, range, binary, &upstream_ids);
-    }
-    var in_list: std.ArrayList(Oid) = .empty;
-    var walked: std.ArrayList(Oid) = .empty;
-    while (try walk.next(io)) |c| {
-        if (range.max_count) |n| if (in_list.items.len >= n) break;
-        try walked.append(a, c.oid);
-        if (c.parents.len > 1) continue;
-        try in_list.append(a, c.oid);
-        if (upstream_ids.items.len != 0) {
-            if (try patchid.ofCommit(gpa, io, db, c.oid, binary)) |id| {
-                if (containsOid(upstream_ids.items, id)) continue;
-            }
-        }
-        try list.append(a, c.oid);
-    }
-    if (list.items.len == 0) return emptySeries(gpa, &arena_instance);
+    const selected = try selectCommits(gpa, a, io, db, range, options, binary) orelse return emptySeries(gpa, &arena_instance);
+    const list = selected.list;
 
     // the boundary: the one commit outside the range the range grew from
-    const origin = try findOrigin(gpa, io, db, in_list.items, walked.items);
+    const origin = try findOrigin(gpa, io, db, selected.in_list, selected.walked);
 
-    var total = list.items.len;
+    var total = list.len;
     var start_number = options.start_number;
     const numbered = if (options.keep_subject) false else options.numbered orelse (total > 1 or options.cover_letter != null);
 
@@ -342,14 +318,14 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
 
     // base tree information
     var bases: ?Bases = null;
-    if (options.base) |base| bases = try prepareBases(&ctx, base, list.items);
+    if (options.base) |base| bases = try prepareBases(&ctx, base, list);
 
     var mails: std.ArrayList(Mail) = .empty;
     if (options.cover_letter) |cover| {
         if (options.thread) |t| ctx.message_id = try genMessageId(a, "cover", t);
         var text: std.ArrayList(u8) = .empty;
         ctx.nr = 0;
-        try coverLetter(&ctx, &text, cover, origin, list.items);
+        try coverLetter(&ctx, &text, cover, origin, list);
         if (bases) |*b| try printBases(&ctx, &text, b);
         try printSignature(a, &text, options.signature);
         try mails.append(a, .{ .name = try fileName(&ctx, null, "cover-letter"), .text = text.items, .commit = null });
@@ -357,10 +333,10 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         start_number -= 1;
     }
 
-    var idx = list.items.len;
+    var idx = list.len;
     while (idx > 0) {
         idx -= 1;
-        const commit = list.items[idx];
+        const commit = list[idx];
         ctx.nr = total + start_number - 1 - idx;
         if (options.thread) |t| {
             if (ctx.message_id) |prev| {
@@ -380,6 +356,43 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         try mails.append(a, .{ .name = try fileName(&ctx, commit, null), .text = text.items, .commit = commit });
     }
     return .{ .gpa = gpa, .arena = arena_instance.state, .mails = mails.items };
+}
+
+/// What a series formats: its commits, newest first, those of them a
+/// merge does not leave out, and every commit the walk met, for finding
+/// where the range grew from.
+const Selected = struct { list: []const Oid, in_list: []const Oid, walked: []const Oid };
+
+/// The commits of `range`, newest first, as `git format-patch` takes them:
+/// merges left out, at most `max_count`, and under `ignore_if_in_upstream`
+/// those whose patch id upstream has. `null` when there are none.
+fn selectCommits(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, options: Options, binary: diff.BinaryRule) Error!?Selected {
+    var list: std.ArrayList(Oid) = .empty;
+    var walk = revwalk.Walk.init(gpa, db);
+    defer walk.deinit();
+    try walk.push(range.tip);
+    if (range.upstream) |u| try walk.hide(u);
+    var upstream_ids: std.ArrayList(Oid) = .empty;
+    if (options.ignore_if_in_upstream and range.upstream != null) {
+        if (range.upstream.?.eql(range.tip)) return null;
+        try upstreamPatchIds(gpa, a, io, db, range, binary, &upstream_ids);
+    }
+    var in_list: std.ArrayList(Oid) = .empty;
+    var walked: std.ArrayList(Oid) = .empty;
+    while (try walk.next(io)) |c| {
+        if (range.max_count) |n| if (in_list.items.len >= n) break;
+        try walked.append(a, c.oid);
+        if (c.parents.len > 1) continue;
+        try in_list.append(a, c.oid);
+        if (upstream_ids.items.len != 0) {
+            if (try patchid.ofCommit(gpa, io, db, c.oid, binary)) |id| {
+                if (containsOid(upstream_ids.items, id)) continue;
+            }
+        }
+        try list.append(a, c.oid);
+    }
+    if (list.items.len == 0) return null;
+    return .{ .list = list.items, .in_list = in_list.items, .walked = walked.items };
 }
 
 /// The subject prefix, as git builds it: `PATCH` or the caller's, with the

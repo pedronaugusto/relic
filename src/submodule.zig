@@ -291,7 +291,8 @@ fn configKey(arena: Allocator, name: []const u8, variable: []const u8) Allocator
 /// A configuration value with its quotes and escapes undone, or `null`.
 fn configString(arena: Allocator, config: *const config_mod.Config, key: []const u8) Error!?[]const u8 {
     const value = config.get(key) orelse return null;
-    return try arena.dupe(u8, value);
+    const copy = try arena.dupe(u8, value);
+    return copy;
 }
 
 /// Whether git counts the submodule as active: `submodule.<name>.active`

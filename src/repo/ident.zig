@@ -58,7 +58,8 @@ pub const Error = errors: {
 };
 
 fn decoded(arena: Allocator, raw: []const u8) Allocator.Error![]const u8 {
-    return try arena.dupe(u8, raw);
+    const copy = try arena.dupe(u8, raw);
+    return copy;
 }
 
 fn configValue(arena: Allocator, config: *const config_mod.Config, name: []const u8) Allocator.Error!?[]const u8 {

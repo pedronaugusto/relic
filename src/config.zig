@@ -180,6 +180,20 @@ pub const SourceFile = struct {
         f.* = undefined;
     }
 
+    /// The lower-cased name and the decoded value of a variable line this
+    /// file's writer made, `text`, kept in the file's `names`.
+    fn readBack(f: *SourceFile, text: []const u8, parsed: VariableLine) Allocator.Error!struct { name: []const u8, value: []const u8 } {
+        var names = f.names.promote(f.gpa);
+        defer f.names = names.state;
+        // unreachable: the writer escapes every value it writes so that it
+        // decodes back to itself
+        const value = valueIn(names.allocator(), text[parsed.value_start..parsed.value_end]) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        return .{ .name = try lowered(names.allocator(), parsed.name), .value = value };
+    }
+
     /// The file's current bytes, after any edits. The result is the caller's.
     pub fn render(f: *const SourceFile) Allocator.Error![]u8 {
         var out: std.Io.Writer.Allocating = .init(f.gpa);
@@ -971,11 +985,12 @@ pub const Config = struct {
     /// against `Context.home`. The result is the caller's.
     pub fn getPath(config: *const Config, gpa: Allocator, full_name: []const u8) Allocator.Error!?[]u8 {
         const value = config.get(full_name) orelse return null;
-        if (std.mem.startsWith(u8, value, "~/")) {
-            const home = config.context.home orelse return try gpa.dupe(u8, value);
-            return try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, value[2..] });
-        }
-        return try gpa.dupe(u8, value);
+        const home = config.context.home orelse "";
+        const path = if (std.mem.startsWith(u8, value, "~/") and config.context.home != null)
+            try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, value[2..] })
+        else
+            try gpa.dupe(u8, value);
+        return path;
     }
 
     /// Every subsection name under `section`, in order and without
@@ -1090,28 +1105,20 @@ pub const Config = struct {
             // The line reads back as the variable it replaced, with a value.
             assert(parsed.has_value);
             assert(std.ascii.eqlIgnoreCase(parsed.name, line.name));
-            var decoded: []const u8 = undefined;
-            const name = blk: {
+            const read = blk: {
                 errdefer config.gpa.free(replacement);
-                var names = file.names.promote(config.gpa);
-                defer file.names = names.state;
-                // unreachable: the escaped value decodes to `value`
-                decoded = valueIn(names.allocator(), replacement[parsed.value_start..parsed.value_end]) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => unreachable,
-                };
-                break :blk try lowered(names.allocator(), parsed.name);
+                break :blk try file.readBack(replacement, parsed);
             };
             if (line.owned) config.gpa.free(line.text);
             line.text = replacement;
             line.owned = true;
             // A lowercase name may borrow the text of its line. Transfer
             // it with the replacement, before the old text is released.
-            line.name = name;
+            line.name = read.name;
             line.value_start = parsed.value_start;
             line.value_end = parsed.value_end;
             line.has_value = parsed.has_value;
-            line.value = decoded;
+            line.value = read.value;
             return config.reindex();
         }
 
@@ -1128,27 +1135,19 @@ pub const Config = struct {
         assert(parsed.has_value);
         assert(std.ascii.eqlIgnoreCase(parsed.name, split.name));
         assert(parsed.value_end == new_text.len - 1);
-        var decoded: []const u8 = undefined;
-        const name = blk: {
+        const read = blk: {
             errdefer config.gpa.free(new_text);
-            var names = file.names.promote(config.gpa);
-            defer file.names = names.state;
-            // unreachable: the written value decodes to `value`
-            decoded = valueIn(names.allocator(), new_text[parsed.value_start..parsed.value_end]) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => unreachable,
-            };
-            break :blk try lowered(names.allocator(), parsed.name);
+            break :blk try file.readBack(new_text, parsed);
         };
         const new_line: Line = .{
             .kind = .variable,
             .text = new_text,
             .owned = true,
-            .name = name,
+            .name = read.name,
             .value_start = parsed.value_start,
             .value_end = parsed.value_end,
             .has_value = true,
-            .value = decoded,
+            .value = read.value,
         };
         {
             errdefer config.gpa.free(new_text);

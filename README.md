@@ -401,14 +401,18 @@ cache, so `F_FULLFSYNC` is the real barrier. Waiting for the drive's cache
 adds a storage barrier, which is why ordinary object writes can put it at
 the end of a batch.
 
-**Every path from a tree is checked, on every platform.** A tree entry's name
-is written by whoever wrote the tree and becomes a filesystem path on
-checkout. Refused: `.` and `..`; `.git` in any case, including the NTFS short
-name `git~1` and any alternate-data-stream spelling such as `.git:`; DOS
-device names with or without an extension; a component ending in a dot or a
-space; a backslash inside a name; an absolute path or a drive letter. A ref
-name ending in `.lock` is refused too, since that is the name of the file that
-blocks every update to the ref without it.
+**Every path from a tree is checked before it is written.** A tree entry's
+name is written by whoever wrote the tree and becomes a filesystem path on
+checkout. Refused everywhere: `.` and `..`; `.git` in any case and in every
+spelling NTFS or HFS+ opens as it, `git~1` and `.git::$DATA` among them; a
+link named `.gitmodules`; an entry standing where another entry of the tree
+has its directory; and any write, removal or new directory past a symbolic
+link on the disk. Refused on Windows, as git refuses them there: DOS device
+names such as `aux.c`, a component ending in a dot or a space, a colon, a
+backslash inside a name and a drive letter; elsewhere these are names like
+any other, and the Linux kernel's tree checks out. A ref name ending in
+`.lock` is refused too, since that is the name of the file that blocks every
+update to the ref without it.
 
 **A remote that works from the person's terminal works from here.** relic
 reads the configuration their git reads — the system file their git was built
@@ -740,8 +744,9 @@ Planned, in the order they are likely to come; none is promised for a date.
 
 Paths in trees and in the index are always `/`-separated byte strings; the
 working-tree layer converts. `core.ignoreCase` is honoured in matching, and a
-tree carrying two entries that differ only in case is refused on a filesystem
-that folds case rather than having one silently overwrite the other.
+tree carrying two entries that differ only in case, or one whose name folds to
+another's directory, is refused on a filesystem that folds case rather than
+having one written over or through the other.
 
 `zig build check -Dtarget=…` compiles everything, tests included, without
 running it, and CI does that for `x86_64-linux-gnu`, `aarch64-linux-gnu`,

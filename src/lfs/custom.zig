@@ -96,7 +96,8 @@ pub fn configured(arena: Allocator, config: *const config_mod.Config) (Allocator
             fn get(a: Allocator, c: *const config_mod.Config, buf: []u8, adapter: []const u8, field: []const u8) (Allocator.Error || error{MalformedValue})!?[]const u8 {
                 const key = std.fmt.bufPrint(buf, "lfs.customtransfer.{s}.{s}", .{ adapter, field }) catch return null;
                 const raw = c.get(key) orelse return null;
-                return try a.dupe(u8, raw);
+                const copy = try a.dupe(u8, raw);
+                return copy;
             }
         }.get;
         const path = try value(arena, config, &key_buf, name, "path") orelse continue;

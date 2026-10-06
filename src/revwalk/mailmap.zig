@@ -37,7 +37,6 @@ const odb_mod = @import("../odb.zig");
 
 const repo_mod = @import("../repo.zig");
 const revparse = @import("revparse.zig");
-const config_mod = @import("../config.zig");
 
 const Repository = repo_mod.Repository;
 

@@ -679,7 +679,8 @@ fn settingValue(
     const raw = config.get(name) orelse
         (if (file_config) |c| c.get(name) else null) orelse
         return null;
-    return try a.dupe(u8, raw);
+    const copy = try a.dupe(u8, raw);
+    return copy;
 }
 
 const testing = std.testing;
