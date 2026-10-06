@@ -22,6 +22,7 @@ pub const Diagnostic = struct {
     /// Release the diagnostic's copies.
     pub fn deinit(diagnostic: *Diagnostic) void {
         diagnostic.clear();
+        diagnostic.* = undefined;
     }
 
     fn clear(diagnostic: *Diagnostic) void {

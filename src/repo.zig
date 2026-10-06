@@ -317,7 +317,7 @@ pub const Repository = struct {
                 const work = try current.openDir(io, ".", .{ .iterate = true });
                 errdefer work.close(io);
                 try checkOwnership(gpa, io, options, null, work, git_dir);
-                return try withCommon(gpa, io, git_dir, work);
+                return withCommon(gpa, io, git_dir, work);
             } else |_| {}
 
             // A `.git` file, which is what a linked worktree has.
@@ -334,7 +334,7 @@ pub const Repository = struct {
                 const work = try current.openDir(io, ".", .{ .iterate = true });
                 errdefer work.close(io);
                 try checkOwnership(gpa, io, options, work, work, git_dir);
-                return try withCommon(gpa, io, git_dir, work);
+                return withCommon(gpa, io, git_dir, work);
             }
 
             // The directory may itself be a git directory — a bare
@@ -344,7 +344,7 @@ pub const Repository = struct {
                 errdefer git_dir.close(io);
                 try checkBare(gpa, io, options, git_dir);
                 try checkOwnership(gpa, io, options, null, null, git_dir);
-                return try withCommon(gpa, io, git_dir, null);
+                return withCommon(gpa, io, git_dir, null);
             }
 
             if (!options.discover) break;
@@ -632,7 +632,8 @@ pub const Repository = struct {
             return null;
         }
         if (!std.mem.startsWith(u8, target, "refs/heads/")) return null;
-        return try gpa.dupe(u8, target);
+        const branch = try gpa.dupe(u8, target);
+        return branch;
     }
 
     /// The `reftable.*` settings, for the stack's writes and compactions.
@@ -1309,7 +1310,8 @@ pub const Repository = struct {
     pub fn headTree(repo: *Repository, io: Io) Self.Error!?Oid {
         const resolved = (try repo.head(io)) orelse return null;
         defer repo.gpa.free(resolved.name);
-        return try repo.commitTree(io, resolved.oid);
+        const tree = try repo.commitTree(io, resolved.oid);
+        return tree;
     }
 
     /// The tree a commit points at.

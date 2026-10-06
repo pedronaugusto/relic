@@ -83,6 +83,7 @@ const Fixture = struct {
         f.super.deinit();
         f.lib.deinit();
         f.inner.deinit();
+        f.* = undefined;
     }
 };
 
@@ -109,6 +110,7 @@ const Clone = struct {
     fn deinit(c: *Clone, io: Io) void {
         c.git.dir.close(io);
         c.owner.deinit();
+        c.* = undefined;
     }
 
     fn open(c: *Clone, gpa: Allocator, io: Io) !Repository {

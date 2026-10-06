@@ -935,7 +935,8 @@ pub const Config = struct {
         if (std.mem.startsWith(u8, decoded, "~/")) {
             const home = config.context.home orelse return decoded;
             defer gpa.free(decoded);
-            return try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, decoded[2..] });
+            const expanded = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, decoded[2..] });
+            return expanded;
         }
         return decoded;
     }

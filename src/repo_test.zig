@@ -929,10 +929,10 @@ test "repository writes preserve signature and hash refusals" {
 test "worktree configuration adapters refuse malformed settings and allocation failures" {
     const Adapter = struct {
         fn core(r: *const repo_mod.Repository) !worktree.attributes.CoreSettings {
-            return try r.coreSettings();
+            return r.coreSettings();
         }
         fn rules(r: *const repo_mod.Repository) !worktree.Rules {
-            return try r.worktreeRules();
+            return r.worktreeRules();
         }
     };
     const gpa = std.testing.allocator;

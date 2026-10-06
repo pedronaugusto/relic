@@ -360,7 +360,8 @@ fn gitCommandValues(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "command\t")) try out.print(gpa, "{s}\n", .{line["command\t".len..]});
     }
-    return try out.toOwnedSlice(gpa);
+    const values = try out.toOwnedSlice(gpa);
+    return values;
 }
 
 /// The same list from relic's reading: the command-line entries as git

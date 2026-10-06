@@ -72,6 +72,7 @@ pub const Transport = struct {
     /// Release the failure's description.
     pub fn deinit(t: *Transport) void {
         t.auth_failure.deinit();
+        t.* = undefined;
     }
 
     /// The seam `submodule.UpdateOptions.transport` takes. `t` must

@@ -286,7 +286,8 @@ fn configKey(arena: Allocator, name: []const u8, variable: []const u8) Allocator
 /// A configuration value with its quotes and escapes undone, or `null`.
 fn configString(arena: Allocator, config: *const config_mod.Config, key: []const u8) Error!?[]const u8 {
     const raw = config.get(key) orelse return null;
-    return try config_mod.unquote(arena, raw);
+    const value = try config_mod.unquote(arena, raw);
+    return value;
 }
 
 /// Whether git counts the submodule as active: `submodule.<name>.active`
@@ -447,6 +448,7 @@ const LocalEdits = struct {
 
     fn deinit(e: *LocalEdits) void {
         e.file.deinit();
+        e.* = undefined;
     }
 
     fn set(e: *LocalEdits, repo: *Repository, key: []const u8, value: []const u8) Error!void {
