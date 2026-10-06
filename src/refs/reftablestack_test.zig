@@ -591,7 +591,7 @@ test "a log entry goes into the stack, and the files path refuses to write where
     const shown = try gitReflog(&git, io, "refs/heads/main");
     defer gpa.free(shown);
     try std.testing.expect(std.mem.startsWith(u8, shown, tip_text));
-    try std.testing.expect(std.mem.indexOf(u8, shown, "\treset: moving to HEAD\n") != null);
+    try std.testing.expect(std.mem.find(u8, shown, "\treset: moving to HEAD\n") != null);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, shown, "\n"));
     var log = try repo.readLog(io, "refs/heads/main");
     defer log.deinit();
@@ -830,8 +830,8 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
     // git reads the worktree this made, and this reads the one git made.
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(listed);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "branch refs/heads/ours") != null);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "branch refs/heads/theirs") != null);
+    try std.testing.expect(std.mem.find(u8, listed, "branch refs/heads/ours") != null);
+    try std.testing.expect(std.mem.find(u8, listed, "branch refs/heads/theirs") != null);
     var ours = try repo.listWorktrees(io);
     defer ours.deinit();
     try std.testing.expectEqualStrings("ours", ours.find("ours").?.branch.?);

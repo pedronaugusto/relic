@@ -90,7 +90,7 @@ pub fn parse(gpa: Allocator, kind: Kind, bytes: []u8) ReadError!Listing {
         if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
         if (line.len == 0) continue;
         if (line[0] == '#') {
-            if (first and std.mem.indexOf(u8, line, "fully-peeled") != null) fully_peeled = true;
+            if (first and std.mem.find(u8, line, "fully-peeled") != null) fully_peeled = true;
             first = false;
             continue;
         }

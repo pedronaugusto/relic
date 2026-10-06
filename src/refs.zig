@@ -1222,7 +1222,7 @@ test "packed refs read, shadow and write" {
     var raw: [512]u8 = undefined;
     const text = try tmp.dir.readFile(io, "packed-refs", &raw);
     try std.testing.expect(std.mem.startsWith(u8, text, packed_header));
-    try std.testing.expect(std.mem.indexOf(u8, text, "^3333") != null);
+    try std.testing.expect(std.mem.find(u8, text, "^3333") != null);
 
     const found = (try store.read(gpa, io, "refs/tags/v1")).?;
     try std.testing.expect(found.direct.eql(two));
@@ -1760,7 +1760,7 @@ test "deleting a ref takes its log and its empty directories with it, as git doe
     const listing_b = try listTree(gpa, io, here.dir);
     defer gpa.free(listing_b);
     try std.testing.expectEqualStrings(listing_a, listing_b);
-    try std.testing.expect(std.mem.indexOf(u8, listing_b, "heads/a") == null);
+    try std.testing.expect(std.mem.find(u8, listing_b, "heads/a") == null);
 }
 
 /// Every path under `.git/refs` and `.git/logs`, sorted, one per line.
@@ -1870,8 +1870,8 @@ fn listLooseRefsForAllocation(gpa: Allocator, io: Io, dir: Io.Dir) !void {
 
 /// Every file below `dir` but objects and logs, by its `/`-separated path,
 /// with its bytes: a before and after of what an operation wrote.
-fn refFilesSnapshot(gpa: Allocator, io: Io, dir: Io.Dir) !std.StringArrayHashMapUnmanaged([]u8) {
-    var out: std.StringArrayHashMapUnmanaged([]u8) = .empty;
+fn refFilesSnapshot(gpa: Allocator, io: Io, dir: Io.Dir) !std.array_hash_map.String([]u8) {
+    var out: std.array_hash_map.String([]u8) = .empty;
     errdefer freeRefFilesSnapshot(gpa, &out);
     var walker = try dir.walk(gpa);
     defer walker.deinit();
@@ -1891,7 +1891,7 @@ fn refFilesSnapshot(gpa: Allocator, io: Io, dir: Io.Dir) !std.StringArrayHashMap
     return out;
 }
 
-fn freeRefFilesSnapshot(gpa: Allocator, snapshot: *std.StringArrayHashMapUnmanaged([]u8)) void {
+fn freeRefFilesSnapshot(gpa: Allocator, snapshot: *std.array_hash_map.String([]u8)) void {
     var it = snapshot.iterator();
     while (it.next()) |entry| {
         gpa.free(entry.key_ptr.*);
@@ -1907,7 +1907,7 @@ fn scopesCover(scopes: []const WatchScope, git_prefix: []const u8, path: []const
         const base = if (scope.dir == .git) git_prefix else "";
         const in_base = below(path, base) orelse continue;
         const rest = below(in_base, scope.sub_path) orelse continue;
-        if (!scope.recursive and std.mem.indexOfScalar(u8, rest, '/') != null) continue;
+        if (!scope.recursive and std.mem.findScalar(u8, rest, '/') != null) continue;
         if (scope.names.len == 0) return true;
         for (scope.names) |name| if (std.mem.eql(u8, name, rest)) return true;
     }
@@ -1963,7 +1963,7 @@ test "the watch scopes cover every ref and HEAD move, in a linked worktree too" 
             defer freeRefFilesSnapshot(gpa, &after);
             var own = false;
             var other = false;
-            for ([_]*const std.StringArrayHashMapUnmanaged([]u8){ &before, &after }, [_]*const std.StringArrayHashMapUnmanaged([]u8){ &after, &before }) |one, two| {
+            for ([_]*const std.array_hash_map.String([]u8){ &before, &after }, [_]*const std.array_hash_map.String([]u8){ &after, &before }) |one, two| {
                 var it = one.iterator();
                 while (it.next()) |entry| {
                     const same = if (two.get(entry.key_ptr.*)) |bytes| std.mem.eql(u8, bytes, entry.value_ptr.*) else false;

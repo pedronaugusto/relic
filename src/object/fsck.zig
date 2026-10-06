@@ -613,13 +613,13 @@ fn parsesAsGit(kind: Kind, t: object.Type, bytes: []const u8) bool {
             at += 1;
             if (!std.mem.startsWith(u8, bytes[at..], "type ")) return false;
             at += 5;
-            const nl = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return false;
+            const nl = std.mem.findScalarPos(u8, bytes, at, '\n') orelse return false;
             if (nl - at >= 20) return false;
             _ = object.Type.parse(bytes[at..nl]) catch return false;
             at = nl + 1;
             if (!(at + 4 < bytes.len and std.mem.startsWith(u8, bytes[at..], "tag "))) return false;
             at += 4;
-            _ = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return false;
+            _ = std.mem.findScalarPos(u8, bytes, at, '\n') orelse return false;
             return true;
         },
     }
@@ -661,7 +661,7 @@ fn checkTree(gpa: Allocator, r: *Reporter, kind: Kind, bytes: []const u8, found:
     while (rest.len != 0) {
         const name = entry.name;
         has_null_sha1 = has_null_sha1 or std.mem.allEqual(u8, entry.oid, 0);
-        has_full_path = has_full_path or std.mem.indexOfScalar(u8, name, '/') != null;
+        has_full_path = has_full_path or std.mem.findScalar(u8, name, '/') != null;
         has_empty_name = has_empty_name or name.len == 0;
         has_dot = has_dot or std.mem.eql(u8, name, ".");
         has_dotdot = has_dotdot or std.mem.eql(u8, name, "..");
@@ -760,7 +760,7 @@ fn decodeEntry(bytes: []const u8, raw_len: usize) ?TreeEntry {
         mode = (mode << 3) +% (c - '0');
     }
     at += 1;
-    const nul = std.mem.indexOfScalarPos(u8, bytes, at, 0) orelse return null;
+    const nul = std.mem.findScalarPos(u8, bytes, at, 0) orelse return null;
     if (nul == at) return null;
     if (nul + 1 + raw_len > bytes.len) return null;
     return .{
@@ -831,7 +831,7 @@ fn oidLine(kind: Kind, bytes: []const u8, at: usize) bool {
 }
 
 fn nextLine(bytes: []const u8, at: usize) usize {
-    const nl = std.mem.indexOfScalarPos(u8, bytes, @min(at, bytes.len), '\n') orelse return bytes.len;
+    const nl = std.mem.findScalarPos(u8, bytes, @min(at, bytes.len), '\n') orelse return bytes.len;
     return nl + 1;
 }
 
@@ -865,7 +865,7 @@ fn checkCommit(r: *Reporter, kind: Kind, bytes: []const u8) Allocator.Error!bool
     if (!(at < bytes.len and std.mem.startsWith(u8, bytes[at..], "committer "))) return r.report(.missing_committer, "");
     at += 10;
     if (try checkIdent(r, bytes, &at)) return true;
-    if (std.mem.indexOfScalar(u8, bytes, 0) != null) {
+    if (std.mem.findScalar(u8, bytes, 0) != null) {
         if (try r.report(.nul_in_commit, "")) return true;
     }
     return false;
@@ -882,14 +882,14 @@ fn checkTag(r: *Reporter, kind: Kind, bytes: []const u8) Allocator.Error!bool {
     at = nextLine(bytes, at);
     if (!(at < bytes.len and std.mem.startsWith(u8, bytes[at..], "type "))) return r.report(.missing_type_entry, "");
     at += 5;
-    const type_end = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return r.report(.missing_type, "");
+    const type_end = std.mem.findScalarPos(u8, bytes, at, '\n') orelse return r.report(.missing_type, "");
     if (object.Type.parse(bytes[at..type_end])) |_| {} else |_| {
         if (try r.report(.bad_type, "")) return true;
     }
     at = type_end + 1;
     if (!(at < bytes.len and std.mem.startsWith(u8, bytes[at..], "tag "))) return r.report(.missing_tag_entry, "");
     at += 4;
-    const tag_end = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return r.report(.missing_tag, "");
+    const tag_end = std.mem.findScalarPos(u8, bytes, at, '\n') orelse return r.report(.missing_tag, "");
     const tag_name = bytes[at..tag_end];
     var ref_buf: [4096]u8 = undefined;
     const ref_name = std.fmt.bufPrint(&ref_buf, "refs/tags/{s}", .{tag_name}) catch "";
@@ -905,10 +905,10 @@ fn checkTag(r: *Reporter, kind: Kind, bytes: []const u8) Allocator.Error!bool {
         if (try checkIdent(r, bytes, &at)) return true;
     }
     if (at < bytes.len and (std.mem.startsWith(u8, bytes[at..], "gpgsig ") or std.mem.startsWith(u8, bytes[at..], "gpgsig-sha256 "))) {
-        const eol = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return r.report(.bad_gpgsig, "");
+        const eol = std.mem.findScalarPos(u8, bytes, at, '\n') orelse return r.report(.bad_gpgsig, "");
         at = eol + 1;
         while (at < bytes.len and bytes[at] == ' ') {
-            const cont = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse return r.report(.bad_header_continuation, "");
+            const cont = std.mem.findScalarPos(u8, bytes, at, '\n') orelse return r.report(.bad_header_continuation, "");
             at = cont + 1;
         }
     }
@@ -922,7 +922,7 @@ fn checkTag(r: *Reporter, kind: Kind, bytes: []const u8) Allocator.Error!bool {
 /// `at` moves past the line. Whether the problem found is an error.
 fn checkIdent(r: *Reporter, bytes: []const u8, at: *usize) Allocator.Error!bool {
     var p = at.*;
-    const nl = std.mem.indexOfScalarPos(u8, bytes, @min(p, bytes.len), '\n') orelse bytes.len;
+    const nl = std.mem.findScalarPos(u8, bytes, @min(p, bytes.len), '\n') orelse bytes.len;
     at.* = @min(nl + 1, bytes.len);
     const end = bytes.len;
 
@@ -1019,7 +1019,7 @@ pub fn checkBlob(gpa: Allocator, rules: *const Rules, oid: Oid, as: Special, byt
                 return r.first;
             }
             // git reads it as a C string: a NUL ends it.
-            const text_ = content[0 .. std.mem.indexOfScalar(u8, content, 0) orelse content.len];
+            const text_ = content[0 .. std.mem.findScalar(u8, content, 0) orelse content.len];
             var lines = std.mem.splitScalar(u8, text_, '\n');
             while (lines.next()) |line| {
                 if (line.len >= attr_max_line_length) {
@@ -1472,7 +1472,7 @@ test "git refuses the same objects and names the same problem" {
         defer gpa.free(result.stdout);
         defer gpa.free(result.stderr);
         try testing.expect(result.term != .exited or result.term.exited != 0);
-        if (std.mem.indexOf(u8, result.stderr, case.problem.id()) == null) {
+        if (std.mem.find(u8, result.stderr, case.problem.id()) == null) {
             std.debug.print("git said: {s}\nexpected: {s}\n", .{ result.stderr, case.problem.id() });
             return error.TestUnexpectedResult;
         }

@@ -192,7 +192,7 @@ pub const Index = struct {
         const end = index.names_chunk_at + index.names_chunk_len;
         var i: u32 = 0;
         while (at < end) {
-            const nul = std.mem.indexOfScalarPos(u8, index.bytes[0..end], at, 0) orelse return null;
+            const nul = std.mem.findScalarPos(u8, index.bytes[0..end], at, 0) orelse return null;
             if (i == position) {
                 var name = index.bytes[at..nul];
                 if (std.mem.endsWith(u8, name, ".idx")) name = name[0 .. name.len - 4];
@@ -331,7 +331,7 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, packs: []const WritePack, options
     for (order, 0..) |original, i| {
         permutation[original] = @intCast(i);
         if (i > 0 and std.mem.eql(u8, packs[order[i - 1]].name, packs[original].name)) return error.InvalidMidxInput;
-        if (std.mem.indexOfScalar(u8, packs[original].name, 0) != null or !std.mem.endsWith(u8, packs[original].name, ".idx")) return error.InvalidMidxInput;
+        if (std.mem.findScalar(u8, packs[original].name, 0) != null or !std.mem.endsWith(u8, packs[original].name, ".idx")) return error.InvalidMidxInput;
         if (options.preferred_pack) |name| {
             if (samePackName(name, packs[original].name)) preferred = original;
         }

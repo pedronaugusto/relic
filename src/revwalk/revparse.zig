@@ -152,14 +152,14 @@ const Resolver = struct {
         if (name.len == kind.hexLen()) {
             if (Oid.parse(kind, name)) |oid| return oid else |_| {}
         }
-        if (std.mem.lastIndexOf(u8, name, "@{")) |at| {
+        if (std.mem.findLast(u8, name, "@{")) |at| {
             if (name[name.len - 1] != '}') return error.BadRevision;
             return r.reflogSelect(name[0..at], name[at + 2 .. name.len - 1]);
         }
         if (std.mem.eql(u8, name, "@")) return r.ref("HEAD");
         if (try r.dwim(name)) |oid| return oid;
         // `git describe`'s `<tag>-<n>-g<hex>`.
-        if (std.mem.lastIndexOf(u8, name, "-g")) |g| {
+        if (std.mem.findLast(u8, name, "-g")) |g| {
             const hex = name[g + 2 ..];
             if (hex.len >= 4 and allHex(hex)) return r.short(hex);
         }
@@ -377,7 +377,7 @@ const Resolver = struct {
             const prefix = "checkout: moving from ";
             if (!std.mem.startsWith(u8, message, prefix)) continue;
             const rest = message[prefix.len..];
-            const to = std.mem.indexOf(u8, rest, " to ") orelse continue;
+            const to = std.mem.find(u8, rest, " to ") orelse continue;
             seen += 1;
             if (seen != n) continue;
             const from = rest[0..to];

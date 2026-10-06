@@ -225,7 +225,7 @@ pub const CacheTree = struct {
         t.root.oid = null;
         var node = &t.root;
         var rest = path;
-        while (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+        while (std.mem.findScalar(u8, rest, '/')) |slash| {
             const component = rest[0..slash];
             rest = rest[slash + 1 ..];
             node = node.child(component) orelse return;
@@ -251,15 +251,15 @@ pub const CacheTree = struct {
     }
 
     fn parseNode(gpa: Allocator, kind: Kind, data: []const u8, offset: *usize) ReadError!Node {
-        const nul = std.mem.indexOfScalarPos(u8, data, offset.*, 0) orelse return error.CorruptCacheTree;
+        const nul = std.mem.findScalarPos(u8, data, offset.*, 0) orelse return error.CorruptCacheTree;
         const raw_name = data[offset.*..nul];
         offset.* = nul + 1;
 
-        const space = std.mem.indexOfScalarPos(u8, data, offset.*, ' ') orelse return error.CorruptCacheTree;
+        const space = std.mem.findScalarPos(u8, data, offset.*, ' ') orelse return error.CorruptCacheTree;
         const entry_count = std.fmt.parseInt(i64, data[offset.*..space], 10) catch return error.CorruptCacheTree;
         offset.* = space + 1;
 
-        const newline = std.mem.indexOfScalarPos(u8, data, offset.*, '\n') orelse return error.CorruptCacheTree;
+        const newline = std.mem.findScalarPos(u8, data, offset.*, '\n') orelse return error.CorruptCacheTree;
         const subtree_count = std.fmt.parseInt(u32, data[offset.*..newline], 10) catch return error.CorruptCacheTree;
         offset.* = newline + 1;
 
@@ -397,7 +397,7 @@ pub const CacheTree = struct {
                 consumed.* += 1;
                 continue;
             }
-            if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+            if (std.mem.findScalar(u8, rest, '/')) |slash| {
                 const dir_name = rest[0..slash];
                 var child_node: Node = if (node.child(dir_name)) |existing| taken: {
                     const copy = existing.*;
@@ -477,13 +477,13 @@ pub const ResolveUndo = struct {
         errdefer result.deinit();
         var offset: usize = 0;
         while (offset < data.len) {
-            const nul = std.mem.indexOfScalarPos(u8, data, offset, 0) orelse return error.CorruptResolveUndo;
+            const nul = std.mem.findScalarPos(u8, data, offset, 0) orelse return error.CorruptResolveUndo;
             const path = try gpa.dupe(u8, data[offset..nul]);
             errdefer gpa.free(path);
             offset = nul + 1;
             var modes: [3]u32 = @splat(0);
             for (&modes) |*mode| {
-                const end = std.mem.indexOfScalarPos(u8, data, offset, 0) orelse return error.CorruptResolveUndo;
+                const end = std.mem.findScalarPos(u8, data, offset, 0) orelse return error.CorruptResolveUndo;
                 mode.* = std.fmt.parseInt(u32, data[offset..end], 8) catch return error.CorruptResolveUndo;
                 offset = end + 1;
             }
@@ -853,7 +853,7 @@ pub const Index = struct {
                 break :blk try std.fmt.allocPrint(gpa, "{d}", .{nanoseconds});
             },
             2 => blk: {
-                const end = std.mem.indexOfScalar(u8, rest, 0) orelse return error.CorruptFsmonitor;
+                const end = std.mem.findScalar(u8, rest, 0) orelse return error.CorruptFsmonitor;
                 defer rest = rest[end + 1 ..];
                 break :blk try gpa.dupe(u8, rest[0..end]);
             },
@@ -1001,7 +1001,7 @@ pub const Index = struct {
             at += strip.len;
             if (strip.value > previous_path.len) return error.TruncatedIndex;
             const keep = previous_path[0 .. previous_path.len - strip.value];
-            const suffix_end = std.mem.indexOfScalarPos(u8, body, start + at, 0) orelse return error.TruncatedIndex;
+            const suffix_end = std.mem.findScalarPos(u8, body, start + at, 0) orelse return error.TruncatedIndex;
             const suffix = body[start + at .. suffix_end];
             const joined = try gpa.alloc(u8, keep.len + suffix.len);
             @memcpy(joined[0..keep.len], keep);
@@ -1010,7 +1010,7 @@ pub const Index = struct {
             next = suffix_end + 1;
         } else {
             const stated: usize = flags & 0x0fff;
-            const nul = std.mem.indexOfScalarPos(u8, body, start + at, 0) orelse return error.TruncatedIndex;
+            const nul = std.mem.findScalarPos(u8, body, start + at, 0) orelse return error.TruncatedIndex;
             const found = body[start + at .. nul];
             if (stated != 0x0fff and found.len != stated) return error.TruncatedIndex;
             path = try gpa.dupe(u8, found);
@@ -1808,14 +1808,14 @@ test "the offset caches are written on request, and kept by an index that had th
     // Nothing asked for, nothing written: this is what stock git writes.
     const plain = try index.toBytes(.{});
     defer gpa.free(plain);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "EOIE") == null);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "IEOT") == null);
+    try std.testing.expect(std.mem.find(u8, plain, "EOIE") == null);
+    try std.testing.expect(std.mem.find(u8, plain, "IEOT") == null);
 
     const with = try index.toBytes(.{ .end_of_index_entries = true, .entry_offset_blocks = 3 });
     defer gpa.free(with);
 
-    const ieot_at = std.mem.indexOf(u8, with, "IEOT").?;
-    const eoie_at = std.mem.indexOf(u8, with, "EOIE").?;
+    const ieot_at = std.mem.find(u8, with, "IEOT").?;
+    const eoie_at = std.mem.find(u8, with, "EOIE").?;
     try std.testing.expect(ieot_at < eoie_at);
 
     // `EOIE` says where the extensions begin, which is where `IEOT`'s own
@@ -1901,7 +1901,7 @@ test "a sparse directory entry reads and writes back, and needs sdir" {
     index.sparse = true;
     const bytes = try index.toBytes(.{});
     defer gpa.free(bytes);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "sdir\x00\x00\x00\x00") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "sdir\x00\x00\x00\x00") != null);
 
     var back = try Index.parse(gpa, .sha1, bytes);
     defer back.deinit();

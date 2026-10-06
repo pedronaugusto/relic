@@ -122,7 +122,7 @@ fn build(comptime alphabet: Alphabet, table: []Entry, lens: []const u8, counted:
         // Incomplete: only a single one-bit code, and never the precode. It
         // is code 0; reading a 1 there is an error.
         if (alphabet == .precode or max != 1) return error.CorruptStream;
-        const sym = std.mem.indexOfScalar(u8, lens, 1).?;
+        const sym = std.mem.findScalar(u8, lens, 1).?;
         const e = symbolEntry(alphabet, sym, 1);
         var i: usize = 0;
         while (i < main_len) : (i += 2) {

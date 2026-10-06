@@ -58,7 +58,7 @@ fn marks(gpa: std.mem.Allocator, io: Io, repo: *testgit.Repo) ![]Oid {
     errdefer list.deinit(gpa);
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
     while (lines.next()) |line| {
-        const space = std.mem.indexOfScalar(u8, line, ' ').?;
+        const space = std.mem.findScalar(u8, line, ' ').?;
         const index = try std.fmt.parseUnsigned(usize, line[1..space], 10);
         if (list.items.len < index) try list.resize(gpa, index);
         list.items[index - 1] = try Oid.parse(.sha1, line[space + 1 ..]);

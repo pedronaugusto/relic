@@ -104,7 +104,7 @@ pub const Shortlog = struct {
     author: bool,
     committer: bool,
     dedup: bool,
-    records: std.StringArrayHashMapUnmanaged(Record) = .empty,
+    records: std.array_hash_map.String(Record) = .empty,
 
     /// A shortlog with nothing in it yet.
     pub fn init(gpa: Allocator, options: Options) Self.Error!Shortlog {
@@ -235,8 +235,8 @@ pub const Shortlog = struct {
     /// `parse_ident`: a trailer value that reads as `Name <email>` is shown
     /// as a person is, and anything else as it is written.
     fn identOf(s: *const Shortlog, a: Allocator, value: []const u8) Allocator.Error!?[]const u8 {
-        const lt = std.mem.indexOfScalar(u8, value, '<') orelse return null;
-        const gt = std.mem.indexOfScalarPos(u8, value, lt + 1, '>') orelse return null;
+        const lt = std.mem.findScalar(u8, value, '<') orelse return null;
+        const gt = std.mem.findScalarPos(u8, value, lt + 1, '>') orelse return null;
         const person = try s.formatPerson(a, trimName(value[0..lt]), value[lt + 1 .. gt]);
         return person;
     }
@@ -254,9 +254,9 @@ pub const Shortlog = struct {
 
         var oneline = oneline_in;
         while (oneline.len > 0 and isSpace(oneline[0])) oneline = oneline[1..];
-        const eol = std.mem.indexOfScalar(u8, oneline, '\n') orelse oneline.len;
+        const eol = std.mem.findScalar(u8, oneline, '\n') orelse oneline.len;
         if (std.mem.startsWith(u8, oneline, "[PATCH")) {
-            if (std.mem.indexOfScalar(u8, oneline, ']')) |eob| {
+            if (std.mem.findScalar(u8, oneline, ']')) |eob| {
                 if (eob < eol) oneline = oneline[eob + 1 ..];
             }
         }
@@ -342,7 +342,7 @@ pub fn addWrappedText(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8,
         var indent: usize = @intCast(@max(indent1, 0));
         var rest = text;
         while (rest.len > 0) {
-            const eol = if (std.mem.indexOfScalar(u8, rest, '\n')) |nl| nl + 1 else rest.len;
+            const eol = if (std.mem.findScalar(u8, rest, '\n')) |nl| nl + 1 else rest.len;
             try out.appendNTimes(gpa, ' ', indent);
             try out.appendSlice(gpa, rest[0..eol]);
             rest = rest[eol..];
@@ -462,7 +462,7 @@ const repo_mod = @import("../repo.zig");
 const revwalk = @import("../revwalk.zig");
 
 fn commitAs(r: *testgit.Repo, io: Io, author: []const u8, committer: []const u8, msg: []const u8) !void {
-    const lt = std.mem.indexOfScalar(u8, committer, '<').?;
+    const lt = std.mem.findScalar(u8, committer, '<').?;
     const name = try std.fmt.allocPrint(r.gpa, "user.name={s}", .{std.mem.trim(u8, committer[0..lt], " ")});
     defer r.gpa.free(name);
     const email = try std.fmt.allocPrint(r.gpa, "user.email={s}", .{committer[lt + 1 .. committer.len - 1]});

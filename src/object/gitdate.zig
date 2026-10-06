@@ -391,7 +391,7 @@ const timestamp_max: i64 = ((2100 - 1970) * 365 + 32) * 24 * 60 * 60 - 1;
 /// Read `text` as git's `parse_date` does; `null` where git says "invalid
 /// date format".
 pub fn parse(text_in: []const u8, ctx: Context) ?Parsed {
-    const text = if (std.mem.indexOfScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
+    const text = if (std.mem.findScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
     if (text.len > 0 and text[0] == '@') {
         if (matchObjectHeaderDate(text[1..])) |p| return p;
     }
@@ -435,7 +435,7 @@ pub fn parse(text_in: []const u8, ctx: Context) ?Parsed {
 /// error, which is text in which no word meant anything.
 pub fn approximate(text_in: []const u8, ctx: Context) ?i64 {
     if (parse(text_in, ctx)) |p| return p.secs;
-    const text = if (std.mem.indexOfScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
+    const text = if (std.mem.findScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
     var a: Approx = .{ .off = ctx.local_offset_minutes, .now_secs = ctx.now };
     a.localtime(ctx.now, &a.tm);
     a.now = a.tm;

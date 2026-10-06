@@ -122,7 +122,7 @@ pub const Mailmap = struct {
     /// Add the lines of `text` as git reads a mailmap blob: up to its
     /// first NUL, one line at a time.
     pub fn addText(m: *Mailmap, text: []const u8) Allocator.Error!void {
-        const end = std.mem.indexOfScalar(u8, text, 0) orelse text.len;
+        const end = std.mem.findScalar(u8, text, 0) orelse text.len;
         var lines = std.mem.splitScalar(u8, text[0..end], '\n');
         while (lines.next()) |line| try m.addLine(line);
     }
@@ -134,10 +134,10 @@ pub const Mailmap = struct {
         var at: usize = 0;
         while (at < bytes.len) {
             const limit = @min(bytes.len, at + 1023);
-            const end = if (std.mem.indexOfScalarPos(u8, bytes[0..limit], at, '\n')) |nl| nl + 1 else limit;
+            const end = if (std.mem.findScalarPos(u8, bytes[0..limit], at, '\n')) |nl| nl + 1 else limit;
             const piece = bytes[at..end];
             at = end;
-            const cut = std.mem.indexOfScalar(u8, piece, 0) orelse piece.len;
+            const cut = std.mem.findScalar(u8, piece, 0) orelse piece.len;
             try m.addLine(piece[0..cut]);
         }
     }
@@ -278,8 +278,8 @@ const Parsed = struct {
 
 /// `parse_name_and_email`.
 fn parseNameAndEmail(buffer: []const u8, allow_empty_email: bool) Parsed {
-    const left = std.mem.indexOfScalar(u8, buffer, '<') orelse return .{};
-    const right = std.mem.indexOfScalarPos(u8, buffer, left + 1, '>') orelse return .{};
+    const left = std.mem.findScalar(u8, buffer, '<') orelse return .{};
+    const right = std.mem.findScalarPos(u8, buffer, left + 1, '>') orelse return .{};
     if (!allow_empty_email and left + 1 == right) return .{};
     var nstart: usize = 0;
     while (nstart < left and isSpace(buffer[nstart])) nstart += 1;
@@ -408,7 +408,7 @@ fn compareWithGit(gpa: Allocator, io: Io, seed: u64) !void {
     var got: std.Io.Writer.Allocating = .init(gpa);
     defer got.deinit();
     for (args.items[1..]) |contact| {
-        const lt = std.mem.indexOfScalar(u8, contact, '<').?;
+        const lt = std.mem.findScalar(u8, contact, '<').?;
         var name = contact[0..lt];
         while (name.len > 0 and isSpace(name[name.len - 1])) name = name[0 .. name.len - 1];
         const email = contact[lt + 1 .. contact.len - 1];

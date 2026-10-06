@@ -269,7 +269,7 @@ fn parseLine(line: []const u8, kind: hash.Kind) ReadError!Entry {
     const new = Oid.parse(kind, line[hex_len + 1 ..][0..hex_len]) catch return error.MalformedReflogEntry;
     if (line[hex_len * 2 + 1] != ' ') return error.MalformedReflogEntry;
     const rest = line[hex_len * 2 + 2 ..];
-    const tab = std.mem.indexOfScalar(u8, rest, '\t');
+    const tab = std.mem.findScalar(u8, rest, '\t');
     const ident = if (tab) |at| rest[0..at] else rest;
     const message = if (tab) |at| rest[at + 1 ..] else "";
     return .{
@@ -301,7 +301,7 @@ test "an appended entry reads back" {
     var raw: [512]u8 = undefined;
     const text = try tmp.dir.readFile(io, "logs/refs/heads/main", &raw);
     try std.testing.expect(std.mem.startsWith(u8, text, "0000000000000000000000000000000000000000 1111"));
-    try std.testing.expect(std.mem.indexOf(u8, text, "Ada <ada@example.com> 1700000000 +0000\tcommit (initial): first\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Ada <ada@example.com> 1700000000 +0000\tcommit (initial): first\n") != null);
 
     var log = try read(gpa, io, tmp.dir, "refs/heads/main", .sha1);
     defer log.deinit();

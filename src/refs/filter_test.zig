@@ -260,7 +260,7 @@ fn localeDateFullYear(gpa: Allocator, io: Io, git: *testgit.Repo) !bool {
     if (builtin.os.tag == .windows) return false;
     const date = try git.line(io, &.{ "log", "-1", "--format=%cd", "--date=format:%x" });
     defer gpa.free(date);
-    const slash = std.mem.lastIndexOfScalar(u8, date, '/') orelse return error.TestUnexpectedResult;
+    const slash = std.mem.findScalarLast(u8, date, '/') orelse return error.TestUnexpectedResult;
     return date.len - slash - 1 == 4;
 }
 

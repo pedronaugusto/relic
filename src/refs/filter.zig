@@ -539,7 +539,7 @@ fn matchArgValue(text: []const u8, candidate: []const u8) ?struct { value: ?[]co
     var value: ?[]const u8 = null;
     if (at < text.len and text[at] == '=') {
         const start = at + 1;
-        at = std.mem.indexOfScalarPos(u8, text, start, ',') orelse text.len;
+        at = std.mem.findScalarPos(u8, text, start, ',') orelse text.len;
         value = text[start..at];
     } else if (at < text.len and text[at] != ',') return null;
     if (at < text.len and text[at] == ',') at += 1;
@@ -775,7 +775,7 @@ pub const Listing = struct {
             var stack_listing = try l.repo.refStore().list(gpa, io, "");
             defer stack_listing.deinit();
             for (stack_listing.entries) |entry| {
-                if (std.mem.indexOfScalar(u8, entry.name, '/') != null or !isRootRef(entry.name)) continue;
+                if (std.mem.findScalar(u8, entry.name, '/') != null or !isRootRef(entry.name)) continue;
                 for (names.items) |known| {
                     if (std.mem.eql(u8, known, entry.name)) break;
                 } else try names.append(gpa, try l.a().dupe(u8, entry.name));
@@ -1153,7 +1153,7 @@ pub const Listing = struct {
         var cp: usize = 0;
         while (cp < text.len) {
             const sp = findNext(text, cp) orelse break;
-            const ep = std.mem.indexOfScalarPos(u8, text, sp, ')') orelse return error.MalformedFormat;
+            const ep = std.mem.findScalarPos(u8, text, sp, ')') orelse return error.MalformedFormat;
             if (cp < sp) try parts.append(l.a(), .{ .literal = text[cp..sp] });
             const index = try l.atomIndex(text[sp + 2 .. ep]);
             const atom = l.atoms.items[index];
@@ -1645,17 +1645,17 @@ pub const Listing = struct {
         const line = findWholine(mapped orelse buf, who) orelse return .{};
         const rest = if (creator) (if (atom.kind == .creator) "" else "date") else name[who.len..];
         if (rest.len == 0 or (creator and atom.kind == .creator)) {
-            const eol = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
+            const eol = std.mem.findScalar(u8, line, '\n') orelse line.len;
             return .{ .s = line[0..eol] };
         }
         if (std.mem.startsWith(u8, rest, "name")) {
-            const eol = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
-            const lt = std.mem.indexOf(u8, line[0..eol], " <") orelse return .{};
+            const eol = std.mem.findScalar(u8, line, '\n') orelse line.len;
+            const lt = std.mem.find(u8, line[0..eol], " <") orelse return .{};
             return .{ .s = line[0..lt] };
         }
         if (std.mem.startsWith(u8, rest, "email")) return .{ .s = copyEmail(line, atom) };
         if (std.mem.startsWith(u8, rest, "date")) {
-            const eoemail = std.mem.indexOf(u8, line, "> ") orelse return .{};
+            const eoemail = std.mem.find(u8, line, "> ") orelse return .{};
             const after = line[eoemail + 2 ..];
             var i: usize = 0;
             while (i < after.len and std.ascii.isDigit(after[i])) i += 1;
@@ -1685,7 +1685,7 @@ pub const Listing = struct {
         var at: usize = 0;
         var in_header = true;
         while (at < buf.len) {
-            const eol = std.mem.indexOfScalarPos(u8, buf, at, '\n') orelse buf.len;
+            const eol = std.mem.findScalarPos(u8, buf, at, '\n') orelse buf.len;
             const line = buf[at..eol];
             const next = if (eol < buf.len) eol + 1 else eol;
             if (in_header and line.len == 0) in_header = false;
@@ -1694,8 +1694,8 @@ pub const Listing = struct {
                 for ([_][]const u8{ "author ", "committer ", "tagger " }) |header| {
                     if (!std.mem.startsWith(u8, line, header)) continue;
                     const ident = line[header.len..];
-                    const lt = std.mem.indexOfScalar(u8, ident, '<') orelse break;
-                    const gt = std.mem.indexOfScalarPos(u8, ident, lt, '>') orelse break;
+                    const lt = std.mem.findScalar(u8, ident, '<') orelse break;
+                    const gt = std.mem.findScalarPos(u8, ident, lt, '>') orelse break;
                     const name = std.mem.trimEnd(u8, ident[0..lt], " ");
                     const email = ident[lt + 1 .. gt];
                     const found = l.mailmap.?.lookup(name, email) orelse break;
@@ -1826,7 +1826,7 @@ pub const Listing = struct {
                 var n: u32 = 0;
                 while (n < atom.lines and sp < text.len) : (n += 1) {
                     if (n != 0) try out.appendSlice(ar, "\n    ");
-                    const eol = std.mem.indexOfScalarPos(u8, text, sp, '\n');
+                    const eol = std.mem.findScalarPos(u8, text, sp, '\n');
                     try out.appendSlice(ar, text[sp .. eol orelse text.len]);
                     sp = (eol orelse break) + 1;
                 }
@@ -2164,7 +2164,7 @@ pub const Listing = struct {
             const prefix = "checkout: moving from ";
             if (!std.mem.startsWith(u8, entry.message, prefix)) continue;
             const after = entry.message[prefix.len..];
-            const to = std.mem.indexOf(u8, after, " to ") orelse continue;
+            const to = std.mem.find(u8, after, " to ") orelse continue;
             var target = after[to + 4 ..];
             if (std.mem.findScalar(u8, target, '\n')) |nl| target = target[0..nl];
             const noid = entry.new;
@@ -2273,7 +2273,7 @@ fn caseOrder(x: []const u8, y: []const u8) i32 {
 }
 
 fn cString(v: Value) []const u8 {
-    return if (std.mem.indexOfScalar(u8, v.s, 0)) |z| v.s[0..z] else v.s;
+    return if (std.mem.findScalar(u8, v.s, 0)) |z| v.s[0..z] else v.s;
 }
 
 fn isDir(io: Io, dir: Io.Dir, path: []const u8) bool {
@@ -2313,13 +2313,13 @@ const rev_parse_rules = [_][]const u8{
 };
 
 fn expandRule(gpa: Allocator, rule: []const u8, name: []const u8) Allocator.Error![]const u8 {
-    const at = std.mem.indexOf(u8, rule, "%s").?;
+    const at = std.mem.find(u8, rule, "%s").?;
     return std.mem.concat(gpa, u8, &.{ rule[0..at], name, rule[at + 2 ..] });
 }
 
 /// git's `match_parse_rule`: the part of `name` a rule's `%s` stands for.
 fn matchParseRule(name: []const u8, rule: []const u8) ?[]const u8 {
-    const at = std.mem.indexOf(u8, rule, "%s").?;
+    const at = std.mem.find(u8, rule, "%s").?;
     const before = rule[0..at];
     const after = rule[at + 2 ..];
     if (!std.mem.startsWith(u8, name, before)) return null;
@@ -2405,7 +2405,7 @@ fn findWholine(buf: []const u8, who: []const u8) ?[]const u8 {
     while (at < buf.len) {
         if (std.mem.startsWith(u8, buf[at..], who) and at + who.len < buf.len and buf[at + who.len] == ' ')
             return buf[at + who.len + 1 ..];
-        const eol = std.mem.indexOfScalarPos(u8, buf, at, '\n') orelse return null;
+        const eol = std.mem.findScalarPos(u8, buf, at, '\n') orelse return null;
         at = eol + 1;
         if (at < buf.len and buf[at] == '\n') return null;
     }
@@ -2414,14 +2414,14 @@ fn findWholine(buf: []const u8, who: []const u8) ?[]const u8 {
 
 /// git's `copy_email`.
 fn copyEmail(line: []const u8, atom: Atom) []const u8 {
-    const eol = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
+    const eol = std.mem.findScalar(u8, line, '\n') orelse line.len;
     _ = eol;
-    var email_at = std.mem.indexOfScalar(u8, line, '<') orelse return "";
+    var email_at = std.mem.findScalar(u8, line, '<') orelse return "";
     if (atom.email_localpart or atom.email_trim) email_at += 1;
     const email = line[email_at..];
     var end: ?usize = null;
     if (atom.email_localpart) {
-        end = std.mem.indexOfScalar(u8, email, '@') orelse std.mem.indexOfScalar(u8, email, '>');
+        end = std.mem.findScalar(u8, email, '@') orelse std.mem.findScalar(u8, email, '>');
     } else if (atom.email_trim) {
         end = std.mem.findScalar(u8, email, '>');
     } else {
@@ -2444,7 +2444,7 @@ fn findSubpos(buf_in: []const u8) Subpos {
     var at: usize = 0;
     const buf = buf_in;
     while (at < buf.len and buf[at] != '\n') {
-        const eol = std.mem.indexOfScalarPos(u8, buf, at, '\n') orelse buf.len;
+        const eol = std.mem.findScalarPos(u8, buf, at, '\n') orelse buf.len;
         at = if (eol < buf.len) eol + 1 else eol;
     }
     while (at < buf.len and buf[at] == '\n') at += 1;

@@ -60,7 +60,7 @@ pub fn hasSparseDirectories(index: *const Index) bool {
 /// trailing slash.
 pub fn containing(index: *const Index, path: []const u8) ?*Entry {
     var end = path.len;
-    while (std.mem.lastIndexOfScalar(u8, path[0..end], '/')) |slash| {
+    while (std.mem.findScalarLast(u8, path[0..end], '/')) |slash| {
         end = slash;
         // A sparse directory's path is the directory with its slash.
         if (index.find(path[0 .. end + 1])) |entry| {
@@ -143,7 +143,7 @@ fn clearSkipPass(io: Io, wt: Io.Dir, index: *Index, cleared: *u32) fs.StatError!
         }
         missing = path;
         var end: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {
+        while (std.mem.findScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {
             if (try fs.statAt(io, wt, path[0..slash]) == null) {
                 missing = path[0..slash];
                 break;
@@ -327,7 +327,7 @@ fn collapseNode(
     while (i < entries.len) {
         const entry = entries[i];
         const rest = entry.path[base_len..];
-        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+        const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
         // A file of this directory. A sparse directory below it has a
         // slash and is taken with the node it names; one that is this
         // directory itself, which only a cone that has since widened can

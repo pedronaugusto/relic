@@ -396,7 +396,7 @@ fn checkNames(tx: anytype, stacks: *const Stacks) refs.TransactionError!void {
         const stack = cache.internal.forName(stacks, tx.store, edit.name);
         // A ref where a directory of this one would be.
         var end = edit.name.len;
-        while (std.mem.lastIndexOfScalar(u8, edit.name[0..end], '/')) |slash| {
+        while (std.mem.findScalarLast(u8, edit.name[0..end], '/')) |slash| {
             end = slash;
             const ancestor = edit.name[0..end];
             if (deletedHere(tx, ancestor)) continue;

@@ -102,7 +102,7 @@ fn parseAlternate(gpa: Allocator, raw: []const u8) Allocator.Error!?[]u8 {
         } else if (c == '"') return null;
         try out.append(gpa, c);
     }
-    if (out.items.len == 0 or std.mem.indexOfScalar(u8, out.items, 0) != null) return null;
+    if (out.items.len == 0 or std.mem.findScalar(u8, out.items, 0) != null) return null;
     const value = try out.toOwnedSlice(gpa);
     return value;
 }
@@ -310,7 +310,7 @@ pub const Odb = struct {
     /// Append one object-directory path if it is not already named. The
     /// newly named objects are available through this open database at once.
     pub fn addAlternate(odb: *Odb, io: Io, path: []const u8) Error!void {
-        if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAlternatePath;
+        if (path.len == 0 or std.mem.findScalar(u8, path, 0) != null) return error.InvalidAlternatePath;
         var listed = try odb.listAlternates(odb.backendData().gpa, io);
         defer listed.deinit();
         for (listed.paths) |existing| if (std.mem.eql(u8, existing, path)) return;
@@ -333,7 +333,7 @@ pub const Odb = struct {
         var changed = false;
         var cursor: usize = 0;
         while (cursor < listed.text.len) {
-            const end = std.mem.indexOfScalarPos(u8, listed.text, cursor, '\n') orelse listed.text.len;
+            const end = std.mem.findScalarPos(u8, listed.text, cursor, '\n') orelse listed.text.len;
             const raw = listed.text[cursor..end];
             if (try parseAlternate(odb.backendData().gpa, raw)) |existing| {
                 defer odb.backendData().gpa.free(existing);
@@ -609,7 +609,7 @@ pub const Odb = struct {
             if (body.len != parsed.header.size) return error.CorruptLooseObject;
             // The body moves to the front of the allocation it was inflated
             // into, rather than into a second one.
-            std.mem.copyForwards(u8, bytes[0..body.len], body);
+            @memmove(bytes[0..body.len], body);
             const out = try odb.backendData().gpa.realloc(bytes, body.len);
             return .{ .type = parsed.header.type, .bytes = out };
         }
@@ -812,7 +812,7 @@ pub const Odb = struct {
                 const n = decompress.reader.readSliceShort(head[got..]) catch return looseInflateError(&decompress, &file_reader);
                 if (n == 0) break;
                 got += n;
-                if (std.mem.indexOfScalar(u8, head[0..got], 0) != null) break;
+                if (std.mem.findScalar(u8, head[0..got], 0) != null) break;
             }
             const parsed = object.parseHeader(head[0..got]) catch return error.CorruptLooseObject;
             const body: []u8 = switch (want) {
@@ -861,7 +861,7 @@ pub const Odb = struct {
         var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &.{});
         var head: [64]u8 = undefined;
         var out: Io.Writer = .fixed(&head);
-        while (std.mem.indexOfScalar(u8, out.buffered(), 0) == null and out.end < head.len) {
+        while (std.mem.findScalar(u8, out.buffered(), 0) == null and out.end < head.len) {
             const n = decompress.reader.stream(&out, .limited(head.len - out.end)) catch |err| switch (err) {
                 error.EndOfStream => break,
                 error.ReadFailed => return looseInflateError(&decompress, file_reader),
@@ -3720,7 +3720,7 @@ test "search groups end after enough objects, and never inside one name's run" {
     }
     try std.testing.expectEqual(@as(usize, 3), groups);
     // The first group ends at the first name change after its objects.
-    const second = std.mem.indexOfScalarPos(bool, starts, 1, true).?;
+    const second = std.mem.findScalarPos(bool, starts, 1, true).?;
     try std.testing.expectEqual((search_group_objects + 9) / 10 * 10, second);
 
     // Objects with no name end a full group where they stand, whatever

@@ -315,7 +315,7 @@ fn getTerms(c: *Ctx) Error!?Terms {
     var lines: [2][]const u8 = .{ "", "" };
     for (&lines) |*line| {
         if (at >= text.len) return error.NoTermsDefined;
-        const end = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
+        const end = std.mem.findScalarPos(u8, text, at, '\n') orelse text.len;
         line.* = text[at..end];
         at = end + 1;
     }
@@ -1057,7 +1057,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
             t.good = args[i];
         } else if (std.mem.startsWith(u8, arg, "--term-good=") or std.mem.startsWith(u8, arg, "--term-old=")) {
             must_write_terms = true;
-            t.good = arg[std.mem.indexOfScalar(u8, arg, '=').? + 1 ..];
+            t.good = arg[std.mem.findScalar(u8, arg, '=').? + 1 ..];
         } else if (std.mem.eql(u8, arg, "--term-bad") or std.mem.eql(u8, arg, "--term-new")) {
             i += 1;
             if (i >= args.len) return error.InvalidTerm;
@@ -1065,7 +1065,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
             t.bad = args[i];
         } else if (std.mem.startsWith(u8, arg, "--term-bad=") or std.mem.startsWith(u8, arg, "--term-new=")) {
             must_write_terms = true;
-            t.bad = arg[std.mem.indexOfScalar(u8, arg, '=').? + 1 ..];
+            t.bad = arg[std.mem.findScalar(u8, arg, '=').? + 1 ..];
         } else if (std.mem.startsWith(u8, arg, "--")) {
             return error.UnrecognizedOption;
         } else if (c.commitOf(arg)) |oid| {
@@ -1151,7 +1151,7 @@ pub fn mark(gpa: Allocator, io: Io, repo: *Repository, state: []const u8, revs: 
     if (std.mem.eql(u8, state, "skip")) {
         // `bisect_skip`: a range is every commit in it.
         for (revs) |rev| {
-            if (std.mem.indexOf(u8, rev, "..")) |dots| {
+            if (std.mem.find(u8, rev, "..")) |dots| {
                 var walk: revwalk.Walk = .init(c.gpa, &c.repo.odb);
                 defer walk.deinit();
                 try walk.hide(try c.commitOf(rev[0..dots]));
@@ -1535,9 +1535,9 @@ const Twin = struct {
         defer gpa.free(cap.stderr);
         // The `git show` after a first bad commit's line is left out, and
         // what `bisect run` prints after it kept.
-        if (std.mem.indexOf(u8, cap.stdout, " commit\ncommit ")) |at| {
+        if (std.mem.find(u8, cap.stdout, " commit\ncommit ")) |at| {
             const end = at + " commit\n".len;
-            const tail = if (std.mem.indexOfPos(u8, cap.stdout, end, "\nbisect found first")) |t_at| cap.stdout[t_at + 1 ..] else "";
+            const tail = if (std.mem.findPos(u8, cap.stdout, end, "\nbisect found first")) |t_at| cap.stdout[t_at + 1 ..] else "";
             const cut = try std.mem.concat(gpa, u8, &.{ cap.stdout[0..end], tail });
             gpa.free(cap.stdout);
             return cut;
@@ -1562,7 +1562,7 @@ const Twin = struct {
             defer gpa.free(b);
             if (std.mem.eql(u8, name, "BISECT_RUN")) {
                 // git's ends with the `git show` of a first bad commit.
-                const cut = std.mem.indexOf(u8, a, " commit\ncommit ");
+                const cut = std.mem.find(u8, a, " commit\ncommit ");
                 try std.testing.expectEqualStrings(if (cut) |at| a[0 .. at + " commit\n".len] else a, b);
                 continue;
             }
@@ -1691,7 +1691,7 @@ fn bisectLikeGit(case: Case) !void {
             if (t.git.readFile(io, ".git/BISECT_EXPECTED_REV")) |b| gpa.free(b) else |_| break;
             const log_text = try t.git.readFile(io, ".git/BISECT_LOG");
             defer gpa.free(log_text);
-            if (std.mem.indexOf(u8, log_text, "first '") != null or std.mem.indexOf(u8, log_text, "only skipped") != null) break;
+            if (std.mem.find(u8, log_text, "first '") != null or std.mem.find(u8, log_text, "only skipped") != null) break;
             var word = try t.verdict(io, case.first_bad, case.skip, no_checkout);
             if (renamed) word = if (std.mem.eql(u8, word, "bad")) "broken" else if (std.mem.eql(u8, word, "good")) "fine" else word;
             try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));

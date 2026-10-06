@@ -910,20 +910,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/index.zig",
-    "source": "while (std.mem.indexOfScalar(u8, rest, '/')) |slash| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/index.zig",
-    "source": "if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z015",
     "path": "src/archive.zig",
     "source": "pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options: Options, w: *Io.Writer) Error!void {",
@@ -2506,20 +2492,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/revwalk/shortlog.zig",
-    "source": "if (std.mem.indexOfScalar(u8, oneline, ']')) |eob| {",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/revwalk/shortlog.zig",
-    "source": "const eol = if (std.mem.indexOfScalar(u8, rest, '\\n')) |nl| nl + 1 else rest.len;",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z023",
     "path": "src/revwalk/shortlog.zig",
     "source": "fn commitAs(r: *testgit.Repo, io: Io, author: []const u8, committer: []const u8, msg: []const u8) !void {",
@@ -2541,13 +2513,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/revwalk/bisect.zig",
-    "source": "if (std.mem.indexOf(u8, rev, \"..\")) |dots| {",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z023",
     "path": "src/revwalk/bisect.zig",
     "source": "fn f(rr: *testgit.Repo, i: Io, env: *std.process.Environ.Map, w: *i64, k: *usize, extra: []const u8) !void {",
@@ -2555,38 +2520,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/revwalk/bisect.zig",
-    "source": "if (std.mem.indexOf(u8, cap.stdout, \" commit\\ncommit \")) |at| {",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/revwalk/bisect.zig",
-    "source": "const tail = if (std.mem.indexOfPos(u8, cap.stdout, end, \"\\nbisect found first\")) |t_at| cap.stdout[t_at + 1 ..] else \"\";",
-    "detail": "'indexOfPos' is deprecated: Deprecated in favor of `findPos`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/revwalk/bisect.zig",
-    "source": "const cut = std.mem.indexOf(u8, a, \" commit\\ncommit \");",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z023",
     "path": "src/revwalk/bisect.zig",
     "source": "fn gitOrFailed(r: *testgit.Repo, io: Io, args: []const []const u8) ![]u8 {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/revwalk/shallow_test.zig",
-    "source": "if (std.mem.indexOf(u8, payload, \"agent=\")) |at| {",
-    "detail": "'indexOf' is deprecated: Deprecated in favor of `find`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2625,31 +2562,10 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/revwalk/mailmap.zig",
-    "source": "const end = if (std.mem.indexOfScalarPos(u8, bytes[0..limit], at, '\\n')) |nl| nl + 1 else limit;",
-    "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z028",
     "path": "src/revwalk/mailmap.zig",
     "source": "error{MalformedValue} || @import(\"../odb.zig\").Error;",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/revwalk/revparse.zig",
-    "source": "if (std.mem.lastIndexOf(u8, name, \"@{\")) |at| {",
-    "detail": "'lastIndexOf' is deprecated: Deprecated in favor of `find`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/revwalk/revparse.zig",
-    "source": "if (std.mem.lastIndexOf(u8, name, \"-g\")) |g| {",
-    "detail": "'lastIndexOf' is deprecated: Deprecated in favor of `find`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2786,13 +2702,6 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z011",
-    "path": "src/refs.zig",
-    "source": "var out: std.StringArrayHashMapUnmanaged([]u8) = .empty;",
-    "detail": "'StringArrayHashMapUnmanaged' is deprecated: Deprecated; use `array_hash_map.String`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z028",
     "path": "src/refs.zig",
     "source": "pub const Listing = @import(\"refs/value.zig\").Listing;",
@@ -2870,13 +2779,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/odb/indexpack.zig",
-    "source": "std.mem.copyForwards(u8, t.tail[0 .. t.tail_len - release], t.tail[release..t.tail_len]);",
-    "detail": "'copyForwards' is deprecated: Copy all of source into dest at position 0.\ndest.len must be >= source.len.\nIf the slices overlap, dest.ptr must be <= src.ptr.\nThis function is deprecated; use @memmove instead.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z028",
     "path": "src/odb/revindex.zig",
     "source": "pub const test_access = if (@import(\"builtin\").is_test) struct {",
@@ -2930,13 +2832,6 @@
     "path": "src/odb/open.zig",
     "source": "errdefer if (@import(\"state.zig\").get(db._state).sources.items.len == 0) objects.close(io);",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/odb/pack.zig",
-    "source": "pub fn deinit(w: *Writer, io: Io) void {",
-    "detail": "deinit should set w.* = undefined",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -3021,20 +2916,6 @@
     "path": "src/odb/abbrev.zig",
     "source": "for (@import(\"state.zig\").get(db._state).sources.items) |*source| {",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/object/gitdate.zig",
-    "source": "const text = if (std.mem.indexOfScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/odb.zig",
-    "source": "std.mem.copyForwards(u8, bytes[0..body.len], body);",
-    "detail": "'copyForwards' is deprecated: Copy all of source into dest at position 0.\ndest.len must be >= source.len.\nIf the slices overlap, dest.ptr must be <= src.ptr.\nThis function is deprecated; use @memmove instead.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -3409,13 +3290,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z011",
-    "path": "src/refs/reflog.zig",
-    "source": "const tab = std.mem.indexOfScalar(u8, rest, '\\t');",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z023",
     "path": "src/refs/reftablestack/cache.zig",
     "source": "fn refresh(c: *Cache, store: anytype, io: Io) Error!*const Stacks {",
@@ -3637,13 +3511,6 @@
     "path": "src/refs/reftablestack/transaction.zig",
     "source": "fn commitSpecial(tx: anytype, io: Io) refs.TransactionError!void {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/refs/reftablestack/transaction.zig",
-    "source": "while (std.mem.lastIndexOfScalar(u8, edit.name[0..end], '/')) |slash| {",
-    "detail": "'lastIndexOfScalar' is deprecated: Deprecated in favor of `findScalarLast`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -4008,13 +3875,6 @@
     "path": "src/index/sparseindex_test.zig",
     "source": "fn readIndexBytes(repo: *testgit.Repo, io: Io) ![]u8 {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/index/sparseindex.zig",
-    "source": "while (std.mem.lastIndexOfScalar(u8, path[0..end], '/')) |slash| {",
-    "detail": "'lastIndexOfScalar' is deprecated: Deprecated in favor of `findScalarLast`.",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -4887,13 +4747,6 @@
   },
   {
     "rule": "Z011",
-    "path": "src/index/sparseindex.zig",
-    "source": "while (std.mem.indexOfScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {",
-    "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
-    "reason": "Existing finish declaration before adopting preflight; this exact source and finding are retained through the CI rebase."
-  },
-  {
-    "rule": "Z011",
     "path": "src/worktree.zig",
     "source": "while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| : (at = slash + 1) {",
     "detail": "'indexOfScalarPos' is deprecated: Deprecated in favor of `findScalarPos`.",
@@ -4939,13 +4792,6 @@
     "path": "src/config.zig",
     "source": "const wildmatch = @import(\"worktree/wildmatch.zig\");",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finish declaration before adopting preflight; this additional occurrence is retained through the CI rebase."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/object/gitdate.zig",
-    "source": "const text = if (std.mem.indexOfScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;",
-    "detail": "'indexOfScalar' is deprecated: Deprecated in favor of `findScalar`.",
     "reason": "Existing finish declaration before adopting preflight; this additional occurrence is retained through the CI rebase."
   },
   {

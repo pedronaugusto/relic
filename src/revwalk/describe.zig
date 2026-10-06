@@ -947,7 +947,7 @@ fn subpathMatches(path: []const u8, filter: []const u8) ?usize {
     var at: usize = 0;
     while (true) {
         if (wildmatch.match(filter, path[at..], .{}) catch false) return at;
-        const slash = std.mem.indexOfScalarPos(u8, path, at, '/') orelse return null;
+        const slash = std.mem.findScalarPos(u8, path, at, '/') orelse return null;
         at = slash + 1;
     }
 }

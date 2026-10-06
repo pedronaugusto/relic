@@ -2038,14 +2038,14 @@ pub const Writer = struct {
 
     /// Release everything. Safe after `finish` and after `abort`.
     pub fn deinit(w: *Writer, io: Io) void {
+        const gpa = w.gpa;
+        defer gpa.destroy(w);
         if (!w.finished) w.abort(io);
         w.entries.deinit(w.gpa);
         w.seen.deinit(w.gpa);
         if (w.file_buffer.len != 0) w.gpa.free(w.file_buffer);
         w.deflater.deinit(w.gpa);
-        const gpa = w.gpa;
         w.* = undefined;
-        gpa.destroy(w);
     }
 
     /// Give up, leaving the directory as it was.

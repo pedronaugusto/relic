@@ -557,7 +557,7 @@ const Tee = struct {
             const release = held - raw_len;
             if (release <= t.tail_len) {
                 t.hasher.update(t.tail[0..release]);
-                std.mem.copyForwards(u8, t.tail[0 .. t.tail_len - release], t.tail[release..t.tail_len]);
+                @memmove(t.tail[0 .. t.tail_len - release], t.tail[release..t.tail_len]);
                 t.tail_len -= release;
                 @memcpy(t.tail[t.tail_len..][0..n], chunk);
                 t.tail_len += n;
@@ -1905,7 +1905,7 @@ test "a pack is refused where git's index-pack --fsck-objects refuses it, at the
         defer rules.deinit(gpa);
         var levels = std.mem.tokenizeScalar(u8, case.levels, ',');
         while (levels.next()) |pair| {
-            const eq = std.mem.indexOfScalar(u8, pair, '=').?;
+            const eq = std.mem.findScalar(u8, pair, '=').?;
             const lowered = try std.ascii.allocLowerString(gpa, pair[0..eq]);
             defer gpa.free(lowered);
             try rules.set(lowered, pair[eq + 1 ..]);
@@ -1922,7 +1922,7 @@ test "a pack is refused where git's index-pack --fsck-objects refuses it, at the
         }
         if (case.problem) |problem| {
             try testing.expectEqual(problem, diagnostic.problem.?);
-            try testing.expect(std.mem.indexOf(u8, said.stderr, problem.id()) != null);
+            try testing.expect(std.mem.find(u8, said.stderr, problem.id()) != null);
         }
         if (refused) try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
     }
@@ -2230,5 +2230,5 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     const missing = (try links.firstMissing(io, &repo.odb, &index)).?;
     const ls = try source.run(io, &.{ "ls-tree", "-r", "-t", "HEAD" });
     defer gpa.free(ls);
-    try testing.expect(std.mem.indexOf(u8, ls, missing.hex(&hex)) != null);
+    try testing.expect(std.mem.find(u8, ls, missing.hex(&hex)) != null);
 }

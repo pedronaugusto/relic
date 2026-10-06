@@ -57,7 +57,7 @@ pub fn build(gpa: Allocator, paths: []const []const u8, settings: Settings) (All
         while (end != 0) {
             try unique.put(gpa, path[0..end], {});
             if (unique.count() > settings.max_changed_paths) return gpa.dupe(u8, &.{255});
-            end = std.mem.lastIndexOfScalar(u8, path[0..end], '/') orelse 0;
+            end = std.mem.findScalarLast(u8, path[0..end], '/') orelse 0;
         }
     }
     if (unique.count() == 0) return gpa.dupe(u8, &.{0});

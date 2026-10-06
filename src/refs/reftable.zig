@@ -1632,7 +1632,7 @@ test "a table git wrote is read record for record, and written back byte for byt
     const list = try repo.readFile(io, ".git/reftable/tables.list");
     defer gpa.free(list);
     const table_name = std.mem.trimEnd(u8, list, "\n");
-    try std.testing.expect(std.mem.indexOfScalar(u8, table_name, '\n') == null);
+    try std.testing.expect(std.mem.findScalar(u8, table_name, '\n') == null);
     var path_buf: [128]u8 = undefined;
     const bytes = try repo.readFile(io, try std.fmt.bufPrint(&path_buf, ".git/reftable/{s}", .{table_name}));
     defer gpa.free(bytes);

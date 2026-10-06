@@ -68,9 +68,9 @@ pub const HeaderParseError = error{
 /// that offset. A size with a leading zero is refused, because git writes none
 /// and accepting one gives an object two spellings.
 pub fn parseHeader(bytes: []const u8) HeaderParseError!struct { header: Header, len: usize } {
-    const nul = std.mem.indexOfScalar(u8, bytes, 0) orelse return error.MissingHeaderTerminator;
+    const nul = std.mem.findScalar(u8, bytes, 0) orelse return error.MissingHeaderTerminator;
     const line = bytes[0..nul];
-    const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.MalformedHeader;
+    const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedHeader;
     const t = try Type.parse(line[0..space]);
     const digits = line[space + 1 ..];
     if (digits.len == 0) return error.InvalidObjectSize;
@@ -235,13 +235,13 @@ pub const Tree = struct {
             const bytes = it.tree.bytes;
             if (it.offset >= bytes.len) return null;
             const rest = bytes[it.offset..];
-            const space = std.mem.indexOfScalar(u8, rest, ' ') orelse return error.TruncatedTree;
+            const space = std.mem.findScalar(u8, rest, ' ') orelse return error.TruncatedTree;
             const mode = try Mode.parse(rest[0..space]);
             const after_mode = rest[space + 1 ..];
-            const nul = std.mem.indexOfScalar(u8, after_mode, 0) orelse return error.TruncatedTree;
+            const nul = std.mem.findScalar(u8, after_mode, 0) orelse return error.TruncatedTree;
             const name = after_mode[0..nul];
             if (name.len == 0) return error.InvalidEntryName;
-            if (std.mem.indexOfScalar(u8, name, '/') != null) return error.InvalidEntryName;
+            if (std.mem.findScalar(u8, name, '/') != null) return error.InvalidEntryName;
             const raw_len = it.tree.kind.rawLen();
             const oid_start = space + 1 + nul + 1;
             if (rest.len < oid_start + raw_len) return error.TruncatedTree;
@@ -292,8 +292,8 @@ pub const Tree = struct {
         pub fn add(b: *Builder, mode: Mode, name: []const u8, oid: Oid) AddError!void {
             if (oid.kind != b.kind) return error.ObjectFormatMismatch;
             if (name.len == 0) return error.InvalidEntryName;
-            if (std.mem.indexOfScalar(u8, name, '/') != null) return error.InvalidEntryName;
-            if (std.mem.indexOfScalar(u8, name, 0) != null) return error.InvalidEntryName;
+            if (std.mem.findScalar(u8, name, '/') != null) return error.InvalidEntryName;
+            if (std.mem.findScalar(u8, name, 0) != null) return error.InvalidEntryName;
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidEntryName;
             for (b.entries.items) |e| {
                 if (std.mem.eql(u8, e.name, name)) return error.DuplicateEntry;
@@ -388,15 +388,15 @@ pub const Signature = struct {
     /// A line with no time — which older tools wrote — parses with a time of
     /// zero and an offset of zero rather than failing, because git reads one.
     pub fn parse(line: []const u8) Signature.ParseError!Signature {
-        const lt = std.mem.indexOfScalar(u8, line, '<') orelse return error.MalformedSignature;
-        const gt = std.mem.indexOfScalarPos(u8, line, lt, '>') orelse return error.MalformedSignature;
+        const lt = std.mem.findScalar(u8, line, '<') orelse return error.MalformedSignature;
+        const gt = std.mem.findScalarPos(u8, line, lt, '>') orelse return error.MalformedSignature;
         var name = line[0..lt];
         while (name.len > 0 and name[name.len - 1] == ' ') name = name[0 .. name.len - 1];
         const email = line[lt + 1 .. gt];
         var rest = line[gt + 1 ..];
         while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
         if (rest.len == 0) return .{ .name = name, .email = email, .when_secs = 0, .offset_minutes = 0 };
-        const space = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+        const space = std.mem.findScalar(u8, rest, ' ') orelse rest.len;
         const secs = std.fmt.parseInt(i64, rest[0..space], 10) catch return error.InvalidSignatureTime;
         var offset: i16 = 0;
         if (space < rest.len) {
@@ -516,11 +516,11 @@ pub const Commit = struct {
                 rest = rest[1..];
                 break;
             }
-            const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+            const nl = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
             var line = rest[0..nl];
             rest = if (nl < rest.len) rest[nl + 1 ..] else rest[rest.len..];
 
-            const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.MalformedObject;
+            const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedObject;
             const key = line[0..space];
             var value = line[space + 1 ..];
 
@@ -528,7 +528,7 @@ pub const Commit = struct {
             // into one value, dropping that space and keeping the newlines.
             var folded: ?[]u8 = null;
             while (rest.len > 0 and rest[0] == ' ') {
-                const cont_nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+                const cont_nl = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
                 const cont = rest[1..cont_nl];
                 rest = if (cont_nl < rest.len) rest[cont_nl + 1 ..] else rest[rest.len..];
                 const base = folded orelse try arena.dupe(u8, value);
@@ -696,16 +696,16 @@ pub const Tag = struct {
                 rest = rest[1..];
                 break;
             }
-            const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+            const nl = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
             const line = rest[0..nl];
             rest = if (nl < rest.len) rest[nl + 1 ..] else rest[rest.len..];
-            const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.MalformedObject;
+            const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedObject;
             const key = line[0..space];
             var value = line[space + 1 ..];
 
             var folded: ?[]u8 = null;
             while (rest.len > 0 and rest[0] == ' ') {
-                const cont_nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+                const cont_nl = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
                 const cont = rest[1..cont_nl];
                 rest = if (cont_nl < rest.len) rest[cont_nl + 1 ..] else rest[rest.len..];
                 const base = folded orelse try arena.dupe(u8, value);
@@ -851,8 +851,8 @@ test "commit round trip keeps parent order and header order" {
     defer gpa.free(bytes);
 
     try std.testing.expect(std.mem.startsWith(u8, bytes, "tree 496d6428"));
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "author Ada <ada@example.com> 1700000000 -0500\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "gpgsig -----BEGIN-----\n \n line\n -----END-----\n") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "author Ada <ada@example.com> 1700000000 -0500\n") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "gpgsig -----BEGIN-----\n \n line\n -----END-----\n") != null);
 
     var c = try Commit.parse(gpa, .sha1, bytes);
     defer c.deinit();

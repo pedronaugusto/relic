@@ -434,7 +434,7 @@ test "a push from a shallow repository tells the server its boundary, as git's s
             const bytes = try tools.dir.readFileAlloc(io, "sent", gpa, .unlimited);
             defer gpa.free(bytes);
             // Up to the pack, whose compression is each side's own.
-            const end = std.mem.indexOf(u8, bytes, "PACK") orelse bytes.len;
+            const end = std.mem.find(u8, bytes, "PACK") orelse bytes.len;
             sent[who] = try withoutAgentBytes(gpa, bytes[0..end]);
         }
         defer for (sent) |b| gpa.free(b);
@@ -459,7 +459,7 @@ fn withoutAgentBytes(gpa: Allocator, bytes: []const u8) ![]u8 {
         if (len > rest.len) break;
         const payload = rest[4..len];
         rest = rest[len..];
-        if (std.mem.indexOf(u8, payload, "agent=")) |at| {
+        if (std.mem.find(u8, payload, "agent=")) |at| {
             try out.print(gpa, "????{s}\n", .{payload[0 .. at + "agent=".len]});
         } else try out.print(gpa, "{d}:{s}\n", .{ len, payload });
     }
