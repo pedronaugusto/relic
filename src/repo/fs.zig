@@ -847,22 +847,22 @@ extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]co
 /// symbolic link, is the effective user; on Windows its owner is the
 /// user's SID, or the Administrators group when the user is one, and the
 /// user's home (`home`, as git reads `HOME`) is always theirs. A path that
-/// cannot be asked about is not owned.
+/// cannot be asked about is not owned: where the platform cannot say whose
+/// a file is -- WASI, which has no users, or a POSIX build without libc
+/// beyond Linux -- nothing is, and a caller that trusts its paths there
+/// opens with `OpenOptions.ownership = .trust`.
 pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
     switch (builtin.os.tag) {
         .windows => return ownedWindows(io, dir, sub_path, home),
-        .wasi => return true,
+        .wasi => return false,
         else => {
             const found = switch (platstat.full(dir, sub_path)) {
                 .found => |f| f,
-                .absent => return false,
-                // a platform that cannot say whose a file is owns nothing
-                // of it to doubt
-                .unavailable => return true,
+                .absent, .unavailable => return false,
             };
             const euid: u32 = switch (builtin.os.tag) {
                 .linux => std.os.linux.geteuid(),
-                else => if (builtin.link_libc) std.c.geteuid() else return true,
+                else => if (builtin.link_libc) std.c.geteuid() else return false,
             };
             return found.extra.uid == euid;
         },

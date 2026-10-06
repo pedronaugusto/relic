@@ -439,7 +439,7 @@ test "a name and a directory of names conflict with what is already there" {
     try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/a") == null);
 }
 
-test "FETCH_HEAD and MERGE_HEAD are files and the other pseudorefs are in the stack, as git keeps them" {
+test "FETCH_HEAD and MERGE_HEAD are files no transaction writes, and the other pseudorefs are in the stack, as git keeps them" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     try requireReftableGit(gpa, io);
@@ -454,16 +454,24 @@ test "FETCH_HEAD and MERGE_HEAD are files and the other pseudorefs are in the st
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
+    var line_buf: [64]u8 = undefined;
+    const want_line = try std.fmt.bufPrint(&line_buf, "{s}\n", .{tip_text});
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
-        for ([_][]const u8{ "FETCH_HEAD", "MERGE_HEAD", "ORIG_HEAD", "CHERRY_PICK_HEAD" }) |name| {
+        // git's "refusing to update pseudoref": fetch and merge write these
+        // files themselves.
+        for ([_][]const u8{ "FETCH_HEAD", "MERGE_HEAD" }) |name| {
+            try std.testing.expectError(error.InvalidRefName, tx.create(name, .{ .direct = tip }));
+            const path = try std.fmt.allocPrint(gpa, ".git/{s}", .{name});
+            defer gpa.free(path);
+            try git.writeFile(io, path, want_line);
+        }
+        for ([_][]const u8{ "ORIG_HEAD", "CHERRY_PICK_HEAD" }) |name| {
             try tx.create(name, .{ .direct = tip });
         }
         try tx.commit(io, .{ .who = fixtureWho(1_700_000_000), .message = "pseudorefs" });
     }
-    var line_buf: [64]u8 = undefined;
-    const want_line = try std.fmt.bufPrint(&line_buf, "{s}\n", .{tip_text});
     for ([_][]const u8{ ".git/FETCH_HEAD", ".git/MERGE_HEAD" }) |path| {
         const text = try git.readFile(io, path);
         defer gpa.free(text);
@@ -486,11 +494,11 @@ test "FETCH_HEAD and MERGE_HEAD are files and the other pseudorefs are in the st
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
-        try tx.delete("MERGE_HEAD", .{ .matches = tip });
+        try std.testing.expectError(error.InvalidRefName, tx.delete("MERGE_HEAD", .{ .matches = tip }));
         try tx.delete("CHERRY_PICK_HEAD", .must_exist);
         try tx.commit(io, null);
     }
-    try std.testing.expectError(error.FileNotFound, git.dir.access(io, ".git/MERGE_HEAD", .{}));
+    try git.dir.access(io, ".git/MERGE_HEAD", .{});
     git.report_failures = false;
     try std.testing.expectError(error.GitFailed, git.exec(io, &.{ "rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD" }));
     git.report_failures = true;

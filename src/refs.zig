@@ -579,6 +579,19 @@ fn isPseudoRef(name: []const u8) bool {
     return true;
 }
 
+/// Whether a transaction may write `name`: git's
+/// `transaction_refname_valid`, which refuses the pseudo-refs `FETCH_HEAD`
+/// and `MERGE_HEAD` a transaction does not own, and beyond git a name of
+/// one level that is not spelled as a root ref is: git writes `index`,
+/// `config` or `shallow` as a ref when a stream names it, over the files of
+/// those names.
+fn isUpdatableName(name: []const u8) bool {
+    if (!safepath.isValidRefName(name)) return false;
+    if (std.mem.findScalar(u8, name, '/') != null) return true;
+    if (std.mem.eql(u8, name, "FETCH_HEAD") or std.mem.eql(u8, name, "MERGE_HEAD")) return false;
+    return isPseudoRef(name);
+}
+
 fn isReadableName(name: []const u8) bool {
     // A pseudo-ref such as `HEAD` or `ORIG_HEAD` is upper case with no
     // slash, which `checkRefName` would otherwise allow through anyway; the
@@ -693,7 +706,7 @@ pub const Transaction = struct {
     }
 
     fn add(tx: *Transaction, name: []const u8, new: ?Ref, expected: Expected) TransactionError!void {
-        if (!safepath.isValidRefName(name)) return error.InvalidRefName;
+        if (!isUpdatableName(name)) return error.InvalidRefName;
         for (tx.edits.items) |edit| {
             if (std.mem.eql(u8, edit.name, name)) return error.DuplicateEdit;
         }

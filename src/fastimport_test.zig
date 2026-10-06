@@ -382,6 +382,10 @@ test "what git's fast-import refuses is refused by name" {
         .{ .stream = "blob\ndata 0\nfeature done\n", .err = error.LateFeature },
         .{ .stream = "feature done\nblob\ndata 0\n", .err = error.StreamEndsEarly },
         .{ .stream = "commit bad..name\ncommitter A <a> 1 +0000\ndata 0\n", .err = error.InvalidRefName },
+        // git's "refusing to update pseudoref"; and, beyond git, a name of
+        // one level that would write over the index.
+        .{ .stream = "commit FETCH_HEAD\ncommitter A <a> 1 +0000\ndata 0\n", .err = error.InvalidRefName },
+        .{ .stream = "commit index\ncommitter A <a> 1 +0000\ndata 0\n", .err = error.InvalidRefName },
     };
     for (cases) |case| {
         var input: Io.Reader = .fixed(case.stream);
