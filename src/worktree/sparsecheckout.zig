@@ -95,8 +95,8 @@ pub const Outcome = struct {
 };
 
 /// The settings as the repository's files hold them now.
-pub fn settings(repo: *Repository, io: Io) Self.Error!Settings {
-    var files = try Files.open(repo, io);
+pub fn settings(io: Io, repo: *Repository) Self.Error!Settings {
+    var files = try Files.open(io, repo);
     defer files.deinit();
     return files.settings(repo);
 }
@@ -108,8 +108,8 @@ pub fn settings(repo: *Repository, io: Io) Self.Error!Settings {
 /// under it; with none, only the files at the root are included. Otherwise
 /// each is a line of the pattern file, and with none the file is `/*` and
 /// `!/*/`, which is the same root-only checkout.
-pub fn set(repo: *Repository, io: Io, patterns: []const []const u8, options: Options) Self.Error!Outcome {
-    var op = try Op.init(repo, io);
+pub fn set(io: Io, repo: *Repository, patterns: []const []const u8, options: Options) Self.Error!Outcome {
+    var op = try Op.init(io, repo);
     defer op.deinit();
     try op.updateModes(options);
     try op.sanitize(patterns, options);
@@ -138,8 +138,8 @@ pub fn set(repo: *Repository, io: Io, patterns: []const []const u8, options: Opt
 /// In cone mode the directories are added to the cone already there; a
 /// pattern file without the cone's shape is `error.NotACone`. Otherwise the
 /// lines are appended to the file's own.
-pub fn add(repo: *Repository, io: Io, patterns: []const []const u8, options: Options) Self.Error!Outcome {
-    var op = try Op.init(repo, io);
+pub fn add(io: Io, repo: *Repository, patterns: []const []const u8, options: Options) Self.Error!Outcome {
+    var op = try Op.init(io, repo);
     defer op.deinit();
     if (!op.state.enabled) return error.NotSparse;
     try op.sanitize(patterns, options);
@@ -181,8 +181,8 @@ pub fn add(repo: *Repository, io: Io, patterns: []const []const u8, options: Opt
 /// `git sparse-checkout reapply`: make the working tree follow the
 /// patterns already there, after a merge or a checkout brought back files
 /// they leave out.
-pub fn reapply(repo: *Repository, io: Io, options: Options) Self.Error!Outcome {
-    var op = try Op.init(repo, io);
+pub fn reapply(io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
+    var op = try Op.init(io, repo);
     defer op.deinit();
     if (!op.state.enabled) return error.NotSparse;
     try op.updateModes(options);
@@ -193,8 +193,8 @@ pub fn reapply(repo: *Repository, io: Io, options: Options) Self.Error!Outcome {
 ///
 /// A pattern file already there is kept and applied. Without one the file
 /// becomes `/*` and `!/*/` -- only the files at the root.
-pub fn init(repo: *Repository, io: Io, options: Options) Self.Error!Outcome {
-    var op = try Op.init(repo, io);
+pub fn init(io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
+    var op = try Op.init(io, repo);
     defer op.deinit();
     try op.updateModes(options);
     if (try fs.statAt(io, repo.git_dir, pattern_file)) |_| return op.updateWorkingTree(null);
@@ -203,8 +203,8 @@ pub fn init(repo: *Repository, io: Io, options: Options) Self.Error!Outcome {
 
 /// `git sparse-checkout disable`: put every file back and turn sparse
 /// checkout off. The pattern file is left where it is, as git leaves it.
-pub fn disable(repo: *Repository, io: Io) Self.Error!Outcome {
-    var op = try Op.init(repo, io);
+pub fn disable(io: Io, repo: *Repository) Self.Error!Outcome {
+    var op = try Op.init(io, repo);
     defer op.deinit();
 
     var everything = try sparse.Patterns.fromText(repo.gpa, "/*\n", .{ .case_fold = op.fold });
@@ -236,8 +236,8 @@ pub const Listing = struct {
 
 /// `git sparse-checkout list`. A worktree whose pattern file is missing
 /// lists nothing, which git reports with a warning rather than an error.
-pub fn list(repo: *Repository, io: Io) Self.Error!Listing {
-    var op = try Op.init(repo, io);
+pub fn list(io: Io, repo: *Repository) Self.Error!Listing {
+    var op = try Op.init(io, repo);
     defer op.deinit();
     if (!op.state.enabled) return error.NotSparse;
 
@@ -277,7 +277,7 @@ const Files = struct {
     local: Config,
     worktree: ?Config,
 
-    fn open(repo: *Repository, io: Io) Error!Files {
+    fn open(io: Io, repo: *Repository) Error!Files {
         var local = try Config.openFile(repo.gpa, io, .{ .dir = repo.common_dir, .sub_path = "config" }, .local, .{});
         errdefer local.deinit();
         const on = try local.getBool("extensions.worktreeconfig", false);
@@ -341,9 +341,9 @@ const Op = struct {
     state: Settings,
     fold: bool,
 
-    fn init(repo: *Repository, io: Io) Error!Op {
+    fn init(io: Io, repo: *Repository) Error!Op {
         if (repo.work_dir == null) return error.NoWorkingTree;
-        var files = try Files.open(repo, io);
+        var files = try Files.open(io, repo);
         errdefer files.deinit();
         const state = try files.settings(repo);
         return .{
@@ -453,7 +453,7 @@ const Op = struct {
     /// update has succeeded.
     fn writePatternsAndUpdate(op: *Op, text: []const u8) Error!Outcome {
         const repo = op.repo;
-        try makeInfoDir(repo, op.io);
+        try makeInfoDir(op.io, repo);
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(repo.gpa, op.io, repo.git_dir, pattern_file, &buffer, .{ .shared = repo.shared });
         defer lock.deinit(op.io);
@@ -534,7 +534,7 @@ fn openWritable(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, level
     return Config.openFile(gpa, io, .{ .dir = dir, .sub_path = sub_path }, level, .{});
 }
 
-fn makeInfoDir(repo: *Repository, io: Io) Error!void {
+fn makeInfoDir(io: Io, repo: *Repository) Error!void {
     repo.git_dir.createDirPath(io, "info") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => |e| return e,
@@ -687,14 +687,14 @@ const Twin = struct {
     theirs: testgit.Repo,
     ours: testgit.Repo,
 
-    fn init(gpa: Allocator, io: Io, extra: []const []const u8, comptime setup: fn (*testgit.Repo, Io) anyerror!void) !Twin {
+    fn init(comptime setup: fn (Io, *testgit.Repo) anyerror!void, gpa: Allocator, io: Io, extra: []const []const u8) !Twin {
         try requireCurrentGit(gpa, io);
         var theirs = try testgit.Repo.init(gpa, io, extra);
         errdefer theirs.deinit();
-        try setup(&theirs, io);
+        try setup(io, &theirs);
         var ours = try testgit.Repo.init(gpa, io, extra);
         errdefer ours.deinit();
-        try setup(&ours, io);
+        try setup(io, &ours);
         return .{ .theirs = theirs, .ours = ours };
     }
 
@@ -807,7 +807,7 @@ fn listFiles(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn setupTree(repo: *testgit.Repo, io: Io) anyerror!void {
+fn setupTree(io: Io, repo: *testgit.Repo) anyerror!void {
     for ([_][]const u8{
         "top.txt",      "A/a.txt",   "A/B/b.txt", "A/B/C/c.txt",
         "D/d.txt",      "E/F/f.txt", "E/e.txt",   "g[1]/y.txt",
@@ -820,13 +820,13 @@ fn setupTree(repo: *testgit.Repo, io: Io) anyerror!void {
 test "set, add, reapply and disable leave what git's own commands leave" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var twin = try Twin.init(gpa, io, &.{}, setupTree);
+    var twin = try Twin.init(setupTree, gpa, io, &.{});
     defer twin.deinit();
 
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        const out = try set(&repo, io, &.{ "A/B", "E", "./D/../g[1]//" }, .{ .skip_checks = true });
+        const out = try set(io, &repo, &.{ "A/B", "E", "./D/../g[1]//" }, .{ .skip_checks = true });
         try std.testing.expect(out.index_written);
         try std.testing.expect(out.update.skipped > 0);
     }
@@ -839,7 +839,7 @@ test "set, add, reapply and disable leave what git's own commands leave" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try add(&repo, io, &.{ "D", "A/B/C" }, .{});
+        _ = try add(io, &repo, &.{ "D", "A/B/C" }, .{});
     }
     try twin.expectSame(io);
 
@@ -847,7 +847,7 @@ test "set, add, reapply and disable leave what git's own commands leave" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try set(&repo, io, &.{ "A/*.txt", "!A/B/", "/sp ace/" }, .{ .cone = false });
+        _ = try set(io, &repo, &.{ "A/*.txt", "!A/B/", "/sp ace/" }, .{ .cone = false });
     }
     try twin.expectSame(io);
 
@@ -855,7 +855,7 @@ test "set, add, reapply and disable leave what git's own commands leave" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try add(&repo, io, &.{"/top.txt"}, .{});
+        _ = try add(io, &repo, &.{"/top.txt"}, .{});
     }
     try twin.expectSame(io);
 
@@ -863,7 +863,7 @@ test "set, add, reapply and disable leave what git's own commands leave" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try reapply(&repo, io, .{});
+        _ = try reapply(io, &repo, .{});
     }
     try twin.expectSame(io);
 
@@ -871,7 +871,7 @@ test "set, add, reapply and disable leave what git's own commands leave" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try reapply(&repo, io, .{ .cone = true });
+        _ = try reapply(io, &repo, .{ .cone = true });
     }
     try twin.expectSame(io);
 
@@ -879,7 +879,7 @@ test "set, add, reapply and disable leave what git's own commands leave" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        const out = try disable(&repo, io);
+        const out = try disable(io, &repo);
         try std.testing.expect(out.update.restored > 0);
     }
     try twin.expectSame(io);
@@ -888,7 +888,7 @@ test "set, add, reapply and disable leave what git's own commands leave" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try init(&repo, io, .{ .sparse_index = false });
+        _ = try init(io, &repo, .{ .sparse_index = false });
     }
     try twin.expectSame(io);
 }
@@ -902,7 +902,7 @@ test "reapply takes out an excluded file a checkout brought back, as git does" {
         .{ .cone = false, .sparse_index = false },
         .{ .cone = true, .sparse_index = true },
     }) |case| {
-        var twin = try Twin.init(gpa, io, &.{}, setupTree);
+        var twin = try Twin.init(setupTree, gpa, io, &.{});
         defer twin.deinit();
         const mode: []const u8 = if (case.cone) "--cone" else "--no-cone";
         const index_flag: []const u8 = if (case.sparse_index) "--sparse-index" else "--no-sparse-index";
@@ -926,7 +926,7 @@ test "reapply takes out an excluded file a checkout brought back, as git does" {
         {
             var repo = try twin.open(io);
             defer repo.deinit(io);
-            const out = try reapply(&repo, io, .{ .cone = case.cone, .sparse_index = case.sparse_index });
+            const out = try reapply(io, &repo, .{ .cone = case.cone, .sparse_index = case.sparse_index });
             try std.testing.expectEqual(@as(u32, 2), out.unmarked);
         }
         try twin.expectSame(io);
@@ -936,15 +936,15 @@ test "reapply takes out an excluded file a checkout brought back, as git does" {
 test "a list is git's list, in both modes" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var twin = try Twin.init(gpa, io, &.{}, setupTree);
+    var twin = try Twin.init(setupTree, gpa, io, &.{});
     defer twin.deinit();
 
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        try std.testing.expectError(error.NotSparse, list(&repo, io));
-        _ = try set(&repo, io, &.{ "E/F", "A" }, .{});
-        var listing = try list(&repo, io);
+        try std.testing.expectError(error.NotSparse, list(io, &repo));
+        _ = try set(io, &repo, &.{ "E/F", "A" }, .{});
+        var listing = try list(io, &repo);
         defer listing.deinit();
         try std.testing.expect(listing.cone);
         try std.testing.expectEqual(@as(usize, 2), listing.entries.len);
@@ -958,8 +958,8 @@ test "a list is git's list, in both modes" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try set(&repo, io, &.{ "/*", "!D/" }, .{ .cone = false });
-        var listing = try list(&repo, io);
+        _ = try set(io, &repo, &.{ "/*", "!D/" }, .{ .cone = false });
+        var listing = try list(io, &repo);
         defer listing.deinit();
         try std.testing.expect(!listing.cone);
         try std.testing.expectEqual(@as(usize, 2), listing.entries.len);
@@ -973,7 +973,7 @@ test "a list is git's list, in both modes" {
 test "a dirty file stays, and a file in the way is not written over" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var twin = try Twin.init(gpa, io, &.{}, setupTree);
+    var twin = try Twin.init(setupTree, gpa, io, &.{});
     defer twin.deinit();
 
     for ([_]*testgit.Repo{ &twin.theirs, &twin.ours }) |r| {
@@ -983,7 +983,7 @@ test "a dirty file stays, and a file in the way is not written over" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        const out = try set(&repo, io, &.{"A"}, .{});
+        const out = try set(io, &repo, &.{"A"}, .{});
         try std.testing.expectEqual(@as(u32, 1), out.update.kept_dirty);
     }
     try twin.expectSame(io);
@@ -995,7 +995,7 @@ test "a dirty file stays, and a file in the way is not written over" {
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        const out = try add(&repo, io, &.{"E"}, .{});
+        const out = try add(io, &repo, &.{"E"}, .{});
         try std.testing.expectEqual(@as(u32, 1), out.unmarked);
         try std.testing.expectEqual(@as(u32, 0), out.update.already_present);
     }
@@ -1008,17 +1008,17 @@ test "cone-mode paths that are patterns or files are refused unless checks are s
     try requireCurrentGit(gpa, io);
     var repo_git = try testgit.Repo.init(gpa, io, &.{});
     defer repo_git.deinit();
-    try setupTree(&repo_git, io);
+    try setupTree(io, &repo_git);
 
     var repo = try Repository.open(gpa, io, repo_git.dir, .{});
     defer repo.deinit(io);
-    try std.testing.expectError(error.NotSparse, add(&repo, io, &.{"A"}, .{}));
-    try std.testing.expectError(error.PathIsAFile, set(&repo, io, &.{"top.txt"}, .{}));
-    try std.testing.expectError(error.PatternNotADirectory, set(&repo, io, &.{"A*"}, .{}));
-    try std.testing.expectError(error.PatternNotADirectory, set(&repo, io, &.{"/A"}, .{}));
-    try std.testing.expectError(error.PatternNotADirectory, set(&repo, io, &.{"!A"}, .{}));
-    try std.testing.expectError(error.PathOutsideWorktree, set(&repo, io, &.{"../A"}, .{}));
-    _ = try set(&repo, io, &.{"top.txt"}, .{ .skip_checks = true });
+    try std.testing.expectError(error.NotSparse, add(io, &repo, &.{"A"}, .{}));
+    try std.testing.expectError(error.PathIsAFile, set(io, &repo, &.{"top.txt"}, .{}));
+    try std.testing.expectError(error.PatternNotADirectory, set(io, &repo, &.{"A*"}, .{}));
+    try std.testing.expectError(error.PatternNotADirectory, set(io, &repo, &.{"/A"}, .{}));
+    try std.testing.expectError(error.PatternNotADirectory, set(io, &repo, &.{"!A"}, .{}));
+    try std.testing.expectError(error.PathOutsideWorktree, set(io, &repo, &.{"../A"}, .{}));
+    _ = try set(io, &repo, &.{"top.txt"}, .{ .skip_checks = true });
     const text = try repo_git.readFile(io, ".git/info/sparse-checkout");
     defer gpa.free(text);
     try std.testing.expectEqualStrings("/*\n!/*/\n/top.txt/\n", text);
@@ -1027,16 +1027,16 @@ test "cone-mode paths that are patterns or files are refused unless checks are s
 test "a branch with no commit gets the root-only patterns and no index" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var twin = try Twin.init(gpa, io, &.{}, struct {
-        fn setup(_: *testgit.Repo, _: Io) anyerror!void {}
-    }.setup);
+    var twin = try Twin.init(struct {
+        fn setup(_: Io, _: *testgit.Repo) anyerror!void {}
+    }.setup, gpa, io, &.{});
     defer twin.deinit();
 
     try twin.git(io, &.{"init"});
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        const out = try init(&repo, io, .{});
+        const out = try init(io, &repo, .{});
         try std.testing.expect(!out.index_written);
     }
     try twin.expectSame(io);
@@ -1045,12 +1045,12 @@ test "a branch with no commit gets the root-only patterns and no index" {
 test "a linked worktree gets its own patterns and its own configuration" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var twin = try Twin.init(gpa, io, &.{}, struct {
-        fn setup(r: *testgit.Repo, i: Io) anyerror!void {
-            try setupTree(r, i);
+    var twin = try Twin.init(struct {
+        fn setup(i: Io, r: *testgit.Repo) anyerror!void {
+            try setupTree(i, r);
             try r.exec(i, &.{ "worktree", "add", "-q", "linked" });
         }
-    }.setup);
+    }.setup, gpa, io, &.{});
     defer twin.deinit();
 
     try twin.theirs.exec(io, &.{ "-C", "linked", "sparse-checkout", "set", "A" });
@@ -1059,7 +1059,7 @@ test "a linked worktree gets its own patterns and its own configuration" {
         defer linked.close(io);
         var repo = try Repository.open(gpa, io, linked, .{});
         defer repo.deinit(io);
-        _ = try set(&repo, io, &.{"A"}, .{});
+        _ = try set(io, &repo, &.{"A"}, .{});
     }
     for ([_][]const u8{
         ".git/config",
@@ -1087,15 +1087,15 @@ test "a linked worktree gets its own patterns and its own configuration" {
 test "a bare repository's core.bare moves where git moves it" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var twin = try Twin.init(gpa, io, &.{"--bare"}, struct {
-        fn setup(r: *testgit.Repo, i: Io) anyerror!void {
+    var twin = try Twin.init(struct {
+        fn setup(i: Io, r: *testgit.Repo) anyerror!void {
             try r.exec(i, &.{ "worktree", "add", "-q", "--orphan", "-b", "main", "linked" });
             try r.writeFile(i, "linked/A/a.txt", "a\n");
             try r.writeFile(i, "linked/top.txt", "top\n");
             try r.exec(i, &.{ "-C", "linked", "add", "-A" });
             try r.exec(i, &.{ "-C", "linked", "commit", "-q", "-m", "one" });
         }
-    }.setup);
+    }.setup, gpa, io, &.{"--bare"});
     defer twin.deinit();
 
     try twin.theirs.exec(io, &.{ "-C", "linked", "sparse-checkout", "set", "--cone" });
@@ -1104,7 +1104,7 @@ test "a bare repository's core.bare moves where git moves it" {
         defer linked.close(io);
         var repo = try Repository.open(gpa, io, linked, .{});
         defer repo.deinit(io);
-        _ = try set(&repo, io, &.{}, .{ .cone = true });
+        _ = try set(io, &repo, &.{}, .{ .cone = true });
     }
     for ([_][]const u8{ "config", "config.worktree", "worktrees/linked/config.worktree" }) |path| {
         const a = try readOptional(gpa, io, twin.theirs.dir, path);
@@ -1145,14 +1145,14 @@ fn expectSameIndex(gpa: Allocator, io: Io, t: *Twin) !void {
 test "a sparse index is written where git writes one, and made full where git makes it full" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var twin = try Twin.init(gpa, io, &.{}, setupTree);
+    var twin = try Twin.init(setupTree, gpa, io, &.{});
     defer twin.deinit();
 
     try twin.git(io, &.{ "set", "--sparse-index", "A/B" });
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try set(&repo, io, &.{"A/B"}, .{ .sparse_index = true });
+        _ = try set(io, &repo, &.{"A/B"}, .{ .sparse_index = true });
     }
     try twin.expectSame(io);
     try expectSameIndex(gpa, io, &twin);
@@ -1162,7 +1162,7 @@ test "a sparse index is written where git writes one, and made full where git ma
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try add(&repo, io, &.{ "D", "E/F" }, .{});
+        _ = try add(io, &repo, &.{ "D", "E/F" }, .{});
     }
     try twin.expectSame(io);
     try expectSameIndex(gpa, io, &twin);
@@ -1171,7 +1171,7 @@ test "a sparse index is written where git writes one, and made full where git ma
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try set(&repo, io, &.{"A"}, .{});
+        _ = try set(io, &repo, &.{"A"}, .{});
     }
     try twin.expectSame(io);
     try expectSameIndex(gpa, io, &twin);
@@ -1180,7 +1180,7 @@ test "a sparse index is written where git writes one, and made full where git ma
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try reapply(&repo, io, .{ .sparse_index = false });
+        _ = try reapply(io, &repo, .{ .sparse_index = false });
     }
     try twin.expectSame(io);
     try expectSameIndex(gpa, io, &twin);
@@ -1189,7 +1189,7 @@ test "a sparse index is written where git writes one, and made full where git ma
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try reapply(&repo, io, .{ .sparse_index = true });
+        _ = try reapply(io, &repo, .{ .sparse_index = true });
     }
     try twin.expectSame(io);
     try expectSameIndex(gpa, io, &twin);
@@ -1198,7 +1198,7 @@ test "a sparse index is written where git writes one, and made full where git ma
     {
         var repo = try twin.open(io);
         defer repo.deinit(io);
-        _ = try disable(&repo, io);
+        _ = try disable(io, &repo);
     }
     try twin.expectSame(io);
     try expectSameIndex(gpa, io, &twin);

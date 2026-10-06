@@ -199,18 +199,18 @@ pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u
         switch (e.unit()) {
             .u16 => if (cp >= 0x10000) {
                 const v = cp - 0x10000;
-                try appendInt(a, &out, u16, @intCast(0xd800 + (v >> 10)), endian); // safe: v is below 2^20
-                try appendInt(a, &out, u16, @intCast(0xdc00 + (v & 0x3ff)), endian); // safe: ten bits
+                try appendInt(u16, a, &out, @intCast(0xd800 + (v >> 10)), endian); // safe: v is below 2^20
+                try appendInt(u16, a, &out, @intCast(0xdc00 + (v & 0x3ff)), endian); // safe: ten bits
             } else {
-                try appendInt(a, &out, u16, @intCast(cp), endian); // safe: below 0x10000
+                try appendInt(u16, a, &out, @intCast(cp), endian); // safe: below 0x10000
             },
-            .u32 => try appendInt(a, &out, u32, cp, endian),
+            .u32 => try appendInt(u32, a, &out, cp, endian),
         }
     }
     return out.toOwnedSlice(a);
 }
 
-fn appendInt(a: Allocator, out: *std.ArrayList(u8), comptime T: type, value: T, endian: std.builtin.Endian) Allocator.Error!void {
+fn appendInt(comptime T: type, a: Allocator, out: *std.ArrayList(u8), value: T, endian: std.builtin.Endian) Allocator.Error!void {
     var bytes: [@sizeOf(T)]u8 = undefined;
     std.mem.writeInt(T, &bytes, value, endian);
     try out.appendSlice(a, &bytes);

@@ -50,7 +50,7 @@ pub const ChangeSource = struct {
     context: *anyopaque,
     /// What changed since `token`, or `null` for no answer, which makes
     /// every file be looked at. The answer may live in `arena`.
-    queryFn: *const fn (context: *anyopaque, arena: Allocator, token: []const u8) Allocator.Error!?Changes,
+    queryFn: *const fn (arena: Allocator, context: *anyopaque, token: []const u8) Allocator.Error!?Changes,
 };
 
 /// git's hook: `core.fsmonitor` and `core.fsmonitorHookVersion`.
@@ -108,7 +108,7 @@ pub fn refresh(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, source: Source
     const since = index.fsmonitor_token.?;
 
     const answer: ?Changes = switch (source) {
-        .changes => |c| try c.queryFn(c.context, arena, since),
+        .changes => |c| try c.queryFn(arena, c.context, since),
         .hook => |h| try askHook(arena, io, wt, h, since, now),
     };
     var token: []const u8 = now;

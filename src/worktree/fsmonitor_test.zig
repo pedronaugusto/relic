@@ -305,7 +305,7 @@ const Feed = struct {
         return .{ .changes = .{ .context = f, .queryFn = query } };
     }
 
-    fn query(context: *anyopaque, arena: Allocator, since: []const u8) Allocator.Error!?fsmonitor.Changes {
+    fn query(arena: Allocator, context: *anyopaque, since: []const u8) Allocator.Error!?fsmonitor.Changes {
         _ = arena;
         const f: *Feed = @ptrCast(@alignCast(context));
         f.asked_len = @min(since.len, f.asked_with.len);

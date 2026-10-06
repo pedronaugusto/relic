@@ -473,7 +473,7 @@ pub const Session = struct {
         line: []const u8,
         bytes: []const u8,
     ) Error!?[]const u8 {
-        return switch (try filter.runCommand(programs, a, s.io, s.options.wt, line, path, bytes)) {
+        return switch (try filter.runCommand(a, s.io, programs, s.options.wt, line, path, bytes)) {
             .output => |out| out,
             .failed => |stderr| s.passOver(path, driver, .exited, stderr),
             .not_started => s.passOver(path, driver, .not_started, ""),
@@ -491,7 +491,7 @@ pub const Session = struct {
             if (std.mem.eql(u8, p.command, command)) return p;
         }
         try s.processes.ensureUnusedCapacity(s.gpa, 1);
-        const p = try filter.Process.start(s.options.programs.?, s.gpa, s.io, command, s.options.wt);
+        const p = try filter.Process.start(s.gpa, s.io, s.options.programs.?, command, s.options.wt);
         s.processes.appendAssumeCapacity(p);
         return p;
     }

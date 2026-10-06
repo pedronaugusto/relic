@@ -385,9 +385,9 @@ pub const Ran = union(enum) {
 /// with the repository's own variables removed from the environment so the
 /// program finds the repository from where it stands.
 pub fn runCommand(
-    programs: program.Programs,
     a: Allocator,
     io: Io,
+    programs: program.Programs,
     cwd: Io.Dir,
     line: []const u8,
     path: []const u8,
@@ -676,7 +676,7 @@ pub const Process = struct {
     /// Start `command` from `cwd` and shake hands. Its diagnostics are not
     /// kept: a long-running program's standard error is not something a
     /// caller can be made to drain.
-    pub fn start(programs: program.Programs, gpa: Allocator, io: Io, command: []const u8, cwd: Io.Dir) StartError!*Process {
+    pub fn start(gpa: Allocator, io: Io, programs: program.Programs, command: []const u8, cwd: Io.Dir) StartError!*Process {
         const p = try gpa.create(Process);
         errdefer gpa.destroy(p);
         p.gpa = gpa;
