@@ -850,7 +850,7 @@ test "a malformed signing policy is refused before an unsigned object is written
     }
 }
 
-test "reading a signing policy preserves allocation resource failures" {
+test "reading a signing policy allocates nothing of the configuration's" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -863,13 +863,15 @@ test "reading a signing policy preserves allocation resource failures" {
     defer config_state.get(repo._config).gpa = gpa;
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
-    try std.testing.expectError(error.OutOfMemory, repo.writeTag(io, .{
+    // The policy is read, and a tag it says to sign has nothing to sign
+    // with.
+    try std.testing.expectError(error.SigningRequiresPrograms, repo.writeTag(io, .{
         .target = hash.Hasher.object(.sha1, "tree", ""),
         .target_type = .tree,
         .name = "t",
         .message = "m",
     }, &diagnostic));
-    try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
+    try std.testing.expectEqualStrings("tag.gpgSign", diagnostic.unsupported_setting);
 }
 
 test "discovery closes its git directory when the worktree handle cannot be opened" {
@@ -1084,7 +1086,7 @@ test "repository format and ref cache state have no writable public fields" {
     }
 }
 
-test "rule loaders preserve malformed case policy and allocation failures" {
+test "rule loaders refuse a malformed case policy, and read one without the configuration allocating" {
     const Load = struct {
         fn ignoreRules(io: Io, r: *repo_mod.Repository) !void {
             var rules = try r.loadIgnore(io);
@@ -1108,12 +1110,11 @@ test "rule loaders preserve malformed case policy and allocation failures" {
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     config_state.get(r._config).gpa = failing.allocator();
     defer config_state.get(r._config).gpa = gpa;
-    try std.testing.expectError(error.OutOfMemory, Load.ignoreRules(io, &r));
-    failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    try std.testing.expectError(error.OutOfMemory, Load.attributesRules(io, &r));
+    try Load.ignoreRules(io, &r);
+    try Load.attributesRules(io, &r);
 }
 
-test "required filter discovery keeps full names and resource failures" {
+test "required filter discovery keeps full names, and reads the policy without the configuration allocating" {
     const Read = struct {
         fn count(r: *repo_mod.Repository) !usize {
             const names = try r.requiredFilters(r.gpa);
@@ -1133,11 +1134,12 @@ test "required filter discovery keeps full names and resource failures" {
     defer gpa.free(names);
     try std.testing.expectEqual(@as(usize, 1), names.len);
     try std.testing.expectEqualStrings(long_name, names[0]);
-    // The query's allocation and the value decoder's allocation have owners.
+    // The values were read when the file was: asking for them allocates
+    // nothing of the configuration's.
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     config_state.get(r._config).gpa = failing.allocator();
     defer config_state.get(r._config).gpa = gpa;
-    try std.testing.expectError(error.OutOfMemory, Read.count(&r));
+    try std.testing.expectEqual(@as(usize, 1), try Read.count(&r));
 }
 
 test "required filter discovery refuses malformed required policy" {

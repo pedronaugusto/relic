@@ -1120,7 +1120,7 @@ test "sequencer settings preserve allocation resource failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }
 
-test "sequencer signing policy refuses malformed values and allocation failures" {
+test "sequencer signing policy refuses malformed values, and reads one without the configuration allocating" {
     const Read = struct {
         fn run(r: *Repository, request: signing_mod.Request) !bool {
             return signs(r, request);
@@ -1140,7 +1140,7 @@ test "sequencer signing policy refuses malformed values and allocation failures"
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     state.get(r._config).gpa = failing.allocator();
     defer state.get(r._config).gpa = gpa;
-    try std.testing.expectError(error.OutOfMemory, Read.run(&r, .{}));
+    try std.testing.expect(try Read.run(&r, .{}));
 }
 
 test "a reset to a SHA-256 commit records its whole name in the reflog" {
