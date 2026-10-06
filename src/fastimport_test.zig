@@ -34,6 +34,7 @@ const Pair = struct {
     fn deinit(p: *Pair) void {
         p.theirs.deinit();
         p.mine.deinit();
+        p.* = undefined;
     }
 
     /// Import `stream` into both, git with `args`; what each printed must

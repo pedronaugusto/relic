@@ -492,6 +492,7 @@ const Walk = struct {
         if (wk.mailmap) |*m| m.deinit();
         if (wk.decorations) |*d| d.deinit();
         if (wk.signer) |*s| s.deinit();
+        wk.* = undefined;
     }
 
     /// What a format needs besides the commit: the mailmap, the refs and a

@@ -275,7 +275,8 @@ const Scoreboard = struct {
     fn samePath(s: *Scoreboard, parent: *Node, o: *const Origin) Error!?*Origin {
         const entry = (try s.entryAt(parent.tree, o.path)) orelse return null;
         if (!sameKind(entry.mode, try s.modeAt(o))) return null;
-        return try s.origin(parent, o.path, entry.oid);
+        const found = try s.origin(parent, o.path, entry.oid);
+        return found;
     }
 
     fn modeAt(s: *Scoreboard, o: *const Origin) Error!object.Mode {
@@ -317,7 +318,8 @@ const Scoreboard = struct {
         const wanted = target orelse return null;
         _ = try rename.detect(s.arena, s.io, s.db, &queue, .{});
         if (!wanted.renamed) return null;
-        return try s.origin(parent, wanted.one.path, wanted.one.oid);
+        const found = try s.origin(parent, wanted.one.path, wanted.one.oid);
+        return found;
     }
 
     /// git's `pass_blame_to_parent`: every suspect on a line the diff from

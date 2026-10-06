@@ -45,7 +45,8 @@ pub fn ofCommit(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid) Self.
         defer parsed.deinit();
         parent_tree = parsed.tree;
     }
-    return try ofTrees(gpa, io, db, parent_tree, commit.tree);
+    const id = try ofTrees(gpa, io, db, parent_tree, commit.tree);
+    return id;
 }
 
 /// The patch id of the change from `old` to `new`, either of which may be

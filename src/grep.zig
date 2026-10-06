@@ -224,6 +224,7 @@ const Searcher = struct {
             .regex => |*r| r.deinit(),
             .fixed, .perl => {},
         };
+        s.* = undefined;
     }
 };
 
@@ -252,7 +253,8 @@ const ExprParser = struct {
         const x = try p.andExpr() orelse return null;
         if (p.at < p.terms.len and p.terms[p.at] != .close) {
             const y = try p.orExpr() orelse return error.InvalidExpression;
-            return try p.new(.{ .@"or" = .{ x, y } });
+            const expr = try p.new(.{ .@"or" = .{ x, y } });
+            return expr;
         }
         return x;
     }
@@ -264,7 +266,8 @@ const ExprParser = struct {
             p.at += 1;
             if (p.at >= p.terms.len) return error.InvalidExpression;
             const y = try p.andExpr() orelse return error.InvalidExpression;
-            return try p.new(.{ .@"and" = .{ left, y } });
+            const expr = try p.new(.{ .@"and" = .{ left, y } });
+            return expr;
         }
         return x;
     }
@@ -274,7 +277,8 @@ const ExprParser = struct {
             p.at += 1;
             if (p.at >= p.terms.len) return error.InvalidExpression;
             const x = try p.notExpr() orelse return error.InvalidExpression;
-            return try p.new(.{ .not = x });
+            const expr = try p.new(.{ .not = x });
+            return expr;
         }
         return p.atom();
     }
@@ -423,6 +427,7 @@ const Scratch = struct {
         gpa.free(sc.vms);
         if (sc.func_vm) |*v| v.deinit(gpa);
         gpa.free(sc.hits);
+        sc.* = undefined;
     }
 };
 

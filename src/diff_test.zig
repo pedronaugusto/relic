@@ -27,6 +27,7 @@ const Pair = struct {
         p.db.deinit(io);
         p.git_dir.close(io);
         p.repo.deinit();
+        p.* = undefined;
     }
 };
 

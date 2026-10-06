@@ -406,6 +406,7 @@ const Importer = struct {
         imp.rejected.deinit(imp.gpa);
         imp.line.deinit();
         imp.arena_state.deinit();
+        imp.* = undefined;
     }
 
     fn arena(imp: *Importer) Allocator {

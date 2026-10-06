@@ -172,6 +172,7 @@ const Exporter = struct {
         ex.tag_refs.deinit(ex.gpa);
         ex.refspecs.deinit(ex.gpa);
         ex.arena_state.deinit();
+        ex.* = undefined;
     }
 
     fn arena(ex: *Exporter) Allocator {
