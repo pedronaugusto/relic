@@ -85,9 +85,7 @@ pub fn copy(gpa: Allocator, source: *const config.Config) config.ParseError!conf
     for (source.read.items) |read| {
         const path = try gpa.dupe(u8, read.sub_path);
         errdefer gpa.free(path);
-        const bytes = if (read.bytes) |b| try gpa.dupe(u8, b) else null;
-        errdefer if (bytes) |b| gpa.free(b);
-        try out.read.append(gpa, .{ .dir = read.dir, .sub_path = path, .bytes = bytes });
+        try out.read.append(gpa, .{ .dir = read.dir, .sub_path = path, .digest = read.digest });
     }
     return out;
 }

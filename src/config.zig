@@ -303,7 +303,7 @@ pub const Config = struct {
     /// may be read again.
     sources: Sources = .{},
     /// Every file a read tried, includes among them and the ones that were
-    /// not there, with the bytes each held.
+    /// not there, with a digest of the bytes each held.
     read: std.ArrayList(Read) = .empty,
     /// While `open` or `openFile` reads: what it was asked to read, so a
     /// `hasconfig:` condition can read the same files for their URLs.
@@ -328,8 +328,17 @@ pub const Config = struct {
         dir: Io.Dir,
         /// Owned.
         sub_path: []const u8,
-        /// What it held, owned; `null` when it was not there.
-        bytes: ?[]const u8,
+        /// A digest of what it held; `null` when it was not there.
+        digest: ?Digest,
+
+        pub const Digest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
+
+        /// The digest `isStale` compares a file's bytes by.
+        pub fn digestOf(bytes: []const u8) Digest {
+            var out: Digest = undefined;
+            std.crypto.hash.sha2.Sha256.hash(bytes, &out, .{});
+            return out;
+        }
     };
 
     /// An empty configuration, which answers `null` to everything.
@@ -364,7 +373,14 @@ pub const Config = struct {
                 if (sources.global) |p| try config.addFile(io, p, .global, false, 0, false);
                 if (sources.local) |p| try config.addFile(io, p, .local, true, 0, false);
                 if (sources.worktree) |p| try config.addFile(io, p, .worktree, true, 0, false);
-                if (sources.command.len != 0 or sources.pairs.len != 0) try config.addCommandValues(sources.command, sources.pairs);
+                if (sources.command.len != 0 or sources.pairs.len != 0) {
+                    const first_entry = config.entries.items.len;
+                    try config.addCommandValues(sources.command, sources.pairs);
+                    // `-c include.path=` is followed as git follows it:
+                    // only to an absolute path or one under `~/`, there
+                    // being no file for a relative one to be relative to.
+                    try config.followIncludes(io, Io.Dir.cwd(), .command, first_entry, 0);
+                }
             },
             .file => |f| try config.addFile(io, f.path, f.level, true, 0, false),
         }
@@ -450,10 +466,7 @@ pub const Config = struct {
         for (config.files.items) |*f| f.deinit();
         config.files.deinit(config.gpa);
         config.entries.deinit(config.gpa);
-        for (config.read.items) |r| {
-            config.gpa.free(r.sub_path);
-            if (r.bytes) |b| config.gpa.free(b);
-        }
+        for (config.read.items) |r| config.gpa.free(r.sub_path);
         config.read.deinit(config.gpa);
         const paths = [_]?Sources.Path{ config.sources.system, config.sources.xdg, config.sources.global, config.sources.local, config.sources.worktree };
         for (paths) |maybe| {
@@ -550,12 +563,12 @@ pub const Config = struct {
         for (config.read.items) |r| {
             const now = try fs.readFileAlloc(config.gpa, io, r.dir, r.sub_path, 1 << 24);
             defer if (now) |b| config.gpa.free(b);
-            const was = r.bytes orelse {
+            const was = r.digest orelse {
                 if (now != null) return true;
                 continue;
             };
             const is = now orelse return true;
-            if (!std.mem.eql(u8, was, is)) return true;
+            if (!std.mem.eql(u8, &was, &Read.digestOf(is))) return true;
         }
         return false;
     }
@@ -586,9 +599,10 @@ pub const Config = struct {
         errdefer if (read) |b| config.gpa.free(b);
         const sub_path = try config.gpa.dupe(u8, path.sub_path);
         errdefer config.gpa.free(sub_path);
-        const bytes = if (read) |b| try config.gpa.dupe(u8, b) else null;
-        errdefer if (bytes) |b| config.gpa.free(b);
-        try config.read.append(config.gpa, .{ .dir = path.dir, .sub_path = sub_path, .bytes = bytes });
+        // A digest, not a second copy: an include named many times over is
+        // held once, as the file it parsed to.
+        const digest = if (read) |b| Read.digestOf(b) else null;
+        try config.read.append(config.gpa, .{ .dir = path.dir, .sub_path = sub_path, .digest = digest });
     }
 
     fn addParsedFile(config: *Config, path: []const u8, text: []const u8, level: Level, writable: bool) ParseError!void {
@@ -692,10 +706,18 @@ pub const Config = struct {
             } else if (std.ascii.eqlIgnoreCase(entry.section, "includeif") and
                 std.ascii.eqlIgnoreCase(entry.name, "path"))
             {
-                if (try config.includeHolds(io, entry.subsection)) include_path = value;
+                // A `gitdir:./` condition is the including file's
+                // directory's, absolute and with its links resolved.
+                var dir_buf: [4096]u8 = undefined;
+                const including_dir = if (std.mem.indexOf(u8, entry.subsection, ":./") != null)
+                    absoluteDirOf(io, dir, config.files.items[entry.file_index].path, &dir_buf)
+                else
+                    null;
+                if (try config.includeHolds(io, entry.subsection, including_dir)) include_path = value;
                 conditional = true;
             }
             const path = include_path orelse continue;
+            if (level == .command and !std.fs.path.isAbsolute(path) and !std.mem.startsWith(u8, path, "~/")) continue;
 
             var buf: [4096]u8 = undefined;
             const including_path = config.files.items[entry.file_index].path;
@@ -706,6 +728,15 @@ pub const Config = struct {
                 else => continue,
             };
         }
+    }
+
+    /// The directory of `sub_path` under `dir`, absolute, links resolved,
+    /// `/`-separated; `null` when it cannot be found.
+    fn absoluteDirOf(io: Io, dir: Io.Dir, sub_path: []const u8, buf: []u8) ?[]const u8 {
+        const len = dir.realPathFile(io, sub_path, buf) catch return null;
+        const path = buf[0..len];
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+        return std.fs.path.dirnamePosix(path);
     }
 
     fn resolveIncludePath(config: *const Config, path: []const u8, including_path: []const u8, buf: []u8) ?[]const u8 {
@@ -731,10 +762,32 @@ pub const Config = struct {
     /// a path glob; `open` decides it against the URLs of every file it
     /// reads, as git does, wherever in the read the condition stands.
     pub fn conditionHolds(config: *const Config, condition: []const u8) Self.ParseError!bool {
+        return config.conditionHoldsFrom(condition, null);
+    }
+
+    /// `conditionHolds` for a condition written in a file whose directory
+    /// is `including_dir`, which a `gitdir:./` pattern starts from.
+    fn conditionHoldsFrom(config: *const Config, condition: []const u8, including_dir: ?[]const u8) ParseError!bool {
         if (std.mem.startsWith(u8, condition, "gitdir:") or std.mem.startsWith(u8, condition, "gitdir/i:")) {
             const case_fold = std.mem.startsWith(u8, condition, "gitdir/i:");
             const pattern_raw = condition[if (case_fold) "gitdir/i:".len else "gitdir:".len..];
             const git_dir = config.context.git_dir orelse return false;
+            if (std.mem.startsWith(u8, pattern_raw, "./")) {
+                // git's `prepare_include_condition_pattern`: the including
+                // file's directory, compared as it is, and the rest of the
+                // pattern matched below it.
+                const base = including_dir orelse return false;
+                if (git_dir.len <= base.len or git_dir[base.len] != '/') return false;
+                const same = if (case_fold) std.ascii.eqlIgnoreCase(git_dir[0..base.len], base) else std.mem.eql(u8, git_dir[0..base.len], base);
+                if (!same) return false;
+                var rest_buf: [4096]u8 = undefined;
+                const rest = pattern_raw[2..];
+                const rest_pattern = if (std.mem.endsWith(u8, rest, "/"))
+                    std.fmt.bufPrint(&rest_buf, "{s}**", .{rest}) catch return false
+                else
+                    rest;
+                return wildmatch.match(rest_pattern, git_dir[base.len + 1 ..], .{ .pathname = true, .case_fold = case_fold }) catch false;
+            }
             var buf: [4096]u8 = undefined;
             const pattern = config.expandCondition(pattern_raw, &buf) orelse return false;
             // Git matches paths with forward slashes on Windows, including
@@ -777,8 +830,8 @@ pub const Config = struct {
     /// against the URLs every file of the read sets: git's
     /// `include_by_remote_url`. The first such condition reads the same
     /// files again to gather them, with every `hasconfig:` holding.
-    fn includeHolds(config: *Config, io: Io, condition: []const u8) ParseError!bool {
-        if (!std.mem.startsWith(u8, condition, hasconfig_url)) return config.conditionHolds(condition);
+    fn includeHolds(config: *Config, io: Io, condition: []const u8, including_dir: ?[]const u8) ParseError!bool {
+        if (!std.mem.startsWith(u8, condition, hasconfig_url)) return config.conditionHoldsFrom(condition, including_dir);
         if (config.gathering_urls) return true;
         const plan = config.plan orelse return config.conditionHolds(condition);
         if (config.remote_urls == null) config.remote_urls = try config.gatherRemoteUrls(io, plan);
@@ -1308,42 +1361,61 @@ pub fn splitFullName(full: []const u8) ?FullName {
     };
 }
 
-/// git's boolean spellings.
+/// git's boolean spellings, and as git's `git_config_bool` falls back,
+/// any integer: zero is false, anything else true.
 pub fn parseBool(raw: []const u8) Self.ValueError!bool {
     if (raw.len == 0) return false;
-    const truthy = [_][]const u8{ "true", "yes", "on", "1" };
-    const falsy = [_][]const u8{ "false", "no", "off", "0" };
+    const truthy = [_][]const u8{ "true", "yes", "on" };
+    const falsy = [_][]const u8{ "false", "no", "off" };
     for (truthy) |t| {
         if (std.ascii.eqlIgnoreCase(raw, t)) return true;
     }
     for (falsy) |f| {
         if (std.ascii.eqlIgnoreCase(raw, f)) return false;
     }
-    return error.NotABoolean;
+    const n = parseInt(raw) catch return error.NotABoolean;
+    return n != 0;
 }
 
-/// git's integer spellings, including the `k`, `m` and `g` size suffixes.
+/// git's integer spellings, as its `git_parse_signed` reads them:
+/// `strtoimax` in base 0 -- leading blanks and a sign, `0x` for
+/// hexadecimal, a leading `0` for octal -- then a `k`, `m` or `g` size
+/// suffix, and nothing after.
 pub fn parseInt(raw: []const u8) Self.ValueError!i64 {
-    var text = std.mem.trim(u8, raw, " \t");
-    if (text.len == 0) return error.NotAnInteger;
-    var multiplier: i64 = 1;
-    switch (text[text.len - 1]) {
-        'k', 'K' => {
-            multiplier = 1024;
-            text = text[0 .. text.len - 1];
-        },
-        'm', 'M' => {
-            multiplier = 1024 * 1024;
-            text = text[0 .. text.len - 1];
-        },
-        'g', 'G' => {
-            multiplier = 1024 * 1024 * 1024;
-            text = text[0 .. text.len - 1];
-        },
-        else => {},
+    var i: usize = 0;
+    while (i < raw.len and (raw[i] == ' ' or (raw[i] >= '\t' and raw[i] <= '\r'))) i += 1;
+    var negative = false;
+    if (i < raw.len and (raw[i] == '+' or raw[i] == '-')) {
+        negative = raw[i] == '-';
+        i += 1;
     }
-    const base = std.fmt.parseInt(i64, text, 10) catch return error.NotAnInteger;
-    return std.math.mul(i64, base, multiplier) catch error.NotAnInteger;
+    var base: u8 = 10;
+    if (i + 1 < raw.len and raw[i] == '0' and (raw[i + 1] == 'x' or raw[i + 1] == 'X') and
+        i + 2 < raw.len and std.ascii.isHex(raw[i + 2]))
+    {
+        base = 16;
+        i += 2;
+    } else if (i < raw.len and raw[i] == '0') base = 8;
+    const digits_start = i;
+    var value: i64 = 0;
+    while (i < raw.len) : (i += 1) {
+        const digit = std.fmt.charToDigit(raw[i], base) catch break;
+        value = std.math.mul(i64, value, base) catch return error.NotAnInteger;
+        value = (if (negative) std.math.sub(i64, value, digit) else std.math.add(i64, value, digit)) catch return error.NotAnInteger;
+    }
+    if (i == digits_start) return error.NotAnInteger;
+    var multiplier: i64 = 1;
+    if (i < raw.len) {
+        multiplier = switch (raw[i]) {
+            'k', 'K' => 1024,
+            'm', 'M' => 1024 * 1024,
+            'g', 'G' => 1024 * 1024 * 1024,
+            else => return error.NotAnInteger,
+        };
+        i += 1;
+    }
+    if (i != raw.len) return error.NotAnInteger;
+    return std.math.mul(i64, value, multiplier) catch error.NotAnInteger;
 }
 
 /// Check `full` the way git checks a name before it writes one, and split
@@ -1865,6 +1937,41 @@ test "get hands back the value git reads, quotes and escapes undone once, and an
             defer ours.deinit();
             try std.testing.expectEqualStrings(value[0 .. value.len - 1], ours.get("a.x").?);
         } else |_| try std.testing.expectError(error.MalformedValue, parsed);
+    }
+}
+
+test "integers and booleans read as git config --type reads them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    git.report_failures = false;
+    for ([_][]const u8{ "0x10", "010", "08", "1_000", "2", "0", "-0x8k", "+3m", "1k ", "0x", "true", "Off", "", "nope" }) |value| {
+        for ([_][]const u8{ "int", "bool" }) |kind| {
+            const text = try std.fmt.allocPrint(gpa, "[a]\n\tx = \"{s}\"\n", .{value});
+            defer gpa.free(text);
+            try git.writeFile(io, "probe.config", text);
+            const flag = try std.fmt.allocPrint(gpa, "--type={s}", .{kind});
+            defer gpa.free(flag);
+            const theirs = git.run(io, &.{ "config", "-f", "probe.config", flag, "a.x" });
+            defer if (theirs) |t| gpa.free(t) else |_| {};
+            var config = try Config.parseText(gpa, text, .local);
+            defer config.deinit();
+            var buf: [64]u8 = undefined;
+            const ours: anyerror![]const u8 = if (kind[0] == 'i')
+                (if (config.getInt("a.x", 0)) |n| std.fmt.bufPrint(&buf, "{d}\n", .{n}) else |err| err)
+            else
+                (if (config.getBool("a.x", false)) |b| std.fmt.bufPrint(&buf, "{}\n", .{b}) else |err| err);
+            if (theirs) |t| {
+                std.testing.expectEqualStrings(t, try ours) catch |err| {
+                    std.debug.print("{s} as {s}\n", .{ value, kind });
+                    return err;
+                };
+            } else |_| std.testing.expect(std.meta.isError(ours)) catch |err| {
+                std.debug.print("{s} as {s}: git refuses it\n", .{ value, kind });
+                return err;
+            };
+        }
     }
 }
 

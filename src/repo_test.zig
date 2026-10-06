@@ -605,6 +605,47 @@ test "discovery stops at a damaged .git file, passes over a .git that is no repo
     from_a.deinit(io);
 }
 
+test "an includeIf gitdir:./ starts from the including file's directory, and -c include.path is followed, as git does both" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var home = std.testing.tmpDir(.{ .iterate = true });
+    defer home.cleanup();
+    const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(home_path);
+    try home.dir.createDirPath(io, "work/repo");
+    try home.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = "[includeIf \"gitdir:./work/\"]\n\tpath = inc\n" });
+    try home.dir.writeFile(io, .{ .sub_path = "inc", .data = "[probe]\n\tv = yes\n" });
+    try home.dir.writeFile(io, .{ .sub_path = "cmd.inc", .data = "[probe]\n\tw = fromcmd\n" });
+    var work = try home.dir.openDir(io, "work/repo", .{});
+    defer work.close(io);
+    {
+        var init = try repo_mod.Repository.init(gpa, io, work, .{});
+        init.deinit(io);
+    }
+    var environ = try testgit.isolatedEnviron(gpa, home_path);
+    defer environ.deinit();
+    const cmd_inc = try std.fmt.allocPrint(gpa, "include.path={s}/cmd.inc", .{home_path});
+    defer gpa.free(cmd_inc);
+    const said = try std.process.run(gpa, io, .{
+        .argv = &.{ "git", "-c", cmd_inc, "config", "--get-regexp", "^probe\\." },
+        .cwd = .{ .dir = work },
+        .environ_map = &environ,
+    });
+    defer gpa.free(said.stdout);
+    defer gpa.free(said.stderr);
+    try std.testing.expectEqualStrings("probe.v yes\nprobe.w fromcmd\n", said.stdout);
+
+    var repo = try repo_mod.Repository.open(gpa, io, work, .{
+        .global_config = .{ .dir = home.dir, .sub_path = ".gitconfig" },
+        .home = home_path,
+        .config_overrides = &.{cmd_inc},
+        .ownership = .trust,
+    });
+    defer repo.deinit(io);
+    try std.testing.expectEqualStrings("yes", repo.configuration().get("probe.v").?);
+    try std.testing.expectEqualStrings("fromcmd", repo.configuration().get("probe.w").?);
+}
+
 test "a config refresh keeps only its own refused setting" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
