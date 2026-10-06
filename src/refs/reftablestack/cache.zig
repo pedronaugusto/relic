@@ -26,6 +26,8 @@
 //! `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `AUTO_MERGE` -- is a ref in the stack,
 //! which is where git since 2.45 keeps them.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -481,50 +483,30 @@ fn isPerWorktree(store: anytype, name: []const u8) bool {
 }
 
 pub const internal = struct {
-    pub const hash = fixture_hash;
-    pub const object = fixture_object;
-    pub const fs = fixture_fs;
-    pub const reftable = fixture_reftable;
-    pub const reflog = fixture_reflog;
-    pub const max_reload_attempts = fixture_max_reload_attempts;
-    pub const mergedRefs = fixture_mergedRefs;
-    pub const allLogs = fixture_allLogs;
-    pub const copyLog = fixture_copyLog;
-    pub const lessThanRef = fixture_lessThanRef;
-    pub const newerFirst = fixture_newerFirst;
-    pub const logOrder = fixture_logOrder;
-    pub const isTableName = fixture_isTableName;
-    pub const tableName = fixture_tableName;
-    pub const Validity = fixture_Validity;
-    pub const Stacks = fixture_Stacks;
-    pub const loadIn = fixture_loadIn;
-    pub const reloadIn = fixture_reloadIn;
-    pub const isLinked = fixture_isLinked;
-    pub const isPerWorktree = fixture_isPerWorktree;
+    pub const hash = Self.hash;
+    pub const object = Self.object;
+    pub const fs = Self.fs;
+    pub const reftable = Self.reftable;
+    pub const reflog = Self.reflog;
+    pub const max_reload_attempts = Self.max_reload_attempts;
+    pub const mergedRefs = Self.mergedRefs;
+    pub const allLogs = Self.allLogs;
+    pub const copyLog = Self.copyLog;
+    pub const lessThanRef = Self.lessThanRef;
+    pub const newerFirst = Self.newerFirst;
+    pub const logOrder = Self.logOrder;
+    pub const isTableName = Self.isTableName;
+    pub const tableName = Self.tableName;
+    pub const Validity = Self.Validity;
+    pub const Stacks = Self.Stacks;
+    pub const loadIn = Self.loadIn;
+    pub const reloadIn = Self.reloadIn;
+    pub const isLinked = Self.isLinked;
+    pub const isPerWorktree = Self.isPerWorktree;
     pub const refresh = Cache.refresh;
-    pub const open = fixture_Stacks.open;
-    pub const deinit = fixture_Stacks.deinit;
-    pub const forName = fixture_Stacks.forName;
+    pub const open = Self.Stacks.open;
+    pub const deinit = Self.Stacks.deinit;
+    pub const forName = Self.Stacks.forName;
     pub const empty = Stack.empty;
     pub const closeUnclaimed = Stack.closeUnclaimed;
 };
-const fixture_hash = hash;
-const fixture_object = object;
-const fixture_fs = fs;
-const fixture_reftable = reftable;
-const fixture_reflog = reflog;
-const fixture_max_reload_attempts = max_reload_attempts;
-const fixture_mergedRefs = mergedRefs;
-const fixture_allLogs = allLogs;
-const fixture_copyLog = copyLog;
-const fixture_lessThanRef = lessThanRef;
-const fixture_newerFirst = newerFirst;
-const fixture_logOrder = logOrder;
-const fixture_isTableName = isTableName;
-const fixture_tableName = tableName;
-const fixture_Validity = Validity;
-const fixture_Stacks = Stacks;
-const fixture_loadIn = loadIn;
-const fixture_reloadIn = reloadIn;
-const fixture_isLinked = isLinked;
-const fixture_isPerWorktree = isPerWorktree;

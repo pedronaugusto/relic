@@ -1,3 +1,5 @@
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -866,38 +868,21 @@ pub fn isReftableRepository(io: Io, common_dir: Io.Dir) Io.Dir.AccessError!bool 
 //=========================================================================
 
 pub const test_access = if (@import("builtin").is_test) struct {
-    pub const View = test_View;
-    pub const readIn = test_readIn;
-    pub const resolveIn = test_resolveIn;
-    pub const lessThanNamed = test_lessThanNamed;
-    pub const put = test_put;
-    pub const lockStack = test_lockStack;
-    pub const lockSpecial = test_lockSpecial;
-    pub const commitSpecial = test_commitSpecial;
-    pub const checkNames = test_checkNames;
-    pub const deletedHere = test_deletedHere;
-    pub const install = test_install;
-    pub const addTable = test_addTable;
-    pub const logMessage = test_logMessage;
-    pub const writeTable = test_writeTable;
-    pub const Segment = test_Segment;
-    pub const suggestSegment = test_suggestSegment;
-    pub const suggest = test_suggest;
+    pub const View = Self.View;
+    pub const readIn = Self.readIn;
+    pub const resolveIn = Self.resolveIn;
+    pub const lessThanNamed = Self.lessThanNamed;
+    pub const put = Self.put;
+    pub const lockStack = Self.lockStack;
+    pub const lockSpecial = Self.lockSpecial;
+    pub const commitSpecial = Self.commitSpecial;
+    pub const checkNames = Self.checkNames;
+    pub const deletedHere = Self.deletedHere;
+    pub const install = Self.install;
+    pub const addTable = Self.addTable;
+    pub const logMessage = Self.logMessage;
+    pub const writeTable = Self.writeTable;
+    pub const Segment = Self.Segment;
+    pub const suggestSegment = Self.suggestSegment;
+    pub const suggest = Self.suggest;
 } else struct {};
-const test_View = View;
-const test_readIn = readIn;
-const test_resolveIn = resolveIn;
-const test_lessThanNamed = lessThanNamed;
-const test_put = put;
-const test_lockStack = lockStack;
-const test_lockSpecial = lockSpecial;
-const test_commitSpecial = commitSpecial;
-const test_checkNames = checkNames;
-const test_deletedHere = deletedHere;
-const test_install = install;
-const test_addTable = addTable;
-const test_logMessage = logMessage;
-const test_writeTable = writeTable;
-const test_Segment = Segment;
-const test_suggestSegment = suggestSegment;
-const test_suggest = suggest;
