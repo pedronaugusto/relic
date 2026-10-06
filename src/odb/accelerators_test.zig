@@ -667,7 +667,9 @@ test "a repository with replace refs is repacked with a commit graph of the pare
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
     _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1, .sync = .none }, .remove_packs = true });
-    try repo.exec(io, &.{ "commit-graph", "verify" });
+    // git 2.30's verify reads the commits replaced, though its write does
+    // not, so the replace refs are set aside for it.
+    try repo.exec(io, &.{ "--no-replace-objects", "commit-graph", "verify" });
     const ours = try repo.readFile(io, ".git/objects/info/commit-graph");
     defer gpa.free(ours);
     try repo.dir.deleteFile(io, ".git/objects/info/commit-graph");

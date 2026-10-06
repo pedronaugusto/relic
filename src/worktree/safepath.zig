@@ -412,7 +412,7 @@ test "traversal and separators are refused" {
 
 test "a stored path refuses what git's verify_path refuses everywhere, and no more" {
     // Names only Windows cannot create, which a Linux or macOS index holds.
-    for ([_][]const u8{ "d/aux.c", "a\tb", "t.", "x ", "con", "a:b" }) |path| {
+    for ([_][]const u8{ "d/aux.c", "a\tb", "t.", "x ", "con", "ab:c" }) |path| {
         try std.testing.expectEqual(null, check(path, .stored));
         try std.testing.expect(check(path, .worktree) != null);
     }
