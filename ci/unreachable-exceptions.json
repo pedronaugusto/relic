@@ -50,13 +50,6 @@
   },
   {
     "rule": "catch-unreachable",
-    "path": "src/object/fsck.zig",
-    "source": "return Oid.fromRaw(kind, e.oid) catch unreachable; // safe: decodeEntry took exactly rawLen bytes",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
     "path": "src/repo.zig",
     "source": ".mode => |m| std.fmt.bufPrint(buf, \"0{o}\", .{m}) catch unreachable,",
     "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
