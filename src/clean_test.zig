@@ -204,3 +204,39 @@ test "clean refuses without force as git does, and names a bare repository" {
     defer outcome.deinit();
     try std.testing.expect(outcome.reports.len > 0);
 }
+
+test "clean leaves a directory whose .git file cannot be read, as git takes it for a repository" {
+    // A mode that refuses reading is POSIX's, and refuses no one as root.
+    if (builtin.os.tag == .windows or std.c.getuid() == 0) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var outs: [2][]const u8 = undefined;
+    var trees: [2][]const u8 = undefined;
+    for (0..2) |side| {
+        var git = try testgit.Repo.init(gpa, io, &.{});
+        defer git.deinit();
+        try git.writeFile(io, "tracked", "t\n");
+        try git.exec(io, &.{ "add", "tracked" });
+        try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+        try git.writeFile(io, "nested/work.txt", "someone's work\n");
+        try git.writeFile(io, "nested/.git", "gitdir: ../.git/modules/nested\n");
+        try git.dir.setFilePermissions(io, "nested/.git", @enumFromInt(@as(std.posix.mode_t, 0)), .{});
+        defer git.dir.setFilePermissions(io, "nested/.git", @enumFromInt(@as(std.posix.mode_t, 0o644)), .{}) catch {};
+        if (side == 0) {
+            outs[side] = try git.run(io, &.{ "clean", "-f", "-d" });
+        } else {
+            var repo = try Repository.open(gpa, io, git.dir, .{});
+            defer repo.deinit(io);
+            var printed: Io.Writer.Allocating = .init(gpa);
+            defer printed.deinit();
+            var outcome = try clean_mod.clean(gpa, io, &repo, .{ .force = .yes, .directories = true, .out = &printed.writer });
+            outcome.deinit();
+            outs[side] = try gpa.dupe(u8, printed.written());
+        }
+        trees[side] = try listTree(gpa, io, git.dir);
+    }
+    defer for (outs ++ trees) |text| gpa.free(text);
+    try std.testing.expectEqualStrings(outs[0], outs[1]);
+    try std.testing.expectEqualStrings(trees[0], trees[1]);
+    try std.testing.expect(std.mem.indexOf(u8, trees[1], "nested/work.txt") != null);
+}
