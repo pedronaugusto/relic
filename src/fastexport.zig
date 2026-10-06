@@ -16,6 +16,7 @@
 //! converter; a commit in another encoding is written as it is
 //! (`Reencode.no`) or refused.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -127,7 +128,7 @@ pub const Options = struct {
 };
 
 /// Write the stream for `options.tips` to `w`.
-pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, options: Options) Error!void {
+pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, options: Options) Self.Error!void {
     var ex: Exporter = .{
         .gpa = gpa,
         .io = io,

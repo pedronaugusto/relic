@@ -5,6 +5,7 @@
 //! a caller wants — a name-status list, added and removed line counts, and a
 //! patch with git's own headers.
 
+const Self = @This();
 pub const blame = @import("diff/blame.zig");
 pub const patchid = @import("diff/patchid.zig");
 // The modules relic's API puts under this one, as `relic.diff.<name>`.
@@ -148,7 +149,7 @@ pub fn tree(
     old: ?Oid,
     new: ?Oid,
     options: TreeOptions,
-) Error!Changes {
+) Self.Error!Changes {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -530,7 +531,7 @@ pub fn numstat(
     db: *odb_mod.Odb,
     changes: []const Change,
     options: Options,
-) Error![]NumStat {
+) Self.Error![]NumStat {
     var out = try gpa.alloc(NumStat, changes.len);
     errdefer gpa.free(out);
     for (changes, 0..) |change, i| {

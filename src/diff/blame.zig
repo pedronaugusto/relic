@@ -16,6 +16,7 @@
 //! commit that receives suspects after it was taken is taken again, so the
 //! answer does not depend on the order.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -73,7 +74,7 @@ pub const Blame = struct {
 };
 
 /// Blame `path` as `commit` has it.
-pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit: Oid, path: []const u8, options: Options) Error!Blame {
+pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit: Oid, path: []const u8, options: Options) Self.Error!Blame {
     var out_arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer out_arena.deinit();
     var work: std.heap.ArenaAllocator = .init(gpa);

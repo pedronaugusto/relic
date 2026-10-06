@@ -13,6 +13,7 @@
 //! and human dates, wrapping, padding and colour — is refused as
 //! `error.UnsupportedPlaceholder`.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -612,7 +613,7 @@ fn cstr(s: []const u8) []const u8 {
 }
 
 /// The commit `oid` formatted by `format`, appended to `out`.
-pub fn formatCommit(a: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, format: []const u8, ctx: Context, out: *std.ArrayList(u8)) Error!void {
+pub fn formatCommit(a: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, format: []const u8, ctx: Context, out: *std.ArrayList(u8)) Self.Error!void {
     const found = try db.read(io, oid);
     defer db.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;

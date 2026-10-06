@@ -18,6 +18,7 @@
 //! `-P` (PCRE) is the caller's to bring, as a `Matcher`; without one it is
 //! refused by name, as are submodule recursion and `--no-index`.
 
+const Self = @This();
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -967,7 +968,7 @@ const task_output_bytes: usize = 1 << 20;
 
 /// `git grep`: write to `w` what git writes, and say whether anything
 /// matched.
-pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.Writer) Error!Outcome {
+pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.Writer) Self.Error!Outcome {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const a = arena_instance.allocator();

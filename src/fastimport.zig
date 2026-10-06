@@ -20,6 +20,7 @@
 //! modes, is not offered. `rewrite-submodules-*` and `export-pack-edges`
 //! are refused by name.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -279,7 +280,7 @@ pub const Marks = struct {
 };
 
 /// Read the fast-import stream `input` into `repo`.
-pub fn import(gpa: Allocator, io: Io, repo: *Repository, input: *Io.Reader, options: Options) Error!Report {
+pub fn import(gpa: Allocator, io: Io, repo: *Repository, input: *Io.Reader, options: Options) Self.Error!Report {
     var imp: Importer = try .init(gpa, io, repo, input, options);
     defer imp.deinit();
     try imp.run();

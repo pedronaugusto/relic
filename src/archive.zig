@@ -17,6 +17,7 @@
 //! out, `export-subst` expands `$Format:...$` (`pretty.zig`), and line
 //! endings, `ident` and filters apply as a checkout applies them.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -662,7 +663,7 @@ fn tarUmask(repo: *Repository, user: ?u32) Error!u32 {
 }
 
 /// `git archive <tree-ish> [<path>...]`: write the archive to `w`.
-pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options: Options, w: *Io.Writer) Error!void {
+pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options: Options, w: *Io.Writer) Self.Error!void {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const a = arena_instance.allocator();

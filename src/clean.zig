@@ -22,6 +22,7 @@
 //! What git does that this does not offer: `-i` (interactive), which is a
 //! terminal conversation and not a library call.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -127,7 +128,7 @@ pub const Outcome = struct {
 
 /// Remove the untracked files of `repo`'s working tree that `options`
 /// name.
-pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Outcome {
+pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     const wt = repo.work_dir orelse return error.BareRepository;
     const config = repo.configuration();
     if (try config.getBool("clean.requireforce", true) and options.force == .no and !options.dry_run)

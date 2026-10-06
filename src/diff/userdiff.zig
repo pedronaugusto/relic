@@ -3,6 +3,7 @@
 //! driver of that name, else git's default — a line starting with a
 //! letter, `_` or `$`. What `git grep -p` and `-W` look for.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -61,7 +62,7 @@ pub const Rule = struct {
 
     /// The rule for the driver the `diff` attribute names, or git's
     /// default for `null` or a name no driver has.
-    pub fn init(gpa: Allocator, config: *const config_mod.Config, driver: ?[]const u8) Error!Rule {
+    pub fn init(gpa: Allocator, config: *const config_mod.Config, driver: ?[]const u8) Self.Error!Rule {
         var rule: Rule = .{ .arena = .init(gpa), .regs = &.{} };
         errdefer rule.deinit();
         const name = driver orelse return rule;

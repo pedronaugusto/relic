@@ -8,6 +8,7 @@
 //! `:(glob)`. Paths are from the top of the working tree: there is no
 //! current directory to be relative to. `:(attr:...)` is refused by name.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -239,7 +240,7 @@ fn normalize(a: Allocator, path: []const u8) Error![]u8 {
 
 /// Read `specs`, each as git reads a pathspec argument at the top of the
 /// working tree.
-pub fn parse(gpa: Allocator, specs: []const []const u8) Error!Pathspec {
+pub fn parse(gpa: Allocator, specs: []const []const u8) Self.Error!Pathspec {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();

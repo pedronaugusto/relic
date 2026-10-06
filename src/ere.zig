@@ -10,6 +10,7 @@
 //! make it run away; one past a budget of work is still refused, as
 //! `error.PatternTooComplex`.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -43,7 +44,7 @@ pub const Pattern = struct {
     root: *const Alt,
 
     /// Compile `text`.
-    pub fn compile(gpa: Allocator, text: []const u8) Error!Pattern {
+    pub fn compile(gpa: Allocator, text: []const u8) Self.Error!Pattern {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
         var p: Parser = .{ .a = arena.allocator(), .text = text };
@@ -62,7 +63,7 @@ pub const Pattern = struct {
     /// tried at once: the places each node can leave off at are carried as
     /// a set, so a pattern costs its length times the text's, not the
     /// number of ways it can match.
-    pub fn search(p: *const Pattern, gpa: Allocator, text: []const u8) Error!bool {
+    pub fn search(p: *const Pattern, gpa: Allocator, text: []const u8) Self.Error!bool {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
         var m: Matcher = .{ .a = arena.allocator(), .text = text, .budget = 1 << 24 };

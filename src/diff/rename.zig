@@ -16,6 +16,7 @@
 //! that moved can be recognised, and a count of where each one's files
 //! went. Those inputs are optional; a diff leaves them out.
 
+const rename = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -118,7 +119,7 @@ pub const Outcome = struct {
 /// does, and write the queue back as git does: a rename or copy stands
 /// where its destination stood, and a deletion whose file went somewhere is
 /// gone. Everything allocated is `arena`'s.
-pub fn detect(arena: Allocator, io: Io, db: *odb_mod.Odb, queue: *std.ArrayList(*Pair), options: Options) Error!Outcome {
+pub fn detect(arena: Allocator, io: Io, db: *odb_mod.Odb, queue: *std.ArrayList(*Pair), options: Options) rename.Error!Outcome {
     var r: Run = .{ .arena = arena, .io = io, .db = db, .options = options };
     const empty = hash.Hasher.object(db.objectFormat(), "blob", "");
     for (queue.items) |p| {

@@ -11,6 +11,7 @@
 //! binary file contributes its two object names instead of its lines. A
 //! merge commit has no patch id.
 
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -28,7 +29,7 @@ pub const Error = diff.Error || object.ParseError || error{NotACommit};
 
 /// The patch id of `commit` against its parent, or against nothing for a
 /// root commit. `null` for a merge, which has none.
-pub fn ofCommit(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid) Error!?Oid {
+pub fn ofCommit(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid) Self.Error!?Oid {
     const found = try db.read(io, commit_oid);
     defer db.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
@@ -49,7 +50,7 @@ pub fn ofCommit(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit_oid: Oid) Error
 
 /// The patch id of the change from `old` to `new`, either of which may be
 /// the empty tree.
-pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, old: ?Oid, new: ?Oid) Error!Oid {
+pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, old: ?Oid, new: ?Oid) Self.Error!Oid {
     var changes = try diff.tree(gpa, io, db, old, new, .{});
     defer changes.deinit();
     var result: [hash.max_raw_len]u8 = @splat(0);
