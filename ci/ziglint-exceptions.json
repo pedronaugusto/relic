@@ -3691,13 +3691,6 @@
   {
     "rule": "Z023",
     "path": "src/refs/reftablestack/cache.zig",
-    "source": "fn tableName(buf: []u8, io: Io, min: u64, max: u64) []const u8 {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/refs/reftablestack/cache.zig",
     "source": "fn refresh(c: *Cache, store: anytype, io: Io) Error!*const Stacks {",
     "detail": "'Io' parameter should come before 'other'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."

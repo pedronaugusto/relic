@@ -354,6 +354,7 @@ pub fn receive(
     const copied = tee.finish();
     if (copied.size < 12 + raw_len) return error.TruncatedPack;
     if (!copied.trailerMatches(kind)) return error.PackChecksumMismatch;
+    // unreachable: the tail is cut to the format's raw length
     const trailer = Oid.fromRaw(kind, copied.tail[0..raw_len]) catch unreachable;
     const body_end = copied.size - raw_len;
     if (parsed_end > body_end) return error.TruncatedPack;
@@ -399,8 +400,10 @@ pub fn receive(
     var hex: [hash.max_hex_len]u8 = undefined;
     const text = name.hex(&hex);
     var pack_name_buf: [96]u8 = undefined;
+    // unreachable: a hex name is at most max_hex_len digits, the rest ten bytes
     const pack_name = std.fmt.bufPrint(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
     var idx_name_buf: [96]u8 = undefined;
+    // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
     const idx_name = std.fmt.bufPrint(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
 
     const result: Result = .{
@@ -436,6 +439,7 @@ pub fn receive(
     kept = true;
     if (rev_temp) |t| {
         var rev_name_buf: [96]u8 = undefined;
+        // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
         const rev_name = std.fmt.bufPrint(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
         try renameBesidePack(io, pack_dir, t, rev_name, pack_name);
     }
@@ -475,6 +479,7 @@ const Copied = struct {
     tail: [hash.max_raw_len]u8,
 
     fn trailerMatches(c: *const Copied, kind: Kind) bool {
+        // unreachable: the tail is cut to the format's raw length
         const trailer = Oid.fromRaw(kind, c.tail[0..kind.rawLen()]) catch unreachable;
         return trailer.eql(c.checksum);
     }
@@ -800,6 +805,7 @@ const Indexer = struct {
                 entry.kind = .ref_delta;
                 try x.ref_bases.append(x.gpa, .{
                     .child = @intCast(x.entries.items.len),
+                    // unreachable: the slice is cut to the format's raw length
                     .base = Oid.fromRaw(x.kind, raw[0..x.kind.rawLen()]) catch unreachable,
                 });
             },

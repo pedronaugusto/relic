@@ -145,6 +145,7 @@ pub const Index = struct {
 
     /// The checksum that names a bitmap written beside this index.
     pub fn checksum(index: *const Index) Oid {
+        // unreachable: the slice is the last raw length of bytes, which parse checked are there
         return Oid.fromRaw(index.kind, index.bytes[index.bytes.len - index.kind.rawLen() ..]) catch unreachable;
     }
 
@@ -206,6 +207,7 @@ pub const Index = struct {
     /// The name of the object at `position`.
     pub fn nameAt(index: *const Index, position: u32) Oid {
         const raw_len = index.kind.rawLen();
+        // unreachable: the slice is cut to the format's raw length
         return Oid.fromRaw(index.kind, index.bytes[index.oids_at + @as(usize, position) * raw_len ..][0..raw_len]) catch unreachable;
     }
 

@@ -704,14 +704,14 @@ fn daysFromCivil(year_in: i64, month: i64, day: i64) i64 {
 }
 
 /// The date `secs` is in UTC, as `YYYY-MM-DD hh:mm:ss`.
-fn formatUtc(buf: []u8, secs: i64) []const u8 {
+fn formatUtc(buf: *[32]u8, secs: i64) []const u8 {
     var tm: Tm = .{};
     gmtime(secs, &tm);
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
         @as(u32, @intCast(tm.year + 1900)), @as(u32, @intCast(tm.mon + 1)),
         @as(u32, @intCast(tm.mday)),        @as(u32, @intCast(tm.hour)),
         @as(u32, @intCast(tm.min)),         @as(u32, @intCast(tm.sec)),
-    }) catch unreachable;
+    }) catch unreachable; // unreachable: a u32 year is at most ten digits, the rest of the stamp fifteen bytes
 }
 
 // ---------------------------------------------------------------------------

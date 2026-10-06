@@ -266,6 +266,7 @@ pub const CacheTree = struct {
         if (entry_count >= 0) {
             const raw_len = kind.rawLen();
             if (offset.* + raw_len > data.len) return error.CorruptCacheTree;
+            // unreachable: the slice is cut to the format's raw length
             oid = Oid.fromRaw(kind, data[offset.*..][0..raw_len]) catch unreachable;
             offset.* += raw_len;
         }
@@ -490,6 +491,7 @@ pub const ResolveUndo = struct {
             for (modes, 0..) |mode, i| {
                 if (mode == 0) continue;
                 if (offset + raw_len > data.len) return error.CorruptResolveUndo;
+                // unreachable: the slice is cut to the format's raw length
                 oids[i] = Oid.fromRaw(kind, data[offset..][0..raw_len]) catch unreachable;
                 offset += raw_len;
             }
@@ -741,6 +743,7 @@ pub const Index = struct {
             var hasher: hash.Hasher = .init(kind);
             hasher.update(body);
             const computed = hasher.final();
+            // unreachable: the trailer is cut to the format's raw length
             const stored = Oid.fromRaw(kind, trailer) catch unreachable;
             if (!computed.eql(stored)) return error.ChecksumMismatch;
         }
@@ -876,6 +879,7 @@ pub const Index = struct {
     fn parseLink(index: *Index, gpa: Allocator, data: []const u8) ReadError!void {
         const raw_len = index.kind.rawLen();
         if (data.len < raw_len) return error.TruncatedIndex;
+        // unreachable: the slice is cut to the format's raw length
         const base = Oid.fromRaw(index.kind, data[0..raw_len]) catch unreachable;
         index.was_split = true;
         if (!base.isZero()) index.split_base = base;
@@ -897,6 +901,7 @@ pub const Index = struct {
     fn mergeShared(index: *Index, gpa: Allocator, io: Io, git_dir: Io.Dir, base: Oid) ReadError!void {
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [hash.max_hex_len + 16]u8 = undefined;
+        // unreachable: a hex name is at most max_hex_len digits, the prefix twelve bytes
         const name = std.fmt.bufPrint(&name_buf, "sharedindex.{s}", .{base.hex(&hex)}) catch unreachable;
         const shared_bytes = (try fs.readFileAlloc(gpa, io, git_dir, name, 1 << 31)) orelse
             return error.SharedIndexMissing;
@@ -1030,6 +1035,7 @@ pub const Index = struct {
         return .{
             .entry = .{
                 .path = path,
+                // unreachable: the slice is cut to the format's raw length
                 .oid = Oid.fromRaw(kind, b[40..][0..raw_len]) catch unreachable,
                 .mode = mode,
                 .stage = @truncate((flags >> 12) & 3),

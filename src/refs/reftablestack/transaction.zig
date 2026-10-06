@@ -496,7 +496,7 @@ pub fn appendLog(
 /// through the lock the caller holds.
 fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack, bytes: []const u8, update_index: u64) refs.TransactionError!void {
     var name_buf: [64]u8 = undefined;
-    const name = tableName(&name_buf, io, update_index, update_index);
+    const name = tableName(io, &name_buf, update_index, update_index);
     try writeTable(gpa, io, locked.dir, name, bytes, locked.shared);
     const w = locked.lock.writer();
     w.writeAll(stack.list) catch return error.WriteFailed;
@@ -720,7 +720,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
         const max = tables[tables.len - 1].max_update_index;
         const bytes = try reftable.write(gpa, kind, options.write, min, max, merged_refs, merged_logs);
         defer gpa.free(bytes);
-        const name = tableName(&name_buf, io, min, max);
+        const name = tableName(io, &name_buf, min, max);
         try writeTable(gpa, io, dir, name, bytes, options.shared);
         new_name = name;
     }
@@ -816,9 +816,10 @@ pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: ref
     const bytes = try reftable.write(gpa, kind, options.write, 1, 1, records[0..n], &.{});
     defer gpa.free(bytes);
     var name_buf: [64]u8 = undefined;
-    const name = tableName(&name_buf, io, 1, 1);
+    const name = tableName(io, &name_buf, 1, 1);
     try writeTable(gpa, io, dir, name, bytes, options.shared);
     var list_buf: [96]u8 = undefined;
+    // unreachable: a table name is at most 46 bytes
     const list_text = std.fmt.bufPrint(&list_buf, "{s}\n", .{name}) catch unreachable;
     try dir.writeFile(io, .{ .sub_path = "tables.list", .data = list_text });
 

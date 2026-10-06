@@ -1566,7 +1566,7 @@ const Twin = struct {
                 continue;
             }
             std.testing.expectEqualStrings(a, b) catch |err| {
-                std.debug.print("{s} differs\n", .{name});
+                std.log.err("{s} differs", .{name});
                 return err;
             };
         }
@@ -1583,7 +1583,7 @@ const Twin = struct {
             const b = try gitOrFailed(&t.ours, io, args);
             defer gpa.free(b);
             std.testing.expectEqualStrings(a, b) catch |err| {
-                std.debug.print("git {any} differs\n", .{args});
+                std.log.err("git {any} differs", .{args});
                 return err;
             };
         }
@@ -1612,12 +1612,12 @@ fn expectReport(t: *Twin, io: Io, git_args: []const []const u8, report: anytype)
     const expected = try t.gitBisect(io, git_args);
     defer t.git.gpa.free(expected);
     var r = report catch |err| {
-        std.debug.print("bisect {any}: {t}; git said:\n{s}\n", .{ git_args, err, expected });
+        std.log.err("bisect {any}: {t}; git said:\n{s}", .{ git_args, err, expected });
         return err;
     };
     defer r.deinit();
     std.testing.expectEqualStrings(expected, r.text) catch |err| {
-        std.debug.print("bisect {any} differs\n", .{git_args});
+        std.log.err("bisect {any} differs", .{git_args});
         return err;
     };
     try t.expectSameState(io);

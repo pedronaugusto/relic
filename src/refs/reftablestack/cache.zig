@@ -327,14 +327,14 @@ fn isTableName(name: []const u8) bool {
 }
 
 /// A table's file name, as git forms it.
-fn tableName(buf: []u8, io: Io, min: u64, max: u64) []const u8 {
+fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) []const u8 {
     var random: [4]u8 = undefined;
     io.random(&random);
     return std.fmt.bufPrint(buf, "0x{x:0>12}-0x{x:0>12}-{x:0>8}.ref", .{
         min,
         max,
         std.mem.readInt(u32, &random, .little),
-    }) catch unreachable;
+    }) catch unreachable; // unreachable: two u64 of at most sixteen hex digits, a u32 of eight and fourteen bytes fit 64
 }
 
 //=========================================================================

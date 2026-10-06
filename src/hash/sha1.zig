@@ -637,6 +637,7 @@ fn hexDigest(bytes: []const u8) [40]u8 {
     var out: [20]u8 = undefined;
     Sha1.hash(bytes, &out, .{});
     var text: [40]u8 = undefined;
+    // unreachable: twenty bytes are forty hex digits
     _ = std.fmt.bufPrint(&text, "{x}", .{&out}) catch unreachable;
     return text;
 }

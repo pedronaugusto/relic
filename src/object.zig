@@ -99,6 +99,7 @@ pub const Mode = enum(u32) {
     /// The octal text a tree entry carries: no leading zero, so a directory
     /// is `40000` and a file is `100644`.
     pub fn text(m: Mode, buf: *[6]u8) []const u8 {
+        // unreachable: every mode is at most 0o160000, six octal digits
         return std.fmt.bufPrint(buf, "{o}", .{m.raw()}) catch unreachable;
     }
 
@@ -244,6 +245,7 @@ pub const Tree = struct {
             const raw_len = it.tree.kind.rawLen();
             const oid_start = space + 1 + nul + 1;
             if (rest.len < oid_start + raw_len) return error.TruncatedTree;
+            // unreachable: the slice is cut to the format's raw length
             const oid = Oid.fromRaw(it.tree.kind, rest[oid_start..][0..raw_len]) catch unreachable;
             it.offset += oid_start + raw_len;
             return .{ .mode = mode, .name = name, .oid = oid };

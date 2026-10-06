@@ -712,6 +712,7 @@ fn skipValue(t: *const Table, typ: u8, data: []const u8, at: usize, extra: u3, k
 fn readOid(t: *const Table, data: []const u8, at: usize) Error!Oid {
     const len = t.kind.rawLen();
     if (at > data.len or data.len - at < len) return error.CorruptRecord;
+    // unreachable: the slice is cut to the format's raw length
     return Oid.fromRaw(t.kind, data[at..][0..len]) catch unreachable;
 }
 
@@ -1310,6 +1311,7 @@ const testgit = @import("../testing/git.zig");
 fn oidOf(byte: u8) Oid {
     var raw: [20]u8 = @splat(byte);
     raw[19] = byte +% 1;
+    // unreachable: twenty bytes are a SHA-1 name
     return Oid.fromRaw(.sha1, &raw) catch unreachable;
 }
 

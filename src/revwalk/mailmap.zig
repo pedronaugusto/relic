@@ -417,7 +417,7 @@ fn compareWithGit(gpa: Allocator, io: Io, seed: u64) !void {
         try got.writer.print("<{s}>\n", .{shown.email});
     }
     std.testing.expectEqualStrings(expected, got.written()) catch |err| {
-        std.debug.print("seed {d}, mailmap:\n{s}\n", .{ seed, text.items });
+        std.log.err("seed {d}, mailmap:\n{s}", .{ seed, text.items });
         return err;
     };
 }

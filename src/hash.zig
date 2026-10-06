@@ -309,9 +309,11 @@ pub const Hasher = struct {
 
     /// Feed the `"<type> <size>\0"` header an object name is taken over.
     pub fn updateHeader(h: *Hasher, type_name: []const u8, size: u64) void {
-        var buf: [64]u8 = undefined;
-        const header = std.fmt.bufPrint(&buf, "{s} {d}\x00", .{ type_name, size }) catch unreachable;
-        h.update(header);
+        var digits: [20]u8 = undefined;
+        h.update(type_name);
+        h.update(" ");
+        h.update(digits[0..std.fmt.printInt(&digits, size, 10, .lower, .{})]);
+        h.update("\x00");
     }
 
     /// The name. The hasher must not be used afterwards; `collisionAttack`

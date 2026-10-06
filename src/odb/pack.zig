@@ -156,6 +156,7 @@ pub const Index = struct {
         var checksum_hasher: hash.Hasher = .init(kind);
         checksum_hasher.update(bytes[0 .. bytes.len - raw_len]);
         const computed_checksum = checksum_hasher.final();
+        // unreachable: the slice is cut to the format's raw length
         const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;
         if (!computed_checksum.eql(stored_checksum)) return error.ChecksumMismatch;
 
@@ -177,6 +178,7 @@ pub const Index = struct {
         if (remaining % 8 != 0) return error.TruncatedIndex;
         const large_count: u32 = @intCast(remaining / 8);
 
+        // unreachable: the slice is cut to the format's raw length
         const pack_checksum = Oid.fromRaw(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]) catch unreachable;
 
         const index: Index = .{
@@ -224,6 +226,7 @@ pub const Index = struct {
 
     /// The name of the object at position `i`.
     pub fn nameAt(index: Index, i: u32) Oid {
+        // unreachable: rawNameAt cuts the name to the format's raw length
         return Oid.fromRaw(index.kind, index.rawNameAt(i)) catch unreachable;
     }
 
@@ -527,6 +530,7 @@ pub const Pack = struct {
             .max_chain_bytes = options.max_chain_bytes,
             .window = window,
             .decoder = decoder,
+            // unreachable: read_block_bytes is a nonzero constant
             .slots = @intCast(@max(1, @min(options.read_cache_bytes / read_block_bytes, std.math.divCeil(u64, stat.size, read_block_bytes) catch unreachable))),
         };
     }
@@ -782,6 +786,7 @@ pub const Pack = struct {
             7 => blk: {
                 const raw_len = p.kind.rawLen();
                 if (i + raw_len > bytes.len) return null;
+                // unreachable: the slice is cut to the format's raw length
                 const oid = Oid.fromRaw(p.kind, bytes[i..][0..raw_len]) catch unreachable;
                 i += raw_len;
                 break :blk .{ .ref_delta = oid };
@@ -1181,6 +1186,7 @@ pub const Pack = struct {
         var trailer: [hash.max_raw_len]u8 = undefined;
         const raw_len = p.kind.rawLen();
         try p.readAtExact(io, p.bodyEnd(), trailer[0..raw_len]);
+        // unreachable: the trailer is cut to the format's raw length
         const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable;
         if (!computed.eql(stored)) return error.ChecksumMismatch;
         if (!stored.eql(p.index.pack_checksum)) return error.ChecksumMismatch;
@@ -2207,8 +2213,10 @@ pub const Writer = struct {
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = checksum.hex(&hex);
         var pack_name_buf: [hash.max_hex_len + 16]u8 = undefined;
+        // unreachable: a hex name is at most max_hex_len digits, the rest ten bytes
         const pack_name = std.fmt.bufPrint(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
         var idx_name_buf: [hash.max_hex_len + 16]u8 = undefined;
+        // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
         const idx_name = std.fmt.bufPrint(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
 
         // The index goes to a temporary of its own, because the order the two
@@ -2239,6 +2247,7 @@ pub const Writer = struct {
         // The reverse index before the index, as git renames them.
         if (rev_temp) |t| {
             var rev_name_buf: [hash.max_hex_len + 16]u8 = undefined;
+            // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
             const rev_name = std.fmt.bufPrint(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
             try fs.renameWithRetry(io, w.dir, t, rev_name);
         }

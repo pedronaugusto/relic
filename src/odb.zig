@@ -499,10 +499,11 @@ pub const Odb = struct {
         return odb.backendData().kind;
     }
 
-    fn loosePath(odb: *const Odb, oid: Oid, buf: []u8) []const u8 {
+    fn loosePath(odb: *const Odb, oid: Oid, buf: *[hash.max_hex_len + 2]u8) []const u8 {
         _ = odb;
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
+        // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
         return std.fmt.bufPrint(buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
     }
 
@@ -990,6 +991,7 @@ pub const Odb = struct {
         var name_buf: [hash.max_hex_len + 32]u8 = undefined;
         const temp = tempObjectName(io, &name_buf, text[0..2]);
         var final_buf: [hash.max_hex_len + 2]u8 = undefined;
+        // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
         const final = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
 
         const shared = odb.backendData().options.shared;
@@ -1025,6 +1027,7 @@ pub const Odb = struct {
         const compress = state.compress;
         compress.* = try flate.Compress.init(&file_writer.interface, odb.backendData().deflate_window, .zlib, .level_1);
         var header_buf: [64]u8 = undefined;
+        // unreachable: a type name is at most six bytes and a usize at most twenty digits
         const header = std.fmt.bufPrint(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
         try compress.writer.writeAll(header);
         try compress.writer.writeAll(bytes);
@@ -1069,9 +1072,10 @@ pub const Odb = struct {
     ///
     /// The temporary lies beside the object it becomes, so the rename that
     /// finishes it stays inside one directory and needs no handle on it.
-    fn tempObjectName(io: Io, buf: []u8, fan_out: []const u8) []const u8 {
+    fn tempObjectName(io: Io, buf: *[hash.max_hex_len + 32]u8, fan_out: *const [2]u8) []const u8 {
         var raw: [12]u8 = undefined;
         io.random(&raw);
+        // unreachable: two digits, nine bytes and twenty-four hex digits fit
         return std.fmt.bufPrint(buf, "{s}/tmp_obj_{x}", .{ fan_out, &raw }) catch unreachable;
     }
 
@@ -1174,6 +1178,7 @@ pub const Odb = struct {
                 else => |e| return e,
             }
             var final_buf: [hash.max_hex_len + 2]u8 = undefined;
+            // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
             const final_path = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
             fs.renameWithRetry(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
                 // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
@@ -1245,6 +1250,7 @@ pub const Odb = struct {
         out.compress = try flate.Compress.init(&out.file_writer.interface, window, .zlib, .level_1);
         out.hasher.updateHeader(t.name(), size);
         var header_buf: [64]u8 = undefined;
+        // unreachable: a type name is at most six bytes and a u64 at most twenty digits
         const header = std.fmt.bufPrint(&header_buf, "{s} {d}\x00", .{ t.name(), size }) catch unreachable;
         try out.compress.writer.writeAll(header);
     }
@@ -1435,7 +1441,7 @@ pub const Odb = struct {
         var trailer: [hash.max_raw_len]u8 = undefined;
         const raw_len = p.kind.rawLen();
         try p.readStored(io, p.bodyEnd(), trailer[0..raw_len]);
-        const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable;
+        const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable; // unreachable: the trailer is cut to the format's raw length
         if (!computed.eql(stored) or !stored.eql(p.index.pack_checksum)) return error.ChecksumMismatch;
         return report;
     }
@@ -1545,6 +1551,7 @@ pub const Odb = struct {
         }
         for (fanouts, 0..) |used, byte| if (used) {
             var path: [2]u8 = undefined;
+            // unreachable: a byte is two hex digits
             _ = std.fmt.bufPrint(&path, "{x:0>2}", .{byte}) catch unreachable;
             try barrier.syncDirectory(io, source.dir, &path);
         };
@@ -2310,6 +2317,7 @@ pub const Odb = struct {
         var report: RepackReport = .{ .written = written };
         var hex: [hash.max_hex_len]u8 = undefined;
         var base_buf: [hash.max_hex_len + 8]u8 = undefined;
+        // unreachable: a hex name is at most max_hex_len digits, the prefix five bytes
         const base = std.fmt.bufPrint(&base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch unreachable;
         const opened = odb.findPackByName(base) orelse return report;
 

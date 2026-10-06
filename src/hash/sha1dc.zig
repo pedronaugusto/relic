@@ -900,6 +900,7 @@ const collision_b = &hexBytes("255044462d312e330a25e2e3cfd30a0a0a312030206f626a0
 
 fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
+    // unreachable: every vector is literal hex of even length
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
     return out;
 }

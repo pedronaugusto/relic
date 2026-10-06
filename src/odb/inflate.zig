@@ -314,8 +314,10 @@ pub const Decoder = struct {
         @memset(lens[144..256], 9);
         @memset(lens[256..280], 7);
         @memset(lens[280..288], 8);
+        // unreachable: RFC 1951's fixed literal lengths are a complete code
         build(.litlen, &d.fixed_litlen, &lens, &countLengths(&lens), litlen_table_bits) catch unreachable;
         var dlens = [_]u8{5} ** 32;
+        // unreachable: RFC 1951's fixed distance lengths are a complete code
         build(.dist, &d.fixed_dist, &dlens, &countLengths(&dlens), dist_table_bits) catch unreachable;
         d.fixed_built = true;
     }

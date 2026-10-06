@@ -993,8 +993,7 @@ fn expectWalkLikeRevList(gpa: Allocator, io: Io, repo: *testgit.Repo, db: *odb_m
         try got.append(gpa, '\n');
     }
     std.testing.expectEqualStrings(expected, got.items) catch |err| {
-        for (args) |arg| std.debug.print("{s} ", .{arg});
-        std.debug.print(": rev-list differs\n", .{});
+        std.log.err("rev-list {any} differs", .{args});
         return err;
     };
 }
