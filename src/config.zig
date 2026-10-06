@@ -121,7 +121,7 @@ const Line = struct {
         if (rest.len == 0 or rest[0] != '.') return false;
         // A dotted name before the quotes, `[a.b "c"]`, reads as the
         // subsection `b.c`: the quoted part is what follows the dotted one.
-        const quoted_part = if (std.mem.indexOfScalar(u8, line.spelled, '.')) |dot|
+        const quoted_part = if (std.mem.findScalar(u8, line.spelled, '.')) |dot|
             line.subsection[line.spelled.len - dot ..]
         else
             line.subsection;
@@ -644,7 +644,7 @@ pub const Config = struct {
         const every = try config.gpa.alloc(Sources.Pair, values.len + pairs.len);
         defer config.gpa.free(every);
         for (values, every[0..values.len]) |pair, *out| {
-            const eq = std.mem.indexOfScalar(u8, pair, '=');
+            const eq = std.mem.findScalar(u8, pair, '=');
             out.* = .{ .name = if (eq) |at| pair[0..at] else pair, .value = if (eq) |at| pair[at + 1 ..] else null };
         }
         @memcpy(every[values.len..], pairs);
@@ -1292,8 +1292,8 @@ pub const FullName = struct {
 /// The subsection may itself hold dots — `url.https://example.com/.insteadOf`
 /// is one — so the split is at the first dot and the last, not at every dot.
 pub fn splitFullName(full: []const u8) ?FullName {
-    const first = std.mem.indexOfScalar(u8, full, '.') orelse return null;
-    const last = std.mem.lastIndexOfScalar(u8, full, '.').?;
+    const first = std.mem.findScalar(u8, full, '.') orelse return null;
+    const last = std.mem.findScalarLast(u8, full, '.').?;
     if (first == last) {
         return .{ .section = full[0..first], .subsection = null, .name = full[first + 1 ..] };
     }
@@ -1351,7 +1351,7 @@ pub fn parseInt(raw: []const u8) Self.ValueError!i64 {
 /// break, which no header can carry. A section may be empty only when a
 /// subsection follows it, as in `.sub.name`.
 pub fn checkKey(full: []const u8) error{InvalidKey}!FullName {
-    const last = std.mem.lastIndexOfScalar(u8, full, '.') orelse return error.InvalidKey;
+    const last = std.mem.findScalarLast(u8, full, '.') orelse return error.InvalidKey;
     if (last == 0 or last == full.len - 1) return error.InvalidKey;
     const split = splitFullName(full).?;
     for (split.section) |c| {
@@ -1362,7 +1362,7 @@ pub fn checkKey(full: []const u8) error{InvalidKey}!FullName {
         if (!isKeyChar(c)) return error.InvalidKey;
     }
     if (split.subsection) |sub| {
-        if (std.mem.indexOfScalar(u8, sub, '\n') != null) return error.InvalidKey;
+        if (std.mem.findScalar(u8, sub, '\n') != null) return error.InvalidKey;
     }
     return split;
 }
@@ -1461,7 +1461,7 @@ fn parseLines(gpa: Allocator, names: Allocator, text: []const u8, out: *std.Arra
             continue;
         }
         if (c == '#' or c == ';') {
-            offset = if (std.mem.indexOfScalarPos(u8, text, offset, '\n')) |nl| nl + 1 else text.len;
+            offset = if (std.mem.findScalarPos(u8, text, offset, '\n')) |nl| nl + 1 else text.len;
             try out.append(gpa, .{ .kind = .other, .text = text[start..offset] });
             start = offset;
             continue;
@@ -1535,7 +1535,7 @@ fn variableEnd(text: []const u8, start: usize) ParseError!usize {
             continue;
         }
         if (!in_quotes and (c == '#' or c == ';')) {
-            return if (std.mem.indexOfScalarPos(u8, text, i, '\n')) |nl| nl + 1 else text.len;
+            return if (std.mem.findScalarPos(u8, text, i, '\n')) |nl| nl + 1 else text.len;
         }
     }
     return text.len;
@@ -1571,7 +1571,7 @@ fn parseSectionHeader(names: Allocator, text: []const u8, at: usize) ParseError!
     }
     const spelled = text[at + 1 .. i];
     const name = try lowered(names, spelled);
-    const dot = std.mem.indexOfScalar(u8, name, '.');
+    const dot = std.mem.findScalar(u8, name, '.');
     const section = name[0 .. dot orelse name.len];
 
     if (text[i] == ']') {
@@ -2471,7 +2471,7 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
     defer gpa.free(key);
     config.set(key, value) catch |err| switch (err) {
         error.InvalidKey => {
-            try std.testing.expect(std.mem.indexOfScalar(u8, subsection, '\n') != null);
+            try std.testing.expect(std.mem.findScalar(u8, subsection, '\n') != null);
             return;
         },
         else => return err,

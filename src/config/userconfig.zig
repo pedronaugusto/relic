@@ -178,7 +178,7 @@ pub fn parseParameters(arena: Allocator, text: []const u8) Self.Error![]const co
         var next = key.next;
         if (next == null or isSpace(text[next.?])) {
             // The old form, 'name=value'.
-            const eq = std.mem.indexOfScalar(u8, key.text, '=');
+            const eq = std.mem.findScalar(u8, key.text, '=');
             const name = key.text[0 .. eq orelse key.text.len];
             if (name.len == 0) return error.MalformedConfigEnvironment;
             try out.append(arena, .{ .name = name, .value = if (eq) |e| key.text[e + 1 ..] else null });

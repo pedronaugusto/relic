@@ -364,7 +364,7 @@ fn decodesToNewline(url: []const u8) bool {
 /// The parts of git's `url_normalize` that decide whether it fails, then
 /// the newline check on what it would produce.
 fn curlUrlIsSafe(url: []const u8) bool {
-    if (std.mem.indexOfScalar(u8, url, '\n') != null) return false;
+    if (std.mem.findScalar(u8, url, '\n') != null) return false;
     // Every `%` must begin a two-digit escape.
     var i: usize = 0;
     while (i < url.len) : (i += 1) {
@@ -383,15 +383,15 @@ fn curlUrlIsSafe(url: []const u8) bool {
     const after = url[colon + 3 ..];
     const authority_end = std.mem.indexOfAny(u8, after, "/?#") orelse after.len;
     var authority = after[0..authority_end];
-    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| authority = authority[at + 1 ..];
+    if (std.mem.findScalarLast(u8, authority, '@')) |at| authority = authority[at + 1 ..];
     // The host, then an optional port.
     var host = authority;
     if (host.len > 0 and host[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, host, ']') orelse return false;
+        const close = std.mem.findScalar(u8, host, ']') orelse return false;
         const port_part = host[close + 1 ..];
         host = host[0 .. close + 1];
         if (port_part.len > 0 and !validPort(port_part)) return false;
-    } else if (std.mem.lastIndexOfScalar(u8, host, ':')) |port_at| {
+    } else if (std.mem.findScalarLast(u8, host, ':')) |port_at| {
         if (!validPort(host[port_at..])) return false;
         host = host[0..port_at];
     }
@@ -459,7 +459,7 @@ pub fn resolveUrl(gpa: Allocator, base: []const u8, url: []const u8, up_path: ?[
             rest = rest[3..];
             if (lastDirSep(remote.items)) |at| {
                 remote.items.len = at;
-            } else if (std.mem.lastIndexOfScalar(u8, remote.items, ':')) |at| {
+            } else if (std.mem.findScalarLast(u8, remote.items, ':')) |at| {
                 remote.items.len = at;
                 colon_separated = true;
             } else {
@@ -487,8 +487,8 @@ pub fn resolveUrl(gpa: Allocator, base: []const u8, url: []const u8, up_path: ?[
 /// git's `url_is_local_not_ssh`: no colon, or a slash before the first
 /// one, or a drive letter on Windows.
 fn isLocalNotSsh(url: []const u8) bool {
-    const colon = std.mem.indexOfScalar(u8, url, ':') orelse return true;
-    if (std.mem.indexOfScalar(u8, url, '/')) |slash| {
+    const colon = std.mem.findScalar(u8, url, ':') orelse return true;
+    if (std.mem.findScalar(u8, url, '/')) |slash| {
         if (slash < colon) return true;
     }
     return builtin.os.tag == .windows and hasDriveLetter(url);

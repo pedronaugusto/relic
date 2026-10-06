@@ -3,7 +3,6 @@
 const std = @import("std");
 const config = @import("../config.zig");
 const Allocator = std.mem.Allocator;
-const fs = @import("../repo/fs.zig");
 
 pub const State = opaque {};
 

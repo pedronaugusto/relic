@@ -767,11 +767,13 @@ test "reading a signing policy preserves allocation resource failures" {
 
 test "discovery closes its git directory when the worktree handle cannot be opened" {
     const Recorder = struct {
+        const Self = @This();
+
         opened: ?Io.Dir = null,
         closed: usize = 0,
 
         fn openDir(context: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-            const r: *@This() = @ptrCast(@alignCast(context.?));
+            const r: *Self = @ptrCast(@alignCast(context.?));
             if (r.opened != null) return error.ProcessFdQuotaExceeded;
             const opened = try dir.openDir(std.testing.io, path, options);
             r.opened = opened;
@@ -779,7 +781,7 @@ test "discovery closes its git directory when the worktree handle cannot be open
         }
 
         fn close(context: ?*anyopaque, dirs: []const Io.Dir) void {
-            const r: *@This() = @ptrCast(@alignCast(context.?));
+            const r: *Self = @ptrCast(@alignCast(context.?));
             for (dirs) |dir| {
                 std.debug.assert(dir.handle == r.opened.?.handle);
                 dir.close(std.testing.io);

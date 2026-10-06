@@ -327,34 +327,39 @@ fn testEnviron() !Environ.Map {
     return map;
 }
 
+/// A spawn hook that records it started and ended the child.
+const SpawnHooks = struct {
+    started: bool = false,
+    /// The options carried the program, its argument and the variable set.
+    prepared: bool = false,
+    ended: bool = false,
+
+    fn start(gpa: Allocator, io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
+        const self: *SpawnHooks = @ptrCast(@alignCast(raw));
+        self.started = true;
+        const hooked = options.environ.?.get("RELIC_HOOKED") orelse "";
+        self.prepared = std.mem.eql(u8, process_fixture, options.argv[0]) and
+            std.mem.eql(u8, "copy", options.argv[1]) and
+            std.mem.eql(u8, "hooked", hooked);
+        return Child.spawn(io, gpa, options);
+    }
+
+    fn terminate(io: Io, raw: *anyopaque, child: *Child) void {
+        const self: *SpawnHooks = @ptrCast(@alignCast(raw));
+        self.ended = true;
+        // ziglint-ignore: Z026 termination cannot fail its caller; a child already gone has nothing left to reap
+        _ = child.killWait(io, 0) catch {};
+    }
+};
+
 test "Programs spawn hook receives prepared options and owns termination" {
-    const Hooks = struct {
-        started: bool = false,
-        ended: bool = false,
-
-        fn start(gpa: Allocator, io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.started = true;
-            testing.expectEqualStrings(process_fixture, options.argv[0]) catch unreachable;
-            testing.expectEqualStrings("copy", options.argv[1]) catch unreachable;
-            testing.expectEqualStrings("hooked", options.environ.?.get("RELIC_HOOKED").?) catch unreachable;
-            return Child.spawn(io, gpa, options);
-        }
-
-        fn terminate(io: Io, raw: *anyopaque, child: *Child) void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.ended = true;
-            // ziglint-ignore: Z026 termination cannot fail its caller; a child already gone has nothing left to reap
-            _ = child.killWait(io, 0) catch {};
-        }
-    };
     var env = try testEnviron();
     defer env.deinit();
-    var hooks: Hooks = .{};
+    var hooks: SpawnHooks = .{};
     var outcome = try run(.{ .environ = &env, .spawn = .{
         .context = &hooks,
-        .start = Hooks.start,
-        .terminate = Hooks.terminate,
+        .start = SpawnHooks.start,
+        .terminate = SpawnHooks.terminate,
     } }, testing.allocator, testing.io, .{
         .argv = &.{ process_fixture, "copy" },
         .set = &.{.{ .name = "RELIC_HOOKED", .value = "hooked" }},
@@ -362,6 +367,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
     defer outcome.deinit(testing.allocator);
     try testing.expectEqualStrings("hello", outcome.stdout);
     try testing.expect(hooks.started and hooks.ended);
+    try testing.expect(hooks.prepared);
 }
 
 test "a command line reaches the shell as git hands it one, and its arguments stay arguments" {
