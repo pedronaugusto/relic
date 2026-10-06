@@ -973,6 +973,79 @@ fn taskCount(threads: u16) usize {
 const batch_bytes: usize = 16 << 20;
 const task_output_bytes: usize = 1 << 20;
 
+/// The pattern syntax asked for, else the one `grep.patternType` (or the
+/// older `grep.extendedRegexp`) names, else basic.
+fn patternSyntax(repo: *Repository, options: Options) Syntax {
+    if (options.syntax) |syntax| return syntax;
+    const config = repo.configuration();
+    var syntax: Syntax = .basic;
+    if (config.getBool("grep.extendedregexp", false) catch false) syntax = .extended;
+    if (config.get("grep.patterntype")) |v| {
+        if (std.mem.eql(u8, v, "basic")) syntax = .basic else if (std.mem.eql(u8, v, "extended")) syntax = .extended else if (std.mem.eql(u8, v, "fixed")) syntax = .fixed else if (std.mem.eql(u8, v, "perl")) syntax = .perl;
+    }
+    return syntax;
+}
+
+/// The files `source` names under `spec`, in the order git searches them.
+fn collect(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, source: Source, items: *std.ArrayList(Item)) Error!void {
+    switch (source) {
+        .worktree => {
+            if (repo.work_dir == null) return error.BareRepository;
+            try collectIndex(a, io, repo, spec, false, items);
+        },
+        .index => try collectIndex(a, io, repo, spec, true, items),
+        .tree => |t| {
+            const tree = try peelToTree(io, repo, t.oid);
+            const prefix = if (t.name.len == 0) "" else try std.mem.concat(a, u8, &.{ t.name, ":" });
+            try collectTree(a, io, repo, spec, tree, "", prefix, items);
+        },
+    }
+}
+
+/// One batch of files read for the tasks: as many as fit the byte budget,
+/// each with its bytes (`null` for a file that could not be read) and
+/// whether it is binary.
+const Batch = struct {
+    contents: std.ArrayList(?[]const u8) = .empty,
+    binaries: std.ArrayList(bool) = .empty,
+    /// The bytes read, the object database allocator's to free.
+    owned: std.ArrayList([]u8) = .empty,
+
+    /// Read the files from `start` on until the budget is spent, at least
+    /// one; returns where the batch ends.
+    fn load(batch: *Batch, a: Allocator, gpa: Allocator, io: Io, repo: *Repository, items: []const Item, start: usize) Error!usize {
+        var end = start;
+        var bytes: usize = 0;
+        while (end < items.len and (end == start or bytes < batch_bytes)) : (end += 1) {
+            const item = items[end];
+            const content: ?[]u8 = switch (item.source) {
+                .blob => |oid| blk: {
+                    const found = try repo.odb.read(io, oid);
+                    break :blk found.bytes;
+                },
+                .file => (fs.readFileAlloc(repo.odb.allocator(), io, repo.work_dir.?, item.path, 1 << 31) catch null) orelse null,
+            };
+            if (content) |c| {
+                try batch.owned.append(gpa, c);
+                bytes += c.len;
+            }
+            try batch.contents.append(a, content);
+            var bin = false;
+            if (content) |c| {
+                bin = item.binary orelse isBinaryContent(c);
+            }
+            try batch.binaries.append(a, bin);
+        }
+        return end;
+    }
+
+    fn deinit(batch: *Batch, gpa: Allocator, repo: *Repository) void {
+        for (batch.owned.items) |b| repo.odb.allocator().free(b);
+        batch.owned.deinit(gpa);
+        batch.* = undefined;
+    }
+};
+
 /// `git grep`: write to `w` what git writes, and say whether anything
 /// matched.
 pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.Writer) Self.Error!Outcome {
@@ -981,15 +1054,8 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     const a = arena_instance.allocator();
     const config = repo.configuration();
 
-    var syntax: Syntax = options.syntax orelse .basic;
-    if (options.syntax == null) {
-        if (config.getBool("grep.extendedregexp", false) catch false) syntax = .extended;
-        if (config.get("grep.patterntype")) |v| {
-            if (std.mem.eql(u8, v, "basic")) syntax = .basic else if (std.mem.eql(u8, v, "extended")) syntax = .extended else if (std.mem.eql(u8, v, "fixed")) syntax = .fixed else if (std.mem.eql(u8, v, "perl")) syntax = .perl;
-        }
-    }
     const column = options.column orelse (config.getBool("grep.column", false) catch false);
-    var searcher = try compile(a, gpa, options, syntax, column);
+    var searcher = try compile(a, gpa, options, patternSyntax(repo, options), column);
     defer searcher.deinit();
     const fmt: Format = .{
         .show = options.show,
@@ -1009,18 +1075,7 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     var spec = try pathspec_mod.parse(gpa, options.pathspecs);
     defer spec.deinit();
     var items: std.ArrayList(Item) = .empty;
-    switch (options.source) {
-        .worktree => {
-            if (repo.work_dir == null) return error.BareRepository;
-            try collectIndex(a, io, repo, &spec, false, &items);
-        },
-        .index => try collectIndex(a, io, repo, &spec, true, &items),
-        .tree => |t| {
-            const tree = try peelToTree(io, repo, t.oid);
-            const prefix = if (t.name.len == 0) "" else try std.mem.concat(a, u8, &.{ t.name, ":" });
-            try collectTree(a, io, repo, &spec, tree, "", prefix, &items);
-        },
-    }
+    try collect(a, io, repo, &spec, options.source, &items);
 
     var attrs: ?attributes.Attrs = null;
     defer if (attrs) |*x| x.deinit();
@@ -1048,36 +1103,9 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     var first_mark = fmt.before != 0 or fmt.after != 0 or fmt.funcbody;
     var start: usize = 0;
     while (start < items.items.len) {
-        // a batch: as many files as fit the byte budget
-        var end = start;
-        var bytes: usize = 0;
-        var contents: std.ArrayList(?[]const u8) = .empty;
-        var binaries: std.ArrayList(bool) = .empty;
-        var owned: std.ArrayList([]u8) = .empty;
-        defer {
-            for (owned.items) |b| repo.odb.allocator().free(b);
-            owned.deinit(gpa);
-        }
-        while (end < items.items.len and (end == start or bytes < batch_bytes)) : (end += 1) {
-            const item = items.items[end];
-            const content: ?[]u8 = switch (item.source) {
-                .blob => |oid| blk: {
-                    const found = try repo.odb.read(io, oid);
-                    break :blk found.bytes;
-                },
-                .file => (fs.readFileAlloc(repo.odb.allocator(), io, repo.work_dir.?, item.path, 1 << 31) catch null) orelse null,
-            };
-            if (content) |c| {
-                try owned.append(gpa, c);
-                bytes += c.len;
-            }
-            try contents.append(a, content);
-            var bin = false;
-            if (content) |c| {
-                bin = item.binary orelse isBinaryContent(c);
-            }
-            try binaries.append(a, bin);
-        }
+        var batch: Batch = .{};
+        defer batch.deinit(gpa, repo);
+        const end = try batch.load(a, gpa, io, repo, items.items, start);
         const n = end - start;
         const outputs = try a.alloc(?[]const u8, n);
         @memset(outputs, null);
@@ -1089,8 +1117,8 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
             .searcher = &searcher,
             .fmt = &fmt,
             .items = items.items[start..end],
-            .contents = contents.items,
-            .binaries = binaries.items,
+            .contents = batch.contents.items,
+            .binaries = batch.binaries.items,
             .outputs = outputs,
             .hits = hits,
             .buffers = buffers,

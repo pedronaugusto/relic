@@ -608,6 +608,13 @@ const Run = struct {
 // git's hashmap, for iteration order
 //=========================================================================
 
+/// git's `strhash`: FNV-1 over the bytes, multiply then xor.
+fn strhash(key: []const u8) u32 {
+    var h: u32 = 0x811c9dc5;
+    for (key) |c| h = (h *% 0x01000193) ^ c;
+    return h;
+}
+
 /// A map that hands its entries back in the order git's `strmap` would:
 /// FNV-1 over the key, a table of 64 buckets growing fourfold past 80%
 /// full and shrinking when a fifth of that, each bucket a list with the
@@ -627,12 +634,6 @@ pub fn GitMap(comptime V: type) type {
         grow_at: u32 = 0,
         shrink_at: u32 = 0,
         index: std.StringHashMapUnmanaged(u32) = .empty,
-
-        fn strhash(key: []const u8) u32 {
-            var h: u32 = 0x811c9dc5;
-            for (key) |c| h = (h *% 0x01000193) ^ c;
-            return h;
-        }
 
         fn allocTable(self: *Self, arena: Allocator, size: u32) Allocator.Error!void {
             self.table = try arena.alloc(?u32, size);

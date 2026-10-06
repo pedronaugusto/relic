@@ -571,41 +571,46 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
             return 1;
         },
         's', 'f', 'b' => {
-            const msg = cstr(p.message);
-            const subject = skipBlankLines(msg);
-            // the subject paragraph and where the body starts
-            var rest = subject;
-            while (true) {
-                const len = getOneLine(rest);
-                if (len == 0 or isBlank(rest[0..len])) break;
-                rest = rest[len..];
-            }
-            const body = skipBlankLines(rest);
-            switch (ph[0]) {
-                's' => {
-                    var first = true;
-                    var r = subject;
-                    while (true) {
-                        const len = getOneLine(r);
-                        if (len == 0 or isBlank(r[0..len])) break;
-                        var line = r[0..len];
-                        while (line.len > 0 and isSpace(line[line.len - 1])) line = line[0 .. line.len - 1];
-                        if (!first) try out.append(a, ' ');
-                        try out.appendSlice(a, line);
-                        first = false;
-                        r = r[len..];
-                    }
-                },
-                'f' => {
-                    const eol = std.mem.findScalar(u8, subject, '\n') orelse subject.len;
-                    try sanitizedSubject(a, out, subject[0..eol]);
-                },
-                'b' => try out.appendSlice(a, body),
-                else => unreachable,
-            }
+            try messagePart(a, out, cstr(p.message), ph[0]);
             return 1;
         },
         else => return 0,
+    }
+}
+
+/// `%s`, `%f` or `%b`, as `which` says: the subject paragraph joined onto one
+/// line, that subject as a file name, or the body after it.
+fn messagePart(a: Allocator, out: *std.ArrayList(u8), msg: []const u8, which: u8) Allocator.Error!void {
+    const subject = skipBlankLines(msg);
+    // the subject paragraph and where the body starts
+    var rest = subject;
+    while (true) {
+        const len = getOneLine(rest);
+        if (len == 0 or isBlank(rest[0..len])) break;
+        rest = rest[len..];
+    }
+    const body = skipBlankLines(rest);
+    switch (which) {
+        's' => {
+            var first = true;
+            var r = subject;
+            while (true) {
+                const len = getOneLine(r);
+                if (len == 0 or isBlank(r[0..len])) break;
+                var line = r[0..len];
+                while (line.len > 0 and isSpace(line[line.len - 1])) line = line[0 .. line.len - 1];
+                if (!first) try out.append(a, ' ');
+                try out.appendSlice(a, line);
+                first = false;
+                r = r[len..];
+            }
+        },
+        'f' => {
+            const eol = std.mem.findScalar(u8, subject, '\n') orelse subject.len;
+            try sanitizedSubject(a, out, subject[0..eol]);
+        },
+        'b' => try out.appendSlice(a, body),
+        else => unreachable,
     }
 }
 

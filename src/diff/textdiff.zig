@@ -876,55 +876,70 @@ const Search = struct {
             }
 
             // Enough. Take the furthest reaching path either frontier has.
-            if (ec >= s.max_cost) {
-                var fbest: isize = -1;
-                var fbest1: isize = -1;
-                d = fmax;
-                while (d >= fmin) : (d -= 2) {
-                    var x = @min(s.getF(d), l1);
-                    var y = x - d;
-                    if (l2 < y) {
-                        x = l2 + d;
-                        y = l2;
-                    }
-                    if (fbest < x + y) {
-                        fbest = x + y;
-                        fbest1 = x;
-                    }
-                }
+            if (ec >= s.max_cost) return s.furthestSplit(fmin, fmax, bmin, bmax, o1, l1, o2, l2);
+        }
+    }
 
-                var bbest: isize = std.math.maxInt(isize);
-                var bbest1: isize = std.math.maxInt(isize);
-                d = bmax;
-                while (d >= bmin) : (d -= 2) {
-                    var x = @max(o1, s.getB(d));
-                    var y = x - d;
-                    if (y < o2) {
-                        x = o2 + d;
-                        y = o2;
-                    }
-                    if (x + y < bbest) {
-                        bbest = x + y;
-                        bbest1 = x;
-                    }
-                }
-
-                if ((l1 + l2) - bbest < fbest - (o1 + o2)) {
-                    return .{
-                        .i1 = @intCast(fbest1),
-                        .i2 = @intCast(fbest - fbest1),
-                        .min_lo = true,
-                        .min_hi = false,
-                    };
-                }
-                return .{
-                    .i1 = @intCast(bbest1),
-                    .i2 = @intCast(bbest - bbest1),
-                    .min_lo = false,
-                    .min_hi = true,
-                };
+    /// git's last give-up rule: of the paths each frontier has pushed
+    /// furthest into the box, split on the one that has covered more of it.
+    /// The half behind that frontier is exact; the half in front is not.
+    fn furthestSplit(
+        s: *Search,
+        fmin: isize,
+        fmax: isize,
+        bmin: isize,
+        bmax: isize,
+        o1: isize,
+        l1: isize,
+        o2: isize,
+        l2: isize,
+    ) Split {
+        var fbest: isize = -1;
+        var fbest1: isize = -1;
+        var d = fmax;
+        while (d >= fmin) : (d -= 2) {
+            var x = @min(s.getF(d), l1);
+            var y = x - d;
+            if (l2 < y) {
+                x = l2 + d;
+                y = l2;
+            }
+            if (fbest < x + y) {
+                fbest = x + y;
+                fbest1 = x;
             }
         }
+
+        var bbest: isize = std.math.maxInt(isize);
+        var bbest1: isize = std.math.maxInt(isize);
+        d = bmax;
+        while (d >= bmin) : (d -= 2) {
+            var x = @max(o1, s.getB(d));
+            var y = x - d;
+            if (y < o2) {
+                x = o2 + d;
+                y = o2;
+            }
+            if (x + y < bbest) {
+                bbest = x + y;
+                bbest1 = x;
+            }
+        }
+
+        if ((l1 + l2) - bbest < fbest - (o1 + o2)) {
+            return .{
+                .i1 = @intCast(fbest1),
+                .i2 = @intCast(fbest - fbest1),
+                .min_lo = true,
+                .min_hi = false,
+            };
+        }
+        return .{
+            .i1 = @intCast(bbest1),
+            .i2 = @intCast(bbest - bbest1),
+            .min_lo = false,
+            .min_hi = true,
+        };
     }
 
     /// The forward diagonal that has reached furthest from its corner, if it
