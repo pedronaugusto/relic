@@ -977,44 +977,9 @@ pub const Proxy = struct {
         var words = std.mem.tokenizeScalar(u8, first, ' ');
         const method = words.next() orelse return error.BadRequest;
         const target = words.next() orelse return error.BadRequest;
-        {
-            p.log_mutex.lockUncancelable(io);
-            defer p.log_mutex.unlock(io);
-            try p.log.print(p.gpa, "{s} {s}\n", .{ method, target });
-            if (std.mem.eql(u8, method, "CONNECT")) {
-                var lines = std.mem.splitSequence(u8, head, "\r\n");
-                while (lines.next()) |line| {
-                    const agent = "User-Agent: git/";
-                    const kept = if (std.mem.startsWith(u8, line, agent)) agent else line;
-                    try p.connects.print(p.gpa, "{s}\n", .{kept});
-                }
-            }
-        }
+        try p.logHead(method, target, head);
         if (p.basic) |credentials| {
-            var expected_buf: [256]u8 = undefined;
-            const encoder = std.base64.standard.Encoder;
-            const encoded = encoder.encode(&expected_buf, credentials);
-            var authorized = false;
-            var given: []const u8 = "none";
-            var lines = std.mem.splitSequence(u8, head, "\r\n");
-            while (lines.next()) |line| {
-                const colon = std.mem.findScalar(u8, line, ':') orelse continue;
-                if (!std.ascii.eqlIgnoreCase(line[0..colon], "proxy-authorization")) continue;
-                const value = std.mem.trim(u8, line[colon + 1 ..], " ");
-                if (std.mem.startsWith(u8, value, "Basic ")) {
-                    given = "basic";
-                    if (p.scheme == .basic and std.mem.eql(u8, value["Basic ".len..], encoded)) authorized = true;
-                } else if (std.mem.startsWith(u8, value, "Digest ")) {
-                    given = "digest";
-                    if (p.scheme != .basic and p.digestTaken(value, method, target, credentials)) authorized = true;
-                } else given = "other";
-            }
-            {
-                p.log_mutex.lockUncancelable(io);
-                defer p.log_mutex.unlock(io);
-                try p.auth_log.print(p.gpa, "{s} {s} {s}\n", .{ method, given, if (authorized) "taken" else "refused" });
-            }
-            if (!authorized) {
+            if (!try p.authorize(credentials, method, target, head)) {
                 const challenge = switch (p.scheme) {
                     .basic => "Basic realm=\"proxy\"",
                     .digest_md5 => "Digest realm=\"proxy\", nonce=\"" ++ digest_nonce ++ "\", qop=\"auth\", algorithm=MD5",
@@ -1059,18 +1024,7 @@ pub const Proxy = struct {
             try to_client.interface.flush();
         }
         from_client.interface.toss(head_len);
-        if (rewritten == null) {
-            // What the client says first inside the tunnel.
-            while (from_client.interface.bufferedLen() < 5) from_client.interface.fillMore() catch break;
-            const seen = from_client.interface.buffered();
-            const kept = try p.gpa.dupe(u8, seen[0..@min(seen.len, 512)]);
-            p.log_mutex.lockUncancelable(io);
-            defer p.log_mutex.unlock(io);
-            p.tunnel_starts.append(p.gpa, kept) catch |err| {
-                p.gpa.free(kept);
-                return err;
-            };
-        }
+        if (rewritten == null) try p.noteTunnelStart(&from_client.interface);
         try to_up.interface.writeAll(from_client.interface.buffered());
         from_client.interface.tossBuffered();
         try to_up.interface.flush();
@@ -1078,6 +1032,62 @@ pub const Proxy = struct {
         var upward = try io.concurrent(copy, .{ &from_client.interface, &to_up.interface });
         copy(&from_up.interface, &to_client.interface);
         upward.cancel(io);
+    }
+
+    /// Log the request line, and a CONNECT's whole head with git's version
+    /// left out of its user agent.
+    fn logHead(p: *Proxy, method: []const u8, target: []const u8, head: []const u8) !void {
+        p.log_mutex.lockUncancelable(p.io);
+        defer p.log_mutex.unlock(p.io);
+        try p.log.print(p.gpa, "{s} {s}\n", .{ method, target });
+        if (std.mem.eql(u8, method, "CONNECT")) {
+            var lines = std.mem.splitSequence(u8, head, "\r\n");
+            while (lines.next()) |line| {
+                const agent = "User-Agent: git/";
+                const kept = if (std.mem.startsWith(u8, line, agent)) agent else line;
+                try p.connects.print(p.gpa, "{s}\n", .{kept});
+            }
+        }
+    }
+
+    /// Whether the head's Proxy-Authorization carries `credentials` in the
+    /// proxy's scheme; what was given and the verdict go to the auth log.
+    fn authorize(p: *Proxy, credentials: []const u8, method: []const u8, target: []const u8, head: []const u8) !bool {
+        var expected_buf: [256]u8 = undefined;
+        const encoder = std.base64.standard.Encoder;
+        const encoded = encoder.encode(&expected_buf, credentials);
+        var authorized = false;
+        var given: []const u8 = "none";
+        var lines = std.mem.splitSequence(u8, head, "\r\n");
+        while (lines.next()) |line| {
+            const colon = std.mem.findScalar(u8, line, ':') orelse continue;
+            if (!std.ascii.eqlIgnoreCase(line[0..colon], "proxy-authorization")) continue;
+            const value = std.mem.trim(u8, line[colon + 1 ..], " ");
+            if (std.mem.startsWith(u8, value, "Basic ")) {
+                given = "basic";
+                if (p.scheme == .basic and std.mem.eql(u8, value["Basic ".len..], encoded)) authorized = true;
+            } else if (std.mem.startsWith(u8, value, "Digest ")) {
+                given = "digest";
+                if (p.scheme != .basic and p.digestTaken(value, method, target, credentials)) authorized = true;
+            } else given = "other";
+        }
+        p.log_mutex.lockUncancelable(p.io);
+        defer p.log_mutex.unlock(p.io);
+        try p.auth_log.print(p.gpa, "{s} {s} {s}\n", .{ method, given, if (authorized) "taken" else "refused" });
+        return authorized;
+    }
+
+    /// Keep what the client says first inside a tunnel, up to 512 bytes.
+    fn noteTunnelStart(p: *Proxy, from_client: *Io.Reader) !void {
+        while (from_client.bufferedLen() < 5) from_client.fillMore() catch break;
+        const seen = from_client.buffered();
+        const kept = try p.gpa.dupe(u8, seen[0..@min(seen.len, 512)]);
+        p.log_mutex.lockUncancelable(p.io);
+        defer p.log_mutex.unlock(p.io);
+        p.tunnel_starts.append(p.gpa, kept) catch |err| {
+            p.gpa.free(kept);
+            return err;
+        };
     }
 
     fn copy(from: *Io.Reader, to: *Io.Writer) void {

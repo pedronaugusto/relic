@@ -3144,18 +3144,29 @@ fn signedHistory(format: signing.Format) !void {
     const programs: program.Programs = .{ .environ = &pair.env };
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "before" });
 
-    // A merge commit, by commit.gpgSign.
+    try signedMerge(&pair, io, programs);
+    try signedPickAndRevert(&pair, io, programs);
+    try signedStoppedPick(&pair, io, programs);
+    try unsignedPick(&pair, io, programs);
+    try signedRebase(&pair, io, programs);
+}
+
+/// A merge commit, by commit.gpgSign.
+fn signedMerge(pair: *Pair, io: Io, programs: program.Programs) !void {
     try pair.git.exec(io, &.{ "-c", "commit.gpgSign=true", "merge", "--no-edit", "-X", "theirs", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
-        const target = try merging.resolve(gpa, io, &repo, "topic");
-        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who, .strategy_options = &.{"theirs"}, .signing = .{ .programs = programs } });
+        const target = try merging.resolve(pair.gpa, io, &repo, "topic");
+        var outcome = try merging.start(pair.gpa, io, &repo, target, .{ .who = who, .strategy_options = &.{"theirs"}, .signing = .{ .programs = programs } });
         defer outcome.deinit();
     }
-    try expectSignedAlike(&pair, io, "HEAD");
+    try expectSignedAlike(pair, io, "HEAD");
+}
 
-    // A pick and a revert.
+/// A pick and a revert.
+fn signedPickAndRevert(pair: *Pair, io: Io, programs: program.Programs) !void {
+    const gpa = pair.gpa;
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
     try pair.git.exec(io, &.{ "-c", "commit.gpgSign=true", "cherry-pick", "topic~2" });
     try pair.git.exec(io, &.{ "-c", "commit.gpgSign=true", "revert", "--no-edit", "HEAD" });
@@ -3168,11 +3179,14 @@ fn signedHistory(format: signing.Format) !void {
         var reverted = try sequencer.revert(gpa, io, &repo, &.{try oidOf(gpa, io, &pair.ours, "HEAD")}, options);
         reverted.deinit();
     }
-    try expectSignedAlike(&pair, io, "HEAD");
-    try expectSignedAlike(&pair, io, "HEAD~1");
+    try expectSignedAlike(pair, io, "HEAD");
+    try expectSignedAlike(pair, io, "HEAD~1");
+}
 
-    // A pick that stops keeps the decision in its opts, and the commit that
-    // continues it is signed; -S with a key names the key.
+/// A pick that stops keeps the decision in its opts, and the commit that
+/// continues it is signed; -S with a key names the key.
+fn signedStoppedPick(pair: *Pair, io: Io, programs: program.Programs) !void {
+    const gpa = pair.gpa;
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
     try gitMayFail(io, &pair.git, &.{ "-c", "commit.gpgSign=false", "cherry-pick", "-S", "topic~1", "topic" });
     {
@@ -3185,13 +3199,7 @@ fn signedHistory(format: signing.Format) !void {
     }
     // Earlier commits carry signatures of their own moment, so what is
     // compared is the recorded decision.
-    {
-        const a = try readOrMissing(gpa, io, &pair.git, ".git/sequencer/opts");
-        defer gpa.free(a);
-        const b = try readOrMissing(gpa, io, &pair.ours, ".git/sequencer/opts");
-        defer gpa.free(b);
-        try std.testing.expectEqualStrings(a, b);
-    }
+    try expectSameFile(pair, io, ".git/sequencer/opts");
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
         try r.writeFile(io, "f", "a\nboth\nc\n");
         try r.writeFile(io, "shared", "one\n2\n3\n4\n5\n6\nseven\n");
@@ -3204,10 +3212,13 @@ fn signedHistory(format: signing.Format) !void {
         var outcome = try sequencer.proceed(gpa, io, &repo, .{ .who = who, .signing = .{ .programs = programs } });
         defer outcome.deinit();
     }
-    try expectSignedAlike(&pair, io, "HEAD");
-    try expectSignedAlike(&pair, io, "HEAD~1");
+    try expectSignedAlike(pair, io, "HEAD");
+    try expectSignedAlike(pair, io, "HEAD~1");
+}
 
-    // --no-gpg-sign wins over commit.gpgSign.
+/// --no-gpg-sign wins over commit.gpgSign.
+fn unsignedPick(pair: *Pair, io: Io, programs: program.Programs) !void {
+    const gpa = pair.gpa;
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
         try r.exec(io, &.{ "config", "commit.gpgSign", "true" });
         try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
@@ -3218,9 +3229,12 @@ fn signedHistory(format: signing.Format) !void {
         var picked = try sequencer.pick(gpa, io, &repo, &.{try oidOf(gpa, io, &pair.ours, "topic~2")}, .{ .who = who, .signing = .{ .sign = .never, .programs = programs } });
         picked.deinit();
     }
-    try std.testing.expectEqual(@as(u8, 'N'), try signatureLetter(&pair, io, "HEAD"));
+    try std.testing.expectEqual(@as(u8, 'N'), try signatureLetter(pair, io, "HEAD"));
+}
 
-    // A rebase signs every commit it makes, and keeps -S in its state.
+/// A rebase signs every commit it makes, and keeps -S in its state.
+fn signedRebase(pair: *Pair, io: Io, programs: program.Programs) !void {
+    const gpa = pair.gpa;
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
         try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
         try r.exec(io, &.{ "checkout", "-q", "topic" });
@@ -3235,14 +3249,8 @@ fn signedHistory(format: signing.Format) !void {
     }
     // The commits already made carry signatures of their own moment, so
     // what is compared is the recorded decision.
-    {
-        const a = try readOrMissing(gpa, io, &pair.git, ".git/rebase-merge/gpg_sign_opt");
-        defer gpa.free(a);
-        const b = try readOrMissing(gpa, io, &pair.ours, ".git/rebase-merge/gpg_sign_opt");
-        defer gpa.free(b);
-        try std.testing.expectEqualStrings(a, b);
-    }
-    try expectSignedAlike(&pair, io, "HEAD");
+    try expectSameFile(pair, io, ".git/rebase-merge/gpg_sign_opt");
+    try expectSignedAlike(pair, io, "HEAD");
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
         try r.writeFile(io, "f", "a\nresolved\nc\n");
         try r.exec(io, &.{ "add", "f" });
@@ -3255,7 +3263,16 @@ fn signedHistory(format: signing.Format) !void {
         defer outcome.deinit();
         try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
     }
-    for ([_][]const u8{ "HEAD", "HEAD~1", "HEAD~2" }) |rev| try expectSignedAlike(&pair, io, rev);
+    for ([_][]const u8{ "HEAD", "HEAD~1", "HEAD~2" }) |rev| try expectSignedAlike(pair, io, rev);
+}
+
+/// git and relic left the same bytes at `path`, or neither left the file.
+fn expectSameFile(pair: *Pair, io: Io, path: []const u8) !void {
+    const a = try readOrMissing(pair.gpa, io, &pair.git, path);
+    defer pair.gpa.free(a);
+    const b = try readOrMissing(pair.gpa, io, &pair.ours, path);
+    defer pair.gpa.free(b);
+    try std.testing.expectEqualStrings(a, b);
 }
 
 test "merges, picks, reverts and rebases are signed with an ssh key as git signs them" {

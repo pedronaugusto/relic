@@ -28,8 +28,16 @@ const Helper = struct {
     local: []const u8,
     in: *Io.Reader,
     out: *Io.Writer,
+    /// Which helper this runs as: testgit, or testfetch.
+    testgit: bool,
     force: bool = false,
     object_format: bool = false,
+    /// git's marks and the helper's own, under `$GIT_DIR/testgit/<alias>`.
+    gitmarks: []const u8 = "",
+    testgitmarks: []const u8 = "",
+    /// The private namespace for heads and for tags.
+    h_refspec: []const u8 = "",
+    t_refspec: []const u8 = "",
 
     fn git(h: *Helper, git_dir: []const u8, args: []const []const u8, input: ?[]const u8) ![]u8 {
         var argv: std.ArrayList([]const u8) = .empty;
@@ -87,6 +95,139 @@ const Helper = struct {
         try h.out.print("@{s} HEAD\n\n", .{std.mem.trimEnd(u8, head, "\n")});
         try h.out.flush();
     }
+
+    /// Make the marks files under `$GIT_DIR/testgit/<alias>` when they are
+    /// not there yet, and name the private namespace's refspecs.
+    fn prepareMarks(h: *Helper, alias: []const u8) !void {
+        const dir = try std.fmt.allocPrint(h.gpa, "{s}/testgit/{s}", .{ h.local, alias });
+        try Io.Dir.cwd().createDirPath(h.io, dir);
+        h.gitmarks = try std.fmt.allocPrint(h.gpa, "{s}/git.marks", .{dir});
+        h.testgitmarks = try std.fmt.allocPrint(h.gpa, "{s}/testgit.marks", .{dir});
+        for ([_][]const u8{ h.gitmarks, h.testgitmarks }) |path| {
+            Io.Dir.cwd().access(h.io, path, .{}) catch try Io.Dir.cwd().writeFile(h.io, .{ .sub_path = path, .data = "" });
+        }
+        h.h_refspec = try std.fmt.allocPrint(h.gpa, "refs/heads/*:refs/testgit/{s}/heads/*", .{alias});
+        h.t_refspec = try std.fmt.allocPrint(h.gpa, "refs/tags/*:refs/testgit/{s}/tags/*", .{alias});
+    }
+
+    fn capabilities(h: *Helper) !void {
+        if (h.testgit) {
+            try h.out.print("import\nexport\nrefspec {s}\nrefspec {s}\n*import-marks {s}\n*export-marks {s}\n", .{ h.h_refspec, h.t_refspec, h.gitmarks, h.gitmarks });
+            if (h.environ.get("RELIC_HELPER_NO_PRIVATE_UPDATE") != null) try h.out.writeAll("no-private-update\n");
+            try h.out.writeAll("option\nobject-format\n\n");
+        } else {
+            try h.out.writeAll("fetch\npush\noption\n\n");
+        }
+        try h.out.flush();
+    }
+
+    /// Take `force` and `object-format`; any other option is unsupported.
+    fn option(h: *Helper, setting: []const u8) !void {
+        var words = std.mem.splitScalar(u8, setting, ' ');
+        const name = words.next().?;
+        const value = words.rest();
+        if (std.mem.eql(u8, name, "force")) {
+            h.force = std.mem.eql(u8, value, "true");
+            try h.out.writeAll("ok\n");
+        } else if (std.mem.eql(u8, name, "object-format")) {
+            h.object_format = std.mem.eql(u8, value, "true");
+            try h.out.writeAll("ok\n");
+        } else try h.out.writeAll("unsupported\n");
+        try h.out.flush();
+    }
+
+    /// The lines of a batch that begins with `first`, each without `prefix`;
+    /// the line that ends the batch is read and dropped.
+    fn batch(h: *Helper, first: []const u8, prefix: []const u8, buf: *std.ArrayList(u8)) ![]const []const u8 {
+        var items: std.ArrayList([]const u8) = .empty;
+        var current: ?[]const u8 = first;
+        while (current) |l| {
+            if (!std.mem.startsWith(u8, l, prefix)) break;
+            try items.append(h.gpa, try h.gpa.dupe(u8, l[prefix.len..]));
+            current = try h.line(buf);
+        }
+        return items.items;
+    }
+
+    /// A batch of `import`s: the remote's refs as a fast-export stream,
+    /// through the marks.
+    fn import(h: *Helper, first: []const u8, buf: *std.ArrayList(u8)) !void {
+        const gpa = h.gpa;
+        const refs = try h.batch(first, "import ", buf);
+        try h.out.print("feature import-marks={s}\nfeature export-marks={s}\nfeature done\n", .{ h.gitmarks, h.gitmarks });
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(gpa, &.{
+            "fast-export",
+            try std.fmt.allocPrint(gpa, "--refspec={s}", .{h.h_refspec}),
+            try std.fmt.allocPrint(gpa, "--refspec={s}", .{h.t_refspec}),
+            try std.fmt.allocPrint(gpa, "--import-marks={s}", .{h.testgitmarks}),
+            try std.fmt.allocPrint(gpa, "--export-marks={s}", .{h.testgitmarks}),
+        });
+        try argv.appendSlice(gpa, refs);
+        const stream = try h.git(h.remote, argv.items, null);
+        try h.out.writeAll(stream);
+        try h.out.writeAll("done\n");
+        try h.out.flush();
+    }
+
+    /// An `export`: the stream fast-imported into the remote, and each ref
+    /// it moved answered `ok`, or `error` when the environment asks.
+    fn @"export"(h: *Helper, buf: *std.ArrayList(u8)) !void {
+        const gpa = h.gpa;
+        const stream = try readStream(h, buf);
+        const before = try h.git(h.remote, &.{ "for-each-ref", "--format=%(refname) %(objectname)" }, null);
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.append(gpa, "fast-import");
+        if (h.force) try argv.append(gpa, "--force");
+        try argv.appendSlice(gpa, &.{
+            try std.fmt.allocPrint(gpa, "--import-marks={s}", .{h.testgitmarks}),
+            try std.fmt.allocPrint(gpa, "--export-marks={s}", .{h.testgitmarks}),
+            "--quiet",
+        });
+        _ = try h.git(h.remote, argv.items, stream);
+        const after = try h.git(h.remote, &.{ "for-each-ref", "--format=%(refname) %(objectname)" }, null);
+        var lines = std.mem.splitScalar(u8, after, '\n');
+        while (lines.next()) |l| {
+            if (l.len == 0) continue;
+            if (std.mem.find(u8, before, l) != null) continue;
+            const ref = l[0..std.mem.findScalar(u8, l, ' ').?];
+            if (h.environ.get("RELIC_HELPER_PUSH_ERROR")) |why| {
+                try h.out.print("error {s} {s}\n", .{ ref, why });
+            } else try h.out.print("ok {s}\n", .{ref});
+        }
+        try h.out.writeAll("\n");
+        try h.out.flush();
+    }
+
+    /// A batch of `fetch`es: the remote packs the objects, and this side
+    /// indexes the pack.
+    fn fetch(h: *Helper, first: []const u8, buf: *std.ArrayList(u8)) !void {
+        const lines = try h.batch(first, "fetch ", buf);
+        var oids: std.ArrayList(u8) = .empty;
+        for (lines) |rest| {
+            try oids.appendSlice(h.gpa, rest[0..std.mem.findScalar(u8, rest, ' ').?]);
+            try oids.append(h.gpa, '\n');
+        }
+        const pack = try h.git(h.remote, &.{ "pack-objects", "--revs", "--stdout" }, oids.items);
+        _ = try h.git(h.local, &.{ "index-pack", "--stdin" }, pack);
+        try h.out.writeAll("\n");
+        try h.out.flush();
+    }
+
+    /// A batch of `push`es: each refspec pushed from here to the remote by
+    /// git, and answered by its outcome.
+    fn push(h: *Helper, first: []const u8, buf: *std.ArrayList(u8)) !void {
+        const specs = try h.batch(first, "push ", buf);
+        for (specs) |spec| {
+            const dst = spec[std.mem.findScalarLast(u8, spec, ':').? + 1 ..];
+            if (h.git(h.local, &.{ "push", "--quiet", h.remote, spec }, null)) |o| {
+                h.gpa.free(o);
+                try h.out.print("ok {s}\n", .{dst});
+            } else |_| try h.out.print("error {s} rejected\n", .{dst});
+        }
+        try h.out.writeAll("\n");
+        try h.out.flush();
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -96,7 +237,6 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 3) return error.MissingArguments;
     var base = std.fs.path.basename(args[0]);
     if (std.mem.endsWith(u8, base, ".exe")) base = base[0 .. base.len - 4];
-    const testgit = std.mem.eql(u8, base, "git-remote-testgit");
 
     // The gits this runs are pointed at their repository by name, never by
     // the variables that point at this one.
@@ -119,122 +259,28 @@ pub fn main(init: std.process.Init) !void {
         .local = local,
         .in = &in.interface,
         .out = &out.interface,
+        .testgit = std.mem.eql(u8, base, "git-remote-testgit"),
     };
     const absolute = try h.git("", &.{ "-C", url, "rev-parse", "--absolute-git-dir" }, null);
     h.remote = std.mem.trimEnd(u8, absolute, "\r\n");
-
-    const dir = try std.fmt.allocPrint(gpa, "{s}/testgit/{s}", .{ local, alias });
-    try Io.Dir.cwd().createDirPath(io, dir);
-    const gitmarks = try std.fmt.allocPrint(gpa, "{s}/git.marks", .{dir});
-    const testgitmarks = try std.fmt.allocPrint(gpa, "{s}/testgit.marks", .{dir});
-    for ([_][]const u8{ gitmarks, testgitmarks }) |path| {
-        Io.Dir.cwd().access(io, path, .{}) catch try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "" });
-    }
-    const h_refspec = try std.fmt.allocPrint(gpa, "refs/heads/*:refs/testgit/{s}/heads/*", .{alias});
-    const t_refspec = try std.fmt.allocPrint(gpa, "refs/tags/*:refs/testgit/{s}/tags/*", .{alias});
+    try h.prepareMarks(alias);
 
     var buf: std.ArrayList(u8) = .empty;
     while (try h.line(&buf)) |text| {
         if (std.mem.eql(u8, text, "capabilities")) {
-            if (testgit) {
-                try h.out.print("import\nexport\nrefspec {s}\nrefspec {s}\n*import-marks {s}\n*export-marks {s}\n", .{ h_refspec, t_refspec, gitmarks, gitmarks });
-                if (environ.get("RELIC_HELPER_NO_PRIVATE_UPDATE") != null) try h.out.writeAll("no-private-update\n");
-                try h.out.writeAll("option\nobject-format\n\n");
-            } else {
-                try h.out.writeAll("fetch\npush\noption\n\n");
-            }
-            try h.out.flush();
+            try h.capabilities();
         } else if (std.mem.eql(u8, text, "list") or std.mem.eql(u8, text, "list for-push")) {
-            try h.list(!testgit);
+            try h.list(!h.testgit);
         } else if (std.mem.startsWith(u8, text, "option ")) {
-            var words = std.mem.splitScalar(u8, text["option ".len..], ' ');
-            const name = words.next().?;
-            const value = words.rest();
-            if (std.mem.eql(u8, name, "force")) {
-                h.force = std.mem.eql(u8, value, "true");
-                try h.out.writeAll("ok\n");
-            } else if (std.mem.eql(u8, name, "object-format")) {
-                h.object_format = std.mem.eql(u8, value, "true");
-                try h.out.writeAll("ok\n");
-            } else try h.out.writeAll("unsupported\n");
-            try h.out.flush();
+            try h.option(text["option ".len..]);
         } else if (std.mem.startsWith(u8, text, "import ")) {
-            var refs: std.ArrayList([]const u8) = .empty;
-            var current: ?[]const u8 = text;
-            while (current) |l| {
-                if (!std.mem.startsWith(u8, l, "import ")) break;
-                try refs.append(gpa, try gpa.dupe(u8, l["import ".len..]));
-                current = try h.line(&buf);
-            }
-            try h.out.print("feature import-marks={s}\nfeature export-marks={s}\nfeature done\n", .{ gitmarks, gitmarks });
-            var argv: std.ArrayList([]const u8) = .empty;
-            try argv.appendSlice(gpa, &.{
-                "fast-export",
-                try std.fmt.allocPrint(gpa, "--refspec={s}", .{h_refspec}),
-                try std.fmt.allocPrint(gpa, "--refspec={s}", .{t_refspec}),
-                try std.fmt.allocPrint(gpa, "--import-marks={s}", .{testgitmarks}),
-                try std.fmt.allocPrint(gpa, "--export-marks={s}", .{testgitmarks}),
-            });
-            try argv.appendSlice(gpa, refs.items);
-            const stream = try h.git(h.remote, argv.items, null);
-            try h.out.writeAll(stream);
-            try h.out.writeAll("done\n");
-            try h.out.flush();
+            try h.import(text, &buf);
         } else if (std.mem.eql(u8, text, "export")) {
-            const stream = try readStream(&h, &buf);
-            const before = try h.git(h.remote, &.{ "for-each-ref", "--format=%(refname) %(objectname)" }, null);
-            var argv: std.ArrayList([]const u8) = .empty;
-            try argv.append(gpa, "fast-import");
-            if (h.force) try argv.append(gpa, "--force");
-            try argv.appendSlice(gpa, &.{
-                try std.fmt.allocPrint(gpa, "--import-marks={s}", .{testgitmarks}),
-                try std.fmt.allocPrint(gpa, "--export-marks={s}", .{testgitmarks}),
-                "--quiet",
-            });
-            _ = try h.git(h.remote, argv.items, stream);
-            const after = try h.git(h.remote, &.{ "for-each-ref", "--format=%(refname) %(objectname)" }, null);
-            var lines = std.mem.splitScalar(u8, after, '\n');
-            while (lines.next()) |l| {
-                if (l.len == 0) continue;
-                if (std.mem.find(u8, before, l) != null) continue;
-                const ref = l[0..std.mem.findScalar(u8, l, ' ').?];
-                if (environ.get("RELIC_HELPER_PUSH_ERROR")) |why| {
-                    try h.out.print("error {s} {s}\n", .{ ref, why });
-                } else try h.out.print("ok {s}\n", .{ref});
-            }
-            try h.out.writeAll("\n");
-            try h.out.flush();
+            try h.@"export"(&buf);
         } else if (std.mem.startsWith(u8, text, "fetch ")) {
-            var oids: std.ArrayList(u8) = .empty;
-            var current: ?[]const u8 = text;
-            while (current) |l| {
-                if (!std.mem.startsWith(u8, l, "fetch ")) break;
-                const rest = l["fetch ".len..];
-                try oids.appendSlice(gpa, rest[0..std.mem.findScalar(u8, rest, ' ').?]);
-                try oids.append(gpa, '\n');
-                current = try h.line(&buf);
-            }
-            const pack = try h.git(h.remote, &.{ "pack-objects", "--revs", "--stdout" }, oids.items);
-            _ = try h.git(h.local, &.{ "index-pack", "--stdin" }, pack);
-            try h.out.writeAll("\n");
-            try h.out.flush();
+            try h.fetch(text, &buf);
         } else if (std.mem.startsWith(u8, text, "push ")) {
-            var specs: std.ArrayList([]const u8) = .empty;
-            var current: ?[]const u8 = text;
-            while (current) |l| {
-                if (!std.mem.startsWith(u8, l, "push ")) break;
-                try specs.append(gpa, try gpa.dupe(u8, l["push ".len..]));
-                current = try h.line(&buf);
-            }
-            for (specs.items) |spec| {
-                const dst = spec[std.mem.findScalarLast(u8, spec, ':').? + 1 ..];
-                if (h.git(h.local, &.{ "push", "--quiet", h.remote, spec }, null)) |o| {
-                    gpa.free(o);
-                    try h.out.print("ok {s}\n", .{dst});
-                } else |_| try h.out.print("error {s} rejected\n", .{dst});
-            }
-            try h.out.writeAll("\n");
-            try h.out.flush();
+            try h.push(text, &buf);
         } else if (text.len == 0) {
             return;
         } else return error.UnknownCommand;

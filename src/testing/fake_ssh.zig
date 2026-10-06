@@ -19,59 +19,103 @@ pub fn main(init: std.process.Init) !void {
     // when it ends.
     if (args.len == 3 and std.mem.eql(u8, args[1], "--hold-stderr")) return holdStderr(io, args[2]);
     const executable = try std.process.executablePathAlloc(io, arena);
+    const fixture = try Fixture.read(arena, io, executable);
+    try logInvocation(arena, io, init.environ_map, executable, args, fixture);
+    try act(io, executable, fixture);
+
+    const at = commandStart(args) orelse return;
+    var line: std.ArrayList(u8) = .empty;
+    for (args[at..], 0..) |arg, i| {
+        if (i != 0) try line.append(arena, ' ');
+        try line.appendSlice(arena, arg);
+    }
+    const words = try parseWords(arena, line.items);
+    if (words.len == 0) return;
+    const command = try localCommand(arena, io, init.environ_map, executable, words);
+    try run(arena, io, init.environ_map, executable, command);
+}
+
+/// What the test asked of this run, from `<executable>.fixture`: a mode on
+/// the first line, the message to say on the second, and for `refuse-held`
+/// the file that releases its grandchild on the third. No file is the
+/// plain mode.
+const Fixture = struct {
+    mode: []const u8,
+    message: []const u8,
+    release: []const u8,
+
+    fn read(arena: Allocator, io: Io, executable: []const u8) !Fixture {
+        const fixture_path = try std.fmt.allocPrint(arena, "{s}.fixture", .{executable});
+        const fixture = Io.Dir.cwd().readFileAlloc(io, fixture_path, arena, .limited(4096)) catch |err| switch (err) {
+            error.FileNotFound => "",
+            else => return err,
+        };
+        const mode = std.mem.sliceTo(fixture, '\n');
+        var lines = std.mem.splitScalar(u8, if (mode.len < fixture.len) fixture[mode.len + 1 ..] else "", '\n');
+        const message = std.mem.trimEnd(u8, lines.next() orelse "", "\r");
+        const release = std.mem.trimEnd(u8, lines.next() orelse "", "\r");
+        return .{ .mode = mode, .message = message, .release = release };
+    }
+
+    fn is(f: Fixture, mode: []const u8) bool {
+        return std.mem.eql(u8, f.mode, mode);
+    }
+};
+
+/// Append the arguments to `<stem>.log`, each in brackets, with the agent
+/// and home this saw when the mode is about authentication.
+fn logInvocation(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, executable: []const u8, args: []const []const u8, fixture: Fixture) !void {
     const stem = if (std.ascii.endsWithIgnoreCase(executable, ".exe")) executable[0 .. executable.len - 4] else executable;
-    const fixture_path = try std.fmt.allocPrint(arena, "{s}.fixture", .{executable});
-    const fixture = Io.Dir.cwd().readFileAlloc(io, fixture_path, arena, .limited(4096)) catch |err| switch (err) {
-        error.FileNotFound => "",
-        else => return err,
-    };
-    const mode = std.mem.sliceTo(fixture, '\n');
-    var lines = std.mem.splitScalar(u8, if (mode.len < fixture.len) fixture[mode.len + 1 ..] else "", '\n');
-    const message = std.mem.trimEnd(u8, lines.next() orelse "", "\r");
-    // For `refuse-held`, the file that releases its grandchild.
-    const release = std.mem.trimEnd(u8, lines.next() orelse "", "\r");
     const log_name = try std.fmt.allocPrint(arena, "{s}.log", .{stem});
     const log = try Io.Dir.cwd().createFile(io, log_name, .{ .truncate = false, .read = true });
     defer log.close(io);
     var entry: std.ArrayList(u8) = .empty;
     for (args[1..]) |arg| try entry.print(arena, "[{s}]", .{arg});
-    const held = std.mem.eql(u8, mode, "refuse-held");
-    if (std.mem.eql(u8, mode, "auth") or std.mem.eql(u8, mode, "refuse") or held) {
+    if (fixture.is("auth") or fixture.is("refuse") or fixture.is("refuse-held")) {
         try entry.print(arena, " agent={s} home={s}", .{
-            init.environ_map.get("SSH_AUTH_SOCK") orelse "",
-            init.environ_map.get("HOME") orelse "",
+            environ.get("SSH_AUTH_SOCK") orelse "",
+            environ.get("HOME") orelse "",
         });
     }
     try entry.append(arena, '\n');
     try log.writePositionalAll(io, entry.items, try log.length(io));
-    if (std.mem.eql(u8, mode, "warn") or std.mem.eql(u8, mode, "refuse") or held) {
-        var stderr_buf: [4096]u8 = undefined;
-        var stderr = Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr.interface.print("{s}\n", .{message});
-        try stderr.interface.flush();
-        if (held) {
-            // As an ssh ControlMaster does: something started here keeps
-            // the standard error open after this program has ended. It
-            // leaves the conversation's two pipes alone, as the master
-            // does; a Windows child would otherwise inherit them too.
-            if (builtin.os.tag == .windows) {
-                _ = SetHandleInformation(Io.File.stdin().handle, handle_flag_inherit, 0);
-                _ = SetHandleInformation(Io.File.stdout().handle, handle_flag_inherit, 0);
-            }
-            _ = try std.process.spawn(io, .{
-                .argv = &.{ executable, "--hold-stderr", release },
-                .stdin = .ignore,
-                .stdout = .ignore,
-                .stderr = .inherit,
-            });
-        }
-        if (std.mem.eql(u8, mode, "refuse") or held) std.process.exit(255);
-    }
+}
 
+/// Say the fixture's message for `warn`, `refuse` and `refuse-held`, and
+/// end here, as ssh refusing the connection, for the last two.
+fn act(io: Io, executable: []const u8, fixture: Fixture) !void {
+    const held = fixture.is("refuse-held");
+    if (!(fixture.is("warn") or fixture.is("refuse") or held)) return;
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr = Io.File.stderr().writerStreaming(io, &stderr_buf);
+    try stderr.interface.print("{s}\n", .{fixture.message});
+    try stderr.interface.flush();
+    if (held) {
+        // As an ssh ControlMaster does: something started here keeps
+        // the standard error open after this program has ended. It
+        // leaves the conversation's two pipes alone, as the master
+        // does; a Windows child would otherwise inherit them too.
+        if (builtin.os.tag == .windows) {
+            _ = SetHandleInformation(Io.File.stdin().handle, handle_flag_inherit, 0);
+            _ = SetHandleInformation(Io.File.stdout().handle, handle_flag_inherit, 0);
+        }
+        _ = try std.process.spawn(io, .{
+            .argv = &.{ executable, "--hold-stderr", fixture.release },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .inherit,
+        });
+    }
+    if (fixture.is("refuse") or held) std.process.exit(255);
+}
+
+/// Where the remote command starts in ssh's arguments, past the options
+/// and the host; null for git's `-G` probe or when there is no command.
+fn commandStart(args: []const []const u8) ?usize {
     var at: usize = 1;
     while (at < args.len) {
         const arg = args[at];
-        if (std.mem.eql(u8, arg, "-G")) return;
+        if (std.mem.eql(u8, arg, "-G")) return null;
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "-P") or
             std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "-J") or std.mem.eql(u8, arg, "-F"))
         {
@@ -80,24 +124,24 @@ pub fn main(init: std.process.Init) !void {
             at += 1;
         } else break;
     }
-    if (at >= args.len) return;
+    if (at >= args.len) return null;
     at += 1; // The host is deliberately ignored.
-    if (at >= args.len) return;
+    if (at >= args.len) return null;
+    return at;
+}
 
-    var line: std.ArrayList(u8) = .empty;
-    for (args[at..], 0..) |arg, i| {
-        if (i != 0) try line.append(arena, ' ');
-        try line.appendSlice(arena, arg);
-    }
-    const words = try parseWords(arena, line.items);
-    if (words.len == 0) return;
+/// The local program and arguments for the remote command's `words`: a
+/// `git-<service>` runs as `git <service>`, a Windows drive path loses the
+/// leading slash, and `git-lfs-transfer` is the helper beside this one when
+/// there is one.
+fn localCommand(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, executable: []const u8, words: []const []const u8) ![]const []const u8 {
     var command: std.ArrayList([]const u8) = .empty;
     if (std.mem.startsWith(u8, words[0], "git-") and
         (std.mem.eql(u8, words[0], "git-upload-pack") or
             std.mem.eql(u8, words[0], "git-receive-pack") or
             std.mem.eql(u8, words[0], "git-upload-archive")))
     {
-        try command.appendSlice(arena, &.{ try testprogram.path(arena, io, init.environ_map, "git"), words[0]["git-".len..] });
+        try command.appendSlice(arena, &.{ try testprogram.path(arena, io, environ, "git"), words[0]["git-".len..] });
         try command.appendSlice(arena, words[1..]);
     } else try command.appendSlice(arena, words);
     if (builtin.os.tag == .windows and command.items.len > 1) {
@@ -113,13 +157,20 @@ pub fn main(init: std.process.Init) !void {
             command.items[0] = sibling;
         } else |_| {}
     }
-    command.items[0] = try testprogram.path(arena, io, init.environ_map, command.items[0]);
+    command.items[0] = try testprogram.path(arena, io, environ, command.items[0]);
+    return command.items;
+}
+
+/// Run `command` with this program's streams, its standard input copied to
+/// `<executable>.capture` when that file names where, and end with its
+/// status: 127 when it cannot be found, 255 when it did not exit.
+fn run(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, executable: []const u8, command: []const []const u8) !void {
     const capture_sidecar = try std.fmt.allocPrint(arena, "{s}.capture", .{executable});
     const capture = Io.Dir.cwd().readFileAlloc(io, capture_sidecar, arena, .limited(4096)) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };
-    var child = std.process.spawn(io, .{ .argv = command.items, .environ_map = init.environ_map, .stdin = if (capture == null) .inherit else .pipe }) catch |err| {
+    var child = std.process.spawn(io, .{ .argv = command, .environ_map = environ, .stdin = if (capture == null) .inherit else .pipe }) catch |err| {
         if (err == error.FileNotFound) std.process.exit(127);
         return err;
     };

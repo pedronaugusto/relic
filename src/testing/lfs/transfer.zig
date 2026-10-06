@@ -36,25 +36,8 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
-    var root: []const u8 = ".";
-    var log_dir: ?[]const u8 = null;
-    var user: []const u8 = "ada";
-    var offer_version = true;
-    var rest: std.ArrayList([]const u8) = .empty;
-    for (args[1..]) |arg| {
-        if (std.mem.startsWith(u8, arg, "--root=")) {
-            root = arg["--root=".len..];
-        } else if (std.mem.startsWith(u8, arg, "--log=")) {
-            log_dir = arg["--log=".len..];
-        } else if (std.mem.startsWith(u8, arg, "--user=")) {
-            user = arg["--user=".len..];
-        } else if (std.mem.eql(u8, arg, "--no-version")) {
-            offer_version = false;
-        } else try rest.append(gpa, arg);
-    }
-    if (rest.items.len != 2) return error.Usage;
-    const operation = rest.items[1];
-    const repo_path = try std.fs.path.join(gpa, &.{ root, std.mem.trimStart(u8, rest.items[0], "/") });
+    const options = try Options.parse(gpa, args);
+    const repo_path = try std.fs.path.join(gpa, &.{ options.root, std.mem.trimStart(u8, options.path, "/") });
     var repo = try Io.Dir.cwd().createDirPathOpen(io, repo_path, .{});
     defer repo.close(io);
 
@@ -66,152 +49,209 @@ pub fn main(init: std.process.Init) !void {
     const w = &out.interface;
 
     var log: std.ArrayList(u8) = .empty;
-    defer if (log_dir) |dir| writeLog(io, dir, log.items);
-    try log.print(gpa, "== {s} {s}\n", .{ rest.items[0], operation });
+    defer if (options.log_dir) |dir| writeLog(io, dir, log.items);
+    try log.print(gpa, "== {s} {s}\n", .{ options.path, options.operation });
 
-    if (offer_version) try pktline.write(w, "version=1\n");
+    if (options.offer_version) try pktline.write(w, "version=1\n");
     try pktline.write(w, "locking\n");
     try pktline.flush(w);
     try w.flush();
 
+    const session: Session = .{ .gpa = gpa, .io = io, .repo = repo, .operation = options.operation, .user = options.user, .w = w };
     while (true) {
-        const req = (try readRequest(gpa, r, operation)) orelse return;
+        const req = (try readRequest(gpa, r, options.operation)) orelse return;
         try note(gpa, &log, req);
+        if (!try session.answer(req)) return;
+    }
+}
+
+/// What the helper was started with: `--root=`, `--log=`, `--user=` and
+/// `--no-version`, then the repository's path and the operation.
+const Options = struct {
+    root: []const u8 = ".",
+    log_dir: ?[]const u8 = null,
+    user: []const u8 = "ada",
+    offer_version: bool = true,
+    path: []const u8 = "",
+    operation: []const u8 = "",
+
+    fn parse(gpa: Allocator, args: []const []const u8) !Options {
+        var options: Options = .{};
+        var rest: std.ArrayList([]const u8) = .empty;
+        for (args[1..]) |arg| {
+            if (std.mem.startsWith(u8, arg, "--root=")) {
+                options.root = arg["--root=".len..];
+            } else if (std.mem.startsWith(u8, arg, "--log=")) {
+                options.log_dir = arg["--log=".len..];
+            } else if (std.mem.startsWith(u8, arg, "--user=")) {
+                options.user = arg["--user=".len..];
+            } else if (std.mem.eql(u8, arg, "--no-version")) {
+                options.offer_version = false;
+            } else try rest.append(gpa, arg);
+        }
+        if (rest.items.len != 2) return error.Usage;
+        options.path = rest.items[0];
+        options.operation = rest.items[1];
+        return options;
+    }
+};
+
+/// One connection's server: the repository it keeps objects and locks in,
+/// the operation and user it serves, and where its answers go.
+const Session = struct {
+    gpa: Allocator,
+    io: Io,
+    repo: Io.Dir,
+    operation: []const u8,
+    user: []const u8,
+    w: *Io.Writer,
+
+    /// Answer one request; false once the client has said `quit`.
+    fn answer(s: *const Session, req: Request) !bool {
         const cmd = req.command;
         if (std.mem.eql(u8, cmd, "version 1")) {
-            try status(w, 200, &.{}, null);
+            try status(s.w, 200, &.{}, null);
         } else if (std.mem.eql(u8, cmd, "quit")) {
-            try status(w, 200, &.{}, null);
-            return;
+            try status(s.w, 200, &.{}, null);
+            return false;
         } else if (std.mem.eql(u8, cmd, "batch")) {
-            var lines: std.ArrayList([]const u8) = .empty;
-            for (req.lines) |line| {
-                var it = std.mem.splitScalar(u8, line, ' ');
-                const oid = it.next() orelse continue;
-                const size = it.next() orelse continue;
-                const have = try hasObject(gpa, io, repo, oid);
-                const action: []const u8 = if (std.mem.eql(u8, operation, "upload"))
-                    (if (have) "noop" else "upload")
-                else
-                    (if (have) "download" else "noop");
-                if (std.mem.eql(u8, action, "noop")) {
-                    try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s} noop", .{ oid, size }));
-                } else {
-                    try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s} {s} id={s} token=tok-{s} expires-in=3600", .{ oid, size, action, oid[0..@min(oid.len, 8)], oid[0..@min(oid.len, 8)] }));
-                }
-            }
-            try status(w, 200, &.{"hash-algo=sha256"}, lines.items);
+            try s.batch(req);
         } else if (std.mem.startsWith(u8, cmd, "get-object ")) {
-            const oid = cmd["get-object ".len..];
-            if (!try authorised(req, oid)) {
-                try status(w, 403, &.{}, &.{"missing id or token"});
-                continue;
-            }
-            const bytes = readObject(gpa, io, repo, oid) orelse {
-                try status(w, 404, &.{}, &.{"not found"});
-                continue;
-            };
-            try pktline.write(w, "status 200\n");
-            try pktline.print("size={d}\n", .{bytes.len}, w);
-            try pktline.delim(w);
-            var left = bytes;
-            while (left.len != 0) {
-                const n = @min(left.len, pktline.max_data);
-                try pktline.write(w, left[0..n]);
-                left = left[n..];
-            }
-            try pktline.flush(w);
-            try w.flush();
+            try s.getObject(req, cmd["get-object ".len..]);
         } else if (std.mem.startsWith(u8, cmd, "put-object ")) {
-            const oid = cmd["put-object ".len..];
-            if (!try authorised(req, oid)) {
-                try status(w, 403, &.{}, &.{"missing id or token"});
-                continue;
-            }
-            const bytes = req.body orelse "";
-            var digest: [32]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-            var hex: [64]u8 = undefined;
-            _ = try std.fmt.bufPrint(&hex, "{x}", .{&digest});
-            if (!std.mem.eql(u8, &hex, oid)) {
-                try status(w, 400, &.{}, &.{"the data is not the object"});
-                continue;
-            }
-            const path = try objectPath(gpa, oid);
-            try repo.createDirPath(io, std.fs.path.dirname(path).?);
-            try repo.writeFile(io, .{ .sub_path = path, .data = bytes });
-            try status(w, 200, &.{}, null);
+            try s.putObject(req, cmd["put-object ".len..]);
         } else if (std.mem.startsWith(u8, cmd, "verify-object ")) {
             const oid = cmd["verify-object ".len..];
             if (!try authorised(req, oid)) {
-                try status(w, 403, &.{}, &.{"missing id or token"});
-                continue;
-            }
-            if (try hasObject(gpa, io, repo, oid)) try status(w, 200, &.{}, null) else try status(w, 404, &.{}, &.{"not found"});
+                try status(s.w, 403, &.{}, &.{"missing id or token"});
+            } else if (try hasObject(s.gpa, s.io, s.repo, oid)) try status(s.w, 200, &.{}, null) else try status(s.w, 404, &.{}, &.{"not found"});
         } else if (std.mem.eql(u8, cmd, "lock")) {
-            const path = argValue(req.args, "path") orelse {
-                try status(w, 400, &.{}, &.{"no path"});
-                continue;
-            };
-            var locks = try readLocks(gpa, io, repo);
-            for (locks.items) |l| {
-                if (std.mem.eql(u8, l.path, path)) {
-                    try status(w, 409, try lockArgs(gpa, l), &.{"already locked"});
-                    break;
-                }
-            } else {
-                const l: Lock = .{ .id = try std.fmt.allocPrint(gpa, "{d}", .{nextId(locks.items)}), .path = path, .owner = user };
-                try locks.append(gpa, l);
-                try writeLocks(gpa, io, repo, locks.items);
-                try status(w, 201, try lockArgs(gpa, l), null);
-            }
+            try s.lock(req);
         } else if (std.mem.eql(u8, cmd, "list-lock")) {
-            const locks = try readLocks(gpa, io, repo);
-            const want_path = argValue(req.args, "path");
-            const want_id = argValue(req.args, "id");
-            const limit = if (argValue(req.args, "limit")) |t| std.fmt.parseInt(usize, t, 10) catch 100 else 100;
-            const start = if (argValue(req.args, "cursor")) |t| std.fmt.parseInt(usize, t, 10) catch 0 else 0;
-            var lines: std.ArrayList([]const u8) = .empty;
-            var shown: usize = 0;
-            var next: ?usize = null;
-            for (locks.items, 0..) |l, i| {
-                if (i < start) continue;
-                if (want_path) |p| if (!std.mem.eql(u8, p, l.path)) continue;
-                if (want_id) |id| if (!std.mem.eql(u8, id, l.id)) continue;
-                if (shown == limit) {
-                    next = i;
-                    break;
-                }
-                shown += 1;
-                try lines.append(gpa, try std.fmt.allocPrint(gpa, "lock {s}", .{l.id}));
-                try lines.append(gpa, try std.fmt.allocPrint(gpa, "path {s} {s}", .{ l.id, l.path }));
-                try lines.append(gpa, try std.fmt.allocPrint(gpa, "locked-at {s} {s}", .{ l.id, locked_at }));
-                try lines.append(gpa, try std.fmt.allocPrint(gpa, "ownername {s} {s}", .{ l.id, l.owner }));
-                try lines.append(gpa, try std.fmt.allocPrint(gpa, "owner {s} {s}", .{ l.id, if (std.mem.eql(u8, l.owner, user)) "ours" else "theirs" }));
-            }
-            var out_args: std.ArrayList([]const u8) = .empty;
-            if (next) |n| try out_args.append(gpa, try std.fmt.allocPrint(gpa, "next-cursor={d}", .{n}));
-            try status(w, 200, out_args.items, lines.items);
+            try s.listLocks(req);
         } else if (std.mem.startsWith(u8, cmd, "unlock ")) {
-            const id = cmd["unlock ".len..];
-            var locks = try readLocks(gpa, io, repo);
-            for (locks.items, 0..) |l, i| {
-                if (!std.mem.eql(u8, l.id, id)) continue;
-                const force = if (argValue(req.args, "force")) |f| std.mem.eql(u8, f, "true") else false;
-                if (!std.mem.eql(u8, l.owner, user) and !force) {
-                    try status(w, 403, &.{}, &.{"the lock is someone else's"});
-                    break;
-                }
-                _ = locks.orderedRemove(i);
-                try writeLocks(gpa, io, repo, locks.items);
-                try status(w, 200, try lockArgs(gpa, l), null);
-                break;
-            } else try status(w, 404, &.{}, &.{"no such lock"});
+            try s.unlock(req, cmd["unlock ".len..]);
         } else {
-            try status(w, 400, &.{}, &.{"unknown command"});
+            try status(s.w, 400, &.{}, &.{"unknown command"});
         }
+        return true;
     }
-}
+
+    /// Each object's action for this operation: an upload of what the
+    /// server lacks, a download of what it has, a noop otherwise.
+    fn batch(s: *const Session, req: Request) !void {
+        const gpa = s.gpa;
+        var lines: std.ArrayList([]const u8) = .empty;
+        for (req.lines) |line| {
+            var it = std.mem.splitScalar(u8, line, ' ');
+            const oid = it.next() orelse continue;
+            const size = it.next() orelse continue;
+            const have = try hasObject(gpa, s.io, s.repo, oid);
+            const action: []const u8 = if (std.mem.eql(u8, s.operation, "upload"))
+                (if (have) "noop" else "upload")
+            else
+                (if (have) "download" else "noop");
+            if (std.mem.eql(u8, action, "noop")) {
+                try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s} noop", .{ oid, size }));
+            } else {
+                try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s} {s} {s} id={s} token=tok-{s} expires-in=3600", .{ oid, size, action, oid[0..@min(oid.len, 8)], oid[0..@min(oid.len, 8)] }));
+            }
+        }
+        try status(s.w, 200, &.{"hash-algo=sha256"}, lines.items);
+    }
+
+    /// Send the object's size and bytes.
+    fn getObject(s: *const Session, req: Request, oid: []const u8) !void {
+        if (!try authorised(req, oid)) return status(s.w, 403, &.{}, &.{"missing id or token"});
+        const bytes = readObject(s.gpa, s.io, s.repo, oid) orelse return status(s.w, 404, &.{}, &.{"not found"});
+        try pktline.write(s.w, "status 200\n");
+        try pktline.print("size={d}\n", .{bytes.len}, s.w);
+        try pktline.delim(s.w);
+        var left = bytes;
+        while (left.len != 0) {
+            const n = @min(left.len, pktline.max_data);
+            try pktline.write(s.w, left[0..n]);
+            left = left[n..];
+        }
+        try pktline.flush(s.w);
+        try s.w.flush();
+    }
+
+    /// Keep the request's data as the object, when its digest is the name.
+    fn putObject(s: *const Session, req: Request, oid: []const u8) !void {
+        if (!try authorised(req, oid)) return status(s.w, 403, &.{}, &.{"missing id or token"});
+        const bytes = req.body orelse "";
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        var hex: [64]u8 = undefined;
+        _ = try std.fmt.bufPrint(&hex, "{x}", .{&digest});
+        if (!std.mem.eql(u8, &hex, oid)) return status(s.w, 400, &.{}, &.{"the data is not the object"});
+        const path = try objectPath(s.gpa, oid);
+        try s.repo.createDirPath(s.io, std.fs.path.dirname(path).?);
+        try s.repo.writeFile(s.io, .{ .sub_path = path, .data = bytes });
+        try status(s.w, 200, &.{}, null);
+    }
+
+    /// Lock a path for this user, unless someone holds it already.
+    fn lock(s: *const Session, req: Request) !void {
+        const gpa = s.gpa;
+        const path = argValue(req.args, "path") orelse return status(s.w, 400, &.{}, &.{"no path"});
+        var locks = try readLocks(gpa, s.io, s.repo);
+        for (locks.items) |l| {
+            if (std.mem.eql(u8, l.path, path)) return status(s.w, 409, try lockArgs(gpa, l), &.{"already locked"});
+        }
+        const l: Lock = .{ .id = try std.fmt.allocPrint(gpa, "{d}", .{nextId(locks.items)}), .path = path, .owner = s.user };
+        try locks.append(gpa, l);
+        try writeLocks(gpa, s.io, s.repo, locks.items);
+        try status(s.w, 201, try lockArgs(gpa, l), null);
+    }
+
+    /// The locks matching the path and id asked for, a page at a time from
+    /// the cursor, with the next page's cursor when there is one.
+    fn listLocks(s: *const Session, req: Request) !void {
+        const gpa = s.gpa;
+        const locks = try readLocks(gpa, s.io, s.repo);
+        const want_path = argValue(req.args, "path");
+        const want_id = argValue(req.args, "id");
+        const limit = if (argValue(req.args, "limit")) |t| std.fmt.parseInt(usize, t, 10) catch 100 else 100;
+        const start = if (argValue(req.args, "cursor")) |t| std.fmt.parseInt(usize, t, 10) catch 0 else 0;
+        var lines: std.ArrayList([]const u8) = .empty;
+        var shown: usize = 0;
+        var next: ?usize = null;
+        for (locks.items, 0..) |l, i| {
+            if (i < start) continue;
+            if (want_path) |p| if (!std.mem.eql(u8, p, l.path)) continue;
+            if (want_id) |id| if (!std.mem.eql(u8, id, l.id)) continue;
+            if (shown == limit) {
+                next = i;
+                break;
+            }
+            shown += 1;
+            try lines.append(gpa, try std.fmt.allocPrint(gpa, "lock {s}", .{l.id}));
+            try lines.append(gpa, try std.fmt.allocPrint(gpa, "path {s} {s}", .{ l.id, l.path }));
+            try lines.append(gpa, try std.fmt.allocPrint(gpa, "locked-at {s} {s}", .{ l.id, locked_at }));
+            try lines.append(gpa, try std.fmt.allocPrint(gpa, "ownername {s} {s}", .{ l.id, l.owner }));
+            try lines.append(gpa, try std.fmt.allocPrint(gpa, "owner {s} {s}", .{ l.id, if (std.mem.eql(u8, l.owner, s.user)) "ours" else "theirs" }));
+        }
+        var out_args: std.ArrayList([]const u8) = .empty;
+        if (next) |n| try out_args.append(gpa, try std.fmt.allocPrint(gpa, "next-cursor={d}", .{n}));
+        try status(s.w, 200, out_args.items, lines.items);
+    }
+
+    /// Release the lock `id`: this user's own, or anyone's with `force`.
+    fn unlock(s: *const Session, req: Request, id: []const u8) !void {
+        var locks = try readLocks(s.gpa, s.io, s.repo);
+        for (locks.items, 0..) |l, i| {
+            if (!std.mem.eql(u8, l.id, id)) continue;
+            const force = if (argValue(req.args, "force")) |f| std.mem.eql(u8, f, "true") else false;
+            if (!std.mem.eql(u8, l.owner, s.user) and !force) return status(s.w, 403, &.{}, &.{"the lock is someone else's"});
+            _ = locks.orderedRemove(i);
+            try writeLocks(s.gpa, s.io, s.repo, locks.items);
+            return status(s.w, 200, try lockArgs(s.gpa, l), null);
+        }
+        try status(s.w, 404, &.{}, &.{"no such lock"});
+    }
+};
 
 /// One request: its command line, arguments, and what follows a
 /// delimiter; `null` at the end of the input.

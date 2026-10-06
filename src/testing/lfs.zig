@@ -428,23 +428,7 @@ pub const Server = struct {
             proxied_for = target["http://".len..slash];
             target = target[slash..];
         }
-        var authorization: ?[]const u8 = null;
-        var content_type: ?[]const u8 = null;
-        var git_protocol: ?[]const u8 = null;
-        var range: ?[]const u8 = null;
-        var accept_encoding: ?[]const u8 = null;
-        var transfer_encoding: ?[]const u8 = null;
-        var content_length: ?[]const u8 = null;
-        var headers = request.iterateHeaders();
-        while (headers.next()) |h| {
-            if (std.ascii.eqlIgnoreCase(h.name, "transfer-encoding")) transfer_encoding = try arena.dupe(u8, h.value);
-            if (std.ascii.eqlIgnoreCase(h.name, "content-length")) content_length = try arena.dupe(u8, h.value);
-            if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) accept_encoding = try arena.dupe(u8, h.value);
-            if (std.ascii.eqlIgnoreCase(h.name, "authorization")) authorization = try arena.dupe(u8, h.value);
-            if (std.ascii.eqlIgnoreCase(h.name, "content-type")) content_type = try arena.dupe(u8, h.value);
-            if (std.ascii.eqlIgnoreCase(h.name, "git-protocol")) git_protocol = try arena.dupe(u8, h.value);
-            if (std.ascii.eqlIgnoreCase(h.name, "range")) range = try arena.dupe(u8, h.value);
-        }
+        const headers: RequestHeaders = try .read(arena, &request);
         const question = std.mem.findScalar(u8, target, '?');
         const path = target[0 .. question orelse target.len];
         const query = if (question) |q| target[q + 1 ..] else "";
@@ -460,13 +444,13 @@ pub const Server = struct {
         if (lfs_at == null) {
             const git_root = s.git_root orelse return request.respond("", .{ .status = .not_found, .keep_alive = false });
             try s.logRequest(method, path, "-");
-            return s.cgi(arena, &request, git_root, method, path, query, content_type, git_protocol, body);
+            return s.cgi(arena, &request, git_root, method, path, query, headers.content_type, headers.git_protocol, body);
         }
         const prefix = path[0 .. lfs_at.? + "/info/lfs".len];
         const route = path[prefix.len..];
 
-        const user = s.authenticate(authorization);
-        if (range) |r| {
+        const user = s.authenticate(headers.authorization);
+        if (headers.range) |r| {
             const logged = try std.fmt.allocPrint(arena, "{s} range={s}", .{ user orelse "?", r });
             try s.logRequest(method, route, logged);
         } else if (proxied_for) |host| {
@@ -492,77 +476,88 @@ pub const Server = struct {
             if (s.takeFault(.batch)) |f| return respondFault(&request, f);
             // A token is handed back in each action, as a hosting service
             // hands one back; a basic credential is not.
+            const authorization = headers.authorization;
             const token: ?[]const u8 = if (authorization != null and std.mem.startsWith(u8, authorization.?, "RemoteAuth ")) authorization.? else null;
             return s.batch(arena, &request, base, body, token);
         }
         if (std.mem.startsWith(u8, route, "/objects/") and route.len == "/objects/".len + 64) {
             const oid = route["/objects/".len..];
-            if (method == .GET) {
-                try s.logObject(method, oid, "accept-encoding", accept_encoding);
-                const fault = s.takeFault(.download);
-                if (fault) |f| if (!f.cut) return respondFault(&request, f);
-                const bytes = try s.object(arena, oid) orelse return request.respond("", .{ .status = .not_found, .keep_alive = false });
-                if (fault != null) {
-                    const out = request.server.out;
-                    try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{bytes.len});
-                    try out.writeAll(bytes[0 .. bytes.len / 2]);
-                    try out.flush();
-                    return;
-                }
-                if (range) |r| {
-                    // `bytes=<first>-<last>`, as a client resuming asks.
-                    const spec = if (std.mem.startsWith(u8, r, "bytes=")) r["bytes=".len..] else "";
-                    const dash = std.mem.findScalar(u8, spec, '-') orelse spec.len;
-                    const first = std.fmt.parseInt(usize, spec[0..dash], 10) catch bytes.len;
-                    const last = if (dash + 1 < spec.len) std.fmt.parseInt(usize, spec[dash + 1 ..], 10) catch bytes.len - 1 else bytes.len - 1;
-                    if (first >= bytes.len or last < first) return request.respond("", .{ .status = .range_not_satisfiable, .keep_alive = false });
-                    const end = @min(last + 1, bytes.len);
-                    const content_range = try std.fmt.allocPrint(arena, "bytes {d}-{d}/{d}", .{ first, end - 1, bytes.len });
-                    return request.respond(bytes[first..end], .{ .status = .partial_content, .keep_alive = false, .extra_headers = &.{
-                        .{ .name = "Content-Type", .value = "application/octet-stream" },
-                        .{ .name = "Content-Range", .value = content_range },
-                    } });
-                }
-                if (s.options.encode and accept_encoding != null) {
-                    const accepted = accept_encoding.?;
-                    const zstd = std.mem.find(u8, accepted, "zstd") != null;
-                    if (zstd or std.mem.find(u8, accepted, "gzip") != null) {
-                        const encoded = if (zstd) try encodeZstd(arena, bytes, s.zstdWindowLog()) else try encodeGzip(arena, bytes);
-                        return request.respond(encoded, .{ .keep_alive = false, .extra_headers = &.{
-                            .{ .name = "Content-Type", .value = "application/octet-stream" },
-                            .{ .name = "Content-Encoding", .value = if (zstd) "zstd" else "gzip" },
-                        } });
-                    }
-                }
-                return request.respond(bytes, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/octet-stream" }} });
-            }
-            if (method == .PUT) {
-                try s.logObject(method, oid, "content-type", content_type);
-                if (s.options.chunked_uploads) {
-                    try s.logObject(method, oid, "transfer-encoding", transfer_encoding);
-                    try s.logObject(method, oid, "content-length", content_length);
-                }
-                if (s.takeFault(.upload)) |f| return respondFault(&request, f);
-                if (!std.mem.eql(u8, &sha256Hex(body), oid)) return request.respond("", .{ .status = .bad_request, .keep_alive = false });
-                try s.putObject(oid, body);
-                return request.respond("", .{ .keep_alive = false });
-            }
+            if (method == .GET) return s.serveDownload(arena, &request, oid, headers);
+            if (method == .PUT) return s.serveUpload(&request, oid, headers, body);
         }
-        if (method == .POST and std.mem.eql(u8, route, "/verify")) {
-            if (s.takeFault(.verify)) |f| return respondFault(&request, f);
-            const Want = struct { oid: []const u8, size: u64 };
-            const want = std.json.parseFromSliceLeaky(Want, arena, body, .{ .ignore_unknown_fields = true }) catch
-                return request.respond("", .{ .status = .unprocessable_entity, .keep_alive = false });
-            const have = try s.object(arena, want.oid) orelse return request.respond("", .{ .status = .not_found, .keep_alive = false });
-            if (have.len != want.size) return request.respond("", .{ .status = .not_found, .keep_alive = false });
-            return request.respond("", .{ .keep_alive = false });
-        }
+        if (method == .POST and std.mem.eql(u8, route, "/verify")) return s.serveVerify(arena, &request, body);
         if (std.mem.startsWith(u8, route, "/locks")) {
             if (!s.options.locking) return request.respond("", .{ .status = .not_found, .keep_alive = false });
             if (s.takeFault(.locks)) |f| return respondFault(&request, f);
             return s.locking(arena, &request, method, route, query, body, user.?);
         }
         return request.respond("", .{ .status = .not_found, .keep_alive = false });
+    }
+
+    /// Send an object: whole, the range asked for, encoded when the server
+    /// encodes and the client accepts it, or cut halfway by a fault.
+    fn serveDownload(s: *Server, arena: Allocator, request: *http.Server.Request, oid: []const u8, headers: RequestHeaders) !void {
+        try s.logObject(.GET, oid, "accept-encoding", headers.accept_encoding);
+        const fault = s.takeFault(.download);
+        if (fault) |f| if (!f.cut) return respondFault(request, f);
+        const bytes = try s.object(arena, oid) orelse return request.respond("", .{ .status = .not_found, .keep_alive = false });
+        if (fault != null) {
+            const out = request.server.out;
+            try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{bytes.len});
+            try out.writeAll(bytes[0 .. bytes.len / 2]);
+            try out.flush();
+            return;
+        }
+        if (headers.range) |r| {
+            // `bytes=<first>-<last>`, as a client resuming asks.
+            const spec = if (std.mem.startsWith(u8, r, "bytes=")) r["bytes=".len..] else "";
+            const dash = std.mem.findScalar(u8, spec, '-') orelse spec.len;
+            const first = std.fmt.parseInt(usize, spec[0..dash], 10) catch bytes.len;
+            const last = if (dash + 1 < spec.len) std.fmt.parseInt(usize, spec[dash + 1 ..], 10) catch bytes.len - 1 else bytes.len - 1;
+            if (first >= bytes.len or last < first) return request.respond("", .{ .status = .range_not_satisfiable, .keep_alive = false });
+            const end = @min(last + 1, bytes.len);
+            const content_range = try std.fmt.allocPrint(arena, "bytes {d}-{d}/{d}", .{ first, end - 1, bytes.len });
+            return request.respond(bytes[first..end], .{ .status = .partial_content, .keep_alive = false, .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "application/octet-stream" },
+                .{ .name = "Content-Range", .value = content_range },
+            } });
+        }
+        if (s.options.encode and headers.accept_encoding != null) {
+            const accepted = headers.accept_encoding.?;
+            const zstd = std.mem.find(u8, accepted, "zstd") != null;
+            if (zstd or std.mem.find(u8, accepted, "gzip") != null) {
+                const encoded = if (zstd) try encodeZstd(arena, bytes, s.zstdWindowLog()) else try encodeGzip(arena, bytes);
+                return request.respond(encoded, .{ .keep_alive = false, .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "application/octet-stream" },
+                    .{ .name = "Content-Encoding", .value = if (zstd) "zstd" else "gzip" },
+                } });
+            }
+        }
+        return request.respond(bytes, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/octet-stream" }} });
+    }
+
+    /// Keep an uploaded object whose digest is its name.
+    fn serveUpload(s: *Server, request: *http.Server.Request, oid: []const u8, headers: RequestHeaders, body: []const u8) !void {
+        try s.logObject(.PUT, oid, "content-type", headers.content_type);
+        if (s.options.chunked_uploads) {
+            try s.logObject(.PUT, oid, "transfer-encoding", headers.transfer_encoding);
+            try s.logObject(.PUT, oid, "content-length", headers.content_length);
+        }
+        if (s.takeFault(.upload)) |f| return respondFault(request, f);
+        if (!std.mem.eql(u8, &sha256Hex(body), oid)) return request.respond("", .{ .status = .bad_request, .keep_alive = false });
+        try s.putObject(oid, body);
+        return request.respond("", .{ .keep_alive = false });
+    }
+
+    /// Confirm the server holds the object at the size the client names.
+    fn serveVerify(s: *Server, arena: Allocator, request: *http.Server.Request, body: []const u8) !void {
+        if (s.takeFault(.verify)) |f| return respondFault(request, f);
+        const Want = struct { oid: []const u8, size: u64 };
+        const want = std.json.parseFromSliceLeaky(Want, arena, body, .{ .ignore_unknown_fields = true }) catch
+            return request.respond("", .{ .status = .unprocessable_entity, .keep_alive = false });
+        const have = try s.object(arena, want.oid) orelse return request.respond("", .{ .status = .not_found, .keep_alive = false });
+        if (have.len != want.size) return request.respond("", .{ .status = .not_found, .keep_alive = false });
+        return request.respond("", .{ .keep_alive = false });
     }
 
     fn logRequest(s: *Server, method: http.Method, path: []const u8, user: []const u8) !void {
@@ -812,6 +807,32 @@ pub const Server = struct {
             } else try response_headers.append(arena, .{ .name = name, .value = value });
         }
         try request.respond(output[split + 4 ..], .{ .status = @enumFromInt(status), .keep_alive = false, .extra_headers = response_headers.items });
+    }
+};
+
+/// The request headers the LFS server reads, copied out of the head.
+const RequestHeaders = struct {
+    authorization: ?[]const u8 = null,
+    content_type: ?[]const u8 = null,
+    git_protocol: ?[]const u8 = null,
+    range: ?[]const u8 = null,
+    accept_encoding: ?[]const u8 = null,
+    transfer_encoding: ?[]const u8 = null,
+    content_length: ?[]const u8 = null,
+
+    fn read(arena: Allocator, request: *const http.Server.Request) !RequestHeaders {
+        var headers: RequestHeaders = .{};
+        var it = request.iterateHeaders();
+        while (it.next()) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "transfer-encoding")) headers.transfer_encoding = try arena.dupe(u8, h.value);
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length")) headers.content_length = try arena.dupe(u8, h.value);
+            if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) headers.accept_encoding = try arena.dupe(u8, h.value);
+            if (std.ascii.eqlIgnoreCase(h.name, "authorization")) headers.authorization = try arena.dupe(u8, h.value);
+            if (std.ascii.eqlIgnoreCase(h.name, "content-type")) headers.content_type = try arena.dupe(u8, h.value);
+            if (std.ascii.eqlIgnoreCase(h.name, "git-protocol")) headers.git_protocol = try arena.dupe(u8, h.value);
+            if (std.ascii.eqlIgnoreCase(h.name, "range")) headers.range = try arena.dupe(u8, h.value);
+        }
+        return headers;
     }
 };
 
