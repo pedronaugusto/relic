@@ -252,6 +252,11 @@ const Ctx = struct {
     nr: usize = 0,
     message_id: ?[]const u8 = null,
     ref_ids: std.ArrayList([]const u8) = .empty,
+
+    /// Which files are binary, as git's `diff_filespec_is_binary` says.
+    fn binaryRule(ctx: *const Ctx) diff.BinaryRule {
+        return .{ .attrs = ctx.attrs, .work_dir = ctx.repo.work_dir, .config = ctx.repo.configuration() };
+    }
 };
 
 /// Format `range` as `git format-patch` would.
@@ -274,6 +279,12 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
 
     const prefix = try subjectPrefix(a, options);
 
+    var own_attrs: ?attributes.Attrs = null;
+    defer if (own_attrs) |*x| x.deinit();
+    if (repo.work_dir != null) own_attrs = try repo.loadAttrs(io);
+    defer if (own_attrs) |*x| x.leave();
+    const binary: diff.BinaryRule = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.work_dir, .config = config };
+
     // the commits, newest first, then reversed
     var list: std.ArrayList(Oid) = .empty;
     var walk = revwalk.Walk.init(gpa, db);
@@ -283,7 +294,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     var upstream_ids: std.ArrayList(Oid) = .empty;
     if (options.ignore_if_in_upstream and range.upstream != null) {
         if (range.upstream.?.eql(range.tip)) return emptySeries(gpa, &arena_instance);
-        try upstreamPatchIds(gpa, a, io, db, range, &upstream_ids);
+        try upstreamPatchIds(gpa, a, io, db, range, binary, &upstream_ids);
     }
     var in_list: std.ArrayList(Oid) = .empty;
     var walked: std.ArrayList(Oid) = .empty;
@@ -293,7 +304,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         if (c.parents.len > 1) continue;
         try in_list.append(a, c.oid);
         if (upstream_ids.items.len != 0) {
-            if (try patchid.ofCommit(gpa, io, db, c.oid)) |id| {
+            if (try patchid.ofCommit(gpa, io, db, c.oid, binary)) |id| {
                 if (containsOid(upstream_ids.items, id)) continue;
             }
         }
@@ -311,10 +322,6 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
     var quote_path = true;
     if (options.quote_path) |q| quote_path = q else if (config.get("core.quotepath")) |v| quote_path = config_mod.parseBool(v) catch true;
 
-    var own_attrs: ?attributes.Attrs = null;
-    defer if (own_attrs) |*x| x.deinit();
-    if (repo.work_dir != null) own_attrs = try repo.loadAttrs(io);
-
     var ctx: Ctx = .{
         .gpa = gpa,
         .a = a,
@@ -330,7 +337,6 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, options: 
         .prefix = prefix,
         .total = if (options.keep_subject) -1 else if (numbered) @intCast(total + start_number - 1) else 0,
     };
-    defer if (ctx.attrs) |x| x.leave();
 
     if (options.in_reply_to) |r| try ctx.ref_ids.append(a, try cleanMessageId(a, r));
 
@@ -398,7 +404,7 @@ fn subjectPrefix(a: Allocator, options: Options) Allocator.Error![]const u8 {
 
 /// The patch ids of the upstream's own commits, which
 /// `--ignore-if-in-upstream` leaves out of the series.
-fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, out: *std.ArrayList(Oid)) Error!void {
+fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, range: Range, binary: diff.BinaryRule, out: *std.ArrayList(Oid)) Error!void {
     var back = revwalk.Walk.init(gpa, db);
     defer back.deinit();
     // Asked only of a range with an upstream.
@@ -406,7 +412,7 @@ fn upstreamPatchIds(gpa: Allocator, a: Allocator, io: Io, db: *odb_mod.Odb, rang
     try back.hide(range.tip);
     while (try back.next(io)) |c| {
         if (c.parents.len > 1) continue;
-        if (try patchid.ofCommit(gpa, io, db, c.oid)) |id| try out.append(a, id);
+        if (try patchid.ofCommit(gpa, io, db, c.oid, binary)) |id| try out.append(a, id);
     }
 }
 
@@ -531,7 +537,7 @@ fn prepareBases(ctx: *Ctx, base: Oid, list: []const Oid) Error!Bases {
             if (l.eql(c.oid)) listed = true;
         }
         if (listed) continue;
-        const id = (try patchid.ofCommit(gpa, ctx.io, ctx.db, c.oid)) orelse continue;
+        const id = (try patchid.ofCommit(gpa, ctx.io, ctx.db, c.oid, ctx.binaryRule())) orelse continue;
         try ids.append(ctx.a, id);
     }
     return .{ .base = base, .patch_ids = ids.items };
@@ -957,20 +963,8 @@ fn loadSide(ctx: *Ctx, e: diff.Entry) Error!Side {
     return .{ .path = e.path, .mode = e.mode, .oid = e.oid, .bytes = bytes, .binary = try isBinaryPath(ctx, e.path, bytes) };
 }
 
-/// git's `diff_filespec_is_binary`: the `diff` attribute first, then a
-/// NUL in the first 8000 bytes.
 fn isBinaryPath(ctx: *Ctx, path: []const u8, bytes: []const u8) Error!bool {
-    if (ctx.attrs) |attrs| {
-        if (ctx.repo.work_dir) |wt| try attrs.enter(ctx.io, wt, path);
-        const applied = try attrs.lookup(ctx.a, path, false);
-        if (applied.get("diff")) |state| switch (state) {
-            .unset => return true,
-            .set => return false,
-            else => {},
-        };
-        if (applied.get("binary")) |state| if (state == .set) return true;
-    }
-    return diff.isBinary(bytes);
+    return ctx.binaryRule().isBinary(ctx.a, ctx.io, path, bytes);
 }
 
 const StatFile = struct {

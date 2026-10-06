@@ -505,6 +505,44 @@ pub fn isBinary(bytes: []const u8) bool {
     return attributes.isBinaryForDiff(bytes);
 }
 
+/// Whether a path's contents diff as binary, as git's
+/// `diff_filespec_is_binary` decides it: the `diff` attribute first -- set
+/// is text, unset is binary, a driver's name is that driver's
+/// `diff.<driver>.binary` when it has one -- and `isBinary` of the bytes
+/// after. The zero value has no attributes and decides by the bytes alone.
+pub const BinaryRule = struct {
+    attrs: ?*attributes.Attrs = null,
+    /// The working tree whose `.gitattributes` are read on the way down to
+    /// a path; `null` reads only what `attrs` holds.
+    work_dir: ?Io.Dir = null,
+    /// Where `diff.<driver>.binary` is read.
+    config: ?*const config_mod.Config = null,
+
+    /// Whether `path`, holding `bytes`, is binary. `a` holds the lookup.
+    pub fn isBinary(rule: BinaryRule, a: Allocator, io: Io, path: []const u8, bytes: []const u8) attributes.Error!bool {
+        if (rule.attrs) |attrs| {
+            if (rule.work_dir) |wt| try attrs.enter(io, wt, path);
+            const applied = try attrs.lookup(a, path, false);
+            if (applied.get("diff")) |state| switch (state) {
+                .unset => return true,
+                .set => return false,
+                .value => |driver| if (rule.config) |config| {
+                    var key_buf: [512]u8 = undefined;
+                    if (std.fmt.bufPrint(&key_buf, "diff.{s}.binary", .{driver})) |key| {
+                        if (config.has(key)) {
+                            // git dies on a value that is not a boolean;
+                            // here it decides nothing.
+                            if (config.getBool(key, false)) |binary| return binary else |_| {}
+                        }
+                    } else |_| {}
+                },
+                .unspecified => {},
+            };
+        }
+        return attributes.isBinaryForDiff(bytes);
+    }
+};
+
 /// The longest line `gitlinkText` writes: the words, the widest name, the newline.
 const gitlink_text_max = "Subproject commit \n".len + hash.max_hex_len;
 

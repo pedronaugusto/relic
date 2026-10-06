@@ -536,15 +536,21 @@ fn makeScript(r: *Run, upstream: Oid, orig_head: Oid) Error![]todo.Item {
     // Commits upstream already has, by patch id.
     var same: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
     if (!r.options.reapply_cherry_picks and sides.left.len != 0 and sides.right.len != 0) {
+        // A file the attributes call binary is one by its names alone, as
+        // git's patch ids take it.
+        var attrs = try r.repo.loadAttrs(r.io);
+        defer attrs.deinit();
+        defer attrs.leave();
+        const binary: diff.BinaryRule = .{ .attrs = &attrs, .work_dir = r.repo.work_dir, .config = r.repo.configuration() };
         var ids: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
         for (sides.left) |oid| {
             if ((try w.load(oid)).parents.len > 1) continue;
-            const id = (try patchid.ofCommit(r.gpa, r.io, &r.repo.odb, oid)) orelse continue;
+            const id = (try patchid.ofCommit(r.gpa, r.io, &r.repo.odb, oid, binary)) orelse continue;
             try ids.put(r.arena, id.bytes, {});
         }
         for (sides.right) |oid| {
             if ((try w.load(oid)).parents.len > 1) continue;
-            const id = (try patchid.ofCommit(r.gpa, r.io, &r.repo.odb, oid)) orelse continue;
+            const id = (try patchid.ofCommit(r.gpa, r.io, &r.repo.odb, oid, binary)) orelse continue;
             if (ids.contains(id.bytes)) try same.put(r.arena, oid.bytes, {});
         }
     }

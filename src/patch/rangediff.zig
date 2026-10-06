@@ -265,20 +265,9 @@ const Reader = struct {
         return .{ .path = e.path, .mode = e.mode, .oid = e.oid, .bytes = bytes, .binary = try r.isBinary(e.path, bytes) };
     }
 
-    /// git's `diff_filespec_is_binary`: the `diff` attribute first, then a
-    /// NUL in the first 8000 bytes.
     fn isBinary(r: *Reader, path: []const u8, bytes: []const u8) Error!bool {
-        if (r.attrs) |*attrs| {
-            if (r.repo.work_dir) |wt| try attrs.enter(r.io, wt, path);
-            const applied = try attrs.lookup(r.a, path, false);
-            if (applied.get("diff")) |state| switch (state) {
-                .unset => return true,
-                .set => return false,
-                else => {},
-            };
-            if (applied.get("binary")) |state| if (state == .set) return true;
-        }
-        return diff.isBinary(bytes);
+        const rule: diff.BinaryRule = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = r.repo.work_dir, .config = r.repo.configuration() };
+        return rule.isBinary(r.a, r.io, path, bytes);
     }
 
     /// One file of the commit: ` ## <name> ##` for its `diff --git` header,
