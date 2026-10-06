@@ -160,12 +160,26 @@ pub fn readRef(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) refs
     }
 }
 
-/// Remove the pseudo-ref `name`, which need not exist.
+/// Remove the pseudo-ref `name`, which need not exist, through the ref
+/// store `writeRef` wrote it to: a reftable repository keeps it in its
+/// tables, not in a file. A symbolic one goes itself, not what it names.
 pub fn deleteRef(io: Io, repo: *Repository, name: []const u8) Self.Error!void {
-    repo.refStore().dirFor(name).deleteFile(io, name) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => |e| return e,
-    };
+    var tx = repo.beginRefs();
+    defer tx.deinit(io);
+    try tx.change(name, null, .any, .{ .no_deref = true });
+    try tx.commit(io, null);
+}
+
+/// Whether the pseudo-ref `name` is there, read through the ref store
+/// rather than as a file, which a reftable repository has none of. As
+/// git's `ref_exists`, one that cannot be read is not there.
+pub fn refExists(io: Io, repo: *Repository, name: []const u8) bool {
+    const found = (repo.refStore().read(repo.gpa, io, name) catch return false) orelse return false;
+    switch (found) {
+        .direct => {},
+        .symbolic => |target| repo.gpa.free(target),
+    }
+    return true;
 }
 
 /// Replace the state file `sub_path` under `dir` with `bytes`, making the

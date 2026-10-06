@@ -285,8 +285,8 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
 
     if (targets.len == 0) return error.NoMergeTarget;
     if (inProgress(io, repo)) return error.MergeInProgress;
-    if (head_mod.stateExists(io, repo.git_dir, "CHERRY_PICK_HEAD") or
-        head_mod.stateExists(io, repo.git_dir, "REVERT_HEAD")) return error.SequencerInProgress;
+    if (head_mod.refExists(io, repo, "CHERRY_PICK_HEAD") or
+        head_mod.refExists(io, repo, "REVERT_HEAD")) return error.SequencerInProgress;
     if (repo.configuration().getBool("merge.log", false) catch true) return error.UnsupportedMergeMessage;
     if (repo.configuration().getBool("merge.branchdesc", false) catch true) return error.UnsupportedMergeMessage;
 

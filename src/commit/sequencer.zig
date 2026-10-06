@@ -232,8 +232,8 @@ pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, o
 /// `.git/sequencer`, or a single pick's `CHERRY_PICK_HEAD` or `REVERT_HEAD`.
 pub fn inProgress(io: Io, repo: *Repository) ?Action {
     if (lastCommand(repo.gpa, io, repo)) |action| return action;
-    if (head_mod.stateExists(io, repo.git_dir, "CHERRY_PICK_HEAD")) return .pick;
-    if (head_mod.stateExists(io, repo.git_dir, "REVERT_HEAD")) return .revert;
+    if (head_mod.refExists(io, repo, "CHERRY_PICK_HEAD")) return .pick;
+    if (head_mod.refExists(io, repo, "REVERT_HEAD")) return .revert;
     return null;
 }
 
@@ -934,8 +934,8 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         return finishOutcome(&r, &arena_instance, .committed, null);
     }
     const list = try readTodo(&r);
-    if (head_mod.stateExists(io, repo.git_dir, "CHERRY_PICK_HEAD") or
-        head_mod.stateExists(io, repo.git_dir, "REVERT_HEAD"))
+    if (head_mod.refExists(io, repo, "CHERRY_PICK_HEAD") or
+        head_mod.refExists(io, repo, "REVERT_HEAD"))
     {
         _ = try commitStaged(&r);
     }
@@ -975,7 +975,7 @@ fn requireIndexIsHead(r: *Replay) Error!void {
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
-    if (!head_mod.stateExists(io, repo.git_dir, action.headRef())) {
+    if (!head_mod.refExists(io, repo, action.headRef())) {
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
     }
     try resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), options.who, options.blocked);
@@ -992,8 +992,8 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// is, as git leaves it. The state goes either way.
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Self.Error!void {
     const text = (try head_mod.readState(gpa, io, repo.git_dir, head_path)) orelse {
-        if (!head_mod.stateExists(io, repo.git_dir, "CHERRY_PICK_HEAD") and
-            !head_mod.stateExists(io, repo.git_dir, "REVERT_HEAD")) return error.NoSequencerInProgress;
+        if (!head_mod.refExists(io, repo, "CHERRY_PICK_HEAD") and
+            !head_mod.refExists(io, repo, "REVERT_HEAD")) return error.NoSequencerInProgress;
         return resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), who, blocked);
     };
     defer gpa.free(text);

@@ -26,6 +26,7 @@ const ort = @import("../merge/ort.zig");
 const signing = @import("../commit/signing.zig");
 const program = @import("../repo/program.zig");
 const fs = @import("../repo/fs.zig");
+const head_mod = @import("../commit/head.zig");
 
 const Oid = hash.Oid;
 
@@ -974,6 +975,41 @@ test "an octopus whose head before the last conflicts fails as git's does" {
 //=========================================================================
 // Rebase
 //=========================================================================
+
+test "a pick's pseudo-refs are found and removed in a reftable repository, as git keeps them there" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // `--ref-format=reftable` is git 2.45's.
+    try testgit.requireGitVersion(gpa, io, 2, 45);
+    var r = try testgit.Repo.init(gpa, io, &.{"--ref-format=reftable"});
+    defer r.deinit();
+    try r.writeFile(io, "f", "a\n");
+    try r.exec(io, &.{ "add", "-A" });
+    try r.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try r.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try r.writeFile(io, "f", "b\n");
+    try r.exec(io, &.{ "commit", "-q", "-am", "topic" });
+    try r.exec(io, &.{ "checkout", "-q", "main" });
+    try r.writeFile(io, "f", "c\n");
+    try r.exec(io, &.{ "commit", "-q", "-am", "main" });
+    try gitMayFail(io, &r, &.{ "cherry-pick", "topic" });
+    gpa.free(try r.run(io, &.{ "rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD" }));
+
+    var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    try std.testing.expectEqual(sequencer.Action.pick, sequencer.inProgress(io, &repo).?);
+    try sequencer.abort(gpa, io, &repo, who, null);
+    r.report_failures = false;
+    try std.testing.expectError(error.GitFailed, r.exec(io, &.{ "rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD" }));
+
+    const head = try r.run(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head);
+    try head_mod.writeRef(io, &repo, "REBASE_HEAD", try Oid.parse(.sha1, head[0..40]));
+    gpa.free(try r.run(io, &.{ "rev-parse", "--verify", "-q", "REBASE_HEAD" }));
+    try head_mod.deleteRef(io, &repo, "REBASE_HEAD");
+    try head_mod.deleteRef(io, &repo, "REBASE_HEAD");
+    try std.testing.expectError(error.GitFailed, r.exec(io, &.{ "rev-parse", "--verify", "-q", "REBASE_HEAD" }));
+}
 
 const rebase = @import("../commit/rebase.zig");
 
