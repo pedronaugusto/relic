@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
     const executable = try std.process.executablePathAlloc(io, arena);
     const sidecar = try std.fmt.allocPrint(arena, "{s}.fixture", .{executable});
     const description = try Io.Dir.cwd().readFileAlloc(io, sidecar, arena, .limited(4096));
-    const newline = std.mem.indexOfScalar(u8, description, '\n') orelse return error.InvalidFixture;
+    const newline = std.mem.findScalar(u8, description, '\n') orelse return error.InvalidFixture;
     const action = description[0..newline];
     const data = description[newline + 1 ..];
 
@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, action, "status")) {
         code = try std.fmt.parseUnsigned(u8, std.mem.trim(u8, data, "\r\n"), 10);
     } else if (std.mem.eql(u8, action, "reject")) {
-        const split = std.mem.indexOfScalar(u8, data, '\n') orelse return error.InvalidFixture;
+        const split = std.mem.findScalar(u8, data, '\n') orelse return error.InvalidFixture;
         code = try std.fmt.parseUnsigned(u8, data[0..split], 10);
         try stderr.interface.writeAll(data[split + 1 ..]);
         for (args[1..], 0..) |arg, i| {
@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
         var stdin = Io.File.stdin().readerStreaming(io, &stdin_buf);
         _ = try stdin.interface.streamRemaining(&stdout.interface);
     } else if (std.mem.eql(u8, action, "record_stdin")) {
-        const split = std.mem.indexOfScalar(u8, data, '\n') orelse return error.InvalidFixture;
+        const split = std.mem.findScalar(u8, data, '\n') orelse return error.InvalidFixture;
         const path = data[0..split];
         const reject_state = std.mem.trim(u8, data[split + 1 ..], "\r\n");
         const state = if (args.len > 1) args[1] else "";
@@ -111,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
         if (head_result.term != .exited or head_result.term.exited != 0) return error.GitFailed;
         const head = std.mem.trim(u8, head_result.stdout, "\r\n");
         var at: usize = 0;
-        while (std.mem.indexOfPos(u8, input.items, at, head)) |found| {
+        while (std.mem.findPos(u8, input.items, at, head)) |found| {
             try entry.appendSlice(arena, input.items[at..found]);
             try entry.appendSlice(arena, "NEW");
             at = found + head.len;

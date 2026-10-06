@@ -10,7 +10,7 @@ const Io = std.Io;
 
 pub fn path(arena: std.mem.Allocator, io: Io, env: *const std.process.Environ.Map, name: []const u8) ![]const u8 {
     if (builtin.os.tag != .windows) return name;
-    if (std.mem.indexOfAny(u8, name, "/\\:") != null) return name;
+    if (std.mem.findAny(u8, name, "/\\:") != null) return name;
     const executable = if (std.mem.endsWith(u8, name, ".exe")) name else try std.fmt.allocPrint(arena, "{s}.exe", .{name});
     var path_value: ?[]const u8 = null;
     for (env.keys()) |key| {

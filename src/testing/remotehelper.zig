@@ -196,8 +196,8 @@ pub fn main(init: std.process.Init) !void {
             var lines = std.mem.splitScalar(u8, after, '\n');
             while (lines.next()) |l| {
                 if (l.len == 0) continue;
-                if (std.mem.indexOf(u8, before, l) != null) continue;
-                const ref = l[0..std.mem.indexOfScalar(u8, l, ' ').?];
+                if (std.mem.find(u8, before, l) != null) continue;
+                const ref = l[0..std.mem.findScalar(u8, l, ' ').?];
                 if (environ.get("RELIC_HELPER_PUSH_ERROR")) |why| {
                     try h.out.print("error {s} {s}\n", .{ ref, why });
                 } else try h.out.print("ok {s}\n", .{ref});
@@ -210,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
             while (current) |l| {
                 if (!std.mem.startsWith(u8, l, "fetch ")) break;
                 const rest = l["fetch ".len..];
-                try oids.appendSlice(gpa, rest[0..std.mem.indexOfScalar(u8, rest, ' ').?]);
+                try oids.appendSlice(gpa, rest[0..std.mem.findScalar(u8, rest, ' ').?]);
                 try oids.append(gpa, '\n');
                 current = try h.line(&buf);
             }
@@ -227,7 +227,7 @@ pub fn main(init: std.process.Init) !void {
                 current = try h.line(&buf);
             }
             for (specs.items) |spec| {
-                const dst = spec[std.mem.lastIndexOfScalar(u8, spec, ':').? + 1 ..];
+                const dst = spec[std.mem.findScalarLast(u8, spec, ':').? + 1 ..];
                 if (h.git(h.local, &.{ "push", "--quiet", h.remote, spec }, null)) |o| {
                     gpa.free(o);
                     try h.out.print("ok {s}\n", .{dst});

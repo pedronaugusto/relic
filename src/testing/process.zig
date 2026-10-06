@@ -58,11 +58,11 @@ pub fn main(init: std.process.Init) !void {
             try out.interface.print("path={s}\n", .{args[2]});
             try out.interface.writeAll(input.items);
         } else if (std.mem.eql(u8, args[1], "drop-first-line")) {
-            if (std.mem.indexOfScalar(u8, input.items, '\n')) |at| try out.interface.writeAll(input.items[at + 1 ..]);
+            if (std.mem.findScalar(u8, input.items, '\n')) |at| try out.interface.writeAll(input.items[at + 1 ..]);
         } else {
             var start: usize = 0;
             while (start < input.items.len) {
-                const end = std.mem.indexOfScalarPos(u8, input.items, start, '\n') orelse input.items.len;
+                const end = std.mem.findScalarPos(u8, input.items, start, '\n') orelse input.items.len;
                 const line = std.mem.trimEnd(u8, input.items[start..end], "\r");
                 try out.interface.print("{s}\r\n", .{line});
                 start = if (end == input.items.len) end else end + 1;

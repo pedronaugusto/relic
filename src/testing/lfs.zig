@@ -129,7 +129,7 @@ pub const Server = struct {
     task: Io.Future(void) = undefined,
     stopping: std.atomic.Value(bool) = .init(false),
     mutex: Io.Mutex = .init,
-    objects: std.StringArrayHashMapUnmanaged([]u8) = .empty,
+    objects: std.array_hash_map.String([]u8) = .empty,
     locks: std.ArrayList(Lock) = .empty,
     next_lock: u32 = 1,
     faults: std.ArrayList(Fault) = .empty,
@@ -424,7 +424,7 @@ pub const Server = struct {
         var target = try arena.dupe(u8, request.head.target);
         var proxied_for: ?[]const u8 = null;
         if (std.mem.startsWith(u8, target, "http://")) {
-            const slash = std.mem.indexOfScalarPos(u8, target, "http://".len, '/') orelse target.len;
+            const slash = std.mem.findScalarPos(u8, target, "http://".len, '/') orelse target.len;
             proxied_for = target["http://".len..slash];
             target = target[slash..];
         }
@@ -445,7 +445,7 @@ pub const Server = struct {
             if (std.ascii.eqlIgnoreCase(h.name, "git-protocol")) git_protocol = try arena.dupe(u8, h.value);
             if (std.ascii.eqlIgnoreCase(h.name, "range")) range = try arena.dupe(u8, h.value);
         }
-        const question = std.mem.indexOfScalar(u8, target, '?');
+        const question = std.mem.findScalar(u8, target, '?');
         const path = target[0 .. question orelse target.len];
         const query = if (question) |q| target[q + 1 ..] else "";
 
@@ -456,7 +456,7 @@ pub const Server = struct {
             body = try body_reader.allocRemaining(arena, .limited(1 << 30));
         }
 
-        const lfs_at = std.mem.indexOf(u8, path, "/info/lfs");
+        const lfs_at = std.mem.find(u8, path, "/info/lfs");
         if (lfs_at == null) {
             const git_root = s.git_root orelse return request.respond("", .{ .status = .not_found, .keep_alive = false });
             try s.logRequest(method, path, "-");
@@ -512,7 +512,7 @@ pub const Server = struct {
                 if (range) |r| {
                     // `bytes=<first>-<last>`, as a client resuming asks.
                     const spec = if (std.mem.startsWith(u8, r, "bytes=")) r["bytes=".len..] else "";
-                    const dash = std.mem.indexOfScalar(u8, spec, '-') orelse spec.len;
+                    const dash = std.mem.findScalar(u8, spec, '-') orelse spec.len;
                     const first = std.fmt.parseInt(usize, spec[0..dash], 10) catch bytes.len;
                     const last = if (dash + 1 < spec.len) std.fmt.parseInt(usize, spec[dash + 1 ..], 10) catch bytes.len - 1 else bytes.len - 1;
                     if (first >= bytes.len or last < first) return request.respond("", .{ .status = .range_not_satisfiable, .keep_alive = false });
@@ -525,8 +525,8 @@ pub const Server = struct {
                 }
                 if (s.options.encode and accept_encoding != null) {
                     const accepted = accept_encoding.?;
-                    const zstd = std.mem.indexOf(u8, accepted, "zstd") != null;
-                    if (zstd or std.mem.indexOf(u8, accepted, "gzip") != null) {
+                    const zstd = std.mem.find(u8, accepted, "zstd") != null;
+                    if (zstd or std.mem.find(u8, accepted, "gzip") != null) {
                         const encoded = if (zstd) try encodeZstd(arena, bytes, s.zstdWindowLog()) else try encodeGzip(arena, bytes);
                         return request.respond(encoded, .{ .keep_alive = false, .extra_headers = &.{
                             .{ .name = "Content-Type", .value = "application/octet-stream" },
@@ -587,7 +587,7 @@ pub const Server = struct {
         if (len > decoded.len) return null;
         std.base64.standard.Decoder.decode(decoded[0..len], encoded) catch return null;
         const plain = decoded[0..len];
-        const colon = std.mem.indexOfScalar(u8, plain, ':') orelse return null;
+        const colon = std.mem.findScalar(u8, plain, ':') orelse return null;
         for (s.options.users) |u| {
             if (std.mem.eql(u8, plain[0..colon], u.name) and std.mem.eql(u8, plain[colon + 1 ..], u.password)) return u.name;
         }
@@ -732,7 +732,7 @@ pub const Server = struct {
             var limit: ?usize = null;
             var params = std.mem.splitScalar(u8, query, '&');
             while (params.next()) |param| {
-                const eq = std.mem.indexOfScalar(u8, param, '=') orelse continue;
+                const eq = std.mem.findScalar(u8, param, '=') orelse continue;
                 const value = try percentDecode(arena, param[eq + 1 ..]);
                 const key = param[0..eq];
                 if (std.mem.eql(u8, key, "path")) path_filter = value;
@@ -799,12 +799,12 @@ pub const Server = struct {
         var outcome = try program.run(.{ .environ = &cgi_env }, s.gpa, s.io, .{ .argv = &.{ "git", "-c", "http.receivepack=true", "http-backend" } }, body, .{});
         defer outcome.deinit(s.gpa);
         const output = outcome.stdout;
-        const split = std.mem.indexOf(u8, output, "\r\n\r\n") orelse return error.MalformedCgiResponse;
+        const split = std.mem.find(u8, output, "\r\n\r\n") orelse return error.MalformedCgiResponse;
         var status: u16 = 200;
         var response_headers: std.ArrayList(http.Header) = .empty;
         var lines = std.mem.splitSequence(u8, output[0..split], "\r\n");
         while (lines.next()) |line| {
-            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            const colon = std.mem.findScalar(u8, line, ':') orelse continue;
             const name = line[0..colon];
             const value = std.mem.trim(u8, line[colon + 1 ..], " ");
             if (std.ascii.eqlIgnoreCase(name, "status")) {

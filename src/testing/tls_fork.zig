@@ -48,9 +48,9 @@ test "the TLS client is std's, with the recorded diff and nothing else" {
 
 /// The hex SHA-256 in the diff's `---` line: `... sha256:<hex>`.
 fn baseHash(diff: []const u8) ?[]const u8 {
-    const first = diff[0 .. std.mem.indexOfScalar(u8, diff, '\n') orelse return null];
+    const first = diff[0 .. std.mem.findScalar(u8, diff, '\n') orelse return null];
     if (!std.mem.startsWith(u8, first, "--- ")) return null;
-    const at = std.mem.lastIndexOf(u8, first, "sha256:") orelse return null;
+    const at = std.mem.findLast(u8, first, "sha256:") orelse return null;
     const hex = first[at + "sha256:".len ..];
     return if (hex.len == 64) hex else null;
 }
@@ -74,7 +74,7 @@ fn apply(gpa: std.mem.Allocator, original: []const u8, diff: []const u8) ![]u8 {
         if (line.len == 0) continue; // the end of the diff
         if (std.mem.startsWith(u8, line, "@@ -")) {
             const rest = line["@@ -".len..];
-            const end = std.mem.indexOfAny(u8, rest, ", ") orelse return error.DiffDoesNotApply;
+            const end = std.mem.findAny(u8, rest, ", ") orelse return error.DiffDoesNotApply;
             const start = try std.fmt.parseInt(usize, rest[0..end], 10);
             // Everything before the hunk is the original's, as it is.
             while (line_no < start) : (line_no += 1) {

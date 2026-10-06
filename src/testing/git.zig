@@ -535,7 +535,7 @@ pub fn gitAtLeast(gpa: Allocator, io: Io, major: u32, minor: u32) !bool {
 /// parse leaves the version at zero, which is older than anything asked for.
 fn parseVersion(line: []const u8) void {
     const prefix = "git version ";
-    const at = std.mem.indexOf(u8, line, prefix) orelse return;
+    const at = std.mem.find(u8, line, prefix) orelse return;
     var numbers = std.mem.splitScalar(u8, line[at + prefix.len ..], '.');
     const major_text = numbers.next() orelse return;
     const minor_text = numbers.next() orelse return;
@@ -555,7 +555,7 @@ test "a git the harness runs reads no configuration but the harness's own" {
     defer gpa.free(listed);
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, listed, "\n"), '\n');
     while (lines.next()) |entry| {
-        const scope = entry[0 .. std.mem.indexOfScalar(u8, entry, '\t') orelse entry.len];
+        const scope = entry[0 .. std.mem.findScalar(u8, entry, '\t') orelse entry.len];
         if (!std.mem.eql(u8, scope, "command") and !std.mem.eql(u8, scope, "local")) {
             std.debug.print("a setting from outside the fixture: {s}\n", .{entry});
             return error.TestUnexpectedResult;

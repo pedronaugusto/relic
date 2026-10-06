@@ -296,6 +296,8 @@ test "hardware and checked hashes process the same bytes as software" {
     prng.random().bytes(buf);
 
     const Pass = struct {
+        const Self = @This();
+
         buf: []const u8,
         mine: hash.Oid = undefined,
         reference: [20]u8 = undefined,
@@ -304,7 +306,7 @@ test "hardware and checked hashes process the same bytes as software" {
         checked_attack: bool = false,
 
         /// relic's SHA-1, on whichever arm this processor turned out to have.
-        fn relicSha1(p: *@This()) void {
+        fn relicSha1(p: *Self) void {
             var h: hash.Hasher = .init(.sha1);
             h.update(p.buf);
             p.mine = h.final();
@@ -312,19 +314,19 @@ test "hardware and checked hashes process the same bytes as software" {
 
         /// The library's SHA-1, which is the same eighty rounds relic falls
         /// back to, over the same input.
-        fn librarySha1(p: *@This()) void {
+        fn librarySha1(p: *Self) void {
             std.crypto.hash.Sha1.hash(p.buf, &p.reference, .{});
         }
 
         /// SHA-256 over the same input.
-        fn relicSha256(p: *@This()) void {
+        fn relicSha256(p: *Self) void {
             var h: hash.Hasher = .init(.sha256);
             h.update(p.buf);
             p.sha256 = h.final();
         }
 
         /// SHA-1 with the collision check over the same input.
-        fn checkedSha1(p: *@This()) void {
+        fn checkedSha1(p: *Self) void {
             var h: hash.Hasher = .initOptions(.sha1, .{ .detect_collisions = true });
             h.update(p.buf);
             p.checked = h.final();

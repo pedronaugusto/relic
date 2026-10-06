@@ -308,7 +308,7 @@ pub const HttpServer = struct {
         const repo_path = path[0 .. path.len - (if (info_refs) "/info/refs".len else "/git-upload-pack".len)];
         const full = try std.fmt.allocPrint(arena, "{s}{s}", .{ s.root, repo_path });
         var env = try s.env.clone(arena);
-        const v2 = s.options.protocol_v2 and git_protocol != null and std.mem.indexOf(u8, git_protocol.?, "version=2") != null;
+        const v2 = s.options.protocol_v2 and git_protocol != null and std.mem.find(u8, git_protocol.?, "version=2") != null;
         if (v2) try env.put("GIT_PROTOCOL", "version=2");
         var input = body;
         if (content_encoding) |ce| if (std.ascii.eqlIgnoreCase(ce, "gzip")) {
@@ -357,7 +357,7 @@ pub const HttpServer = struct {
             try s.log.print(gpa, "{s} {s} {s}{s}\n", .{ @tagName(method), target, if (authorization != null) "auth" else "-", if (content_encoding != null) " gzip" else "" });
         }
 
-        const question = std.mem.indexOfScalar(u8, target, '?');
+        const question = std.mem.findScalar(u8, target, '?');
         const path = target[0 .. question orelse target.len];
         const query = if (question) |q| target[q + 1 ..] else "";
 
@@ -426,12 +426,12 @@ pub const HttpServer = struct {
         }, body, .{});
         defer outcome.deinit(gpa);
         const output = outcome.stdout;
-        const split = std.mem.indexOf(u8, output, "\r\n\r\n") orelse return error.MalformedCgiResponse;
+        const split = std.mem.find(u8, output, "\r\n\r\n") orelse return error.MalformedCgiResponse;
         var status: u16 = 200;
         var response_headers: std.ArrayList(std.http.Header) = .empty;
         var lines = std.mem.splitSequence(u8, output[0..split], "\r\n");
         while (lines.next()) |line| {
-            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            const colon = std.mem.findScalar(u8, line, ':') orelse continue;
             const name = line[0..colon];
             const value = std.mem.trim(u8, line[colon + 1 ..], " ");
             if (std.ascii.eqlIgnoreCase(name, "status")) {
@@ -856,7 +856,7 @@ pub const Proxy = struct {
             try std.testing.expect(bytes.len >= 2);
             try std.testing.expectEqual(@as(u8, 0x16), bytes[0]);
             try std.testing.expectEqual(@as(u8, 0x03), bytes[1]);
-            try std.testing.expect(std.mem.indexOf(u8, bytes, " HTTP/1.") == null);
+            try std.testing.expect(std.mem.find(u8, bytes, " HTTP/1.") == null);
         }
         return p.tunnel_starts.items.len;
     }
@@ -879,16 +879,16 @@ pub const Proxy = struct {
         var rest = value["Digest ".len..];
         while (rest.len != 0 and n < params.len) {
             rest = std.mem.trimStart(u8, rest, " ,");
-            const eq = std.mem.indexOfScalar(u8, rest, '=') orelse break;
+            const eq = std.mem.findScalar(u8, rest, '=') orelse break;
             const key = rest[0..eq];
             rest = rest[eq + 1 ..];
             var v: []const u8 = undefined;
             if (rest.len != 0 and rest[0] == '"') {
-                const end = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return false;
+                const end = std.mem.findScalarPos(u8, rest, 1, '"') orelse return false;
                 v = rest[1..end];
                 rest = rest[end + 1 ..];
             } else {
-                const end = std.mem.indexOfScalar(u8, rest, ',') orelse rest.len;
+                const end = std.mem.findScalar(u8, rest, ',') orelse rest.len;
                 v = rest[0..end];
                 rest = rest[end..];
             }
@@ -902,7 +902,7 @@ pub const Proxy = struct {
             }
         }.of;
         const list = params[0..n];
-        const colon = std.mem.indexOfScalar(u8, credentials, ':').?;
+        const colon = std.mem.findScalar(u8, credentials, ':').?;
         const user = credentials[0..colon];
         const password = credentials[colon + 1 ..];
         if (!std.mem.eql(u8, get(list, "username") orelse return false, user)) return false;
@@ -910,7 +910,7 @@ pub const Proxy = struct {
         if (!std.mem.eql(u8, get(list, "nonce") orelse return false, digest_nonce)) return false;
         // curl names a request handed over whole by its path.
         const uri = if (std.mem.startsWith(u8, target, "http://")) blk: {
-            const slash = std.mem.indexOfScalarPos(u8, target, "http://".len, '/') orelse target.len;
+            const slash = std.mem.findScalarPos(u8, target, "http://".len, '/') orelse target.len;
             break :blk target[slash..];
         } else target;
         if (!std.mem.eql(u8, get(list, "uri") orelse return false, uri)) return false;
@@ -965,14 +965,14 @@ pub const Proxy = struct {
         var head_len: usize = 0;
         while (true) {
             const seen = from_client.interface.buffered();
-            if (std.mem.indexOf(u8, seen, "\r\n\r\n")) |end| {
+            if (std.mem.find(u8, seen, "\r\n\r\n")) |end| {
                 head_len = end + 4;
                 break;
             }
             try from_client.interface.fillMore();
         }
         const head = from_client.interface.buffered()[0..head_len];
-        const line_end = std.mem.indexOf(u8, head, "\r\n").?;
+        const line_end = std.mem.find(u8, head, "\r\n").?;
         const first = head[0..line_end];
         var words = std.mem.tokenizeScalar(u8, first, ' ');
         const method = words.next() orelse return error.BadRequest;
@@ -998,7 +998,7 @@ pub const Proxy = struct {
             var given: []const u8 = "none";
             var lines = std.mem.splitSequence(u8, head, "\r\n");
             while (lines.next()) |line| {
-                const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+                const colon = std.mem.findScalar(u8, line, ':') orelse continue;
                 if (!std.ascii.eqlIgnoreCase(line[0..colon], "proxy-authorization")) continue;
                 const value = std.mem.trim(u8, line[colon + 1 ..], " ");
                 if (std.mem.startsWith(u8, value, "Basic ")) {
@@ -1035,11 +1035,11 @@ pub const Proxy = struct {
             const prefix = "http://";
             if (!std.mem.startsWith(u8, target, prefix)) return error.BadRequest;
             const rest = target[prefix.len..];
-            const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+            const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
             host_port = rest[0..slash];
             rewritten = try std.fmt.bufPrint(&line_buf, "{s} {s} {s}", .{ method, if (slash < rest.len) rest[slash..] else "/", words.rest() });
         }
-        const colon = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return error.BadRequest;
+        const colon = std.mem.findScalarLast(u8, host_port, ':') orelse return error.BadRequest;
         const port = try std.fmt.parseUnsigned(u16, host_port[colon + 1 ..], 10);
         // A name that is not an address is this machine: a test names a
         // host no resolver knows, for a client to send through the proxy.
@@ -1208,7 +1208,7 @@ pub const SocksProxy = struct {
             var methods: [255]u8 = undefined;
             try r.readSliceAll(methods[0..count]);
             const method: u8 = if (p.options.credential != null) 2 else 0;
-            if (std.mem.indexOfScalar(u8, methods[0..count], method) == null) {
+            if (std.mem.findScalar(u8, methods[0..count], method) == null) {
                 try w.writeAll(&.{ 5, 255 });
                 try w.flush();
                 return;

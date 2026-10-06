@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     try pktline.flush(w);
     try w.flush();
 
-    var delayed: std.StringArrayHashMapUnmanaged([]u8) = .empty;
+    var delayed: std.array_hash_map.String([]u8) = .empty;
     var ready: std.ArrayList([]const u8) = .empty;
     var first = true;
     while (true) {

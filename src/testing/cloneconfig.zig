@@ -79,7 +79,7 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
         // Nothing of the person's was written into the new repository.
         const local = try d.readFileAlloc(io, ".git/config", gpa, .limited(1 << 20));
         defer gpa.free(local);
-        try testing.expect(std.mem.indexOf(u8, local, "filter") == null);
+        try testing.expect(std.mem.find(u8, local, "filter") == null);
     }
 
     // Without it, the pointer is checked out, as git without git-lfs's
@@ -139,7 +139,7 @@ test "a clone given no settings of its own reaches the remote with the person's,
     try testing.expectEqualStrings(fake, repo.configuration().get("core.sshCommand").?);
     const local = try d.readFileAlloc(io, ".git/config", gpa, .limited(1 << 20));
     defer gpa.free(local);
-    try testing.expect(std.mem.indexOf(u8, local, "sshCommand") == null);
+    try testing.expect(std.mem.find(u8, local, "sshCommand") == null);
 }
 
 test "a clone goes where url.<base>.insteadOf sends it and records the URL as given, as git clone does" {

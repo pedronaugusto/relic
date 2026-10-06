@@ -125,7 +125,7 @@ test "a file whose indexed version has CRLF endings keeps them where the content
         defer result.deinit();
         const porcelain = try twin.ours.run(io, &.{ "status", "--porcelain", "--untracked-files=no" });
         defer gpa.free(porcelain);
-        const git_says_touched = std.mem.indexOf(u8, porcelain, "touched.txt") != null;
+        const git_says_touched = std.mem.find(u8, porcelain, "touched.txt") != null;
         try testing.expectEqual(git_says_touched, result.find("touched.txt") != null);
 
         try twin.theirs.exec(io, &.{ "add", "-A" });

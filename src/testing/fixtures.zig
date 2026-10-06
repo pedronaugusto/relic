@@ -545,8 +545,8 @@ test "an annotated tag written is one git reads, and its gpgsig header survives"
 
     const shown = try repo.run(io, &.{ "cat-file", "tag", tag_text });
     defer gpa.free(shown);
-    try std.testing.expect(std.mem.indexOf(u8, shown, "tag v1.0\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, shown, "gpgsig -----BEGIN SSH SIGNATURE-----\n \n") != null);
+    try std.testing.expect(std.mem.find(u8, shown, "tag v1.0\n") != null);
+    try std.testing.expect(std.mem.find(u8, shown, "gpgsig -----BEGIN SSH SIGNATURE-----\n \n") != null);
 
     const peeled = try repo.line(io, &.{ "rev-parse", "v1.0^{commit}" });
     defer gpa.free(peeled);
@@ -603,7 +603,7 @@ test "a commit's gpgsig header is read back exactly as git stores it" {
     // the empty ones included.
     const raw = try repo.run(io, &.{ "cat-file", "commit", signed_text });
     defer gpa.free(raw);
-    try std.testing.expect(std.mem.indexOf(u8, raw, "gpgsig -----BEGIN PGP SIGNATURE-----\n \n line one\n \n line three\n") != null);
+    try std.testing.expect(std.mem.find(u8, raw, "gpgsig -----BEGIN PGP SIGNATURE-----\n \n line one\n \n line three\n") != null);
 
     const back = try db.read(io, signed_oid);
     defer gpa.free(back.bytes);
@@ -1035,8 +1035,8 @@ test "a worktree that moved is repaired and git follows it" {
 
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(listed);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "trees/after") != null);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "trees/before") == null);
+    try std.testing.expect(std.mem.find(u8, listed, "trees/after") != null);
+    try std.testing.expect(std.mem.find(u8, listed, "trees/before") == null);
 
     // Opening the moved worktree still finds the repository behind it.
     var linked = try repo_mod.Repository.open(gpa, io, moved, .{ .discover = false });
@@ -1365,8 +1365,8 @@ test "a pack this wrote is a pack git verifies, object for object" {
     // other rebuilds the index from the pack and compares.
     const listing = try repo.run(io, &.{ "verify-pack", "-v", idx });
     defer gpa.free(listing);
-    try std.testing.expect(std.mem.indexOf(u8, listing, "chain length") != null or
-        std.mem.indexOf(u8, listing, "non delta") != null);
+    try std.testing.expect(std.mem.find(u8, listing, "chain length") != null or
+        std.mem.find(u8, listing, "non delta") != null);
     try repo.exec(io, &.{ "index-pack", "--verify", pack_file });
 
     // Every object in it reads back through git, as the type and the length
@@ -1480,7 +1480,7 @@ test "a deltified pack is read back by git and by this, object for object" {
     try repo.exec(io, &.{ "index-pack", "--verify", try std.fmt.bufPrint(&path_buf, ".git/objects/pack/{s}.pack", .{base}) });
     const listing = try repo.run(io, &.{ "verify-pack", "-v", try std.fmt.bufPrint(&path_buf, ".git/objects/pack/{s}.idx", .{base}) });
     defer gpa.free(listing);
-    try std.testing.expect(std.mem.indexOf(u8, listing, "chain length = 1") != null);
+    try std.testing.expect(std.mem.find(u8, listing, "chain length = 1") != null);
 
     // And this reads every one of them back: `verify` rehashes each object
     // against the name the index gives it, which is the whole delta chain
@@ -1744,12 +1744,12 @@ test "a staging pass that writes a pack stages what one that writes loose object
         var hex: [hash.max_hex_len]u8 = undefined;
         const listed = try repo_git.run(io, &.{ "ls-tree", "-r", "--name-only", trees[pass].hex(&hex) });
         defer gpa.free(listed);
-        try std.testing.expect(std.mem.indexOf(u8, listed, "same-b.txt") != null);
+        try std.testing.expect(std.mem.find(u8, listed, "same-b.txt") != null);
         try repo_git.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 
         const status = try repo_git.run(io, &.{ "status", "--porcelain" });
         defer gpa.free(status);
-        try std.testing.expect(std.mem.indexOf(u8, status, "A  same-a.txt") != null);
+        try std.testing.expect(std.mem.find(u8, status, "A  same-a.txt") != null);
     }
     try std.testing.expect(trees[0].eql(trees[1]));
 }

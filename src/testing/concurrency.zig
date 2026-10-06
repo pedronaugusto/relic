@@ -170,7 +170,7 @@ test "writing the index while git reads the same repository" {
 
         const listed = try repo.run(io, &.{"ls-files"});
         defer gpa.free(listed);
-        try std.testing.expect(std.mem.indexOf(u8, listed, path) != null);
+        try std.testing.expect(std.mem.find(u8, listed, path) != null);
     }
     try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
@@ -250,6 +250,8 @@ test "concurrent reflog appends preserve every complete line" {
     try tmp.dir.writeFile(io, .{ .sub_path = "logs/refs/heads/main", .data = "" });
 
     const ThreadContext = struct {
+        const Self = @This();
+
         io: Io,
         dir: Io.Dir,
         start: *Io.Event,
@@ -257,7 +259,7 @@ test "concurrent reflog appends preserve every complete line" {
         old: Oid,
         new: Oid,
 
-        fn run(ctx: *@This()) void {
+        fn run(ctx: *Self) void {
             ctx.start.wait(ctx.io) catch {
                 ctx.failed.store(true, .release);
                 return;

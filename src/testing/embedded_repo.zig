@@ -245,7 +245,7 @@ test "addAll stages a repository inside the working tree as the gitlink git add 
     const theirs = try git.run(io, &.{ "ls-files", "-s" });
     defer gpa.free(theirs);
     try testing.expectEqualStrings(theirs, ours);
-    try testing.expect(std.mem.indexOf(u8, ours, "160000 ") != null);
+    try testing.expect(std.mem.find(u8, ours, "160000 ") != null);
     const theirs_tree = try git.line(io, &.{"write-tree"});
     defer gpa.free(theirs_tree);
     var hex: [hash.max_hex_len]u8 = undefined;

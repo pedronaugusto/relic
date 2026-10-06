@@ -463,7 +463,7 @@ test "a criss-cross merge folds its two bases into one, as git does" {
     try expectSameState(&pair, io, &merge_state, &main_logs);
     const marked = try pair.ours.readFile(io, "f");
     defer gpa.free(marked);
-    try std.testing.expect(std.mem.indexOf(u8, marked, "||||||| merged common ancestors\n") != null);
+    try std.testing.expect(std.mem.find(u8, marked, "||||||| merged common ancestors\n") != null);
 }
 
 test "a signed-off merge with its own message, and one stopped before committing" {
@@ -856,7 +856,7 @@ fn sameTemporaryNames(pair: *Pair, io: Io, path: []const u8) !void {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(pair.gpa);
         var at: usize = 0;
-        while (std.mem.indexOfPos(u8, text, at, ".merge_file_")) |found| {
+        while (std.mem.findPos(u8, text, at, ".merge_file_")) |found| {
             try out.appendSlice(pair.gpa, text[at..found]);
             try out.appendSlice(pair.gpa, ".merge_file_XXXXXX");
             at = @min(text.len, found + ".merge_file_".len + 6);
@@ -1001,8 +1001,8 @@ fn expectSameSheet(pair: *Pair, io: Io, name: []const u8) !void {
     defer gpa.free(left);
     const right = try readOrMissing(gpa, io, &pair.ours, name);
     defer gpa.free(right);
-    const cut_left = left[0 .. std.mem.indexOf(u8, left, "\n#") orelse left.len];
-    const cut_right = right[0 .. std.mem.indexOf(u8, right, "\n#") orelse right.len];
+    const cut_left = left[0 .. std.mem.find(u8, left, "\n#") orelse left.len];
+    const cut_right = right[0 .. std.mem.find(u8, right, "\n#") orelse right.len];
     try std.testing.expectEqualStrings(cut_left, cut_right);
 }
 
@@ -1516,8 +1516,8 @@ test "update-refs moves the other branches with the commits they point at, and n
         defer repo.deinit(io);
         const sheet = try rebase.plan(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .update_refs = true });
         defer gpa.free(sheet);
-        try std.testing.expect(std.mem.indexOf(u8, sheet, "update-ref refs/heads/zpart\nupdate-ref refs/heads/part\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, sheet, "# Ref refs/heads/held checked out at '") != null);
+        try std.testing.expect(std.mem.find(u8, sheet, "update-ref refs/heads/zpart\nupdate-ref refs/heads/part\n") != null);
+        try std.testing.expect(std.mem.find(u8, sheet, "# Ref refs/heads/held checked out at '") != null);
         var outcome = try rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .update_refs = true });
         defer outcome.deinit();
         try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);
@@ -1576,10 +1576,12 @@ test "the messages a person would edit come from the caller, and land as an edit
     try useFixtureEditor(&pair, "GIT_EDITOR", "silent");
 
     const Editor = struct {
+        const Self = @This();
+
         seen: [4]rebase.MessageKind = undefined,
         count: usize = 0,
         fn edit(context: *anyopaque, kind: rebase.MessageKind, proposed: []const u8) ?[]const u8 {
-            const self: *@This() = @ptrCast(@alignCast(context));
+            const self: *Self = @ptrCast(@alignCast(context));
             std.debug.assert(proposed.len != 0);
             self.seen[self.count] = kind;
             self.count += 1;
@@ -3092,7 +3094,7 @@ fn unsigned(pair: *Pair, io: Io, repo: *testgit.Repo, rev: []const u8) ![]u8 {
             try out.appendSlice(pair.gpa, "parent\n");
             continue;
         }
-        if (std.mem.indexOf(u8, line, parent)) |at| {
+        if (std.mem.find(u8, line, parent)) |at| {
             try out.appendSlice(pair.gpa, line[0..at]);
             try out.appendSlice(pair.gpa, "<parent>");
             try out.appendSlice(pair.gpa, line[at + parent.len ..]);

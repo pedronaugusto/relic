@@ -43,7 +43,7 @@ fn dirKindOf(path: []const u8) ?[]const u8 {
 }
 
 /// Every kind found under `dir`, with the permission bits each has.
-fn modes(gpa: Allocator, io: Io, dir: Io.Dir) !std.StringArrayHashMapUnmanaged(std.ArrayList(u32)) {
+fn modes(gpa: Allocator, io: Io, dir: Io.Dir) !std.array_hash_map.String(std.ArrayList(u32)) {
     var out: std.array_hash_map.String(std.ArrayList(u32)) = .empty;
     var walker = try dir.walk(gpa);
     defer walker.deinit();
@@ -67,7 +67,7 @@ fn modes(gpa: Allocator, io: Io, dir: Io.Dir) !std.StringArrayHashMapUnmanaged(s
     return out;
 }
 
-fn freeModes(gpa: Allocator, m: *std.StringArrayHashMapUnmanaged(std.ArrayList(u32))) void {
+fn freeModes(gpa: Allocator, m: *std.array_hash_map.String(std.ArrayList(u32))) void {
     for (m.values()) |*list| list.deinit(gpa);
     m.deinit(gpa);
 }
