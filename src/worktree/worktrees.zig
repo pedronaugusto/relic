@@ -516,5 +516,6 @@ pub fn readGitFile(gpa: Allocator, io: Io, dir: Io.Dir) Self.Error!?[]u8 {
     if (!std.mem.startsWith(u8, trimmed, "gitdir:")) return null;
     const target = std.mem.trim(u8, trimmed["gitdir:".len..], " \t");
     if (target.len == 0) return null;
-    return try gpa.dupe(u8, target);
+    const owned = try gpa.dupe(u8, target);
+    return owned;
 }

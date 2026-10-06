@@ -2034,6 +2034,7 @@ const WriteBatch = struct {
         b.jobs.deinit(b.gpa);
         var arena = b.arena.promote(b.gpa);
         arena.deinit();
+        b.* = undefined;
     }
 
     /// Take a copy of a file to write; `true` when the batch is full.

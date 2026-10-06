@@ -164,6 +164,7 @@ pub const Twin = struct {
     pub fn deinit(t: *Twin) void {
         t.ours.deinit();
         t.theirs.deinit();
+        t.* = undefined;
     }
 };
 

@@ -559,7 +559,8 @@ fn normalizeDirectory(arena: Allocator, raw: []const u8) Error!?[]const u8 {
         try parts.append(arena, part);
     }
     if (parts.items.len == 0) return null;
-    return try std.mem.join(arena, "/", parts.items);
+    const joined = try std.mem.join(arena, "/", parts.items);
+    return joined;
 }
 
 const Set = enum { recursive, parents };
@@ -700,6 +701,7 @@ const Twin = struct {
     fn deinit(t: *Twin) void {
         t.theirs.deinit();
         t.ours.deinit();
+        t.* = undefined;
     }
 
     /// Run `git sparse-checkout <args>` in theirs.

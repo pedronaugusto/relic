@@ -817,6 +817,7 @@ const Scripted = struct {
 
     fn deinit(s: *Scripted) void {
         s.sent.deinit();
+        s.* = undefined;
     }
 };
 

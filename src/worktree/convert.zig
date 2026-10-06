@@ -697,7 +697,8 @@ pub const Session = struct {
             if (s.next_available < s.available.items.len) {
                 const d = &s.delayed.items[s.available.items[s.next_available]];
                 s.next_available += 1;
-                return try s.redeliver(a, d);
+                const redelivered = try s.redeliver(a, d);
+                return redelivered;
             }
             if (!try s.askAvailable(a)) break;
         }
@@ -872,7 +873,8 @@ pub fn identToGit(a: Allocator, src: []const u8) Allocator.Error!?[]u8 {
         }
     }
     out.appendSliceAssumeCapacity(rest);
-    return try out.toOwnedSlice(a);
+    const owned = try out.toOwnedSlice(a);
+    return owned;
 }
 
 /// `$Id$`, and a `$Id: … $` git itself would have written, become
@@ -910,7 +912,8 @@ pub fn identToWorktree(a: Allocator, kind: hash.Kind, src: []const u8) Allocator
         try out.appendSlice(a, " $");
     }
     try out.appendSlice(a, rest);
-    return try out.toOwnedSlice(a);
+    const owned = try out.toOwnedSlice(a);
+    return owned;
 }
 
 const testing = std.testing;

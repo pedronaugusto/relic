@@ -49,6 +49,7 @@ const Harness = struct {
         h.db.deinit(io);
         h.git_dir.close(io);
         h.repo.deinit();
+        h.* = undefined;
     }
 
     fn reload(h: *Harness, gpa: std.mem.Allocator, io: Io) !void {

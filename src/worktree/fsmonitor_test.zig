@@ -67,6 +67,7 @@ const Pair = struct {
         pair.ours.deinit();
         pair.git.deinit();
         pair.env.deinit();
+        pair.* = undefined;
     }
 
     /// Both hooks' answer to a question of `version`.
@@ -164,7 +165,8 @@ fn tokenOf(gpa: Allocator, io: Io, r: *testgit.Repo) !?[]u8 {
     var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
     defer index.deinit();
     const t = index.fsmonitor_token orelse return null;
-    return try gpa.dupe(u8, t);
+    const token = try gpa.dupe(u8, t);
+    return token;
 }
 
 fn porcelain(gpa: Allocator, entries: []const worktree.StatusEntry) ![]u8 {
