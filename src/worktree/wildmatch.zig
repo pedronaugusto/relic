@@ -37,145 +37,113 @@ pub const Error = error{
 /// `match("x[abc", "y", .{})` is a plain `false` because the `x` already
 /// failed, which is how git behaves too.
 pub fn match(pattern: []const u8, text: []const u8, options: Options) Error!bool {
-    return matchFrom(pattern, 0, text, 0, options, 0);
+    return try dowild(pattern, 0, text, 0, options, 0) == .match;
 }
 
-/// How far a `*` run may reach. The kind decides both what the star may
-/// swallow and where backtracking may resume it.
-const StarKind = enum {
-    /// A single `*` under `pathname`: swallows bytes up to the next `/`.
-    no_slash,
-    /// A `*` without `pathname`, or a trailing `**` component: swallows
-    /// anything at all.
-    any,
-    /// A `**/` standing as a whole component: swallows zero or more entire
-    /// path components, so `a/**/b` matches `a/b` as well as `a/x/y/b`.
-    whole_components,
+/// What a match attempt says, as git's `dowild` says it. The two aborts are
+/// what keep backtracking linear: a failure no later placement of an outer
+/// star can mend says so, and the outer stars stop trying.
+const Outcome = enum {
+    match,
+    no_match,
+    /// No placement of any star can match: the text ran out, or a literal
+    /// after a star is nowhere in the rest of it.
+    abort_all,
+    /// No placement of a star short of a `**` can match: only a `**` that
+    /// may cross a `/` is worth moving.
+    abort_to_starstar,
 };
 
-/// The one pending star a frame can resume from. `pattern_index` is where
-/// matching restarts, `text_index` is the star's current end in the text.
-const Star = struct {
-    kind: StarKind,
-    pattern_index: usize,
-    text_index: usize,
-};
+/// Every star tried is one frame, so a pattern of a few hundred stars is as
+/// deep as this goes; past it the pattern is refused rather than run off the
+/// stack.
+const max_depth = 1024;
 
-/// Recursion is only entered when a star of a different kind meets a pending
-/// star of another kind, which is rare in real patterns; 64 of those nested is
-/// far past anything a `.gitignore` contains.
-const max_depth = 64;
-
-/// The heart of the matcher: a two-pointer scan that remembers one star and
-/// backtracks it on failure.
-///
-/// One remembered star is enough whenever consecutive stars have the same
-/// reach, because then the leftmost placement of each fixed-width run between
-/// them is always the best one. It stops being enough when a permissive star
-/// is followed by a restrictive one (`a/**/x*y`), since moving the earlier
-/// star forward can lift a `/` out of the later star's span. That, and only
-/// that, is what recursion here is for.
-fn matchFrom(
+/// git's `dowild` from `wildmatch.c`, over bytes: a star tries each place
+/// the rest of the pattern could start, and gives up on the first abort.
+fn dowild(
     pattern: []const u8,
     pattern_start: usize,
     text: []const u8,
     text_start: usize,
     options: Options,
-    depth: u8,
-) Error!bool {
-    var pi = pattern_start;
-    var ti = text_start;
-    var star: ?Star = null;
+    depth: u32,
+) Error!Outcome {
+    if (depth > max_depth) return error.PatternTooComplex;
+    var p = pattern_start;
+    var t = text_start;
+    while (p < pattern.len) {
+        if (pattern[p] != '*') {
+            if (t >= text.len) return .abort_all;
+            const item = try matchItem(pattern, p, text[t], options);
+            if (!item.matched) return .no_match;
+            p = item.next;
+            t += 1;
+            continue;
+        }
 
-    while (true) {
-        if (pi < pattern.len) {
-            if (pattern[pi] == '*') {
-                const parsed = parseStar(pattern, pi, options);
-                if (star) |pending| {
-                    if (pending.kind != parsed.kind) {
-                        if (depth >= max_depth) return error.PatternTooComplex;
-                        if (try matchFrom(pattern, pi, text, ti, options, depth + 1)) return true;
-                        if (backtrack(&star, text, &pi, &ti)) continue;
-                        return false;
-                    }
+        // A run of stars, and how far it may reach.
+        var q = p + 1;
+        var match_slash = !options.pathname;
+        if (q < pattern.len and pattern[q] == '*') {
+            while (q < pattern.len and pattern[q] == '*') q += 1;
+            const starts_component = p == 0 or pattern[p - 1] == '/';
+            const ends_component = q == pattern.len or pattern[q] == '/' or
+                (pattern[q] == '\\' and q + 1 < pattern.len and pattern[q + 1] == '/');
+            if (!options.pathname) {
+                match_slash = true;
+            } else if (starts_component and ends_component) {
+                // `**/` may match nothing at all, slash included, which is
+                // what lets `a/**/b` match `a/b`.
+                if (q < pattern.len and pattern[q] == '/') {
+                    if (try dowild(pattern, q + 1, text, t, options, depth + 1) == .match) return .match;
                 }
-                star = .{ .kind = parsed.kind, .pattern_index = parsed.next, .text_index = ti };
-                pi = parsed.next;
-                continue;
+                match_slash = true;
             }
-            if (ti < text.len) {
-                const item = try matchItem(pattern, pi, text[ti], options);
-                if (item.matched) {
-                    pi = item.next;
-                    ti += 1;
-                    continue;
-                }
-            }
-        } else if (ti == text.len) return true;
+        }
+        p = q;
 
-        if (!backtrack(&star, text, &pi, &ti)) return false;
+        if (p == pattern.len) {
+            // A trailing `**` matches everything; a trailing `*` only what
+            // has no slash left.
+            if (!match_slash and std.mem.findScalarPos(u8, text, t, '/') != null) return .abort_to_starstar;
+            return .match;
+        }
+        if (!match_slash and pattern[p] == '/') {
+            // One star and a slash: the star takes the rest of this
+            // component, and the slashes meet.
+            const slash = std.mem.findScalarPos(u8, text, t, '/') orelse return .abort_all;
+            t = slash + 1;
+            p += 1;
+            continue;
+        }
+        while (t < text.len) {
+            // A literal after the star: the star takes everything before
+            // its next appearance, and none appearing is the end of it.
+            if (!isGlobSpecial(pattern[p])) {
+                const want = if (options.case_fold) fold(pattern[p]) else pattern[p];
+                while (t < text.len and (match_slash or text[t] != '/')) : (t += 1) {
+                    const have = if (options.case_fold) fold(text[t]) else text[t];
+                    if (have == want) break;
+                }
+                if (t >= text.len or (if (options.case_fold) fold(text[t]) else text[t]) != want) {
+                    return if (match_slash) .abort_all else .abort_to_starstar;
+                }
+            }
+            const matched = try dowild(pattern, p, text, t, options, depth + 1);
+            if (matched != .no_match) {
+                if (!match_slash or matched != .abort_to_starstar) return matched;
+            } else if (!match_slash and text[t] == '/') return .abort_to_starstar;
+            t += 1;
+        }
+        return .abort_all;
     }
+    return if (t == text.len) .match else .no_match;
 }
 
-/// Moves the pending star one candidate further and rewinds both cursors to
-/// it. False means this frame has no way left to match.
-fn backtrack(star: *?Star, text: []const u8, pi: *usize, ti: *usize) bool {
-    if (star.*) |*pending| {
-        switch (pending.kind) {
-            .no_slash => {
-                if (pending.text_index >= text.len) return false;
-                if (text[pending.text_index] == '/') return false;
-                pending.text_index += 1;
-            },
-            .any => {
-                if (pending.text_index >= text.len) return false;
-                pending.text_index += 1;
-            },
-            .whole_components => {
-                const rest = text[pending.text_index..];
-                const slash = std.mem.findScalar(u8, rest, '/') orelse return false;
-                pending.text_index += slash + 1;
-            },
-        }
-        pi.* = pending.pattern_index;
-        ti.* = pending.text_index;
-        return true;
-    }
-    return false;
-}
-
-const ParsedStar = struct {
-    kind: StarKind,
-    /// Index of the first pattern byte after the star, and after the `/` that
-    /// closes a `**/` component.
-    next: usize,
-};
-
-/// Classifies the run of `*` starting at `pi`.
-///
-/// `**` only earns its wider reach when the whole run stands alone as a path
-/// component: preceded by the start of the pattern or a `/`, and followed by
-/// `/` or the end. `a**b` is therefore just a `*`, exactly as in git.
-fn parseStar(pattern: []const u8, pi: usize, options: Options) ParsedStar {
-    var j = pi;
-    while (j < pattern.len and pattern[j] == '*') j += 1;
-
-    if (!options.pathname) return .{ .kind = .any, .next = j };
-
-    const doubled = j - pi >= 2;
-    const starts_component = pi == 0 or pattern[pi - 1] == '/';
-    const ends_component = j == pattern.len or pattern[j] == '/' or
-        (pattern[j] == '\\' and j + 1 < pattern.len and pattern[j + 1] == '/');
-
-    if (doubled and starts_component and ends_component) {
-        // The `/` belongs to the wildcard, which is what lets `a/**/b` match
-        // `a/b`: the component run may be empty and take the slash with it.
-        if (j < pattern.len and pattern[j] == '/') {
-            return .{ .kind = .whole_components, .next = j + 1 };
-        }
-        return .{ .kind = .any, .next = j };
-    }
-    return .{ .kind = .no_slash, .next = j };
+/// git's `is_glob_special`: the bytes a star cannot skip ahead to.
+fn isGlobSpecial(c: u8) bool {
+    return c == '*' or c == '?' or c == '[' or c == '\\';
 }
 
 const Item = struct {
@@ -550,13 +518,13 @@ test "pathological star pattern finishes without hanging" {
 }
 
 test "nesting past the recursion bound is refused" {
-    // Every `**/` followed by a `*` flips the star kind, and each flip costs
-    // one frame, so 70 of them run past the cap of 64.
+    // Every star tried is a frame, two to each `**/*a/`, so six hundred of
+    // them run past the cap of 1024.
     var pattern: std.ArrayList(u8) = .empty;
     defer pattern.deinit(std.testing.allocator);
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(std.testing.allocator);
-    for (0..70) |_| {
+    for (0..600) |_| {
         try pattern.appendSlice(std.testing.allocator, "**/*a/");
         try text.appendSlice(std.testing.allocator, "a/");
     }
@@ -576,6 +544,22 @@ test "nesting past the recursion bound is refused" {
     try short.append(std.testing.allocator, 'z');
     try short_text.append(std.testing.allocator, 'z');
     try expect(try match(short.items, short_text.items, .{}));
+}
+
+test "alternating ** and * patterns give up as git's do rather than backtracking exponentially" {
+    // The reviewer's shape: twelve `**/x*/` against forty `x/` and a `z`,
+    // which backtracked for minutes and git answers in milliseconds.
+    var pattern: std.ArrayList(u8) = .empty;
+    defer pattern.deinit(std.testing.allocator);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(std.testing.allocator);
+    for (0..12) |_| try pattern.appendSlice(std.testing.allocator, "**/x*/");
+    try pattern.append(std.testing.allocator, 'y');
+    for (0..40) |_| try text.appendSlice(std.testing.allocator, "x/");
+    try text.append(std.testing.allocator, 'z');
+    try no(pattern.items, text.items);
+    text.items[text.items.len - 1] = 'y';
+    try yes(pattern.items, text.items);
 }
 
 test "fuzz: any pattern and text answer or name an error" {
