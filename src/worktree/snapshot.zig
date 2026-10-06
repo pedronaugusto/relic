@@ -208,7 +208,7 @@ pub const Store = struct {
     // Only a completed walk may put a tree in the shortcut cache.
     fn ownTree(store: *Store, io: Io, oid: hash.Oid, source_db: ?*odb.Odb, depth: u32) Error!void {
         if (store.complete.contains(oid)) return;
-        if (depth > 128) return error.TreeDepthExceeded;
+        if (depth > object.max_tree_depth) return error.TreeDepthExceeded;
         try store.ownObject(io, oid, source_db, .tree);
         const found = try store.db.read(io, oid);
         defer store.gpa.free(found.bytes);

@@ -2075,6 +2075,8 @@ pub const FetchError = Error || objectwalk.Error || repo_mod.Error || error{
     /// A recent fetch counts `lfs.fetchrecentrefsdays` back from now, and
     /// `FetchOptions.now` was not given.
     LfsRecentNeedsTime,
+    /// A tree nests deeper than `object.max_tree_depth`.
+    TreeTooDeep,
 } || revwalk.Error || diff_mod.Error || index_mod.ReadError || index_mod.WriteError || fs.AtomicWriteError || fs.StatError;
 
 /// Bring the LFS objects the trees at `options.refs` point at into the
@@ -2137,7 +2139,7 @@ fn recentPointers(arena: Allocator, server: *lfsapi.Server, repo: *Repository, t
             defer repo.odb.allocator().free(found.bytes);
             var commit = try object_mod.Commit.parse(arena, repo.objectFormat(), found.bytes);
             defer commit.deinit();
-            try scanTree(arena, io, repo, commit.tree, "", &out, &seen);
+            try scanTree(arena, io, repo, commit.tree, "", &out, &seen, 0);
         }
     }
 
@@ -2228,19 +2230,20 @@ fn scan(arena: Allocator, io: Io, repo: *Repository, options: FetchOptions, tips
             .tree => tip,
             else => continue,
         };
-        try scanTree(arena, io, repo, tree, "", &out, &seen);
+        try scanTree(arena, io, repo, tree, "", &out, &seen, 0);
     }
     return out.items;
 }
 
-fn scanTree(arena: Allocator, io: Io, repo: *Repository, tree: Oid, prefix: []const u8, out: *std.ArrayList(Object), seen: *std.StringHashMapUnmanaged(void)) FetchError!void {
+fn scanTree(arena: Allocator, io: Io, repo: *Repository, tree: Oid, prefix: []const u8, out: *std.ArrayList(Object), seen: *std.StringHashMapUnmanaged(void), depth: u32) FetchError!void {
+    if (depth > object_mod.max_tree_depth) return error.TreeTooDeep;
     const found = try repo.odb.read(io, tree);
     defer repo.odb.allocator().free(found.bytes);
     var entries = object_mod.Tree.parse(repo.objectFormat(), found.bytes).iterate();
     while (try entries.next()) |entry| {
         const path = if (prefix.len == 0) try arena.dupe(u8, entry.name) else try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
         switch (entry.mode) {
-            .tree => try scanTree(arena, io, repo, entry.oid, path, out, seen),
+            .tree => try scanTree(arena, io, repo, entry.oid, path, out, seen, depth + 1),
             .file, .exec => {
                 const header = try repo.odb.readHeader(io, entry.oid);
                 try addPointer(arena, io, repo, entry.oid, header.size, path, out, seen);

@@ -17,7 +17,10 @@ const pathspec = @import("../pathspec.zig");
 
 const Oid = hash.Oid;
 
-pub const Error = odb_mod.Error || object.TreeParseError || Allocator.Error;
+pub const Error = odb_mod.Error || object.TreeParseError || Allocator.Error || error{
+    /// A tree nests deeper than `object.max_tree_depth`.
+    TreeTooDeep,
+};
 
 /// Whether trees `a` and `b`, `null` for the empty tree, hold the same
 /// entries everywhere `paths` names: git's `REV_TREE_SAME` from a tree
@@ -25,7 +28,7 @@ pub const Error = odb_mod.Error || object.TreeParseError || Allocator.Error;
 pub fn sameWithin(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: ?Oid, b: ?Oid, paths: *const pathspec.Pathspec) Self.Error!bool {
     var prefix: std.ArrayList(u8) = .empty;
     defer prefix.deinit(gpa);
-    return sameUnder(gpa, io, db, a, b, paths, &prefix);
+    return sameUnder(gpa, io, db, a, b, paths, &prefix, 0);
 }
 
 fn readTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: ?Oid) Error!?[]const u8 {
@@ -60,7 +63,9 @@ fn sameUnder(
     b_oid: ?Oid,
     paths: *const pathspec.Pathspec,
     prefix: *std.ArrayList(u8),
+    depth: u32,
 ) Error!bool {
+    if (depth > object.max_tree_depth) return error.TreeTooDeep;
     const kind = db.objectFormat();
     const a_bytes = try readTree(gpa, io, db, a_oid);
     defer if (a_bytes) |bytes| gpa.free(bytes);
@@ -85,7 +90,7 @@ fn sameUnder(
                 if (entry.mode.isTree()) {
                     if (paths.couldMatchUnder(path)) {
                         try prefix.append(gpa, '/');
-                        if (!try sameUnder(gpa, io, db, entry.oid, other.oid, paths, prefix)) return false;
+                        if (!try sameUnder(gpa, io, db, entry.oid, other.oid, paths, prefix, depth + 1)) return false;
                     }
                 } else if (paths.matches(path)) return false;
             }
@@ -99,7 +104,7 @@ fn sameUnder(
                 try prefix.append(gpa, '/');
                 const only_a: ?Oid = if (which == .lt) entry.oid else null;
                 const only_b: ?Oid = if (which == .gt) entry.oid else null;
-                if (!try sameUnder(gpa, io, db, only_a, only_b, paths, prefix)) return false;
+                if (!try sameUnder(gpa, io, db, only_a, only_b, paths, prefix, depth + 1)) return false;
             }
         } else if (paths.matches(path)) return false;
         if (which == .lt) a_next = try ai.next() else b_next = try bi.next();

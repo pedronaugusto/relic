@@ -65,6 +65,8 @@ pub const Error = error{
     BareRepository,
     /// The object to search is not a commit or a tree.
     NotATree,
+    /// The tree nests deeper than `object.max_tree_depth`.
+    TreeTooDeep,
 } || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || attributes.Error || Io.Writer.Error ||
     odb_mod.Error || object.TreeParseError;
 
@@ -851,7 +853,8 @@ fn collectIndex(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_m
     }
 }
 
-fn collectTree(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, tree_oid: Oid, prefix: []const u8, name_prefix: []const u8, items: *std.ArrayList(Item)) Error!void {
+fn collectTree(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pathspec, tree_oid: Oid, prefix: []const u8, name_prefix: []const u8, items: *std.ArrayList(Item), depth: u32) Error!void {
+    if (depth > object.max_tree_depth) return error.TreeTooDeep;
     const db = &repo.odb;
     const found = try db.read(io, tree_oid);
     defer db.allocator().free(found.bytes);
@@ -865,7 +868,7 @@ fn collectTree(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mo
                 const name = try std.mem.concat(a, u8, &.{ name_prefix, path });
                 try items.append(a, .{ .name = name, .path = path, .source = .{ .blob = entry.oid } });
             },
-            .tree => if (spec.couldMatchUnder(path)) try collectTree(a, io, repo, spec, entry.oid, path, name_prefix, items),
+            .tree => if (spec.couldMatchUnder(path)) try collectTree(a, io, repo, spec, entry.oid, path, name_prefix, items, depth + 1),
             else => {},
         }
     }
@@ -998,7 +1001,7 @@ fn collect(a: Allocator, io: Io, repo: *Repository, spec: *const pathspec_mod.Pa
         .tree => |t| {
             const tree = try peelToTree(io, repo, t.oid);
             const prefix = if (t.name.len == 0) "" else try std.mem.concat(a, u8, &.{ t.name, ":" });
-            try collectTree(a, io, repo, spec, tree, "", prefix, items);
+            try collectTree(a, io, repo, spec, tree, "", prefix, items, 0);
         },
     }
 }

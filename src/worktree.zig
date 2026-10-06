@@ -1078,7 +1078,7 @@ fn flattenStaged(
     cached: *const std.StringHashMapUnmanaged(Oid),
     unchanged: *std.StringHashMapUnmanaged(void),
 ) Error!void {
-    if (depth > 64) return error.UnsupportedEntry;
+    if (depth > object.max_tree_depth) return error.TreeTooDeep;
     const found = try db.read(io, tree_oid);
     defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.UnsupportedEntry;
@@ -1500,7 +1500,7 @@ fn flattenTree(
     depth: u32,
     same: ?*const std.StringHashMapUnmanaged(Oid),
 ) Error!void {
-    if (depth > 64) return error.UnsupportedEntry;
+    if (depth > object.max_tree_depth) return error.TreeTooDeep;
     const found = try db.read(io, tree_oid);
     defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.UnsupportedEntry;

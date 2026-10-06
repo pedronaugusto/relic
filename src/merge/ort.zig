@@ -431,10 +431,8 @@ const CommitRef = union(enum) {
     virtual: usize,
 };
 
-/// How deep trees nest before a walk of them stops: git's
-/// `core.maxTreeDepth` default, which keeps a hostile tree from running a
-/// recursive walk off its stack.
-pub const max_tree_depth = 2048;
+/// How deep trees nest before a walk of them stops: `object.max_tree_depth`.
+pub const max_tree_depth = object.max_tree_depth;
 
 const Outcome = struct {
     tree: Oid,

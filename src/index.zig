@@ -251,9 +251,8 @@ pub const CacheTree = struct {
         t.root.oid = null;
     }
 
-    /// git's `core.maxTreeDepth` default: the deepest a tree, and so a
-    /// cache tree, goes.
-    const max_cache_tree_depth = 2048;
+    /// The deepest a tree, and so a cache tree, goes.
+    const max_cache_tree_depth = object.max_tree_depth;
 
     /// The nodes are read depth first with a stack of their own, not by
     /// recursion: the extension is the file's to say how deep it goes, and

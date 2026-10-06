@@ -46,7 +46,7 @@ pub const Error = error{
     object.TreeParseError || object.Tree.Builder.AddError;
 
 /// How deep an expansion follows trees.
-const max_depth: u32 = 256;
+const max_depth: u32 = object.max_tree_depth;
 
 /// Whether the index holds any sparse directory entry.
 pub fn hasSparseDirectories(index: *const Index) bool {

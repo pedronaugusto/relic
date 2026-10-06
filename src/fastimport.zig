@@ -110,6 +110,10 @@ pub const Error = error{
     StreamEndsEarly,
     /// A marks file line that is not `:<mark> <name>`.
     CorruptMarks,
+    /// A path, or a tree a copy or rename builds, nesting deeper than
+    /// `object.max_tree_depth`. git's fast-import writes such a tree, which
+    /// git's own walks then refuse; relic stops at the stream.
+    TreeTooDeep,
 } || Allocator.Error || odb_mod.Error || refs_mod.ReadError || refs_mod.TransactionError || revwalk.Error ||
     Io.Reader.Error || Io.Writer.Error || Io.Dir.ReadFileAllocError || Io.Dir.CreateDirPathError || fs.LockError || fs.CommitError;
 
@@ -1367,6 +1371,11 @@ const Importer = struct {
 
     /// git's `tree_content_set`: whether anything changed.
     fn setPath(imp: *Importer, node: *Node, path: []const u8, oid: Oid, mode: u32, subtree: ?*Node) Error!bool {
+        try checkDepth(path);
+        return imp.setPathIn(node, path, oid, mode, subtree);
+    }
+
+    fn setPathIn(imp: *Importer, node: *Node, path: []const u8, oid: Oid, mode: u32, subtree: ?*Node) Error!bool {
         const slash = std.mem.findScalar(u8, path, '/');
         const name = path[0 .. slash orelse path.len];
         if (name.len == 0) return error.InvalidPath;
@@ -1385,7 +1394,7 @@ const Importer = struct {
                 e.sub = try imp.newNode(null);
                 e.mode = dir_mode;
             }
-            if (try imp.setPath(e.sub.?, path[slash.? + 1 ..], oid, mode, subtree)) {
+            if (try imp.setPathIn(e.sub.?, path[slash.? + 1 ..], oid, mode, subtree)) {
                 node.oid = null;
                 return true;
             }
@@ -1395,7 +1404,7 @@ const Importer = struct {
         if (slash) |s| {
             e.mode = dir_mode;
             e.sub = try imp.newNode(null);
-            _ = try imp.setPath(e.sub.?, path[s + 1 ..], oid, mode, subtree);
+            _ = try imp.setPathIn(e.sub.?, path[s + 1 ..], oid, mode, subtree);
         } else if (isDir(mode)) {
             e.sub = subtree orelse try imp.newNode(oid);
         }
@@ -1415,6 +1424,7 @@ const Importer = struct {
             slot.* = try imp.newNode(null);
             return true;
         }
+        try checkDepth(path);
         return imp.removeIn(node, path, backup);
     }
 
@@ -1449,6 +1459,11 @@ const Importer = struct {
     /// git's `tree_content_get`: the entry at `path`, a held tree copied so
     /// changes to one do not reach the other.
     fn getPath(imp: *Importer, node: *Node, path: []const u8, leaf: *Entry, allow_root: bool) Error!bool {
+        try checkDepth(path);
+        return imp.getPathIn(node, path, leaf, allow_root);
+    }
+
+    fn getPathIn(imp: *Importer, node: *Node, path: []const u8, leaf: *Entry, allow_root: bool) Error!bool {
         const slash = std.mem.findScalar(u8, path, '/');
         const name = path[0 .. slash orelse path.len];
         if (name.len == 0 and !allow_root) return error.InvalidPath;
@@ -1465,17 +1480,22 @@ const Importer = struct {
                 return true;
             }
             if (!isDir(e.mode)) return false;
-            return imp.getPath(e.sub.?, path[slash.? + 1 ..], leaf, false);
+            return imp.getPathIn(e.sub.?, path[slash.? + 1 ..], leaf, false);
         }
         return false;
     }
 
     fn copyNode(imp: *Importer, node: *Node) Error!*Node {
+        return imp.copyNodeAt(node, 0);
+    }
+
+    fn copyNodeAt(imp: *Importer, node: *Node, depth: u32) Error!*Node {
         if (node.oid) |oid| return imp.newNode(oid);
+        if (depth > object.max_tree_depth) return error.TreeTooDeep;
         const copy = try imp.newNode(null);
         for (node.entries.?.items) |e| {
             var c = e;
-            if (e.sub) |sub| c.sub = try imp.copyNode(sub);
+            if (e.sub) |sub| c.sub = try imp.copyNodeAt(sub, depth + 1);
             try copy.entries.?.append(imp.arena(), c);
         }
         return copy;
@@ -1484,14 +1504,22 @@ const Importer = struct {
     /// Write a held tree and everything changed under it: git's
     /// `store_tree`.
     fn storeTree(imp: *Importer, node: *Node) Error!Oid {
+        return imp.storeTreeAt(node, 0);
+    }
+
+    /// `storeTree` for a node `depth` trees down. Copies and renames can
+    /// stack held trees deeper than any one path reaches, so the depth is
+    /// counted here too.
+    fn storeTreeAt(imp: *Importer, node: *Node, depth: u32) Error!Oid {
         if (node.oid) |oid| return oid;
+        if (depth > object.max_tree_depth) return error.TreeTooDeep;
         try imp.load(node);
         const entries = &node.entries.?;
         var kept: usize = 0;
         for (entries.items) |e| {
             if (e.mode == 0) continue;
             var c = e;
-            if (e.sub) |sub| c.oid = try imp.storeTree(sub);
+            if (e.sub) |sub| c.oid = try imp.storeTreeAt(sub, depth + 1);
             entries.items[kept] = c;
             kept += 1;
         }
@@ -1736,6 +1764,12 @@ fn validRawDate(text: []const u8, strict: bool) bool {
     const value = std.fmt.parseInt(u64, zone[1..], 10) catch return false;
     if (!std.ascii.isDigit(zone[1])) return false;
     return !(strict and value > 1400);
+}
+
+/// A path deeper than `object.max_tree_depth` is refused before a walk
+/// along it recurses once per component.
+fn checkDepth(path: []const u8) Error!void {
+    if (std.mem.countScalar(u8, path, '/') >= object.max_tree_depth) return error.TreeTooDeep;
 }
 
 /// git's `verify_path`, with `core.protectNTFS` and `core.protectHFS` on:

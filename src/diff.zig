@@ -185,7 +185,7 @@ const Walk = struct {
     out: *std.ArrayList(Change),
 
     fn trees(w: *Walk, old: ?Oid, new: ?Oid, base: []const u8, depth: u32) Error!void {
-        if (depth > 64) return error.TreeTooDeep;
+        if (depth > object.max_tree_depth) return error.TreeTooDeep;
         if (old != null and new != null and old.?.eql(new.?)) return;
         const old_bytes = if (old) |oid| try w.readTree(oid) else null;
         defer if (old_bytes) |b| w.db.allocator().free(b);
@@ -298,7 +298,7 @@ fn flatten(
     out: *Flat,
     depth: u32,
 ) Error!void {
-    if (depth > 64) return error.TreeTooDeep;
+    if (depth > object.max_tree_depth) return error.TreeTooDeep;
     const found = try db.read(io, tree_oid);
     defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.NotATree;

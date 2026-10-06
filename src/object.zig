@@ -160,6 +160,12 @@ pub const Mode = enum(u32) {
     }
 };
 
+/// How deep trees nest before a walk of them stops: git's
+/// `core.maxTreeDepth` default, which keeps a hostile tree from running a
+/// recursive walk off its stack. Every walk over trees in relic stops here
+/// with `error.TreeTooDeep`.
+pub const max_tree_depth = 2048;
+
 /// Errors from reading a tree object.
 pub const TreeParseError = error{
     /// An entry ran off the end of the object.

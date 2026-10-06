@@ -140,12 +140,12 @@ pub fn collect(
     for (pending) |oid| {
         const header = try db.readHeader(io, oid);
         switch (header.type) {
-            .tree => try t.tree(oid, "", true),
+            .tree => try t.tree(oid, "", true, 0),
             .blob => try t.blob(oid, "", true),
             else => {},
         }
     }
-    for (commits) |c| try t.tree(c.tree, "", false);
+    for (commits) |c| try t.tree(c.tree, "", false, 0);
 }
 
 const Traversal = struct {
@@ -168,7 +168,8 @@ const Traversal = struct {
         try t.out.append(t.gpa, .{ .oid = oid, .hint = try t.out_arena.dupe(u8, path) });
     }
 
-    fn tree(t: *Traversal, oid: Oid, path: []const u8, user_given: bool) objectwalk.Error!void {
+    fn tree(t: *Traversal, oid: Oid, path: []const u8, user_given: bool, depth: u32) objectwalk.Error!void {
+        if (depth > object.max_tree_depth) return error.TreeTooDeep;
         if (t.had.contains(oid) or t.seen.contains(oid)) return;
         const begin = if (user_given) Verdict.shown else try t.verdict(&t.state, .begin_tree, oid, path);
         if (begin.seen) try t.seen.put(t.gpa, oid, {});
@@ -184,7 +185,7 @@ const Traversal = struct {
                 else
                     try std.fmt.allocPrint(t.a, "{s}/{s}", .{ path, entry.name });
                 switch (entry.mode) {
-                    .tree => try t.tree(entry.oid, child, false),
+                    .tree => try t.tree(entry.oid, child, false, depth + 1),
                     .gitlink => {},
                     else => try t.blob(entry.oid, child, false),
                 }

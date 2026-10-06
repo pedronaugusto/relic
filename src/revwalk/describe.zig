@@ -89,6 +89,8 @@ pub const Options = struct {
 pub const Error = error{
     /// No ref the options allow: `No names found, cannot describe anything.`
     NoNames,
+    /// A tree nests deeper than `object.max_tree_depth`.
+    TreeTooDeep,
     /// `--exact-match` and no name is on the commit.
     NoExactMatch,
     /// Only lightweight tags reach the commit; `tags` would use them.
@@ -445,7 +447,7 @@ pub const Describer = struct {
         while (try walk.next(io)) |c| {
             const tree = try d.repo.commitTree(io, c.oid);
             path.clearRetainingCapacity();
-            if (try findInTree(d, io, tree, blob, &seen, &path)) {
+            if (try findInTree(d, io, tree, blob, &seen, &path, 0)) {
                 try d.describeCommit(io, c.oid, null, out);
                 try out.append(d.gpa, ':');
                 try out.appendSlice(d.gpa, path.items);
@@ -675,7 +677,8 @@ fn finishDepth(w: *Walk, io: Io, depth: *u32, within: u32) Error!void {
 
 /// `traverse_commit_list`'s tree walk for one commit: entries in tree
 /// order, a subtree as it is met, nothing seen in an earlier commit again.
-fn findInTree(d: *Describer, io: Io, tree: Oid, blob: Oid, seen: *Oid.Set, path: *std.ArrayList(u8)) Error!bool {
+fn findInTree(d: *Describer, io: Io, tree: Oid, blob: Oid, seen: *Oid.Set, path: *std.ArrayList(u8), depth: u32) Error!bool {
+    if (depth > object.max_tree_depth) return error.TreeTooDeep;
     if ((try seen.getOrPut(d.gpa, tree)).found_existing) return false;
     const found = try d.repo.odb.read(io, tree);
     defer d.repo.odb.allocator().free(found.bytes);
@@ -686,7 +689,7 @@ fn findInTree(d: *Describer, io: Io, tree: Oid, blob: Oid, seen: *Oid.Set, path:
             .tree => {
                 try path.appendSlice(d.gpa, entry.name);
                 try path.append(d.gpa, '/');
-                if (try findInTree(d, io, entry.oid, blob, seen, path)) return true;
+                if (try findInTree(d, io, entry.oid, blob, seen, path, depth + 1)) return true;
             },
             .gitlink => {},
             else => {

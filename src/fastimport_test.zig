@@ -397,3 +397,48 @@ test "what git's fast-import refuses is refused by name" {
         };
     }
 }
+
+/// A commit stream writing one file `levels` directories down, `a/` each.
+fn deepStream(gpa: Allocator, levels: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, "commit refs/heads/main\ncommitter A <a@a> 1 +0000\ndata 0\nM 100644 inline ");
+    for (0..levels) |_| try out.appendSlice(gpa, "a/");
+    try out.appendSlice(gpa, "f\ndata 2\nx\n");
+    return out.toOwnedSlice(gpa);
+}
+
+test "a path as deep as git's tree limit imports as git's does, and a deeper one, or a copy that stacks past it, is refused rather than overflowing the stack" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    {
+        var pair = try Pair.init(gpa, io);
+        defer pair.deinit();
+        const at_limit = try deepStream(gpa, object.max_tree_depth - 1);
+        defer gpa.free(at_limit);
+        var report = try pair.import(gpa, io, at_limit, &.{}, .{ .who = who });
+        report.deinit();
+    }
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    // The reviewer's stream: ten thousand directories, which git's
+    // fast-import takes and its other walks refuse.
+    const deep = try deepStream(gpa, 10000);
+    defer gpa.free(deep);
+    var input: Io.Reader = .fixed(deep);
+    try std.testing.expectError(error.TreeTooDeep, fastimport.import(gpa, io, &repo, &input, .{ .who = who }));
+
+    // Each path within the limit, and `b` twenty levels deep: copying it
+    // to the bottom of a path two thousand deep makes a tree past it.
+    var both: std.ArrayList(u8) = .empty;
+    defer both.deinit(gpa);
+    try both.appendSlice(gpa, "commit refs/heads/other\ncommitter A <a@a> 1 +0000\ndata 0\nM 100644 inline b/");
+    for (0..20) |_| try both.appendSlice(gpa, "c/");
+    try both.appendSlice(gpa, "g\ndata 2\ny\nC b ");
+    for (0..object.max_tree_depth - 10) |_| try both.appendSlice(gpa, "a/");
+    try both.appendSlice(gpa, "b\n");
+    var copy_input: Io.Reader = .fixed(both.items);
+    try std.testing.expectError(error.TreeTooDeep, fastimport.import(gpa, io, &repo, &copy_input, .{ .who = who }));
+}

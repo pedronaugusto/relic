@@ -56,6 +56,10 @@ pub const Error = error{
     PathTooLong,
     /// `tar.umask` is not a number.
     InvalidTarUmask,
+    /// A zip asked of a commit dated before 1970: git's "timestamp too
+    /// large for this system", for git holds a time unsigned. A tar carries
+    /// it, as git's does.
+    TimestampTooLarge,
 } || pretty.Error || pretty.Decorations.LoadError || mailmap_mod.LoadError || pathspec_mod.Error || worktree.Error || convert.Error || attributes.Error ||
     repo_mod.Error || Io.Writer.Error || object.TreeParseError;
 
@@ -101,7 +105,9 @@ const Tar = struct {
     block: [block_size]u8 = undefined,
     offset: usize = 0,
     umask: u32,
-    time: i64,
+    /// The entries' time as git holds one, unsigned: a commit dated before
+    /// 1970 is a time past the ustar field, written to a pax header.
+    time: u64,
 
     fn writeIfNeeded(t: *Tar) Io.Writer.Error!void {
         if (t.offset == block_size) {
@@ -202,10 +208,10 @@ fn octal(field: []u8, value: u64) void {
     field[digits] = 0;
 }
 
-fn prepareHeader(h: *Header, mode: u32, size: u64, time: i64) void {
+fn prepareHeader(h: *Header, mode: u32, size: u64, time: u64) void {
     octal(&h.mode, mode & 0o7777);
     octal(&h.size, if (mode & 0o170000 == 0o100000) size else 0);
-    octal(&h.mtime, @intCast(time));
+    octal(&h.mtime, time);
     octal(&h.uid, 0);
     octal(&h.gid, 0);
     @memcpy(h.uname[0..4], "root");
@@ -330,7 +336,7 @@ const Zip = struct {
     max_creator_version: u16 = 0,
     dos_date: u16,
     dos_time: u16,
-    time: i64,
+    time: u64,
     level: ?u4,
 
     fn le(z: *Zip, out: *std.ArrayList(u8), size: usize, value: u64) Allocator.Error!void {
@@ -414,29 +420,50 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary
     }
     if (creator_version > z.max_creator_version) z.max_creator_version = creator_version;
     const offset = z.offset;
+    const size: u64 = content.len;
     var extra: [9]u8 = undefined;
     std.mem.writeInt(u16, extra[0..2], 0x5455, .little);
     std.mem.writeInt(u16, extra[2..4], 5, .little);
     extra[4] = 1;
-    std.mem.writeInt(u32, extra[5..9], @truncate(@as(u64, @bitCast(z.time))), .little);
+    std.mem.writeInt(u32, extra[5..9], @truncate(z.time), .little);
+    // Past four gigabytes the sizes go in a zip64 extra field, as git's
+    // `write_zip_entry` puts them, and the header says 0xffffffff.
+    const zip64 = size > 0xffffffff or compressed_size > 0xffffffff;
     var header: std.ArrayList(u8) = .empty;
     try z.le(&header, 4, 0x04034b50);
-    try z.le(&header, 2, 10);
+    try z.le(&header, 2, if (zip64) 45 else 10);
     try z.le(&header, 2, flags);
     try z.le(&header, 2, method);
     try z.le(&header, 2, z.dos_time);
     try z.le(&header, 2, z.dos_date);
     try z.le(&header, 4, crc);
-    try z.le(&header, 4, compressed_size);
-    try z.le(&header, 4, content.len);
+    try z.le(&header, 4, if (zip64) 0xffffffff else compressed_size);
+    try z.le(&header, 4, if (zip64) 0xffffffff else size);
     try z.le(&header, 2, path.len);
-    try z.le(&header, 2, extra.len);
+    try z.le(&header, 2, extra.len + if (zip64) @as(usize, 20) else 0);
     // The local header is fixed at thirty bytes before its name and extra.
     assert(header.items.len == 30);
-    try z.write(header.items);
+    if (zip64) {
+        try z.le(&header, 2, 0x0001);
+        try z.le(&header, 2, 16);
+        try z.le(&header, 8, size);
+        try z.le(&header, 8, compressed_size);
+    }
+    try z.write(header.items[0..30]);
     try z.write(path);
     try z.write(&extra);
+    try z.write(header.items[30..]);
     if (compressed_size > 0) try z.write(out);
+
+    // The directory holds each of the three that does not fit in four
+    // bytes as 0xffffffff, and its value in a zip64 extra field.
+    var zip64_payload: u16 = 0;
+    if (compressed_size > 0xffffffff or size > 0xffffffff or offset > 0xffffffff) {
+        if (compressed_size >= 0xffffffff) zip64_payload += 8;
+        if (size >= 0xffffffff) zip64_payload += 8;
+        if (offset >= 0xffffffff) zip64_payload += 8;
+    }
+    const dir_extra_len = extra.len + if (zip64_payload != 0) 4 + @as(usize, zip64_payload) else 0;
     const dir_start = z.dir.items.len;
     try z.le(&z.dir, 4, 0x02014b50);
     try z.le(&z.dir, 2, creator_version);
@@ -446,20 +473,27 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary
     try z.le(&z.dir, 2, z.dos_time);
     try z.le(&z.dir, 2, z.dos_date);
     try z.le(&z.dir, 4, crc);
-    try z.le(&z.dir, 4, compressed_size);
-    try z.le(&z.dir, 4, content.len);
+    try z.le(&z.dir, 4, @min(compressed_size, 0xffffffff));
+    try z.le(&z.dir, 4, @min(size, 0xffffffff));
     try z.le(&z.dir, 2, path.len);
-    try z.le(&z.dir, 2, extra.len);
+    try z.le(&z.dir, 2, dir_extra_len);
     try z.le(&z.dir, 2, 0);
     try z.le(&z.dir, 2, 0);
     try z.le(&z.dir, 2, @intFromBool(text));
     try z.le(&z.dir, 4, attr2);
-    try z.le(&z.dir, 4, offset);
+    try z.le(&z.dir, 4, @min(offset, 0xffffffff));
     try z.dir.appendSlice(a, path);
     try z.dir.appendSlice(a, &extra);
-    // A central directory record is forty-six bytes, then the name and extra
-    // the local header has; the trailer counts the directory by these.
-    assert(z.dir.items.len - dir_start == 46 + path.len + extra.len);
+    if (zip64_payload != 0) {
+        try z.le(&z.dir, 2, 0x0001);
+        try z.le(&z.dir, 2, zip64_payload);
+        if (size >= 0xffffffff) try z.le(&z.dir, 8, size);
+        if (compressed_size >= 0xffffffff) try z.le(&z.dir, 8, compressed_size);
+        if (offset >= 0xffffffff) try z.le(&z.dir, 8, offset);
+    }
+    // A central directory record is forty-six bytes, then the name and the
+    // extra fields; the trailer counts the directory by these.
+    assert(z.dir.items.len - dir_start == 46 + path.len + dir_extra_len);
     z.entries += 1;
 }
 
@@ -478,6 +512,28 @@ fn zipTrailer(z: *Zip, commit: ?Oid) Error!void {
     // The end record is twenty-two bytes, the comment after it.
     assert(t.items.len == 22);
     try z.w.writeAll(z.dir.items);
+    // A count or an offset the end record cannot hold: git's
+    // `write_zip64_trailer`, the zip64 end record and its locator before it.
+    if (z.entries > 0xffff or z.offset > 0xffffffff) {
+        var t64: std.ArrayList(u8) = .empty;
+        try z.le(&t64, 4, 0x06064b50);
+        try z.le(&t64, 8, 44);
+        try z.le(&t64, 2, z.max_creator_version);
+        try z.le(&t64, 2, 45);
+        try z.le(&t64, 4, 0);
+        try z.le(&t64, 4, 0);
+        try z.le(&t64, 8, z.entries);
+        try z.le(&t64, 8, z.entries);
+        try z.le(&t64, 8, z.dir.items.len);
+        try z.le(&t64, 8, z.offset);
+        try z.le(&t64, 4, 0x07064b50);
+        try z.le(&t64, 4, 0);
+        try z.le(&t64, 8, z.offset + z.dir.items.len);
+        try z.le(&t64, 4, 1);
+        // Fifty-six bytes of record, twenty of locator.
+        assert(t64.items.len == 76);
+        try z.w.writeAll(t64.items);
+    }
     try z.w.writeAll(t.items);
     try z.w.writeAll(comment);
 }
@@ -555,6 +611,8 @@ const Walk = struct {
     }
 
     fn walk(wk: *Walk, tree_oid: Oid, base: []const u8) Error!void {
+        // The directories queued are the ones this walk is inside.
+        if (wk.queued.items.len > object.max_tree_depth) return error.TreeTooDeep;
         const db = &wk.repo.odb;
         const found = try db.read(wk.io, tree_oid);
         defer db.allocator().free(found.bytes);
@@ -655,7 +713,8 @@ fn formatSubst(wk: *Walk, commit: Oid, src: []const u8) Error![]const u8 {
     return out.items;
 }
 
-fn anyMatch(a: Allocator, io: Io, db: *odb_mod.Odb, tree_oid: Oid, base: []const u8, spec: *const pathspec_mod.Pathspec) Error!bool {
+fn anyMatch(a: Allocator, io: Io, db: *odb_mod.Odb, tree_oid: Oid, base: []const u8, spec: *const pathspec_mod.Pathspec, depth: u32) Error!bool {
+    if (depth > object.max_tree_depth) return error.TreeTooDeep;
     const found = try db.read(io, tree_oid);
     defer db.allocator().free(found.bytes);
     const tree = object.Tree.parse(db.objectFormat(), found.bytes);
@@ -664,7 +723,7 @@ fn anyMatch(a: Allocator, io: Io, db: *odb_mod.Odb, tree_oid: Oid, base: []const
         const path = try std.mem.concat(a, u8, &.{ base, entry.name });
         if (entry.mode == .tree) {
             if (spec.matchesDir(path)) return true;
-            if (spec.couldMatchUnder(path) and try anyMatch(a, io, db, entry.oid, try std.mem.concat(a, u8, &.{ path, "/" }), spec)) return true;
+            if (spec.couldMatchUnder(path) and try anyMatch(a, io, db, entry.oid, try std.mem.concat(a, u8, &.{ path, "/" }), spec, depth + 1)) return true;
         } else if (spec.matches(path)) return true;
     }
     return false;
@@ -727,7 +786,7 @@ pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options:
         if (p.len == 0) continue;
         var one = try pathspec_mod.parse(gpa, &.{p});
         defer one.deinit();
-        if (!try anyMatch(a, io, db, tree, "", &one)) return error.PathspecNoMatch;
+        if (!try anyMatch(a, io, db, tree, "", &one, 0)) return error.PathspecNoMatch;
     }
     var spec = try pathspec_mod.parse(gpa, options.pathspecs);
     defer spec.deinit();
@@ -768,11 +827,14 @@ pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options:
     var zip: Zip = undefined;
     switch (options.format) {
         .tar => {
-            tar = .{ .w = w, .umask = try tarUmask(repo, options.user_umask), .time = time };
+            tar = .{ .w = w, .umask = try tarUmask(repo, options.user_umask), .time = @bitCast(time) };
             try tarGlobalHeader(&tar, a, commit);
             wk.tar = &tar;
         },
         .zip => {
+            // git holds a time unsigned, so one before 1970 is past any
+            // date a zip can carry, and git's archive stops there.
+            if (time < 0) return error.TimestampTooLarge;
             const c = mailfmt.civil(time + @as(i64, options.zip_offset_minutes) * 60);
             const year: i64 = c.year - 1980;
             zip = .{
@@ -781,7 +843,7 @@ pub fn archive(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options:
                 .gpa = gpa,
                 .dos_date = @truncate(@as(u64, @bitCast(@as(i64, c.day) + @as(i64, c.month) * 32 + year * 512))),
                 .dos_time = @intCast(@as(u32, c.second) / 2 + @as(u32, c.minute) * 32 + @as(u32, c.hour) * 2048),
-                .time = time,
+                .time = @intCast(time),
                 .level = options.level,
             };
             wk.zip = &zip;

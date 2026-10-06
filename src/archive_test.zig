@@ -212,3 +212,62 @@ fn centralDirectory(gpa: Allocator, zip: []const u8) !std.ArrayList(CdEntry) {
     }
     return out;
 }
+
+test "a commit dated before 1970 is archived as git archives it: a tar with git's unsigned time, a zip refused" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "f", "x\n");
+    try git.exec(io, &.{ "add", "f" });
+    const tree = try git.line(io, &.{"write-tree"});
+    defer gpa.free(tree);
+    const body = try std.fmt.allocPrint(gpa, "tree {s}\nauthor A <a@a> -5 +0000\ncommitter A <a@a> -5 +0000\n\nm\n", .{tree});
+    defer gpa.free(body);
+    const text = try git.runInput(io, &.{ "hash-object", "-t", "commit", "-w", "--literally", "--stdin" }, body);
+    defer gpa.free(text);
+    const commit = try Oid.parse(.sha1, std.mem.trim(u8, text, "\n"));
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var hex: [hash.max_hex_len]u8 = undefined;
+    try compare(gpa, io, &git, &repo, &.{commit.hex(&hex)}, commit, .{});
+    // git's zip writer dies: "timestamp too large for this system".
+    var zip = try git.capture(io, &.{ "archive", "--format=zip", commit.hex(&hex) });
+    defer zip.deinit(gpa);
+    try std.testing.expect(zip.code != 0);
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectError(error.TimestampTooLarge, archive_mod.archive(gpa, io, &repo, commit, .{ .format = .zip }, &out.writer));
+}
+
+test "a tree deeper than sixty-four directories, and a zip of more entries than its end record counts, are git's byte for byte" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.isolated.?.put("TZ", "UTC");
+    const blob = try git.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "x\n");
+    defer gpa.free(blob);
+    var info: std.ArrayList(u8) = .empty;
+    defer info.deinit(gpa);
+    try info.appendSlice(gpa, "100644 ");
+    try info.appendSlice(gpa, std.mem.trim(u8, blob, "\n"));
+    try info.append(gpa, '\t');
+    for (0..70) |_| try info.appendSlice(gpa, "d/");
+    try info.appendSlice(gpa, "f\n");
+    gpa.free(try git.runInput(io, &.{ "update-index", "--add", "--index-info" }, info.items));
+    try git.exec(io, &.{ "commit", "-q", "-m", "deep" });
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    try compare(gpa, io, &git, &repo, &.{"HEAD"}, try oidOf(gpa, io, &git, "HEAD"), .{});
+
+    // Seventy thousand entries: the end record holds 65535, and git adds
+    // the zip64 end record and its locator.
+    info.clearRetainingCapacity();
+    for (0..70000) |i| try info.print(gpa, "100644 {s}\tmany/{d}\n", .{ std.mem.trim(u8, blob, "\n"), i });
+    gpa.free(try git.runInput(io, &.{ "update-index", "--add", "--index-info" }, info.items));
+    try git.exec(io, &.{ "commit", "-q", "-m", "many" });
+    var again = try Repository.open(gpa, io, git.dir, .{});
+    defer again.deinit(io);
+    try compare(gpa, io, &git, &again, &.{ "--format=zip", "-0", "HEAD" }, try oidOf(gpa, io, &git, "HEAD"), .{ .format = .zip, .level = 0 });
+}

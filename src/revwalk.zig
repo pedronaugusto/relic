@@ -44,6 +44,9 @@ pub const Error = error{
     /// The walk went deeper than `max_commits`, which a caller sets to
     /// bound a history it does not trust.
     WalkTooLong,
+    /// A tree a path limit is checked in nests deeper than
+    /// `object.max_tree_depth`.
+    TreeTooDeep,
 } || Allocator.Error || odb_mod.Error || object.ParseError || object.TreeParseError;
 
 /// The order commits come out in.

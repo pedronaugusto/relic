@@ -12,6 +12,8 @@ pub const Error = error{
     /// An object below a tip is not in the database. `missing_out` names
     /// it.
     MissingObject,
+    /// A tree nests deeper than `object.max_tree_depth`.
+    TreeTooDeep,
     /// A commit named something that is not a commit as its parent, or a
     /// tree named a tree entry that is not a tree.
     UnexpectedObjectType,
