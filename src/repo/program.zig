@@ -335,7 +335,7 @@ const SpawnHooks = struct {
     ended: bool = false,
 
     fn start(gpa: Allocator, io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
-        const self: *SpawnHooks = @ptrCast(@alignCast(raw));
+        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // safe: the test hands the hook a *SpawnHooks as its context
         self.started = true;
         const hooked = options.environ.?.get("RELIC_HOOKED") orelse "";
         self.prepared = std.mem.eql(u8, process_fixture, options.argv[0]) and
@@ -345,7 +345,7 @@ const SpawnHooks = struct {
     }
 
     fn terminate(io: Io, raw: *anyopaque, child: *Child) void {
-        const self: *SpawnHooks = @ptrCast(@alignCast(raw));
+        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // safe: the test hands the hook a *SpawnHooks as its context
         self.ended = true;
         // ziglint-ignore: Z026 termination cannot fail its caller; a child already gone has nothing left to reap
         _ = child.killWait(io, 0) catch {};
