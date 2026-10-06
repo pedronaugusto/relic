@@ -1822,6 +1822,37 @@ fn refuseUnsafeTree(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEn
     if (options.rules.ignore_case) {
         try refuseCaseCollisions(arena, wanted);
     }
+    try refuseCollidingPaths(arena, wanted, options.rules.ignore_case, options.refusal);
+}
+
+/// An entry standing where another entry of the tree has its directory --
+/// the same name twice in one tree, or a name the filesystem folds to the
+/// other's -- is refused before anything is written: written in order, a
+/// link of that name would carry the files under it out of the working
+/// tree. git writes no such tree; relic does not try to.
+fn refuseCollidingPaths(
+    arena: Allocator,
+    wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+    ignore_case: bool,
+    refusal: ?*Refusal,
+) Error!void {
+    var dirs: std.StringHashMapUnmanaged(void) = .empty;
+    var it = wanted.keyIterator();
+    while (it.next()) |key| {
+        const path = if (ignore_case) try std.ascii.allocLowerString(arena, key.*) else key.*;
+        var at: usize = 0;
+        while (std.mem.findScalarPos(u8, path, at, '/')) |slash| : (at = slash + 1) {
+            try dirs.put(arena, path[0..slash], {});
+        }
+    }
+    it = wanted.keyIterator();
+    while (it.next()) |key| {
+        const path = if (ignore_case) try std.ascii.allocLowerString(arena, key.*) else key.*;
+        if (dirs.contains(path)) {
+            if (refusal) |out| out.set(.path_collision, key.*);
+            return error.UnsafePath;
+        }
+    }
 }
 
 /// Without `force`, refuse a checkout that would lose work: every path the
@@ -1892,6 +1923,7 @@ fn removeUnwanted(
     outcome: *CheckoutOutcome,
 ) Error!std.StringHashMapUnmanaged(void) {
     var removed_dirs: std.StringHashMapUnmanaged(void) = .empty;
+    var leading: LeadingDirs = .{};
     var i: usize = 0;
     while (i < index.entries.items.len) {
         const entry = index.entries.items[i];
@@ -1903,7 +1935,9 @@ fn removeUnwanted(
             i += 1;
             continue;
         }
-        if (entry.mode == .gitlink) {
+        if (!try leading.real(io, wt, std.fs.path.dirnamePosix(entry.path) orelse "")) {
+            // Past a symbolic link: nothing of the working tree's to remove.
+        } else if (entry.mode == .gitlink) {
             // A submodule nobody populated leaves with its empty directory;
             // a populated one's directory stays where it is, as git leaves
             // it with a warning.
@@ -1938,10 +1972,12 @@ fn removeEmptiedDirectories(
     wanted: *const std.StringHashMapUnmanaged(TreeEntry),
     force: bool,
 ) Error!void {
+    var leading: LeadingDirs = .{};
     for (paths) |path| {
         const want = wanted.get(path).?;
         if (want.mode == .gitlink) continue;
         if (keeps(index, path, want, force)) continue;
+        if (!try leading.real(io, wt, std.fs.path.dirnamePosix(path) orelse "")) continue;
         if (try fs.statAt(io, wt, path)) |found| {
             if (found.kind == .directory) try wt.deleteDir(io, path);
         }
@@ -1970,7 +2006,7 @@ const CheckoutWrite = struct {
         // A path that fails here leaves every path before it written, as a
         // checkout one file at a time leaves them.
         errdefer batch.flush(c.io, c.wt, c.index, c.outcome) catch {};
-        var made_parent: []const u8 = "";
+        var leading: LeadingDirs = .{};
         for (paths) |path| {
             const want = c.wanted.get(path).?;
             if (try c.unchanged(path, want)) {
@@ -1978,12 +2014,9 @@ const CheckoutWrite = struct {
                 continue;
             }
             if (std.fs.path.dirnamePosix(path)) |parent| {
-                if (!std.mem.eql(u8, parent, made_parent)) {
-                    try makeDirPath(c.io, c.wt, parent);
-                    made_parent = parent;
-                }
+                try leading.make(c.io, c.wt, parent, c.options.force, c.options.refusal);
             }
-            try c.one(&batch, path, want);
+            try c.one(&batch, &leading, path, want);
         }
         try batch.flush(c.io, c.wt, c.index, c.outcome);
     }
@@ -2000,16 +2033,19 @@ const CheckoutWrite = struct {
 
     /// Write one path, or hand a regular file to `batch`, or leave one a
     /// filter delays for `late`.
-    fn one(c: *const CheckoutWrite, batch: *WriteBatch, path: []const u8, want: TreeEntry) Error!void {
+    fn one(c: *const CheckoutWrite, batch: *WriteBatch, leading: *LeadingDirs, path: []const u8, want: TreeEntry) Error!void {
         switch (want.mode) {
             .gitlink => {
-                try makeDirPath(c.io, c.wt, path);
+                try leading.make(c.io, c.wt, path, c.options.force, c.options.refusal);
                 c.outcome.gitlinks += 1;
             },
             .symlink => {
                 const found = try c.db.read(c.io, want.oid);
                 defer c.gpa.free(found.bytes);
                 if (try writeLink(c.io, c.wt, path, found.bytes, c.options.rules.symlinks)) c.outcome.symlinks_as_files += 1;
+                // A link where a proved directory's name folds to it is
+                // looked at again before anything is written under it.
+                leading.forget();
                 c.outcome.written += 1;
             },
             .file, .exec => {
@@ -2056,13 +2092,100 @@ const CheckoutWrite = struct {
     }
 };
 
-/// Make the directory `path` and those above it; one already there is
-/// left as it is.
-fn makeDirPath(io: Io, wt: Io.Dir, path: []const u8) Io.Dir.CreateDirPathError!void {
-    wt.createDirPath(io, path) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => |e| return e,
-    };
+/// The directories above what a write puts into the working tree, as
+/// git's `create_directories` and `has_symlink_leading_path` see them: each
+/// is a directory on the disk, never followed through a symbolic link, so a
+/// tree that writes a link and then a path under the link's name writes
+/// into the working tree and nowhere else. The last directory proved is
+/// remembered, as git's lstat cache remembers it, so sorted paths cost one
+/// look per new directory.
+const LeadingDirs = struct {
+    buf: [4096]u8 = undefined,
+    len: usize = 0,
+
+    /// Make `dir` and the directories above it. A symbolic link or a file
+    /// standing as one is replaced when `force`, as git's forced checkout
+    /// replaces it; otherwise a link is refused as `.beyond_symlink`, and a
+    /// file is `error.NotDir`.
+    fn make(l: *LeadingDirs, io: Io, wt: Io.Dir, dir: []const u8, force: bool, refusal: ?*Refusal) Error!void {
+        var start = l.provenUpTo(dir);
+        while (start < dir.len) {
+            const end = std.mem.findScalarPos(u8, dir, start, '/') orelse dir.len;
+            const sub = dir[0..end];
+            if (try fs.statAt(io, wt, sub)) |found| {
+                if (found.kind != .directory) {
+                    if (!force) {
+                        if (found.kind != .sym_link) return error.NotDir;
+                        if (refusal) |out| out.set(.beyond_symlink, sub);
+                        return error.UnsafePath;
+                    }
+                    try fs.deleteFile(io, wt, sub);
+                    try wt.createDir(io, sub, .default_dir);
+                }
+            } else wt.createDir(io, sub, .default_dir) catch |err| switch (err) {
+                // Made since the look by someone else: a directory is as
+                // good, anything else is looked at again next time.
+                error.PathAlreadyExists => {
+                    const now = try fs.statAt(io, wt, sub) orelse return err;
+                    if (now.kind != .directory) return error.NotDir;
+                },
+                else => |e| return e,
+            };
+            start = end + 1;
+        }
+        l.remember(dir);
+    }
+
+    /// Whether `dir` and every directory above it is a directory on the
+    /// disk: `false` for a symbolic link or a missing one, under which
+    /// nothing of the working tree's is to be removed.
+    fn real(l: *LeadingDirs, io: Io, wt: Io.Dir, dir: []const u8) Error!bool {
+        var start = l.provenUpTo(dir);
+        while (start < dir.len) {
+            const end = std.mem.findScalarPos(u8, dir, start, '/') orelse dir.len;
+            const found = try fs.statAt(io, wt, dir[0..end]) orelse return false;
+            if (found.kind != .directory) return false;
+            start = end + 1;
+        }
+        l.remember(dir);
+        return true;
+    }
+
+    /// Where in `dir` the components not yet proved start.
+    fn provenUpTo(l: *const LeadingDirs, dir: []const u8) usize {
+        const proven = l.buf[0..l.len];
+        if (proven.len == 0 or !std.mem.startsWith(u8, dir, proven)) return 0;
+        if (dir.len == proven.len) return dir.len;
+        return if (dir[proven.len] == '/') proven.len + 1 else 0;
+    }
+
+    fn remember(l: *LeadingDirs, dir: []const u8) void {
+        l.len = if (dir.len <= l.buf.len) dir.len else 0;
+        @memcpy(l.buf[0..l.len], dir[0..l.len]);
+    }
+
+    /// Forget what was proved, after the disk may have changed under it.
+    fn forget(l: *LeadingDirs) void {
+        l.len = 0;
+    }
+};
+
+/// Whether every directory above `path` is a directory on the disk, none a
+/// symbolic link and none missing: git's `has_symlink_or_noent_leading_path`
+/// turned around. A caller about to remove or replace `path` itself, as
+/// relic's merge and patch do, removes nothing when this is `false`.
+pub fn realLeadingPath(io: Io, wt: Io.Dir, path: []const u8) Self.Error!bool {
+    const parent = std.fs.path.dirnamePosix(path) orelse return true;
+    var leading: LeadingDirs = .{};
+    return leading.real(io, wt, parent);
+}
+
+/// Make the directories above `path` for a write that replaces whatever is
+/// at it, refusing a symbolic link among them.
+fn makeLeadingDirs(io: Io, wt: Io.Dir, path: []const u8) Error!void {
+    const parent = std.fs.path.dirnamePosix(path) orelse return;
+    var leading: LeadingDirs = .{};
+    try leading.make(io, wt, parent, false, null);
 }
 
 /// Write a symlink to `target` at `path`, replacing whatever is there; or,
@@ -2371,23 +2494,25 @@ pub fn writePaths(
 
     var waiting: std.StringHashMapUnmanaged(PathWrite) = .empty;
     defer waiting.deinit(gpa);
+    var leading: LeadingDirs = .{};
     for (writes) |w| {
         const want = w.blob orelse continue;
+        if (std.fs.path.dirnamePosix(w.path)) |parent| try leading.make(io, wt, parent, options.force, options.refusal);
         if (try fs.statAt(io, wt, w.path)) |found| {
             // An empty directory gives way; one with anything in it is
             // someone's work.
             if (found.kind == .directory) wt.deleteDir(io, w.path) catch return error.UntrackedWouldBeOverwritten;
         }
-        if (std.fs.path.dirnamePosix(w.path)) |parent| try makeDirPath(io, wt, parent);
         switch (want.mode) {
             .gitlink => {
-                try makeDirPath(io, wt, w.path);
+                try leading.make(io, wt, w.path, options.force, options.refusal);
                 outcome.gitlinks += 1;
             },
             .symlink => {
                 const found = try db.read(io, want.oid);
                 defer gpa.free(found.bytes);
                 if (try writeLink(io, wt, w.path, found.bytes, options.rules.symlinks)) outcome.symlinks_as_files += 1;
+                leading.forget();
                 outcome.written += 1;
             },
             .file, .exec => {
@@ -2426,9 +2551,11 @@ fn removePaths(
     remove_empty_directories: bool,
     outcome: *CheckoutOutcome,
 ) Error!void {
+    var leading: LeadingDirs = .{};
     for (writes) |w| {
         if (w.blob != null) continue;
-        fs.deleteFile(io, wt, w.path) catch |err| switch (err) {
+        // A file past a symbolic link is not the working tree's to remove.
+        if (try leading.real(io, wt, std.fs.path.dirnamePosix(w.path) orelse "")) fs.deleteFile(io, wt, w.path) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => {},
             else => |e| return e,
         };
@@ -2507,13 +2634,12 @@ pub fn writeEntry(
     rules: Rules,
 ) Self.Error!Written {
     if (safepath.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
-    if (std.fs.path.dirnamePosix(path)) |parent| {
-        try makeDirPath(io, wt, parent);
-    }
+    try makeLeadingDirs(io, wt, path);
     var written: Written = .{ .stat = .none };
     switch (mode) {
         .gitlink => {
-            try makeDirPath(io, wt, path);
+            var leading: LeadingDirs = .{};
+            try leading.make(io, wt, path, false, null);
         },
         .symlink => {
             const found = try db.read(io, oid);
@@ -2552,16 +2678,15 @@ pub fn writeBytes(
     rules: Rules,
 ) Self.Error!Written {
     if (safepath.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
-    if (std.fs.path.dirnamePosix(path)) |parent| {
-        try makeDirPath(io, wt, parent);
-    }
+    try makeLeadingDirs(io, wt, path);
     if (try fs.statAt(io, wt, path)) |found| {
         if (found.kind == .directory and mode != .gitlink) wt.deleteDir(io, path) catch return error.UntrackedWouldBeOverwritten;
     }
     var written: Written = .{ .stat = .none };
     switch (mode) {
         .gitlink => {
-            try makeDirPath(io, wt, path);
+            var leading: LeadingDirs = .{};
+            try leading.make(io, wt, path, false, null);
         },
         .symlink => {
             written.symlink_as_file = try writeLink(io, wt, path, bytes, rules.symlinks);
@@ -2588,6 +2713,9 @@ pub fn writeBytes(
 /// it leaves empty. A file that is already gone is not an error.
 pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
     if (safepath.check(path, .worktree) != null) return error.UnsafePath;
+    // A file past a symbolic link is not the working tree's: git's
+    // `unlink_entry` leaves it.
+    if (!try realLeadingPath(io, wt, path)) return;
     wt.deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {},
         // ziglint-ignore: Z026 as git's remove_path: a directory with something in it stays, and only an empty one goes
@@ -2909,6 +3037,11 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
 }
 
 fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
+    // Only directories of the working tree's own go: none reached through
+    // a symbolic link.
+    var leading: LeadingDirs = .{};
+    const real = leading.real(io, wt, path) catch false;
+    if (!real) return;
     var current = path;
     while (current.len != 0) {
         wt.deleteDir(io, current) catch return;
@@ -3006,7 +3139,7 @@ pub fn applySparse(
                         continue;
                     }
                 }
-                fs.deleteFile(io, wt, entry.path) catch |err| switch (err) {
+                if (try realLeadingPath(io, wt, entry.path)) fs.deleteFile(io, wt, entry.path) catch |err| switch (err) {
                     error.FileNotFound, error.NotDir, error.IsDir => {},
                     else => |e| return e,
                 };
@@ -3031,12 +3164,40 @@ pub fn applySparse(
                 continue;
             }
             _ = scratch.reset(.retain_capacity);
-            const a = scratch.allocator();
-            if (std.fs.path.dirnamePosix(entry.path)) |parent| {
-                try makeDirPath(io, wt, parent);
-            }
+            try restoreSparse(scratch.allocator(), io, wt, db, &conv, entry, options);
+            if (try fs.statAt(io, wt, entry.path)) |after| entry.stat = after.stat;
+            entry.skip_worktree = false;
+            outcome.restored += 1;
+        }
+    }
+    return outcome;
+}
+
+/// Write back an entry a wider sparse pattern brings in, as a checkout
+/// writes its mode: a link as a link, a gitlink as the empty directory a
+/// submodule's checkout goes in, a file through the attributes.
+fn restoreSparse(
+    a: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    db: *Odb,
+    conv: *convert.Session,
+    entry: *const index_mod.Entry,
+    options: CheckoutOptions,
+) Error!void {
+    var leading: LeadingDirs = .{};
+    if (std.fs.path.dirnamePosix(entry.path)) |parent| try leading.make(io, wt, parent, false, options.refusal);
+    switch (entry.mode) {
+        // The submodule's commit is in its own repository, not this one.
+        .gitlink => return leading.make(io, wt, entry.path, false, options.refusal),
+        .symlink => {
             const found = try db.read(io, entry.oid);
-            defer gpa.free(found.bytes);
+            defer db.allocator().free(found.bytes);
+            _ = try writeLink(io, wt, entry.path, found.bytes, options.rules.symlinks);
+        },
+        .file, .exec => {
+            const found = try db.read(io, entry.oid);
+            defer db.allocator().free(found.bytes);
             const executable = entry.mode == .exec and options.rules.file_mode;
             if (options.rules.attrs) |attrs| {
                 try attrs.enter(io, wt, entry.path);
@@ -3046,12 +3207,9 @@ pub fn applySparse(
             } else {
                 try writeFile(io, wt, entry.path, .{ .bytes = found.bytes }, executable);
             }
-            if (try fs.statAt(io, wt, entry.path)) |after| entry.stat = after.stat;
-            entry.skip_worktree = false;
-            outcome.restored += 1;
-        }
+        },
+        .tree => return error.UnsupportedEntry,
     }
-    return outcome;
 }
 
 /// What `list` found.

@@ -459,7 +459,7 @@ fn removeGone(io: Io, wt: Io.Dir, index: *const Index, changes: []const []const 
         if (entry.skip_worktree) continue;
         if (entry.mode == .gitlink) {
             // Only an empty submodule directory goes, as with git.
-            try removeIfEmpty(io, wt, path);
+            if (try worktree.realLeadingPath(io, wt, path)) try removeIfEmpty(io, wt, path);
             removed += 1;
             continue;
         }
@@ -530,7 +530,10 @@ fn writeChanged(
             // has to resolve it.
             if (entry.skip_worktree and !conflicted.contains(path)) continue;
         }
-        if (try fs.statAt(w.io, w.wt, path)) |found| {
+        // Past a symbolic link nothing is removed; `writeEntry` refuses
+        // the write.
+        const in_tree = try worktree.realLeadingPath(w.io, w.wt, path);
+        if (if (in_tree) try fs.statAt(w.io, w.wt, path) else null) |found| {
             if (found.kind == .directory) {
                 // A submodule's checkout is left as it is, as git leaves it
                 // without `--recurse-submodules`; the index records the

@@ -1173,3 +1173,196 @@ test "checkout writes the same files, index and error whatever the number of tas
         }
     }
 }
+
+/// A tree object's bytes from raw entries, in the order given: a hostile
+/// tree may hold a name twice, which `Tree.Builder` refuses to write.
+fn rawTree(gpa: std.mem.Allocator, io: Io, db: *odb_mod.Odb, entries: []const struct { mode: []const u8, name: []const u8, oid: Oid }) !Oid {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    for (entries) |e| {
+        try bytes.print(gpa, "{s} {s}\x00", .{ e.mode, e.name });
+        try bytes.appendSlice(gpa, e.oid.raw());
+    }
+    return db.write(io, .tree, bytes.items);
+}
+
+/// `a/hooks/post-checkout`, an executable, under a tree named `a`.
+fn hookTree(gpa: std.mem.Allocator, io: Io, db: *odb_mod.Odb) !Oid {
+    const script = try db.write(io, .blob, "#!/bin/sh\necho owned\n");
+    const hooks = try rawTree(gpa, io, db, &.{.{ .mode = "100755", .name = "post-checkout", .oid = script }});
+    return rawTree(gpa, io, db, &.{.{ .mode = "40000", .name = "hooks", .oid = hooks }});
+}
+
+fn expectNoHook(io: Io, h: *Harness) !void {
+    try std.testing.expectError(error.FileNotFound, h.git_dir.access(io, "hooks/post-checkout", .{}));
+}
+
+test "a tree holding a link and a directory of one name is refused before anything is written, and git writes no hook either" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    const link = try h.db.write(io, .blob, ".git");
+    const a = try hookTree(gpa, io, &h.db);
+    // `120000 a -> .git` and then `40000 a`: written in order, the hook
+    // would land in `.git/hooks`.
+    const tree = try rawTree(gpa, io, &h.db, &.{
+        .{ .mode = "120000", .name = "a", .oid = link },
+        .{ .mode = "40000", .name = "a", .oid = a },
+    });
+    var refusal: worktree.Refusal = .{};
+    try std.testing.expectError(error.UnsafePath, worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, .{
+        .rules = h.worktreeRules(),
+        .refusal = &refusal,
+    }));
+    try std.testing.expectEqual(worktree.safepath.Reason.path_collision, refusal.reason.?);
+    try std.testing.expectEqualStrings("a", refusal.path());
+    try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "a", .{}));
+    try expectNoHook(io, &h);
+
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var git = try h.repo.capture(io, &.{ "read-tree", "-u", "--reset", tree.hex(&hex) });
+    git.deinit(gpa);
+    try expectNoHook(io, &h);
+}
+
+test "a link and a directory whose names a folding filesystem makes one are refused, and nothing reaches .git on any filesystem" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for ([_]bool{ true, false }) |ignore_case| {
+        var h = try Harness.init(gpa, io, &.{});
+        defer h.deinit(io);
+        const link = try h.db.write(io, .blob, ".git");
+        const a = try hookTree(gpa, io, &h.db);
+        const tree = try rawTree(gpa, io, &h.db, &.{
+            .{ .mode = "120000", .name = "A", .oid = link },
+            .{ .mode = "40000", .name = "a", .oid = a },
+        });
+        var rules = h.worktreeRules();
+        rules.ignore_case = ignore_case;
+        var refusal: worktree.Refusal = .{};
+        const result = worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, .{ .rules = rules, .refusal = &refusal });
+        if (ignore_case) {
+            try std.testing.expectError(error.UnsafePath, result);
+            try std.testing.expectEqual(worktree.safepath.Reason.path_collision, refusal.reason.?);
+        } else if (result) |_| {} else |err| {
+            // A filesystem that folds case anyway: the link is found on the
+            // way down and the write past it refused.
+            try std.testing.expectEqual(error.UnsafePath, err);
+            try std.testing.expectEqual(worktree.safepath.Reason.beyond_symlink, refusal.reason.?);
+        }
+        try expectNoHook(io, &h);
+    }
+}
+
+test "nothing is written or removed past a symbolic link in the working tree, and a forced checkout replaces the link as git's does" {
+    // A link needs a privilege on Windows.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    try h.repo.writeFile(io, "d/f", "tracked\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const tree_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(tree_text);
+    const tree = try Oid.parse(.sha1, tree_text);
+
+    // `d` is now an untracked link to a directory beside it.
+    try h.repo.exec(io, &.{ "rm", "-q", "--cached", "d/f" });
+    try h.repo.dir.deleteTree(io, "d");
+    try h.repo.writeFile(io, "elsewhere/keep", "mine\n");
+    try h.repo.dir.symLink(io, "elsewhere", "d", .{ .is_directory = true });
+    try h.reload(gpa, io);
+
+    var refusal: worktree.Refusal = .{};
+    const options: worktree.CheckoutOptions = .{ .rules = h.worktreeRules(), .refusal = &refusal, .force = true };
+    var unforced = options;
+    unforced.force = false;
+    try std.testing.expectError(error.UnsafePath, worktree.writePaths(gpa, io, h.repo.dir, &h.index, &h.db, &.{
+        .{ .path = "d/f", .blob = .{ .mode = .file, .oid = (try h.db.write(io, .blob, "tracked\n")) } },
+    }, unforced));
+    try std.testing.expectEqual(worktree.safepath.Reason.beyond_symlink, refusal.reason.?);
+    try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "elsewhere/f", .{}));
+
+    // Removing `d/keep` removes nothing: it is not the working tree's.
+    try worktree.removeEntry(io, h.repo.dir, "d/keep");
+    try h.repo.dir.access(io, "elsewhere/keep", .{});
+
+    _ = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, options);
+    const d = (try fs.statAt(io, h.repo.dir, "d")).?;
+    try std.testing.expectEqual(Io.File.Kind.directory, d.kind);
+    try h.repo.dir.access(io, "d/f", .{});
+    try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "elsewhere/f", .{}));
+    try h.repo.dir.access(io, "elsewhere/keep", .{});
+}
+
+test "a wider sparse pattern brings a link back as a link and a submodule back as its empty directory, as git does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    // A link needs a privilege on Windows, where git writes it as a file.
+    const links = builtin.os.tag != .windows;
+    try h.repo.writeFile(io, "top", "top\n");
+    try h.repo.writeFile(io, "dir/file", "file\n");
+    if (links) try h.repo.dir.symLink(io, "file", "dir/link", .{});
+    try h.repo.exec(io, &.{ "add", "-A" });
+    // A submodule's commit, which this repository's objects do not hold.
+    try h.repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,dir/sub" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    try h.reload(gpa, io);
+
+    try h.git_dir.createDirPath(io, "info");
+    try h.git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n!/dir/\n" });
+    var narrow = (try sparse.Patterns.load(gpa, io, h.git_dir, false)).?;
+    defer narrow.deinit();
+    _ = try worktree.applySparse(gpa, io, h.repo.dir, &h.index, &h.db, &narrow, .{});
+    try std.testing.expectError(error.FileNotFound, h.repo.dir.access(io, "dir/file", .{}));
+    try h.repo.dir.deleteTree(io, "dir");
+
+    try h.git_dir.writeFile(io, .{ .sub_path = "info/sparse-checkout", .data = "/*\n" });
+    var wide = (try sparse.Patterns.load(gpa, io, h.git_dir, false)).?;
+    defer wide.deinit();
+    const back = try worktree.applySparse(gpa, io, h.repo.dir, &h.index, &h.db, &wide, .{ .rules = h.worktreeRules() });
+    try std.testing.expectEqual(@as(u32, if (links) 3 else 2), back.restored);
+    try std.testing.expectEqual(Io.File.Kind.directory, (try fs.statAt(io, h.repo.dir, "dir/sub")).?.kind);
+    if (links) {
+        try std.testing.expectEqual(Io.File.Kind.sym_link, (try fs.statAt(io, h.repo.dir, "dir/link")).?.kind);
+        var buf: [16]u8 = undefined;
+        try std.testing.expectEqualStrings("file", buf[0..try h.repo.dir.readLink(io, "dir/link", &buf)]);
+    }
+
+    // git calls the result clean.
+    try h.index.write(io, h.git_dir, "index", .{});
+    try h.repo.exec(io, &.{ "config", "core.sparseCheckout", "true" });
+    const status = try h.repo.run(io, &.{ "status", "--porcelain" });
+    defer gpa.free(status);
+    try std.testing.expectEqualStrings("", status);
+}
+
+test "a tree with names only Windows refuses checks out elsewhere as git checks it out" {
+    // git itself refuses these names on Windows.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    const names = [_][]const u8{ "drivers/i2c/aux.c", "a\tb", "t.", "v1 ", "con", "x:y" };
+    for (names) |path| try h.repo.writeFile(io, path, "kernel\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const tree_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(tree_text);
+    for (names) |path| try h.repo.dir.deleteFile(io, path);
+    try h.repo.exec(io, &.{ "rm", "-q", "--cached", "-r", "." });
+    try h.reload(gpa, io);
+
+    const out = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, try Oid.parse(.sha1, tree_text), .{ .rules = h.worktreeRules() });
+    try std.testing.expectEqual(@as(u32, names.len), out.written);
+    try h.index.write(io, h.git_dir, "index", .{});
+    const status = try h.repo.run(io, &.{ "status", "--porcelain" });
+    defer gpa.free(status);
+    try std.testing.expectEqualStrings("", status);
+}

@@ -1738,19 +1738,11 @@ fn validRawDate(text: []const u8, strict: bool) bool {
     return !(strict and value > 1400);
 }
 
-/// git's `verify_path`, with `core.protectNTFS` on as it is by default:
-/// no empty, `.` or `..` component, and no spelling of `.git` — nor of
-/// `.gitmodules` for a symlink.
+/// git's `verify_path`, with `core.protectNTFS` and `core.protectHFS` on:
+/// no empty, `.` or `..` component, no spelling of `.git` NTFS or HFS+
+/// opens as it, nor of `.gitmodules` for a symlink.
 fn validPath(path: []const u8, mode: u32) bool {
-    var it = std.mem.splitScalar(u8, path, '/');
-    while (it.next()) |component| {
-        if (component.len == 0) return false;
-        if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return false;
-        const trimmed = std.mem.trimEnd(u8, component, ". ");
-        if (std.ascii.eqlIgnoreCase(trimmed, ".git") or std.ascii.eqlIgnoreCase(component, "git~1")) return false;
-        if (mode == 0o120000 and std.ascii.eqlIgnoreCase(trimmed, ".gitmodules")) return false;
-    }
-    return true;
+    return safepath.checkEntry(path, .stored, mode == 0o120000) == null;
 }
 
 fn validSignatureFormat(text: []const u8) bool {
