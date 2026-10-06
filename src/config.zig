@@ -17,6 +17,7 @@ const config_write = @import("config/write.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const fs = @import("repo/fs.zig");
@@ -1050,6 +1051,9 @@ pub const Config = struct {
             };
             // unreachable: the name was read from this line and the escaped value closes every quote it opens
             const parsed = parseVariableLine(replacement) catch unreachable;
+            // The line reads back as the variable it replaced, with a value.
+            assert(parsed.has_value);
+            assert(std.ascii.eqlIgnoreCase(parsed.name, line.name));
             const name = blk: {
                 errdefer config.gpa.free(replacement);
                 var names = file.names.promote(config.gpa);
@@ -1076,6 +1080,11 @@ pub const Config = struct {
         const new_text = try text.toOwnedSlice();
         // unreachable: checkKey passed the name and writeValue closes every quote it opens
         const parsed = parseVariableLine(new_text) catch unreachable;
+        // The line reads back as the variable written, its value running to
+        // the newline: writeValue quotes any space it would otherwise lose.
+        assert(parsed.has_value);
+        assert(std.ascii.eqlIgnoreCase(parsed.name, split.name));
+        assert(parsed.value_end == new_text.len - 1);
         const name = blk: {
             errdefer config.gpa.free(new_text);
             var names = file.names.promote(config.gpa);
@@ -1708,6 +1717,8 @@ fn parseVariableLine(raw: []const u8) ParseError!VariableLine {
         }
     }
     if (in_quotes) return error.MalformedValue;
+    assert(value_start <= last_significant);
+    assert(last_significant <= raw.len);
     return .{
         .name = name,
         .value_start = value_start,

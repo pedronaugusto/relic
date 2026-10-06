@@ -11,6 +11,7 @@
 const Self = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
@@ -134,6 +135,9 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
 
     var unit: u64 = std.time.ns_per_s;
     while (unit > 1 and divisor % unit != 0) unit /= 10;
+    // A power of ten no coarser than a second, which is what a stat
+    // comparison rounds a nanosecond field down to.
+    assert(std.time.ns_per_s % unit == 0);
     return .{ .ns = unit, .measured = true };
 }
 
@@ -493,7 +497,7 @@ pub const LockFile = struct {
     /// Flush, make durable, close and rename over the target. After this the
     /// lock is gone and the new bytes are the file.
     pub fn commit(lock: *LockFile, io: Io) Self.CommitError!void {
-        std.debug.assert(!lock.finished);
+        assert(!lock.finished);
         try lock.file_writer.interface.flush();
         // Contents shorter than the `pid` line under them leave its tail.
         if (lock.file_writer.pos < lock.pid_len) try lock.file.setLength(io, lock.file_writer.pos);
@@ -696,7 +700,12 @@ pub const Shared = union(enum) {
             else => {
                 if (n & 0o600 != 0o600) return error.InvalidSharedMode;
                 // others never write
-                return .{ .mode = @intCast(n & 0o666) };
+                const mode: u16 = @intCast(n & 0o666);
+                // What `calc` builds on: the owner reads and writes, and
+                // nobody is given execute, which `calc` copies from the file.
+                assert(mode & 0o600 == 0o600);
+                assert(mode & 0o111 == 0);
+                return .{ .mode = mode };
             },
         };
     }
@@ -992,6 +1001,8 @@ pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) StaleReport {
 
     // The lock's own first bytes while it is held: `pid <n>`.
     var contents: [64]u8 = undefined;
+    // Holds the longest line `LockFile.open` writes.
+    comptime assert(contents.len >= "pid 4294967295\n".len);
     const text = dir.readFile(io, lock_name, &contents) catch
         return .{ .held = true, .pid = null, .holder_alive = null };
     const line = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
@@ -1077,7 +1088,7 @@ pub fn atomicWrite(
 pub fn tempName(io: Io, buf: []u8, prefix: []const u8) []const u8 {
     var raw: [12]u8 = undefined;
     var hex: [2 * raw.len]u8 = undefined;
-    std.debug.assert(buf.len >= prefix.len + hex.len);
+    assert(buf.len >= prefix.len + hex.len);
     io.random(&raw);
     // unreachable: twelve bytes are twenty-four hex digits
     _ = std.fmt.bufPrint(&hex, "{x}", .{&raw}) catch unreachable;

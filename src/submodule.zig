@@ -37,6 +37,7 @@ pub const gitlink = @import("submodule/gitlink.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
@@ -542,6 +543,8 @@ fn connect(
     git_dir_abs: []const u8,
 ) Error!void {
     const to_git_dir = try relativePath(arena, git_dir_abs, work_abs);
+    // `gitlink.gitFileTarget` refuses a `.git` file with no path in it.
+    assert(to_git_dir.len != 0);
     const line = try std.fmt.allocPrint(arena, "gitdir: {s}\n", .{to_git_dir});
     try work.writeFile(io, .{ .sub_path = ".git", .data = line });
     try editConfigFile(gpa, io, git_dir, "core.worktree", try relativePath(arena, work_abs, git_dir_abs));
@@ -1784,6 +1787,11 @@ pub const Walk = struct {
         }
         while (w.frames.items.len > 0) {
             const frame = w.frames.items[w.frames.items.len - 1];
+            // Each frame is one level below the one under it, and only the
+            // caller's superproject, at the bottom, is not the walk's to close.
+            assert(frame.depth == w.frames.items.len - 1);
+            assert((frame.repo_storage == null) == (frame.depth == 0));
+            assert(frame.next <= frame.listing.entries.len);
             if (frame.next == frame.listing.entries.len) {
                 _ = w.frames.pop();
                 frame.destroy(w.gpa, w.io);

@@ -17,6 +17,7 @@ pub const ident = @import("repo/ident.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
@@ -200,6 +201,8 @@ const Discovered = struct {
     common_is_separate: bool,
 
     fn close(d: *Discovered, io: Io) void {
+        // One handle, closed once, when the common directory is not separate.
+        if (!d.common_is_separate) assert(d.common_dir.handle == d.git_dir.handle);
         if (d.common_is_separate) d.common_dir.close(io);
         d.git_dir.close(io);
         if (d.work_dir) |w| w.close(io);
@@ -946,6 +949,8 @@ pub const Repository = struct {
         repo.gpa.destroy(repo.refStore());
         repo.odb.deinit(io);
         config_owner.destroy(repo._config);
+        // One handle, closed once, when the common directory is not separate.
+        if (!repo.common_is_separate) assert(repo.common_dir.handle == repo.git_dir.handle);
         if (repo.common_is_separate) repo.common_dir.close(io);
         repo.git_dir.close(io);
         if (repo.work_dir) |w| w.close(io);

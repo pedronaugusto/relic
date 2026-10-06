@@ -6,6 +6,7 @@
 //! give is a refusal.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
@@ -93,6 +94,8 @@ fn withoutCrud(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
         '\n', '<', '>' => {},
         else => try out.append(arena, c),
     };
+    // A signature line is `name <email> when`: neither field may close it.
+    assert(std.mem.findAny(u8, out.items, "\n<>") == null);
     return out.items;
 }
 
