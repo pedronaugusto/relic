@@ -1017,7 +1017,7 @@ test "a worktree that moved is repaired and git follows it" {
 
     try git.dir.createDirPath(io, "trees/before");
     var dest = try git.dir.openDir(io, "trees/before", .{ .iterate = true });
-    var added = try worktrees_mod.add(gpa, io, repo.common_dir, "moving", dest, "trees/before", .{
+    var added = try worktrees_mod.add(gpa, io, repo.common_dir, "moving", dest, .{
         .detach_at = try Oid.parse(.sha1, commit_text),
     });
     added.admin_dir.close(io);

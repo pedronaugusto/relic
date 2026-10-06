@@ -346,7 +346,7 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
     const input_name = try gpa.dupe(u8, "one");
     defer gpa.free(input_name);
 
-    var added = try worktrees.add(gpa, io, repo.common_dir, input_name, dest, "trees/one", .{
+    var added = try worktrees.add(gpa, io, repo.common_dir, input_name, dest, .{
         .detach_at = commit,
     });
     defer added.admin_dir.close(io);
@@ -433,7 +433,7 @@ test "worktree remove takes the tree and the admin directory with it" {
 
     try git.dir.createDirPath(io, "trees/two");
     var dest = try git.dir.openDir(io, "trees/two", .{ .iterate = true });
-    var added = try worktrees.add(gpa, io, repo.common_dir, "two", dest, "trees/two", .{
+    var added = try worktrees.add(gpa, io, repo.common_dir, "two", dest, .{
         .detach_at = try Oid.parse(.sha1, commit_text),
     });
     added.admin_dir.close(io);
@@ -446,6 +446,73 @@ test "worktree remove takes the tree and the admin directory with it" {
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(listed);
     try std.testing.expect(std.mem.indexOf(u8, listed, "trees/two") == null);
+}
+
+test "a worktree git added with relative paths lists and removes, and remove touches only a tree that points back" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    // `worktree.useRelativePaths` came in 2.48.
+    if (!try testgit.gitAtLeast(gpa, io, 2, 48)) return error.SkipZigTest;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "a.txt", "hello\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+    try git.exec(io, &.{ "-c", "worktree.useRelativePaths=true", "worktree", "add", "-q", "linked" });
+    try git.exec(io, &.{ "worktree", "add", "-q", "other" });
+
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    {
+        var listing = try repo.listWorktrees(io);
+        defer listing.deinit();
+        const linked = listing.find("linked").?;
+        try std.testing.expect(!linked.prunable);
+        try std.testing.expectEqualStrings("linked", linked.branch.?);
+        var real_buf: [4096]u8 = undefined;
+        const len = try git.dir.realPath(io, &real_buf);
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, real_buf[0..len], '\\', '/');
+        const want = try std.fmt.allocPrint(gpa, "{s}/linked", .{real_buf[0..len]});
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, linked.path);
+    }
+
+    // A `gitdir` file pointed at a tree that is not this worktree's: the
+    // tree stays, as git's validation keeps it.
+    try git.writeFile(io, "victim/keep", "mine\n");
+    var other_admin = try git.dir.openDir(io, ".git/worktrees/other", .{});
+    try other_admin.writeFile(io, .{ .sub_path = "gitdir", .data = "../../../victim/.git\n" });
+    other_admin.close(io);
+    try std.testing.expectError(error.CorruptWorktree, worktrees.remove(gpa, io, repo.common_dir, "other", .{}));
+    try git.dir.access(io, "victim/keep", .{});
+
+    try worktrees.remove(gpa, io, repo.common_dir, "linked", .{});
+    try std.testing.expectError(error.FileNotFound, git.dir.access(io, "linked", .{}));
+    const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
+    defer gpa.free(listed);
+    try std.testing.expect(std.mem.indexOf(u8, listed, "/linked\n") == null);
+}
+
+test "worktree add refuses a destination with something in it and a branch git would not name" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    try git.writeFile(io, "full/.git", "gitdir: elsewhere\n");
+    var full = try git.dir.openDir(io, "full", .{ .iterate = true });
+    defer full.close(io);
+    try std.testing.expectError(error.DestinationNotEmpty, worktrees.add(gpa, io, repo.common_dir, "full", full, .{ .branch = "main" }));
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("gitdir: elsewhere\n", try full.readFile(io, ".git", &buf));
+
+    try git.dir.createDirPath(io, "empty");
+    var empty = try git.dir.openDir(io, "empty", .{ .iterate = true });
+    defer empty.close(io);
+    for ([_][]const u8{ "a\nb", "a..b", "bad.lock" }) |branch| {
+        try std.testing.expectError(error.InvalidBranchName, worktrees.add(gpa, io, repo.common_dir, "empty", empty, .{ .branch = branch }));
+    }
 }
 
 test "a config refresh keeps only its own refused setting" {

@@ -4,7 +4,10 @@
 //! What is on the disk, measured against git rather than read from a
 //! document: `<common>/worktrees/<id>/` holding `HEAD`, `gitdir`,
 //! `commondir`, `index`, `ORIG_HEAD` and `logs/HEAD`, and a `.git` *file* in
-//! the destination whose only line is `gitdir: <absolute path>`. In a
+//! the destination whose only line is `gitdir: <absolute path>`. A worktree
+//! git added with `worktree.useRelativePaths` holds both paths relative: the
+//! `gitdir` file's to the administrative directory, the `.git` file's to
+//! the working tree; both are read either way. In a
 //! repository whose refs are a reftable stack, `HEAD` and `ORIG_HEAD` are in
 //! a stack of the worktree's own under `reftable/`, and the `HEAD` file is
 //! the placeholder git leaves there.
@@ -38,10 +41,16 @@ pub const Error = error{
     /// The destination is not empty, and `add` will not write into a
     /// directory that already holds something.
     DestinationNotEmpty,
-    /// A name that cannot be a directory under `worktrees/`.
+    /// A name that cannot be a directory under `worktrees/`, or a path to
+    /// write into one of its files that holds a newline.
     InvalidWorktreeName,
+    /// `AddOptions.branch` is no name git's `check-ref-format` takes.
+    InvalidBranchName,
     /// The administrative directory is there but does not hold what a
-    /// worktree needs.
+    /// worktree needs, or the working tree it names has a `.git` that does
+    /// not point back at it: git's "validation failed", which `remove` and
+    /// `move` stop at rather than touch a directory that is not this
+    /// worktree's.
     CorruptWorktree,
 } || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.DeleteFileError ||
@@ -55,8 +64,8 @@ pub const Entry = struct {
     /// The directory name under `worktrees/`. Owned by the listing.
     name: []const u8,
     /// The absolute path of the working tree, from the admin directory's
-    /// `gitdir` file with the trailing `/.git` removed. Owned by the
-    /// listing.
+    /// `gitdir` file with the trailing `/.git` removed, a relative one taken
+    /// from the admin directory. Owned by the listing.
     path: []const u8,
     /// What its `HEAD` holds: a branch name, or `null` when detached.
     /// Owned by the listing.
@@ -130,19 +139,12 @@ pub fn list(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Er
         const admin = worktrees_dir.openDir(io, dir_entry.name, .{ .iterate = true }) catch continue;
         defer admin.close(io);
 
-        const gitdir_text = (try fs.readFileAlloc(arena, io, admin, "gitdir", 4096)) orelse continue;
-        const gitfile_path = std.mem.trim(u8, gitdir_text, " \t\r\n");
-        // The `gitdir` file names the destination's `.git` *file*; the
-        // working tree is its parent.
-        const work_path = if (std.mem.endsWith(u8, gitfile_path, "/.git"))
-            gitfile_path[0 .. gitfile_path.len - "/.git".len]
-        else
-            gitfile_path;
+        const named = try namedTree(arena, io, admin) orelse continue;
 
         // A worktree whose `.git` file is gone is one git prunes: the
         // directory it pointed at has been deleted by hand.
         var prunable = true;
-        if (std.Io.Dir.accessAbsolute(io, gitfile_path, .{})) |_| {
+        if (std.Io.Dir.accessAbsolute(io, named.gitfile, .{})) |_| {
             prunable = false;
         } else |_| {}
 
@@ -176,7 +178,7 @@ pub fn list(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Er
 
         try entries.append(arena, .{
             .name = try arena.dupe(u8, dir_entry.name),
-            .path = try arena.dupe(u8, work_path),
+            .path = named.work,
             .branch = branch,
             .head = head,
             .locked = lock_text != null,
@@ -193,6 +195,55 @@ fn lessThanName(_: void, a: Entry, b: Entry) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
+/// Where an administrative directory's `gitdir` file says the worktree is.
+const Named = struct {
+    /// The working tree's `.git` file, absolute.
+    gitfile: []const u8,
+    /// The working tree, absolute: the `.git` file's directory.
+    work: []const u8,
+};
+
+/// Read `admin`'s `gitdir` file, a relative path in it taken from `admin`
+/// as git's `worktree.useRelativePaths` writes it. `null` when there is no
+/// such file. Both paths are `arena`'s.
+fn namedTree(arena: Allocator, io: Io, admin: Io.Dir) Self.Error!?Named {
+    const text = (try fs.readFileAlloc(arena, io, admin, "gitdir", 4096)) orelse return null;
+    const written = std.mem.trim(u8, text, " \t\r\n");
+    if (written.len == 0) return null;
+    const gitfile = if (std.fs.path.isAbsolute(written)) written else blk: {
+        var buf: [4096]u8 = undefined;
+        break :blk try std.fs.path.resolvePosix(arena, &.{ try absolutePath(io, admin, &buf), written });
+    };
+    // The `gitdir` file names the destination's `.git` *file*; the
+    // working tree is its parent.
+    const work = if (std.mem.endsWith(u8, gitfile, "/.git")) gitfile[0 .. gitfile.len - "/.git".len] else gitfile;
+    return .{ .gitfile = gitfile, .work = work };
+}
+
+/// git's `validate_worktree`: whether the working tree's `.git` file points
+/// back at `admin`. A working tree that is gone is valid, there being
+/// nothing of it to touch.
+fn pointsBack(arena: Allocator, io: Io, admin: Io.Dir, named: Named) Self.Error!bool {
+    var work = Io.Dir.openDirAbsolute(io, named.work, .{}) catch |err| switch (err) {
+        error.FileNotFound => return true,
+        else => return false,
+    };
+    defer work.close(io);
+    const text = (try fs.readFileAlloc(arena, io, work, ".git", 4096)) orelse return false;
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, "gitdir:")) return false;
+    const target = std.mem.trim(u8, trimmed["gitdir:".len..], " \t");
+    if (target.len == 0) return false;
+    var target_dir = (if (std.fs.path.isAbsolute(target))
+        Io.Dir.openDirAbsolute(io, target, .{})
+    else
+        work.openDir(io, target, .{})) catch return false;
+    defer target_dir.close(io);
+    var target_buf: [4096]u8 = undefined;
+    var admin_buf: [4096]u8 = undefined;
+    return std.mem.eql(u8, try absolutePath(io, target_dir, &target_buf), try absolutePath(io, admin, &admin_buf));
+}
+
 /// What `add` is asked to create.
 pub const AddOptions = struct {
     /// The object `HEAD` will point at when detached.
@@ -200,8 +251,6 @@ pub const AddOptions = struct {
     /// The branch `HEAD` will point at, without `refs/heads/`. Exactly one
     /// of this and `detach_at` is used; `detach_at` wins.
     branch: ?[]const u8 = null,
-    /// Whether to create the destination directory if it is not there.
-    create_destination: bool = true,
 };
 
 /// Where a new worktree lives.
@@ -214,29 +263,39 @@ pub const Added = struct {
     work_dir: Io.Dir,
 };
 
-/// Register a worktree and write every file git writes, leaving the working
-/// tree itself empty.
+/// Register a worktree in `dest_dir`, which the caller has made and which
+/// must be empty, as git's `worktree add` refuses one that is not, and
+/// write every file git writes, leaving the working tree itself empty.
 ///
 /// The checkout is a separate call, because it needs an object database and
-/// an index and this does not. `Repository.addWorktree` does both.
+/// an index and this does not: `worktree.checkout` into `Added.work_dir`.
 pub fn add(
     gpa: Allocator,
     io: Io,
     common_dir: Io.Dir,
     name: []const u8,
     dest_dir: Io.Dir,
-    dest_path: []const u8,
     options: AddOptions,
 ) Self.Error!Added {
     // The name becomes a directory under `worktrees/`, so it is held to
     // the rules of a name written to the disk.
     if (safepath.checkComponent(name, .worktree) != null) return error.InvalidWorktreeName;
-    _ = options.create_destination;
+    if (options.detach_at == null) {
+        if (options.branch) |branch| {
+            var ref_buf: [512]u8 = undefined;
+            const ref = std.fmt.bufPrint(&ref_buf, "refs/heads/{s}", .{branch}) catch return error.InvalidBranchName;
+            if (!safepath.isValidRefName(ref)) return error.InvalidBranchName;
+        }
+    }
 
     const owned_name = try gpa.dupe(u8, name);
     errdefer gpa.free(owned_name);
     const opened_work_dir = try dest_dir.openDir(io, ".", .{ .iterate = true });
     errdefer opened_work_dir.close(io);
+    {
+        var it = opened_work_dir.iterate();
+        if (try it.next(io) != null) return error.DestinationNotEmpty;
+    }
 
     common_dir.createDirPath(io, "worktrees") catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -316,14 +375,13 @@ pub fn add(
         return error.InvalidWorktreeName;
     try dest_dir.writeFile(io, .{ .sub_path = ".git", .data = pointer });
 
-    _ = dest_path;
     return .{ .name = owned_name, .admin_dir = admin, .work_dir = opened_work_dir };
 }
 
 fn writeLine(io: Io, dir: Io.Dir, name: []const u8, text: []const u8) Error!void {
     // Each of these files is one line, which git and `list` read back
-    // trimmed of its newline.
-    assert(std.mem.findScalar(u8, text, '\n') == null);
+    // trimmed of its newline; a path holding one cannot be written there.
+    if (std.mem.findScalar(u8, text, '\n') != null) return error.InvalidWorktreeName;
     var buf: [4300]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s}\n", .{text}) catch return error.InvalidWorktreeName;
     try dir.writeFile(io, .{ .sub_path = name, .data = line });
@@ -355,6 +413,13 @@ pub const RemoveOptions = struct {
 };
 
 /// Remove a worktree: its administrative directory, and its files.
+///
+/// The working tree is removed only when its `.git` points back at the
+/// administrative directory, as git's `validate_worktree` checks, so a
+/// `gitdir` file naming some other directory is `error.CorruptWorktree`
+/// and nothing goes. Unlike `git worktree remove`, this does not look for
+/// local changes or untracked files first: that takes the worktree's index
+/// and a status, which are the caller's to run before asking.
 pub fn remove(
     gpa: Allocator,
     io: Io,
@@ -381,16 +446,13 @@ pub fn remove(
     // reported, after the administrative directory has gone all the same.
     var files_error: ?Io.Dir.DeleteTreeError = null;
     if (options.delete_files) {
-        const gitdir_text = try fs.readFileAlloc(gpa, io, admin, "gitdir", 4096);
-        if (gitdir_text) |text| {
-            defer gpa.free(text);
-            const gitfile_path = std.mem.trim(u8, text, " \t\r\n");
-            const work_path = if (std.mem.endsWith(u8, gitfile_path, "/.git"))
-                gitfile_path[0 .. gitfile_path.len - "/.git".len]
-            else
-                gitfile_path;
+        var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_instance.deinit();
+        const arena = arena_instance.allocator();
+        if (try namedTree(arena, io, admin)) |named| {
+            if (!try pointsBack(arena, io, admin, named)) return error.CorruptWorktree;
             const cwd: Io.Dir = .cwd();
-            cwd.deleteTree(io, work_path) catch |err| {
+            cwd.deleteTree(io, named.work) catch |err| {
                 files_error = err;
             };
         }
@@ -498,13 +560,19 @@ pub fn move(
     new_parent: Io.Dir,
     new_name: []const u8,
 ) Self.Error!void {
-    var listing = try list(gpa, io, common_dir, .sha1);
-    defer listing.deinit();
-    const entry = listing.find(name) orelse return error.WorktreeNotFound;
-    if (entry.locked) return error.WorktreeLocked;
+    var worktrees_dir = common_dir.openDir(io, "worktrees", .{}) catch return error.WorktreeNotFound;
+    defer worktrees_dir.close(io);
+    var admin = worktrees_dir.openDir(io, name, .{}) catch return error.WorktreeNotFound;
+    defer admin.close(io);
+    if (admin.access(io, "locked", .{})) |_| return error.WorktreeLocked else |_| {}
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const named = try namedTree(arena, io, admin) orelse return error.CorruptWorktree;
+    if (!try pointsBack(arena, io, admin, named)) return error.CorruptWorktree;
 
     const cwd: Io.Dir = .cwd();
-    try cwd.rename(entry.path, new_parent, new_name, io);
+    try cwd.rename(named.work, new_parent, new_name, io);
 
     var moved = try new_parent.openDir(io, new_name, .{ .iterate = true });
     defer moved.close(io);
