@@ -119,12 +119,14 @@ const Shifter = struct {
 
     /// `score_trees`: the two trees' top levels walked together, each
     /// name scored by whether both have it and with what.
-    fn scoreTrees(s: Shifter, oid1: Oid, oid2: Oid) Error!i32 {
+    fn scoreTrees(s: Shifter, oid1: Oid, oid2: Oid) Error!i64 {
         const one = try s.entries(oid1);
         const two = try s.entries(oid2);
         var i: usize = 0;
         var j: usize = 0;
-        var score: i32 = 0;
+        // Wide enough for any tree: an `int` overflows at a couple of
+        // million entries.
+        var score: i64 = 0;
         while (i < one.len or j < two.len) {
             const order: std.math.Order = if (i < one.len and j < two.len)
                 baseNameOrder(one[i], two[j])
@@ -151,7 +153,7 @@ const Shifter = struct {
     /// `match_trees`: every directory of `oid1`, `limit` levels further
     /// down too, scored against `oid2`; a strictly better score takes
     /// `best`, so the first found keeps a tie.
-    fn matchTrees(s: Shifter, oid1: Oid, oid2: Oid, best_score: *i32, best: *[]const u8, base: []const u8, limit: u32) Error!void {
+    fn matchTrees(s: Shifter, oid1: Oid, oid2: Oid, best_score: *i64, best: *[]const u8, base: []const u8, limit: u32) Error!void {
         for (try s.entries(oid1)) |e| {
             if (!isDir(e.mode)) continue;
             const score = try s.scoreTrees(e.oid, oid2);

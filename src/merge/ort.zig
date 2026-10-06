@@ -56,7 +56,7 @@ pub const Error = error{
     NotABlob,
     /// A commit named something that is not a commit.
     NotACommit,
-    /// The trees nest deeper than the walk will go.
+    /// The trees nest deeper than `max_tree_depth`, where git's walk stops.
     TreeTooDeep,
     /// A path's `merge` attribute names a driver `merge.<name>.driver`
     /// configures, which is a program this merge does not run.
@@ -431,6 +431,11 @@ const CommitRef = union(enum) {
     virtual: usize,
 };
 
+/// How deep trees nest before a walk of them stops: git's
+/// `core.maxTreeDepth` default, which keeps a hostile tree from running a
+/// recursive walk off its stack.
+pub const max_tree_depth = 2048;
+
 const Outcome = struct {
     tree: Oid,
     /// What rename processing returned on the pass that counted.
@@ -598,7 +603,7 @@ const Merge = struct {
     /// `traverse_trees` over three trees: every name any of them holds,
     /// in byte order, a file and a directory of one name met together.
     fn traverse(m: *Merge, trees: [3]?Oid, dir: []const u8, depth: u32) Error!void {
-        if (depth > 4096) return error.TreeTooDeep;
+        if (depth > max_tree_depth) return error.TreeTooDeep;
         var lists: [3][]TreeItem = undefined;
         for (0..3) |i| lists[i] = try m.readTree(trees[i]);
         var names: std.array_hash_map.String(Names) = .empty;
@@ -861,7 +866,10 @@ const Merge = struct {
                 m.current_dir_name = path;
                 m.dir_rename_mask = node.value;
                 const interned = m.paths.getKey(path).?;
-                try m.traverse(trees, interned, 1);
+                // As deep as the directory sits: `traverse` counts from the
+                // root, wherever the walk picks a directory up again.
+                const depth = std.math.cast(u32, std.mem.countScalar(u8, interned, '/') + 1) orelse return error.TreeTooDeep;
+                try m.traverse(trees, interned, depth);
             }
             var rest = m.deferred[side].possible_trivial_merges.iterator();
             while (rest.next()) |node| {
@@ -1993,7 +2001,9 @@ const Merge = struct {
         while (i < one.len and i < two.len and one[i] == two[i]) i += 1;
         const c1: u8 = if (i < one.len) one[i] else '/';
         const c2: u8 = if (i < two.len) two[i] else '/';
-        if (c1 == c2) return i >= one.len;
+        // A leading directory of the other sorts first; a path is not
+        // before itself, which a sort of many paths asks.
+        if (c1 == c2) return i >= one.len and i < two.len;
         return c1 < c2;
     }
 

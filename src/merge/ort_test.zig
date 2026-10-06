@@ -225,6 +225,52 @@ test "a directory rename split is unclean with no path conflicted, as git's merg
     try std.testing.expect(!result.isClean());
 }
 
+/// Three commits through fast-import, each with one file at `depth`
+/// directories down: the base's, ours changing it on `main`, theirs on
+/// `topic`. A path that long is past what a checkout could write.
+fn deepHistory(gpa: Allocator, io: Io, repo: *testgit.Repo, depth: usize) !void {
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(gpa);
+    for (0..depth) |_| try path.appendSlice(gpa, "d/");
+    try path.appendSlice(gpa, "f");
+    var stream: std.ArrayList(u8) = .empty;
+    defer stream.deinit(gpa);
+    const sides = [_]struct { ref: []const u8, text: []const u8, from: []const u8 }{
+        .{ .ref = "main", .text = "a\nb\nc\n", .from = "" },
+        .{ .ref = "main", .text = "A\nb\nc\n", .from = ":2" },
+        .{ .ref = "topic", .text = "a\nb\nC\n", .from = ":2" },
+    };
+    for (sides, 0..) |side, i| {
+        try stream.print(gpa, "blob\nmark :{d}\ndata {d}\n{s}\n", .{ 2 * i + 1, side.text.len, side.text });
+        try stream.print(gpa, "commit refs/heads/{s}\nmark :{d}\ncommitter A <a@example.com> 1700000000 +0000\ndata 2\nc\n", .{ side.ref, 2 * i + 2 });
+        if (side.from.len != 0) try stream.print(gpa, "from {s}\n", .{side.from});
+        try stream.print(gpa, "M 100644 :{d} {s}\n\n", .{ 2 * i + 1, path.items });
+    }
+    gpa.free(try repo.runInput(io, &.{ "fast-import", "--quiet" }, stream.items));
+}
+
+test "trees nested to git's depth limit merge, and deeper ones are refused by name" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]usize{ 2040, 2100 }) |depth| {
+        var repo = try testgit.Repo.init(gpa, io, &.{});
+        defer repo.deinit();
+        try deepHistory(gpa, io, &repo, depth);
+        const git_dir = try repo.gitDir(io);
+        defer git_dir.close(io);
+        var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+        defer db.deinit(io);
+        const merged = ort.mergeCommits(gpa, io, &db, try revParse(gpa, io, &repo, "main"), try revParse(gpa, io, &repo, "topic"), null, .{});
+        if (depth > ort.max_tree_depth) {
+            try std.testing.expectError(error.TreeTooDeep, merged);
+        } else {
+            var result = try merged;
+            defer result.deinit();
+            try std.testing.expect(result.isClean());
+        }
+    }
+}
+
 test "rename/rename, rename/delete and rename/add conflicts are git's" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

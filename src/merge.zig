@@ -154,8 +154,10 @@ pub const TreeOptions = struct {
     /// both sides changed differently is left at stages 1, 2 and 3, which
     /// is not git's merge.
     content_merge: bool = false,
-    /// The labels, conflict style, favoured side and line diff of the
-    /// content merges.
+    /// The labels, conflict style, favoured side, line diff and overlooked
+    /// whitespace of the content merges. Their marker size is a path's
+    /// `conflict-marker-size` attribute, as git's merge reads it, and not
+    /// `blob.marker_size`.
     blob: BlobOptions = .{ .algorithm = .histogram },
     /// The attributes that decide how a path is content-merged: `merge`
     /// (`-merge` and `merge=binary` keep our side as a conflict,
@@ -237,6 +239,8 @@ pub fn treesWithOptions(
     var index: index_mod.Index = .initEmpty(gpa, db.objectFormat());
     errdefer index.deinit();
     var conflicts: std.ArrayList(Conflict) = .empty;
+    const our_dirs = try directoriesOf(arena, &our_entries);
+    const their_dirs = try directoriesOf(arena, &their_entries);
 
     for (paths.items) |path| {
         const b = base_entries.get(path);
@@ -245,7 +249,7 @@ pub fn treesWithOptions(
 
         // A directory on one side and a file on the other is a conflict
         // whatever the contents are, because one path cannot be both.
-        if (isDirectoryOf(&our_entries, path) and t != null) {
+        if (our_dirs.contains(path) and t != null) {
             try conflicts.append(arena, .{
                 .path = path,
                 .base = b,
@@ -256,7 +260,7 @@ pub fn treesWithOptions(
             try stageAll(&index, path, b, o, t);
             continue;
         }
-        if (isDirectoryOf(&their_entries, path) and o != null) {
+        if (their_dirs.contains(path) and o != null) {
             try conflicts.append(arena, .{
                 .path = path,
                 .base = b,
@@ -328,6 +332,7 @@ fn contentMerge(
     ort_options.favor = options.blob.favor;
     ort_options.algorithm = options.blob.algorithm;
     ort_options.minimal = options.blob.minimal;
+    ort_options.whitespace = options.blob.whitespace;
     ort_options.attributes = options.attributes;
     ort_options.attributes_dir = options.attributes_dir;
     ort_options.configured_drivers = options.configured_drivers;
@@ -400,15 +405,22 @@ fn sameSide(a: ?Side, b: ?Side) bool {
     return a.?.mode == b.?.mode and a.?.oid.eql(b.?.oid);
 }
 
-fn isDirectoryOf(entries: *const Entries, path: []const u8) bool {
-    // A path is a directory on this side when some entry lives under it.
+/// Every directory a side's paths are under, each once: a path is a
+/// directory on that side when it is one of these. Built once, so the
+/// check is not a walk of every path for every path.
+fn directoriesOf(arena: Allocator, entries: *const Entries) Allocator.Error!std.StringHashMapUnmanaged(void) {
+    var dirs: std.StringHashMapUnmanaged(void) = .empty;
     var it = entries.keyIterator();
     while (it.next()) |key| {
-        if (key.len > path.len and std.mem.startsWith(u8, key.*, path) and key.*[path.len] == '/') {
-            return true;
+        var end = key.len;
+        while (std.mem.findScalarLast(u8, key.*[0..end], '/')) |slash| {
+            const slot = try dirs.getOrPut(arena, key.*[0..slash]);
+            // A directory already met has its parents in already.
+            if (slot.found_existing) break;
+            end = slash;
         }
     }
-    return false;
+    return dirs;
 }
 
 fn stage(index: *index_mod.Index, path: []const u8, side: Side, at: u2) Allocator.Error!void {
@@ -435,7 +447,7 @@ fn flatten(
     out: *Entries,
     depth: u32,
 ) Error!void {
-    if (depth > 64) return error.TreeTooDeep;
+    if (depth > ort.max_tree_depth) return error.TreeTooDeep;
     const found = try db.read(io, tree_oid);
     defer db.allocator().free(found.bytes);
     if (found.type != .tree) return error.NotATree;
@@ -892,6 +904,48 @@ test "the content-merging tree merge writes the tree and the stages git merge-tr
     }
     try std.testing.expectEqualStrings(expected_stages.items, got_stages.items);
     try std.testing.expectEqual(@as(usize, 4), result.conflicts.len);
+}
+
+test "the content merge takes blob.whitespace, and reads a file 66 directories down, as git merge-tree does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // `merge-tree --write-tree` with `-X` is 2.40's.
+    try testgit.requireGitVersion(gpa, io, 2, 40);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    const deep = "d/" ** 66 ++ "f";
+    try repo.writeFile(io, deep, "a\nb\nc\n");
+    try repo.writeFile(io, "w", "x y\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "branch", "theirs" });
+    try repo.writeFile(io, deep, "A\nb\nc\n");
+    try repo.writeFile(io, "w", "x  y\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "ours" });
+    try repo.exec(io, &.{ "checkout", "-q", "theirs" });
+    try repo.writeFile(io, "w", "x y z\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "theirs" });
+
+    const git_tree = try repo.line(io, &.{ "merge-tree", "--write-tree", "-X", "ignore-space-change", "main", "theirs" });
+    defer gpa.free(git_tree);
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    var sides: [3]Oid = undefined;
+    for ([_][]const u8{ "main~1^{tree}", "main^{tree}", "theirs^{tree}" }, &sides) |rev, *oid| {
+        const text = try repo.line(io, &.{ "rev-parse", rev });
+        defer gpa.free(text);
+        oid.* = try Oid.parse(.sha1, text);
+    }
+    var result = try treesWithOptions(gpa, io, &db, sides[0], sides[1], sides[2], .{
+        .content_merge = true,
+        .blob = .{ .algorithm = .histogram, .whitespace = .{ .change = true } },
+    });
+    defer result.deinit();
+    try std.testing.expect(result.isClean());
+    var hex: [hash.max_hex_len]u8 = undefined;
+    try std.testing.expectEqualStrings(git_tree, (try tree(io, &db, &result)).hex(&hex));
 }
 
 test "fuzz: three-way blob merges never crash and an unchanged theirs preserves ours" {
