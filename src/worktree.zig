@@ -848,11 +848,32 @@ pub fn status(
     const arena = arena_instance.allocator();
 
     var entries: std.array_hash_map.String(StatusEntry) = .empty;
+    const head = try headSide(arena, io, index, db, options.head_tree);
+    try recordStaged(arena, index, &head, options, &entries);
+    try recordUnstaged(gpa, arena, io, wt, index, db, options, &entries);
+    const out = try keepChanged(arena, index, &head.paths, &entries);
+    return .{ .gpa = gpa, .arena = arena_instance.state, .entries = out };
+}
 
-    // HEAD against the index. A sparse directory is a tree: where HEAD has
-    // the same tree there, nothing under it differs and neither side is
-    // flattened; where it does not, its files are flattened out of the
-    // index's tree and compared one by one, as a full index would be.
+/// HEAD as `status` compares the index with it: its files, the directories
+/// nothing under which is staged, and the files of each sparse directory
+/// whose tree is not HEAD's.
+const HeadSide = struct {
+    /// HEAD's files, except under the directories in `unchanged` and the
+    /// sparse directories HEAD has the same tree for.
+    paths: std.StringHashMapUnmanaged(TreeEntry) = .empty,
+    /// Directories the cache tree holds as HEAD's own tree; "" is the root.
+    unchanged: std.StringHashMapUnmanaged(void) = .empty,
+    /// The files of the index's sparse directories that differ from HEAD's.
+    expanded: std.StringHashMapUnmanaged(TreeEntry) = .empty,
+};
+
+/// HEAD against the index. A sparse directory is a tree: where HEAD has the
+/// same tree there, nothing under it differs and neither side is flattened;
+/// where it does not, its files are flattened out of the index's tree and
+/// compared one by one, as a full index would be.
+fn headSide(arena: Allocator, io: Io, index: *const Index, db: *Odb, head_tree: ?Oid) Error!HeadSide {
+    var head: HeadSide = .{};
     var sparse_dirs: std.StringHashMapUnmanaged(Oid) = .empty;
     for (index.entries.items) |entry| {
         if (entry.isSparseDirectory()) try sparse_dirs.put(arena, entry.path[0 .. entry.path.len - 1], entry.oid);
@@ -863,30 +884,39 @@ pub fn status(
     // that is the root, and HEAD is not read at all — git's shortcut.
     var cached: std.StringHashMapUnmanaged(Oid) = .empty;
     if (index.cache_tree) |*tree| try validTrees(arena, &tree.root, "", &cached);
-    var unchanged: std.StringHashMapUnmanaged(void) = .empty;
-    var head_paths: std.StringHashMapUnmanaged(TreeEntry) = .empty;
-    if (options.head_tree) |tree_oid| {
+    if (head_tree) |tree_oid| {
         if (cached.get("")) |root| {
-            if (root.eql(tree_oid)) try unchanged.put(arena, "", {});
+            if (root.eql(tree_oid)) try head.unchanged.put(arena, "", {});
         }
-        if (!unchanged.contains("")) {
-            try flattenStaged(arena, io, db, tree_oid, "", &head_paths, 0, &sparse_dirs, &cached, &unchanged);
+        if (!head.unchanged.contains("")) {
+            try flattenStaged(arena, io, db, tree_oid, "", &head.paths, 0, &sparse_dirs, &cached, &head.unchanged);
         }
     }
-    var expanded: std.StringHashMapUnmanaged(TreeEntry) = .empty;
     for (index.entries.items) |entry| {
         if (!entry.isSparseDirectory()) continue;
         const dir = entry.path[0 .. entry.path.len - 1];
-        if (options.head_tree) |head| {
-            if (try treeAt(io, db, head, dir)) |at| {
+        if (head_tree) |tree_oid| {
+            if (try treeAt(io, db, tree_oid, dir)) |at| {
                 if (at.eql(entry.oid)) continue;
             }
         }
-        try flattenTree(arena, io, db, entry.oid, dir, &expanded, 1, null);
+        try flattenTree(arena, io, db, entry.oid, dir, &head.expanded, 1, null);
     }
-    var expanded_it = expanded.iterator();
+    return head;
+}
+
+/// Record what is staged: each index path against HEAD's, a conflict as
+/// conflicted, and a HEAD path the index does not have as deleted.
+fn recordStaged(
+    arena: Allocator,
+    index: *const Index,
+    head: *const HeadSide,
+    options: StatusOptions,
+    entries: *std.array_hash_map.String(StatusEntry),
+) Allocator.Error!void {
+    var expanded_it = head.expanded.iterator();
     while (expanded_it.next()) |pair| {
-        const staged = compareToHead(&head_paths, pair.key_ptr.*, pair.value_ptr.mode, pair.value_ptr.oid);
+        const staged = compareToHead(&head.paths, pair.key_ptr.*, pair.value_ptr.mode, pair.value_ptr.oid);
         if (staged == .unmodified) continue;
         const slot = try entries.getOrPut(arena, pair.key_ptr.*);
         slot.value_ptr.* = .{ .path = slot.key_ptr.*, .staged = staged, .unstaged = .unmodified };
@@ -908,12 +938,12 @@ pub fn status(
         }
         if (options.submodules) |probe| {
             if (probe.ignore_staged) {
-                const was_gitlink = if (head_paths.get(entry.path)) |e| e.mode == .gitlink else false;
+                const was_gitlink = if (head.paths.get(entry.path)) |e| e.mode == .gitlink else false;
                 if (entry.mode == .gitlink or was_gitlink) continue;
             }
         }
-        const staged = if (options.head_tree == null or !underAny(&unchanged, entry.path))
-            compareToHead(&head_paths, entry.path, entry.mode, entry.oid)
+        const staged = if (options.head_tree == null or !underAny(&head.unchanged, entry.path))
+            compareToHead(&head.paths, entry.path, entry.mode, entry.oid)
         else
             .unmodified;
         if (staged == .unmodified) continue;
@@ -925,9 +955,9 @@ pub fn status(
         };
     }
 
-    var head_it = head_paths.iterator();
+    var head_it = head.paths.iterator();
     while (head_it.next()) |pair| {
-        if (index.find(pair.key_ptr.*) != null or expanded.contains(pair.key_ptr.*)) continue;
+        if (index.find(pair.key_ptr.*) != null or head.expanded.contains(pair.key_ptr.*)) continue;
         if (options.submodules) |probe| {
             if (probe.ignore_staged and pair.value_ptr.mode == .gitlink) continue;
         }
@@ -938,9 +968,21 @@ pub fn status(
             .unstaged = .unmodified,
         };
     }
+}
 
-    // The index against the working tree. A file whose stat changed is
-    // compared through what it would be stored as, clean filter and all.
+/// The index against the working tree. A file whose stat changed is
+/// compared through what it would be stored as, clean filter and all, and
+/// an index path the scan never met is deleted.
+fn recordUnstaged(
+    gpa: Allocator,
+    arena: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    index: *Index,
+    db: *Odb,
+    options: StatusOptions,
+    entries: *std.array_hash_map.String(StatusEntry),
+) Error!void {
     var conv: convert.Session = .init(gpa, io, .{
         .wt = wt,
         .kind = db.objectFormat(),
@@ -963,9 +1005,10 @@ pub fn status(
         .index = index,
         .db = db,
         .options = options,
-        .entries = &entries,
+        .entries = entries,
         .monitored = index.fsmonitor_token != null and index.fsmonitor_refreshed,
     };
+    defer scan.seen.deinit(gpa);
     if (scan.monitored and options.untracked == .no) try scan.checkEntries() else try scan.walk("", 0);
 
     for (index.entries.items) |entry| {
@@ -977,10 +1020,17 @@ pub fn status(
         }
         slot.value_ptr.unstaged = .deleted;
     }
-    scan.seen.deinit(gpa);
+}
 
-    // Only paths that differ somewhere are reported; an unchanged path is
-    // absent, which is what makes the result the same shape as git's.
+/// Only paths that differ somewhere are reported; an unchanged path is
+/// absent, which is what makes the result the same shape as git's. The
+/// paths come out sorted, a gitlink on either side marked a submodule.
+fn keepChanged(
+    arena: Allocator,
+    index: *const Index,
+    head_paths: *const std.StringHashMapUnmanaged(TreeEntry),
+    entries: *const std.array_hash_map.String(StatusEntry),
+) Allocator.Error![]StatusEntry {
     var kept: usize = 0;
     for (entries.values()) |value| {
         if (value.conflicted or value.staged != .unmodified or value.unstaged != .unmodified) kept += 1;
@@ -998,8 +1048,7 @@ pub fn status(
         i += 1;
     }
     std.mem.sort(StatusEntry, out, {}, lessThanStatus);
-
-    return .{ .gpa = gpa, .arena = arena_instance.state, .entries = out };
+    return out;
 }
 
 /// HEAD's side of one index path: what `status` calls a staged change.
@@ -1570,13 +1619,7 @@ pub fn resetIndex(
     }
     try index.addMany(fresh.items);
 
-    // The index now describes exactly this tree, and, as git's
-    // `unpack_trees` leaves it, remembers no resolutions.
-    const cache_tree = try index.cacheTree();
-    cache_tree.invalidateAll();
-    cache_tree.root.entry_count = @intCast(index.entries.items.len);
-    cache_tree.root.oid = tree_oid;
-    index.dropResolveUndo();
+    try describeTree(index, tree_oid);
     return outcome;
 }
 
@@ -1706,8 +1749,66 @@ pub fn checkout(
     });
     defer conv.deinit();
 
-    // Every path out of the tree is checked before it becomes a filesystem
-    // path. A tree is a file format and anyone may write one.
+    try refuseUnsafeTree(arena, &wanted, options);
+    if (!options.force) try verifyCheckout(gpa, arena, io, wt, index, &wanted, options);
+    try refuseDirectoriesInTheWay(arena, io, wt, index, &wanted, options.force);
+    var removed_dirs = try removeUnwanted(gpa, arena, io, wt, index, &wanted, &outcome);
+
+    // Write what the tree has, in path order.
+    var paths = try arena.alloc([]const u8, wanted.count());
+    var n: usize = 0;
+    var key_it = wanted.keyIterator();
+    while (key_it.next()) |key| {
+        paths[n] = key.*;
+        n += 1;
+    }
+    std.debug.assert(n == paths.len);
+    std.mem.sort([]const u8, paths, {}, lessThanName);
+    try removeEmptiedDirectories(io, wt, index, paths, &wanted, options.force);
+
+    var writing: CheckoutWrite = .{
+        .gpa = gpa,
+        .io = io,
+        .wt = wt,
+        .index = index,
+        .db = db,
+        .conv = &conv,
+        .tree_oid = tree_oid,
+        .wanted = &wanted,
+        .options = options,
+        .outcome = &outcome,
+    };
+    try writing.all(paths);
+    try writing.late();
+    outcome.lfs_pointers = conv.lfs_pointers;
+
+    if (options.remove_empty_directories) {
+        var dir_it = removed_dirs.keyIterator();
+        while (dir_it.next()) |dir_path| {
+            removeEmptyDirectories(io, wt, dir_path.*);
+        }
+    }
+
+    if (options.durability == .durable) try syncCheckout(arena, io, wt, &wanted, &removed_dirs);
+
+    try describeTree(index, tree_oid);
+    return outcome;
+}
+
+/// The tree the index now describes is exactly `tree_oid`, so the cache
+/// tree is told so rather than rebuilt; and, as git's `unpack_trees` leaves
+/// it, the index remembers no resolutions.
+fn describeTree(index: *Index, tree_oid: Oid) Allocator.Error!void {
+    const tree = try index.cacheTree();
+    tree.invalidateAll();
+    tree.root.entry_count = @intCast(index.entries.items.len);
+    tree.root.oid = tree_oid;
+    index.dropResolveUndo();
+}
+
+/// Every path out of the tree is checked before it becomes a filesystem
+/// path. A tree is a file format and anyone may write one.
+fn refuseUnsafeTree(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEntry), options: CheckoutOptions) Error!void {
     var check_it = wanted.keyIterator();
     while (check_it.next()) |path| {
         if (safepath.check(path.*, .worktree)) |refused| {
@@ -1716,47 +1817,77 @@ pub fn checkout(
         }
     }
     if (options.rules.ignore_case) {
-        try refuseCaseCollisions(arena, &wanted);
+        try refuseCaseCollisions(arena, wanted);
     }
+}
 
-    if (!options.force) {
-        var updates: std.array_hash_map.String(?TreeEntry) = .empty;
-        for (index.entries.items) |entry| {
-            if (entry.stage != 0) return error.UnmergedIndex;
-            const want = wanted.get(entry.path);
-            if (want != null and want.?.mode == entry.mode and want.?.oid.eql(entry.oid)) continue;
-            try updates.put(arena, entry.path, want);
-        }
-        var want_it = wanted.iterator();
-        while (want_it.next()) |item| {
-            if (index.find(item.key_ptr.*) != null) continue;
-            try updates.put(arena, item.key_ptr.*, item.value_ptr.*);
-        }
-        try verifyUpdates(gpa, io, wt, index, &updates, .{
-            .rules = options.rules,
-            .ignore = options.ignore,
-            .obstructions = options.obstructions,
-        });
+/// Without `force`, refuse a checkout that would lose work: every path the
+/// tree changes, against what is on the disk.
+fn verifyCheckout(
+    gpa: Allocator,
+    arena: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    index: *Index,
+    wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+    options: CheckoutOptions,
+) Error!void {
+    var updates: std.array_hash_map.String(?TreeEntry) = .empty;
+    for (index.entries.items) |entry| {
+        if (entry.stage != 0) return error.UnmergedIndex;
+        const want = wanted.get(entry.path);
+        if (want != null and want.?.mode == entry.mode and want.?.oid.eql(entry.oid)) continue;
+        try updates.put(arena, entry.path, want);
     }
+    var want_it = wanted.iterator();
+    while (want_it.next()) |item| {
+        if (index.find(item.key_ptr.*) != null) continue;
+        try updates.put(arena, item.key_ptr.*, item.value_ptr.*);
+    }
+    try verifyUpdates(gpa, io, wt, index, &updates, .{
+        .rules = options.rules,
+        .ignore = options.ignore,
+        .obstructions = options.obstructions,
+    });
+}
 
-    // A directory-to-file transition is safe only when everything below the
-    // directory is tracked and is about to leave the index. Prove that before
-    // deleting any old entry, so an untracked file cannot turn a checkout
-    // failure into a partially deleted working tree.
+/// A directory-to-file transition is safe only when everything below the
+/// directory is tracked and is about to leave the index. Prove that before
+/// deleting any old entry, so an untracked file cannot turn a checkout
+/// failure into a partially deleted working tree.
+fn refuseDirectoriesInTheWay(
+    arena: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    index: *const Index,
+    wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+    force: bool,
+) Error!void {
     var conflict_it = wanted.iterator();
     while (conflict_it.next()) |item| {
         if (item.value_ptr.mode == .gitlink) continue;
-        if (keeps(index, item.key_ptr.*, item.value_ptr.*, options.force)) continue;
+        if (keeps(index, item.key_ptr.*, item.value_ptr.*, force)) continue;
         if (try fs.statAt(io, wt, item.key_ptr.*)) |found| {
             if (found.kind == .directory and
-                !try directoryIsReplaceable(arena, io, wt, item.key_ptr.*, index, &wanted))
+                !try directoryIsReplaceable(arena, io, wt, item.key_ptr.*, index, wanted))
             {
                 return error.UntrackedWouldBeOverwritten;
             }
         }
     }
+}
 
-    // Remove what the index has and the tree does not.
+/// Remove what the index has and the tree does not, from both. The
+/// directories they were in are returned, for removing once empty.
+fn removeUnwanted(
+    gpa: Allocator,
+    arena: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    index: *Index,
+    wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+    outcome: *CheckoutOutcome,
+) Error!std.StringHashMapUnmanaged(void) {
     var removed_dirs: std.StringHashMapUnmanaged(void) = .empty;
     var i: usize = 0;
     while (i < index.entries.items.len) {
@@ -1790,152 +1921,158 @@ pub fn checkout(
         _ = index.entries.orderedRemove(i);
         outcome.removed += 1;
     }
+    return removed_dirs;
+}
 
-    // Write what the tree has.
-    var paths = try arena.alloc([]const u8, wanted.count());
-    var n: usize = 0;
-    var key_it = wanted.keyIterator();
-    while (key_it.next()) |key| {
-        paths[n] = key.*;
-        n += 1;
-    }
-    std.mem.sort([]const u8, paths, {}, lessThanName);
-
-    // Tracked children have now gone. Remove the empty directories they
-    // occupied before attempting the atomic file replacements. A path the
-    // checkout keeps as it is needs no look at the disk.
+/// Tracked children have now gone. Remove the empty directories they
+/// occupied before attempting the atomic file replacements. A path the
+/// checkout keeps as it is needs no look at the disk.
+fn removeEmptiedDirectories(
+    io: Io,
+    wt: Io.Dir,
+    index: *const Index,
+    paths: []const []const u8,
+    wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+    force: bool,
+) Error!void {
     for (paths) |path| {
         const want = wanted.get(path).?;
         if (want.mode == .gitlink) continue;
-        if (keeps(index, path, want, options.force)) continue;
+        if (keeps(index, path, want, force)) continue;
         if (try fs.statAt(io, wt, path)) |found| {
             if (found.kind == .directory) try wt.deleteDir(io, path);
         }
     }
+}
 
-    // Regular files are written on tasks, a batch at a time; everything
-    // else, and everything a batch needs first, here and in order.
-    var batch: WriteBatch = .{ .gpa = gpa, .workers = checkoutWorkers(options.workers) };
-    defer batch.deinit();
-    // A path that fails here leaves every path before it written, as a
-    // checkout one file at a time leaves them.
-    errdefer batch.flush(io, wt, index, &outcome) catch {};
-    var made_parent: []const u8 = "";
-    for (paths) |path| {
-        const want = wanted.get(path).?;
-        if (keeps(index, path, want, options.force)) {
-            outcome.unchanged += 1;
-            continue;
-        }
-        if (index.find(path)) |entry| {
-            // With `force`, a file whose stat says it is the one the index
-            // has is left as it is.
-            if (entry.oid.eql(want.oid) and entry.mode == want.mode and !index.isRacy(entry.*)) {
-                if (try fs.statAt(io, wt, path)) |on_disk| {
-                    if (entry.stat.matches(on_disk.stat, options.rules.check_stat, options.rules.timestamp_resolution)) {
-                        outcome.unchanged += 1;
-                        continue;
-                    }
+/// What `checkout` writes the tree's paths with.
+const CheckoutWrite = struct {
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    index: *Index,
+    db: *Odb,
+    conv: *convert.Session,
+    tree_oid: Oid,
+    wanted: *const std.StringHashMapUnmanaged(TreeEntry),
+    options: CheckoutOptions,
+    outcome: *CheckoutOutcome,
+
+    /// Write `paths`, sorted. Regular files are written on tasks, a batch
+    /// at a time; everything else, and everything a batch needs first,
+    /// here and in order.
+    fn all(c: *const CheckoutWrite, paths: []const []const u8) Error!void {
+        var batch: WriteBatch = .{ .gpa = c.gpa, .workers = checkoutWorkers(c.options.workers) };
+        defer batch.deinit();
+        // A path that fails here leaves every path before it written, as a
+        // checkout one file at a time leaves them.
+        errdefer batch.flush(c.io, c.wt, c.index, c.outcome) catch {};
+        var made_parent: []const u8 = "";
+        for (paths) |path| {
+            const want = c.wanted.get(path).?;
+            if (try c.unchanged(path, want)) {
+                c.outcome.unchanged += 1;
+                continue;
+            }
+            if (std.fs.path.dirnamePosix(path)) |parent| {
+                if (!std.mem.eql(u8, parent, made_parent)) {
+                    try makeDirPath(c.io, c.wt, parent);
+                    made_parent = parent;
                 }
             }
+            try c.one(&batch, path, want);
         }
+        try batch.flush(c.io, c.wt, c.index, c.outcome);
+    }
 
-        if (std.fs.path.dirnamePosix(path)) |parent| {
-            if (!std.mem.eql(u8, parent, made_parent)) {
-                wt.createDirPath(io, parent) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => |e| return e,
-                };
-                made_parent = parent;
-            }
-        }
+    /// Whether `path` is left as it is: kept with its local changes, or,
+    /// with `force`, a file whose stat says it is the one the index has.
+    fn unchanged(c: *const CheckoutWrite, path: []const u8, want: TreeEntry) Error!bool {
+        if (keeps(c.index, path, want, c.options.force)) return true;
+        const entry = c.index.find(path) orelse return false;
+        if (!entry.oid.eql(want.oid) or entry.mode != want.mode or c.index.isRacy(entry.*)) return false;
+        const on_disk = try fs.statAt(c.io, c.wt, path) orelse return false;
+        return entry.stat.matches(on_disk.stat, c.options.rules.check_stat, c.options.rules.timestamp_resolution);
+    }
 
-        var scratch: std.heap.ArenaAllocator = .init(gpa);
-        defer scratch.deinit();
-        const a = scratch.allocator();
-
+    /// Write one path, or hand a regular file to `batch`, or leave one a
+    /// filter delays for `late`.
+    fn one(c: *const CheckoutWrite, batch: *WriteBatch, path: []const u8, want: TreeEntry) Error!void {
         switch (want.mode) {
             .gitlink => {
-                wt.createDirPath(io, path) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => |e| return e,
-                };
-                outcome.gitlinks += 1;
+                try makeDirPath(c.io, c.wt, path);
+                c.outcome.gitlinks += 1;
             },
             .symlink => {
-                const found = try db.read(io, want.oid);
-                defer gpa.free(found.bytes);
-                // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
-                fs.deleteFile(io, wt, path) catch {};
-                if (options.rules.symlinks) {
-                    wt.symLink(io, found.bytes, path, .{}) catch {
-                        try writeFile(io, wt, path, .{ .bytes = found.bytes }, false);
-                        outcome.symlinks_as_files += 1;
-                    };
-                } else {
-                    try writeFile(io, wt, path, .{ .bytes = found.bytes }, false);
-                    outcome.symlinks_as_files += 1;
-                }
-                outcome.written += 1;
+                const found = try c.db.read(c.io, want.oid);
+                defer c.gpa.free(found.bytes);
+                if (try writeLink(c.io, c.wt, path, found.bytes, c.options.rules.symlinks)) c.outcome.symlinks_as_files += 1;
+                c.outcome.written += 1;
             },
             .file, .exec => {
-                const found = try db.read(io, want.oid);
-                defer gpa.free(found.bytes);
-                const executable = want.mode == .exec and options.rules.file_mode;
-                const smudged: convert.Smudged = if (options.rules.attrs) |attrs| try conv.toWorktree(a, path, found.bytes, try attrs.lookup(a, path, false), .{
+                var scratch: std.heap.ArenaAllocator = .init(c.gpa);
+                defer scratch.deinit();
+                const a = scratch.allocator();
+                const found = try c.db.read(c.io, want.oid);
+                defer c.gpa.free(found.bytes);
+                const executable = want.mode == .exec and c.options.rules.file_mode;
+                const smudged: convert.Smudged = if (c.options.rules.attrs) |attrs| try c.conv.toWorktree(a, path, found.bytes, try attrs.lookup(a, path, false), .{
                     .blob = want.oid,
-                    .treeish = tree_oid,
+                    .treeish = c.tree_oid,
                     .can_delay = true,
                 }) else .{ .bytes = found.bytes };
                 switch (smudged) {
                     // Its index entry is added when it arrives.
-                    .delayed => continue,
+                    .delayed => return,
                     .bytes => |bytes| {
                         if (try batch.add(path, want, bytes, executable)) {
-                            try batch.flush(io, wt, index, &outcome);
+                            try batch.flush(c.io, c.wt, c.index, c.outcome);
                         }
-                        continue;
+                        return;
                     },
-                    .file => try writeSmudged(io, wt, path, smudged, executable),
+                    .file => try writeSmudged(c.io, c.wt, path, smudged, executable),
                 }
-                outcome.written += 1;
+                c.outcome.written += 1;
             },
             .tree => return error.UnsupportedEntry,
         }
-        try recordWritten(io, wt, index, path, want);
+        try recordWritten(c.io, c.wt, c.index, path, want);
     }
-    try batch.flush(io, wt, index, &outcome);
 
-    var late: std.heap.ArenaAllocator = .init(gpa);
-    defer late.deinit();
-    while (try conv.nextReady(late.allocator())) |ready| {
-        defer _ = late.reset(.retain_capacity);
-        const want = wanted.get(ready.path).?;
-        try writeSmudged(io, wt, ready.path, ready.content, want.mode == .exec and options.rules.file_mode);
-        outcome.written += 1;
-        try recordWritten(io, wt, index, ready.path, want);
-    }
-    outcome.lfs_pointers = conv.lfs_pointers;
-
-    if (options.remove_empty_directories) {
-        var dir_it = removed_dirs.keyIterator();
-        while (dir_it.next()) |dir_path| {
-            removeEmptyDirectories(io, wt, dir_path.*);
+    /// Write the files a filter delayed, as it hands them over.
+    fn late(c: *const CheckoutWrite) Error!void {
+        var arena: std.heap.ArenaAllocator = .init(c.gpa);
+        defer arena.deinit();
+        while (try c.conv.nextReady(arena.allocator())) |ready| {
+            defer _ = arena.reset(.retain_capacity);
+            const want = c.wanted.get(ready.path).?;
+            try writeSmudged(c.io, c.wt, ready.path, ready.content, want.mode == .exec and c.options.rules.file_mode);
+            c.outcome.written += 1;
+            try recordWritten(c.io, c.wt, c.index, ready.path, want);
         }
     }
+};
 
-    if (options.durability == .durable) try syncCheckout(arena, io, wt, &wanted, &removed_dirs);
+/// Make the directory `path` and those above it; one already there is
+/// left as it is.
+fn makeDirPath(io: Io, wt: Io.Dir, path: []const u8) Io.Dir.CreateDirPathError!void {
+    wt.createDirPath(io, path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => |e| return e,
+    };
+}
 
-    // The tree the index now describes is exactly the tree asked for, so
-    // the cache tree may be told so rather than rebuilt.
-    const tree = try index.cacheTree();
-    tree.invalidateAll();
-    tree.root.entry_count = @intCast(index.entries.items.len);
-    tree.root.oid = tree_oid;
-    // As git's `unpack_trees` leaves it: no resolutions remembered.
-    index.dropResolveUndo();
-
-    return outcome;
+/// Write a symlink to `target` at `path`, replacing whatever is there; or,
+/// where `symlinks` is off or the platform refuses one, an ordinary file
+/// holding the target. `true` when it was written as a file.
+fn writeLink(io: Io, wt: Io.Dir, path: []const u8, target: []const u8, symlinks: bool) Error!bool {
+    // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
+    fs.deleteFile(io, wt, path) catch {};
+    if (symlinks) {
+        if (wt.symLink(io, target, path, .{})) |_| return false else |_| {}
+    }
+    try writeFile(io, wt, path, .{ .bytes = target }, false);
+    return true;
 }
 
 // Sync existing paths too: a skipped write is not evidence of durability.
@@ -2216,22 +2353,7 @@ pub fn writePaths(
     });
     defer conv.deinit();
 
-    for (writes) |w| {
-        if (w.blob != null) continue;
-        fs.deleteFile(io, wt, w.path) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir => {},
-            else => |e| return e,
-        };
-        if (w.index) {
-            const tree = try index.cacheTree();
-            tree.invalidate(w.path);
-            _ = index.remove(w.path);
-        }
-        outcome.removed += 1;
-        if (options.remove_empty_directories) {
-            if (std.fs.path.dirnamePosix(w.path)) |parent| removeEmptyDirectories(io, wt, parent);
-        }
-    }
+    try removePaths(io, wt, index, writes, options.remove_empty_directories, &outcome);
 
     var waiting: std.StringHashMapUnmanaged(PathWrite) = .empty;
     defer waiting.deinit(gpa);
@@ -2242,59 +2364,23 @@ pub fn writePaths(
             // someone's work.
             if (found.kind == .directory) wt.deleteDir(io, w.path) catch return error.UntrackedWouldBeOverwritten;
         }
-        if (std.fs.path.dirnamePosix(w.path)) |parent| {
-            wt.createDirPath(io, parent) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => |e| return e,
-            };
-        }
-        var scratch: std.heap.ArenaAllocator = .init(gpa);
-        defer scratch.deinit();
-        const a = scratch.allocator();
+        if (std.fs.path.dirnamePosix(w.path)) |parent| try makeDirPath(io, wt, parent);
         switch (want.mode) {
             .gitlink => {
-                wt.createDirPath(io, w.path) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => |e| return e,
-                };
+                try makeDirPath(io, wt, w.path);
                 outcome.gitlinks += 1;
             },
             .symlink => {
                 const found = try db.read(io, want.oid);
                 defer gpa.free(found.bytes);
-                // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
-                fs.deleteFile(io, wt, w.path) catch {};
-                if (options.rules.symlinks) {
-                    wt.symLink(io, found.bytes, w.path, .{}) catch {
-                        try writeFile(io, wt, w.path, .{ .bytes = found.bytes }, false);
-                        outcome.symlinks_as_files += 1;
-                    };
-                } else {
-                    try writeFile(io, wt, w.path, .{ .bytes = found.bytes }, false);
-                    outcome.symlinks_as_files += 1;
-                }
+                if (try writeLink(io, wt, w.path, found.bytes, options.rules.symlinks)) outcome.symlinks_as_files += 1;
                 outcome.written += 1;
             },
             .file, .exec => {
-                const found = try db.read(io, want.oid);
-                defer gpa.free(found.bytes);
-                const executable = want.mode == .exec and options.rules.file_mode;
-                if (options.rules.attrs) |attrs| {
-                    try attrs.enter(io, wt, w.path);
-                    const applied = try attrs.lookup(a, w.path, false);
-                    const smudged = try conv.toWorktree(a, w.path, found.bytes, applied, .{
-                        .blob = want.oid,
-                        .can_delay = true,
-                    });
-                    if (smudged == .delayed) {
-                        try waiting.put(gpa, w.path, w);
-                        continue;
-                    }
-                    try writeSmudged(io, wt, w.path, smudged, executable);
-                } else {
-                    try writeFile(io, wt, w.path, .{ .bytes = found.bytes }, executable);
+                if (!try writePathFile(gpa, io, wt, db, &conv, w.path, want, options.rules)) {
+                    try waiting.put(gpa, w.path, w);
+                    continue;
                 }
-                if (options.rules.attrs) |attrs| attrs.written(w.path);
                 outcome.written += 1;
             },
             .tree => return error.UnsupportedEntry,
@@ -2314,6 +2400,69 @@ pub fn writePaths(
     }
     outcome.lfs_pointers = conv.lfs_pointers;
     return outcome;
+}
+
+/// The removals of `writePaths`, made before any write so a file may give
+/// way to a directory of the same name.
+fn removePaths(
+    io: Io,
+    wt: Io.Dir,
+    index: *Index,
+    writes: []const PathWrite,
+    remove_empty_directories: bool,
+    outcome: *CheckoutOutcome,
+) Error!void {
+    for (writes) |w| {
+        if (w.blob != null) continue;
+        fs.deleteFile(io, wt, w.path) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => {},
+            else => |e| return e,
+        };
+        if (w.index) {
+            const tree = try index.cacheTree();
+            tree.invalidate(w.path);
+            _ = index.remove(w.path);
+        }
+        outcome.removed += 1;
+        if (remove_empty_directories) {
+            if (std.fs.path.dirnamePosix(w.path)) |parent| removeEmptyDirectories(io, wt, parent);
+        }
+    }
+}
+
+/// Write one regular file of `writePaths` as a checkout writes it. `false`
+/// when a filter delays it, to be handed over later.
+fn writePathFile(
+    gpa: Allocator,
+    io: Io,
+    wt: Io.Dir,
+    db: *Odb,
+    conv: *convert.Session,
+    path: []const u8,
+    want: PathWrite.Blob,
+    rules: Rules,
+) Error!bool {
+    std.debug.assert(want.mode == .file or want.mode == .exec);
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const found = try db.read(io, want.oid);
+    defer gpa.free(found.bytes);
+    const executable = want.mode == .exec and rules.file_mode;
+    const attrs = rules.attrs orelse {
+        try writeFile(io, wt, path, .{ .bytes = found.bytes }, executable);
+        return true;
+    };
+    try attrs.enter(io, wt, path);
+    const applied = try attrs.lookup(a, path, false);
+    const smudged = try conv.toWorktree(a, path, found.bytes, applied, .{
+        .blob = want.oid,
+        .can_delay = true,
+    });
+    if (smudged == .delayed) return false;
+    try writeSmudged(io, wt, path, smudged, executable);
+    attrs.written(path);
+    return true;
 }
 
 /// What `writeEntry` left on the disk.
@@ -2345,33 +2494,17 @@ pub fn writeEntry(
 ) Self.Error!Written {
     if (safepath.check(path, .worktree) != null) return error.UnsafePath;
     if (std.fs.path.dirnamePosix(path)) |parent| {
-        wt.createDirPath(io, parent) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => |e| return e,
-        };
+        try makeDirPath(io, wt, parent);
     }
     var written: Written = .{ .stat = .none };
     switch (mode) {
         .gitlink => {
-            wt.createDirPath(io, path) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => |e| return e,
-            };
+            try makeDirPath(io, wt, path);
         },
         .symlink => {
             const found = try db.read(io, oid);
             defer gpa.free(found.bytes);
-            // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
-            wt.deleteFile(io, path) catch {};
-            if (rules.symlinks) {
-                wt.symLink(io, found.bytes, path, .{}) catch {
-                    try writeFile(io, wt, path, .{ .bytes = found.bytes }, false);
-                    written.symlink_as_file = true;
-                };
-            } else {
-                try writeFile(io, wt, path, .{ .bytes = found.bytes }, false);
-                written.symlink_as_file = true;
-            }
+            written.symlink_as_file = try writeLink(io, wt, path, found.bytes, rules.symlinks);
         },
         .file, .exec => {
             var scratch: std.heap.ArenaAllocator = .init(gpa);
@@ -2406,10 +2539,7 @@ pub fn writeBytes(
 ) Self.Error!Written {
     if (safepath.check(path, .worktree) != null) return error.UnsafePath;
     if (std.fs.path.dirnamePosix(path)) |parent| {
-        wt.createDirPath(io, parent) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => |e| return e,
-        };
+        try makeDirPath(io, wt, parent);
     }
     if (try fs.statAt(io, wt, path)) |found| {
         if (found.kind == .directory and mode != .gitlink) wt.deleteDir(io, path) catch return error.UntrackedWouldBeOverwritten;
@@ -2417,23 +2547,10 @@ pub fn writeBytes(
     var written: Written = .{ .stat = .none };
     switch (mode) {
         .gitlink => {
-            wt.createDirPath(io, path) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => |e| return e,
-            };
+            try makeDirPath(io, wt, path);
         },
         .symlink => {
-            // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
-            wt.deleteFile(io, path) catch {};
-            if (rules.symlinks) {
-                wt.symLink(io, bytes, path, .{}) catch {
-                    try writeFile(io, wt, path, .{ .bytes = bytes }, false);
-                    written.symlink_as_file = true;
-                };
-            } else {
-                try writeFile(io, wt, path, .{ .bytes = bytes }, false);
-                written.symlink_as_file = true;
-            }
+            written.symlink_as_file = try writeLink(io, wt, path, bytes, rules.symlinks);
         },
         .file, .exec => {
             var scratch: std.heap.ArenaAllocator = .init(gpa);
@@ -2902,10 +3019,7 @@ pub fn applySparse(
             _ = scratch.reset(.retain_capacity);
             const a = scratch.allocator();
             if (std.fs.path.dirnamePosix(entry.path)) |parent| {
-                wt.createDirPath(io, parent) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => |e| return e,
-                };
+                try makeDirPath(io, wt, parent);
             }
             const found = try db.read(io, entry.oid);
             defer gpa.free(found.bytes);
