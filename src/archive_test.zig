@@ -230,11 +230,20 @@ test "a commit dated before 1970 is archived as git archives it: a tar with git'
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
     var hex: [hash.max_hex_len]u8 = undefined;
-    try compare(gpa, io, &git, &repo, &.{commit.hex(&hex)}, commit, .{});
+    if (builtin.os.tag != .windows) {
+        try compare(gpa, io, &git, &repo, &.{commit.hex(&hex)}, commit, .{});
+    } else {
+        // git for Windows casts the clamped time to a 32-bit `unsigned
+        // long` in each header, where git elsewhere writes the ustar
+        // maximum; the pax record is the same everywhere.
+        const tar = try ours(gpa, io, &repo, commit, .{});
+        defer gpa.free(tar);
+        try std.testing.expect(std.mem.indexOf(u8, tar, "30 mtime=18446744073709551611\n") != null);
+    }
     // git's zip writer dies: "timestamp too large for this system".
     var zip = try git.capture(io, &.{ "archive", "--format=zip", commit.hex(&hex) });
     defer zip.deinit(gpa);
-    try std.testing.expect(zip.code != 0);
+    if (builtin.os.tag != .windows) try std.testing.expect(zip.code != 0);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try std.testing.expectError(error.TimestampTooLarge, archive_mod.archive(gpa, io, &repo, commit, .{ .format = .zip }, &out.writer));
@@ -267,7 +276,16 @@ test "a tree deeper than sixty-four directories, and a zip of more entries than 
     for (0..70000) |i| try info.print(gpa, "100644 {s}\tmany/{d}\n", .{ std.mem.trim(u8, blob, "\n"), i });
     gpa.free(try git.runInput(io, &.{ "update-index", "--add", "--index-info" }, info.items));
     try git.exec(io, &.{ "commit", "-q", "-m", "many" });
-    var again = try Repository.open(gpa, io, git.dir, .{});
+    // The testing allocator takes a stack trace at every allocation, which
+    // over seventy thousand blobs is most of a minute in a Debug build; the
+    // tree above has already proved this path frees what it takes.
+    const fast = std.heap.smp_allocator;
+    var again = try Repository.open(fast, io, git.dir, .{});
     defer again.deinit(io);
-    try compare(gpa, io, &git, &again, &.{ "--format=zip", "-0", "HEAD" }, try oidOf(gpa, io, &git, "HEAD"), .{ .format = .zip, .level = 0 });
+    const theirs = try git.run(io, &.{ "archive", "--format=zip", "-0", "HEAD" });
+    defer gpa.free(theirs);
+    const mine = try ours(fast, io, &again, try oidOf(gpa, io, &git, "HEAD"), .{ .format = .zip, .level = 0 });
+    defer fast.free(mine);
+    try std.testing.expectEqual(theirs.len, mine.len);
+    try std.testing.expect(std.mem.eql(u8, theirs, mine));
 }

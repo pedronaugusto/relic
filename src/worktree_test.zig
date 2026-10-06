@@ -1245,11 +1245,14 @@ test "a link and a directory whose names a folding filesystem makes one are refu
         if (ignore_case) {
             try std.testing.expectError(error.UnsafePath, result);
             try std.testing.expectEqual(worktree.safepath.Reason.path_collision, refusal.reason.?);
-        } else if (result) |_| {} else |err| {
+        } else if (result) |_| {} else |err| switch (err) {
             // A filesystem that folds case anyway: the link is found on the
-            // way down and the write past it refused.
-            try std.testing.expectEqual(error.UnsafePath, err);
-            try std.testing.expectEqual(worktree.safepath.Reason.beyond_symlink, refusal.reason.?);
+            // way down and the write past it refused, or, where a link
+            // could not be made, the file written in its place stands in
+            // the way.
+            error.UnsafePath => try std.testing.expectEqual(worktree.safepath.Reason.beyond_symlink, refusal.reason.?),
+            error.NotDir => {},
+            else => return err,
         }
         try expectNoHook(io, &h);
     }
@@ -1426,8 +1429,8 @@ test "attributes resolve as git check-attr resolves them: the last assignment of
     try h.git_dir.createDirPath(io, "info");
     try h.git_dir.writeFile(io, .{ .sub_path = "info/attributes", .data = "[attr]n q\n" });
     try h.attrs.loadGlobal(io, h.git_dir, null, null);
-    if (builtin.os.tag != .windows) {
-        // A .gitattributes that is a link is not followed.
+    // A .gitattributes that is a link is not followed, from git 2.32 on.
+    if (builtin.os.tag != .windows and try testgit.gitAtLeast(gpa, io, 2, 32)) {
         try h.repo.writeFile(io, "elsewhere.attrs", "* evil\n");
         try h.repo.dir.createDirPath(io, "link");
         try h.repo.dir.symLink(io, "../elsewhere.attrs", "link/.gitattributes", .{});

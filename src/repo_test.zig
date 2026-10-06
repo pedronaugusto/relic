@@ -547,11 +547,13 @@ test "the repository's format is its own config file's alone, as git reads it" {
         defer repo.deinit(io);
         try std.testing.expectEqual(hash.Kind.sha1, repo.objectFormat());
     }
-    // A v1-only extension at version 0 is refused by both.
+    // A v1-only extension at version 0 is refused, as git refuses it; one
+    // older than the check lets it through.
     try git.exec(io, &.{ "config", "--unset", "include.path" });
-    try git.exec(io, &.{ "config", "extensions.refStorage", "files" });
-    git.report_failures = false;
-    try std.testing.expectError(error.GitFailed, git.run(io, &.{ "status", "--porcelain" }));
+    try git.exec(io, &.{ "config", "extensions.objectFormat", "sha1" });
+    var said = try git.capture(io, &.{ "status", "--porcelain" });
+    defer said.deinit(gpa);
+    if (said.code != 0 or try testgit.gitAtLeast(gpa, io, 2, 31)) try std.testing.expect(said.code != 0);
     try std.testing.expectError(error.UnsupportedExtension, repo_mod.Repository.open(gpa, io, git.dir, .{}));
 }
 
