@@ -118,7 +118,7 @@ const ReadWork = struct {
 /// What two passes over every object of a deep delta chain read: the
 /// objects and their bytes, the positional reads and the bytes those
 /// returned, and the bases the delta cache holds after each pass.
-const ChainScan = struct {
+pub const ChainScan = struct {
     cold_objects: usize = 0,
     warm_objects: usize = 0,
     cold_object_bytes: usize = 0,
