@@ -107,11 +107,8 @@ test "two series are paired and their differences written as git range-diff writ
     try compare(gpa, io, &git, &.{"old...new"}, try range(gpa, io, &git, "new", "old"), try range(gpa, io, &git, "old", "new"), .{});
     try compare(gpa, io, &git, &.{ "--creation-factor=200", "base", "old", "new" }, old, new, .{ .creation_factor = 200 });
     try compare(gpa, io, &git, &.{ "--creation-factor=0", "base", "old", "new" }, old, new, .{ .creation_factor = 0 });
-    // Git 2.31 introduced the one-sided range-diff options.
-    if (try testgit.gitAtLeast(gpa, io, 2, 31)) {
-        try compare(gpa, io, &git, &.{ "--left-only", "base", "old", "new" }, old, new, .{ .left_only = true });
-        try compare(gpa, io, &git, &.{ "--right-only", "base", "old", "new" }, old, new, .{ .right_only = true });
-    }
+    try compare(gpa, io, &git, &.{ "--left-only", "base", "old", "new" }, old, new, .{ .left_only = true });
+    try compare(gpa, io, &git, &.{ "--right-only", "base", "old", "new" }, old, new, .{ .right_only = true });
     try compare(gpa, io, &git, &.{ "-s", "base", "old", "new" }, old, new, .{ .patch = false });
     try compare(gpa, io, &git, &.{ "-U1", "base", "old", "new" }, old, new, .{ .diff = .{ .context = 1 } });
     try compare(gpa, io, &git, &.{ "base", "new", "old" }, new, old, .{});

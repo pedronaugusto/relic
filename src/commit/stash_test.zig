@@ -163,12 +163,7 @@ test "a stash pushed here is the stash git pushes, and git lists, shows and appl
         try twin.expectSame(io, &.{ "rev-parse", "stash", "stash^1", "stash^2" });
         try twin.expectSame(io, &.{ "log", "-g", "--format=%H %gs", "refs/stash" });
         try twin.expectSame(io, &.{ "stash", "list" });
-        // `stash show --include-untracked` is git 2.32's.
-        if (try testgit.gitAtLeast(gpa, io, 2, 32)) {
-            try twin.expectSame(io, &.{ "stash", "show", "-p", "--include-untracked" });
-        } else {
-            try twin.expectSame(io, &.{ "stash", "show", "-p" });
-        }
+        try twin.expectSame(io, &.{ "stash", "show", "-p", "--include-untracked" });
         try twin.expectSameFile(io, ".git/logs/refs/stash");
         // And the working tree and index left behind.
         try twin.expectSameState(io, &files);

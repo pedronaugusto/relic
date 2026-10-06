@@ -455,8 +455,6 @@ test "a .mailmap that is a symbolic link is not read, as git does not read one" 
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // An older git followed the link.
-    try testgit.requireGitVersion(gpa, io, 2, 32);
     var r = try testgit.Repo.init(gpa, io, &.{});
     defer r.deinit();
     try r.writeFile(io, "real", "Linked <a@x>\n");

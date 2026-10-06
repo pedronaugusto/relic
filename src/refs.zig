@@ -2088,8 +2088,6 @@ test "a deletion is announced as git announces it, packed or loose" {
 test "deleting a ref takes its log and its empty directories with it, as git does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // git removes the directories a deleted ref leaves empty from 2.31 on.
-    try testgit.requireGitVersion(gpa, io, 2, 31);
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
     var here = try testgit.Repo.init(gpa, io, &.{});

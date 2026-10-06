@@ -144,8 +144,6 @@ test "a configuration the repository can no longer be opened with is refused, an
 test "includeIf hasconfig:remote.*.url: holds for the URLs of every file, as it holds for git" {
     const gpa = testing.allocator;
     const io = testing.io;
-    // Git 2.36 introduced remote URL include conditions.
-    try testgit.requireGitVersion(gpa, io, 2, 36);
     var home_tmp = testing.tmpDir(.{});
     defer home_tmp.cleanup();
     var home_buf: [4096]u8 = undefined;

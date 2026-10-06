@@ -19,8 +19,6 @@ const repo_mod = @import("../repo.zig");
 test "a pack relic writes has the reverse index git's index-pack writes for it" {
     const gpa = testing.allocator;
     const io = testing.io;
-    // `index-pack --rev-index` is git 2.31's.
-    try testgit.requireGitVersion(gpa, io, 2, 31);
     var source = try testremote.historyRepo(gpa, io, 6);
     defer source.deinit();
     var repo = try repo_mod.Repository.open(gpa, io, source.dir, .{});

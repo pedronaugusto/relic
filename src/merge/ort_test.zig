@@ -161,8 +161,6 @@ fn lines(gpa: Allocator, prefix: []const u8, n: usize) ![]u8 {
 test "renames, exact and edited, merge with the other side's changes as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // `merge-tree --write-tree` is git 2.38's.
-    try testgit.requireGitVersion(gpa, io, 2, 38);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 
@@ -195,8 +193,6 @@ test "renames, exact and edited, merge with the other side's changes as git's do
 test "a directory rename split is unclean with no path conflicted, as git's merge says" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // `merge-tree --write-tree` is git 2.38's.
-    try testgit.requireGitVersion(gpa, io, 2, 38);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 
@@ -274,8 +270,6 @@ test "trees nested to git's depth limit merge, and deeper ones are refused by na
 test "rename/rename, rename/delete and rename/add conflicts are git's" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // `merge-tree --write-tree` is git 2.38's.
-    try testgit.requireGitVersion(gpa, io, 2, 38);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 
@@ -310,8 +304,6 @@ test "rename/rename, rename/delete and rename/add conflicts are git's" {
 test "a rename both ways that a directory rename lands on a directory stops where git's merge stops" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // git's merge stops on this assertion from 2.39 on; an older one merges.
-    try testgit.requireGitVersion(gpa, io, 2, 39);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 
@@ -343,8 +335,6 @@ test "a rename both ways that a directory rename lands on a directory stops wher
 test "a rename a directory rename lands on a directory, whose source is also moved aside, stops where git's merge stops" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // git's merge stops on this assertion from 2.39 on; an older one merges.
-    try testgit.requireGitVersion(gpa, io, 2, 39);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 
@@ -590,8 +580,6 @@ fn checkScenario(seed: u64, crowded: bool) !void {
     if (seed >= scenario_count) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // `merge-tree --write-tree` is git 2.38's.
-    try testgit.requireGitVersion(gpa, io, 2, 38);
     try runScenario(gpa, io, seed, crowded);
 }
 
@@ -1045,8 +1033,6 @@ fn checkCrissCross(seed: u64) !void {
     if (seed >= criss_cross_count) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // `merge-tree --write-tree` is git 2.38's.
-    try testgit.requireGitVersion(gpa, io, 2, 38);
     try runCrissCross(gpa, io, seed);
 }
 
@@ -1261,8 +1247,6 @@ test "submodules merge by fast-forward, or say which merge would join them, as g
 test "a rename search too big for merge.renameLimit is skipped as git skips it" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // `merge-tree --write-tree` is git 2.38's.
-    try testgit.requireGitVersion(gpa, io, 2, 38);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 

@@ -289,7 +289,6 @@ test "snapshot plain folders keep executable modes symlinks and SHA256 names" {
 test "snapshot retains sparse tracked files absent from disk and captures present edits" {
     const gpa = testing.allocator;
     const io = testing.io;
-    try testgit.requireGitVersion(gpa, io, 2, 34);
     var source = try testgit.Repo.init(gpa, io, &.{});
     defer source.deinit();
     try source.writeFile(io, "included/file", "before\n");

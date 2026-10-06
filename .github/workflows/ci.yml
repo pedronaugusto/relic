@@ -48,7 +48,7 @@ jobs:
     needs: skip
     if: needs.skip.outputs.docs-only != 'true' && github.event_name != 'push' && (github.event_name != 'workflow_dispatch' || inputs.full)
     runs-on: ubuntu-latest
-    container: buildpack-deps:bullseye
+    container: buildpack-deps:bookworm
     timeout-minutes: 30
     env:
       RELIC_GIT: old

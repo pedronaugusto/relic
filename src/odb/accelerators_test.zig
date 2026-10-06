@@ -76,8 +76,6 @@ test "commit graph writing agrees byte for byte with git, including overflow and
 }
 
 test "split commit graph chains and merge thresholds agree byte for byte with git" {
-    // This fixture compares generation-v2 split layers.
-    try testgit.requireGitVersion(gpa, io, 2, 31);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     for (0..8) |n| try commit(&repo, n);
@@ -183,7 +181,7 @@ fn bitmapPath(repo: *testgit.Repo, prefix: []const u8) ![]u8 {
 }
 
 test "MIDX object selection, RIDX, BTMP and its bitmap agree byte for byte with git" {
-    // MIDX bitmaps and bitmap lookup tables appeared after Git 2.30.
+    // The MIDX bitmap and its lookup table as git writes them from 2.43 on.
     try testgit.requireGitVersion(gpa, io, 2, 43);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
@@ -229,8 +227,6 @@ test "MIDX object selection, RIDX, BTMP and its bitmap agree byte for byte with 
 }
 
 test "pack bitmap bytes, XORs, hashes, lookup table and accelerated counts agree with git" {
-    // This fixture compares bitmap lookup tables introduced after Git 2.30.
-    try testgit.requireGitVersion(gpa, io, 2, 34);
     for ([_]bool{ false, true }) |lookup| {
         var repo = try testgit.Repo.init(gpa, io, &.{});
         defer repo.deinit();
@@ -353,8 +349,6 @@ test "configured maintenance writes full and split commit graphs and repack bitm
 }
 
 test "bitmap commit selection past the dense region agrees byte for byte with git" {
-    // Git 2.30 serializes selected entries in a different order than the modern builder.
-    try testgit.requireGitVersion(gpa, io, 2, 34);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     for (0..140) |n| try linearCommit(&repo, n);
@@ -376,8 +370,6 @@ test "bitmap commit selection past the dense region agrees byte for byte with gi
 }
 
 test "preferred pack duplicate selection agrees byte for byte with git" {
-    // Preferred-pack selection appeared with MIDX bitmap writing.
-    try testgit.requireGitVersion(gpa, io, 2, 34);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     for (0..12) |n| {
@@ -455,7 +447,6 @@ test "a MIDX bitmap carries the existing pack bitmap's name hash cache" {
 }
 
 test "merged split layers are marked at the write time before an older expiry cutoff" {
-    try testgit.requireGitVersion(gpa, io, 2, 31);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     for (0..3) |n| try linearCommit(&repo, n);
@@ -667,11 +658,8 @@ test "a repository with replace refs is repacked with a commit graph of the pare
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
     _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1, .sync = .none }, .remove_packs = true });
-    // git 2.30's verify reads the commits replaced, though its write does
-    // not, so the replace refs are set aside for it.
-    try repo.exec(io, &.{ "--no-replace-objects", "commit-graph", "verify" });
-    // Generation v2 appeared after the oldest supported git, whose bytes
-    // differ for it.
+    try repo.exec(io, &.{ "commit-graph", "verify" });
+    // git writes these generation bytes from 2.43 on.
     if (!try testgit.gitAtLeast(gpa, io, 2, 43)) return;
     const ours = try repo.readFile(io, ".git/objects/info/commit-graph");
     defer gpa.free(ours);

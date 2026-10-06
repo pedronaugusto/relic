@@ -104,15 +104,13 @@ const Verdict = enum { clean, unclean, refused };
 /// repositories afterwards.
 fn compare(p: *Pair, io: Io, patch: []const u8, args: []const []const u8, options: apply_mod.Options) !void {
     const gpa = p.gpa;
-    // This follows today's git. `--3way` tries the merge first since 2.32
-    // and passes it by in git's corner cases since 2.35, `--allow-empty`
-    // came in 2.35, `--ours`, `--theirs` and `--union` with `--3way` came
-    // in 2.47; `-N` keeps the rest of the index since 2.51, where an
-    // older git wrote the index with the new files alone. An older git
-    // answers something else, or nothing.
+    // This follows today's git. `--ours`, `--theirs` and `--union` with
+    // `--3way` came in 2.47; `-N` keeps the rest of the index since 2.51,
+    // where an older git wrote the index with the new files alone. An
+    // older git answers something else, or nothing.
     const since: [2]u32 = for (args) |arg| {
         if (std.mem.eql(u8, arg, "--ours") or std.mem.eql(u8, arg, "--theirs") or std.mem.eql(u8, arg, "--union")) break .{ 2, 47 };
-    } else if (options.intent_to_add) .{ 2, 51 } else if (options.three_way or options.allow_empty) .{ 2, 35 } else .{ 0, 0 };
+    } else if (options.intent_to_add) .{ 2, 51 } else .{ 0, 0 };
     if (!try testgit.gitAtLeast(gpa, io, since[0], since[1])) return;
     var git_dir = try p.git.gitDir(io);
     defer git_dir.close(io);

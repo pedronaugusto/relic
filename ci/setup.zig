@@ -104,18 +104,16 @@ fn lfs(c: Context, root: []const u8) !void {
 }
 
 fn old(c: Context) !void {
-    try std.Io.Dir.cwd().writeFile(c.io, .{ .sub_path = "/etc/apt/sources.list", .data = "deb http://archive.debian.org/debian bullseye main\n" });
-    try std.Io.Dir.cwd().deleteTree(c.io, "/etc/apt/sources.list.d");
-    try std.Io.Dir.cwd().createDirPath(c.io, "/etc/apt/sources.list.d");
-    try std.Io.Dir.cwd().writeFile(c.io, .{ .sub_path = "/etc/apt/preferences.d/archive", .data = "Package: *\nPin: release n=bullseye\nPin-Priority: 1001\n" });
     try c.command(&.{ "apt-get", "update" });
-    // Match the original minimal Debian job's oracle tools. The bootstrap
-    // image supplies xz for Zig, but also tools the Git 2.30.2 job never had.
-    // Modern native jobs keep Python and signers for the full comparisons.
+    // The floor job proves interop with the distribution's git and nothing
+    // else. The bootstrap image supplies xz for Zig, but also Python, ssh
+    // and signers; those go, and the comparisons that need them stand aside.
+    // Modern native jobs keep them for the full comparisons.
     try c.command(&.{ "apt-get", "remove", "-y", "--purge", "python3-minimal", "openssh-client", "gpg", "gpgconf" });
-    try c.command(&.{ "apt-get", "install", "-y", "--no-install-recommends", "--allow-downgrades", "git", "curl", "xz-utils", "ca-certificates" });
+    try c.command(&.{ "apt-get", "install", "-y", "--no-install-recommends", "git", "curl", "xz-utils", "ca-certificates" });
+    // Debian 12's packaged git, the oldest a supported LTS distribution ships.
     const version = try c.capture(&.{ "git", "--version" });
-    if (!std.mem.startsWith(u8, version, "git version 2.30.2")) return error.WrongOldestGit;
+    if (!std.mem.eql(u8, std.mem.trimEnd(u8, version, "\r\n"), "git version 2.39.5")) return error.WrongOldestGit;
 }
 
 fn selectLfs(c: Context, root: []const u8, git: []const u8) !void {

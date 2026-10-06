@@ -197,7 +197,6 @@ fn code(change: worktree.Change) u8 {
 test "a version 2 hook decides what status looks at, as git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGitVersion(gpa, io, 2, 36);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, null);
     defer pair.deinit();
@@ -231,7 +230,6 @@ test "a version 2 hook decides what status looks at, as git's does" {
 test "git believes what this package's index vouches for, and the other way round" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGitVersion(gpa, io, 2, 36);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, "2");
     defer pair.deinit();
@@ -253,7 +251,6 @@ test "git believes what this package's index vouches for, and the other way roun
 test "an index git wrote with FSMN is written back byte for byte" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGitVersion(gpa, io, 2, 36);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, "2");
     defer pair.deinit();
@@ -280,7 +277,6 @@ test "an index git wrote with FSMN is written back byte for byte" {
 test "a version 1 hook, and a version 2 question falling back to version 1, as git asks them" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try testgit.requireGitVersion(gpa, io, 2, 36);
     for ([_]?[]const u8{ "1", null }) |version| {
         var pair: Pair = undefined;
         try Pair.init(gpa, io, &pair, version);

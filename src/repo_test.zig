@@ -547,13 +547,12 @@ test "the repository's format is its own config file's alone, as git reads it" {
         defer repo.deinit(io);
         try std.testing.expectEqual(hash.Kind.sha1, repo.objectFormat());
     }
-    // A v1-only extension at version 0 is refused, as git refuses it; one
-    // older than the check lets it through.
+    // A v1-only extension at version 0 is refused, as git refuses it.
     try git.exec(io, &.{ "config", "--unset", "include.path" });
     try git.exec(io, &.{ "config", "extensions.objectFormat", "sha1" });
     var said = try git.capture(io, &.{ "status", "--porcelain" });
     defer said.deinit(gpa);
-    if (said.code != 0 or try testgit.gitAtLeast(gpa, io, 2, 31)) try std.testing.expect(said.code != 0);
+    try std.testing.expect(said.code != 0);
     try std.testing.expectError(error.UnsupportedExtension, repo_mod.Repository.open(gpa, io, git.dir, .{}));
 }
 
@@ -1549,14 +1548,12 @@ test "init copies a template and starts from its configuration, as git init does
     try compareInit(gpa, io, &scratch, "future", &.{}, null);
     // shared, by the argument and by the template's own setting
     try scratch.writeFile(io, "empty/.keep", "");
-    if (try testgit.gitAtLeast(gpa, io, 2, 31)) {
-        try compareInit(gpa, io, &scratch, "empty", &.{"--shared=group"}, .group);
-        try scratch.writeFile(io, "mode/info/exclude", "x\n");
-        try compareInit(gpa, io, &scratch, "mode", &.{"--shared=0640"}, .{ .mode = 0o640 });
-        try scratch.writeFile(io, "all/config", "[core]\n\tsharedrepository = all\n");
-        try scratch.writeFile(io, "all/info/exclude", "x\n");
-        try compareInit(gpa, io, &scratch, "all", &.{}, null);
-    }
+    try compareInit(gpa, io, &scratch, "empty", &.{"--shared=group"}, .group);
+    try scratch.writeFile(io, "mode/info/exclude", "x\n");
+    try compareInit(gpa, io, &scratch, "mode", &.{"--shared=0640"}, .{ .mode = 0o640 });
+    try scratch.writeFile(io, "all/config", "[core]\n\tsharedrepository = all\n");
+    try scratch.writeFile(io, "all/info/exclude", "x\n");
+    try compareInit(gpa, io, &scratch, "all", &.{}, null);
 }
 
 test "init.templateDir names the template git init copies" {

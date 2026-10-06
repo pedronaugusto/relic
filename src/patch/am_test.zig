@@ -86,12 +86,6 @@ fn threeCommits(io: Io, r: *testgit.Repo) !void {
 
 /// Everything in `rebase-apply`, sorted, `patch-merge-index` left out: an
 /// index file whose stat fields neither side fills.
-/// `error.SkipZigTest` on a git older than the session this keeps: git
-/// keeps `rebase-apply/quoted-cr` since 2.33.
-fn requireTodaysSession(gpa: Allocator, io: Io) !void {
-    try testgit.requireGitVersion(gpa, io, 2, 33);
-}
-
 fn stateFiles(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -233,7 +227,6 @@ test "keep, keep-non-patch, sign-off and message ids shape the commits as git's 
 test "a patch that does not apply stops both at the same mail with the same state, and either finishes the other's session" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try requireTodaysSession(gpa, io);
     const mbox = try makeMailbox(gpa, io, &.{}, threeCommits);
     defer gpa.free(mbox);
     for ([_]bool{ false, true }) |cross| {
@@ -276,7 +269,6 @@ test "a patch that does not apply stops both at the same mail with the same stat
 test "the three-way fallback leaves git's conflict, and skip and abort put things back as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try requireTodaysSession(gpa, io);
     const mbox = try makeMailbox(gpa, io, &.{}, threeCommits);
     defer gpa.free(mbox);
     for ([_][]const u8{ "skip", "abort" }) |how| {
@@ -306,7 +298,6 @@ test "the three-way fallback leaves git's conflict, and skip and abort put thing
 test "the three-way fallback reads the patch under --directory as the apply did, and a stray rebase-apply goes on abort and quit, as git's do" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try requireTodaysSession(gpa, io);
     const mbox = try makeMailbox(gpa, io, &.{}, threeCommits);
     defer gpa.free(mbox);
     var p = try Pair.init(gpa, io);
@@ -363,7 +354,6 @@ const plain_patch =
 test "mails in quoted-printable, base64, Latin-1, flowed and multipart text, with in-body headers and scissors, are read as git reads them" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try requireTodaysSession(gpa, io);
     const mails = [_]struct { mbox: []const u8, args: []const []const u8, options: am.Options }{
         .{ .mbox = mailWith("From: =?ISO-8859-1?Q?Ren=E9_Lat?= <rene@example.com>\nDate: Wed, 15 Nov 2023 10:00:00 +0100\nSubject: [PATCH] Quoted =?UTF-8?B?w6l0w6k=?=\nContent-Type: text/plain; charset=UTF-8\nContent-Transfer-Encoding: quoted-printable\n", "Caf=C3=A9 is =\nfolded.\n" ++ plain_patch), .args = &.{}, .options = .{ .committer = committer } },
         .{ .mbox = mailWith("From: A Latin <latin@example.com>\nDate: Wed, 15 Nov 2023 10:00:00 -0500\nSubject: Latin body\nContent-Type: text/plain; charset=ISO-8859-1\nContent-Transfer-Encoding: 8bit\n", "Caf\xe9 in Latin-1.\n" ++ plain_patch), .args = &.{}, .options = .{ .committer = committer } },

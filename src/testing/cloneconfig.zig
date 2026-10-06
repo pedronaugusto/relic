@@ -159,9 +159,8 @@ test "a clone goes where url.<base>.insteadOf sends it and records the URL as gi
     defer gpa.free(bare);
     try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
     // The person's own file names a short form for the server. It is the
-    // home's `.gitconfig`, named by `GIT_CONFIG_GLOBAL` as well for the git
-    // that reads that (2.32 and later) and found through `HOME` by one that
-    // does not.
+    // home's `.gitconfig`, named by `GIT_CONFIG_GLOBAL` as well as found
+    // through `HOME`.
     const url_root = try gpa.dupe(u8, root_path);
     defer gpa.free(url_root);
     if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, url_root, '\\', '/');

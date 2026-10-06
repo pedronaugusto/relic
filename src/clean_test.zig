@@ -99,11 +99,6 @@ fn sortedLines(gpa: Allocator, text: []const u8) ![]const u8 {
 
 /// Clean one copy with git and the other with `options`, and compare.
 fn compare(gpa: Allocator, io: Io, args: []const []const u8, options: clean_mod.Options) !void {
-    // git 2.32 fixed -X for ignored paths inside untracked and ignored
-    // directories ("git clean ... had confusion around working on or
-    // showing ignored paths inside an ignored directory"); an older git
-    // keeps them, and this follows the fixed one
-    if (options.ignored == .only and !try testgit.gitAtLeast(gpa, io, 2, 32)) return;
     var theirs = try testgit.Repo.init(gpa, io, &.{});
     defer theirs.deinit();
     try fixture(io, &theirs);

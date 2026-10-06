@@ -1889,14 +1889,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     defer gpa.free(pack_path);
     const idx_path = try std.fmt.allocPrint(gpa, "objects/pack/pack-{s}.idx", .{result.name.?.hex(&hex)});
     defer gpa.free(idx_path);
-    // `--rev-index` is git 2.31's; an older index-pack writes the index
-    // alone, and that is compared alone.
-    const rev_index = try testgit.gitAtLeast(gpa, io, 2, 31);
-    if (rev_index) {
-        try target.exec(io, &.{ "index-pack", "--rev-index", "-o", "check.idx", pack_path });
-    } else {
-        try target.exec(io, &.{ "index-pack", "-o", "check.idx", pack_path });
-    }
+    try target.exec(io, &.{ "index-pack", "--rev-index", "-o", "check.idx", pack_path });
     const ours = try target.readFile(io, idx_path);
     defer gpa.free(ours);
     const theirs = try target.readFile(io, "check.idx");
@@ -1907,11 +1900,9 @@ test "a thin pack is completed from the database, and git indexes the result ide
     defer gpa.free(rev_path);
     const our_rev = try target.readFile(io, rev_path);
     defer gpa.free(our_rev);
-    if (rev_index) {
-        const their_rev = try target.readFile(io, "check.rev");
-        defer gpa.free(their_rev);
-        try testing.expectEqualSlices(u8, their_rev, our_rev);
-    }
+    const their_rev = try target.readFile(io, "check.rev");
+    defer gpa.free(their_rev);
+    try testing.expectEqualSlices(u8, their_rev, our_rev);
     try target.exec(io, &.{ "verify-pack", idx_path });
     try target.exec(io, &.{ "update-ref", "refs/heads/main", new });
     try target.exec(io, &.{ "fsck", "--strict", "--no-dangling" });

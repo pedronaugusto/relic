@@ -87,10 +87,7 @@ test "a bundle's header is git's byte for byte, and its pack unbundles in git to
         .{ .args = &.{ "--filter=blob:limit=1k", "main" }, .request = .{ .include = &.{"main"}, .filter = "blob:limit=1k" } },
         .{ .args = &.{ "v1", "^main" }, .request = .{ .include = &.{"v1"}, .exclude = &.{"main"} } },
     };
-    // Filtered bundles are git 2.36's.
-    const filters = try testgit.gitAtLeast(gpa, io, 2, 36);
     for (cases, 0..) |case, n| {
-        if (case.request.filter != null and !filters) continue;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
@@ -181,7 +178,6 @@ fn packObjects(gpa: Allocator, io: Io, r: *testgit.Repo, dir: Io.Dir, dir_path: 
 test "a bundle filtered by sparse:oid= holds the objects git's holds" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    if (!try testgit.gitAtLeast(gpa, io, 2, 36)) return error.SkipZigTest;
     var env = try testgit.datedEnv(gpa, 1_700_000_000);
     defer env.deinit();
     var src = try history(gpa, io, &env);

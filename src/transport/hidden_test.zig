@@ -44,7 +44,6 @@ fn sortLines(lines: *std.ArrayList([]u8)) void {
 test "a repository on this machine lists what git ls-remote lists of it, hidden refs left out" {
     const gpa = testing.allocator;
     const io = testing.io;
-    try testgit.requireGitVersion(gpa, io, 2, 30);
     var source = try hidingSource(gpa, io);
     defer source.deinit();
     const source_path = try testremote.absolutePath(gpa, io, source.dir);
@@ -98,7 +97,6 @@ test "a repository on this machine lists what git ls-remote lists of it, hidden 
 test "a hidden ref's tip is a v0 want only where git's upload-pack allows a tip" {
     const gpa = testing.allocator;
     const io = testing.io;
-    try testgit.requireGitVersion(gpa, io, 2, 30);
     var source = try hidingSource(gpa, io);
     defer source.deinit();
     const source_path = try testremote.absolutePath(gpa, io, source.dir);
@@ -136,7 +134,6 @@ test "a hidden ref's tip is a v0 want only where git's upload-pack allows a tip"
 test "a push to a hidden ref is refused as git's receive-pack refuses it" {
     const gpa = testing.allocator;
     const io = testing.io;
-    try testgit.requireGitVersion(gpa, io, 2, 30);
     var source = try hidingSource(gpa, io);
     defer source.deinit();
     const source_path = try testremote.absolutePath(gpa, io, source.dir);

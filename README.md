@@ -786,9 +786,10 @@ measurements run only from the `bench` branch harness on a quiet machine.
 temporary directory, and compared byte for byte where the format is exact.
 Because they come from git and not from a file in this repository, a format
 change arrives as a red build rather than as a silent divergence, and
-CI runs the suite against an old git and against git's own main branch as well
-as against the runner's. A machine with no git skips those tests instead of
-failing them. What is compared: an index at each version read and written
+CI runs the suite against the oldest supported git (Debian 12's 2.39.5) and
+against git's own main branch as well as against the runner's. A machine
+with no git skips those tests instead of failing them. What is compared:
+an index at each version read and written
 back; a repacked repository walked against `cat-file --batch-all-objects`,
 once with offset deltas, once with reference deltas, and once under SHA-256;
 `addAll` and `writeTree` against `add -A` and `write-tree`, including under
@@ -868,6 +869,13 @@ deep. The first is a named error and the second resolves without recursing.
 
 Zig 0.16.0. A `git` on the path for the fixture tests, which are skipped
 without one.
+
+Supported git: 2.39 and newer. The floor is the oldest git shipped by a
+supported LTS distribution, reviewed yearly; today that is Debian 12's 2.39,
+which is also the release Apple ships on macOS. Correctness is held to the
+newest git, 2.55 and git's main branch. The floor job only proves interop:
+repositories relic writes open in git 2.39, and its credential helpers, remote
+helpers and LFS filters work with relic.
 
 ## Licence
 

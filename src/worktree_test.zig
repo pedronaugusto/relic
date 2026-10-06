@@ -1429,8 +1429,8 @@ test "attributes resolve as git check-attr resolves them: the last assignment of
     try h.git_dir.createDirPath(io, "info");
     try h.git_dir.writeFile(io, .{ .sub_path = "info/attributes", .data = "[attr]n q\n" });
     try h.attrs.loadGlobal(io, h.git_dir, null, null);
-    // A .gitattributes that is a link is not followed, from git 2.32 on.
-    if (builtin.os.tag != .windows and try testgit.gitAtLeast(gpa, io, 2, 32)) {
+    // A .gitattributes that is a link is not followed.
+    if (builtin.os.tag != .windows) {
         try h.repo.writeFile(io, "elsewhere.attrs", "* evil\n");
         try h.repo.dir.createDirPath(io, "link");
         try h.repo.dir.symLink(io, "../elsewhere.attrs", "link/.gitattributes", .{});

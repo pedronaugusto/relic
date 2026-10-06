@@ -384,8 +384,6 @@ fn relicCommandValues(gpa: Allocator, io: Io, pairs: []const config_mod.Sources.
 test "GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are read as git reads them, both quotings, and refused where git refuses them" {
     const gpa = testing.allocator;
     const io = testing.io;
-    // GIT_CONFIG_COUNT and the 'key'='value' quoting are git 2.31's.
-    try testgit.requireGitVersion(gpa, io, 2, 31);
     var home = testing.tmpDir(.{});
     defer home.cleanup();
     const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);

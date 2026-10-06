@@ -14,10 +14,9 @@ const testgit = @import("testing/git.zig");
 const Repository = repo_mod.Repository;
 
 fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *Repository, args: []const []const u8, options: grep_mod.Options) !void {
-    // This follows today's git: `-m` came in 2.38, and `-o` with
-    // `--column` numbers each match from the start of the line since 2.55,
-    // where an older git counted from the end of the match before it.
-    if (options.max_count != null and !try testgit.gitAtLeast(gpa, io, 2, 38)) return;
+    // This follows today's git: `-o` with `--column` numbers each match
+    // from the start of the line since 2.55, where an older git counted
+    // from the end of the match before it.
     if (options.only_matching and options.column == true and !try testgit.gitAtLeast(gpa, io, 2, 55)) return;
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);

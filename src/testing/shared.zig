@@ -140,9 +140,6 @@ test "core.sharedRepository gives what is written git's permissions" {
     if (!std.Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // git sets a directory's set-group-ID bit only where the group gains
-    // something from 2.39 on
-    try testgit.requireGitVersion(gpa, io, 2, 39);
     for ([_]?[]const u8{ null, "umask", "group", "true", "all", "0640", "0660", "0600", "0644" }) |setting| {
         var a = try testgit.Repo.init(gpa, io, &.{});
         defer a.deinit();

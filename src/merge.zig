@@ -789,8 +789,6 @@ test "markers take a carriage return where both sides end their lines with one" 
     const ours = "a\r\nB\r\nc\r\n";
     const theirs = "a\r\nX\r\nc\r\n";
     for ([_]ConflictStyle{ .merge, .diff3, .zdiff3 }) |style| {
-        // zdiff3 is git 2.35's.
-        if (style == .zdiff3 and !try testgit.gitAtLeast(gpa, io, 2, 35)) continue;
         const expected = try gitMergeFile(gpa, io, &repo, ancestor, ours, theirs, .{ .conflict_style = style });
         defer gpa.free(expected);
         var got = try blobs(gpa, ancestor, ours, theirs, .{ .conflict_style = style });
@@ -803,8 +801,6 @@ test "markers take a carriage return where both sides end their lines with one" 
 test "the content-merging tree merge writes the tree and the stages git merge-tree does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // `merge-tree --write-tree` is 2.38's.
-    try testgit.requireGitVersion(gpa, io, 2, 38);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
 

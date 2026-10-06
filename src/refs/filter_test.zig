@@ -392,13 +392,9 @@ test "every atom git offers for refs comes out as git's for-each-ref writes it" 
     if (try testgit.gitAtLeast(gpa, io, 2, 45)) {
         try compare(gpa, io, git, .for_each_ref, &.{"--format=%(authordate:iso-strict)|%(taggerdate:iso8601-strict)|%(creatordate:iso-strict-local)"});
     }
-    if (try testgit.gitAtLeast(gpa, io, 2, 29)) {
-        try compare(gpa, io, git, .for_each_ref, &.{"--format=%(contents:size)|%(objectsize:disk)|%(deltabase)|%(upstream:remoteref)|%(push:remoteref)"});
-    }
-    if (try testgit.gitAtLeast(gpa, io, 2, 35)) {
-        try compare(gpa, io, git, .for_each_ref, &.{"--format=%(subject:sanitize)|%(authoremail:trim)|%(authoremail:localpart)|%(*authoremail:trim)|%(raw:size)|%(authordate:human)"});
-        try compare(gpa, io, git, .for_each_ref, &.{ "--perl", "--format=%(raw)" });
-    }
+    try compare(gpa, io, git, .for_each_ref, &.{"--format=%(contents:size)|%(objectsize:disk)|%(deltabase)|%(upstream:remoteref)|%(push:remoteref)"});
+    try compare(gpa, io, git, .for_each_ref, &.{"--format=%(subject:sanitize)|%(authoremail:trim)|%(authoremail:localpart)|%(*authoremail:trim)|%(raw:size)|%(authordate:human)"});
+    try compare(gpa, io, git, .for_each_ref, &.{ "--perl", "--format=%(raw)" });
     if (try testgit.gitAtLeast(gpa, io, 2, 42)) {
         try compare(gpa, io, git, .for_each_ref, &.{"--format=%(describe)|%(describe:tags)|%(describe:abbrev=4)|%(describe:match=v1*,exclude=*rc*)|%(describe:tags=no,abbrev=0)|%(*describe)"});
         try compare(gpa, io, git, .for_each_ref, &.{"--format=%(signature)|%(signature:grade)|%(signature:signer)|%(signature:key)|%(signature:fingerprint)|%(signature:primarykeyfingerprint)|%(signature:trustlevel)"});
@@ -408,9 +404,7 @@ test "every atom git offers for refs comes out as git's for-each-ref writes it" 
     }
     // git pack-objects makes a delta and the sizes on disk change
     try git.exec(io, &.{ "repack", "-adq" });
-    if (try testgit.gitAtLeast(gpa, io, 2, 29)) {
-        try compare(gpa, io, git, .for_each_ref, &.{"--format=%(objectsize:disk)|%(deltabase)|%(*objectsize:disk)|%(*deltabase)"});
-    }
+    try compare(gpa, io, git, .for_each_ref, &.{"--format=%(objectsize:disk)|%(deltabase)|%(*objectsize:disk)|%(*deltabase)"});
 }
 
 test "blocks, quoting and literals are written as git writes them" {
