@@ -1,111 +1,6 @@
 [
   {
     "rule": "catch-unreachable",
-    "path": "src/config.zig",
-    "source": "const parsed = parseVariableLine(replacement) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/config.zig",
-    "source": "const parsed = parseVariableLine(new_text) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/config/userconfig.zig",
-    "source": "const key = environ.get(std.fmt.bufPrint(&key_buf, \"GIT_CONFIG_KEY_{d}\", .{i}) catch unreachable) orelse",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/config/userconfig.zig",
-    "source": "const value = environ.get(std.fmt.bufPrint(&value_buf, \"GIT_CONFIG_VALUE_{d}\", .{i}) catch unreachable) orelse",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/diff.zig",
-    "source": "return std.fmt.bufPrint(buf, \"Subproject commit {s}\\n\", .{oid.hex(&hex)}) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/diff/patchid.zig",
-    "source": "return Oid.fromRaw(db.objectFormat(), result[0..raw_len]) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/diff/patchid.zig",
-    "source": "h.update(std.fmt.bufPrint(&buf, \"{o:0>6}\", .{mode.raw()}) catch unreachable);",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/repo.zig",
-    "source": ".mode => |m| std.fmt.bufPrint(buf, \"0{o}\", .{m}) catch unreachable,",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/repo.zig",
-    "source": "try set(&config, \"core.repositoryformatversion\", std.fmt.bufPrint(&version_buf, \"{d}\", .{version}) catch unreachable);",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/repo/fs.zig",
-    "source": "const line = std.fmt.bufPrint(&text, \"pid {d}\\n\", .{currentPid()}) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/repo/fs.zig",
-    "source": "_ = std.fmt.bufPrint(&hex, \"{x}\", .{&raw}) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/repo/fs.zig",
-    "source": "return std.fmt.bufPrint(buf, \"{s}{s}\", .{ prefix, hex }) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/repo/hooks.zig",
-    "source": "return std.fmt.bufPrint(buf, \"@{d} {c}{d:0>2}{d:0>2}\", .{ who.when_secs, sign, abs / 60, abs % 60 }) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/repo/ident.zig",
-    "source": "const key = std.fmt.bufPrint(&key_buf, \"{s}.email\", .{role_name}) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/repo/ident.zig",
-    "source": "const key = std.fmt.bufPrint(&key_buf, \"{s}.name\", .{role_name}) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
     "path": "src/transport/tls/Client.zig",
     "source": "const record_ct = input.takeEnumNonexhaustive(tls.ContentType, .big) catch unreachable; // already peeked",
     "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
@@ -166,12 +61,5 @@
     "source": "const auth_tag = (input.takeArray(P.mac_length) catch unreachable).*; // already peeked",
     "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
     "reason": "src/transport/tls/Client.zig is Zig's std TLS client, held byte for byte to std and its recorded patch by zig build check-tls-fork (ci/preflight.json vendored); this line is std's, and changing it would fork the fork."
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/worktree/convert.zig",
-    "source": ".hash_only => lfs.hashOnly(&source) catch unreachable,",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
   }
 ]
