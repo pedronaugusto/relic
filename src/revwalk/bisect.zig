@@ -26,6 +26,8 @@
 //! simplified to the commits that change them, and a commit that does not
 //! is neither counted nor tested.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -344,7 +346,7 @@ fn checkAndSetTerms(c: *Ctx, t: *Terms, cmd: []const u8) Error!void {
 
 /// The terms of the bisection in progress, from `BISECT_TERMS`, or `null`
 /// when none are recorded: `git bisect terms`.
-pub fn terms(gpa: Allocator, io: Io, repo: *Repository) Error!?struct { bad: []u8, good: []u8 } {
+pub fn terms(gpa: Allocator, io: Io, repo: *Repository) Self.Error!?struct { bad: []u8, good: []u8 } {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
@@ -1015,7 +1017,7 @@ fn isSpace(ch: u8) bool {
 /// [--no-checkout] [--first-parent] [--reset-when-found[=<where>]] [<bad>
 /// [<good>...]] [--] [<pathspec>...]`, `args` as git is given them: they
 /// are what the log records.
-pub fn start(gpa: Allocator, io: Io, repo: *Repository, args: []const []const u8, options: Options) Error!Report {
+pub fn start(gpa: Allocator, io: Io, repo: *Repository, args: []const []const u8, options: Options) Self.Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
@@ -1139,7 +1141,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
 /// `git bisect <term> [<rev>...]`, `git bisect skip [<rev>...]`: `state`
 /// is the bad or the good term or `skip`, and `revs` empty means
 /// `BISECT_HEAD` or `HEAD`. A `skip` of `<a>..<b>` skips the range.
-pub fn mark(gpa: Allocator, io: Io, repo: *Repository, state: []const u8, revs: []const []const u8, options: Options) Error!Report {
+pub fn mark(gpa: Allocator, io: Io, repo: *Repository, state: []const u8, revs: []const []const u8, options: Options) Self.Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
@@ -1190,7 +1192,7 @@ fn state_(c: *Ctx, t: *Terms, state: []const u8, revs: []const []const u8) Error
 }
 
 /// `git bisect next`.
-pub fn nextStep(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Report {
+pub fn nextStep(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
@@ -1203,7 +1205,7 @@ pub fn nextStep(gpa: Allocator, io: Io, repo: *Repository, options: Options) Err
 
 /// `git bisect reset [<commit>]`: back to where the bisection started, or
 /// to `commit`, and every trace of it removed.
-pub fn reset(gpa: Allocator, io: Io, repo: *Repository, commit: ?[]const u8, options: Options) Error!Report {
+pub fn reset(gpa: Allocator, io: Io, repo: *Repository, commit: ?[]const u8, options: Options) Self.Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
@@ -1229,7 +1231,7 @@ fn resetTo(c: *Ctx, commit: ?[]const u8) Error!void {
 }
 
 /// `git bisect log`: what `BISECT_LOG` holds. The result is the caller's.
-pub fn log(gpa: Allocator, io: Io, repo: *Repository) Error![]u8 {
+pub fn log(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
     const text = repo.git_dir.readFileAlloc(io, "BISECT_LOG", gpa, .unlimited) catch |err| switch (err) {
         error.FileNotFound => return error.NoLog,
         else => |e| return e,
@@ -1244,7 +1246,7 @@ pub fn log(gpa: Allocator, io: Io, repo: *Repository) Error![]u8 {
 /// `git bisect replay`: the state of the bisection in progress cleaned,
 /// with nothing checked out, then the one a log records done again, nothing
 /// checked out but by its `start` and its end.
-pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, options: Options) Error!Report {
+pub fn replay(gpa: Allocator, io: Io, repo: *Repository, log_text: []const u8, options: Options) Self.Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;
@@ -1317,7 +1319,7 @@ pub const RunOptions = struct {
 /// `git bisect run <cmd> [<arg>...]`: the command run on each commit to
 /// test, its exit status the verdict -- 0 good, 125 skip, 1 to 127 bad --
 /// until the first bad commit is found or only skipped ones are left.
-pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u8, options: Options, run_options: RunOptions) Error!Report {
+pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u8, options: Options, run_options: RunOptions) Self.Error!Report {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var out: std.ArrayList(u8) = .empty;

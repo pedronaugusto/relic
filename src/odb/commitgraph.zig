@@ -11,6 +11,8 @@
 //! same name; a graph that carries only those is read for its parents and
 //! reports no generations rather than pretending the two are the same.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -75,7 +77,7 @@ pub const Graph = struct {
     bloom_settings: bloom.Settings = .{},
 
     /// Read `objects/info/commit-graph`, or `null` when there is none.
-    pub fn open(gpa: Allocator, io: Io, objects_dir: Io.Dir, kind: hash.Kind) Error!?Graph {
+    pub fn open(gpa: Allocator, io: Io, objects_dir: Io.Dir, kind: hash.Kind) Self.Error!?Graph {
         // Keep discovery failures distinct from an absent optional accelerator.
         objects_dir.access(io, "info/commit-graphs/commit-graph-chain", .{}) catch |err| switch (err) {
             error.FileNotFound => {},
@@ -124,7 +126,7 @@ pub const Graph = struct {
     }
 
     /// Read a commit-graph from bytes this takes ownership of.
-    pub fn parse(gpa: Allocator, kind: hash.Kind, bytes: []const u8) Error!Graph {
+    pub fn parse(gpa: Allocator, kind: hash.Kind, bytes: []const u8) Self.Error!Graph {
         return parseBase(gpa, kind, bytes, null);
     }
 
@@ -242,7 +244,7 @@ pub const Graph = struct {
     }
 
     /// The changed-path filter at a global graph position, or null.
-    pub fn changedPaths(graph: *const Graph, position: u32) Error!?struct { bytes: []const u8, settings: bloom.Settings } {
+    pub fn changedPaths(graph: *const Graph, position: u32) Self.Error!?struct { bytes: []const u8, settings: bloom.Settings } {
         if (position >= graph.count) return error.CorruptCommitGraph;
         if (position < graph.base_count) return graph.base.?.changedPaths(position);
         const index = graph.bloom_index orelse return null;
@@ -260,7 +262,7 @@ pub const Graph = struct {
     }
 
     /// Verify parents, generation offsets and changed-path indexes.
-    pub fn verify(graph: *const Graph) Error!void {
+    pub fn verify(graph: *const Graph) Self.Error!void {
         for (0..graph.count) |i| {
             const commit_value = try graph.commitAt(@intCast(i));
             const parents = try graph.parentsOf(graph.gpa, @intCast(i));
@@ -318,7 +320,7 @@ pub const Graph = struct {
     }
 
     /// The commit at `position`.
-    pub fn commitAt(graph: *const Graph, position: u32) Error!Commit {
+    pub fn commitAt(graph: *const Graph, position: u32) Self.Error!Commit {
         if (position >= graph.count) return error.CorruptCommitGraph;
         if (position < graph.base_count) return graph.base.?.commitAt(position);
         const local = position - graph.base_count;
@@ -378,7 +380,7 @@ pub const Graph = struct {
     }
 
     /// The commit named `oid`, or `null` when the graph does not hold it.
-    pub fn commit(graph: *const Graph, oid: Oid) Error!?Commit {
+    pub fn commit(graph: *const Graph, oid: Oid) Self.Error!?Commit {
         const position = graph.find(oid) orelse return null;
         return try graph.commitAt(position);
     }
@@ -387,7 +389,7 @@ pub const Graph = struct {
     ///
     /// The result is the caller's. An octopus merge's third and later
     /// parents come out of the `EDGE` chunk.
-    pub fn parentsOf(graph: *const Graph, gpa: Allocator, position: u32) Error![]Oid {
+    pub fn parentsOf(graph: *const Graph, gpa: Allocator, position: u32) Self.Error![]Oid {
         if (position < graph.base_count) return graph.base.?.parentsOf(gpa, position);
         const found = try graph.commitAt(position);
         var out: std.ArrayList(Oid) = .empty;

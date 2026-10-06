@@ -8,6 +8,8 @@
 //! way, and `writeIndexFile` makes the `.idx`, byte for byte git's, for it
 //! and for a pack received by `indexpack.zig`.
 
+const Self = @This();
+
 const std = @import("std");
 const crc32 = @import("../crc32.zig");
 const Allocator = std.mem.Allocator;
@@ -132,14 +134,14 @@ pub const Index = struct {
         sub_path: []const u8,
         kind: Kind,
         max_bytes: usize,
-    ) IndexError!Index {
+    ) Self.IndexError!Index {
         const bytes = try dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes));
         // parse takes ownership on success and failure.
         return parse(gpa, kind, bytes);
     }
 
     /// Read an index from bytes this takes ownership of.
-    pub fn parse(gpa: Allocator, kind: Kind, bytes: []u8) IndexError!Index {
+    pub fn parse(gpa: Allocator, kind: Kind, bytes: []u8) Self.IndexError!Index {
         errdefer gpa.free(bytes);
         const raw_len = kind.rawLen();
         if (bytes.len < 8) return error.TruncatedIndex;
@@ -226,7 +228,7 @@ pub const Index = struct {
     }
 
     /// The pack offset of the object at position `i`.
-    pub fn offsetAt(index: Index, i: u32) IndexError!u64 {
+    pub fn offsetAt(index: Index, i: u32) Self.IndexError!u64 {
         const small = std.mem.readInt(u32, index.bytes[index.offsets_at + @as(usize, i) * 4 ..][0..4], .big);
         if (small & 0x8000_0000 == 0) return small;
         const row = small & 0x7fff_ffff;
@@ -240,7 +242,7 @@ pub const Index = struct {
     }
 
     /// Where `oid` lives, or `null` if this pack does not hold it.
-    pub fn find(index: Index, oid: Oid) IndexError!?Located {
+    pub fn find(index: Index, oid: Oid) Self.IndexError!?Located {
         if (oid.kind != index.kind) return null;
         const raw = oid.raw();
         var lo: u32 = if (raw[0] == 0) 0 else std.mem.readInt(u32, index.bytes[8 + (@as(usize, raw[0]) - 1) * 4 ..][0..4], .big);
@@ -311,7 +313,7 @@ pub const Index = struct {
         i: u32,
 
         /// The next object, or `null` at the end.
-        pub fn next(it: *Iterator) IndexError!?struct { oid: Oid, located: Located } {
+        pub fn next(it: *Iterator) Self.IndexError!?struct { oid: Oid, located: Located } {
             if (it.i >= it.index.count) return null;
             const i = it.i;
             it.i += 1;
@@ -465,7 +467,7 @@ pub const Pack = struct {
             /// each step at least what it held then, reads no more blocks.
             read_cache_bytes: usize = default_read_cache_bytes,
         },
-    ) Error!Pack {
+    ) Self.Error!Pack {
         var name_buf: [512]u8 = undefined;
         const idx_name = std.fmt.bufPrint(&name_buf, "{s}.idx", .{base}) catch return error.NameTooLong;
         var index = try Index.open(gpa, io, dir, idx_name, kind, options.max_index_bytes);
@@ -700,7 +702,7 @@ pub const Pack = struct {
     /// The `out.len` packed bytes from `offset`, as they are in the file,
     /// read positionally or from the mapping. Nothing of the pack that
     /// changes is touched, so tasks call it at once on one pack.
-    pub fn readStored(p: *const Pack, io: Io, offset: u64, out: []u8) Error!void {
+    pub fn readStored(p: *const Pack, io: Io, offset: u64, out: []u8) Self.Error!void {
         if (offset > p.size or out.len > p.size - offset) return error.TruncatedPack;
         if (p.memory) |mem| {
             @memcpy(out, mem[@intCast(offset)..][0..out.len]);
@@ -715,7 +717,7 @@ pub const Pack = struct {
     }
 
     /// The header of the entry at `offset`, without inflating anything.
-    pub fn entryHeaderAt(p: *Pack, io: Io, offset: u64) Error!EntryHeader {
+    pub fn entryHeaderAt(p: *Pack, io: Io, offset: u64) Self.Error!EntryHeader {
         if (offset < 12 or offset >= p.bodyEnd()) return error.TruncatedPack;
         var buf: [32 + hash.max_raw_len]u8 = undefined;
         const available: usize = @intCast(@min(buf.len, p.bodyEnd() - offset));
@@ -737,7 +739,7 @@ pub const Pack = struct {
 
     /// The header at the start of `bytes`, which begin at `offset`, or
     /// `null` when it runs past their end.
-    pub fn parseEntryHeader(p: *const Pack, offset: u64, bytes: []const u8) Error!?EntryHeader {
+    pub fn parseEntryHeader(p: *const Pack, offset: u64, bytes: []const u8) Self.Error!?EntryHeader {
         var i: usize = 0;
         if (i >= bytes.len) return null;
         var byte = bytes[i];
@@ -866,7 +868,7 @@ pub const Pack = struct {
     /// reads use — so tasks call it at once on one pack, each with a reader
     /// of its own. A delta has no whole object to inflate here: its base is
     /// `readAt`'s, with the delta-base cache.
-    pub fn inflateWith(p: *const Pack, io: Io, reader: *EntryReader, at: u64, size: u64, out: []u8) Error!void {
+    pub fn inflateWith(p: *const Pack, io: Io, reader: *EntryReader, at: u64, size: u64, out: []u8) Self.Error!void {
         const result_len = try inflatedLen(size);
         if (out.len < result_len +| decode_slack) return error.StreamTooLong;
         var fixed_reader: Io.Reader = undefined;
@@ -899,7 +901,7 @@ pub const Pack = struct {
     /// `cache` may be `null`; when it is not, resolved bases are kept in it,
     /// which is what makes a walk over a pack proportional to its objects
     /// rather than to its chains.
-    pub fn readAt(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32) Error!Object {
+    pub fn readAt(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32) Self.Error!Object {
         return p.resolve(io, offset, cache, pack_id, null);
     }
 
@@ -907,7 +909,7 @@ pub const Pack = struct {
     /// of its own: `out` is cleared, grows with this pack's allocator as
     /// needed, and then holds exactly the object. A whole object is
     /// inflated straight into it.
-    pub fn readAtInto(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32, out: *std.ArrayList(u8)) Error!object.Type {
+    pub fn readAtInto(p: *Pack, io: Io, offset: u64, cache: ?*Cache, pack_id: u32, out: *std.ArrayList(u8)) Self.Error!object.Type {
         return (try p.resolve(io, offset, cache, pack_id, out)).type;
     }
 
@@ -1002,7 +1004,7 @@ pub const Pack = struct {
     /// entry, which an offset delta always has before it, rather than by
     /// walking its chain again. The result is the caller's, freed with
     /// `gpa`.
-    pub fn headers(p: *Pack, io: Io, gpa: Allocator) Error![]object.Header {
+    pub fn headers(p: *Pack, gpa: Allocator, io: Io) Self.Error![]object.Header {
         const n = p.index.count;
         const Entry = struct { offset: u64, position: u32 };
         const order = try gpa.alloc(Entry, n);
@@ -1055,7 +1057,7 @@ pub const Pack = struct {
     /// A delta's chain is walked for the type — which is the base's — but the
     /// size is the delta's own stated target, read out of its first few
     /// bytes, so nothing large is decompressed.
-    pub fn headerAt(p: *Pack, io: Io, offset: u64) Error!object.Header {
+    pub fn headerAt(p: *Pack, io: Io, offset: u64) Self.Error!object.Header {
         var current = offset;
         var depth: u32 = 0;
         var size: ?u64 = null;
@@ -1121,7 +1123,7 @@ pub const Pack = struct {
     ///
     /// The pack's own trailing checksum is checked first, so a truncated file
     /// is one error and not thousands.
-    pub fn verify(p: *Pack, io: Io, cache: ?*Cache, pack_id: u32) Error!Report {
+    pub fn verify(p: *Pack, io: Io, cache: ?*Cache, pack_id: u32) Self.Error!Report {
         try p.verifyChecksum(io);
 
         // The compressed span of an entry runs to the next entry's offset, so
@@ -1165,7 +1167,7 @@ pub const Pack = struct {
 
     /// Check the pack's trailing checksum, which names the pack and which the
     /// index repeats.
-    pub fn verifyChecksum(p: *Pack, io: Io) Error!void {
+    pub fn verifyChecksum(p: *Pack, io: Io) Self.Error!void {
         var hasher: hash.Hasher = .init(p.kind);
         var buf: [64 * 1024]u8 = undefined;
         var at: u64 = 0;
@@ -1891,7 +1893,7 @@ pub const Writer = struct {
         kind: Kind,
         object_count: u32,
         options: WriteOptions,
-    ) WriteError!*Writer {
+    ) Self.WriteError!*Writer {
         return initMaybeCounted(gpa, io, dir, kind, object_count, options);
     }
 
@@ -1909,7 +1911,7 @@ pub const Writer = struct {
         dir: Io.Dir,
         kind: Kind,
         options: WriteOptions,
-    ) WriteError!*Writer {
+    ) Self.WriteError!*Writer {
         return initMaybeCounted(gpa, io, dir, kind, null, options);
     }
 
@@ -1923,7 +1925,7 @@ pub const Writer = struct {
         out: *Io.Writer,
         object_count: u32,
         options: WriteOptions,
-    ) WriteError!*Writer {
+    ) Self.WriteError!*Writer {
         const w = try gpa.create(Writer);
         errdefer gpa.destroy(w);
         var deflater: Deflater = try .init(gpa);
@@ -2071,7 +2073,7 @@ pub const Writer = struct {
 
     /// Add a whole object. Returns the offset the entry begins at, which is
     /// what an offset delta against it needs.
-    pub fn add(w: *Writer, oid: Oid, t: object.Type, bytes: []const u8) WriteError!u64 {
+    pub fn add(w: *Writer, oid: Oid, t: object.Type, bytes: []const u8) Self.WriteError!u64 {
         return w.addEntry(oid, typeBits(t), bytes.len, &.{}, bytes);
     }
 
@@ -2081,7 +2083,7 @@ pub const Writer = struct {
     /// only allows an offset delta to point backwards, and a reader that met
     /// one pointing forwards would be reading an object that is not there
     /// yet.
-    pub fn addOfsDelta(w: *Writer, oid: Oid, base_offset: u64, delta_bytes: []const u8) WriteError!u64 {
+    pub fn addOfsDelta(w: *Writer, oid: Oid, base_offset: u64, delta_bytes: []const u8) Self.WriteError!u64 {
         const at = w.sink.count;
         if (base_offset >= at) return error.DeltaBaseNotWritten;
         var buf: [16]u8 = undefined;
@@ -2092,7 +2094,7 @@ pub const Writer = struct {
 
     /// Add an object stored as a delta against a name, which need not be in
     /// this pack. A reader resolves it through the database.
-    pub fn addRefDelta(w: *Writer, oid: Oid, base: Oid, delta_bytes: []const u8) WriteError!u64 {
+    pub fn addRefDelta(w: *Writer, oid: Oid, base: Oid, delta_bytes: []const u8) Self.WriteError!u64 {
         w.deltas += 1;
         return w.addEntry(oid, 7, delta_bytes.len, base.raw(), delta_bytes);
     }
@@ -2104,7 +2106,7 @@ pub const Writer = struct {
     /// those bytes, so the pack is the same pack. Anything else makes a
     /// corrupt pack, as wrong delta bytes given to `addOfsDelta` would.
     /// Returns the offset the entry begins at.
-    pub fn addDeflated(w: *Writer, oid: Oid, payload: Payload, payload_len: u64, deflated: []const u8) WriteError!u64 {
+    pub fn addDeflated(w: *Writer, oid: Oid, payload: Payload, payload_len: u64, deflated: []const u8) Self.WriteError!u64 {
         var buf: [16]u8 = undefined;
         const at = w.sink.count;
         const type_bits: u3, const extra: []const u8 = switch (payload) {
@@ -2170,7 +2172,7 @@ pub const Writer = struct {
     ///
     /// The name both files carry is the pack's own trailing checksum, which
     /// is what git names a pack after.
-    pub fn finish(w: *Writer, io: Io) WriteError!WriteReport {
+    pub fn finish(w: *Writer, io: Io) Self.WriteError!WriteReport {
         if (w.expected) |expected| {
             if (w.entries.items.len != expected) return error.ObjectCountMismatch;
         }
@@ -2303,7 +2305,7 @@ pub fn writeIndexFile(
     entries: []IndexEntry,
     pack_checksum: Oid,
     sync: fs.Sync,
-) WriteError!u64 {
+) Self.WriteError!u64 {
     std.mem.sort(WrittenEntry, entries, {}, lessThanWritten);
 
     const raw_len = kind.rawLen();

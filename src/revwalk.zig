@@ -14,6 +14,8 @@
 //! repository's boundary commits have no parents here, and its commit-graph,
 //! which knows parents the repository lacks, is not read.
 
+const Self = @This();
+
 pub const bisect = @import("revwalk/bisect.zig");
 pub const describe = @import("revwalk/describe.zig");
 pub const shortlog = @import("revwalk/shortlog.zig");
@@ -291,7 +293,7 @@ pub const Walk = struct {
     }
 
     /// Load and order the commits. `next` does this itself the first time.
-    pub fn prepare(walk: *Walk, io: Io) Error!void {
+    pub fn prepare(walk: *Walk, io: Io) Self.Error!void {
         if (walk.prepared) return;
         walk.ordered.clearRetainingCapacity();
         walk.position = 0;
@@ -412,7 +414,7 @@ pub const Walk = struct {
     }
 
     /// The next commit, or `null` at the end.
-    pub fn next(walk: *Walk, io: Io) Error!?Commit {
+    pub fn next(walk: *Walk, io: Io) Self.Error!?Commit {
         try walk.prepare(io);
         if (walk.position >= walk.ordered.items.len) return null;
         const commit = walk.ordered.items[walk.position];
@@ -421,7 +423,7 @@ pub const Walk = struct {
     }
 
     /// How many commits the walk covers. Prepares it.
-    pub fn count(walk: *Walk, io: Io) Error!usize {
+    pub fn count(walk: *Walk, io: Io) Self.Error!usize {
         try walk.prepare(io);
         return walk.ordered.items.len;
     }
@@ -468,7 +470,7 @@ pub fn parentsOf(db: *const odb_mod.Odb, oid: Oid, parents: []const Oid) []const
 ///
 /// The result is the caller's. An empty result means the two commits share
 /// no history, which is what an unrelated-histories merge looks like.
-pub fn mergeBases(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid) Error![]Oid {
+pub fn mergeBases(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid) Self.Error![]Oid {
     return mergeBasesWith(gpa, io, db, a, b, .{});
 }
 
@@ -490,7 +492,7 @@ pub const Virtual = struct {
 };
 
 /// `mergeBases`, reading commits as `options` says.
-pub fn mergeBasesWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid, options: BaseOptions) Error![]Oid {
+pub fn mergeBasesWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid, options: BaseOptions) Self.Error![]Oid {
     return mergeBasesManyWith(gpa, io, db, a, &.{b}, options);
 }
 
@@ -498,12 +500,12 @@ pub fn mergeBasesWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid, 
 /// commit an octopus merge of all of `twos` would be -- every common
 /// ancestor of `one` and any of `twos` that no other one reaches -- newest
 /// first. The result is the caller's.
-pub fn mergeBasesMany(gpa: Allocator, io: Io, db: *odb_mod.Odb, one: Oid, twos: []const Oid) Error![]Oid {
+pub fn mergeBasesMany(gpa: Allocator, io: Io, db: *odb_mod.Odb, one: Oid, twos: []const Oid) Self.Error![]Oid {
     return mergeBasesManyWith(gpa, io, db, one, twos, .{});
 }
 
 /// `mergeBasesMany`, reading commits as `options` says.
-pub fn mergeBasesManyWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, twos: []const Oid, options: BaseOptions) Error![]Oid {
+pub fn mergeBasesManyWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, twos: []const Oid, options: BaseOptions) Self.Error![]Oid {
     for (twos) |b| if (a.eql(b)) {
         const out = try gpa.alloc(Oid, 1);
         out[0] = a;
@@ -744,7 +746,7 @@ const Painter = struct {
 
 /// The first merge base of `a` and `b`, or `null` when they share no
 /// history.
-pub fn mergeBase(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid) Error!?Oid {
+pub fn mergeBase(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid) Self.Error!?Oid {
     const bases = try mergeBases(gpa, io, db, a, b);
     defer gpa.free(bases);
     if (bases.len == 0) return null;
@@ -754,12 +756,12 @@ pub fn mergeBase(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: Oid, b: Oid) Error
 /// Whether `ancestor` is reachable from `descendant`: git's
 /// `repo_in_merge_bases`, which paints both down by date and stops as soon
 /// as nothing left to walk can decide it.
-pub fn isAncestor(gpa: Allocator, io: Io, db: *odb_mod.Odb, ancestor: Oid, descendant: Oid) Error!bool {
+pub fn isAncestor(gpa: Allocator, io: Io, db: *odb_mod.Odb, ancestor: Oid, descendant: Oid) Self.Error!bool {
     return isAncestorWith(gpa, io, db, ancestor, descendant, .{});
 }
 
 /// `isAncestor`, reading commits as `options` says.
-pub fn isAncestorWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, ancestor: Oid, descendant: Oid, options: BaseOptions) Error!bool {
+pub fn isAncestorWith(gpa: Allocator, io: Io, db: *odb_mod.Odb, ancestor: Oid, descendant: Oid, options: BaseOptions) Self.Error!bool {
     if (ancestor.eql(descendant)) return true;
     var painter: Painter = .{ .gpa = gpa, .io = io, .db = db, .virtuals = options.virtuals, .graph = options.graph };
     defer painter.deinit();

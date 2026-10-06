@@ -27,6 +27,8 @@
 //! This is the one owner of mailmap parsing and lookup in relic: shortlog
 //! asks it, and so does anything else that shows a commit's people.
 
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -56,7 +58,7 @@ fn isSpace(c: u8) bool {
 }
 
 /// Keys compared as `strcasecmp` compares them: ASCII case folded.
-const Folded = struct {
+pub const Folded = struct {
     pub fn hash(_: Folded, key: []const u8) u64 {
         var h = std.hash.Wyhash.init(0);
         var buf: [64]u8 = undefined;
@@ -207,7 +209,7 @@ pub const Mailmap = struct {
     /// `mailmap.file`. One that is missing, cannot be opened, or does not
     /// name a blob is passed over, as git passes over it with an error on
     /// its standard error.
-    pub fn load(gpa: Allocator, io: Io, repo: *Repository) LoadError!Mailmap {
+    pub fn load(gpa: Allocator, io: Io, repo: *Repository) Self.LoadError!Mailmap {
         var m: Mailmap = .init(gpa);
         errdefer m.deinit();
         const config = repo.configuration();

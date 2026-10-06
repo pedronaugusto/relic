@@ -1,4 +1,6 @@
 //! Bind a reachability bitmap to its pack's or MIDX's object orders.
+
+const Self = @This();
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -27,7 +29,7 @@ pub const Store = struct {
 
     /// Open a MIDX bitmap first, then a pack bitmap. A caller may fall back on
     /// malformed optional data, but IO and allocation errors keep their names.
-    pub fn open(gpa: Allocator, io: Io, objects: Io.Dir, kind: hash.Kind) Error!?Store {
+    pub fn open(gpa: Allocator, io: Io, objects: Io.Dir, kind: hash.Kind) Self.Error!?Store {
         const dir = objects.openDir(io, "pack", .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => return err,

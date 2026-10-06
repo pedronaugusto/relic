@@ -4,6 +4,8 @@
 //! given and every `write` appends to a writer the caller owns, so an object
 //! may be built in memory, named, and only then stored.
 
+const Self = @This();
+
 pub const fsck = @import("object/fsck.zig");
 // The modules relic's API puts under this one, as `relic.object.<name>`.
 
@@ -182,7 +184,7 @@ pub const Tree = struct {
         /// git's sort key: the name for a blob, the name with `/` appended
         /// for a subtree. `writeKey` fills `buf`, which must hold
         /// `name.len + 1` bytes.
-        pub fn sortKey(e: Entry, buf: []u8) []const u8 {
+        pub fn sortKey(e: Tree.Entry, buf: []u8) []const u8 {
             @memcpy(buf[0..e.name.len], e.name);
             if (!e.mode.isTree()) return buf[0..e.name.len];
             buf[e.name.len] = '/';
@@ -228,7 +230,7 @@ pub const Tree = struct {
         offset: usize,
 
         /// The next entry, or `null` at the end.
-        pub fn next(it: *Iterator) TreeParseError!?Entry {
+        pub fn next(it: *Iterator) TreeParseError!?Tree.Entry {
             const bytes = it.tree.bytes;
             if (it.offset >= bytes.len) return null;
             const rest = bytes[it.offset..];
@@ -273,7 +275,7 @@ pub const Tree = struct {
         };
 
         /// A builder for a tree of `kind` object names.
-        pub fn init(gpa: Allocator, kind: Kind) Builder {
+        pub fn init(gpa: Allocator, kind: Kind) Tree.Builder {
             return .{ .gpa = gpa, .kind = kind };
         }
 
@@ -493,7 +495,7 @@ pub const Commit = struct {
     }
 
     /// Read a commit object's bytes.
-    pub fn parse(gpa: Allocator, kind: Kind, bytes: []const u8) ParseError!Commit {
+    pub fn parse(gpa: Allocator, kind: Kind, bytes: []const u8) Self.ParseError!Commit {
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();
@@ -674,7 +676,7 @@ pub const Tag = struct {
     }
 
     /// Read a tag object's bytes.
-    pub fn parse(gpa: Allocator, kind: Kind, bytes: []const u8) ParseError!Tag {
+    pub fn parse(gpa: Allocator, kind: Kind, bytes: []const u8) Self.ParseError!Tag {
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();

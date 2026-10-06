@@ -11,6 +11,8 @@
 //! written back as it is; `sparseindex` is what expands one into the files
 //! under it and collapses them again.
 
+const Self = @This();
+
 pub const sparseindex = @import("index/sparseindex.zig");
 // The modules relic's API puts under this one, as `relic.index.<name>`.
 
@@ -172,7 +174,7 @@ pub const CacheTree = struct {
 
         /// git's order for the children of a node: by length, then by
         /// bytes.
-        pub fn lessThan(_: void, a: Node, b: Node) bool {
+        pub fn lessThan(_: void, a: CacheTree.Node, b: CacheTree.Node) bool {
             if (a.name.len != b.name.len) return a.name.len < b.name.len;
             return std.mem.order(u8, a.name, b.name) == .lt;
         }
@@ -656,7 +658,7 @@ pub const Index = struct {
         sub_path: []const u8,
         git_dir: Io.Dir,
         kind: Kind,
-    ) ReadError!Index {
+    ) Self.ReadError!Index {
         return readImpl(gpa, io, dir, sub_path, git_dir, kind, null);
     }
 
@@ -674,7 +676,7 @@ pub const Index = struct {
         git_dir: Io.Dir,
         kind: Kind,
         timestamp_resolution: fs.Resolution,
-    ) ReadError!Index {
+    ) Self.ReadError!Index {
         return readImpl(gpa, io, dir, sub_path, git_dir, kind, timestamp_resolution);
     }
 
@@ -716,7 +718,7 @@ pub const Index = struct {
     /// A split index read this way keeps its `link` extension unresolved:
     /// `split_base` names the shared file and the entries are only the
     /// overlay. `read` is the call that merges them.
-    pub fn parse(gpa: Allocator, kind: Kind, bytes: []const u8) ReadError!Index {
+    pub fn parse(gpa: Allocator, kind: Kind, bytes: []const u8) Self.ReadError!Index {
         const raw_len = kind.rawLen();
         if (bytes.len < 12 + raw_len) return error.TruncatedIndex;
         if (!std.mem.eql(u8, bytes[0..4], magic)) return error.NotAnIndex;
@@ -1328,7 +1330,7 @@ pub const Index = struct {
     ///
     /// A lock another writer holds is `error.LockHeld` and is left exactly as
     /// it was found.
-    pub fn write(index: *Index, io: Io, dir: Io.Dir, sub_path: []const u8, options: WriteOptions) WriteError!void {
+    pub fn write(index: *Index, io: Io, dir: Io.Dir, sub_path: []const u8, options: WriteOptions) Self.WriteError!void {
         const buffer = try index.gpa.alloc(u8, 64 * 1024);
         defer index.gpa.free(buffer);
         var lock = try fs.LockFile.open(index.gpa, io, dir, sub_path, buffer, options.lock);

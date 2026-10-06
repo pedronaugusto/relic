@@ -13,6 +13,8 @@
 //! whose parents have arrived. `apply` makes the new list from the old one
 //! and those.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -36,7 +38,7 @@ pub const Error = ReadError || fs.LockError || fs.CommitError || Io.Dir.DeleteFi
 
 /// The commits at the boundary, or an empty set for a whole repository.
 /// The set is the caller's.
-pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) ReadError!Oid.Set {
+pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.ReadError!Oid.Set {
     var set: Oid.Set = .empty;
     errdefer set.deinit(gpa);
     const text = common_dir.readFileAlloc(io, file_name, gpa, .limited(1 << 30)) catch |err| switch (err) {
@@ -54,7 +56,7 @@ pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) ReadErr
 
 /// Replace the file with `set`, sorted as git sorts it, or remove it when
 /// `set` is empty.
-pub fn write(gpa: Allocator, io: Io, common_dir: Io.Dir, set: *const Oid.Set) Error!void {
+pub fn write(gpa: Allocator, io: Io, common_dir: Io.Dir, set: *const Oid.Set) Self.Error!void {
     if (set.count() == 0) {
         common_dir.deleteFile(io, file_name) catch |err| switch (err) {
             error.FileNotFound => {},

@@ -22,6 +22,8 @@
 //! repository's refs, and the transactions that add to it, are
 //! `reftablestack`.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -174,7 +176,7 @@ pub const Table = struct {
 
     /// Read a table's header and footer from bytes in memory. Nothing past
     /// them is looked at until a record is asked for.
-    pub fn parse(bytes: []const u8, kind: Kind) Error!Table {
+    pub fn parse(bytes: []const u8, kind: Kind) Self.Error!Table {
         if (bytes.len < 5 or !std.mem.eql(u8, bytes[0..4], magic)) return error.NotAReftable;
         const version = bytes[4];
         if (version != 1 and version != 2) return error.UnsupportedReftableVersion;
@@ -187,7 +189,7 @@ pub const Table = struct {
     /// Read a table's header and footer from an open file, which the caller
     /// keeps open for as long as the table is used. Blocks are read as a
     /// lookup reaches them.
-    pub fn open(io: Io, file: Io.File, kind: Kind) Error!Table {
+    pub fn open(io: Io, file: Io.File, kind: Kind) Self.Error!Table {
         const total = try file.length(io);
         const len: usize = std.math.cast(usize, total) orelse return error.NotAReftable;
         var head_buf: [29]u8 = undefined;
@@ -291,7 +293,7 @@ pub const Table = struct {
     }
 
     /// An iterator over every record of `typ`, from the first.
-    pub fn iterate(t: *const Table, gpa: Allocator, typ: BlockType) Error!Iterator {
+    pub fn iterate(t: *const Table, gpa: Allocator, typ: BlockType) Self.Error!Iterator {
         var it: Iterator = .{ .gpa = gpa, .table = t, .typ = typ };
         errdefer it.deinit();
         const start = t.sectionStart(typ) orelse return it;
@@ -302,7 +304,7 @@ pub const Table = struct {
     /// An iterator over the records of `typ` from the first whose key is
     /// at least `key`, found through the section's index where the table
     /// has one and by the first key of each block where it does not.
-    pub fn seek(t: *const Table, gpa: Allocator, typ: BlockType, key: []const u8) Error!Iterator {
+    pub fn seek(t: *const Table, gpa: Allocator, typ: BlockType, key: []const u8) Self.Error!Iterator {
         var it: Iterator = .{ .gpa = gpa, .table = t, .typ = typ };
         errdefer it.deinit();
         const start = t.sectionStart(typ) orelse return it;
@@ -467,7 +469,7 @@ pub const Table = struct {
     /// that keys rise and that each value is one its type allows. What a
     /// lookup would find is only the part of this a lookup reaches; this is
     /// the whole of it.
-    pub fn verify(t: *const Table, gpa: Allocator) Error!void {
+    pub fn verify(t: *const Table, gpa: Allocator) Self.Error!void {
         for ([_]BlockType{ .ref, .obj, .log }) |typ| {
             var it = try t.iterate(gpa, typ);
             defer it.deinit();
@@ -637,7 +639,7 @@ pub const Iterator = struct {
 
     /// The next record's key and value type, the value checked and passed
     /// over; `value` then reads it.
-    pub fn nextRaw(it: *Iterator) Error!?Raw {
+    pub fn nextRaw(it: *Iterator) Self.Error!?Raw {
         while (true) {
             const block = if (it.block) |*b| b else return null;
             if (it.pos < block.restart_off) {
@@ -660,14 +662,14 @@ pub const Iterator = struct {
     }
 
     /// The next ref. Only for an iterator over refs.
-    pub fn nextRef(it: *Iterator) Error!?RefRecord {
+    pub fn nextRef(it: *Iterator) Self.Error!?RefRecord {
         std.debug.assert(it.typ == .ref);
         const raw = (try it.nextRaw()) orelse return null;
         return try decodeRef(it.table, it.block.?.data[0..it.block.?.restart_off], it.value_at, raw);
     }
 
     /// The next log entry. Only for an iterator over logs.
-    pub fn nextLog(it: *Iterator) Error!?LogRecord {
+    pub fn nextLog(it: *Iterator) Self.Error!?LogRecord {
         std.debug.assert(it.typ == .log);
         const raw = (try it.nextRaw()) orelse return null;
         return try decodeLog(it.table, it.block.?.data[0..it.block.?.restart_off], it.value_at, raw);
@@ -848,7 +850,7 @@ pub fn write(
     max_update_index: u64,
     refs: []const RefRecord,
     logs: []const LogRecord,
-) Error![]u8 {
+) Self.Error![]u8 {
     if (options.block_size < 64 or options.block_size >= (1 << 24)) return error.RecordTooLarge;
     var w: Writer = try .init(gpa, kind, options, min_update_index, max_update_index);
     defer w.deinit();

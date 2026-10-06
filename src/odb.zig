@@ -2044,7 +2044,7 @@ pub const Odb = struct {
                 const p = &named.pack;
                 // Every header of the pack at once, read forward through
                 // it, rather than one lookup and chain walk per object.
-                const headers = p.headers(io, odb.backendData().gpa) catch |err| {
+                const headers = p.headers(odb.backendData().gpa, io) catch |err| {
                     if (opening.readRefusal(err)) return err;
                     var it = p.index.iterate();
                     while (try it.next()) |found| {

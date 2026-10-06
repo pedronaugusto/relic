@@ -17,6 +17,8 @@
 //! correct index. Both rebuild the cache tree afterwards, as git does, since
 //! the entries it counts have changed.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -78,7 +80,7 @@ pub fn containing(index: *const Index, path: []const u8) ?*Entry {
 ///
 /// Every file that comes out of a sparse directory has `skip-worktree` set
 /// and no stat, since none of them is in the working tree.
-pub fn expand(gpa: Allocator, io: Io, index: *Index, db: *Odb, patterns: ?*const sparse.Patterns) Error!void {
+pub fn expand(gpa: Allocator, io: Io, index: *Index, db: *Odb, patterns: ?*const sparse.Patterns) Self.Error!void {
     if (!index.sparse and !hasSparseDirectories(index)) return;
     const cone: ?*const sparse.Cone = if (patterns) |p| (if (p.cone) |*c| c else null) else null;
     return expandSelected(gpa, io, index, db, cone, null);
@@ -261,7 +263,7 @@ fn appendEntry(gpa: Allocator, out: *std.ArrayList(Entry), path: []const u8, mod
 /// the index as it is and return false, which is git's rule: a full index
 /// is never wrong, so a collapse that cannot be proven safe is not made.
 /// The directories of the cone itself, and the root, are never collapsed.
-pub fn collapse(gpa: Allocator, io: Io, index: *Index, db: *Odb, patterns: *const sparse.Patterns) Error!bool {
+pub fn collapse(gpa: Allocator, io: Io, index: *Index, db: *Odb, patterns: *const sparse.Patterns) Self.Error!bool {
     const cone = if (patterns.cone) |*c| c else return false;
     if (index.entries.items.len == 0) return false;
     for (index.entries.items) |entry| {

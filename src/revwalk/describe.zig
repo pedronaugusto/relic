@@ -21,6 +21,8 @@
 //! diff-index HEAD` does after a refresh; the index file itself is read and
 //! not rewritten with fresher stat data, which git's refresh would do.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -160,7 +162,7 @@ pub const Describer = struct {
     parsed: Oid.Map(Parsed) = .empty,
 
     /// Read the refs the options allow.
-    pub fn init(gpa: Allocator, io: Io, repo: *Repository, options_in: Options) Error!Describer {
+    pub fn init(gpa: Allocator, io: Io, repo: *Repository, options_in: Options) Self.Error!Describer {
         var options = options_in;
         if (options.abbrev) |n| {
             if (n != 0 and n < abbrev_mod.minimum) options.abbrev = abbrev_mod.minimum;
@@ -291,7 +293,7 @@ pub const Describer = struct {
 
     /// The description of the object `oid` names: a commit (or a tag of
     /// one), or a blob. The result is the caller's.
-    pub fn describe(d: *Describer, io: Io, oid: Oid) Error![]u8 {
+    pub fn describe(d: *Describer, io: Io, oid: Oid) Self.Error![]u8 {
         return d.describeWithSuffix(io, oid, null);
     }
 
@@ -479,7 +481,7 @@ pub const Describer = struct {
 
 /// The description of what `rev` names, as `git describe <rev>` prints it
 /// without its newline. The result is the caller's.
-pub fn describe(gpa: Allocator, io: Io, repo: *Repository, rev: []const u8, options: Options) Error![]u8 {
+pub fn describe(gpa: Allocator, io: Io, repo: *Repository, rev: []const u8, options: Options) Self.Error![]u8 {
     const oid = try revparse.resolve(gpa, io, repo, rev);
     var d = try Describer.init(gpa, io, repo, options);
     defer d.deinit();
@@ -488,7 +490,7 @@ pub fn describe(gpa: Allocator, io: Io, repo: *Repository, rev: []const u8, opti
 
 /// `git describe` with no revision: `HEAD`, with `dirty` or `broken`
 /// appended as the working tree says. The result is the caller's.
-pub fn head(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error![]u8 {
+pub fn head(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error![]u8 {
     var d = try Describer.init(gpa, io, repo, options);
     defer d.deinit();
     const resolved = (try repo.head(io)) orelse return error.BadRevision;

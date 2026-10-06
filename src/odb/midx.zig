@@ -5,6 +5,8 @@
 //! read the same when it is ignored, so this is only ever consulted before
 //! the per-pack indexes, never instead of them.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -55,7 +57,7 @@ pub const Index = struct {
     large_offsets_at: ?usize,
 
     /// Read `pack/multi-pack-index`, or `null` when there is none.
-    pub fn open(gpa: Allocator, io: Io, pack_dir: Io.Dir, kind: hash.Kind) Error!?Index {
+    pub fn open(gpa: Allocator, io: Io, pack_dir: Io.Dir, kind: hash.Kind) Self.Error!?Index {
         const bytes = (try fs.readFileAlloc(gpa, io, pack_dir, "multi-pack-index", 1 << 30)) orelse
             return null;
         // parse takes ownership on success and failure.
@@ -63,7 +65,7 @@ pub const Index = struct {
     }
 
     /// Read a multi-pack index from bytes this takes ownership of.
-    pub fn parse(gpa: Allocator, kind: hash.Kind, bytes: []const u8) Error!Index {
+    pub fn parse(gpa: Allocator, kind: hash.Kind, bytes: []const u8) Self.Error!Index {
         errdefer gpa.free(bytes);
         if (bytes.len < 12) return error.NotAMultiPackIndex;
         if (!std.mem.eql(u8, bytes[0..4], magic)) return error.NotAMultiPackIndex;
@@ -147,7 +149,7 @@ pub const Index = struct {
     }
 
     /// Name-order position at a pseudo-pack position, when RIDX is present.
-    pub fn reverseAt(index: *const Index, position: u32) Error!?u32 {
+    pub fn reverseAt(index: *const Index, position: u32) Self.Error!?u32 {
         if (position >= index.count) return error.CorruptMultiPackIndex;
         const chunk = format.get(index.bytes, 12, index.bytes[6], "RIDX") orelse return null;
         if (chunk.len != @as(usize, index.count) * 4) return error.CorruptMultiPackIndex;
@@ -157,7 +159,7 @@ pub const Index = struct {
     }
 
     /// Check sorted names, fanout, pack names, offsets and reverse order.
-    pub fn verify(index: *const Index) Error!void {
+    pub fn verify(index: *const Index) Self.Error!void {
         var count: u32 = 0;
         for (0..256) |bucket| {
             while (count < index.count and index.nameAt(count).raw()[0] == bucket) : (count += 1) {
@@ -208,7 +210,7 @@ pub const Index = struct {
     }
 
     /// Where `oid` lives, or `null`.
-    pub fn find(index: *const Index, oid: Oid) Error!?Located {
+    pub fn find(index: *const Index, oid: Oid) Self.Error!?Located {
         if (oid.kind != index.kind) return null;
         const raw = oid.raw();
         var lo: u32 = if (raw[0] == 0)
@@ -227,7 +229,7 @@ pub const Index = struct {
         return null;
     }
 
-    pub fn locate(index: *const Index, position: u32) Error!Located {
+    pub fn locate(index: *const Index, position: u32) Self.Error!Located {
         const row = index.bytes[index.offsets_at + @as(usize, position) * 8 ..];
         const pack = std.mem.readInt(u32, row[0..4], .big);
         const small = std.mem.readInt(u32, row[4..8], .big);

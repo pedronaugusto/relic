@@ -17,6 +17,8 @@
 //! `trailer.*` settings say. A message in an encoding other than UTF-8,
 //! which git would convert first, is refused by name.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -105,7 +107,7 @@ pub const Shortlog = struct {
     records: std.StringArrayHashMapUnmanaged(Record) = .empty,
 
     /// A shortlog with nothing in it yet.
-    pub fn init(gpa: Allocator, options: Options) Error!Shortlog {
+    pub fn init(gpa: Allocator, options: Options) Self.Error!Shortlog {
         var author = false;
         var committer = false;
         var keys: std.ArrayList([]const u8) = .empty;
@@ -155,7 +157,7 @@ pub const Shortlog = struct {
     }
 
     /// Read the commit `oid` from `db` and add it.
-    pub fn add(s: *Shortlog, io: Io, db: *odb_mod.Odb, oid: Oid) Error!void {
+    pub fn add(s: *Shortlog, io: Io, db: *odb_mod.Odb, oid: Oid) Self.Error!void {
         const found = try db.read(io, oid);
         defer db.allocator().free(found.bytes);
         if (found.type != .commit) return error.UnexpectedObjectType;
@@ -166,7 +168,7 @@ pub const Shortlog = struct {
 
     /// `shortlog_add_commit`: add a commit already read. A format group
     /// needs the commit's name, and is `error.FormatGroupNeedsName` here.
-    pub fn addCommit(s: *Shortlog, commit: *const object.Commit) Error!void {
+    pub fn addCommit(s: *Shortlog, commit: *const object.Commit) Self.Error!void {
         if (s.formats.len != 0) return error.FormatGroupNeedsName;
         try s.addParsed(commit, null);
     }

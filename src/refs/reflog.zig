@@ -5,6 +5,8 @@
 //! behind. The line is
 //! `old SP new SP Name <email> SP secs SP ±hhmm [TAB msg] LF`.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -240,7 +242,7 @@ pub const Log = struct {
 /// Read `logs/<ref>`. An absent log is an empty one. In a reftable
 /// repository this is `error.ReftableRepository` rather than an empty log
 /// that is not the truth; `refs.Store.readLog` reads either format.
-pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash.Kind) ReadError!Log {
+pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash.Kind) Self.ReadError!Log {
     if (isReftable(io, git_dir)) return error.ReftableRepository;
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);

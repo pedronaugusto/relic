@@ -23,6 +23,8 @@
 //! is not a pack, or stops short, or carries a delta that reaches outside
 //! itself, is a named error and leaves nothing behind.
 
+const Self = @This();
+
 const std = @import("std");
 const crc32 = @import("../crc32.zig");
 const Allocator = std.mem.Allocator;
@@ -313,7 +315,7 @@ pub fn receive(
     pack_dir: Io.Dir,
     in: *Io.Reader,
     options: Options,
-) Error!Result {
+) Self.Error!Result {
     const kind = db.objectFormat();
     const raw_len = kind.rawLen();
 

@@ -21,6 +21,8 @@
 //! `resolveAt` takes both from the caller. A path relative to a working
 //! directory (`:./x`) is refused; there is none here to be relative to.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -53,7 +55,7 @@ pub const Error = error{
 } || ere.Error || ResourceError;
 
 /// What `expr` names in `repo`.
-pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8) Error!Oid {
+pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8) Self.Error!Oid {
     return resolveWith(gpa, io, repo, expr, null);
 }
 
@@ -67,7 +69,7 @@ pub const Clock = struct {
 };
 
 /// What `expr` names in `repo`, with `@{<date>}` read against `clock`.
-pub fn resolveAt(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, clock: Clock) Error!Oid {
+pub fn resolveAt(gpa: Allocator, io: Io, repo: *Repository, expr: []const u8, clock: Clock) Self.Error!Oid {
     return resolveWith(gpa, io, repo, expr, clock);
 }
 

@@ -1,4 +1,6 @@
 //! The chunk directory shared by git's repository accelerators.
+
+const Self = @This();
 const std = @import("std");
 const hash = @import("../../hash.zig");
 const Allocator = std.mem.Allocator;
@@ -51,7 +53,7 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, header: []const u8, chunks: []con
 }
 
 /// Validate chunk boundaries, unique names and the trailing checksum.
-pub fn validate(kind: hash.Kind, bytes: []const u8, header_len: usize, count: u8) Error!void {
+pub fn validate(kind: hash.Kind, bytes: []const u8, header_len: usize, count: u8) Self.Error!void {
     const table_end = header_len + (@as(usize, count) + 1) * 12;
     if (bytes.len < table_end + kind.rawLen()) return error.CorruptAccelerator;
     const data_end = bytes.len - kind.rawLen();

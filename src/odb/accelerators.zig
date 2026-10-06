@@ -1,5 +1,7 @@
 //! Repository operations for commit-graphs, multi-pack indexes and reachability bitmaps.
 //! Format encoding stays with each format; object traversal stays with the database.
+
+const Self = @This();
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -84,7 +86,7 @@ fn collectGraphNodes(arena: Allocator, io: Io, db: *odb.Odb, pending: *std.Array
 /// Write the commits reachable from `tips`, including their parents, as git does.
 /// A split write keeps the older layers until the chain file is atomically replaced.
 /// A shallow database is refused because its absent parents cannot form a graph.
-pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, options: CommitGraphOptions) Error!?Oid {
+pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, options: CommitGraphOptions) Self.Error!?Oid {
     if (db.shallow.count() != 0) return error.ShallowCommitGraph;
     const dir = db.objectsDirectory();
     var old = try graph_mod.Graph.open(gpa, io, dir, db.objectFormat());
@@ -306,7 +308,7 @@ pub const MidxError = odb.Error || midx_mod.Error || fs.LockError || fs.CommitEr
 
 /// Write the writable database's pack indexes into one MIDX. The digest names
 /// a reachability bitmap; refreshing makes the database consult this index.
-pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) MidxError!?Oid {
+pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Self.MidxError!?Oid {
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var inputs = try readPackInputs(gpa, io, dir, db.objectFormat());
@@ -372,7 +374,7 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Mid
 
 /// Remove packs to which the current MIDX assigns no objects, retaining .keep
 /// and cruft (.mtimes) packs. This is git's separate expire step after repack.
-pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: fs.Sync) MidxError!u32 {
+pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: fs.Sync) Self.MidxError!u32 {
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var index = (try midx_mod.Index.open(gpa, io, dir, db.objectFormat())) orelse return 0;
@@ -629,7 +631,7 @@ fn setBit(words: []u64, pos: u32) void {
 
 /// Write a reachability bitmap for an existing pack. The pack must contain the
 /// entire history of every commit it holds, as Git's FULL_DAG flag requires.
-pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const u8, tips: []const Oid, options: BitmapOptions) BitmapError!void {
+pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const u8, tips: []const Oid, options: BitmapOptions) Self.BitmapError!void {
     if (std.mem.indexOfAny(u8, pack_name, "/\\") != null or !std.mem.startsWith(u8, pack_name, "pack-")) return error.InvalidBitmapInput;
     const base = if (std.mem.endsWith(u8, pack_name, ".pack")) pack_name[0 .. pack_name.len - 5] else if (std.mem.endsWith(u8, pack_name, ".idx")) pack_name[0 .. pack_name.len - 4] else pack_name;
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
@@ -667,7 +669,7 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, pack_name: []const 
 }
 
 /// Write a MIDX with RIDX and BTMP, then the bitmap named by its checksum.
-pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, midx_options: MidxOptions, options: BitmapOptions) BitmapError!?Oid {
+pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, midx_options: MidxOptions, options: BitmapOptions) Self.BitmapError!?Oid {
     var write_options = midx_options;
     write_options.reverse_index = true;
     write_options.keep_bitmaps = true;
@@ -711,7 +713,7 @@ pub const MidxRepackOptions = struct {
 
 /// Repack objects assigned to at least two eligible MIDX packs. Old packs stay
 /// until expireMidx, matching git's separate repack and expire subcommands.
-pub fn repackMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxRepackOptions) MidxError!?pack_mod.WriteReport {
+pub fn repackMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxRepackOptions) Self.MidxError!?pack_mod.WriteReport {
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var index = (try midx_mod.Index.open(gpa, io, dir, db.objectFormat())) orelse return null;
@@ -806,7 +808,7 @@ fn repositoryTips(gpa: Allocator, io: Io, repo: *repo_mod.Repository) repo_mod.E
 /// Apply gc.writeCommitGraph (default true) or fetch.writeCommitGraph (default false).
 /// Fetch uses split chains; gc publishes a full graph. A shallow repository is skipped,
 /// as Git skips it, and replace refs are refused by name.
-pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Repository, purpose: Maintenance) MaintenanceError!?Oid {
+pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Repository, purpose: Maintenance) Self.MaintenanceError!?Oid {
     const config = repo.configuration();
     if (!try config.getBool(if (purpose == .gc) "gc.writecommitgraph" else "fetch.writecommitgraph", purpose == .gc)) return null;
     if (repo.odb.shallow.count() != 0) return null;
@@ -833,7 +835,7 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
 
 /// Repack the repository and apply its bitmap and gc.writeCommitGraph policies.
 /// Object retention is the caller's RepackOptions; this hook does not prune refs or reflogs.
-pub fn repackRepository(gpa: Allocator, io: Io, repo: *repo_mod.Repository, options: odb.Odb.RepackOptions) MaintenanceError!odb.Odb.RepackReport {
+pub fn repackRepository(gpa: Allocator, io: Io, repo: *repo_mod.Repository, options: odb.Odb.RepackOptions) Self.MaintenanceError!odb.Odb.RepackReport {
     const report = try repo.odb.repack(io, options);
     const config = repo.configuration();
     if (report.written) |written| if (try config.getBool("repack.writebitmaps", true)) {

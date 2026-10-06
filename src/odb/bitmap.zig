@@ -1,4 +1,6 @@
 //! Pack and multi-pack reachability bitmap files, and git's EWAH/XOR encoding.
+
+const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash.zig");
@@ -26,7 +28,7 @@ pub const Index = struct {
 
     /// Take ownership of a bitmap and check its digest against the named pack or MIDX.
     /// Pseudo-merge extensions are refused by name; ordinary reachability remains usable without them.
-    pub fn parse(gpa: Allocator, kind: hash.Kind, bytes: []const u8, checksum: Oid, object_count: u32) Error!Index {
+    pub fn parse(gpa: Allocator, kind: hash.Kind, bytes: []const u8, checksum: Oid, object_count: u32) Self.Error!Index {
         errdefer gpa.free(bytes);
         const header_len = 12 + kind.rawLen();
         if (bytes.len < header_len + kind.rawLen() or !std.mem.eql(u8, bytes[0..4], "BITM")) return error.NotABitmap;
@@ -123,7 +125,7 @@ pub const Index = struct {
 
     /// Decode a selected commit's reachability in pack order, or null when unselected.
     /// The caller owns the words. XOR bases always precede the entry, so this cannot cycle.
-    pub fn reach(index: *const Index, gpa: Allocator, position: u32) Error!?[]u64 {
+    pub fn reach(index: *const Index, gpa: Allocator, position: u32) Self.Error!?[]u64 {
         var chosen: ?usize = null;
         for (index.entries, 0..) |entry, i| if (entry.position == position) {
             chosen = i;

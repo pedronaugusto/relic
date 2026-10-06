@@ -4,6 +4,8 @@
 //! TREESAME, and a merge the same as one of its parents that matter
 //! follows that parent alone.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -20,7 +22,7 @@ pub const Error = odb_mod.Error || object.TreeParseError || Allocator.Error;
 /// Whether trees `a` and `b`, `null` for the empty tree, hold the same
 /// entries everywhere `paths` names: git's `REV_TREE_SAME` from a tree
 /// diff limited to the paths. A changed mode is a change.
-pub fn sameWithin(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: ?Oid, b: ?Oid, paths: *const pathspec.Pathspec) Error!bool {
+pub fn sameWithin(gpa: Allocator, io: Io, db: *odb_mod.Odb, a: ?Oid, b: ?Oid, paths: *const pathspec.Pathspec) Self.Error!bool {
     var prefix: std.ArrayList(u8) = .empty;
     defer prefix.deinit(gpa);
     return sameUnder(gpa, io, db, a, b, paths, &prefix);

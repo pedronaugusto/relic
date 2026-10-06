@@ -9,6 +9,8 @@
 //! ascending offset, the pack's checksum, and the checksum of everything
 //! before it.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -41,7 +43,7 @@ pub fn write(
     entries: []const pack.IndexEntry,
     pack_checksum: Oid,
     sync: fs.Sync,
-) Error!void {
+) Self.Error!void {
     const positions = try gpa.alloc(u32, entries.len);
     defer gpa.free(positions);
     for (positions, 0..) |*p, i| p.* = @intCast(i);
