@@ -724,7 +724,7 @@ const Twin = struct {
             const b = try readOptional(gpa, io, t.ours.dir, path);
             defer if (b) |bytes| gpa.free(bytes);
             expectOptional(a, b) catch |err| {
-                std.debug.print("{s} differs\n", .{path});
+                std.log.err("{s} differs", .{path});
                 return err;
             };
         }
@@ -750,7 +750,7 @@ const Twin = struct {
             };
             defer if (b) |bytes| gpa.free(bytes);
             expectOptional(a, b) catch |err| {
-                std.debug.print("git {s} differs\n", .{args[0]});
+                std.log.err("git {s} differs", .{args[0]});
                 return err;
             };
         }
@@ -1071,7 +1071,7 @@ test "a linked worktree gets its own patterns and its own configuration" {
         const b = try readOptional(gpa, io, twin.ours.dir, path);
         defer if (b) |bytes| gpa.free(bytes);
         expectOptional(a, b) catch |err| {
-            std.debug.print("{s} differs\n", .{path});
+            std.log.err("{s} differs", .{path});
             return err;
         };
     }
@@ -1110,7 +1110,7 @@ test "a bare repository's core.bare moves where git moves it" {
         const b = try readOptional(gpa, io, twin.ours.dir, path);
         defer if (b) |bytes| gpa.free(bytes);
         expectOptional(a, b) catch |err| {
-            std.debug.print("{s} differs\n", .{path});
+            std.log.err("{s} differs", .{path});
             return err;
         };
     }
@@ -1130,7 +1130,7 @@ fn expectSameIndex(gpa: Allocator, io: Io, t: *Twin) !void {
     try std.testing.expectEqual(a.sparse, b.sparse);
     try std.testing.expectEqual(a.entries.items.len, b.entries.items.len);
     for (a.entries.items, b.entries.items) |x, y| {
-        errdefer std.debug.print("at {s}\n", .{x.path});
+        errdefer std.log.err("at {s}", .{x.path});
         try std.testing.expectEqualStrings(x.path, y.path);
         try std.testing.expect(x.oid.eql(y.oid));
         try std.testing.expectEqual(x.mode, y.mode);

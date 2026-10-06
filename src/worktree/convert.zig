@@ -613,6 +613,7 @@ pub const Session = struct {
         var source: Io.Reader = .fixed(bytes);
         const pointer = switch (storing) {
             .store => try l.store.install(s.io, &source, null),
+            // unreachable: a fixed reader over bytes in memory does not fail to read
             .hash_only => lfs.hashOnly(&source) catch unreachable,
         };
         return encodePointer(a, &pointer);
