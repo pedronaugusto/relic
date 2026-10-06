@@ -146,8 +146,10 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
         for (0..count) |i| {
             var key_buf: [32]u8 = undefined;
             var value_buf: [32]u8 = undefined;
+            // unreachable: a u32 is at most ten digits after a seventeen-byte prefix
             const key = environ.get(std.fmt.bufPrint(&key_buf, "GIT_CONFIG_KEY_{d}", .{i}) catch unreachable) orelse
                 return error.MalformedConfigEnvironment;
+            // unreachable: a u32 is at most ten digits after a nineteen-byte prefix
             const value = environ.get(std.fmt.bufPrint(&value_buf, "GIT_CONFIG_VALUE_{d}", .{i}) catch unreachable) orelse
                 return error.MalformedConfigEnvironment;
             try pairs.append(arena, .{ .name = try arena.dupe(u8, key), .value = try arena.dupe(u8, value) });

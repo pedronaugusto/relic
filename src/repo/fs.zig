@@ -463,6 +463,7 @@ pub const LockFile = struct {
         var pid_len: u8 = 0;
         if (options.write_pid) {
             var text: [32]u8 = undefined;
+            // unreachable: a u32 pid is at most ten digits
             const line = std.fmt.bufPrint(&text, "pid {d}\n", .{currentPid()}) catch unreachable;
             // Only a name for a report: a lock that could not say it is
             // still the lock.
@@ -1075,9 +1076,12 @@ pub fn atomicWrite(
 /// this package reads one.
 pub fn tempName(io: Io, buf: []u8, prefix: []const u8) []const u8 {
     var raw: [12]u8 = undefined;
+    var hex: [2 * raw.len]u8 = undefined;
+    std.debug.assert(buf.len >= prefix.len + hex.len);
     io.random(&raw);
-    var hex: [24]u8 = undefined;
+    // unreachable: twelve bytes are twenty-four hex digits
     _ = std.fmt.bufPrint(&hex, "{x}", .{&raw}) catch unreachable;
+    // unreachable: the caller's buffer holds the prefix and the digits, asserted above
     return std.fmt.bufPrint(buf, "{s}{s}", .{ prefix, hex }) catch unreachable;
 }
 

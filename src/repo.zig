@@ -821,6 +821,7 @@ pub const Repository = struct {
             .umask => null,
             .group => "1",
             .everybody => "2",
+            // unreachable: a u16 is at most six octal digits after the zero
             .mode => |m| std.fmt.bufPrint(buf, "0{o}", .{m}) catch unreachable,
         };
     }
@@ -842,6 +843,7 @@ pub const Repository = struct {
         if (options.object_format != .sha1) try set(&config, "extensions.objectformat", options.object_format.name());
         if (options.ref_format == .reftable) try set(&config, "extensions.refstorage", "reftable");
         var version_buf: [4]u8 = undefined;
+        // unreachable: a u8 is at most three digits
         try set(&config, "core.repositoryformatversion", std.fmt.bufPrint(&version_buf, "{d}", .{version}) catch unreachable);
         try set(&config, "core.filemode", if (options.file_mode) "true" else "false");
         try set(&config, "core.bare", if (options.bare) "true" else "false");

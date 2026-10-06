@@ -1047,6 +1047,7 @@ pub const Config = struct {
                     line.text[name_end..],
                 });
             };
+            // unreachable: the name was read from this line and the escaped value closes every quote it opens
             const parsed = parseVariableLine(replacement) catch unreachable;
             const name = blk: {
                 errdefer config.gpa.free(replacement);
@@ -1072,6 +1073,7 @@ pub const Config = struct {
         writeValue(&text.writer, value) catch return error.OutOfMemory;
         text.writer.writeByte('\n') catch return error.OutOfMemory;
         const new_text = try text.toOwnedSlice();
+        // unreachable: checkKey passed the name and writeValue closes every quote it opens
         const parsed = parseVariableLine(new_text) catch unreachable;
         const name = blk: {
             errdefer config.gpa.free(new_text);

@@ -678,7 +678,7 @@ fn expectFsckAgrees(name: []const u8, url: []const u8, accepted: bool) !void {
         else => return err,
     };
     if (fsck_ok != accepted) {
-        std.debug.print("name {s} url {s}: git fsck says {}, this says {}\n", .{ name, url, fsck_ok, accepted });
+        std.log.err("name {s} url {s}: git fsck says {}, this says {}", .{ name, url, fsck_ok, accepted });
         return error.TestExpectedEqual;
     }
 }
