@@ -1861,6 +1861,7 @@ pub fn checkout(
             .symlink => {
                 const found = try db.read(io, want.oid);
                 defer gpa.free(found.bytes);
+                // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
                 fs.deleteFile(io, wt, path) catch {};
                 if (options.rules.symlinks) {
                     wt.symLink(io, found.bytes, path, .{}) catch {
@@ -2062,7 +2063,7 @@ const WriteBatch = struct {
             group.concurrent(io, run, .{ io, wt, b.jobs.items, &next }) catch break;
         }
         // This task writes too; with no others it writes them all.
-        run(io, wt, b.jobs.items, &next) catch {};
+        run(io, wt, b.jobs.items, &next);
         group.await(io) catch group.cancel(io);
         var first: ?Error = null;
         for (b.jobs.items) |*job| {
@@ -2076,7 +2077,7 @@ const WriteBatch = struct {
         if (first) |err| return err;
     }
 
-    fn run(io: Io, wt: Io.Dir, jobs: []Job, next: *std.atomic.Value(usize)) Io.Cancelable!void {
+    fn run(io: Io, wt: Io.Dir, jobs: []Job, next: *std.atomic.Value(usize)) void {
         while (true) {
             const at = next.fetchAdd(1, .monotonic);
             if (at >= jobs.len) return;
@@ -2257,6 +2258,7 @@ pub fn writePaths(
             .symlink => {
                 const found = try db.read(io, want.oid);
                 defer gpa.free(found.bytes);
+                // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
                 fs.deleteFile(io, wt, w.path) catch {};
                 if (options.rules.symlinks) {
                     wt.symLink(io, found.bytes, w.path, .{}) catch {
@@ -2355,6 +2357,7 @@ pub fn writeEntry(
         .symlink => {
             const found = try db.read(io, oid);
             defer gpa.free(found.bytes);
+            // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
             wt.deleteFile(io, path) catch {};
             if (rules.symlinks) {
                 wt.symLink(io, found.bytes, path, .{}) catch {
@@ -2416,6 +2419,7 @@ pub fn writeBytes(
             };
         },
         .symlink => {
+            // ziglint-ignore: Z026 whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
             wt.deleteFile(io, path) catch {};
             if (rules.symlinks) {
                 wt.symLink(io, bytes, path, .{}) catch {
@@ -2451,6 +2455,7 @@ pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Error!void {
     if (safepath.check(path, .worktree) != null) return error.UnsafePath;
     wt.deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {},
+        // ziglint-ignore: Z026 as git's remove_path: a directory with something in it stays, and only an empty one goes
         error.IsDir => wt.deleteDir(io, path) catch {},
         else => |e| return e,
     };

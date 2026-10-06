@@ -369,6 +369,9 @@ pub fn remove(
         } else |_| {}
     }
 
+    // As git's delete_git_work_tree: a working tree that will not go is
+    // reported, after the administrative directory has gone all the same.
+    var files_error: ?Io.Dir.DeleteTreeError = null;
     if (options.delete_files) {
         const gitdir_text = try fs.readFileAlloc(gpa, io, admin, "gitdir", 4096);
         if (gitdir_text) |text| {
@@ -379,13 +382,16 @@ pub fn remove(
             else
                 gitfile_path;
             const cwd: Io.Dir = .cwd();
-            cwd.deleteTree(io, work_path) catch {};
+            cwd.deleteTree(io, work_path) catch |err| {
+                files_error = err;
+            };
         }
     }
 
     admin.close(io);
     admin_open = false;
     try worktrees_dir.deleteTree(io, name);
+    if (files_error) |err| return err;
 }
 
 /// What `prune` removed.

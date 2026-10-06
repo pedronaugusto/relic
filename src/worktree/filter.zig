@@ -727,6 +727,7 @@ pub const Process = struct {
 
     /// Stop it and release everything.
     pub fn stop(p: *Process, io: Io, how: Stop) void {
+        // ziglint-ignore: Z026 as git's stop_multi_file_filter: every reply is already read, so how the program exits changes nothing
         if (how == .finish) _ = p.running.wait(io) catch {};
         p.running.deinit(io);
         const gpa = p.gpa;
