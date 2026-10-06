@@ -171,12 +171,8 @@ pub const Settings = struct {
     }
 };
 
-fn decoded(arena: Allocator, raw: ?[]const u8) Allocator.Error!?[]const u8 {
-    const text = raw orelse return null;
-    return config_mod.unquote(arena, text) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => text,
-    };
+fn decoded(arena: Allocator, value: ?[]const u8) Allocator.Error!?[]const u8 {
+    return try arena.dupe(u8, value orelse return null);
 }
 
 /// What `process` and `format` write: git's `process_trailer_options`.

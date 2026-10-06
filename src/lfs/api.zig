@@ -271,23 +271,15 @@ pub const Settings = struct {
     /// set or is not one.
     pub fn getBool(s: *const Settings, full_name: []const u8, fallback: bool) bool {
         const entry = s.lastEntry(full_name) orelse return fallback;
-        const raw = entry.value orelse return true;
-        var sfa = std.heap.stackFallback(1024, s.gpa);
-        const a = sfa.get();
-        const text = config_mod.unquote(a, raw) catch return fallback;
-        defer a.free(text);
-        return config_mod.parseBool(text) catch fallback;
+        const value = entry.value orelse return true;
+        return config_mod.parseBool(value) catch fallback;
     }
 
     /// The value of `full_name` as an integer, or `fallback` when it is not
     /// set or is not one.
     pub fn getInt(s: *const Settings, full_name: []const u8, fallback: i64) i64 {
         const entry = s.lastEntry(full_name) orelse return fallback;
-        var sfa = std.heap.stackFallback(1024, s.gpa);
-        const a = sfa.get();
-        const text = config_mod.unquote(a, entry.value orelse "") catch return fallback;
-        defer a.free(text);
-        return config_mod.parseInt(text) catch fallback;
+        return config_mod.parseInt(entry.value orelse "") catch fallback;
     }
 
     /// git-lfs's URL-scoped lookup: `<section>.<url>.<key>` for the
@@ -336,10 +328,7 @@ pub const Settings = struct {
 pub const LfsconfigError = repo_mod.Repository.LfsconfigError;
 
 fn unquoteValue(a: Allocator, raw: []const u8) Error![]const u8 {
-    return config_mod.unquote(a, raw) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.MalformedValue,
-    };
+    return try a.dupe(u8, raw);
 }
 
 //=====================================================================

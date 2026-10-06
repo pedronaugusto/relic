@@ -194,11 +194,7 @@ pub fn rewrite(gpa: Allocator, config: *const Config, url: []const u8, which: Re
         if (!std.ascii.eqlIgnoreCase(entry.section, "url")) continue;
         if (entry.subsection.len == 0) continue;
         if (!std.ascii.eqlIgnoreCase(entry.name, wanted)) continue;
-        const raw = entry.value orelse continue;
-        const prefix = unquote(gpa, raw) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.MalformedValue,
-        };
+        const prefix = try gpa.dupe(u8, entry.value orelse continue);
         if (prefix.len > best_len and std.mem.startsWith(u8, url, prefix)) {
             if (best_prefix.len != 0) gpa.free(best_prefix);
             best_prefix = prefix;
@@ -269,16 +265,9 @@ pub const Branch = struct {
     }
 };
 
-fn unquote(gpa: Allocator, raw: []const u8) (Allocator.Error || config_mod.ParseError)![]u8 {
-    return config_mod.unquote(gpa, raw);
-}
-
 fn valueOf(arena: Allocator, config: *const Config, key: []const u8) Error!?[]const u8 {
-    const raw = config.get(key) orelse return null;
-    return unquote(arena, raw) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.MalformedValue,
-    };
+    const value = config.get(key) orelse return null;
+    return try arena.dupe(u8, value);
 }
 
 /// Every value of a multi-valued key, with git's rule that an empty value
@@ -287,13 +276,7 @@ fn valuesOf(arena: Allocator, config: *const Config, key: []const u8) Error![]co
     const raw = try config.all(key);
     defer config.gpa.free(raw);
     var out: std.ArrayList([]const u8) = .empty;
-    for (raw) |value| {
-        const text = unquote(arena, value) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.MalformedValue,
-        };
-        try out.append(arena, text);
-    }
+    for (raw) |value| try out.append(arena, try arena.dupe(u8, value));
     return out.items;
 }
 

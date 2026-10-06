@@ -240,10 +240,7 @@ pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, env
             if (gop.found_existing and score.lessThan(gop.value_ptr.*)) continue;
             gop.value_ptr.* = score;
             const raw = entry.value orelse "";
-            const value = config_mod.unquote(arena, raw) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.InvalidHttpSetting,
-            };
+            const value = try arena.dupe(u8, raw);
             const origin = if (entry.subsection.len == 0)
                 try std.fmt.allocPrint(arena, "http.{s}", .{name})
             else
@@ -257,10 +254,7 @@ pub fn resolveForRemote(arena: Allocator, config: ?*const config_mod.Config, env
     if (config) |c| if (remote_name) |name| {
         const key = try std.fmt.allocPrint(arena, "remote.{s}.proxy", .{name});
         if (c.get(key)) |raw| {
-            s.proxy = config_mod.unquote(arena, raw) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                else => error.InvalidHttpSetting,
-            };
+            s.proxy = try arena.dupe(u8, raw);
             proxy_set = true;
         }
     };

@@ -91,6 +91,10 @@ const Line = struct {
     value_end: usize = 0,
     /// Whether the variable had an `=` at all. A bare name means true.
     has_value: bool = false,
+    /// For a `.variable` line with a value: the value as git reads it,
+    /// quotes removed and escapes applied, borrowed from the text when it
+    /// has neither or from the file's `names`.
+    value: []const u8 = "",
 
     const Kind = enum { section, variable, other };
 
@@ -624,7 +628,7 @@ pub const Config = struct {
                     .subsection = subsection,
                     .has_subsection = has_subsection,
                     .name = line.name,
-                    .value = if (line.has_value) line.text[line.value_start..line.value_end] else null,
+                    .value = if (line.has_value) line.value else null,
                     .level = file.level,
                     .file_index = file_index,
                     .line_index = @intCast(i),
@@ -758,12 +762,7 @@ pub const Config = struct {
             const pattern = condition[hasconfig_url.len..];
             for (config.entries.items) |entry| {
                 if (!isRemoteUrl(entry) or config.files.items[entry.file_index].conditional) continue;
-                const url = decodeValue(config.gpa, entry.value.?) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.MalformedValue => continue,
-                };
-                defer config.gpa.free(url);
-                if (urlMatches(pattern, url)) return true;
+                if (urlMatches(pattern, entry.value.?)) return true;
             }
             return false;
         }
@@ -804,10 +803,7 @@ pub const Config = struct {
         }
         for (gathering.entries.items) |entry| {
             if (!isRemoteUrl(entry) or gathering.files.items[entry.file_index].conditional) continue;
-            const url = decodeValue(config.gpa, entry.value.?) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.MalformedValue => return error.MalformedValue,
-            };
+            const url = try config.gpa.dupe(u8, entry.value.?);
             urls.append(config.gpa, url) catch |err| {
                 config.gpa.free(url);
                 return err;
@@ -905,13 +901,8 @@ pub const Config = struct {
         // A name written with no `=` at all is true; a name written with an
         // `=` and nothing after it is false. git makes that distinction and
         // `core.bare` in a bare repository relies on it.
-        const raw = entry.value orelse return true;
-        const decoded = decodeValue(config.gpa, raw) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.MalformedValue => return error.NotABoolean,
-        };
-        defer config.gpa.free(decoded);
-        return parseBool(decoded);
+        const value = entry.value orelse return true;
+        return parseBool(value);
     }
 
     /// The value of `full_name` as an integer, or `fallback`.
@@ -919,27 +910,19 @@ pub const Config = struct {
     /// A `k`, `m` or `g` suffix multiplies by 1024, 1024² or 1024³, which is
     /// what git accepts for a size.
     pub fn getInt(config: *const Config, full_name: []const u8, fallback: i64) Self.ValueError!i64 {
-        const raw = config.get(full_name) orelse return fallback;
-        const decoded = decodeValue(config.gpa, raw) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.MalformedValue => return error.NotAnInteger,
-        };
-        defer config.gpa.free(decoded);
-        return parseInt(decoded);
+        const value = config.get(full_name) orelse return fallback;
+        return parseInt(value);
     }
 
     /// The value of `full_name` as a path, with a leading `~/` expanded
     /// against `Context.home`. The result is the caller's.
-    pub fn getPath(config: *const Config, gpa: Allocator, full_name: []const u8) (Allocator.Error || error{MalformedValue})!?[]u8 {
-        const raw = config.get(full_name) orelse return null;
-        const decoded = try decodeValue(gpa, raw);
-        if (std.mem.startsWith(u8, decoded, "~/")) {
-            const home = config.context.home orelse return decoded;
-            defer gpa.free(decoded);
-            const expanded = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, decoded[2..] });
-            return expanded;
+    pub fn getPath(config: *const Config, gpa: Allocator, full_name: []const u8) Allocator.Error!?[]u8 {
+        const value = config.get(full_name) orelse return null;
+        if (std.mem.startsWith(u8, value, "~/")) {
+            const home = config.context.home orelse return try gpa.dupe(u8, value);
+            return try std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, value[2..] });
         }
-        return decoded;
+        return try gpa.dupe(u8, value);
     }
 
     /// Every subsection name under `section`, in order and without
@@ -1054,10 +1037,16 @@ pub const Config = struct {
             // The line reads back as the variable it replaced, with a value.
             assert(parsed.has_value);
             assert(std.ascii.eqlIgnoreCase(parsed.name, line.name));
+            var decoded: []const u8 = undefined;
             const name = blk: {
                 errdefer config.gpa.free(replacement);
                 var names = file.names.promote(config.gpa);
                 defer file.names = names.state;
+                // unreachable: the escaped value decodes to `value`
+                decoded = valueIn(names.allocator(), replacement[parsed.value_start..parsed.value_end]) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => unreachable,
+                };
                 break :blk try lowered(names.allocator(), parsed.name);
             };
             if (line.owned) config.gpa.free(line.text);
@@ -1069,6 +1058,7 @@ pub const Config = struct {
             line.value_start = parsed.value_start;
             line.value_end = parsed.value_end;
             line.has_value = parsed.has_value;
+            line.value = decoded;
             return config.reindex();
         }
 
@@ -1085,10 +1075,16 @@ pub const Config = struct {
         assert(parsed.has_value);
         assert(std.ascii.eqlIgnoreCase(parsed.name, split.name));
         assert(parsed.value_end == new_text.len - 1);
+        var decoded: []const u8 = undefined;
         const name = blk: {
             errdefer config.gpa.free(new_text);
             var names = file.names.promote(config.gpa);
             defer file.names = names.state;
+            // unreachable: the written value decodes to `value`
+            decoded = valueIn(names.allocator(), new_text[parsed.value_start..parsed.value_end]) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => unreachable,
+            };
             break :blk try lowered(names.allocator(), parsed.name);
         };
         const new_line: Line = .{
@@ -1099,6 +1095,7 @@ pub const Config = struct {
             .value_start = parsed.value_start,
             .value_end = parsed.value_end,
             .has_value = true,
+            .value = decoded,
         };
         {
             errdefer config.gpa.free(new_text);
@@ -1273,9 +1270,7 @@ pub const Config = struct {
     /// would refuse asks for none.
     pub fn sharedPermissions(config: *const Config) fs.Shared {
         const entry = config.find("core.sharedrepository") orelse return .umask;
-        const raw = entry.value orelse return .group;
-        const value = decodeValue(config.gpa, raw) catch return .umask;
-        defer config.gpa.free(value);
+        const value = entry.value orelse return .group;
         return fs.Shared.parse(value) catch .umask;
     }
 
@@ -1512,6 +1507,8 @@ fn parseLines(gpa: Allocator, names: Allocator, text: []const u8, out: *std.Arra
             .value_start = variable.value_start,
             .value_end = variable.value_end,
             .has_value = variable.has_value,
+            // An unknown escape is git's "bad config line", here as there.
+            .value = if (variable.has_value) try valueIn(names, raw[variable.value_start..variable.value_end]) else "",
         });
         start = offset;
     }
@@ -1727,20 +1724,21 @@ fn parseVariableLine(raw: []const u8) ParseError!VariableLine {
     };
 }
 
-/// A value with its quotes removed and its escapes applied. The result is the
-/// caller's.
-///
-/// `get` hands back the raw text as the file spells it; this is what turns
-/// `"a\tb"` into a tab. A caller comparing a value against a literal wants
-/// this, and `getBool`, `getInt` and `getPath` apply it themselves.
-fn decodeValue(gpa: Allocator, raw: []const u8) (Allocator.Error || error{MalformedValue})![]u8 {
-    return unquote(gpa, raw) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.MalformedValue => error.MalformedValue,
-        else => unreachable,
-    };
+/// A value as `valueIn` reads it, borrowed from `raw` when it holds nothing
+/// to undo.
+fn valueIn(names: Allocator, raw: []const u8) ParseError![]const u8 {
+    if (std.mem.findAny(u8, raw, "\"\\") == null) return raw;
+    return unquote(names, raw);
 }
 
+/// A value as git's `parse_value` reads it, from the text between the `=`
+/// and the line's end, ends already trimmed: quotes removed, the escapes
+/// `\n`, `\t`, `\b`, `\\` and `\"` applied, and a backslash before a
+/// line break joining the lines. Any other escape is
+/// `error.MalformedValue`, as git refuses it. The result is the caller's.
+///
+/// `get` hands back values read this way already; this is for text that
+/// is spelled as a value is and comes from elsewhere.
 pub fn unquote(gpa: Allocator, raw: []const u8) (Allocator.Error || ParseError)![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
@@ -1830,13 +1828,44 @@ test "quotes, escapes and inline comments" {
         "\tsig = \"a\\tb\"\n" ++
         "\n", .local);
     defer config.deinit();
-    const name = try unquote(gpa, config.get("user.name").?);
+    const name = try gpa.dupe(u8, config.get("user.name").?);
     defer gpa.free(name);
     try std.testing.expectEqualStrings("Ada  Lovelace", name);
     try std.testing.expectEqualStrings("ada@example.com", config.get("user.email").?);
-    const sig = try unquote(gpa, config.get("user.sig").?);
+    const sig = try gpa.dupe(u8, config.get("user.sig").?);
     defer gpa.free(sig);
     try std.testing.expectEqualStrings("a\tb", sig);
+}
+
+test "get hands back the value git reads, quotes and escapes undone once, and an unknown escape is git's bad config line" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    // What `git config core.commentChar ';'` writes, and the escapes git
+    // takes.
+    try git.exec(io, &.{ "config", "-f", "probe.config", "core.commentChar", ";" });
+    try git.exec(io, &.{ "config", "-f", "probe.config", "a.path", "C:\\dir\\x \"y\"" });
+    const written = try git.readFile(io, "probe.config");
+    defer gpa.free(written);
+    var config = try Config.parseText(gpa, written, .local);
+    defer config.deinit();
+    try std.testing.expectEqualStrings(";", config.get("core.commentchar").?);
+    try std.testing.expectEqualStrings("C:\\dir\\x \"y\"", config.get("a.path").?);
+
+    for ([_][]const u8{ "[a]\n\tx = a\\qb\n", "[a]\n\tx = \"a\\ \"\n", "[a]\n\tx = a\\\n", "[a]\n\tx = \"a\\nb\\tc\\\\d\\\"\"\n" }) |text| {
+        try git.writeFile(io, "probe.config", text);
+        git.report_failures = false;
+        const theirs = git.run(io, &.{ "config", "-f", "probe.config", "-z", "--get", "a.x" });
+        git.report_failures = true;
+        const parsed = Config.parseText(gpa, text, .local);
+        if (theirs) |value| {
+            defer gpa.free(value);
+            var ours = try parsed;
+            defer ours.deinit();
+            try std.testing.expectEqualStrings(value[0 .. value.len - 1], ours.get("a.x").?);
+        } else |_| try std.testing.expectError(error.MalformedValue, parsed);
+    }
 }
 
 test "integers take git's size suffixes" {
@@ -2127,7 +2156,7 @@ test "a header reads as git reads it, and a header git refuses is refused" {
         for (config.entries.items) |entry| {
             try ours.writer.writeAll(entry.section);
             if (entry.has_subsection) try ours.writer.print(".{s}", .{entry.subsection});
-            const value = try unquote(gpa, entry.value orelse "");
+            const value = try gpa.dupe(u8, entry.value orelse "");
             defer gpa.free(value);
             try ours.writer.print(".{s}\n{s}\x00", .{ entry.name, value });
         }
@@ -2160,7 +2189,7 @@ test "a value reads as git reads it, carriage returns and all" {
 
         var config = try Config.parseText(gpa, text, .local);
         defer config.deinit();
-        const ours = try unquote(gpa, config.get("a.y").?);
+        const ours = try gpa.dupe(u8, config.get("a.y").?);
         defer gpa.free(ours);
         const ours_z = try std.fmt.allocPrint(gpa, "{s}\x00", .{ours});
         defer gpa.free(ours_z);
@@ -2237,7 +2266,7 @@ fn expectSetsAgree(git: *testgit.Repo, start: []const u8, sets: []const [2][]con
         // A name git adds a line for rather than replaces reads back as more
         // than one value; the last is the one set.
         try std.testing.expect(std.mem.endsWith(u8, read, want));
-        const value = try unquote(gpa, config.get(pair[0]).?);
+        const value = try gpa.dupe(u8, config.get(pair[0]).?);
         defer gpa.free(value);
         try std.testing.expectEqualStrings(pair[1], value);
     }
@@ -2377,7 +2406,7 @@ test "a value given on the command line is taken as it is, under any subsection"
         "core.bare",
     } }, .{});
     defer config.deinit();
-    const value = try unquote(gpa, config.get("s.a\"b\\c.x").?);
+    const value = try gpa.dupe(u8, config.get("s.a\"b\\c.x").?);
     defer gpa.free(value);
     try std.testing.expectEqualStrings("semi;colon # not a comment", value);
     try std.testing.expect(try config.getBool("core.bare", false));
@@ -2499,7 +2528,7 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
         }
         return error.TestUnexpectedResult;
     };
-    const decoded = try unquote(gpa, raw);
+    const decoded = try gpa.dupe(u8, raw);
     defer gpa.free(decoded);
     try std.testing.expectEqualStrings(value, decoded);
     // Removing the section leaves a file that still parses.

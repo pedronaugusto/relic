@@ -71,8 +71,7 @@ pub fn directoryIsSafe(gpa: Allocator, io: Io, protected: *const config_mod.Conf
             safe = false;
             continue;
         };
-        const value = config_mod.unquote(gpa, raw) catch continue;
-        defer gpa.free(value);
+        const value = raw;
         if (value.len == 0) {
             safe = false;
             continue;
@@ -109,16 +108,41 @@ pub const BareRepositories = enum {
     explicit,
 };
 
-/// `safe.bareRepository` in `protected`, the last value git knows.
-pub fn bareRepositories(protected: *const config_mod.Config) BareRepositories {
+/// `safe.bareRepository` in `protected`, as git's `allowed_bare_repo_cb`
+/// reads it: `explicit` and `all`, spelled exactly, the last one winning.
+/// Any other value, a bare name among them, is
+/// `error.InvalidSafeBareRepository`, where git dies rather than guess.
+pub fn bareRepositories(protected: *const config_mod.Config) error{InvalidSafeBareRepository}!BareRepositories {
     var result: BareRepositories = .all;
     for (protected.entries.items) |entry| {
         if (!entry.matches("safe", null, "barerepository")) continue;
-        const value = entry.value orelse continue;
-        if (std.mem.eql(u8, value, "explicit")) result = .explicit;
-        if (std.mem.eql(u8, value, "all")) result = .all;
+        const value = entry.value orelse return error.InvalidSafeBareRepository;
+        if (std.mem.eql(u8, value, "explicit")) {
+            result = .explicit;
+        } else if (std.mem.eql(u8, value, "all")) {
+            result = .all;
+        } else return error.InvalidSafeBareRepository;
     }
     return result;
+}
+
+test "safe.bareRepository takes git's two values, quoted or not, and refuses any other" {
+    const gpa = std.testing.allocator;
+    for ([_]struct { text: []const u8, want: ?BareRepositories }{
+        .{ .text = "", .want = .all },
+        .{ .text = "[safe]\n\tbareRepository = explicit\n", .want = .explicit },
+        .{ .text = "[safe]\n\tbareRepository = \"explicit\"\n", .want = .explicit },
+        .{ .text = "[safe]\n\tbareRepository = explicit\n\tbareRepository = all\n", .want = .all },
+        .{ .text = "[safe]\n\tbareRepository = Explicit\n", .want = null },
+        .{ .text = "[safe]\n\tbareRepository = explicit\n\tbareRepository = bogus\n", .want = null },
+        .{ .text = "[safe]\n\tbareRepository\n", .want = null },
+    }) |case| {
+        var config = try config_mod.Config.parseText(gpa, case.text, .global);
+        defer config.deinit();
+        if (case.want) |want| {
+            try std.testing.expectEqual(want, try bareRepositories(&config));
+        } else try std.testing.expectError(error.InvalidSafeBareRepository, bareRepositories(&config));
+    }
 }
 
 /// git's `is_implicit_bare_repo`: a bare repository found at `path`, with

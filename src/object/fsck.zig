@@ -381,11 +381,7 @@ pub const Rules = struct {
         for (config.entries.items) |entry| {
             if (!entryUnder(entry, scope)) continue;
             const raw = entry.value orelse return error.MissingValue;
-            const value = config_mod.unquote(gpa, raw) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.MalformedValue,
-            };
-            defer gpa.free(value);
+            const value = raw;
             if (std.ascii.eqlIgnoreCase(entry.name, "skiplist")) {
                 var path = value;
                 var expanded: ?[]u8 = null;
@@ -986,19 +982,13 @@ pub fn checkBlob(gpa: Allocator, rules: *const Rules, oid: Oid, as: Special, byt
             };
             var partial = try config_mod.Config.parseTextUntilError(gpa, content, .local);
             defer partial.config.deinit();
-            var failed = partial.failure != null;
+            const failed = partial.failure != null;
             for (partial.config.entries.items) |entry| {
                 if (!entry.has_subsection or !std.mem.eql(u8, entry.section, "submodule")) continue;
                 const name = entry.subsection;
-                const value: ?[]u8 = if (entry.value) |raw| config_mod.unquote(gpa, raw) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => {
-                        // git's parser stops at a value it cannot read.
-                        failed = true;
-                        break;
-                    },
-                } else null;
-                defer if (value) |v| gpa.free(v);
+                // git's parser stops at a value it cannot read, and so
+                // does the partial parse: what is here was read.
+                const value: ?[]const u8 = entry.value;
                 if (!gitmodules.checkName(name)) _ = try r.report(.gitmodules_name, name);
                 if (value) |v| {
                     if (std.mem.eql(u8, entry.name, "url") and !gitmodules.checkUrl(v)) _ = try r.report(.gitmodules_url, v);

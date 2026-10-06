@@ -610,7 +610,7 @@ pub const Session = struct {
         if (command == null) {
             if (opts.config) |config| {
                 if (config.get("core.askpass")) |raw| {
-                    config_value = config_mod.unquote(s.gpa, raw) catch null;
+                    config_value = s.gpa.dupe(u8, raw) catch null;
                     if (config_value) |v| {
                         if (v.len != 0) command = v;
                     }
@@ -667,7 +667,7 @@ fn settingsFor(arena: Allocator, config: ?*const config_mod.Config, url: ?url_mo
             if (!urlMatches(entry.subsection, u)) continue;
         }
         const raw = entry.value orelse "";
-        const value = config_mod.unquote(arena, raw) catch continue;
+        const value = try arena.dupe(u8, raw);
         if (std.ascii.eqlIgnoreCase(entry.name, "helper")) {
             if (value.len == 0) {
                 helpers.clearRetainingCapacity();

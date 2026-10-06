@@ -95,12 +95,7 @@ pub const Combine = enum {
 /// The notes ref `core.notesRef` names, or `refs/notes/commits`. The
 /// result is the caller's.
 pub fn defaultRef(gpa: Allocator, repo: *const Repository) Allocator.Error![]u8 {
-    if (repo.configuration().get("core.notesref")) |raw| {
-        return config_mod.unquote(gpa, raw) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return gpa.dupe(u8, raw),
-        };
-    }
+    if (repo.configuration().get("core.notesref")) |value| return gpa.dupe(u8, value);
     return gpa.dupe(u8, default_ref);
 }
 

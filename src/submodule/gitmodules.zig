@@ -170,13 +170,7 @@ pub const Gitmodules = struct {
             if (!std.ascii.eqlIgnoreCase(entry.section, "submodule")) continue;
             if (entry.subsection.len == 0) continue;
             const key = try std.ascii.allocLowerString(arena, entry.name);
-            const value: ?[]const u8 = if (entry.value) |raw|
-                config_mod.unquote(arena, raw) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => return error.MalformedValue,
-                }
-            else
-                null;
+            const value: ?[]const u8 = if (entry.value) |v| try arena.dupe(u8, v) else null;
 
             const name = try arena.dupe(u8, entry.subsection);
             if (!checkName(name)) {

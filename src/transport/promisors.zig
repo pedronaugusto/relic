@@ -132,10 +132,7 @@ pub fn remotes(arena: Allocator, config: *const config_mod.Config) Allocator.Err
 fn remoteValue(arena: Allocator, config: *const config_mod.Config, remote: []const u8, key: []const u8) Allocator.Error!?[]const u8 {
     const full = try std.fmt.allocPrint(arena, "remote.{s}.{s}", .{ remote, key });
     const raw = config.get(full) orelse return null;
-    const value = config_mod.unquote(arena, raw) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => raw,
-    };
+    const value = try arena.dupe(u8, raw);
     return if (value.len == 0) null else value;
 }
 

@@ -142,10 +142,7 @@ pub const Drivers = struct {
             // The last line that sets a key wins, as it does in git.
             if (std.ascii.eqlIgnoreCase(entry.name, "required")) {
                 driver.required = if (entry.value == null) true else blk: {
-                    const decoded = config_mod.unquote(a, raw) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        else => return error.NotABoolean,
-                    };
+                    const decoded = try a.dupe(u8, raw);
                     break :blk try config_mod.parseBool(decoded);
                 };
                 continue;
@@ -158,10 +155,7 @@ pub const Drivers = struct {
                 &driver.process
             else
                 continue;
-            const decoded = config_mod.unquote(a, raw) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.MalformedValue,
-            };
+            const decoded = try a.dupe(u8, raw);
             slot.* = if (decoded.len == 0) null else decoded;
         }
         return .{ .gpa = gpa, .arena = arena_instance.state, .items = list.items };

@@ -58,10 +58,7 @@ pub const Error = errors: {
 };
 
 fn decoded(arena: Allocator, raw: []const u8) Allocator.Error![]const u8 {
-    return config_mod.unquote(arena, raw) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => raw,
-    };
+    return try arena.dupe(u8, raw);
 }
 
 fn configValue(arena: Allocator, config: *const config_mod.Config, name: []const u8) Allocator.Error!?[]const u8 {

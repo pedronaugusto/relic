@@ -296,10 +296,7 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
 /// `commit`, and `~/` is the home the repository was opened with. The text
 /// is `gpa`'s.
 pub fn template(gpa: Allocator, io: Io, repo: *Repository) Allocator.Error!?[]u8 {
-    const path = (repo.configuration().getPath(gpa, "commit.template") catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
-    }) orelse return null;
+    const path = (try repo.configuration().getPath(gpa, "commit.template")) orelse return null;
     defer gpa.free(path);
     const dir = if (std.fs.path.isAbsolute(path)) Io.Dir.cwd() else repo.work_dir orelse Io.Dir.cwd();
     const text = dir.readFileAlloc(io, path, gpa, .limited(1 << 30)) catch return null;

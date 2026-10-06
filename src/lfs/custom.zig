@@ -96,10 +96,7 @@ pub fn configured(arena: Allocator, config: *const config_mod.Config) (Allocator
             fn get(a: Allocator, c: *const config_mod.Config, buf: []u8, adapter: []const u8, field: []const u8) (Allocator.Error || error{MalformedValue})!?[]const u8 {
                 const key = std.fmt.bufPrint(buf, "lfs.customtransfer.{s}.{s}", .{ adapter, field }) catch return null;
                 const raw = c.get(key) orelse return null;
-                return config_mod.unquote(a, raw) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => return error.MalformedValue,
-                };
+                return try a.dupe(u8, raw);
             }
         }.get;
         const path = try value(arena, config, &key_buf, name, "path") orelse continue;

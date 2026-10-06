@@ -54,11 +54,7 @@ pub const HiddenRefs = struct {
             if (entry.has_subsection or !std.ascii.eqlIgnoreCase(entry.name, "hiderefs")) continue;
             if (!std.mem.eql(u8, entry.section, "transfer") and !std.mem.eql(u8, entry.section, service.section())) continue;
             const raw = entry.value orelse return error.MalformedValue;
-            const value = config_mod.unquote(gpa, raw) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.MalformedValue,
-            };
-            defer gpa.free(value);
+            const value = raw;
             var len = value.len;
             while (len != 0 and value[len - 1] == '/') len -= 1;
             const trimmed = try gpa.dupe(u8, value[0..len]);

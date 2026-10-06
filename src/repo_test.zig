@@ -515,6 +515,46 @@ test "worktree add refuses a destination with something in it and a branch git w
     }
 }
 
+test "the repository's format is its own config file's alone, as git reads it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "f", "x\n");
+    try git.exec(io, &.{ "add", "f" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+
+    // A `-c` naming another version: git goes on, and so does this.
+    try git.exec(io, &.{ "-c", "core.repositoryformatversion=7", "status", "--porcelain" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{ .config_overrides = &.{"core.repositoryformatversion=7"} });
+        repo.deinit(io);
+    }
+    // An include naming a version and an extension git does not know.
+    var git_dir = try git.gitDir(io);
+    defer git_dir.close(io);
+    try git_dir.writeFile(io, .{ .sub_path = "inc", .data = "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tbogus = true\n" });
+    try git.exec(io, &.{ "config", "include.path", "inc" });
+    try git.exec(io, &.{ "status", "--porcelain" });
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+        repo.deinit(io);
+    }
+    // A global file naming another hash names nothing about this one.
+    try git.writeFile(io, "global.config", "[extensions]\n\tobjectFormat = sha256\n");
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{ .global_config = .{ .dir = git.dir, .sub_path = "global.config" } });
+        defer repo.deinit(io);
+        try std.testing.expectEqual(hash.Kind.sha1, repo.objectFormat());
+    }
+    // A v1-only extension at version 0 is refused by both.
+    try git.exec(io, &.{ "config", "--unset", "include.path" });
+    try git.exec(io, &.{ "config", "extensions.refStorage", "files" });
+    git.report_failures = false;
+    try std.testing.expectError(error.GitFailed, git.run(io, &.{ "status", "--porcelain" }));
+    try std.testing.expectError(error.UnsupportedExtension, repo_mod.Repository.open(gpa, io, git.dir, .{}));
+}
+
 test "a config refresh keeps only its own refused setting" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -1000,7 +1040,7 @@ test "repository writes preserve signature and hash refusals" {
     }, null));
 }
 
-test "worktree configuration adapters refuse malformed settings and allocation failures" {
+test "worktree configuration adapters refuse malformed settings, and read a quoted one without allocating" {
     const Adapter = struct {
         fn core(r: *const repo_mod.Repository) !worktree.attributes.CoreSettings {
             return r.coreSettings();
@@ -1031,7 +1071,8 @@ test "worktree configuration adapters refuse malformed settings and allocation f
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     config_state.get(repo._config).gpa = failing.allocator();
     defer config_state.get(repo._config).gpa = gpa;
-    try std.testing.expectError(error.OutOfMemory, Adapter.core(&repo));
+    // The value was read once, quotes and all, when the file was.
+    try std.testing.expectEqual(worktree.attributes.CoreSettings.AutoCrlf.input, (try Adapter.core(&repo)).autocrlf);
 }
 
 test "repository format and ref cache state have no writable public fields" {

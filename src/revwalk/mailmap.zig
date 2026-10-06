@@ -222,10 +222,7 @@ pub const Mailmap = struct {
         var blob_name: ?[]u8 = null;
         defer if (blob_name) |b| gpa.free(b);
         if (config.get("mailmap.blob")) |raw| {
-            blob_name = config_mod.unquote(gpa, raw) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.MalformedValue,
-            };
+            blob_name = try gpa.dupe(u8, raw);
         } else if (repo.isBare()) {
             blob_name = try gpa.dupe(u8, "HEAD:.mailmap");
         }

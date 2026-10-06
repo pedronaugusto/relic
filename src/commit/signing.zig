@@ -786,11 +786,8 @@ fn withoutCarriageReturns(gpa: Allocator, bytes: []const u8) Allocator.Error![]u
     return gpa.realloc(out, n);
 }
 
-fn unquote(arena: Allocator, raw: []const u8) (Allocator.Error || error{MalformedValue})![]u8 {
-    return config_mod.unquote(arena, raw) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.MalformedValue,
-    };
+fn unquote(arena: Allocator, value: []const u8) (Allocator.Error || error{MalformedValue})![]u8 {
+    return arena.dupe(u8, value);
 }
 
 fn expandPath(arena: Allocator, config: *const config_mod.Config, text: []const u8) Allocator.Error![]const u8 {

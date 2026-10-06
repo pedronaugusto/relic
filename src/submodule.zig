@@ -286,9 +286,8 @@ fn configKey(arena: Allocator, name: []const u8, variable: []const u8) Allocator
 
 /// A configuration value with its quotes and escapes undone, or `null`.
 fn configString(arena: Allocator, config: *const config_mod.Config, key: []const u8) Error!?[]const u8 {
-    const raw = config.get(key) orelse return null;
-    const value = try config_mod.unquote(arena, raw);
-    return value;
+    const value = config.get(key) orelse return null;
+    return try arena.dupe(u8, value);
 }
 
 /// Whether git counts the submodule as active: `submodule.<name>.active`
@@ -299,7 +298,7 @@ pub fn isActive(arena: Allocator, repo: *Repository, name: []const u8, path: []c
     if (repo.configuration().find(active_key) != null) return repo.configuration().getBool(active_key, false);
     const specs = try repo.configuration().all("submodule.active");
     defer repo.configuration().gpa.free(specs);
-    if (specs.len > 0) return pathspecMatches(arena, specs, path);
+    if (specs.len > 0) return pathspecMatches(specs, path);
     return repo.configuration().get(try configKey(arena, name, "url")) != null;
 }
 
@@ -307,12 +306,12 @@ pub fn isActive(arena: Allocator, repo: *Repository, name: []const u8, path: []c
 /// it, or a glob; `:(exclude)`, `:!` and `:^` take matches away; `:(top)`,
 /// `:/`, `:(glob)` and `:(literal)` are read, and any other magic is
 /// refused by name.
-fn pathspecMatches(arena: Allocator, specs: []const []const u8, path: []const u8) Error!bool {
+fn pathspecMatches(specs: []const []const u8, path: []const u8) Error!bool {
     var positive = false;
     var included = false;
     var excluded = false;
     for (specs) |raw| {
-        var spec: []const u8 = try config_mod.unquote(arena, raw);
+        var spec: []const u8 = raw;
         var exclude = false;
         var literal = false;
         var glob = false;

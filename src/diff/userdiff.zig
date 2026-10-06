@@ -88,12 +88,7 @@ pub const Rule = struct {
                 break;
             }
         };
-        const raw = pattern orelse return rule;
-        // a configured value is read as git reads it: quotes and escapes undone
-        const text = if (from_config) config_mod.unquote(rule.arena.allocator(), raw) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidFunctionPattern,
-        } else raw;
+        const text = pattern orelse return rule;
         rule.regs = try compile(rule.arena.allocator(), gpa, text, .{ .syntax = if (extended) .extended else .basic, .icase = icase });
         return rule;
     }

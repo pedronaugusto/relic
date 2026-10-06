@@ -271,7 +271,7 @@ fn selectFilter(arena: Allocator, config: *const config_mod.Config, explicit: ?[
         const spec = explicit orelse if (promisor) configured: {
             const key = try std.fmt.allocPrint(arena, "remote.{s}.partialclonefilter", .{remote_name.?});
             const raw = config.get(key) orelse break :configured null;
-            break :configured try config_mod.unquote(arena, raw);
+            break :configured try arena.dupe(u8, raw);
         } else null;
         const text = spec orelse break :blk null;
         if (!promisor) return error.NotAPromisorRemote;

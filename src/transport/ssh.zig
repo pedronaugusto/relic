@@ -235,7 +235,7 @@ pub fn explain(gpa: Allocator, io: Io, conn: *Connection, err: anyerror, url: ur
 fn configValue(arena: Allocator, config: ?*const config_mod.Config, key: []const u8) ?[]const u8 {
     const c = config orelse return null;
     const raw = c.get(key) orelse return null;
-    return config_mod.unquote(arena, raw) catch null;
+    return arena.dupe(u8, raw) catch null;
 }
 
 /// git's `determine_ssh_variant`.

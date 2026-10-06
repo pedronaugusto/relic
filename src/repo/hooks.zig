@@ -819,10 +819,7 @@ fn readConfigured(
         if (entry.subsection.len == 0) continue;
         const name = entry.subsection;
         const raw = entry.value orelse "";
-        const value = config_mod.unquote(arena, raw) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.MalformedValue,
-        };
+        const value = try arena.dupe(u8, raw);
         if (std.ascii.eqlIgnoreCase(entry.name, "event")) {
             var i: usize = 0;
             while (i < pairs.items.len) {

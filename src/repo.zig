@@ -427,7 +427,9 @@ pub const Repository = struct {
         if (options.explicit) return;
         var protected = try protectedConfig(gpa, io, options);
         defer protected.deinit();
-        if (safe.bareRepositories(&protected) == .all) return;
+        // A value git does not know refuses, as git dies there.
+        const allowed = safe.bareRepositories(&protected) catch .explicit;
+        if (allowed == .all) return;
         const real = git_dir.realPathFileAlloc(io, ".", gpa) catch return error.ImplicitBareRepository;
         defer gpa.free(real);
         const path = try safe.normalize(gpa, real);
@@ -543,8 +545,14 @@ pub const Repository = struct {
     fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, diagnostic: ?*Diagnostic) Error!struct { config: config_mod.Config, format: RepositoryFormat } {
         var config = try config_mod.Config.open(repo.gpa, io, sources, context);
         errdefer config.deinit();
-        const format = try checkFormat(&config, diagnostic);
-        if (!try settingBool(&config, "extensions.worktreeConfig", diagnostic)) return .{ .config = config, .format = format };
+        // The format is the repository's own file's to say, read alone, as
+        // git's `read_repository_format` reads it: no include, no other
+        // file and no `-c` decides which hash a repository's objects are
+        // named with.
+        var own = try ownConfig(repo.gpa, io, sources.local);
+        defer own.deinit();
+        const format = try checkFormat(&own, diagnostic);
+        if (!try settingBool(&own, "extensions.worktreeConfig", diagnostic)) return .{ .config = config, .format = format };
         var with_worktree = sources;
         with_worktree.worktree = .{ .dir = repo.git_dir, .sub_path = "config.worktree" };
         const both = try config_mod.Config.open(repo.gpa, io, with_worktree, context);
@@ -557,6 +565,18 @@ pub const Repository = struct {
         ref_storage: refs_mod.Format,
     };
 
+    /// The repository's own configuration file and nothing it includes.
+    fn ownConfig(gpa: Allocator, io: Io, local: ?config_mod.Sources.Path) Error!config_mod.Config {
+        const path = local orelse return config_mod.Config.initEmpty(gpa);
+        const text = try fs.readFileAlloc(gpa, io, path.dir, path.sub_path, 1 << 24) orelse return config_mod.Config.initEmpty(gpa);
+        defer gpa.free(text);
+        return config_mod.Config.parseText(gpa, text, .local);
+    }
+
+    /// The extensions git takes only from a version 1 repository: one of
+    /// them at version 0 is git's "v1-only extension found" and refused.
+    const v1_only_extensions = [_][]const u8{ "noop-v1", "objectformat", "compatobjectformat", "refstorage", "relativeworktrees" };
+
     /// Decide the repository's format once, from the configuration shared
     /// by its worktrees. A worktree's settings have no say in this decision.
     fn checkFormat(config: *const config_mod.Config, diagnostic: ?*Diagnostic) Error!RepositoryFormat {
@@ -565,7 +585,16 @@ pub const Repository = struct {
             try refuseSetting(diagnostic, "core.repositoryFormatVersion");
             return error.UnsupportedRepositoryVersion;
         }
-        if (version == 1) try checkExtensions(config, diagnostic);
+        if (version == 1) try checkExtensions(config, diagnostic) else {
+            for (config.entries.items) |entry| {
+                if (!std.ascii.eqlIgnoreCase(entry.section, "extensions") or entry.has_subsection) continue;
+                for (v1_only_extensions) |name| {
+                    if (!std.ascii.eqlIgnoreCase(entry.name, name)) continue;
+                    try refuseSetting(diagnostic, entry.name);
+                    return error.UnsupportedExtension;
+                }
+            }
+        }
         const kind = if (config.get("extensions.objectformat")) |text|
             hash.Kind.parse(text) catch {
                 try refuseSetting(diagnostic, "extensions.objectFormat");
@@ -664,12 +693,7 @@ pub const Repository = struct {
     /// `core.sharedRepository`, as git reads it.
     fn sharedOf(config: *const config_mod.Config) Error!fs.Shared {
         const entry = config.find("core.sharedrepository") orelse return .umask;
-        const raw = entry.value orelse return .group;
-        const value = config_mod.unquote(config.gpa, raw) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidSharedMode,
-        };
-        defer config.gpa.free(value);
+        const value = entry.value orelse return .group;
         return fs.Shared.parse(value) catch error.InvalidSharedMode;
     }
 
@@ -1059,9 +1083,7 @@ pub const Repository = struct {
     }
 
     fn coreChoice(repo: *const Repository, comptime T: type, comptime boolean: bool, setting: []const u8, fallback: T) Error!T {
-        const raw = repo.configuration().get(setting) orelse return fallback;
-        const text = try config_mod.unquote(repo.configuration().gpa, raw);
-        defer repo.configuration().gpa.free(text);
+        const text = repo.configuration().get(setting) orelse return fallback;
         if (T == fs.Stat.Check and std.ascii.eqlIgnoreCase(text, "default")) return .full;
         inline for (@typeInfo(T).@"enum".fields) |field| {
             if ((!boolean or (!std.mem.eql(u8, field.name, "true") and !std.mem.eql(u8, field.name, "false"))) and std.ascii.eqlIgnoreCase(text, field.name)) return @enumFromInt(field.value);
