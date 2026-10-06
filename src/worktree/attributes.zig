@@ -136,6 +136,10 @@ pub const Attrs = struct {
     pub const Macro = struct {
         name: []const u8,
         assignments: []Assignment,
+        /// The precedence of the file that defined it: of two definitions
+        /// the higher file's holds, and within a file the later line's, as
+        /// git's `determine_macros` picks.
+        precedence: u32 = global_precedence,
     };
 
     /// Empty attributes, plus git's one built-in macro.
@@ -268,10 +272,10 @@ pub const Attrs = struct {
     ) Self.Error!void {
         if (attributes_file) |path| {
             if (attributes_dir) |dir| {
-                try attrs.addFileIfPresent(io, dir, path, "", path, global_precedence);
+                try attrs.addFileIfPresent(io, dir, path, "", path, global_precedence, .follow);
             }
         }
-        try attrs.addFileIfPresent(io, common_dir, "info/attributes", "", "info/attributes", info_precedence);
+        try attrs.addFileIfPresent(io, common_dir, "info/attributes", "", "info/attributes", info_precedence, .follow);
     }
 
     /// Load `<base>/.gitattributes`, if it is there.
@@ -284,8 +288,12 @@ pub const Attrs = struct {
             ".gitattributes"
         else
             std.fmt.bufPrint(&path_buf, "{s}/.gitattributes", .{base}) catch return;
-        try attrs.addFileIfPresent(io, wt, path, base, path, depth + 1);
+        try attrs.addFileIfPresent(io, wt, path, base, path, depth + 1, .no_follow);
     }
+
+    /// git's `ATTR_MAX_FILE_SIZE`: a larger attributes file is passed over,
+    /// as git passes it over with a warning.
+    pub const max_file_size = 100 * 1024 * 1024;
 
     fn addFileIfPresent(
         attrs: *Attrs,
@@ -295,9 +303,20 @@ pub const Attrs = struct {
         base: []const u8,
         source: []const u8,
         precedence: u32,
+        links: enum { follow, no_follow },
     ) Error!void {
+        // A `.gitattributes` in the working tree is read only as a file,
+        // never through a symbolic link, as git's `READ_ATTR_NOFOLLOW` reads
+        // it: a link would have the tree's attributes come from anywhere.
+        if (links == .no_follow) {
+            const found = fs.statAt(io, dir, path) catch return orelse return;
+            if (found.kind != .file) return;
+        }
         const a = attrs.arena.allocator();
-        const bytes = (try fs.readFileAlloc(a, io, dir, path, 1 << 24)) orelse return;
+        const bytes = fs.readFileAlloc(a, io, dir, path, max_file_size) catch |err| switch (err) {
+            error.StreamTooLong => return,
+            else => |e| return e,
+        } orelse return;
         try attrs.addText(bytes, base, source, precedence);
     }
 
@@ -316,11 +335,15 @@ pub const Attrs = struct {
             if (line.len == 0 or line[0] == '#') continue;
 
             if (std.mem.startsWith(u8, line, "[attr]")) {
+                // A macro is defined only at the top: the root's file, the
+                // global one or `info/attributes`. git refuses one further
+                // down with a warning, as `READ_ATTR_MACRO_OK` allows.
+                if (base.len != 0) continue;
                 const rest = std.mem.trim(u8, line["[attr]".len..], " \t");
                 const space = std.mem.findAny(u8, rest, " \t") orelse continue;
                 const name = rest[0..space];
                 const assignments = try parseAssignments(a, rest[space + 1 ..]);
-                try attrs.macros.append(attrs.gpa, .{ .name = name, .assignments = assignments });
+                try attrs.macros.append(attrs.gpa, .{ .name = name, .assignments = assignments, .precedence = precedence });
                 continue;
             }
 
@@ -396,44 +419,52 @@ pub const Attrs = struct {
                     .case_fold = attrs.case_fold,
                 }) catch false;
                 if (!matched) continue;
-                try attrs.applyAssignments(a, &out, rule.assignments, 0);
+                try attrs.fill(a, &out, rule.assignments);
             }
         }
         return .{ .items = out.items };
     }
 
-    fn applyAssignments(
-        attrs: *const Attrs,
-        a: Allocator,
-        out: *std.ArrayList(Assignment),
-        assignments: []const Assignment,
-        depth: u8,
-    ) Allocator.Error!void {
-        // A macro may name another macro; the depth cap is what stops two
-        // macros naming each other.
-        if (depth > 8) return;
-        for (assignments) |assignment| {
-            if (attrs.macroNamed(assignment.name)) |macro| {
-                if (assignment.state.isSet()) {
-                    try attrs.applyAssignments(a, out, macro.assignments, depth + 1);
-                }
+    /// git's `fill_one` and `macroexpand_one`: a line's assignments last
+    /// first, each only where nothing decided the attribute already, and a
+    /// macro just set -- to set, not to a value -- expanded into its own
+    /// assignments the same way. An attribute is decided once, so each
+    /// macro is expanded at most once per lookup however its definitions
+    /// name each other; the expansion keeps its own stack, so a chain of
+    /// macros as long as a file can hold runs no recursion off the stack.
+    fn fill(attrs: *const Attrs, a: Allocator, out: *std.ArrayList(Assignment), assignments: []const Assignment) Allocator.Error!void {
+        var pending: std.ArrayList([]const Assignment) = .empty;
+        defer pending.deinit(a);
+        try pending.append(a, assignments);
+        while (pending.items.len != 0) {
+            const top = &pending.items[pending.items.len - 1];
+            if (top.len == 0) {
+                _ = pending.pop();
+                continue;
             }
-            var already = false;
-            for (out.items) |existing| {
-                if (std.mem.eql(u8, existing.name, assignment.name)) {
-                    already = true;
-                    break;
-                }
-            }
-            if (!already) try out.append(a, assignment);
+            const assignment = top.*[top.len - 1];
+            top.* = top.*[0 .. top.len - 1];
+            if (decided(out.items, assignment.name)) continue;
+            try out.append(a, assignment);
+            if (assignment.state != .set) continue;
+            if (attrs.macroNamed(assignment.name)) |macro| try pending.append(a, macro.assignments);
         }
     }
 
-    fn macroNamed(attrs: *const Attrs, name: []const u8) ?Macro {
-        for (attrs.macros.items) |macro| {
-            if (std.mem.eql(u8, macro.name, name)) return macro;
+    fn decided(out: []const Assignment, name: []const u8) bool {
+        for (out) |existing| {
+            if (std.mem.eql(u8, existing.name, name)) return true;
         }
-        return null;
+        return false;
+    }
+
+    fn macroNamed(attrs: *const Attrs, name: []const u8) ?Macro {
+        var best: ?Macro = null;
+        for (attrs.macros.items) |macro| {
+            if (!std.mem.eql(u8, macro.name, name)) continue;
+            if (best == null or macro.precedence >= best.?.precedence) best = macro;
+        }
+        return best;
     }
 
     fn higherPrecedenceFirst(_: void, a: *const Level, b: *const Level) bool {
@@ -967,6 +998,28 @@ test "a macro expands, and the built-in binary macro is there" {
     const png = try attrs.lookup(arena.allocator(), "a.png", false);
     try std.testing.expectEqual(State.unset, png.get("text").?);
     try std.testing.expectEqual(State.unset, png.get("diff").?);
+}
+
+test "macros naming each other many times over expand once each, where each expansion used to repeat" {
+    const gpa = std.testing.allocator;
+    var attrs: Attrs = try .init(gpa, false);
+    defer attrs.deinit();
+    // Nine macros, each naming the next twelve times: expanded again at
+    // every mention that is twelve to the eighth expansions per lookup.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    for (0..8) |i| {
+        try text.print(gpa, "[attr]m{d}", .{i});
+        for (0..12) |_| try text.print(gpa, " m{d}", .{i + 1});
+        try text.append(gpa, '\n');
+    }
+    try text.appendSlice(gpa, "[attr]m8 leaf\n* m0\n");
+    try attrs.addText(text.items, "", ".gitattributes", 1);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const found = try attrs.lookup(arena.allocator(), "f", false);
+    try std.testing.expect(found.isSet("leaf"));
+    try std.testing.expectEqual(@as(usize, 10), found.items.len);
 }
 
 test "a deeper file wins, and info/attributes wins over both" {

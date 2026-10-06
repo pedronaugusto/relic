@@ -1366,3 +1366,72 @@ test "a tree with names only Windows refuses checks out elsewhere as git checks 
     defer gpa.free(status);
     try std.testing.expectEqualStrings("", status);
 }
+
+/// What `git check-attr -a` says of `path`, and what relic's lookup says,
+/// each as sorted `name: value` lines.
+fn expectCheckAttr(gpa: std.mem.Allocator, io: Io, h: *Harness, path: []const u8) !void {
+    const said = try h.repo.run(io, &.{ "check-attr", "-a", "--", path });
+    defer gpa.free(said);
+    var theirs: std.ArrayList([]const u8) = .empty;
+    defer theirs.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, said, '\n');
+    while (lines.next()) |line| if (line.len != 0) try theirs.append(gpa, line[path.len + 2 ..]);
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try h.attrs.enter(io, h.repo.dir, path);
+    const found = try h.attrs.lookup(a, path, false);
+    var ours: std.ArrayList([]const u8) = .empty;
+    for (found.items) |item| {
+        const value = switch (item.state) {
+            .set => "set",
+            .unset => "unset",
+            .value => |v| v,
+            .unspecified => continue,
+        };
+        try ours.append(a, try std.fmt.allocPrint(a, "{s}: {s}", .{ item.name, value }));
+    }
+    const less = struct {
+        fn f(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.order(u8, x, y) == .lt;
+        }
+    }.f;
+    std.mem.sort([]const u8, theirs.items, {}, less);
+    std.mem.sort([]const u8, ours.items, {}, less);
+    std.testing.expectEqual(theirs.items.len, ours.items.len) catch |err| {
+        std.debug.print("{s}: git {any}, relic {any}\n", .{ path, theirs.items, ours.items });
+        return err;
+    };
+    for (theirs.items, ours.items) |x, y| try std.testing.expectEqualStrings(x, y);
+}
+
+test "attributes resolve as git check-attr resolves them: the last assignment of a line, macros once and only when set, and only from the top" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    try h.repo.writeFile(io, ".gitattributes",
+        \\[attr]m x y=1
+        \\[attr]n p
+        \\* a -a m -x
+        \\sub/* !m
+        \\val/* m=foo
+        \\top/* n
+        \\
+    );
+    // A macro further down is git's "not allowed", and ignored.
+    try h.repo.writeFile(io, "sub/.gitattributes", "[attr]inner z\n* inner\n");
+    // info/attributes outranks the root's file, its macro too.
+    try h.git_dir.createDirPath(io, "info");
+    try h.git_dir.writeFile(io, .{ .sub_path = "info/attributes", .data = "[attr]n q\n" });
+    try h.attrs.loadGlobal(io, h.git_dir, null, null);
+    if (builtin.os.tag != .windows) {
+        // A .gitattributes that is a link is not followed.
+        try h.repo.writeFile(io, "elsewhere.attrs", "* evil\n");
+        try h.repo.dir.createDirPath(io, "link");
+        try h.repo.dir.symLink(io, "../elsewhere.attrs", "link/.gitattributes", .{});
+        try expectCheckAttr(gpa, io, &h, "link/f");
+    }
+    for ([_][]const u8{ "f", "sub/f", "val/f", "top/f" }) |path| try expectCheckAttr(gpa, io, &h, path);
+}
