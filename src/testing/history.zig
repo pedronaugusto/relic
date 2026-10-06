@@ -25,6 +25,7 @@ const threeway = @import("../merge/threeway.zig");
 const ort = @import("../merge/ort.zig");
 const signing = @import("../commit/signing.zig");
 const program = @import("../repo/program.zig");
+const fs = @import("../repo/fs.zig");
 
 const Oid = hash.Oid;
 
@@ -2464,6 +2465,95 @@ test "rerere's status, remaining, diff, forget and gc answer as git's do" {
         }
         try expectSameRerere(&pair, io);
     }
+}
+
+test "rerere refuses a forged MERGE_RR and variant, and a replay keeps its resolution from gc, as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try requireOrtGit(io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.exec(io, &.{ "config", "rerere.enabled", "true" });
+        try r.exec(io, &.{ "tag", "before" });
+        try gitMayFail(io, r, &.{ "merge", "topic" });
+    }
+    const merge_rr = try pair.ours.readFile(io, ".git/MERGE_RR");
+    defer gpa.free(merge_rr);
+    const id = merge_rr[0..40];
+
+    // A variant with a sign, or past what rerere keeps, is not one of its
+    // files: the reports are the ones git gives without it. git's own scan
+    // takes the first for an index and the second, cut to an int, for a
+    // list it then walks a billion entries of, so only relic is given them.
+    for ([_][]const u8{ "preimage.-1", "postimage.-1", "postimage.99999999999", "preimage.70000" }) |name| {
+        const forged_variant = try std.fmt.allocPrint(gpa, ".git/rr-cache/{s}/{s}", .{ id, name });
+        defer gpa.free(forged_variant);
+        try pair.ours.writeFile(io, forged_variant, "x\n");
+        try expectSameRerereReport(&pair, io);
+        try pair.ours.dir.deleteFile(io, forged_variant);
+    }
+
+    // A conflict name that climbs out of rr-cache is a corrupt MERGE_RR,
+    // and nothing it names is removed.
+    const victim = "victim/" ++ "a" ** 27 ++ "/preimage";
+    const forged = "../../victim/" ++ "a" ** 27 ++ "\tf\x00";
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, victim, "kept\n");
+        try r.writeFile(io, ".git/MERGE_RR", forged);
+    }
+    pair.git.report_failures = false;
+    try std.testing.expectError(error.GitFailed, pair.git.exec(io, &.{ "rerere", "clear" }));
+    pair.git.report_failures = true;
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        try std.testing.expectError(error.MalformedMergeRr, rerere.clear(gpa, io, &repo));
+    }
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        const kept = try r.readFile(io, victim);
+        defer gpa.free(kept);
+        try std.testing.expectEqualStrings("kept\n", kept);
+        try r.dir.deleteTree(io, "victim");
+        try r.writeFile(io, ".git/MERGE_RR", merge_rr);
+    }
+
+    // Resolved and committed, the resolution is recorded; recorded long
+    // ago, a replay marks it used and gc keeps it.
+    const postimage = try std.fmt.allocPrint(gpa, ".git/rr-cache/{s}/postimage", .{id});
+    defer gpa.free(postimage);
+    const long_ago: Io.File.SetTimestampsOptions = .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } },
+    };
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+        try r.writeFile(io, "f", "a\nresolved by hand\nc\n");
+        try r.exec(io, &.{ "add", "-A" });
+        try r.exec(io, &.{ "commit", "-q", "--no-edit" });
+        try fs.setTimestamps(io, r.dir, postimage, long_ago);
+        try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
+    }
+    try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(@as(usize, 1), outcome.reused.len);
+    }
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "merge", "--abort" });
+    try pair.git.exec(io, &.{ "rerere", "gc" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+        try rerere.gc(gpa, io, &repo, now_s);
+    }
+    try expectSameRerere(&pair, io);
+    const kept = try pair.ours.readFile(io, postimage);
+    defer gpa.free(kept);
 }
 
 test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records as git's does" {

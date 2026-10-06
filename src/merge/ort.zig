@@ -1053,7 +1053,7 @@ const Merge = struct {
             var result = merge.blobs(m.arena, orig, src1, src2, .{
                 .conflict_style = m.options.conflict_style,
                 .labels = .{ .ours = name1, .base = base_label, .theirs = name2 },
-                .marker_size = @intCast(@min(marker_size, 255)),
+                .marker_size = marker_size,
                 .favor = favor,
                 .algorithm = m.options.algorithm,
                 .minimal = m.options.minimal,

@@ -162,7 +162,7 @@ const Run = struct {
         try head_mod.removeState(r.io, r.repo.common_dir, sub);
     }
 
-    fn markerSize(r: *Run, path: []const u8) Error!usize {
+    fn markerSize(r: *Run, path: []const u8) Error!u32 {
         const attrs = r.rules.attrs orelse return 7;
         const applied = try attrs.lookup(r.arena, path, false);
         if (applied.value("conflict-marker-size")) |text| {
@@ -179,17 +179,35 @@ const Run = struct {
 fn variantOf(file: []const u8, name: []const u8) ?i32 {
     if (std.mem.eql(u8, file, name)) return 0;
     if (!std.mem.startsWith(u8, file, name) or file.len <= name.len + 1 or file[name.len] != '.') return null;
-    return std.fmt.parseInt(i32, file[name.len + 1 ..], 10) catch null;
+    return parseVariant(file[name.len + 1 ..]);
+}
+
+/// The most variants one conflict may have. Each conflict's variants are
+/// kept as a list as long as the highest, so a file name or a record past
+/// this is not taken as rerere's: no repository records thousands of
+/// resolutions of one conflict.
+const max_variant: i32 = 1 << 16;
+
+/// A variant as rerere writes one: decimal digits, no sign, at most
+/// `max_variant`.
+fn parseVariant(text: []const u8) ?i32 {
+    if (text.len == 0) return null;
+    for (text) |c| if (!std.ascii.isDigit(c)) return null;
+    const variant = std.fmt.parseInt(i32, text, 10) catch return null;
+    return if (variant <= max_variant) variant else null;
 }
 
 fn fit(arena: Allocator, list: *std.ArrayList(u8), variant: i32) Allocator.Error!void {
+    assert(variant >= 0);
+    assert(variant <= max_variant);
+    // The assertion keeps the variant small and not negative.
     const want: usize = @intCast(variant + 1);
     while (list.items.len < want) try list.append(arena, 0);
 }
 
 /// `is_cmarker`: exactly `size` of `c`, then whitespace -- a space for `<`
 /// and `>`, whose markers always carry a label.
-fn isMarker(line: []const u8, c: u8, size: usize) bool {
+fn isMarker(line: []const u8, c: u8, size: u32) bool {
     if (line.len < size) return false;
     for (line[0..size]) |b| {
         if (b != c) return false;
@@ -197,7 +215,7 @@ fn isMarker(line: []const u8, c: u8, size: usize) bool {
     if (line.len == size) return false;
     const next = line[size];
     if ((c == '<' or c == '>') and next != ' ') return false;
-    return next == ' ' or next == '\t' or next == '\n' or next == '\r' or next == 0x0b or next == 0x0c;
+    return next == ' ' or next == '\t' or next == '\n' or next == '\r';
 }
 
 /// The lines of `bytes`, each with its newline.
@@ -223,7 +241,7 @@ const Normalized = struct {
 };
 
 /// `handle_conflict`: one conflict, from after its `<` marker, into `out`.
-fn handleConflict(arena: Allocator, out: *std.ArrayList(u8), lines: *Lines, size: usize, hasher: ?*hash.Hasher) Allocator.Error!i8 {
+fn handleConflict(arena: Allocator, out: *std.ArrayList(u8), lines: *Lines, size: u32, hasher: ?*hash.Hasher) Allocator.Error!i8 {
     var one: std.ArrayList(u8) = .empty;
     var two: std.ArrayList(u8) = .empty;
     const Hunk = enum { side1, side2, original };
@@ -263,13 +281,13 @@ fn handleConflict(arena: Allocator, out: *std.ArrayList(u8), lines: *Lines, size
     return -1;
 }
 
-fn putMarker(arena: Allocator, out: *std.ArrayList(u8), c: u8, size: usize) Allocator.Error!void {
+fn putMarker(arena: Allocator, out: *std.ArrayList(u8), c: u8, size: u32) Allocator.Error!void {
     for (0..size) |_| try out.append(arena, c);
     try out.append(arena, '\n');
 }
 
 /// `handle_path`.
-fn normalize(arena: Allocator, bytes: []const u8, size: usize, kind: hash.Kind) Allocator.Error!Normalized {
+fn normalize(arena: Allocator, bytes: []const u8, size: u32, kind: hash.Kind) Allocator.Error!Normalized {
     var hasher: hash.Hasher = .init(kind);
     var out: std.ArrayList(u8) = .empty;
     var lines: Lines = .{ .bytes = bytes };
@@ -413,11 +431,12 @@ fn parseMergeRr(arena: Allocator, text: []const u8, kind: hash.Kind) (Allocator.
         var variant: i32 = 0;
         if (rest[0] == '.') {
             const tab = std.mem.findScalar(u8, rest, '\t') orelse return error.MalformedMergeRr;
-            variant = std.fmt.parseInt(i32, rest[1..tab], 10) catch return error.MalformedMergeRr;
-            if (variant < 0) return error.MalformedMergeRr;
+            variant = parseVariant(rest[1..tab]) orelse return error.MalformedMergeRr;
             rest = rest[tab..];
         }
         if (rest[0] != '\t') return error.MalformedMergeRr;
+        // The path is read and rewritten in the working tree.
+        if (!worktree.safepath.isSafeStoredPath(rest[1..])) return error.MalformedMergeRr;
         try rr.put(arena, try arena.dupe(u8, rest[1..]), .{ .hex = try arena.dupe(u8, hex), .variant = variant });
     }
     return rr;
@@ -524,19 +543,25 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
 
 /// `merge`: the change from `vid`'s preimage to its postimage, merged into
 /// the conflict at `path`; the file is rewritten when that is clean.
-fn replay(r: *Run, vid: Id, path: []const u8, size: usize) Error!bool {
+fn replay(r: *Run, vid: Id, path: []const u8, size: u32) Error!bool {
     const bytes = readWorktree(r, path) orelse return false;
     const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
     if (n.conflicts < 0) return false;
     try r.writeFile(try r.pathOf(vid, "thisimage"), n.text);
     const merged = (try tryMerge(r, vid, path, n.text, size)) orelse return false;
+    // A replay marks the postimage used, which is what keeps gc from
+    // pruning a resolution still in use; git only warns when it cannot.
+    fs.setTimestamps(r.io, r.repo.common_dir, try r.pathOf(vid, "postimage"), .{ .access_timestamp = .now, .modify_timestamp = .now }) catch |err| switch (err) {
+        error.FileNotFound, error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => {},
+        else => |e| return e,
+    };
     try fs.atomicWrite(r.io, r.wt, path, merged, ".relic-rerere-", .none);
     return true;
 }
 
 /// `try_merge`: `vid`'s preimage to postimage change merged into `cur`, or
 /// `null` when that conflicts or a record is missing.
-fn tryMerge(r: *Run, vid: Id, path: []const u8, cur: []const u8, size: usize) Error!?[]const u8 {
+fn tryMerge(r: *Run, vid: Id, path: []const u8, cur: []const u8, size: u32) Error!?[]const u8 {
     const base = r.readFile(try r.pathOf(vid, "preimage")) orelse return null;
     const other = r.readFile(try r.pathOf(vid, "postimage")) orelse return null;
     const merged = try llMerge(r, path, base, cur, other, size, .{ .ours = "", .base = "", .theirs = "" });
@@ -545,7 +570,7 @@ fn tryMerge(r: *Run, vid: Id, path: []const u8, cur: []const u8, size: usize) Er
 
 /// `ll_merge` with its defaults: the driver the path's attributes name,
 /// Myers, and `merge.conflictStyle`.
-fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs: []const u8, size: usize, labels: blobmerge.Labels) Error!struct { bytes: []const u8, clean: bool } {
+fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs: []const u8, size: u32, labels: blobmerge.Labels) Error!struct { bytes: []const u8, clean: bool } {
     // `find_ll_merge_driver`: set is text, unset binary, a name the driver
     // of that name, and nothing said `merge.default`.
     var name: ?[]const u8 = r.repo.configuration().get("merge.default");
@@ -570,7 +595,7 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
     const style = if (style_text) |text| blobmerge.ConflictStyle.parse(text) orelse .merge else .merge;
     var merged = blobmerge.blobs(r.arena, base, ours, theirs, .{
         .labels = labels,
-        .marker_size = @intCast(@min(size, 255)),
+        .marker_size = size,
         .favor = favor,
         .conflict_style = style,
     }) catch |err| switch (err) {
@@ -609,33 +634,24 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = repo.work_dir orelse return error.BareRepository, .rules = .{} };
-    if (try head_mod.readState(arena, io, repo.git_dir, "MERGE_RR")) |text| {
-        const hex_len = repo.objectFormat().hexLen();
-        var records = std.mem.splitScalar(u8, text, 0);
-        while (records.next()) |record| {
-            if (record.len < hex_len + 2) continue;
-            const hex = record[0..hex_len];
-            var variant: i32 = 0;
-            if (record[hex_len] == '.') {
-                const tab = std.mem.findScalarPos(u8, record, hex_len, '\t') orelse continue;
-                variant = std.fmt.parseInt(i32, record[hex_len + 1 .. tab], 10) catch continue;
-            }
-            const st = try r.status(hex);
-            try fit(arena, st, variant);
-            const both = has_preimage | has_postimage;
-            if (st.items[@intCast(variant)] & both == both) continue;
-            // `unlink_rr_item`: this variant's files, then the directory
-            // if nothing else is in it.
-            const id: Id = .{ .hex = hex, .variant = variant };
-            try r.removeFile(try r.pathOf(id, "thisimage"));
-            try r.removeFile(try r.pathOf(id, "preimage"));
-            try r.removeFile(try r.pathOf(id, "postimage"));
-            const sub = try std.fmt.allocPrint(arena, "rr-cache/{s}", .{hex});
-            repo.common_dir.deleteDir(io, sub) catch |err| switch (err) {
-                error.DirNotEmpty, error.FileNotFound => {},
-                else => return err,
-            };
-        }
+    // `read_rr`, which refuses a corrupt `MERGE_RR` as git's dies on one:
+    // each conflict name becomes a directory name below.
+    const rr = try readMergeRr(&r);
+    for (rr.values()) |slot| {
+        const id = slot.?;
+        const st = try r.status(id.hex);
+        const both = has_preimage | has_postimage;
+        if (st.items[@intCast(id.variant)] & both == both) continue;
+        // `unlink_rr_item`: this variant's files, then the directory if
+        // nothing else is in it.
+        try r.removeFile(try r.pathOf(id, "thisimage"));
+        try r.removeFile(try r.pathOf(id, "preimage"));
+        try r.removeFile(try r.pathOf(id, "postimage"));
+        const sub = try std.fmt.allocPrint(arena, "rr-cache/{s}", .{id.hex});
+        repo.common_dir.deleteDir(io, sub) catch |err| switch (err) {
+            error.DirNotEmpty, error.FileNotFound => {},
+            else => return err,
+        };
     }
     try head_mod.removeState(io, repo.git_dir, "MERGE_RR");
 }
@@ -909,7 +925,7 @@ fn forgetOne(r: *Run, rr: *std.array_hash_map.String(?Id), path: []const u8, sta
 
 /// `handle_cache`: the conflict merged again from its stages, the missing
 /// ones empty, with `ll_merge`'s defaults, and normalized.
-fn handleCache(r: *Run, path: []const u8, stages: Stages, size: usize) Error!Normalized {
+fn handleCache(r: *Run, path: []const u8, stages: Stages, size: u32) Error!Normalized {
     var texts: [3][]const u8 = .{ "", "", "" };
     for (stages, &texts) |stage, *text| {
         const s = stage orelse continue;
@@ -1050,6 +1066,41 @@ test "a conflict is named and normalized as git's rerere names it, whichever sid
     try std.testing.expectEqualStrings(one.text, two.text);
     const clean = try normalize(a, "no markers here\n<<<<<<<< eight\n", 7, .sha1);
     try std.testing.expectEqual(@as(i8, 0), clean.conflicts);
+}
+
+test "a marker ends at a space, a tab or a line end, as git's isspace has it, and may be any length" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A vertical tab or a form feed after the marker is content.
+    for ([_][]const u8{ "\x0b", "\x0c" }) |space| {
+        const text = try std.fmt.allocPrint(a, "<<<<<<< a\nmine\n=======\nyours\n======={s}\n>>>>>>> b\n", .{space});
+        const n = try normalize(a, text, 7, .sha1);
+        try std.testing.expectEqual(@as(i8, 1), n.conflicts);
+        const want = try std.fmt.allocPrint(a, "<<<<<<<\nmine\n=======\nyours\n======={s}\n>>>>>>>\n", .{space});
+        try std.testing.expectEqualStrings(want, n.text);
+    }
+    // The markers a merge writes at a size past a byte's are the ones read.
+    var merged = try blobmerge.blobs(a, "base\n", "mine\n", "yours\n", .{ .marker_size = 300 });
+    defer merged.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, merged.bytes, "<" ** 300 ++ " "));
+    try std.testing.expectEqual(@as(i8, 1), (try normalize(a, merged.bytes, 300, .sha1)).conflicts);
+}
+
+test "a variant is digits, no sign, and no more than rerere keeps" {
+    try std.testing.expectEqual(@as(?i32, 0), variantOf("preimage", "preimage"));
+    try std.testing.expectEqual(@as(?i32, 3), variantOf("preimage.3", "preimage"));
+    for ([_][]const u8{ "preimage.-1", "preimage.+1", "preimage.", "preimage.2147483647", "preimage.99999999999", "preimage.1x" }) |name| {
+        try std.testing.expectEqual(@as(?i32, null), variantOf(name, "preimage"));
+    }
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const id = "a" ** 40;
+    try std.testing.expectError(error.MalformedMergeRr, parseMergeRr(arena.allocator(), id ++ ".-1\tf\x00", .sha1));
+    try std.testing.expectError(error.MalformedMergeRr, parseMergeRr(arena.allocator(), id ++ ".2147483647\tf\x00", .sha1));
+    try std.testing.expectError(error.MalformedMergeRr, parseMergeRr(arena.allocator(), "../../victim/" ++ "a" ** 27 ++ "\tf\x00", .sha1));
+    try std.testing.expectError(error.MalformedMergeRr, parseMergeRr(arena.allocator(), id ++ "\t../outside\x00", .sha1));
 }
 
 test "fuzz: any bytes are a MERGE_RR or a named failure" {

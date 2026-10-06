@@ -55,8 +55,8 @@ pub const BlobOptions = struct {
     conflict_style: ConflictStyle = .merge,
     labels: Labels = .{},
     /// How many characters each marker is: git's `conflict-marker-size`
-    /// attribute.
-    marker_size: u8 = 7,
+    /// attribute, which is an `int` there and as wide here.
+    marker_size: u32 = 7,
     favor: Favor = .none,
     /// The line diff the two sides are taken with. `git merge-file`
     /// uses Myers; the merge machinery behind `merge`, `cherry-pick`,
@@ -494,7 +494,7 @@ fn writeMarker(
     gpa: Allocator,
     out: *std.ArrayList(u8),
     c: u8,
-    size: u8,
+    size: u32,
     label: []const u8,
     crlf: bool,
 ) Allocator.Error!void {
