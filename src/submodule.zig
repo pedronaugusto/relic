@@ -114,6 +114,10 @@ pub const Error = error{
     BareRepository,
     /// The `Transport` failed; it says why.
     TransportFailed,
+    /// Under `UpdateOptions.init`, the submodule's path holds something
+    /// before it is cloned: git's "directory not empty", which keeps a
+    /// clone from landing beside files already there.
+    DirectoryNotEmpty,
 } || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
     config_mod.Config.SetError || refs_mod.TransactionError || program.Error || gitlink.Error ||
     Io.Dir.RealPathError || Io.Dir.RenameError || Io.Dir.DeleteTreeError;
@@ -1547,6 +1551,9 @@ fn populate(
         } else |_| {}
         const transport = options.transport orelse return refuse(options.refusal, display, url, error.NotCloned);
         if (!gitmodules.checkUrl(url)) return refuse(options.refusal, display, url, error.DisallowedUrl);
+        // git's `clone_submodule` under `--init`: a path that is there and
+        // is not an empty directory is not cloned into.
+        if (options.init and !try emptyOrAbsent(io, wt, path)) return refuse(options.refusal, display, url, error.DirectoryNotEmpty);
         try repo.git_dir.createDirPath(io, target);
         const dir = try repo.git_dir.openDir(io, target, .{ .iterate = true });
         errdefer dir.close(io);
@@ -1564,6 +1571,19 @@ fn populate(
     var work = try wt.openDir(io, path, .{});
     defer work.close(io);
     try connect(arena, gpa, io, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+}
+
+/// Whether `path` is not there, or is a directory with nothing in it.
+fn emptyOrAbsent(io: Io, wt: Io.Dir, path: []const u8) Error!bool {
+    const st = wt.statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return true,
+        else => |e| return e,
+    };
+    if (st.kind != .directory) return false;
+    var dir = try wt.openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    return try it.next(io) == null;
 }
 
 /// git's `ensure_core_worktree`: a `core.worktree` a submodule's

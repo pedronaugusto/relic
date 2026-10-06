@@ -312,7 +312,9 @@ fn startsWithDotDotSlash(s: []const u8, cross_platform: bool) bool {
 /// else is left to the transport that reads it.
 pub fn checkUrl(url: []const u8) bool {
     if (looksLikeOption(url)) return false;
-    if (isRelativeUrl(url)) {
+    // A `git://` URL is checked as a relative one is: it may be appended to
+    // an http URL and decoded there.
+    if (isRelativeUrl(url) or std.mem.startsWith(u8, url, "git://")) {
         if (decodesToNewline(url)) return false;
         var rest = url;
         var climbs: usize = 0;
@@ -348,8 +350,9 @@ fn decodesToNewline(url: []const u8) bool {
     while (i < url.len) : (i += 1) {
         if (url[i] == '\n') return true;
         if (url[i] == '%' and i + 2 < url.len) {
-            const byte = std.fmt.parseInt(u8, url[i + 1 .. i + 3], 16) catch continue;
-            if (byte == '\n') return true;
+            const high = std.fmt.charToDigit(url[i + 1], 16) catch continue;
+            const low = std.fmt.charToDigit(url[i + 2], 16) catch continue;
+            if (high * 16 + low == '\n') return true;
         }
     }
     return false;
@@ -637,7 +640,8 @@ test "names and urls: this refuses exactly what git fsck refuses" {
         "x%0ay",          "./x%0a",            "https:///x",         "file:///x%0a",
         "../sub",         "https://h:99999/x", "https://h:22/x",     "https://h/%zz",
         "https://h/../x", "https://h/a/../x",  "http::nohost",       "ssh://h/x",
-        "user@h:repo",    "./a/../b",
+        "user@h:repo",    "./a/../b",          "git://h/a%0ab",      "git://h/a%0Ab",
+        "git://h/ok",     "x%+ay",
     };
     for (urls) |url| {
         try expectFsckAgrees("n", url, checkUrl(url));

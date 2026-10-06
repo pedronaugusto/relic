@@ -1047,6 +1047,29 @@ test "a submodule with no repository needs a clone, and a transport is where one
     try testing.expectEqualStrings("gitdir: ../../../../.git/modules/vendor/lib/modules/deep/inner\n", dot_git);
 }
 
+test "update --init does not clone into a submodule path that already holds something, as git does not" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var f = try Fixture.init(gpa, io);
+    defer f.deinit();
+    var ours = try Clone.init(gpa, io, &f.super, false);
+    defer ours.deinit(io);
+    var theirs = try Clone.init(gpa, io, &f.super, false);
+    defer theirs.deinit(io);
+    for ([_]*testgit.Repo{ &ours.git, &theirs.git }) |g| try g.writeFile(io, "vendor/lib/planted", "not the submodule's\n");
+
+    theirs.git.report_failures = false;
+    try testing.expectError(error.GitFailed, theirs.git.run(io, &.{ "submodule", "update", "--init" }));
+    var repo = try ours.open(gpa, io);
+    defer repo.deinit(io);
+    var t: GitTransport = .{ .git = &ours.git };
+    var refusal: submodule.Refusal = .{};
+    try testing.expectError(error.DirectoryNotEmpty, submodule.update(gpa, io, &repo, .{ .init = true, .transport = t.transport(), .refusal = &refusal }));
+    try testing.expectEqualStrings("vendor/lib", refusal.path());
+    try testing.expectEqual(@as(u32, 0), t.clones);
+    try testing.expectError(error.FileNotFound, ours.git.dir.access(io, "vendor/lib/.git", .{}));
+}
+
 test "a linked worktree of the superproject clones its submodules into its own git directory, as git does" {
     const gpa = testing.allocator;
     const io = testing.io;
