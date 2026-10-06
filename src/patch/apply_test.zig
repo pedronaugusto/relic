@@ -351,7 +351,11 @@ test "a hunk placed past what an int holds lands where git's lands it" {
     var p = try Pair.init(gpa, io);
     defer p.deinit();
     try setupBase(&p, io);
-    for ([_][]const u8{ "9223372036854775808", "18446744073709551615", "4294967297", "2147483649" }) |at| {
+    // Git for Windows reads a position into a 32-bit `unsigned long` and
+    // calls a wider one corrupt; elsewhere it is cut to an `int` as here.
+    const wide = [_][]const u8{ "9223372036854775808", "18446744073709551615", "4294967297", "2147483649" };
+    const positions = if (builtin.os.tag == .windows) wide[3..] else wide[0..];
+    for (positions) |at| {
         const forward = try std.fmt.allocPrint(gpa, "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1,3 +{s},3 @@\n one\n-two\n+TWO\n three\n", .{at});
         defer gpa.free(forward);
         try compare(&p, io, forward, &.{}, .{});

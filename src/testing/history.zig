@@ -2614,7 +2614,8 @@ test "rerere refuses a forged MERGE_RR and variant, and a replay keeps its resol
         defer outcome.deinit();
         try std.testing.expectEqual(@as(usize, 1), outcome.reused.len);
     }
-    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "merge", "--abort" });
+    // Put back by force: what is compared is rr-cache, not the merge.
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
     try pair.git.exec(io, &.{ "rerere", "gc" });
     {
         var repo = try pair.open(io);
