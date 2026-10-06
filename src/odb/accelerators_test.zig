@@ -245,7 +245,8 @@ test "pack bitmap bytes, XORs, hashes, lookup table and accelerated counts agree
         const pack_name = std.fs.path.basename(path);
         try repo.dir.deleteFile(io, path);
         try ops.writePackBitmap(gpa, io, &db, pack_name[0 .. pack_name.len - 7], &.{head}, .{ .lookup_table = lookup });
-        try sameFile(&repo, path, expected);
+        // git writes these bytes from 2.55 on; every git reads them.
+        if (try testgit.gitAtLeast(gpa, io, 2, 55)) try sameFile(&repo, path, expected);
         try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
         var store = (try bitmap_store.Store.open(gpa, io, db.objectsDirectory(), .sha1)).?;
         defer store.deinit();
@@ -365,7 +366,8 @@ test "bitmap commit selection past the dense region agrees byte for byte with gi
     const base = std.fs.path.basename(path);
     try repo.dir.deleteFile(io, path);
     try ops.writePackBitmap(gpa, io, &db, base[0 .. base.len - 7], &.{head}, .{});
-    try sameFile(&repo, path, expected);
+    // git writes these bytes from 2.55 on; every git reads them.
+    if (try testgit.gitAtLeast(gpa, io, 2, 55)) try sameFile(&repo, path, expected);
     try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
 }
 
