@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const Io = std.Io;
 const snapshot = @import("snapshot.zig");
@@ -6,6 +7,10 @@ const repo = @import("../repo.zig");
 const odb = @import("../odb.zig");
 const object = @import("../object.zig");
 const hash = @import("../hash.zig");
+const diff_mod = @import("../diff.zig");
+const fs = @import("../repo/fs.zig");
+const lfs = @import("../lfs.zig");
+const storage = @import("../odb/state.zig");
 const testgit = @import("../testing/git.zig");
 
 fn sourceObjects(dir: Io.Dir) ![:0]u8 {
@@ -75,7 +80,7 @@ test "snapshot owns unchanged nested history before a rewrite and prune" {
     // source is registered, so restore and diff have no alternate reader.
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
-    try testing.expectEqual(@as(usize, 1), @import("../odb/state.zig").get(store.db._state).sources.items.len);
+    try testing.expectEqual(@as(usize, 1), storage.get(store.db._state).sources.items.len);
     try expectClosure(&store.db, first.tree);
     try expectClosure(&store.db, second.tree);
     var dest = testing.tmpDir(.{ .iterate = true });
@@ -142,7 +147,7 @@ test "snapshot follows repository membership and current ignore and attribute ru
     const next = try store.capture(io, .{ .repository = &r }, .{});
     var changes = try store.diff(io, captured.snapshot, next.snapshot, .{});
     defer changes.deinit();
-    try testing.expectEqual(@import("../diff.zig").Status.deleted, changes.find("sub/new").?.status);
+    try testing.expectEqual(diff_mod.Status.deleted, changes.find("sub/new").?.status);
 }
 
 test "snapshot captures a plain folder incrementally and restores additions deletions and modes" {
@@ -240,9 +245,8 @@ test "snapshot keeps native LFS writes inside the private store" {
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
     const pointer_text = try dest.dir.readFileAlloc(io, "large.bin", gpa, .limited(1024));
     defer gpa.free(pointer_text);
-    const lfs = @import("../lfs.zig");
     const pointer = try lfs.Pointer.decode(pointer_text);
-    const payloads = lfs.Store{ .base = store.dir, .root = "lfs" };
+    const payloads: lfs.Store = .{ .base = store.dir, .root = "lfs" };
     try testing.expect(try payloads.contains(io, &pointer));
 }
 
@@ -257,7 +261,7 @@ test "snapshot plain folders keep executable modes symlinks and SHA256 names" {
         defer file.close(io);
         try file.setPermissions(io, .fromMode(0o755));
     }
-    const symlink = if (@import("builtin").os.tag != .windows) blk: {
+    const symlink = if (builtin.os.tag != .windows) blk: {
         try folder.dir.symLink(io, "run", "link", .{});
         break :blk true;
     } else false;
@@ -274,7 +278,7 @@ test "snapshot plain folders keep executable modes symlinks and SHA256 names" {
     try expectFile(dest.dir, "run", "executable\n");
     const executable = try dest.dir.openFile(io, "run", .{});
     defer executable.close(io);
-    if (Io.File.Permissions.has_executable_bit) try testing.expect(@import("../repo/fs.zig").isExecutable((try executable.stat(io)).permissions));
+    if (Io.File.Permissions.has_executable_bit) try testing.expect(fs.isExecutable((try executable.stat(io)).permissions));
     if (symlink) {
         var buf: [100]u8 = undefined;
         const len = try dest.dir.readLink(io, "link", &buf);
@@ -304,7 +308,7 @@ test "snapshot retains sparse tracked files absent from disk and captures presen
     defer store.deinit(io);
     const captured = try store.capture(io, .{ .repository = &r }, .{});
     try expectClosure(&store.db, captured.snapshot.tree);
-    try testing.expectEqual(@as(usize, 1), @import("../odb/state.zig").get(store.db._state).sources.items.len);
+    try testing.expectEqual(@as(usize, 1), storage.get(store.db._state).sources.items.len);
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
@@ -392,7 +396,7 @@ test "a live snapshot store reads its own objects after source packs are damaged
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
     const saved = (try store.capture(io, .{ .repository = &r }, .{})).snapshot;
-    const pack_name = @import("../odb/state.zig").get(r.odb._state).sources.items[0].packs.items[0].name;
+    const pack_name = storage.get(r.odb._state).sources.items[0].packs.items[0].name;
     const path = try std.fmt.allocPrint(gpa, ".git/objects/pack/{s}.pack", .{pack_name});
     defer gpa.free(path);
     try source.writeFile(io, path, "damaged\n");

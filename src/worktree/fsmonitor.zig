@@ -23,6 +23,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const index_mod = @import("../index.zig");
+const hash = @import("../hash.zig");
 const program = @import("../repo/program.zig");
 const config_mod = @import("../config.zig");
 
@@ -220,7 +221,7 @@ test "an answer's paths and a directory's entries are taken out of what is vouch
     const gpa = std.testing.allocator;
     var index: Index = .initEmpty(gpa, .sha1);
     defer index.deinit();
-    const z: @import("../hash.zig").Oid = .zero(.sha1);
+    const z: hash.Oid = .zero(.sha1);
     try index.addMany(&.{
         .{ .path = "a", .oid = z, .mode = .file, .fsmonitor_valid = true },
         .{ .path = "d.txt", .oid = z, .mode = .file, .fsmonitor_valid = true },

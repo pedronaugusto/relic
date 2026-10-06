@@ -2,6 +2,7 @@
 //! out, and a working tree git calls clean.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const testgit = @import("testing/git.zig");
@@ -129,7 +130,7 @@ test "addAll then writeTree equals git add -A and git write-tree" {
 // not make a file unreadable. These fixtures skip there, and under root,
 // whose permission to read survives chmod(000).
 fn makeUnreadable(io: Io, dir: Io.Dir, path: []const u8) !struct { err: Io.File.OpenError } {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     try dir.setFilePermissions(io, path, @enumFromInt(@as(std.posix.mode_t, 0)), .{});
     if (dir.openFile(io, path, .{})) |file| {
         file.close(io);
@@ -142,7 +143,7 @@ fn makeUnreadable(io: Io, dir: Io.Dir, path: []const u8) !struct { err: Io.File.
 
 test "ignore-errors reports unreadable files, keeps their entries and stages the rest as git does" {
     // Windows needs ACL changes, not chmod, to deny reading a file.
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     for ([_]worktree.NewBlobs{ .loose, .pack }) |new_blobs| {
@@ -202,7 +203,7 @@ test "ignore-errors reports unreadable files, keeps their entries and stages the
 
 test "without ignore-errors the first unreadable file stops add" {
     // Windows needs ACL changes, not chmod, to deny reading a file.
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var h = try Harness.init(gpa, io, &.{});

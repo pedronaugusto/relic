@@ -26,6 +26,7 @@ pub const dirscan = @import("worktree/dirscan.zig");
 pub const safepath = @import("worktree/safepath.zig");
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -34,6 +35,7 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const fs = @import("repo/fs.zig");
+const durability = @import("repo/fs/durability.zig");
 const sparseindex = @import("index/sparseindex.zig");
 const pack_mod = @import("odb/pack.zig");
 const gitlink = @import("submodule/gitlink.zig");
@@ -119,7 +121,7 @@ pub const Rules = struct {
     /// Whether symlinks can be created, from `core.symlinks`. When false a
     /// symlink is written as a file holding its target, which is what that
     /// setting means, and the outcome records it.
-    symlinks: bool = @import("builtin").os.tag != .windows,
+    symlinks: bool = builtin.os.tag != .windows,
 };
 
 /// What `addAll` changed.
@@ -1939,7 +1941,6 @@ pub fn checkout(
 // Sync existing paths too: a skipped write is not evidence of durability.
 // Symlink bytes live in their directory; gitlinks belong to another store.
 fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringHashMapUnmanaged(TreeEntry), removed: *const std.StringHashMapUnmanaged(void)) Error!void {
-    const barrier = @import("repo/fs/durability.zig");
     var dirs: std.StringHashMap(bool) = .init(arena);
     try dirs.put(".", true);
     var paths = wanted.iterator();
@@ -1947,7 +1948,7 @@ fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringH
         const path = entry.key_ptr.*;
         if (entry.value_ptr.mode != .gitlink) {
             const st = (try fs.statAt(io, wt, path)) orelse return error.FileNotFound;
-            if (st.kind == .file) try barrier.syncPath(io, wt, path);
+            if (st.kind == .file) try durability.syncPath(io, wt, path);
         }
         try addSyncParents(&dirs, path, true);
     }
@@ -1970,7 +1971,7 @@ fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringH
         }
     }.less);
     for (ordered.items) |path| {
-        barrier.syncDirectory(io, wt, path) catch |err| switch (err) {
+        durability.syncDirectory(io, wt, path) catch |err| switch (err) {
             error.FileNotFound => if (dirs.get(path).?) return err,
             else => return err,
         };

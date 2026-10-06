@@ -16,12 +16,14 @@ const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const odb = @import("../odb.zig");
 const index = @import("../index.zig");
+const sparseindex = @import("../index/sparseindex.zig");
 const repo = @import("../repo.zig");
 const worktree = @import("../worktree.zig");
 const diff_mod = @import("../diff.zig");
 const filter = @import("filter.zig");
 const program = @import("../repo/program.zig");
 const fs = @import("../repo/fs.zig");
+const durability = @import("../repo/fs/durability.zig");
 const opening = @import("../odb/open.zig");
 
 pub const Error = worktree.Error || repo.Error || repo.Repository.LoadFiltersError ||
@@ -146,7 +148,7 @@ pub const Store = struct {
         // The source index is a membership list, not a cache for this store.
         // Sparse directories keep their indexed contents from the source.
         const source_db: ?*odb.Odb = if (source_repo) |r| &r.odb else null;
-        try @import("../index/sparseindex.zig").expand(store.gpa, io, &staged, source_db orelse &store.db, null);
+        try sparseindex.expand(store.gpa, io, &staged, source_db orelse &store.db, null);
         for (staged.entries.items) |*entry| {
             entry.stat = .none;
             entry.assume_valid = false;
@@ -196,7 +198,7 @@ pub const Store = struct {
         try store.db.syncBatch(io);
         if (store.durability == .durable) {
             try store.db.makeDurable(io, &.{tree});
-            try @import("../repo/fs/durability.zig").syncDirectory(io, store.dir, ".");
+            try durability.syncDirectory(io, store.dir, ".");
         }
         return .{ .tree = tree };
     }

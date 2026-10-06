@@ -15,6 +15,7 @@
 const Self = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -530,7 +531,7 @@ pub const CoreSettings = struct {
     pub const SafeCrlf = enum { false, true, warn };
 
     /// The native line ending, which is CRLF on Windows and LF elsewhere.
-    pub const native_is_crlf = @import("builtin").os.tag == .windows;
+    pub const native_is_crlf = builtin.os.tag == .windows;
 };
 
 /// A setting this release does not implement, named so the caller is refused

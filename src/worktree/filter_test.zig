@@ -7,6 +7,7 @@
 //! compiles and hands in through `build_options`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const build_options = @import("build_options");
 
@@ -18,6 +19,7 @@ const filter = @import("filter.zig");
 const program = @import("../repo/program.zig");
 const index_mod = @import("../index.zig");
 const lfs = @import("../lfs.zig");
+const fs = @import("../repo/fs.zig");
 
 const Oid = hash.Oid;
 const testing = std.testing;
@@ -291,7 +293,7 @@ fn helperCommand(gpa: std.mem.Allocator, args: []const u8) ![]u8 {
 fn loggedHelperCommand(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) ![]u8 {
     const path = try dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);
-    if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
     const arg = try std.fmt.allocPrint(gpa, "--log={s}", .{path});
     defer gpa.free(arg);
     return helperCommand(gpa, arg);
@@ -359,12 +361,12 @@ fn processFilterAdd(racy: bool) !void {
         // Only a.r is newer than the index, so write-tree rechecks just it
         // through a fresh filter process when it saves its cache-tree.
         for ([_][]const u8{ ".gitattributes", "sub/b.r", "c.r" }) |path| {
-            try @import("../repo/fs.zig").setTimestamps(io, twin.theirs.dir, path, .{
+            try fs.setTimestamps(io, twin.theirs.dir, path, .{
                 .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } },
             });
         }
         const later: i96 = (Io.Clock.real.now(io).toSeconds() + 60) * std.time.ns_per_s;
-        try @import("../repo/fs.zig").setTimestamps(io, twin.theirs.dir, "a.r", .{
+        try fs.setTimestamps(io, twin.theirs.dir, "a.r", .{
             .modify_timestamp = .{ .new = .{ .nanoseconds = later } },
         });
     }
@@ -408,7 +410,7 @@ test "a delayed smudge is written after the rest, as git writes it" {
     defer log_tmp.cleanup();
     const log_path = try log_tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(log_path);
-    if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, log_path, '\\', '/');
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, log_path, '\\', '/');
     const args = try std.fmt.allocPrint(gpa, "--delay --log={s}", .{log_path});
     defer gpa.free(args);
     const command = try helperCommand(gpa, args);
