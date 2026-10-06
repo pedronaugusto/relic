@@ -1369,6 +1369,41 @@ test "a rebase stopped on one side is skipped and aborted by the other" {
     try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
 }
 
+test "a rebase with a sheet it cannot read is still aborted or quit, and its labels go as refs and nothing else does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 39);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, divergedScript);
+    defer pair.deinit();
+    for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
+    for ([_]bool{ false, true }) |quitting| {
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+            try r.exec(io, &.{ "reset", "-q", "--hard", "topic" });
+            try gitMayFail(io, r, &.{ "rebase", "main" });
+            const sheet = try r.readFile(io, ".git/rebase-merge/git-rebase-todo");
+            defer gpa.free(sheet);
+            const spoiled = try std.mem.concat(gpa, u8, &.{ sheet, "frobnicate xyz\n" });
+            defer gpa.free(spoiled);
+            try r.writeFile(io, ".git/rebase-merge/git-rebase-todo", spoiled);
+            try r.exec(io, &.{ "update-ref", "refs/rewritten/l", "HEAD" });
+            try r.writeFile(io, "victim.txt", "kept\n");
+            try r.writeFile(io, ".git/rebase-merge/refs-to-delete", "refs/rewritten/l\n../victim.txt\n/etc/hosts\n");
+        }
+        try pair.git.exec(io, &.{ "rebase", if (quitting) "--quit" else "--abort" });
+        {
+            var repo = try pair.open(io);
+            defer repo.deinit(io);
+            if (quitting) try rebase.quit(gpa, io, &repo) else try rebase.abort(gpa, io, &repo, who);
+        }
+        try expectSameState(&pair, io, &rebase_state, &.{"HEAD"});
+        try expectSameOutput(gpa, io, &pair.git, &pair.ours, &.{ "for-each-ref", "refs/rewritten/" });
+        const kept = try pair.ours.readFile(io, "victim.txt");
+        defer gpa.free(kept);
+        try std.testing.expectEqualStrings("kept\n", kept);
+    }
+}
+
 test "autosquash moves fixup and squash commits where git's does" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

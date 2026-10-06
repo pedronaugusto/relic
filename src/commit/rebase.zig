@@ -87,6 +87,9 @@ pub const Error = error{
     MalformedState,
     /// A label or commit a `reset` or `merge` names does not resolve.
     UnknownLabel,
+    /// `reset [new root]`, which git's `rebase -r --root` writes: a
+    /// history replayed onto no commit, which this does not do.
+    UnsupportedNewRoot,
     /// The rebase names a merge strategy other than `ort` or `recursive`.
     UnsupportedStrategy,
     /// The branch given does not name a branch or a commit.
@@ -1064,7 +1067,11 @@ fn removeState(r: *Run) Error!void {
     if (try r.readState("refs-to-delete")) |text| {
         var lines = std.mem.tokenizeScalar(u8, text, '\n');
         while (lines.next()) |name| {
-            r.repo.refStore().dirFor(name).deleteFile(r.io, name) catch |err| if (err != error.FileNotFound) return err;
+            // Only the labels a rebase writes, `refs/rewritten/<label>`,
+            // and deleted as refs: a line is not a path to unlink, and a
+            // reftable repository keeps them in its tables.
+            if (!std.mem.startsWith(u8, name, "refs/rewritten/") or !worktree.safepath.isValidRefName(name)) continue;
+            try head_mod.deleteRef(r.io, r.repo, name);
         }
     }
     try r.repo.git_dir.deleteTree(r.io, state_dir);
@@ -1950,6 +1957,10 @@ fn lookupLabel(r: *Run, name: []const u8) Error!Oid {
 
 /// `reset`: `HEAD`, the index and the working tree to a label.
 fn doReset(r: *Run, arg: []const u8) Error!void {
+    // git's `rebase -r --root` sheet starts from no commit at all, which
+    // git reaches through a `squash-onto` commit it amends away; that
+    // replay is not one this does, and the words are no label.
+    if (std.mem.eql(u8, std.mem.trimEnd(u8, arg, " \t\r\n"), "[new root]")) return error.UnsupportedNewRoot;
     const end = std.mem.findAny(u8, arg, " \t\n\r") orelse arg.len;
     const name = arg[0..end];
     const target = try lookupLabel(r, name);
@@ -2418,8 +2429,25 @@ fn finish(r: *Run) Error!Outcome {
     return out;
 }
 
-/// Load a rebase in progress, whoever started it.
+/// Load a rebase in progress, whoever started it, its sheet and all.
 fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Run {
+    var r = try loadBareRun(gpa, io, repo, options);
+    errdefer freeRun(&r);
+    _ = try readBasicState(&r);
+    const text = (try r.readState("git-rebase-todo")) orelse "";
+    var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
+    const list = try todo.parse(r.arena, text, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
+    try r.items.appendSlice(r.arena, list.items.items);
+    if (try r.readState("msgnum")) |n| {
+        r.done_nr = std.fmt.parseInt(usize, std.mem.trim(u8, n, " \n"), 10) catch return error.MalformedState;
+    }
+    return r;
+}
+
+/// A rebase in progress with nothing of its state read: what `--abort`
+/// and `--quit` start from, as git's read only what they undo, so a sheet
+/// it cannot read does not keep a rebase from being given up.
+fn loadBareRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Run {
     if (head_mod.stateExists(io, repo.git_dir, "rebase-apply")) return error.ApplyBackendInProgress;
     if (!inProgress(io, repo)) return error.NoRebaseInProgress;
     const arena_state = try gpa.create(std.heap.ArenaAllocator);
@@ -2430,14 +2458,6 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
     }
     var r = try newRun(gpa, io, arena_state, repo, options);
     r.allow_ff = !options.force;
-    _ = try readBasicState(&r);
-    const text = (try r.readState("git-rebase-todo")) orelse "";
-    var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
-    const list = try todo.parse(r.arena, text, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
-    try r.items.appendSlice(r.arena, list.items.items);
-    if (try r.readState("msgnum")) |n| {
-        r.done_nr = std.fmt.parseInt(usize, std.mem.trim(u8, n, " \n"), 10) catch return error.MalformedState;
-    }
     return r;
 }
 
@@ -2586,7 +2606,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// Stop the rebase and put the branch, `HEAD`, the index and the working
 /// tree back where they were when it began: `--abort`.
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Self.Error!void {
-    var r = try loadRun(gpa, io, repo, .{ .who = who });
+    var r = try loadBareRun(gpa, io, repo, .{ .who = who });
     defer freeRun(&r);
     try rerere.clear(gpa, io, repo);
     const tip = try readBasicState(&r);
@@ -2613,7 +2633,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
 /// Forget the rebase and leave `HEAD`, the index and the working tree as
 /// they are: `--quit`.
 pub fn quit(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
-    var r = try loadRun(gpa, io, repo, .{ .who = .{ .name = "", .email = "", .when_secs = 0, .offset_minutes = 0 } });
+    var r = try loadBareRun(gpa, io, repo, .{ .who = .{ .name = "", .email = "", .when_secs = 0, .offset_minutes = 0 } });
     defer freeRun(&r);
     try removeState(&r);
 }
