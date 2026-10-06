@@ -294,8 +294,8 @@ pub const HttpServer = struct {
     /// it came gzipped.
     fn serveUploadPack(
         s: *HttpServer,
-        request: *std.http.Server.Request,
         arena: Allocator,
+        request: *std.http.Server.Request,
         program_path: []const u8,
         path: []const u8,
         body: []const u8,
@@ -400,7 +400,7 @@ pub const HttpServer = struct {
             if (std.mem.endsWith(u8, path, "/info/refs") and std.mem.eql(u8, query, "service=git-upload-pack") or
                 std.mem.endsWith(u8, path, "/git-upload-pack"))
             {
-                return s.serveUploadPack(request, arena, program_path, path, body, git_protocol, content_encoding);
+                return s.serveUploadPack(arena, request, program_path, path, body, git_protocol, content_encoding);
             }
         }
 

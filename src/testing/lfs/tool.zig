@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, kind, "askpass")) {
         const prompt = if (args.len > 1) args[1] else "";
-        try appendLog(io, arena, stem, try std.fmt.allocPrint(arena, "{s}\n", .{prompt}));
+        try appendLog(arena, io, stem, try std.fmt.allocPrint(arena, "{s}\n", .{prompt}));
         var buf: [4096]u8 = undefined;
         var out = Io.File.stdout().writerStreaming(io, &buf);
         try out.interface.writeAll(if (std.mem.startsWith(u8, prompt, "Username")) "ada\n" else "secret\n");
@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
         }
-        try appendLog(io, arena, person_stem, log_entry.items);
+        try appendLog(arena, io, person_stem, log_entry.items);
         const removable = std.mem.eql(u8, kind, "credential-removable") or std.mem.eql(u8, kind, "credential-removable-verbatim");
         const erased_path = if (removable) try std.fmt.allocPrint(arena, "{s}.erased", .{stem}) else "";
         if (removable and std.mem.eql(u8, operation, "erase")) {
@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
             try log_entry.appendSlice(arena, arg);
         }
         try log_entry.append(arena, '\n');
-        try appendLog(io, arena, stem, log_entry.items);
+        try appendLog(arena, io, stem, log_entry.items);
         var buf: [4096]u8 = undefined;
         var out = Io.File.stdout().writerStreaming(io, &buf);
         try out.interface.print("{{\"href\":\"{s}\",\"header\":{{\"Authorization\":\"RemoteAuth {s}\"}}{s}}}", .{ href, token, expiry });
@@ -129,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
     } else return error.InvalidFixture;
 }
 
-fn appendLog(io: Io, arena: Allocator, stem: []const u8, bytes: []const u8) !void {
+fn appendLog(arena: Allocator, io: Io, stem: []const u8, bytes: []const u8) !void {
     const path = try std.fmt.allocPrint(arena, "{s}.log", .{stem});
     const file = try Io.Dir.cwd().createFile(io, path, .{ .truncate = false, .read = true });
     defer file.close(io);

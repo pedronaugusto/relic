@@ -45,7 +45,7 @@ pub const Pair = struct {
 
     /// Build both copies with `script`, with git's dates fixed at `when`.
     /// The pair must not move once built: each copy points at `env`.
-    pub fn init(gpa: Allocator, io: Io, pair: *Pair, script: *const fn (*testgit.Repo, Io) anyerror!void) !void {
+    pub fn init(gpa: Allocator, io: Io, pair: *Pair, script: *const fn (Io, *testgit.Repo) anyerror!void) !void {
         pair.gpa = gpa;
         pair.env = try testgit.datedEnv(gpa, when);
         errdefer pair.env.deinit();
@@ -60,8 +60,8 @@ pub const Pair = struct {
         pair.ours = try testgit.Repo.init(gpa, io, &.{});
         errdefer pair.ours.deinit();
         pair.ours.environ = &pair.env;
-        try script(&pair.git, io);
-        try script(&pair.ours, io);
+        try script(io, &pair.git);
+        try script(io, &pair.ours);
     }
 
     pub fn deinit(pair: *Pair) void {
@@ -98,7 +98,7 @@ fn requireRebase250(io: Io) !void {
 
 /// Run `git` and keep going whatever it exits with; what it left is what is
 /// compared.
-pub fn gitMayFail(repo: *testgit.Repo, io: Io, args: []const []const u8) !void {
+pub fn gitMayFail(io: Io, repo: *testgit.Repo, args: []const []const u8) !void {
     const was = repo.report_failures;
     repo.report_failures = false;
     defer repo.report_failures = was;
@@ -205,7 +205,7 @@ pub fn expectSameState(
 
 /// `main` and `topic` diverged from one base: `f` changed on both sides
 /// in the same line, `t1` and `t3` added on `topic`, `m` added on `main`.
-fn divergedScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn divergedScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "f", "a\nb\nc\n");
     try repo.writeFile(io, "shared", "1\n2\n3\n4\n5\n6\n7\n");
     try repo.exec(io, &.{ "add", "-A" });
@@ -230,8 +230,8 @@ fn divergedScript(repo: *testgit.Repo, io: Io) anyerror!void {
 
 /// The same, with the conflicting change on `topic` left out, so that the
 /// two branches merge cleanly.
-fn cleanScript(repo: *testgit.Repo, io: Io) anyerror!void {
-    try divergedScript(repo, io);
+fn cleanScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try divergedScript(io, repo);
     try repo.exec(io, &.{ "checkout", "-q", "-b", "clean", "topic~2" });
     try repo.writeFile(io, "t3", "3\n");
     try repo.writeFile(io, "shared", "1\n2\n3\n4\n5\n6\nseven\n");
@@ -256,7 +256,7 @@ test "a conflicted merge stops exactly where git's does" {
         if (std.mem.eql(u8, style, "zdiff3") and !try testgit.gitAtLeast(gpa, io, 2, 35)) continue;
         try pair.git.exec(io, &.{ "config", "merge.conflictStyle", style });
         try pair.ours.exec(io, &.{ "config", "merge.conflictStyle", style });
-        try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+        try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -351,7 +351,7 @@ test "a merge one side stopped is concluded by the other" {
     defer pair.deinit();
 
     // git stops, this concludes; this stops, git concludes.
-    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -415,7 +415,7 @@ test "a merge that would overwrite a local change is refused, and one it does no
 /// Two branches that merged each other, so a merge between their tips has
 /// two merge bases, which merge cleanly into one; then both change the same
 /// line of `f`.
-fn crissCrossScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn crissCrossScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "f", "a\nb\nc\n");
     try repo.writeFile(io, "g", "1\n2\n3\n4\n5\n6\n7\n");
     try repo.exec(io, &.{ "add", "-A" });
@@ -446,7 +446,7 @@ test "a criss-cross merge folds its two bases into one, as git does" {
     defer pair.deinit();
 
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "merge.conflictStyle", "diff3" });
-    try gitMayFail(&pair.git, io, &.{ "merge", "side" });
+    try gitMayFail(io, &pair.git, &.{ "merge", "side" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -539,7 +539,7 @@ test "a cherry-pick sequence stops where git's does, and each side continues the
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
 
-    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "main..topic" });
+    try gitMayFail(io, &pair.git, &.{ "cherry-pick", "main..topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -576,7 +576,7 @@ test "a pick with -x, a sign-off and the other recorded options leaves git's opt
     try Pair.init(gpa, io, &pair, divergedScript);
     defer pair.deinit();
 
-    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "-x", "-s", "--allow-empty", "--keep-redundant-commits", "-m", "1", "main..topic" });
+    try gitMayFail(io, &pair.git, &.{ "cherry-pick", "-x", "-s", "--allow-empty", "--keep-redundant-commits", "-m", "1", "main..topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -616,7 +616,7 @@ test "a single pick and a revert sequence stop, abort and skip as git's do" {
     defer pair.deinit();
 
     // A single pick keeps no sequence.
-    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1" });
+    try gitMayFail(io, &pair.git, &.{ "cherry-pick", "topic~1" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -640,7 +640,7 @@ test "a single pick and a revert sequence stop, abort and skip as git's do" {
         try r.writeFile(io, "f", "a\nX\nc\n");
         try r.exec(io, &.{ "commit", "-q", "-am", "x change" });
     }
-    try gitMayFail(&pair.git, io, &.{ "revert", "--no-edit", "HEAD~1", "topic~3" });
+    try gitMayFail(io, &pair.git, &.{ "revert", "--no-edit", "HEAD~1", "topic~3" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -662,7 +662,7 @@ test "a single pick and a revert sequence stop, abort and skip as git's do" {
 
 /// Commits whose messages exercise the trailer rules, and one that is
 /// empty to begin with, on `side`; `main` has one change of its own.
-fn trailersScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn trailersScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "a", "a\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -735,7 +735,7 @@ test "a pick that becomes empty stops, and is dropped or kept when asked, as git
         .{ .args = &.{ "cherry-pick", "--empty=keep", "side~7" }, .empty = .keep },
     };
     for (empty_modes) |mode| {
-        try gitMayFail(&pair.git, io, mode.args);
+        try gitMayFail(io, &pair.git, mode.args);
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -756,7 +756,7 @@ test "a pick that becomes empty stops, and is dropped or kept when asked, as git
 }
 
 /// A merge commit on `side`, to be picked against its first parent.
-fn mergeCommitScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn mergeCommitScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "a", "a\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -804,7 +804,7 @@ test "a merge commit is picked and reverted against the mainline parent it is gi
 /// Branches off one base for an octopus: `b1` and `b2` change the same
 /// line of `f`, `b3` adds `h`, `b4` changes `k`, `ahead` is `main` and
 /// one more commit, and `main` changes `g`. `start` marks `main`.
-fn octopusScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn octopusScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "f", "a\nb\nc\n");
     try repo.writeFile(io, "g", "x\n");
     try repo.writeFile(io, "k", "1\n2\n3\n");
@@ -915,7 +915,7 @@ test "an octopus stops at its last head's conflict as git's does, and each side 
             try r.exec(io, &.{ "config", "merge.conflictStyle", style });
         }
         const names: []const []const u8 = &.{ "b3", "b1", "b4", "b2" };
-        try gitMayFail(&pair.git, io, &(.{"merge"} ++ .{ "b3", "b1", "b4", "b2" }));
+        try gitMayFail(io, &pair.git, &(.{"merge"} ++ .{ "b3", "b1", "b4", "b2" }));
         {
             var outcome = try octopusHere(&pair, io, names, .{ .who = who });
             defer outcome.deinit();
@@ -950,7 +950,7 @@ test "an octopus whose head before the last conflicts fails as git's does" {
     try Pair.init(gpa, io, &pair, octopusScript);
     defer pair.deinit();
 
-    try gitMayFail(&pair.git, io, &.{ "merge", "b1", "b2", "b3" });
+    try gitMayFail(io, &pair.git, &.{ "merge", "b1", "b2", "b3" });
     try std.testing.expectError(error.OctopusFailed, octopusHere(&pair, io, &.{ "b1", "b2", "b3" }, .{ .who = who }));
     try expectSameState(&pair, io, &merge_state, &main_logs);
     // Something staged is refused before anything is merged. git stashes
@@ -960,7 +960,7 @@ test "an octopus whose head before the last conflicts fails as git's does" {
         try r.writeFile(io, "g", "staged\n");
         try r.exec(io, &.{ "add", "g" });
     }
-    try gitMayFail(&pair.git, io, &.{ "merge", "b3", "b4" });
+    try gitMayFail(io, &pair.git, &.{ "merge", "b3", "b4" });
     try std.testing.expectError(error.DirtyIndex, octopusHere(&pair, io, &.{ "b3", "b4" }, .{ .who = who }));
     try expectSameState(&pair, io, merge_state[0..4], &.{});
 }
@@ -1010,7 +1010,7 @@ test "a rebase that stops on a conflict leaves git's state, and either side fini
     defer pair.deinit();
 
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
-    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    try gitMayFail(io, &pair.git, &.{ "rebase", "main" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1084,7 +1084,7 @@ test "a clean rebase, an up-to-date one, and one onto another base land where gi
 }
 
 /// Run `git rebase -i` with `sheet` as the edited todo list.
-fn gitRebaseInteractive(repo: *testgit.Repo, io: Io, sheet: []const u8, args: []const []const u8) !void {
+fn gitRebaseInteractive(io: Io, repo: *testgit.Repo, sheet: []const u8, args: []const []const u8) !void {
     try repo.writeFile(io, ".git/relic-todo", sheet);
     const env = @constCast(repo.environ.?); // safe: the fixture owns a mutable environment map, borrowed for this synchronous git command.
     const editor = try testgit.fixtureCommand(repo.gpa, @import("build_options").process_fixture_path, "copy-file .git/relic-todo");
@@ -1095,7 +1095,7 @@ fn gitRebaseInteractive(repo: *testgit.Repo, io: Io, sheet: []const u8, args: []
     defer argv.deinit(repo.gpa);
     try argv.appendSlice(repo.gpa, &.{ "rebase", "-i" });
     try argv.appendSlice(repo.gpa, args);
-    try gitMayFail(repo, io, argv.items);
+    try gitMayFail(io, repo, argv.items);
 }
 
 fn useFixtureEditor(pair: *Pair, name: []const u8, arguments: []const u8) !void {
@@ -1106,7 +1106,7 @@ fn useFixtureEditor(pair: *Pair, name: []const u8, arguments: []const u8) !void 
 
 /// Five commits on `side` over `main`, each adding its own file, the last
 /// two meant to be folded into the first.
-fn sheetScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn sheetScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "base", "base\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -1170,7 +1170,7 @@ test "an interactive rebase driven by a sheet does what git's does, line for lin
         "drop side~2",
     });
     defer gpa.free(sheet);
-    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    try gitRebaseInteractive(io, &pair.git, sheet, &.{"main"});
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1197,7 +1197,7 @@ test "an edit and a break stop where git's do, and each side continues the other
         "pick side~3",
     });
     defer gpa.free(sheet);
-    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    try gitRebaseInteractive(io, &pair.git, sheet, &.{"main"});
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1236,7 +1236,7 @@ test "an edit and a break stop where git's do, and each side continues the other
 /// `topic`'s commits, and on `main` the same changes made again -- one in
 /// text, one in a binary file, one a change of mode -- so a rebase finds
 /// them already upstream by patch id.
-fn upstreamScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn upstreamScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "text", "1\n2\n3\n");
     try repo.writeFile(io, "bin", "a\x00b");
     try repo.writeFile(io, "script", "echo\n");
@@ -1292,7 +1292,7 @@ test "a rebase stopped on one side is skipped and aborted by the other" {
     defer pair.deinit();
 
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
-    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    try gitMayFail(io, &pair.git, &.{ "rebase", "main" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1311,7 +1311,7 @@ test "a rebase stopped on one side is skipped and aborted by the other" {
 
     // A second run, aborted crosswise.
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "ORIG_HEAD" });
-    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    try gitMayFail(io, &pair.git, &.{ "rebase", "main" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1379,7 +1379,7 @@ test "an exec line runs only through the programs the caller hands in" {
     }
     for ([_]*testgit.Repo{&pair.git}) |r| try r.writeFile(io, ".git/info/exclude", "exec-log\n");
     try pair.ours.writeFile(io, ".git/info/exclude", "exec-log\n");
-    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    try gitRebaseInteractive(io, &pair.git, sheet, &.{"main"});
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1419,7 +1419,7 @@ test "labels, resets and merges rebuild a merge as git's does" {
         "merge -C side feature # Merge branch 'feature' into side",
     });
     defer gpa.free(sheet);
-    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    try gitRebaseInteractive(io, &pair.git, sheet, &.{"main"});
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1473,7 +1473,7 @@ test "an octopus merge line merges as git's sequencer does, and an unchanged one
         defer gpa.free(start_lines);
         const sheet = try std.mem.concat(gpa, u8, &.{ start_lines, plan.line });
         defer gpa.free(sheet);
-        try gitRebaseInteractive(&pair.git, io, sheet, &.{plan.onto});
+        try gitRebaseInteractive(io, &pair.git, sheet, &.{plan.onto});
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -1487,8 +1487,8 @@ test "an octopus merge line merges as git's sequencer does, and an unchanged one
 
 /// `topic` with two more branches at its first commit and a third checked
 /// out there in a linked worktree.
-fn branchesScript(repo: *testgit.Repo, io: Io) anyerror!void {
-    try cleanScript(repo, io);
+fn branchesScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try cleanScript(io, repo);
     try repo.writeFile(io, ".git/info/exclude", "held-wt\n");
     try repo.exec(io, &.{ "branch", "part", "clean~1" });
     try repo.exec(io, &.{ "branch", "zpart", "clean~1" });
@@ -1540,7 +1540,7 @@ test "a branch named to rebase is switched to first, and a detached HEAD rebases
     try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/clean", "refs/heads/main" });
 
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "--detach", "topic" });
-    try gitMayFail(&pair.git, io, &.{ "rebase", "main~0" });
+    try gitMayFail(io, &pair.git, &.{ "rebase", "main~0" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1567,7 +1567,7 @@ test "the messages a person would edit come from the caller, and land as an edit
     // git's editor writes the same text over whatever it is shown.
     try pair.git.writeFile(io, ".git/relic-message", "Edited by hand\n\n# a comment the cleanup takes away\nwith a body\n");
     try useFixtureEditor(&pair, "GIT_EDITOR", "copy-file .git/relic-message");
-    try gitRebaseInteractive(&pair.git, io, sheet, &.{"main"});
+    try gitRebaseInteractive(io, &pair.git, sheet, &.{"main"});
     try useFixtureEditor(&pair, "GIT_EDITOR", "silent");
 
     const Editor = struct {
@@ -1602,7 +1602,7 @@ test "the messages a person would edit come from the caller, and land as an edit
 
 /// `topic` renames a file and `main` edits it; before that, `topic`
 /// renamed a file `main` leaves alone.
-fn renameScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn renameScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "moved", "1\n2\n3\n4\n5\n6\n7\n8\n");
     try repo.writeFile(io, "quiet", "q1\nq2\nq3\n");
     try repo.exec(io, &.{ "add", "-A" });
@@ -1651,7 +1651,7 @@ test "with renames off the same merge conflicts as git's does" {
     defer pair.deinit();
 
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "merge.renames", "false" });
-    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1664,8 +1664,8 @@ test "with renames off the same merge conflicts as git's does" {
 }
 
 /// `gone` adds a file and takes it away again.
-fn goneScript(repo: *testgit.Repo, io: Io) anyerror!void {
-    try cleanScript(repo, io);
+fn goneScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try cleanScript(io, repo);
     try repo.exec(io, &.{ "checkout", "-q", "-b", "gone", "topic~3" });
     try repo.writeFile(io, "tmp", "for a while\n");
     try repo.exec(io, &.{ "add", "tmp" });
@@ -1683,7 +1683,7 @@ test "a pick refused for an untracked file goes back on the sheet, and continues
     try Pair.init(gpa, io, &pair, goneScript);
     defer pair.deinit();
 
-    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    try gitMayFail(io, &pair.git, &.{ "rebase", "main" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1715,7 +1715,7 @@ test "a cherry-pick sequence refused for an untracked file leaves what git's lea
     defer pair.deinit();
 
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "main" });
-    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "gone~1", "gone" });
+    try gitMayFail(io, &pair.git, &.{ "cherry-pick", "gone~1", "gone" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1738,7 +1738,7 @@ test "a cherry-pick sequence refused for an untracked file leaves what git's lea
 /// Paths each side turns into something the other cannot take as it is: a
 /// file where the other made a directory, a symlink where the other kept a
 /// file, and a file both sides renamed differently.
-fn shapesScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn shapesScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "df", "a file\n");
     try repo.writeFile(io, "kind", "a regular file\n");
     try repo.writeFile(io, "twice", "one\ntwo\nthree\nfour\nfive\nsix\n");
@@ -1774,7 +1774,7 @@ test "a file meeting a directory, a symlink meeting a file and a double rename s
     try Pair.init(gpa, io, &pair, shapesScript);
     defer pair.deinit();
 
-    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1797,7 +1797,7 @@ test "a file meeting a directory, a symlink meeting a file and a double rename s
 
 /// Two branches that each merged the other, with conflicting changes to
 /// one file before, so their two merge bases conflict with each other.
-fn conflictingBasesScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn conflictingBasesScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "f", "1\n2\n3\n4\n5\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -1827,7 +1827,7 @@ test "a criss-cross merge whose bases conflict leaves git's nested markers" {
 
     for ([_][]const u8{ "merge", "diff3" }) |style| {
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "merge.conflictStyle", style });
-        try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+        try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -1841,7 +1841,7 @@ test "a criss-cross merge whose bases conflict leaves git's nested markers" {
 }
 
 /// `main` moves a directory; `topic` edits a file in it and adds one.
-fn movedDirectoryScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn movedDirectoryScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "lib/a", "a1\na2\na3\na4\na5\na6\n");
     try repo.writeFile(io, "lib/b", "b1\nb2\nb3\nb4\nb5\nb6\n");
     try repo.exec(io, &.{ "add", "-A" });
@@ -1867,7 +1867,7 @@ test "cherry-picks and a rebase follow a moved directory as git's do" {
 
     // The edit follows `lib/a` to `src/a`; the new file is a location
     // conflict, as git's default `merge.directoryRenames` makes it.
-    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1", "topic" });
+    try gitMayFail(io, &pair.git, &.{ "cherry-pick", "topic~1", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1884,7 +1884,7 @@ test "cherry-picks and a rebase follow a moved directory as git's do" {
         try r.exec(io, &.{ "config", "merge.directoryRenames", "true" });
         try r.exec(io, &.{ "checkout", "-q", "topic" });
     }
-    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    try gitMayFail(io, &pair.git, &.{ "rebase", "main" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -1897,7 +1897,7 @@ test "cherry-picks and a rebase follow a moved directory as git's do" {
 
 /// A submodule checked out in place, which `main` moves one commit on and
 /// `topic` two.
-fn submoduleScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn submoduleScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "top", "top\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -1941,7 +1941,7 @@ test "a submodule both sides moved forward is fast-forwarded as git's merge does
 }
 
 /// The submodule's two sides diverge, and a merge of them exists in it.
-fn divergedSubmoduleScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn divergedSubmoduleScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "top", "top\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -1979,7 +1979,7 @@ test "a submodule the two sides took different ways is a conflict as git's merge
     try Pair.init(gpa, io, &pair, divergedSubmoduleScript);
     defer pair.deinit();
 
-    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -2051,7 +2051,7 @@ test "rerere takes down a conflict, records its resolution and replays it, as gi
     }
 
     // The conflict is taken down.
-    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -2084,7 +2084,7 @@ test "rerere takes down a conflict, records its resolution and replays it, as gi
             try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
             try r.exec(io, &.{ "config", "rerere.autoUpdate", if (autoupdate) "true" else "false" });
         }
-        try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+        try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -2114,7 +2114,7 @@ test "rerere records a cherry-pick's and a rebase's resolutions and replays them
 
     // A cherry-pick stops; its conflict is taken down, resolved, and the
     // resolution recorded when the pick is continued.
-    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1" });
+    try gitMayFail(io, &pair.git, &.{ "cherry-pick", "topic~1" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -2140,7 +2140,7 @@ test "rerere records a cherry-pick's and a rebase's resolutions and replays them
 
     // Picked again, the resolution is replayed.
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
-    try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1" });
+    try gitMayFail(io, &pair.git, &.{ "cherry-pick", "topic~1" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -2157,7 +2157,7 @@ test "rerere records a cherry-pick's and a rebase's resolutions and replays them
         try r.exec(io, &.{ "config", "rerere.autoUpdate", "true" });
         try r.exec(io, &.{ "checkout", "-q", "topic" });
     }
-    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    try gitMayFail(io, &pair.git, &.{ "rebase", "main" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -2183,7 +2183,7 @@ test "rerere records a cherry-pick's and a rebase's resolutions and replays them
 /// `f` and `g` changed on both sides in a way whose conflict falls
 /// differently under histogram, patience and minimal: `main` changes both
 /// in one commit, `topic` each in a commit of its own.
-fn algorithmScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn algorithmScript(io: Io, repo: *testgit.Repo) anyerror!void {
     const base = "c\nc\ne\nf\nf\ne\nf\ne\nb\nf\n";
     const ours = "g\nb\nc\ne\ne\nf\nf\nf\nf\nc\n";
     const theirs = "c\ne\ne\ne\na\ne\nf\n";
@@ -2226,13 +2226,13 @@ test "diff.algorithm and the strategy options choose the line diff of a merge, a
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
             if (variant.config) |value| {
                 try r.exec(io, &.{ "config", "diff.algorithm", value });
-            } else try gitMayFail(r, io, &.{ "config", "--unset", "diff.algorithm" });
+            } else try gitMayFail(io, r, &.{ "config", "--unset", "diff.algorithm" });
         }
 
         // A merge of topic.
         const merge_args = try std.mem.concat(gpa, []const u8, &.{ &.{"merge"}, args.items, &.{"topic"} });
         defer gpa.free(merge_args);
-        try gitMayFail(&pair.git, io, merge_args);
+        try gitMayFail(io, &pair.git, merge_args);
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -2252,7 +2252,7 @@ test "diff.algorithm and the strategy options choose the line diff of a merge, a
         // A cherry-pick of both of topic's commits stops on the first.
         const pick_args = try std.mem.concat(gpa, []const u8, &.{ &.{"cherry-pick"}, args.items, &.{"main..topic"} });
         defer gpa.free(pick_args);
-        try gitMayFail(&pair.git, io, pick_args);
+        try gitMayFail(io, &pair.git, pick_args);
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -2274,7 +2274,7 @@ test "diff.algorithm and the strategy options choose the line diff of a merge, a
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
         const rebase_args = try std.mem.concat(gpa, []const u8, &.{ &.{"rebase"}, args.items, &.{"main"} });
         defer gpa.free(rebase_args);
-        try gitMayFail(&pair.git, io, rebase_args);
+        try gitMayFail(io, &pair.git, rebase_args);
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -2287,7 +2287,7 @@ test "diff.algorithm and the strategy options choose the line diff of a merge, a
             try r.writeFile(io, "f", "resolved\n");
             try r.exec(io, &.{ "add", "f" });
         }
-        try gitMayFail(&pair.ours, io, &.{ "rebase", "--continue" });
+        try gitMayFail(io, &pair.ours, &.{ "rebase", "--continue" });
         {
             var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
             defer repo.deinit(io);
@@ -2364,7 +2364,7 @@ test "rerere's status, remaining, diff, forget and gc answer as git's do" {
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
         try r.exec(io, &.{ "config", "rerere.enabled", "true" });
         try r.exec(io, &.{ "tag", "before" });
-        try gitMayFail(r, io, &.{ "merge", "topic" });
+        try gitMayFail(io, r, &.{ "merge", "topic" });
     }
     try expectSameRerereReport(&pair, io);
     // Half resolved in the working tree: the diff from the preimage.
@@ -2445,7 +2445,7 @@ test "rerere's status, remaining, diff, forget and gc answer as git's do" {
     // conflicts are kept, pruned once they are not.
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
         try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
-        try gitMayFail(r, io, &.{ "merge", "topic" });
+        try gitMayFail(io, r, &.{ "merge", "topic" });
     }
     for ([_][]const u8{ "never", "-1" }) |age| {
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "config", "gc.rerereUnresolved", age });
@@ -2473,7 +2473,7 @@ test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records 
     const commits = [_]Oid{ try oidOf(gpa, io, &pair.ours, "topic~1"), try oidOf(gpa, io, &pair.ours, "topic") };
 
     for ([_][]const u8{ "--abort", "--skip", "--quit" }) |op| {
-        try gitMayFail(&pair.git, io, &.{ "cherry-pick", "topic~1", "topic" });
+        try gitMayFail(io, &pair.git, &.{ "cherry-pick", "topic~1", "topic" });
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -2481,7 +2481,7 @@ test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records 
             defer outcome.deinit();
         }
         try expectSameRerere(&pair, io);
-        try gitMayFail(&pair.git, io, &.{ "cherry-pick", op });
+        try gitMayFail(io, &pair.git, &.{ "cherry-pick", op });
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -2495,11 +2495,11 @@ test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records 
         try expectSameRerere(&pair, io);
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
             try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
-            try gitMayFail(r, io, &.{ "cherry-pick", "--quit" });
+            try gitMayFail(io, r, &.{ "cherry-pick", "--quit" });
         }
     }
 
-    try gitMayFail(&pair.git, io, &.{ "merge", "topic" });
+    try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -2516,7 +2516,7 @@ test "an aborted, skipped or quit pick, merge or rebase leaves rerere's records 
     try expectSameRerere(&pair, io);
 
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "checkout", "-q", "topic" });
-    try gitMayFail(&pair.git, io, &.{ "rebase", "main" });
+    try gitMayFail(io, &pair.git, &.{ "rebase", "main" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -2545,7 +2545,7 @@ test "adding a resolved file replaces its conflict and remembers the stages, as 
     for ([_]bool{ false, true }) |delete| {
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
             try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
-            try gitMayFail(r, io, &.{ "merge", "topic" });
+            try gitMayFail(io, r, &.{ "merge", "topic" });
             if (delete) {
                 try r.dir.deleteFile(io, "f");
             } else try r.writeFile(io, "f", "a\nresolved by hand\nc\n");
@@ -2578,7 +2578,7 @@ test "adding a resolved file replaces its conflict and remembers the stages, as 
 /// `topic` edits the one, deletes the other and edits `id.txt`; `main`
 /// sets `text=auto` and stores both again normalized, and asks for `ident`
 /// on `id.txt`.
-fn renormalizeScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn renormalizeScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "file.txt", "a\r\nb\r\nc\r\n");
     try repo.writeFile(io, "gone.txt", "x\r\ny\r\n");
     try repo.writeFile(io, "id.txt", "$Id$\nold\n");
@@ -2615,14 +2615,14 @@ test "a merge renormalizes when asked and writes its files through their attribu
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
             if (variant.config) |value| {
                 try r.exec(io, &.{ "config", "merge.renormalize", value });
-            } else try gitMayFail(r, io, &.{ "config", "--unset", "merge.renormalize" });
+            } else try gitMayFail(io, r, &.{ "config", "--unset", "merge.renormalize" });
         }
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
         try args.append(gpa, "merge");
         for (variant.words) |word| try args.appendSlice(gpa, &.{ "-X", word });
         try args.append(gpa, "topic");
-        try gitMayFail(&pair.git, io, args.items);
+        try gitMayFail(io, &pair.git, args.items);
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -2637,7 +2637,7 @@ test "a merge renormalizes when asked and writes its files through their attribu
         defer gpa.free(id);
         try std.testing.expect(std.mem.startsWith(u8, id, "$Id: "));
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
-            try gitMayFail(r, io, &.{ "merge", "--abort" });
+            try gitMayFail(io, r, &.{ "merge", "--abort" });
             try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
         }
     }
@@ -2683,7 +2683,7 @@ fn expectSameHooks(pair: *Pair, io: Io) !void {
 fn gitWithHooks(pair: *Pair, io: Io, args: []const []const u8) !void {
     const full = try std.mem.concat(pair.gpa, []const u8, &.{ &.{ "-c", "core.hooksPath=.git/hooks" }, args });
     defer pair.gpa.free(full);
-    try gitMayFail(&pair.git, io, full);
+    try gitMayFail(io, &pair.git, full);
 }
 
 test "a merge runs git merge's hooks, and a stopped one git commit's, as git's do" {
@@ -2877,12 +2877,12 @@ test "a rebase runs git rebase's hooks, stopped, continued and finished, as git'
         }
         try expectSameHooks(&pair, io);
         try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
-        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(r, io, &.{ "rebase", "--abort" });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(io, r, &.{ "rebase", "--abort" });
     }
 }
 
 /// `topic` carries a commit, a `fixup!` of it and one more, off `main`.
-fn fixupScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn fixupScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "f", "a\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -3167,7 +3167,7 @@ fn signedHistory(format: @import("../commit/signing.zig").Format) !void {
     // A pick that stops keeps the decision in its opts, and the commit that
     // continues it is signed; -S with a key names the key.
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
-    try gitMayFail(&pair.git, io, &.{ "-c", "commit.gpgSign=false", "cherry-pick", "-S", "topic~1", "topic" });
+    try gitMayFail(io, &pair.git, &.{ "-c", "commit.gpgSign=false", "cherry-pick", "-S", "topic~1", "topic" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -3218,7 +3218,7 @@ fn signedHistory(format: @import("../commit/signing.zig").Format) !void {
         try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
         try r.exec(io, &.{ "checkout", "-q", "topic" });
     }
-    try gitMayFail(&pair.git, io, &.{ "-c", "commit.gpgSign=true", "rebase", "main" });
+    try gitMayFail(io, &pair.git, &.{ "-c", "commit.gpgSign=true", "rebase", "main" });
     {
         var repo = try pair.open(io);
         defer repo.deinit(io);
@@ -3278,7 +3278,7 @@ test "merge.default decides a path the attributes say nothing about, as git's do
             try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
             try r.exec(io, &.{ "config", "merge.default", driver });
         }
-        try gitMayFail(&pair.git, io, &.{ "merge", "--no-edit", "topic" });
+        try gitMayFail(io, &pair.git, &.{ "merge", "--no-edit", "topic" });
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -3290,7 +3290,7 @@ test "merge.default decides a path the attributes say nothing about, as git's do
             std.debug.print("with merge.default={s}\n", .{driver});
             return err;
         };
-        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(r, io, &.{ "merge", "--abort" });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(io, r, &.{ "merge", "--abort" });
     }
 }
 
@@ -3349,7 +3349,7 @@ test "a merge with no commit named merges the branch's upstream, as git merge do
 /// `file.txt` committed with CRLF endings and no attributes; `topic`
 /// brings `text=auto` in and stores it again normalized, while `main`
 /// edits a line and keeps its endings.
-fn attributesArriveScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn attributesArriveScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "file.txt", "a\r\nb\r\nc\r\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -3365,7 +3365,7 @@ fn attributesArriveScript(repo: *testgit.Repo, io: Io) anyerror!void {
 
 /// As `attributesArriveScript`, but the base has a `.gitattributes` that
 /// `topic` rewrites and `main` deletes, so the merge's copy is in conflict.
-fn attributesContestedScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn attributesContestedScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, ".gitattributes", "*.md text\n");
     try repo.writeFile(io, "file.txt", "a\r\nb\r\nc\r\n");
     try repo.exec(io, &.{ "add", "-A" });
@@ -3387,13 +3387,13 @@ test "a renormalizing merge reads the attributes the merge brings when the worki
     // natively: a `.gitattributes` the merge writes is itself text, and
     // under CRLF the attributes it is written under show in its bytes.
     for ([_]?[]const u8{ null, "crlf" }) |eol| {
-        for ([_]*const fn (*testgit.Repo, Io) anyerror!void{ attributesArriveScript, attributesContestedScript }) |script| {
+        for ([_]*const fn (Io, *testgit.Repo) anyerror!void{ attributesArriveScript, attributesContestedScript }) |script| {
             try renormalizeWithMergedAttributes(script, eol);
         }
     }
 }
 
-fn renormalizeWithMergedAttributes(script: *const fn (*testgit.Repo, Io) anyerror!void, eol: ?[]const u8) !void {
+fn renormalizeWithMergedAttributes(script: *const fn (Io, *testgit.Repo) anyerror!void, eol: ?[]const u8) !void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try testgit.requireGit(gpa, io);
@@ -3406,7 +3406,7 @@ fn renormalizeWithMergedAttributes(script: *const fn (*testgit.Repo, Io) anyerro
     }
     for ([_][]const []const u8{ &.{}, &.{"renormalize"} }) |words| {
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
-            try gitMayFail(r, io, &.{ "merge", "--abort" });
+            try gitMayFail(io, r, &.{ "merge", "--abort" });
             try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
         }
         var args: std.ArrayList([]const u8) = .empty;
@@ -3414,7 +3414,7 @@ fn renormalizeWithMergedAttributes(script: *const fn (*testgit.Repo, Io) anyerro
         try args.appendSlice(gpa, &.{ "merge", "--no-edit" });
         for (words) |w| try args.appendSlice(gpa, &.{ "-X", w });
         try args.append(gpa, "topic");
-        try gitMayFail(&pair.git, io, args.items);
+        try gitMayFail(io, &pair.git, args.items);
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -3428,7 +3428,7 @@ fn renormalizeWithMergedAttributes(script: *const fn (*testgit.Repo, Io) anyerro
 
 /// `side` merged `feature` with a conflict in `a` it resolved by hand;
 /// `main` moved on.
-fn conflictedMergeScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn conflictedMergeScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "a", "a\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -3438,7 +3438,7 @@ fn conflictedMergeScript(repo: *testgit.Repo, io: Io) anyerror!void {
     try repo.exec(io, &.{ "checkout", "-q", "-b", "side", "main" });
     try repo.writeFile(io, "a", "side\n");
     try repo.exec(io, &.{ "commit", "-q", "-am", "side work" });
-    try gitMayFail(repo, io, &.{ "merge", "-q", "--no-ff", "--no-edit", "feature" });
+    try gitMayFail(io, repo, &.{ "merge", "-q", "--no-ff", "--no-edit", "feature" });
     try repo.writeFile(io, "a", "resolved\n");
     try repo.exec(io, &.{ "commit", "-q", "-am", "Merge branch 'feature' into side" });
     try repo.exec(io, &.{ "checkout", "-q", "main" });
@@ -3453,7 +3453,7 @@ test "a merge line under strategy options merges as the git merge git's rebase r
     // The message a stopped rebase keeps in rebase-merge/message ends in a newline from git 2.45 on.
     try testgit.requireGitVersion(gpa, io, 2, 45);
     try testgit.requireGit(gpa, io);
-    for ([_]*const fn (*testgit.Repo, Io) anyerror!void{ mergeCommitScript, conflictedMergeScript }) |script| {
+    for ([_]*const fn (Io, *testgit.Repo) anyerror!void{ mergeCommitScript, conflictedMergeScript }) |script| {
         var pair: Pair = undefined;
         try Pair.init(gpa, io, &pair, script);
         defer pair.deinit();
@@ -3469,7 +3469,7 @@ test "a merge line under strategy options merges as the git merge git's rebase r
             "merge -C side feature # Merge branch 'feature' into side",
         });
         defer gpa.free(sheet);
-        try gitRebaseInteractive(&pair.git, io, sheet, &.{ "-X", "diff-algorithm=patience", "main" });
+        try gitRebaseInteractive(io, &pair.git, sheet, &.{ "-X", "diff-algorithm=patience", "main" });
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -3514,7 +3514,7 @@ test "a merge line under strategy options merges as the git merge git's rebase r
 /// A project that took a library in under `lib/`, the library's history
 /// going on at the top level, and each side's edits, some of them only to
 /// whitespace.
-fn subtreeScript(repo: *testgit.Repo, io: Io) anyerror!void {
+fn subtreeScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.exec(io, &.{ "checkout", "-q", "--orphan", "library" });
     try repo.writeFile(io, "a", "one\ntwo\nthree\n");
     try repo.writeFile(io, "b", "b\n");
@@ -3560,7 +3560,7 @@ test "merge and cherry-pick with subtree and whitespace options end as git's do"
         try args.appendSlice(gpa, &.{ "merge", "--no-edit" });
         for (words) |word| try args.appendSlice(gpa, &.{ "-X", word });
         try args.append(gpa, "library");
-        try gitMayFail(&pair.git, io, args.items);
+        try gitMayFail(io, &pair.git, args.items);
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -3572,7 +3572,7 @@ test "merge and cherry-pick with subtree and whitespace options end as git's do"
             std.debug.print("merging with {s}\n", .{words[words.len - 1]});
             return err;
         };
-        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(r, io, &.{ "merge", "--abort" });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(io, r, &.{ "merge", "--abort" });
 
         // The library's last commit picked onto the project.
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
@@ -3580,7 +3580,7 @@ test "merge and cherry-pick with subtree and whitespace options end as git's do"
         try args.append(gpa, "cherry-pick");
         for (words) |word| try args.appendSlice(gpa, &.{ "-X", word });
         try args.append(gpa, "library");
-        try gitMayFail(&pair.git, io, args.items);
+        try gitMayFail(io, &pair.git, args.items);
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
@@ -3591,6 +3591,6 @@ test "merge and cherry-pick with subtree and whitespace options end as git's do"
             std.debug.print("picking with {s}\n", .{words[words.len - 1]});
             return err;
         };
-        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(r, io, &.{ "cherry-pick", "--abort" });
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(io, r, &.{ "cherry-pick", "--abort" });
     }
 }

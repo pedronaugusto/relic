@@ -199,20 +199,6 @@ pub const Repo = struct {
         return out.toOwnedSlice(r.gpa);
     }
 
-    /// What a `git` that may fail said: its exit code and both streams,
-    /// the caller's.
-    pub const Captured = struct {
-        code: u8,
-        stdout: []u8,
-        stderr: []u8,
-
-        /// Release both streams.
-        pub fn deinit(c: *Captured, gpa: Allocator) void {
-            gpa.free(c.stdout);
-            gpa.free(c.stderr);
-        }
-    };
-
     /// Run `git` and keep what it said, whatever it exits with.
     pub fn capture(r: *Repo, io: Io, args: []const []const u8) !Captured {
         var argv: std.ArrayList([]const u8) = .empty;
@@ -267,6 +253,20 @@ pub const Repo = struct {
     /// The whole of a file in the repository, as the caller's bytes.
     pub fn readFile(r: *Repo, io: Io, path: []const u8) ![]u8 {
         return r.dir.readFileAlloc(io, path, r.gpa, .limited(64 << 20));
+    }
+};
+
+/// What a `git` that may fail said: its exit code and both streams,
+/// the caller's.
+pub const Captured = struct {
+    code: u8,
+    stdout: []u8,
+    stderr: []u8,
+
+    /// Release both streams.
+    pub fn deinit(c: *Captured, gpa: Allocator) void {
+        gpa.free(c.stdout);
+        gpa.free(c.stderr);
     }
 };
 

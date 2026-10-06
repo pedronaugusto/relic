@@ -458,7 +458,7 @@ pub const Server = struct {
         if (lfs_at == null) {
             const git_root = s.git_root orelse return request.respond("", .{ .status = .not_found, .keep_alive = false });
             try s.logRequest(method, path, "-");
-            return s.cgi(&request, arena, git_root, method, path, query, content_type, git_protocol, body);
+            return s.cgi(arena, &request, git_root, method, path, query, content_type, git_protocol, body);
         }
         const prefix = path[0 .. lfs_at.? + "/info/lfs".len];
         const route = path[prefix.len..];
@@ -491,7 +491,7 @@ pub const Server = struct {
             // A token is handed back in each action, as a hosting service
             // hands one back; a basic credential is not.
             const token: ?[]const u8 = if (authorization != null and std.mem.startsWith(u8, authorization.?, "RemoteAuth ")) authorization.? else null;
-            return s.batch(&request, arena, base, body, token);
+            return s.batch(arena, &request, base, body, token);
         }
         if (std.mem.startsWith(u8, route, "/objects/") and route.len == "/objects/".len + 64) {
             const oid = route["/objects/".len..];
@@ -558,7 +558,7 @@ pub const Server = struct {
         if (std.mem.startsWith(u8, route, "/locks")) {
             if (!s.options.locking) return request.respond("", .{ .status = .not_found, .keep_alive = false });
             if (s.takeFault(.locks)) |f| return respondFault(&request, f);
-            return s.locking(&request, arena, method, route, query, body, user.?);
+            return s.locking(arena, &request, method, route, query, body, user.?);
         }
         return request.respond("", .{ .status = .not_found, .keep_alive = false });
     }
@@ -592,7 +592,7 @@ pub const Server = struct {
         return null;
     }
 
-    fn batch(s: *Server, request: *http.Server.Request, arena: Allocator, base: []const u8, body: []const u8, token: ?[]const u8) !void {
+    fn batch(s: *Server, arena: Allocator, request: *http.Server.Request, base: []const u8, body: []const u8, token: ?[]const u8) !void {
         const auth_header = if (token) |t| try std.fmt.allocPrint(arena, ",\"Authorization\":\"{s}\"", .{t}) else "";
         const Wanted = struct { oid: []const u8, size: u64 };
         const Ref = struct { name: ?[]const u8 = null };
@@ -653,7 +653,7 @@ pub const Server = struct {
         return lock;
     }
 
-    fn locking(s: *Server, request: *http.Server.Request, arena: Allocator, method: http.Method, route: []const u8, query: []const u8, body: []const u8, user: []const u8) !void {
+    fn locking(s: *Server, arena: Allocator, request: *http.Server.Request, method: http.Method, route: []const u8, query: []const u8, body: []const u8, user: []const u8) !void {
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
         var out: std.Io.Writer.Allocating = .init(arena);
@@ -773,8 +773,8 @@ pub const Server = struct {
 
     fn cgi(
         s: *Server,
-        request: *http.Server.Request,
         arena: Allocator,
+        request: *http.Server.Request,
         root: []const u8,
         method: http.Method,
         path: []const u8,
