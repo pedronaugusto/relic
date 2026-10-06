@@ -555,6 +555,56 @@ test "the repository's format is its own config file's alone, as git reads it" {
     try std.testing.expectError(error.UnsupportedExtension, repo_mod.Repository.open(gpa, io, git.dir, .{}));
 }
 
+test "discovery stops at a damaged .git file, passes over a .git that is no repository, and keeps below a ceiling, as git's does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    git.report_failures = false;
+    // A `.git` file that is no gitfile, or names no repository: git dies
+    // rather than take the repository above for this one's.
+    for ([_][]const u8{ "garbage\n", "gitdir:nospace\n", "gitdir: nowhere\n", "gitdir: .\n", "gitdir: \n" }) |text| {
+        try git.writeFile(io, "sub/.git", text);
+        try git.dir.createDirPath(io, "sub/inner");
+        try std.testing.expectError(error.GitFailed, git.run(io, &.{ "-C", "sub/inner", "rev-parse", "--git-dir" }));
+        var inner = try git.dir.openDir(io, "sub/inner", .{});
+        defer inner.close(io);
+        try std.testing.expectError(error.BrokenGitFile, repo_mod.Repository.open(gpa, io, inner, .{}));
+    }
+    try git.dir.deleteTree(io, "sub");
+
+    // An empty `.git` directory is no repository, and the walk goes on.
+    try git.dir.createDirPath(io, "other/.git");
+    const theirs = try git.line(io, &.{ "-C", "other", "rev-parse", "--show-toplevel" });
+    defer gpa.free(theirs);
+    {
+        var other = try git.dir.openDir(io, "other", .{});
+        defer other.close(io);
+        var repo = try repo_mod.Repository.open(gpa, io, other, .{});
+        defer repo.deinit(io);
+        var ours_buf: [4096]u8 = undefined;
+        const len = try repo.work_dir.?.realPath(io, &ours_buf);
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, ours_buf[0..len], '\\', '/');
+        try std.testing.expectEqualStrings(theirs, ours_buf[0..len]);
+    }
+
+    // A ceiling between the start and the repository: neither finds it.
+    try git.dir.createDirPath(io, "a/b");
+    var a_dir = try git.dir.openDir(io, "a", .{});
+    defer a_dir.close(io);
+    const ceiling = try a_dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(ceiling);
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, ceiling, '\\', '/');
+    try git.isolated.?.put("GIT_CEILING_DIRECTORIES", ceiling);
+    try std.testing.expectError(error.GitFailed, git.run(io, &.{ "-C", "a/b", "rev-parse", "--git-dir" }));
+    var b_dir = try git.dir.openDir(io, "a/b", .{});
+    defer b_dir.close(io);
+    try std.testing.expectError(error.NotARepository, repo_mod.Repository.open(gpa, io, b_dir, .{ .ceiling_directories = &.{ceiling} }));
+    // Without the ceiling the walk finds it.
+    var from_a = try repo_mod.Repository.open(gpa, io, b_dir, .{});
+    from_a.deinit(io);
+}
+
 test "a config refresh keeps only its own refused setting" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -898,17 +948,30 @@ test "discovery closes its git directory when the worktree handle cannot be open
                 r.closed += 1;
             }
         }
+
+        // What discovery asks to tell a git directory from another.
+        fn statFile(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
+            return dir.statFile(std.testing.io, path, options);
+        }
+
+        fn access(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
+            return dir.access(std.testing.io, path, options);
+        }
     };
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.createDir(io, ".git", .default_dir);
+    try tmp.dir.createDirPath(io, ".git/objects");
+    try tmp.dir.createDirPath(io, ".git/refs");
+    try tmp.dir.writeFile(io, .{ .sub_path = ".git/HEAD", .data = "ref: refs/heads/main\n" });
     var recorder: Recorder = .{};
     // Clean up even while this test is proving an unfixed leak.
     defer if (recorder.opened) |dir| dir.close(io);
     var vtable = Io.failing.vtable.*;
     vtable.dirOpenDir = Recorder.openDir;
     vtable.dirClose = Recorder.close;
+    vtable.dirStatFile = Recorder.statFile;
+    vtable.dirAccess = Recorder.access;
     const tracked: Io = .{ .userdata = &recorder, .vtable = &vtable };
     try std.testing.expectError(error.ProcessFdQuotaExceeded, repo_mod.Repository.open(std.testing.allocator, tracked, tmp.dir, .{ .discover = false }));
     try std.testing.expectEqual(@as(usize, 1), recorder.closed);

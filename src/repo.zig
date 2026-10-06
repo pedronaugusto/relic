@@ -324,39 +324,44 @@ pub const Repository = struct {
         /// `--git-dir` name one: git checks neither `safe.bareRepository`
         /// nor ownership for it.
         explicit: bool = false,
+        /// Absolute paths discovery does not walk up into, as git's
+        /// `GIT_CEILING_DIRECTORIES`: the start is still looked at when it
+        /// is one, and no directory at or above the nearest one above it
+        /// is. Borrowed for the call.
+        ceiling_directories: []const []const u8 = &.{},
+        /// Whether discovery walks up past the filesystem the start is on,
+        /// as git's `GIT_DISCOVERY_ACROSS_FILESYSTEM`; git stops there
+        /// unless told.
+        across_filesystems: bool = false,
     };
 
     fn discover(gpa: Allocator, io: Io, start: Io.Dir, options: OpenOptions) Error!Discovered {
         var current = start;
         var current_owned = false;
         defer if (current_owned) current.close(io);
+        // Where the walk stops climbing: the nearest ceiling above the
+        // start, by the length of its path, and the start's filesystem.
+        var path_buf: [4096]u8 = undefined;
+        var path: []const u8 = "";
+        var ceiling: ?usize = null;
+        if (options.discover and options.ceiling_directories.len != 0) {
+            path = try absoluteGitDir(io, start, &path_buf);
+            ceiling = nearestCeiling(path, options.ceiling_directories);
+        }
+        const device = if (fs.statAt(io, start, ".") catch null) |found| found.stat.dev else 0;
         var depth: u8 = 0;
         while (true) : (depth += 1) {
             if (depth > max_discovery_depth) break;
 
-            // A `.git` directory here?
-            if (current.openDir(io, ".git", .{ .iterate = true })) |git_dir| {
+            // A `.git` here: a directory that is a git directory, or a file
+            // naming one, which is what a linked worktree and a submodule
+            // have. git's `read_gitfile_gently` and `is_git_directory`.
+            if (try dotGit(gpa, io, current)) |git_dir| {
                 errdefer git_dir.close(io);
                 const work = try current.openDir(io, ".", .{ .iterate = true });
                 errdefer work.close(io);
-                try checkOwnership(gpa, io, options, null, work, git_dir);
-                return withCommon(gpa, io, git_dir, work);
-            } else |_| {}
-
-            // A `.git` file, which is what a linked worktree has.
-            if (try worktrees.readGitFile(gpa, io, current)) |target| {
-                defer gpa.free(target);
-                // A linked worktree's names its directory absolutely; a
-                // submodule's names it relative to the file itself.
-                const git_dir = (if (std.fs.path.isAbsolute(target))
-                    Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
-                else
-                    current.openDir(io, target, .{ .iterate = true })) catch
-                    return error.BrokenGitFile;
-                errdefer git_dir.close(io);
-                const work = try current.openDir(io, ".", .{ .iterate = true });
-                errdefer work.close(io);
-                try checkOwnership(gpa, io, options, work, work, git_dir);
+                const is_file = if (current.statFile(io, ".git", .{})) |st| st.kind == .file else |_| false;
+                try checkOwnership(gpa, io, options, if (is_file) work else null, work, git_dir);
                 return withCommon(gpa, io, git_dir, work);
             }
 
@@ -371,10 +376,18 @@ pub const Repository = struct {
             }
 
             if (!options.discover) break;
+            if (ceiling) |stop| {
+                const up = std.fs.path.dirnamePosix(path) orelse break;
+                // The root's length counts as its slash's.
+                if (@max(up.len, 1) <= stop) break;
+                path = up;
+            }
             const parent = current.openDir(io, "..", .{ .iterate = true }) catch break;
             // The walk stops when `..` is the same directory, which is the
-            // filesystem root.
-            if (sameDir(io, parent, current)) {
+            // filesystem root, and where it would leave the start's
+            // filesystem, as git's does unless told otherwise.
+            const parent_device = if (fs.statAt(io, parent, ".") catch null) |found| found.stat.dev else device;
+            if (sameDir(io, parent, current) or (!options.across_filesystems and parent_device != device)) {
                 parent.close(io);
                 break;
             }
@@ -383,6 +396,53 @@ pub const Repository = struct {
             current_owned = true;
         }
         return error.NotARepository;
+    }
+
+    /// The length of the longest ceiling that is a directory above `path`,
+    /// `path` itself excluded: git's `longest_ancestor_length`.
+    fn nearestCeiling(path: []const u8, ceilings: []const []const u8) ?usize {
+        var best: ?usize = null;
+        for (ceilings) |raw| {
+            const ceiling = if (raw.len > 1) std.mem.trimEnd(u8, raw, "/") else raw;
+            if (ceiling.len == 0 or ceiling.len >= path.len) continue;
+            if (!std.mem.startsWith(u8, path, ceiling)) continue;
+            if (ceiling[ceiling.len - 1] != '/' and path[ceiling.len] != '/') continue;
+            if (best == null or ceiling.len > best.?) best = ceiling.len;
+        }
+        return best;
+    }
+
+    /// The git directory a `.git` in `dir` stands for, or `null` when there
+    /// is none to take, as git's discovery reads one: a directory that is a
+    /// git directory is taken, one that is not is passed over; a file must
+    /// be `gitdir: <path>` naming a git directory, and anything else --
+    /// unreadable, malformed, naming nothing -- is `error.BrokenGitFile`,
+    /// where git dies rather than look further up, as a submodule's damaged
+    /// `.git` must never be taken for its superproject.
+    fn dotGit(gpa: Allocator, io: Io, dir: Io.Dir) Error!?Io.Dir {
+        const st = dir.statFile(io, ".git", .{}) catch return null;
+        if (st.kind != .file) {
+            if (st.kind != .directory) return null;
+            const git_dir = dir.openDir(io, ".git", .{ .iterate = true }) catch return null;
+            if (looksLikeGitDir(io, git_dir)) return git_dir;
+            git_dir.close(io);
+            return null;
+        }
+        const text = fs.readFileAlloc(gpa, io, dir, ".git", 4096) catch return error.BrokenGitFile;
+        const bytes = text orelse return error.BrokenGitFile;
+        defer gpa.free(bytes);
+        if (!std.mem.startsWith(u8, bytes, "gitdir: ")) return error.BrokenGitFile;
+        const target = std.mem.trimEnd(u8, bytes["gitdir: ".len..], "\r\n");
+        if (target.len == 0) return error.BrokenGitFile;
+        // A linked worktree's names its directory absolutely; a
+        // submodule's names it relative to the file itself.
+        const git_dir = (if (std.fs.path.isAbsolute(target))
+            Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
+        else
+            dir.openDir(io, target, .{ .iterate = true })) catch return error.BrokenGitFile;
+        if (looksLikeGitDir(io, git_dir)) return git_dir;
+        git_dir.close(io);
+        return error.BrokenGitFile;
     }
 
     /// The settings a repository cannot write itself: the system, global
@@ -482,10 +542,12 @@ pub const Repository = struct {
         return true;
     }
 
+    /// Whether two handles are one directory: the same inode on the same
+    /// device.
     fn sameDir(io: Io, a: Io.Dir, b: Io.Dir) bool {
-        const sa = a.stat(io) catch return false;
-        const sb = b.stat(io) catch return false;
-        return sa.inode == sb.inode;
+        const sa = (fs.statAt(io, a, ".") catch return false) orelse return false;
+        const sb = (fs.statAt(io, b, ".") catch return false) orelse return false;
+        return sa.stat.ino == sb.stat.ino and sa.stat.dev == sb.stat.dev;
     }
 
     fn finish(gpa: Allocator, io: Io, discovered: Discovered, options: OpenOptions) Error!Repository {
