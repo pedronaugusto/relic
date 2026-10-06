@@ -19,6 +19,7 @@
 const Self = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -560,6 +561,12 @@ fn normalizeDirectory(arena: Allocator, raw: []const u8) Error!?[]const u8 {
     }
     if (parts.items.len == 0) return null;
     const joined = try std.mem.join(arena, "/", parts.items);
+    // A cone directory as `renderCone` writes it between slashes: no empty
+    // component, and no slash at either end.
+    assert(joined.len != 0);
+    assert(joined[0] != '/');
+    assert(joined[joined.len - 1] != '/');
+    assert(std.mem.find(u8, joined, "//") == null);
     return joined;
 }
 

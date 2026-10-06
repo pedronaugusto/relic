@@ -21,6 +21,7 @@
 const Self = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -147,6 +148,8 @@ pub const Scan = struct {
                     }
                     if (b.cursor >= b.buffer.len) return error.Unexpected;
                     const parsed = parseEntry(b.buffer[b.cursor..]) orelse return error.Unexpected;
+                    // `parseEntry` takes no entry longer than what is left.
+                    assert(parsed.length != 0 and parsed.length <= b.buffer.len - b.cursor);
                     b.cursor += parsed.length;
                     b.count -= 1;
                     if (std.mem.eql(u8, parsed.name, ".") or std.mem.eql(u8, parsed.name, "..")) continue;
@@ -210,6 +213,11 @@ const attr = struct {
         fileattr: u32,
         forkattr: u32,
     };
+
+    comptime {
+        // The kernel's `struct attrlist`: two shorts and five bitmaps.
+        assert(@sizeOf(List) == 24);
+    }
 
     const list: List = .{
         .bitmapcount = bit_map_count,

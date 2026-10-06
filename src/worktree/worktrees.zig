@@ -12,6 +12,7 @@
 const Self = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -318,6 +319,9 @@ pub fn add(
 }
 
 fn writeLine(io: Io, dir: Io.Dir, name: []const u8, text: []const u8) Error!void {
+    // Each of these files is one line, which git and `list` read back
+    // trimmed of its newline.
+    assert(std.mem.findScalar(u8, text, '\n') == null);
     var buf: [4300]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s}\n", .{text}) catch return error.InvalidWorktreeName;
     try dir.writeFile(io, .{ .sub_path = name, .data = line });

@@ -19,6 +19,7 @@
 const Self = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
@@ -207,6 +208,11 @@ pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u
             .u32 => try appendInt(u32, a, &out, cp, endian),
         }
     }
+    // What `toUtf8` reads back: whole code units after the mark.
+    assert((out.items.len - bom.len) % @as(usize, switch (e.unit()) {
+        .u16 => 2,
+        .u32 => 4,
+    }) == 0);
     return out.toOwnedSlice(a);
 }
 

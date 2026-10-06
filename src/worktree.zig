@@ -26,6 +26,7 @@ pub const dirscan = @import("worktree/dirscan.zig");
 pub const safepath = @import("worktree/safepath.zig");
 
 const std = @import("std");
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -1047,6 +1048,7 @@ fn keepChanged(
         }
         i += 1;
     }
+    assert(i == kept);
     std.mem.sort(StatusEntry, out, {}, lessThanStatus);
     return out;
 }
@@ -1762,7 +1764,7 @@ pub fn checkout(
         paths[n] = key.*;
         n += 1;
     }
-    std.debug.assert(n == paths.len);
+    assert(n == paths.len);
     std.mem.sort([]const u8, paths, {}, lessThanName);
     try removeEmptiedDirectories(io, wt, index, paths, &wanted, options.force);
 
@@ -2160,6 +2162,11 @@ const WriteBatch = struct {
     /// git's `checkout.thresholdForParallelism`.
     const parallel_threshold = 100;
 
+    comptime {
+        // A full batch is one worth spreading over tasks.
+        assert(parallel_threshold < max_files);
+    }
+
     const Job = struct {
         path: []const u8,
         want: TreeEntry,
@@ -2180,6 +2187,8 @@ const WriteBatch = struct {
         var arena = b.arena.promote(b.gpa);
         defer b.arena = arena.state;
         const owned = try arena.allocator().dupe(u8, bytes);
+        // A full batch is flushed before another file is added.
+        assert(b.jobs.items.len < max_files);
         try b.jobs.append(b.gpa, .{ .path = path, .want = want, .bytes = owned, .executable = executable });
         b.bytes += bytes.len;
         return b.bytes >= max_bytes or b.jobs.items.len >= max_files;
@@ -2205,6 +2214,9 @@ const WriteBatch = struct {
         }
         // This task writes too; with no others it writes them all.
         run(io, wt, b.jobs.items, &next);
+        // It stops only once every job is claimed, so none is read below
+        // with the result it started with.
+        assert(next.load(.monotonic) >= b.jobs.items.len);
         group.await(io) catch group.cancel(io);
         var first: ?Error = null;
         for (b.jobs.items) |*job| {
@@ -2442,7 +2454,7 @@ fn writePathFile(
     want: PathWrite.Blob,
     rules: Rules,
 ) Error!bool {
-    std.debug.assert(want.mode == .file or want.mode == .exec);
+    assert(want.mode == .file or want.mode == .exec);
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     const a = scratch.allocator();

@@ -21,6 +21,7 @@
 const Self = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -694,8 +695,11 @@ pub const Session = struct {
     pub fn nextReady(s: *Session, a: Allocator) Self.Error!?Ready {
         if (try s.nextDeferred()) |ready| return ready;
         while (true) {
+            assert(s.next_available <= s.available.items.len);
             if (s.next_available < s.available.items.len) {
                 const d = &s.delayed.items[s.available.items[s.next_available]];
+                // `askAvailable` lists a delayed file once, as it marks it.
+                assert(d.delivered);
                 s.next_available += 1;
                 const redelivered = try s.redeliver(a, d);
                 return redelivered;
@@ -720,6 +724,7 @@ pub const Session = struct {
             for (s.deferred.items, wanted) |d, *w| w.* = .{ .path = d.path, .pointer = d.pointer };
             try s.options.fetch.?.fetch(s.io, &l.store, &l.settings, wanted);
         }
+        assert(s.next_deferred <= s.deferred.items.len);
         if (s.next_deferred == s.deferred.items.len) return null;
         const d = s.deferred.items[s.next_deferred];
         s.next_deferred += 1;

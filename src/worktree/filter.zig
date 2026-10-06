@@ -32,6 +32,7 @@
 const Self = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -486,6 +487,8 @@ pub const Protocol = struct {
     /// The welcome, the version and the capabilities, as git sends them:
     /// `clean`, `smudge` and `delay` all offered.
     pub fn handshake(p: *Protocol) Self.ProtocolError!void {
+        // `pktline.read` hands back a packet out of the reader's buffer.
+        assert(p.in.buffer.len >= pktline.max_line);
         try p.line("git-filter-client\n");
         try p.line("version=2\n");
         try p.end();
@@ -628,6 +631,8 @@ pub const Protocol = struct {
     /// the list too, as it does in git.
     fn readLine(p: *Protocol) ProtocolError!?[]const u8 {
         const data = (try p.readPacket()) orelse return null;
+        // `readPacket` ends the list at a packet with no data.
+        assert(data.len != 0);
         const text = if (data[data.len - 1] == '\n') data[0 .. data.len - 1] else data;
         return if (text.len == 0) null else text;
     }
