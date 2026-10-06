@@ -20,6 +20,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
@@ -123,6 +124,15 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, commit: Oid, path: []const
             try arena.dupe(u8, g.origin.path);
         try hunks.append(arena, .{ .final_start = g.final + 1, .count = 1, .commit = g.origin.commit, .path = owned, .orig_start = g.at + 1 });
     }
+    // What `Blame` promises: every line blamed once, the hunks running from
+    // the first line to the last without a gap or an overlap.
+    assert(s.guilty.items.len == lines.len);
+    var next_line: usize = 1;
+    for (hunks.items) |h| {
+        assert(h.final_start == next_line);
+        next_line += h.count;
+    }
+    assert(next_line == lines.len + 1);
     return .{ .gpa = gpa, .arena = out_arena.state, .hunks = hunks.items };
 }
 

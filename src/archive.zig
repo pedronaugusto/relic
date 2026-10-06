@@ -21,6 +21,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 const flate = std.compress.flate;
 
@@ -134,6 +135,8 @@ const Tar = struct {
             @memset(t.block[t.offset..][0 .. record_size - tail], 0);
             t.offset += record_size - tail;
         }
+        assert(t.offset % record_size == 0);
+        assert(t.offset <= block_size);
         try t.writeIfNeeded();
     }
 
@@ -173,7 +176,14 @@ const Header = extern struct {
 };
 
 comptime {
-    std.debug.assert(@sizeOf(Header) == 500);
+    assert(@sizeOf(Header) == 500);
+    // A header is one record, padded; records fill a block exactly, so a
+    // block written whole ends on a record.
+    assert(@sizeOf(Header) <= record_size);
+    assert(block_size % record_size == 0);
+    // `prepareHeader` sums the checksum field as spaces by these offsets.
+    assert(@offsetOf(Header, "chksum") == 148);
+    assert(@sizeOf(@FieldType(Header, "chksum")) == 8);
 }
 
 fn octal(field: []u8, value: u64) void {
@@ -186,6 +196,9 @@ fn octal(field: []u8, value: u64) void {
         field[i] = '0' + @as(u8, @intCast(v & 7));
         v >>= 3;
     }
+    // Every value written fits its field: sizes and times past the ustar
+    // limit go to a pax header instead.
+    assert(v == 0);
     field[digits] = 0;
 }
 
@@ -418,10 +431,13 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary
     try z.le(&header, 4, content.len);
     try z.le(&header, 2, path.len);
     try z.le(&header, 2, extra.len);
+    // The local header is fixed at thirty bytes before its name and extra.
+    assert(header.items.len == 30);
     try z.write(header.items);
     try z.write(path);
     try z.write(&extra);
     if (compressed_size > 0) try z.write(out);
+    const dir_start = z.dir.items.len;
     try z.le(&z.dir, 4, 0x02014b50);
     try z.le(&z.dir, 2, creator_version);
     try z.le(&z.dir, 2, 10);
@@ -441,6 +457,9 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary
     try z.le(&z.dir, 4, offset);
     try z.dir.appendSlice(a, path);
     try z.dir.appendSlice(a, &extra);
+    // A central directory record is forty-six bytes, then the name and extra
+    // the local header has; the trailer counts the directory by these.
+    assert(z.dir.items.len - dir_start == 46 + path.len + extra.len);
     z.entries += 1;
 }
 
@@ -456,6 +475,8 @@ fn zipTrailer(z: *Zip, commit: ?Oid) Error!void {
     var hex: [hash.max_hex_len]u8 = undefined;
     const comment: []const u8 = if (commit) |c| c.hex(&hex) else "";
     try z.le(&t, 2, comment.len);
+    // The end record is twenty-two bytes, the comment after it.
+    assert(t.items.len == 22);
     try z.w.writeAll(z.dir.items);
     try z.w.writeAll(t.items);
     try z.w.writeAll(comment);

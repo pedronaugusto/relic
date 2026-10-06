@@ -24,6 +24,7 @@ const Self = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
@@ -250,6 +251,9 @@ pub const Marks = struct {
 
     /// Name `oid` by `mark`, over whatever it named.
     pub fn put(m: *Marks, gpa: Allocator, mark: u64, oid: Oid) Allocator.Error!void {
+        // Mark zero is no mark: `parse` refuses it, and a stream that names
+        // none puts nothing.
+        assert(mark != 0);
         try m.map.put(gpa, mark, oid);
     }
 
@@ -276,7 +280,10 @@ pub const Marks = struct {
         var i: usize = 0;
         while (it.next()) |k| : (i += 1) keys[i] = k.*;
         std.mem.sort(u64, keys, {}, std.sort.asc(u64));
-        for (keys) |k| try w.print(":{d} {f}\n", .{ k, m.map.get(k).? });
+        for (keys) |k| {
+            assert(k != 0);
+            try w.print(":{d} {f}\n", .{ k, m.map.get(k).? });
+        }
     }
 };
 
@@ -1263,7 +1270,7 @@ const Importer = struct {
     }
 
     fn markNumber(text: []const u8) Error!struct { mark: u64, len: usize } {
-        std.debug.assert(text[0] == ':');
+        assert(text[0] == ':');
         var i: usize = 1;
         while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {}
         if (i == 1) return error.MalformedCommand;

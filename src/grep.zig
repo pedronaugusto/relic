@@ -23,6 +23,7 @@ const Self = @This();
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("hash.zig");
@@ -1036,6 +1037,10 @@ const Batch = struct {
             }
             try batch.binaries.append(a, bin);
         }
+        // The tasks index both by a file's place in the batch.
+        assert(end > start);
+        assert(batch.contents.items.len == end - start);
+        assert(batch.binaries.items.len == end - start);
         return end;
     }
 

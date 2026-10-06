@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 /// Which algorithm produces the edit script.
 pub const Algorithm = enum { myers, histogram, patience };
@@ -762,6 +763,11 @@ const Search = struct {
             s.markAll(off1, lim1, off2, lim2);
             return;
         }
+        // Every split lies in the box, so each half is a box inside this one.
+        assert(off1 <= split.i1);
+        assert(split.i1 <= lim1);
+        assert(off2 <= split.i2);
+        assert(split.i2 <= lim2);
         s.myers(off1, split.i1, off2, split.i2, split.min_lo);
         s.myers(split.i1, lim1, split.i2, lim2, split.min_hi);
     }
@@ -1365,7 +1371,7 @@ const Patience = struct {
             if (cursor == no_slot) break;
         }
         // The chain from the top pile back is exactly one slot per pile.
-        std.debug.assert(n == 0);
+        assert(n == 0);
         return out;
     }
 
@@ -1540,13 +1546,13 @@ fn compact(
                 end_matching_other = -1;
 
                 while (slideUp(f, ids, &g)) {
-                    std.debug.assert(groupPrevious(other, &go));
+                    assert(groupPrevious(other, &go));
                 }
                 earliest_end = g.end;
                 if (go.end > go.start) end_matching_other = g.end;
 
                 while (slideDown(f, ids, &g)) {
-                    std.debug.assert(groupNext(other, &go));
+                    assert(groupNext(other, &go));
                     if (go.end > go.start) end_matching_other = g.end;
                 }
 
@@ -1561,8 +1567,8 @@ fn compact(
                 // Pull it back to meet a change on the other side, so that a
                 // deletion and the insertion replacing it print as one hunk.
                 while (go.end == go.start) {
-                    std.debug.assert(slideUp(f, ids, &g));
-                    std.debug.assert(groupPrevious(other, &go));
+                    assert(slideUp(f, ids, &g));
+                    assert(groupPrevious(other, &go));
                 }
             } else if (indent_heuristic) {
                 var shift = earliest_end;
@@ -1582,8 +1588,8 @@ fn compact(
                 }
 
                 while (g.end > best_shift) {
-                    std.debug.assert(slideUp(f, ids, &g));
-                    std.debug.assert(groupPrevious(other, &go));
+                    assert(slideUp(f, ids, &g));
+                    assert(groupPrevious(other, &go));
                 }
             }
 
@@ -1611,10 +1617,10 @@ fn compact(
         }
 
         if (!groupNext(f, &g)) break;
-        std.debug.assert(groupNext(other, &go));
+        assert(groupNext(other, &go));
     }
 
-    std.debug.assert(!groupNext(other, &go));
+    assert(!groupNext(other, &go));
 }
 
 //=========================================================================
