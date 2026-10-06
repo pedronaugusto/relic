@@ -1404,6 +1404,7 @@ const HookTwin = struct {
         t.environ.deinit();
         t.git.deinit();
         t.relic.deinit();
+        t.* = undefined;
     }
 
     fn gitWithHooks(t: *HookTwin, io: Io, args: []const []const u8) !void {

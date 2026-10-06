@@ -597,6 +597,7 @@ const Walk = struct {
         while (it.next()) |n| w.gpa.destroy(n.*);
         w.nodes.deinit(w.gpa);
         w.queue.deinit(w.gpa);
+        w.* = undefined;
     }
 
     fn node(w: *Walk, io: Io, oid: Oid) Error!*Node {
@@ -742,6 +743,7 @@ const NameRev = struct {
         nr.names.deinit(nr.gpa);
         nr.tips.deinit(nr.gpa);
         nr.arena.deinit();
+        nr.* = undefined;
     }
 
     fn commit(nr: *NameRev, io: Io, oid: Oid) Error!*Node {
@@ -1049,6 +1051,7 @@ const Fixture = struct {
         f.commits.deinit(gpa);
         f.r.deinit();
         f.env.deinit();
+        f.* = undefined;
     }
 
     fn commit(f: *Fixture, io: Io, name: []const u8, when: i64) !void {

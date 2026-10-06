@@ -65,7 +65,10 @@ fn alternateLine(raw: []const u8) ?[]const u8 {
 /// Malformed quoted lines name no directory, as an inaccessible path does.
 fn parseAlternate(gpa: Allocator, raw: []const u8) Allocator.Error!?[]u8 {
     const line = alternateLine(raw) orelse return null;
-    if (line[0] != '"') return try gpa.dupe(u8, line);
+    if (line[0] != '"') {
+        const value = try gpa.dupe(u8, line);
+        return value;
+    }
     if (line.len < 2 or line[line.len - 1] != '"') return null;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
@@ -100,7 +103,8 @@ fn parseAlternate(gpa: Allocator, raw: []const u8) Allocator.Error!?[]u8 {
         try out.append(gpa, c);
     }
     if (out.items.len == 0 or std.mem.indexOfScalar(u8, out.items, 0) != null) return null;
-    return try out.toOwnedSlice(gpa);
+    const value = try out.toOwnedSlice(gpa);
+    return value;
 }
 
 fn appendAlternatePath(gpa: Allocator, out: *std.ArrayList(u8), path: []const u8) Allocator.Error!void {
@@ -695,7 +699,8 @@ pub const Odb = struct {
     fn packedHeader(odb: *Odb, io: Io, oid: Oid) Error!?object.Header {
         for (odb.backendData().sources.items) |*source| {
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
-            return try source.packs.items[located.at].pack.headerAt(io, located.offset);
+            const value = try source.packs.items[located.at].pack.headerAt(io, located.offset);
+            return value;
         }
         return null;
     }
@@ -1206,10 +1211,10 @@ pub const Odb = struct {
         pub fn deinit(s: *Stream, io: Io) void {
             if (!s.finished) {
                 s.abort(io);
-                return;
+            } else {
+                s.odb.backendData().gpa.free(s.window);
+                s.odb.backendData().gpa.free(s.out_buffer);
             }
-            s.odb.backendData().gpa.free(s.window);
-            s.odb.backendData().gpa.free(s.out_buffer);
             s.* = undefined;
         }
     };
@@ -1716,7 +1721,7 @@ pub const Odb = struct {
         } else {
             try build.writeSerially(io);
         }
-        return try writer.finish(io);
+        return writer.finish(io);
     }
 
     /// What of `ordered`'s objects is written as their packs store it, as
@@ -2648,9 +2653,9 @@ fn TaskSet(comptime Context: type, comptime work: fn (Context, Io, usize, usize)
         canceled: std.atomic.Value(bool) = .init(false),
         group: Io.Group = .init,
 
-        const Set = @This();
+        const Self = @This();
 
-        fn take(set: *Set, worker: usize) ?usize {
+        fn take(set: *Self, worker: usize) ?usize {
             if (worker < set.limited_workers) {
                 const i = set.limited_from + set.next_limited.fetchAdd(1, .monotonic);
                 if (i < set.failures.len) return i;
@@ -2660,7 +2665,7 @@ fn TaskSet(comptime Context: type, comptime work: fn (Context, Io, usize, usize)
             return null;
         }
 
-        fn run(set: *Set, worker: usize) void {
+        fn run(set: *Self, worker: usize) void {
             while (set.take(worker)) |i| {
                 if (i > set.lowest_failed.load(.monotonic)) continue;
                 const outcome: Error!void = if (set.io.checkCancel()) |_|
@@ -2680,13 +2685,13 @@ fn TaskSet(comptime Context: type, comptime work: fn (Context, Io, usize, usize)
 
         /// Start `tasks` tasks, workers `1` to `tasks`, and never more than
         /// there are items; the calling task is free until `finish`.
-        fn start(set: *Set, tasks: usize) void {
+        fn start(set: *Self, tasks: usize) void {
             @memset(set.failures, null);
             for (0..@min(tasks, set.failures.len)) |t| set.group.async(set.io, run, .{ set, t + 1 });
         }
 
         /// Take what is left as worker `0`, then wait for the others.
-        fn finish(set: *Set) Error!void {
+        fn finish(set: *Self) Error!void {
             set.run(0);
             if (set.canceled.load(.monotonic)) {
                 set.group.cancel(set.io);
@@ -2697,7 +2702,7 @@ fn TaskSet(comptime Context: type, comptime work: fn (Context, Io, usize, usize)
         }
 
         /// Stop the tasks and wait for them: the caller failed meanwhile.
-        fn abandon(set: *Set) void {
+        fn abandon(set: *Self) void {
             set.group.cancel(set.io);
         }
     };
@@ -2760,6 +2765,7 @@ const Window = struct {
         w.slots.deinit(gpa);
         for (w.retired.items) |bytes| gpa.free(bytes);
         w.retired.deinit(gpa);
+        w.* = undefined;
     }
 
     /// Let go of every slot, its body freed: the serial writer has written
@@ -2927,6 +2933,7 @@ const Build = struct {
         b.reuse.deinit(b.gpa);
         b.gpa.free(b.group_starts);
         b.gpa.free(b.offsets);
+        b.* = undefined;
     }
 
     /// How object `pos` is written, by git's rules against the window: the
@@ -3087,6 +3094,7 @@ const Build = struct {
             batch.pending.deinit(gpa);
             batch.parts.deinit(gpa);
             batch.retired.deinit(gpa);
+            batch.* = undefined;
         }
     };
 
@@ -3578,7 +3586,7 @@ const Reuse = struct {
         gpa.free(r.reused);
         gpa.free(r.whole);
         gpa.free(r.depth_left);
-        r.* = .{};
+        r.* = undefined;
     }
 };
 
@@ -3592,6 +3600,7 @@ const PackEntryOrder = struct {
     fn deinit(o: *PackEntryOrder, gpa: Allocator) void {
         gpa.free(o.offsets);
         gpa.free(o.positions);
+        o.* = undefined;
     }
 
     fn find(o: *const PackEntryOrder, offset: u64) ?usize {

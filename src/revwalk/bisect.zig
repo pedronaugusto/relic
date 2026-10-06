@@ -1160,13 +1160,13 @@ pub fn mark(gpa: Allocator, io: Io, repo: *Repository, state: []const u8, revs: 
             } else try expanded.append(c.a, rev);
         }
     } else try expanded.appendSlice(c.a, revs);
-    const step = try state_(&c, &t, state, expanded.items);
+    const step = try applyState(&c, &t, state, expanded.items);
     try resetWhenFound(&c, step);
     return finish(arena, out, step);
 }
 
 /// `bisect_state`.
-fn state_(c: *Ctx, t: *Terms, state: []const u8, revs: []const []const u8) Error!Step {
+fn applyState(c: *Ctx, t: *Terms, state: []const u8, revs: []const []const u8) Error!Step {
     if (try c.emptyOrMissing("BISECT_START")) return error.NotBisecting;
     try checkAndSetTerms(c, t, state);
     if (!oneOf(state, &.{ t.good, t.bad, "skip" })) return error.InvalidCommand;
@@ -1358,7 +1358,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u
         if (code < 0 or code >= 128) return error.RunFailed;
         const new_state = if (code == 125) "skip" else if (code == 0) t.good else t.bad;
         const before = c.out.items.len;
-        const step = try state_(&c, &t, new_state, &.{});
+        const step = try applyState(&c, &t, new_state, &.{});
         try c.writeState("BISECT_RUN", c.out.items[before..]);
         switch (step) {
             .only_skipped => return error.RunCannotContinue,
@@ -1520,6 +1520,7 @@ const Twin = struct {
         t.ours.deinit();
         t.git.deinit();
         t.env.deinit();
+        t.* = undefined;
     }
 
     /// git's standard output for `bisect <args>`, up to and including a

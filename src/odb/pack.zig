@@ -804,7 +804,7 @@ pub const Pack = struct {
         const out = try p.gpa.alloc(u8, result_len +| decode_slack);
         errdefer p.gpa.free(out);
         try p.decodeAt(io, at, size, out);
-        return try p.gpa.realloc(out, result_len);
+        return p.gpa.realloc(out, result_len);
     }
 
     /// `inflateAt` into `out`, which is cleared, grows as needed and then
@@ -1394,6 +1394,7 @@ const TestPack = struct {
         p.names.deinit(p.gpa);
         p.offsets.deinit(p.gpa);
         p.crcs.deinit(p.gpa);
+        p.* = undefined;
     }
 
     fn init(gpa: Allocator) !TestPack {
@@ -2043,6 +2044,7 @@ pub const Writer = struct {
         if (w.file_buffer.len != 0) w.gpa.free(w.file_buffer);
         w.deflater.deinit(w.gpa);
         const gpa = w.gpa;
+        w.* = undefined;
         gpa.destroy(w);
     }
 
@@ -2634,7 +2636,9 @@ test "an aborted pack leaves the directory as it was" {
 /// size, and one insert command. Good for a base under 256 bytes and a
 /// suffix under 128, which is what these tests use.
 fn copyThenInsert(gpa: Allocator, base_len: usize, suffix: []const u8) ![]u8 {
-    std.debug.assert(base_len < 256 and suffix.len < 128 and suffix.len > 0);
+    std.debug.assert(base_len < 256);
+    std.debug.assert(suffix.len < 128);
+    std.debug.assert(suffix.len > 0);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     try out.append(gpa, @intCast(base_len));

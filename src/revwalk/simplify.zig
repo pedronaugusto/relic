@@ -36,7 +36,8 @@ fn readTree(gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: ?Oid) Error!?[]const 
         return error.UnexpectedObjectType;
     }
     defer db.allocator().free(found.bytes);
-    return try gpa.dupe(u8, found.bytes);
+    const value = try gpa.dupe(u8, found.bytes);
+    return value;
 }
 
 /// git's tree order: a subtree sorts as its name with a `/` after it.

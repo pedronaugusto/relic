@@ -445,6 +445,7 @@ const Stacks = struct {
     fn deinit(s: *Stacks) void {
         s.main.deinit();
         if (s.worktree) |*w| w.deinit();
+        s.* = undefined;
     }
 
     fn forName(s: *const Stacks, store: anytype, name: []const u8) *const Stack {

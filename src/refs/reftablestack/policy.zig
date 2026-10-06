@@ -4,10 +4,8 @@ const Io = std.Io;
 const hash = @import("../../hash.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
-const object = @import("../../object.zig");
 const fs = @import("../../repo/fs.zig");
 const reftable = @import("../reftable.zig");
-const reflog = @import("../reflog.zig");
 /// How the stack writes and compacts. The defaults are git's, and
 /// `Repository` fills them in from `reftable.*` in the configuration.
 pub const Options = struct {

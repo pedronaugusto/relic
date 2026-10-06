@@ -235,7 +235,8 @@ pub const Encoder = struct {
             out.deinit(gpa);
             return null;
         }
-        return try out.toOwnedSlice(gpa);
+        const value = try out.toOwnedSlice(gpa);
+        return value;
     }
 
     /// `encode` into `out`, which is cleared first and keeps its capacity,
@@ -312,7 +313,8 @@ fn flushInsert(gpa: Allocator, out: *std.ArrayList(u8), bytes: []const u8) Alloc
 /// out and does not renumber the ones after it, which is the rule that
 /// catches reimplementers of the decoder and the encoder alike.
 fn emitCopy(gpa: Allocator, out: *std.ArrayList(u8), offset: u32, size: u32) Allocator.Error!void {
-    std.debug.assert(size != 0 and size <= max_copy);
+    std.debug.assert(size != 0);
+    std.debug.assert(size <= max_copy);
     var buf: [8]u8 = undefined;
     var n: usize = 1;
     var cmd: u8 = 0x80;

@@ -122,7 +122,8 @@ pub const Graph = struct {
         const bytes = (try fs.readFileAlloc(gpa, io, objects_dir, "info/commit-graph", 1 << 30)) orelse
             return null;
         // parse takes ownership on success and failure.
-        return try parse(gpa, kind, bytes);
+        const value = try parse(gpa, kind, bytes);
+        return value;
     }
 
     /// Read a commit-graph from bytes this takes ownership of.
@@ -385,7 +386,8 @@ pub const Graph = struct {
     /// The commit named `oid`, or `null` when the graph does not hold it.
     pub fn commit(graph: *const Graph, oid: Oid) Self.Error!?Commit {
         const position = graph.find(oid) orelse return null;
-        return try graph.commitAt(position);
+        const value = try graph.commitAt(position);
+        return value;
     }
 
     /// The parents of the commit at `position`, as object names.

@@ -237,7 +237,8 @@ pub const Shortlog = struct {
     fn identOf(s: *const Shortlog, a: Allocator, value: []const u8) Allocator.Error!?[]const u8 {
         const lt = std.mem.indexOfScalar(u8, value, '<') orelse return null;
         const gt = std.mem.indexOfScalarPos(u8, value, lt + 1, '>') orelse return null;
-        return try s.formatPerson(a, trimName(value[0..lt]), value[lt + 1 .. gt]);
+        const person = try s.formatPerson(a, trimName(value[0..lt]), value[lt + 1 .. gt]);
+        return person;
     }
 
     /// `insert_one_record`.

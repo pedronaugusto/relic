@@ -19,7 +19,6 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
-const fs = @import("../repo/fs.zig");
 const safepath = @import("../worktree/safepath.zig");
 const ReadError = @import("value.zig").ReadError;
 

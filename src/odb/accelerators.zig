@@ -278,6 +278,7 @@ const PackInputs = struct {
     packs: []midx_mod.WritePack,
     fn deinit(inputs: *PackInputs) void {
         inputs.arena.deinit();
+        inputs.* = undefined;
     }
 };
 

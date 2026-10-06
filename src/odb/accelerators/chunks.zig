@@ -14,6 +14,7 @@ pub const Buffer = struct {
 
     pub fn deinit(b: *Buffer) void {
         b.bytes.deinit(b.gpa);
+        b.* = undefined;
     }
     pub fn add(b: *Buffer, bytes: []const u8) Allocator.Error!void {
         try b.bytes.appendSlice(b.gpa, bytes);

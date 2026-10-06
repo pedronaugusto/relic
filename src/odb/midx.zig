@@ -61,7 +61,8 @@ pub const Index = struct {
         const bytes = (try fs.readFileAlloc(gpa, io, pack_dir, "multi-pack-index", 1 << 30)) orelse
             return null;
         // parse takes ownership on success and failure.
-        return try parse(gpa, kind, bytes);
+        const value = try parse(gpa, kind, bytes);
+        return value;
     }
 
     /// Read a multi-pack index from bytes this takes ownership of.

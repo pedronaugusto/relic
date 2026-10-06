@@ -170,6 +170,7 @@ pub const CacheTree = struct {
             for (n.children.items) |*sub| sub.deinit(gpa);
             n.children.deinit(gpa);
             gpa.free(n.name);
+            n.* = undefined;
         }
 
         /// git's order for the children of a node: by length, then by

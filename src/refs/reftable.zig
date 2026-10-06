@@ -515,7 +515,7 @@ const Block = struct {
 
     fn deinit(b: *Block, gpa: Allocator) void {
         if (b.owned) |bytes| gpa.free(bytes);
-        b.owned = null;
+        b.* = undefined;
     }
 
     fn restart(b: *const Block, i: usize) usize {
@@ -665,14 +665,16 @@ pub const Iterator = struct {
     pub fn nextRef(it: *Iterator) Self.Error!?RefRecord {
         std.debug.assert(it.typ == .ref);
         const raw = (try it.nextRaw()) orelse return null;
-        return try decodeRef(it.table, it.block.?.data[0..it.block.?.restart_off], it.value_at, raw);
+        const value = try decodeRef(it.table, it.block.?.data[0..it.block.?.restart_off], it.value_at, raw);
+        return value;
     }
 
     /// The next log entry. Only for an iterator over logs.
     pub fn nextLog(it: *Iterator) Self.Error!?LogRecord {
         std.debug.assert(it.typ == .log);
         const raw = (try it.nextRaw()) orelse return null;
-        return try decodeLog(it.table, it.block.?.data[0..it.block.?.restart_off], it.value_at, raw);
+        const value = try decodeLog(it.table, it.block.?.data[0..it.block.?.restart_off], it.value_at, raw);
+        return value;
     }
 };
 
@@ -943,6 +945,7 @@ const Writer = struct {
         for (w.objects.values()) |*offsets| offsets.deinit(w.gpa);
         w.objects.deinit(w.gpa);
         w.scratch.deinit(w.gpa);
+        w.* = undefined;
     }
 
     fn clearIndex(w: *Writer) void {

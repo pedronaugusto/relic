@@ -50,6 +50,7 @@ pub const NamedPack = struct {
     pub fn deinit(named: *NamedPack, gpa: Allocator, io: Io) void {
         named.pack.deinit(io);
         gpa.free(named.name);
+        named.* = undefined;
     }
 };
 

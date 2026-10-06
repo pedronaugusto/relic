@@ -595,6 +595,7 @@ const Painter = struct {
         p.commits.deinit(p.gpa);
         p.flags.deinit(p.gpa);
         p.queued_nonstale.deinit(p.gpa);
+        p.* = undefined;
     }
 
     fn clear(p: *Painter) void {
