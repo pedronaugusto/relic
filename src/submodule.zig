@@ -27,6 +27,8 @@
 //! starts a process unless the caller hands in `program.Programs` and the
 //! repository's own configuration names a `!command` update.
 
+const Self = @This();
+
 pub const submoduletransport = @import("submodule/transport.zig");
 // The modules relic's API puts under this one, as `relic.submodule.<name>`.
 pub const gitmodules = @import("submodule/gitmodules.zig");
@@ -155,7 +157,7 @@ fn refuse(refusal: ?*Refusal, path: []const u8, setting: []const u8, err: Error)
 /// when there is none, the blob the index records; or, when the index
 /// records none, the one in `HEAD`'s tree. While the index holds the file
 /// unmerged git reads none of it, and neither does this.
-pub fn loadGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const Index) Error!Gitmodules {
+pub fn loadGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const Index) Self.Error!Gitmodules {
     if (isUnmerged(index, ".gitmodules")) return .empty(gpa);
     if (repo.work_dir) |wt| {
         const text = fs.readFileAlloc(gpa, io, wt, ".gitmodules", 1 << 24) catch |err| switch (err) {
@@ -237,7 +239,7 @@ pub fn list(
     repo: *Repository,
     index: *const Index,
     paths: ?[]const []const u8,
-) Error!Listing {
+) Self.Error!Listing {
     var modules = try loadGitmodules(gpa, io, repo, index);
     errdefer modules.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
@@ -290,7 +292,7 @@ fn configString(arena: Allocator, config: *const config_mod.Config, key: []const
 /// Whether git counts the submodule as active: `submodule.<name>.active`
 /// when it is set, else whether `submodule.active`'s pathspecs match its
 /// path when those are set, else whether `submodule.<name>.url` is.
-pub fn isActive(arena: Allocator, repo: *Repository, name: []const u8, path: []const u8) Error!bool {
+pub fn isActive(arena: Allocator, repo: *Repository, name: []const u8, path: []const u8) Self.Error!bool {
     const active_key = try configKey(arena, name, "active");
     if (repo.configuration().find(active_key) != null) return repo.configuration().getBool(active_key, false);
     const specs = try repo.configuration().all("submodule.active");
@@ -666,7 +668,7 @@ pub const StatusOptions = struct {
 /// A gitlink `.gitmodules` does not name is `error.NoSubmoduleMapping`, as
 /// it is for git. The describe name git prints after the path is not
 /// computed.
-pub fn status(gpa: Allocator, io: Io, repo: *Repository, options: StatusOptions) Error!Statuses {
+pub fn status(gpa: Allocator, io: Io, repo: *Repository, options: StatusOptions) Self.Error!Statuses {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     var out: std.ArrayList(StatusEntry) = .empty;
@@ -781,7 +783,7 @@ pub const StatusProbe = struct {
 
     /// A probe for `repo`, whose index — for the `.gitmodules` blob, when
     /// the working tree has no file — is `index`.
-    pub fn init(gpa: Allocator, io: Io, repo: *Repository, index: *const Index, options: ProbeOptions) Error!StatusProbe {
+    pub fn init(gpa: Allocator, io: Io, repo: *Repository, index: *const Index, options: ProbeOptions) Self.Error!StatusProbe {
         return initAt(gpa, io, repo, index, options, 0);
     }
 
@@ -953,7 +955,7 @@ pub const InitOutcome = struct {
 /// A url already configured is left as it is. A relative one is resolved
 /// against the default remote's url, or against the superproject's own
 /// path when that remote has none, exactly as git resolves it.
-pub fn init(gpa: Allocator, io: Io, repo: *Repository, options: InitOptions) Error!InitOutcome {
+pub fn init(gpa: Allocator, io: Io, repo: *Repository, options: InitOptions) Self.Error!InitOutcome {
     var outcome: InitOutcome = .{};
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -1020,7 +1022,7 @@ pub const SyncOutcome = struct {
 /// superproject's configuration, and once for the submodule's own remote,
 /// where a superproject url that is itself relative needs a `../` for each
 /// component of the submodule's path in front of it.
-pub fn sync(gpa: Allocator, io: Io, repo: *Repository, options: SyncOptions) Error!SyncOutcome {
+pub fn sync(gpa: Allocator, io: Io, repo: *Repository, options: SyncOptions) Self.Error!SyncOutcome {
     var outcome: SyncOutcome = .{};
     try syncIn(gpa, io, repo, options, options.paths, "", 0, &outcome);
     return outcome;
@@ -1112,7 +1114,7 @@ pub const DeinitOutcome = struct {
 /// commit, modified content, untracked files, or a gitlink change staged in
 /// the superproject. A `.git` directory inside the working tree is moved
 /// into `modules/` first, as git does.
-pub fn deinitialize(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions) Error!DeinitOutcome {
+pub fn deinitialize(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions) Self.Error!DeinitOutcome {
     var outcome: DeinitOutcome = .{};
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -1234,7 +1236,7 @@ pub const AbsorbOutcome = struct {
 /// absorbed into in turn, so nested ones land in
 /// `modules/<outer>/modules/<inner>`; a nested `.git` file left pointing at
 /// where its parent's directory used to be is pointed at where it went.
-pub fn absorbGitDirs(gpa: Allocator, io: Io, repo: *Repository, options: AbsorbOptions) Error!AbsorbOutcome {
+pub fn absorbGitDirs(gpa: Allocator, io: Io, repo: *Repository, options: AbsorbOptions) Self.Error!AbsorbOutcome {
     var outcome: AbsorbOutcome = .{};
     try absorbIn(gpa, io, repo, options, options.paths, "", 0, &outcome);
     return outcome;
@@ -1411,7 +1413,7 @@ pub const UpdateOutcome = struct {
 /// `rebase` are refused by name. A `!command` from the repository's own
 /// configuration runs with `programs`, in the submodule, with the commit as
 /// its argument, as git runs it.
-pub fn update(gpa: Allocator, io: Io, repo: *Repository, options: UpdateOptions) Error!UpdateOutcome {
+pub fn update(gpa: Allocator, io: Io, repo: *Repository, options: UpdateOptions) Self.Error!UpdateOutcome {
     var outcome: UpdateOutcome = .{};
     try updateIn(gpa, io, repo, options, options.paths, "", 0, &outcome);
     return outcome;
@@ -1772,7 +1774,7 @@ pub const Walk = struct {
 
     /// The next populated submodule, or `null` when there are no more. The
     /// visit's slices and repository are valid until the next call.
-    pub fn next(w: *Walk) Error!?Visit {
+    pub fn next(w: *Walk) Self.Error!?Visit {
         if (w.loose) |frame| {
             frame.destroy(w.gpa, w.io);
             w.loose = null;
@@ -1842,7 +1844,7 @@ pub const Walk = struct {
 
 /// Begin walking `repo`'s populated submodules. `repo` is the caller's and
 /// must outlive the walk.
-pub fn walk(gpa: Allocator, io: Io, repo: *Repository, options: WalkOptions) Error!Walk {
+pub fn walk(gpa: Allocator, io: Io, repo: *Repository, options: WalkOptions) Self.Error!Walk {
     var w: Walk = .{ .gpa = gpa, .io = io, .options = options };
     errdefer w.deinit();
     const top = try gpa.create(Walk.Frame);

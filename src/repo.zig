@@ -3,6 +3,8 @@
 //! A repository is a local directory. Nothing here talks to a network or
 //! reads a clock. Signing a write needs the caller's `program.Programs`.
 
+const Self = @This();
+
 pub const warning = @import("repo/warning.zig");
 // The modules relic's API puts under this one, as `relic.repo.<name>`.
 pub const hooks = @import("repo/hooks.zig");
@@ -228,7 +230,7 @@ pub const Repository = struct {
     /// `path` may be the working tree, the `.git` directory, or a linked
     /// worktree. A `.git` *file* is followed, which is how a linked worktree
     /// is opened.
-    pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, options: OpenOptions) Error!Repository {
+    pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, options: OpenOptions) Self.Error!Repository {
         diagnostic_mod.reset(options.diagnostic);
         var discovered = try discover(gpa, io, dir, options);
         errdefer discovered.close(io);
@@ -241,7 +243,7 @@ pub const Repository = struct {
     /// `dir` itself when it is a git directory. For a file of the caller's
     /// own kept beside the repository rather than in the working tree. The
     /// handle is the caller's to close.
-    pub fn gitDirOf(gpa: Allocator, io: Io, dir: Io.Dir) Error!Io.Dir {
+    pub fn gitDirOf(gpa: Allocator, io: Io, dir: Io.Dir) Self.Error!Io.Dir {
         var discovered = try discover(gpa, io, dir, .{ .discover = false });
         if (discovered.common_is_separate) discovered.common_dir.close(io);
         if (discovered.work_dir) |work| work.close(io);
@@ -568,7 +570,7 @@ pub const Repository = struct {
     /// that check's error, and the one held before is kept. A changed hash or
     /// ref backend requires reopening (`ObjectFormatChanged`, `RefStorageChanged`).
     /// `diagnostic`, when given, names the refusal and is cleared on every call.
-    pub fn refreshConfig(repo: *Repository, io: Io, diagnostic: ?*Diagnostic) Error!bool {
+    pub fn refreshConfig(repo: *Repository, io: Io, diagnostic: ?*Diagnostic) Self.Error!bool {
         diagnostic_mod.reset(diagnostic);
         // `onbranch:` makes the branch `HEAD` is on part of what was read.
         const branch = try currentBranch(repo.gpa, io, repo.git_dir);
@@ -715,7 +717,7 @@ pub const Repository = struct {
     ///
     /// Writes `HEAD`, `config`, `objects/`, `refs/heads`, `refs/tags` and
     /// `info/`, which is what a repository needs to be one.
-    pub fn init(gpa: Allocator, io: Io, dir: Io.Dir, options: InitOptions) Error!Repository {
+    pub fn init(gpa: Allocator, io: Io, dir: Io.Dir, options: InitOptions) Self.Error!Repository {
         const git_path = if (options.bare) "." else ".git";
         if (!options.bare) {
             dir.createDir(io, ".git", .default_dir) catch |err| switch (err) {
@@ -1017,7 +1019,7 @@ pub const Repository = struct {
 
     /// The `core` settings that take part in line-ending conversion.
     /// Invalid settings and allocation failures are returned to the caller.
-    pub fn coreSettings(repo: *const Repository) Error!attributes.CoreSettings {
+    pub fn coreSettings(repo: *const Repository) Self.Error!attributes.CoreSettings {
         return .{
             .autocrlf = try repo.coreChoice(attributes.CoreSettings.AutoCrlf, "core.autocrlf", .false, true),
             .eol = try repo.coreChoice(attributes.CoreSettings.Eol, "core.eol", .native, false),
@@ -1040,7 +1042,7 @@ pub const Repository = struct {
     /// The rules a working-tree operation needs, with `ignore` and `attrs`
     /// left for the caller to fill in. Invalid settings and resource failures
     /// are returned instead of replacing the configured policy with defaults.
-    pub fn worktreeRules(repo: *const Repository) Error!worktree.Rules {
+    pub fn worktreeRules(repo: *const Repository) Self.Error!worktree.Rules {
         return .{
             .core = try repo.coreSettings(),
             .ignore_case = try repo.configuration().getBool("core.ignorecase", false),
@@ -1055,7 +1057,7 @@ pub const Repository = struct {
     ///
     /// The result is the caller's, and a walk pushes and pops deeper levels
     /// into it as it goes.
-    pub fn loadIgnore(repo: *Repository, io: Io) Error!ignore.Rules {
+    pub fn loadIgnore(repo: *Repository, io: Io) Self.Error!ignore.Rules {
         const case_fold = try repo.configuration().getBool("core.ignorecase", false);
         var rules = try ignore.Rules.init(repo.gpa, case_fold);
         errdefer rules.deinit();
@@ -1114,7 +1116,7 @@ pub const Repository = struct {
     }
 
     /// Load the attributes for the working tree's root.
-    pub fn loadAttrs(repo: *Repository, io: Io) Error!attributes.Attrs {
+    pub fn loadAttrs(repo: *Repository, io: Io) Self.Error!attributes.Attrs {
         const case_fold = try repo.configuration().getBool("core.ignorecase", false);
         var attrs = try attributes.Attrs.init(repo.gpa, case_fold);
         errdefer attrs.deinit();
@@ -1302,27 +1304,27 @@ pub const Repository = struct {
     }
 
     /// The tree `HEAD` points at, or `null` on an unborn branch.
-    pub fn headTree(repo: *Repository, io: Io) Error!?Oid {
+    pub fn headTree(repo: *Repository, io: Io) Self.Error!?Oid {
         const resolved = (try repo.head(io)) orelse return null;
         defer repo.gpa.free(resolved.name);
         return try repo.commitTree(io, resolved.oid);
     }
 
     /// The tree a commit points at.
-    pub fn commitTree(repo: *Repository, io: Io, commit_oid: Oid) Error!Oid {
+    pub fn commitTree(repo: *Repository, io: Io, commit_oid: Oid) Self.Error!Oid {
         return (try repo.commitInfo(io, commit_oid, null)).tree;
     }
 
     /// A commit's tree and parents, as its object records them, the
     /// parents copied with `out` (none without it). Each commit is read
     /// once per repository handle and kept, a bounded number of them.
-    pub fn commitInfo(repo: *Repository, io: Io, commit_oid: Oid, out: ?Allocator) Error!commit_cache.Info {
+    pub fn commitInfo(repo: *Repository, io: Io, commit_oid: Oid, out: ?Allocator) Self.Error!commit_cache.Info {
         return repo._commits.get(repo.gpa, io, &repo.odb, commit_oid, out);
     }
 
     /// Follow a tag object until it names something that is not a tag, and
     /// return that object's name.
-    pub fn peel(repo: *Repository, io: Io, oid: Oid) Error!Oid {
+    pub fn peel(repo: *Repository, io: Io, oid: Oid) Self.Error!Oid {
         var current = oid;
         var depth: u8 = 0;
         while (depth < 16) : (depth += 1) {
@@ -1362,7 +1364,7 @@ pub const Repository = struct {
     /// is `error.SigningRequiresPrograms`, never an unsigned commit.
     /// `diagnostic`, when given, keeps the refused setting or signing stderr
     /// and is cleared on every call.
-    pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest, diagnostic: ?*Diagnostic) WriteError!Oid {
+    pub fn writeCommit(repo: *Repository, io: Io, request: CommitRequest, diagnostic: ?*Diagnostic) Self.WriteError!Oid {
         diagnostic_mod.reset(diagnostic);
         const fields: object.Commit.Fields = .{
             .tree = request.tree,
@@ -1390,14 +1392,14 @@ pub const Repository = struct {
     /// `tag.forceSignAnnotated` makes it signed, which needs `writeTagWith`
     /// and the caller's `Programs`; here it is refused.
     /// `diagnostic` has the same lifetime as it does for `writeCommit`.
-    pub fn writeTag(repo: *Repository, io: Io, fields: object.Tag.Fields, diagnostic: ?*Diagnostic) WriteError!Oid {
+    pub fn writeTag(repo: *Repository, io: Io, fields: object.Tag.Fields, diagnostic: ?*Diagnostic) Self.WriteError!Oid {
         return repo.writeTagWith(io, fields, .{}, diagnostic);
     }
 
     /// Write an annotated tag object, signed as `request` and the
     /// configuration say, with the signature after the message.
     /// `diagnostic` has the same lifetime as it does for `writeCommit`.
-    pub fn writeTagWith(repo: *Repository, io: Io, fields: object.Tag.Fields, request: signing.Request, diagnostic: ?*Diagnostic) WriteError!Oid {
+    pub fn writeTagWith(repo: *Repository, io: Io, fields: object.Tag.Fields, request: signing.Request, diagnostic: ?*Diagnostic) Self.WriteError!Oid {
         diagnostic_mod.reset(diagnostic);
         var signer = try repo.signerFor(request, .tag, diagnostic);
         defer if (signer) |*s| s.deinit();

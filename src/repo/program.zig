@@ -19,6 +19,8 @@
 //! hook is a file and runs directly. Running a command line needs `sh`,
 //! which is every Unix's and which git for Windows installs.
 
+const Self = @This();
+
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -132,7 +134,7 @@ pub fn run(
     invocation: Invocation,
     input: []const u8,
     limits: Limits,
-) Error!Outcome {
+) Self.Error!Outcome {
     var started = try start(programs, gpa, io, invocation);
     defer started.deinit(io);
     // A program that ends without reading all of its input is no error, as
@@ -213,7 +215,7 @@ pub const Running = struct {
 
 /// Start a program with piped standard input, and its standard output a
 /// pipe unless `Invocation.stdout` sends it elsewhere.
-pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation) Error!Running {
+pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation) Self.Error!Running {
     var environ = try programs.environ.clone(gpa);
     errdefer environ.deinit();
     // conduit's rule for an override: a later one wins, and a removal is

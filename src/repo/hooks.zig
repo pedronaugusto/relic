@@ -27,6 +27,8 @@
 //! commit hooks, `GIT_EDITOR=:` when no editor runs — is set here the same
 //! way.
 
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -295,7 +297,7 @@ pub const Runner = struct {
         place: Place,
         programs: program.Programs,
         options: Options,
-    ) InitError!Runner {
+    ) Self.InitError!Runner {
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();
@@ -356,7 +358,7 @@ pub const Runner = struct {
     /// then the file. Each one runs whatever the one before it did, as in
     /// git; the result says whether any failed, and the typed calls below
     /// decide what a failure means.
-    pub fn run(runner: *Runner, io: Io, event: []const u8, request: Request) Error!Ran {
+    pub fn run(runner: *Runner, io: Io, event: []const u8, request: Request) Self.Error!Ran {
         if (misnamed(runner.configured)) |name| {
             runner.refused = name;
             return error.HookNameIsAnEvent;
@@ -505,7 +507,7 @@ pub const Runner = struct {
 
     /// Run `event`'s hooks as ones that can stop the operation: a failure is
     /// `error.HookRejected`, with `failure` saying which and how.
-    pub fn block(runner: *Runner, io: Io, event: []const u8, request: Request) Error!Ran {
+    pub fn block(runner: *Runner, io: Io, event: []const u8, request: Request) Self.Error!Ran {
         const ran = try runner.run(io, event, request);
         if (ran.failure) |f| {
             runner.failure = f;
@@ -555,7 +557,7 @@ pub const Runner = struct {
 
     /// `pre-commit`, before anything is written. It may change the index,
     /// which is why a commit reads the index again after it.
-    pub fn preCommit(runner: *Runner, io: Io, env: CommitEnv) Error!Ran {
+    pub fn preCommit(runner: *Runner, io: Io, env: CommitEnv) Self.Error!Ran {
         var scratch: [3][64]u8 = undefined;
         var vars: [5]program.Var = undefined;
         return runner.block(io, "pre-commit", runner.commitRequest(&scratch, &vars, env, &.{}));
@@ -583,7 +585,7 @@ pub const Runner = struct {
         message_path: []const u8,
         source: ?MessageSource,
         commit: ?[]const u8,
-    ) Error!Ran {
+    ) Self.Error!Ran {
         var scratch: [3][64]u8 = undefined;
         var vars: [5]program.Var = undefined;
         var args_buf: [3][]const u8 = undefined;
@@ -602,14 +604,14 @@ pub const Runner = struct {
     }
 
     /// `commit-msg <file>`, which may rewrite the message file or refuse it.
-    pub fn commitMsg(runner: *Runner, io: Io, env: CommitEnv, message_path: []const u8) Error!Ran {
+    pub fn commitMsg(runner: *Runner, io: Io, env: CommitEnv, message_path: []const u8) Self.Error!Ran {
         var scratch: [3][64]u8 = undefined;
         var vars: [5]program.Var = undefined;
         return runner.block(io, "commit-msg", runner.commitRequest(&scratch, &vars, env, &.{message_path}));
     }
 
     /// `post-commit`, after the branch has moved. It cannot undo anything.
-    pub fn postCommit(runner: *Runner, io: Io, env: CommitEnv) Error!Ran {
+    pub fn postCommit(runner: *Runner, io: Io, env: CommitEnv) Self.Error!Ran {
         var scratch: [3][64]u8 = undefined;
         var vars: [5]program.Var = undefined;
         return runner.run(io, "post-commit", runner.commitRequest(&scratch, &vars, env, &.{}));
@@ -620,7 +622,7 @@ pub const Runner = struct {
 
     /// `post-checkout <old> <new> <flag>`. It cannot undo the checkout; git
     /// makes its status the command's own, which `Ran.failure` carries.
-    pub fn postCheckout(runner: *Runner, io: Io, old: Oid, new: Oid, kind: CheckoutKind) Error!Ran {
+    pub fn postCheckout(runner: *Runner, io: Io, old: Oid, new: Oid, kind: CheckoutKind) Self.Error!Ran {
         var old_hex: [hash.max_hex_len]u8 = undefined;
         var new_hex: [hash.max_hex_len]u8 = undefined;
         return runner.run(io, "post-checkout", .{ .args = &.{
@@ -631,12 +633,12 @@ pub const Runner = struct {
     }
 
     /// `post-merge <squash>`, after a merge that succeeded.
-    pub fn postMerge(runner: *Runner, io: Io, squash: bool) Error!Ran {
+    pub fn postMerge(runner: *Runner, io: Io, squash: bool) Self.Error!Ran {
         return runner.run(io, "post-merge", .{ .args = &.{if (squash) "1" else "0"} });
     }
 
     /// `pre-rebase <upstream> [<branch>]`, which may refuse the rebase.
-    pub fn preRebase(runner: *Runner, io: Io, upstream: []const u8, branch: ?[]const u8) Error!Ran {
+    pub fn preRebase(runner: *Runner, io: Io, upstream: []const u8, branch: ?[]const u8) Self.Error!Ran {
         if (branch) |b| return runner.block(io, "pre-rebase", .{ .args = &.{ upstream, b } });
         return runner.block(io, "pre-rebase", .{ .args = &.{upstream} });
     }
@@ -662,7 +664,7 @@ pub const Runner = struct {
         remote_name: []const u8,
         url: []const u8,
         updates: []const PushUpdate,
-    ) Error!Ran {
+    ) Self.Error!Ran {
         var input: std.Io.Writer.Allocating = .init(runner.gpa);
         defer input.deinit();
         var a: [hash.max_hex_len]u8 = undefined;
@@ -714,7 +716,7 @@ pub const Runner = struct {
         kind: hash.Kind,
         state: TransactionState,
         updates: []const RefUpdate,
-    ) Error!Ran {
+    ) Self.Error!Ran {
         var input: std.Io.Writer.Allocating = .init(runner.gpa);
         defer input.deinit();
         for (updates) |u| {
@@ -742,13 +744,13 @@ pub const Runner = struct {
 
     /// `post-rewrite <command>`, after `commit --amend` or a rebase has
     /// rewritten commits. It cannot undo anything.
-    pub fn postRewrite(runner: *Runner, io: Io, command: RewriteCommand, rewrites: []const Rewrite) Error!Ran {
+    pub fn postRewrite(runner: *Runner, io: Io, command: RewriteCommand, rewrites: []const Rewrite) Self.Error!Ran {
         return runner.postRewriteBy(io, command, rewrites, null);
     }
 
     /// `postRewrite` from a `git commit --amend`, which exports its author
     /// as the commit hooks see it.
-    pub fn postRewriteBy(runner: *Runner, io: Io, command: RewriteCommand, rewrites: []const Rewrite, author: ?object.Signature) Error!Ran {
+    pub fn postRewriteBy(runner: *Runner, io: Io, command: RewriteCommand, rewrites: []const Rewrite, author: ?object.Signature) Self.Error!Ran {
         var date_buf: [64]u8 = undefined;
         var vars: [3]program.Var = undefined;
         var n: usize = 0;

@@ -19,6 +19,8 @@
 //! against the superproject's own, including the colon a `host:path` url
 //! turns into when its last directory is taken away.
 
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -152,7 +154,7 @@ pub const Gitmodules = struct {
     /// Read `text` the way git reads the working tree's `.gitmodules`: the
     /// last value of a setting wins, and a refused value leaves the one
     /// before it in place.
-    pub fn parse(gpa: Allocator, text: []const u8) ParseError!Gitmodules {
+    pub fn parse(gpa: Allocator, text: []const u8) Self.ParseError!Gitmodules {
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();
@@ -436,7 +438,7 @@ pub const ResolveError = error{
 /// relative stays relative, and `up_path` — `../` for each component of the
 /// submodule's own path, when the url is for the submodule's own remote —
 /// goes in front of it.
-pub fn resolveUrl(gpa: Allocator, base: []const u8, url: []const u8, up_path: ?[]const u8) ResolveError![]u8 {
+pub fn resolveUrl(gpa: Allocator, base: []const u8, url: []const u8, up_path: ?[]const u8) Self.ResolveError![]u8 {
     if (!isLocalNotSsh(url) or isAbsolutePath(url)) return gpa.dupe(u8, url);
     std.debug.assert(base.len != 0);
 

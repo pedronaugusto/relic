@@ -20,6 +20,8 @@
 //! leaves its values for the programs it starts — are values above every
 //! file, in that order.
 
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -90,7 +92,7 @@ pub const Locations = struct {
 /// Where git would read configuration from for a person whose environment
 /// is `environ`. With `programs`, their `git` is asked where its system
 /// file is; without, only the environment can say.
-pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?program.Programs) Error!Locations {
+pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?program.Programs) Self.Error!Locations {
     var l: Locations = .{ .arena = .init(gpa) };
     errdefer l.arena.deinit();
     const arena = l.arena.allocator();
@@ -165,7 +167,7 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
 /// special; `'\''` and `'\!'` put a quote or a `!` between two quoted
 /// parts. Anything else is `MalformedConfigEnvironment`, as git says
 /// "bogus format". The result is `arena`'s.
-pub fn parseParameters(arena: Allocator, text: []const u8) Error![]const config_mod.Sources.Pair {
+pub fn parseParameters(arena: Allocator, text: []const u8) Self.Error![]const config_mod.Sources.Pair {
     var out: std.ArrayList(config_mod.Sources.Pair) = .empty;
     var cur: ?usize = 0;
     while (cur) |at| {

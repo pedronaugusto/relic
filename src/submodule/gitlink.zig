@@ -10,6 +10,8 @@
 //! `HEAD` does not resolve, because git cannot compare a commit it cannot
 //! name.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -61,7 +63,7 @@ pub const GitDir = struct {
 /// A `.git` file's `gitdir:` line is read relative to the directory the file
 /// is in, which is how git writes it for a submodule, or as an absolute path,
 /// which is how it writes it for a linked worktree.
-pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!?GitDir {
+pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?GitDir {
     var work = (if (path.len == 0) wt.openDir(io, ".", .{}) else wt.openDir(io, path, .{})) catch return null;
     defer work.close(io);
 
@@ -116,7 +118,7 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!?GitDir 
 /// `<path>/.git` is a git directory, or a `.git` file naming one. This is
 /// git's `is_nonbare_repository_dir`, which is how its walk of a working
 /// tree tells a repository inside it from a directory to descend into.
-pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!bool {
+pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!bool {
     // Almost every directory has no `.git` at all, and one access says so
     // without opening anything.
     var buf: [4096]u8 = undefined;
@@ -130,7 +132,7 @@ pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!
 /// The commit `HEAD` resolves to in the repository whose working tree is
 /// `path`, or `null` when there is no repository there or its `HEAD` does not
 /// name a commit.
-pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8, kind: hash.Kind) Error!?Oid {
+pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8, kind: hash.Kind) Self.Error!?Oid {
     var found = (try open(gpa, io, wt, path)) orelse return null;
     defer found.close(io);
     var store = try found.refStore(gpa, io, kind);

@@ -1,5 +1,8 @@
 //! Barriers for bytes and names. Ordinary writes choose their own policy;
 //! durable checkout and selected object closures use this stricter one.
+
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -24,13 +27,13 @@ pub fn syncFile(io: Io, file: Io.File) Io.File.SyncError!void {
     }
 }
 
-pub fn syncPath(io: Io, dir: Io.Dir, path: []const u8) Error!void {
+pub fn syncPath(io: Io, dir: Io.Dir, path: []const u8) Self.Error!void {
     const file = try dir.openFile(io, path, .{ .mode = if (builtin.os.tag == .windows) .read_write else .read_only });
     defer file.close(io);
     try syncFile(io, file);
 }
 
-pub fn syncDirectory(io: Io, dir: Io.Dir, path: []const u8) Error!void {
+pub fn syncDirectory(io: Io, dir: Io.Dir, path: []const u8) Self.Error!void {
     if (builtin.os.tag == .windows) {
         const file = try openDirectoryWindows(dir, path);
         defer file.close(io);

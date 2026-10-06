@@ -8,6 +8,8 @@
 //! A lock another process holds is reported, never broken — with the holder's
 //! process id where it can be found, which is what git itself now writes.
 
+const Self = @This();
+
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -258,7 +260,7 @@ pub const StatError = Io.File.OpenError || Io.File.StatError;
 /// One call where the platform reports all of it, two where it does not. A
 /// walk over a working tree asks this once per entry, so the difference is a
 /// syscall per file.
-pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) StatError!?Entry {
+pub fn statAt(io: Io, dir: Io.Dir, sub_path: []const u8) Self.StatError!?Entry {
     switch (platstat.full(dir, sub_path)) {
         .absent => return null,
         .found => |f| return .{
@@ -489,7 +491,7 @@ pub const LockFile = struct {
 
     /// Flush, make durable, close and rename over the target. After this the
     /// lock is gone and the new bytes are the file.
-    pub fn commit(lock: *LockFile, io: Io) CommitError!void {
+    pub fn commit(lock: *LockFile, io: Io) Self.CommitError!void {
         std.debug.assert(!lock.finished);
         try lock.file_writer.interface.flush();
         // Contents shorter than the `pid` line under them leave its tail.
@@ -1043,7 +1045,7 @@ pub fn atomicWrite(
     bytes: []const u8,
     prefix: []const u8,
     sync: Sync,
-) AtomicWriteError!void {
+) Self.AtomicWriteError!void {
     var name_buf: [128]u8 = undefined;
     const temp = tempName(io, &name_buf, prefix);
     var file = try dir.createFile(io, temp, .{ .exclusive = true });
@@ -1099,7 +1101,7 @@ pub fn readFileSized(
     sub_path: []const u8,
     size: u64,
     max_bytes: usize,
-) ReadSizedError![]u8 {
+) Self.ReadSizedError![]u8 {
     if (size > max_bytes) return error.StreamTooLong;
     const file = try dir.openFile(io, sub_path, .{});
     defer file.close(io);

@@ -8,6 +8,8 @@
 //! `includeIf` is not optional. A caller that misses one reads the wrong
 //! `core.autocrlf` and therefore writes a different blob than git would.
 
+const Self = @This();
+
 pub const userconfig = @import("config/userconfig.zig");
 // The modules relic's API puts under this one, as `relic.config.<name>`.
 
@@ -331,7 +333,7 @@ pub const Config = struct {
     /// Read every source that is there, in git's order: system, then the
     /// XDG file and the global one, then local, then worktree, then the
     /// caller's own values.
-    pub fn open(gpa: Allocator, io: Io, sources: Sources, context: Context) ParseError!Config {
+    pub fn open(gpa: Allocator, io: Io, sources: Sources, context: Context) Self.ParseError!Config {
         var config: Config = .{ .gpa = gpa };
         errdefer config.deinit();
         try config.keepContext(context);
@@ -370,7 +372,7 @@ pub const Config = struct {
 
     /// Read one file as the whole configuration. What a tool inspecting a
     /// single file wants.
-    pub fn openFile(gpa: Allocator, io: Io, path: Sources.Path, level: Level, context: Context) ParseError!Config {
+    pub fn openFile(gpa: Allocator, io: Io, path: Sources.Path, level: Level, context: Context) Self.ParseError!Config {
         var config: Config = .{ .gpa = gpa };
         errdefer config.deinit();
         try config.keepContext(context);
@@ -379,7 +381,7 @@ pub const Config = struct {
     }
 
     /// Parse configuration text with no file behind it.
-    pub fn parseText(gpa: Allocator, text: []const u8, level: Level) ParseError!Config {
+    pub fn parseText(gpa: Allocator, text: []const u8, level: Level) Self.ParseError!Config {
         var config: Config = .{ .gpa = gpa };
         errdefer config.deinit();
         const owned_text = try gpa.dupe(u8, text);
@@ -721,7 +723,7 @@ pub const Config = struct {
     /// configuration sets, outside the files an `includeIf` brought in, as
     /// a path glob; `open` decides it against the URLs of every file it
     /// reads, as git does, wherever in the read the condition stands.
-    pub fn conditionHolds(config: *const Config, condition: []const u8) ParseError!bool {
+    pub fn conditionHolds(config: *const Config, condition: []const u8) Self.ParseError!bool {
         const wildmatch = @import("worktree/wildmatch.zig");
         if (std.mem.startsWith(u8, condition, "gitdir:") or std.mem.startsWith(u8, condition, "gitdir/i:")) {
             const case_fold = std.mem.startsWith(u8, condition, "gitdir/i:");
@@ -897,7 +899,7 @@ pub const Config = struct {
     ///
     /// git's spellings: `true`, `yes`, `on`, `1` and a bare name are true;
     /// `false`, `no`, `off`, `0` and the empty string are false.
-    pub fn getBool(config: *const Config, full_name: []const u8, fallback: bool) ValueError!bool {
+    pub fn getBool(config: *const Config, full_name: []const u8, fallback: bool) Self.ValueError!bool {
         const entry = config.find(full_name) orelse return fallback;
         // A name written with no `=` at all is true; a name written with an
         // `=` and nothing after it is false. git makes that distinction and
@@ -915,7 +917,7 @@ pub const Config = struct {
     ///
     /// A `k`, `m` or `g` suffix multiplies by 1024, 1024² or 1024³, which is
     /// what git accepts for a size.
-    pub fn getInt(config: *const Config, full_name: []const u8, fallback: i64) ValueError!i64 {
+    pub fn getInt(config: *const Config, full_name: []const u8, fallback: i64) Self.ValueError!i64 {
         const raw = config.get(full_name) orelse return fallback;
         const decoded = decodeValue(config.gpa, raw) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1300,7 +1302,7 @@ pub fn splitFullName(full: []const u8) ?FullName {
 }
 
 /// git's boolean spellings.
-pub fn parseBool(raw: []const u8) ValueError!bool {
+pub fn parseBool(raw: []const u8) Self.ValueError!bool {
     if (raw.len == 0) return false;
     const truthy = [_][]const u8{ "true", "yes", "on", "1" };
     const falsy = [_][]const u8{ "false", "no", "off", "0" };
@@ -1314,7 +1316,7 @@ pub fn parseBool(raw: []const u8) ValueError!bool {
 }
 
 /// git's integer spellings, including the `k`, `m` and `g` size suffixes.
-pub fn parseInt(raw: []const u8) ValueError!i64 {
+pub fn parseInt(raw: []const u8) Self.ValueError!i64 {
     var text = std.mem.trim(u8, raw, " \t");
     if (text.len == 0) return error.NotAnInteger;
     var multiplier: i64 = 1;
