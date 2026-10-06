@@ -72,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
             if (matches != 1) {
-                std.debug.print("Windows family: {s} has {d} owners\n", .{ qualified, matches });
+                try report("Windows family: {s} has {d} owners\n", io, .{ qualified, matches });
                 return error.InvalidFamilyCoverage;
             }
             count += 1;
@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
     for (core.families) |family| for (family.filters) |filter| {
         const module = filter[0 .. filter.len - ".test".len];
         if (!modules.contains(module)) {
-            std.debug.print("Windows family: stale module {s}\n", .{module});
+            try report("Windows family: stale module {s}\n", io, .{module});
             return error.StaleCoreModule;
         }
         if ((try filters.getOrPut(module)).found_existing) return error.DuplicateCoreModule;

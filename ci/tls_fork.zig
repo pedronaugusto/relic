@@ -2,6 +2,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const options = @import("build_options");
+
+fn report(comptime format: []const u8, io: std.Io, args: anytype) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stderr().writer(io, &buffer);
+    try writer.interface.print(format, args);
+    try writer.interface.flush();
+}
+
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
@@ -18,5 +26,5 @@ pub fn main(init: std.process.Init) !void {
     const start = std.mem.indexOf(u8, result.stdout, "\n@@ ") orelse return error.NoForkChanges;
     const patch = try std.fmt.allocPrint(a, "--- std/crypto/tls/Client.zig zig-{s} sha256:{s}\n+++ src/tls/Client.zig{s}", .{ builtin.zig_version_string, std.fmt.bytesToHex(digest, .lower), result.stdout[start..] });
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = "src/transport/tls/Client.zig.diff", .data = patch });
-    std.debug.print("src/tls/Client.zig.diff: recorded against Zig {s}, sha256 {s}\n", .{ builtin.zig_version_string, std.fmt.bytesToHex(digest, .lower) });
+    try report("src/tls/Client.zig.diff: recorded against Zig {s}, sha256 {s}\n", init.io, .{ builtin.zig_version_string, std.fmt.bytesToHex(digest, .lower) });
 }

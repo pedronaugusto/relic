@@ -10,7 +10,7 @@ const Context = struct {
         for (0..3) |attempt| {
             c.execute(argv) catch |err| {
                 if (attempt == 2) return err;
-                std.debug.print("CI tool command {s} failed; retry {d}/3\n", .{ argv[0], attempt + 2 });
+                try report("CI tool command {s} failed; retry {d}/3\n", c.io, .{ argv[0], attempt + 2 });
                 try std.Io.sleep(c.io, .fromSeconds(@as(i64, 5) << @intCast(attempt)), .awake);
                 continue;
             };
@@ -135,7 +135,14 @@ fn selectLfs(c: Context, root: []const u8, git: []const u8) !void {
     const selected: Context = .{ .a = c.a, .io = c.io, .env = &env };
     const version = try selected.capture(&.{ git, "lfs", "version" });
     if (!std.mem.startsWith(u8, version, "git-lfs/" ++ pins.lfs_version ++ " ")) return error.WrongLfsVersion;
-    std.debug.print("{s}", .{version});
+    try report("{s}", c.io, .{version});
+}
+
+fn report(comptime format: []const u8, io: std.Io, args: anytype) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stderr().writer(io, &buffer);
+    try writer.interface.print(format, args);
+    try writer.interface.flush();
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -164,5 +171,5 @@ pub fn main(init: std.process.Init) !void {
     if (!master) try selectLfs(c, root, git);
     const version = try c.capture(&.{ git, "--version" });
     if (!pins.recent(version)) return error.GitTooOld;
-    std.debug.print("{s}", .{version});
+    try report("{s}", c.io, .{version});
 }

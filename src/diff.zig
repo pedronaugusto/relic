@@ -504,8 +504,12 @@ pub fn isBinary(bytes: []const u8) bool {
     return attributes.isBinaryForDiff(bytes);
 }
 
-fn gitlinkText(buf: []u8, oid: Oid) []const u8 {
+/// The longest line `gitlinkText` writes: the words, the widest name, the newline.
+const gitlink_text_max = "Subproject commit \n".len + hash.max_hex_len;
+
+fn gitlinkText(buf: *[gitlink_text_max]u8, oid: Oid) []const u8 {
     var hex: [hash.max_hex_len]u8 = undefined;
+    // unreachable: the buffer holds the words and the widest name
     return std.fmt.bufPrint(buf, "Subproject commit {s}\n", .{oid.hex(&hex)}) catch unreachable;
 }
 
@@ -537,7 +541,7 @@ pub fn numstat(
     for (changes, 0..) |change, i| {
         // A gitlink has no content in this repository; git counts it as one
         // line changed either way, which is what a commit name is.
-        var old_gitlink: [96]u8 = undefined;
+        var old_gitlink: [gitlink_text_max]u8 = undefined;
         var old_read: ?[]u8 = null;
         defer if (old_read) |bytes| db.allocator().free(bytes);
         const old_bytes: []const u8 = if (change.old) |entry| blk: {
@@ -545,7 +549,7 @@ pub fn numstat(
             old_read = (try db.read(io, entry.oid)).bytes;
             break :blk old_read.?;
         } else "";
-        var new_gitlink: [96]u8 = undefined;
+        var new_gitlink: [gitlink_text_max]u8 = undefined;
         var new_read: ?[]u8 = null;
         defer if (new_read) |bytes| db.allocator().free(bytes);
         const new_bytes: []const u8 = if (change.new) |entry| blk: {
@@ -623,7 +627,7 @@ pub fn unified(
         try w.writeByte('\n');
     }
 
-    var old_gitlink: [96]u8 = undefined;
+    var old_gitlink: [gitlink_text_max]u8 = undefined;
     // an object's bytes are the object database's allocator's, whoever
     // asked for them
     var old_read: ?[]u8 = null;
@@ -633,7 +637,7 @@ pub fn unified(
         old_read = (try db.read(io, entry.oid)).bytes;
         break :blk old_read.?;
     } else "";
-    var new_gitlink: [96]u8 = undefined;
+    var new_gitlink: [gitlink_text_max]u8 = undefined;
     var new_read: ?[]u8 = null;
     defer if (new_read) |bytes| db.allocator().free(bytes);
     const new_bytes: []const u8 = if (change.new) |entry| blk: {

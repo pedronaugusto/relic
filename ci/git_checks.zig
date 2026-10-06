@@ -28,13 +28,20 @@ fn check(a: std.mem.Allocator, text: []const u8) !void {
     if (builds != 2) return error.ImageGitBuildMissing;
 }
 
+fn report(comptime format: []const u8, io: std.Io, args: anytype) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stderr().writer(io, &buffer);
+    try writer.interface.print(format, args);
+    try writer.interface.flush();
+}
+
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const text = try std.Io.Dir.cwd().readFileAlloc(init.io, "ci/linux.Dockerfile", a, .limited(1024 * 1024));
     try check(a, text);
-    std.debug.print("Git {s}: image and Zig installer share release, digest and make flags\n", .{git_version});
+    try report("Git {s}: image and Zig installer share release, digest and make flags\n", init.io, .{git_version});
 }
 
 test "Git fixtures require 2.47 including Windows version suffixes" {

@@ -22,6 +22,13 @@ fn keep(_: void, path: []const u8, kind: std.Io.File.Kind) bool {
     return std.mem.startsWith(u8, path, "src/") and std.mem.endsWith(u8, path, ".zig");
 }
 
+fn report(comptime format: []const u8, io: std.Io, args: anytype) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stderr().writer(io, &buffer);
+    try writer.interface.print(format, args);
+    try writer.interface.flush();
+}
+
 pub fn main(init: std.process.Init) !void {
     var arena: std.heap.ArenaAllocator = .init(init.gpa);
     defer arena.deinit();
@@ -37,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
         .named_modules = declared.modules,
         .tokens = declared.owned,
     }, &diagnostic) catch |err| {
-        if (diagnostic.failure) |failure| std.debug.print("imports: {s}: {s}: {s}\n", .{ failure.path orelse "<scan>", @tagName(failure.phase), @errorName(failure.cause) });
+        if (diagnostic.failure) |failure| try report("imports: {s}: {s}: {s}\n", init.io, .{ failure.path orelse "<scan>", @tagName(failure.phase), @errorName(failure.cause) });
         return err;
     };
     defer graph.deinit();
@@ -72,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer a.free(implementation_findings);
     for (implementation_findings) |finding| {
-        if (finding.edge) |edge| std.debug.print("imports: {s}: {s} -> {s} ({s})\n", .{ finding.rule, edge.from, edge.to, @tagName(finding.reason) });
+        if (finding.edge) |edge| try report("imports: {s}: {s} -> {s} ({s})\n", init.io, .{ finding.rule, edge.from, edge.to, @tagName(finding.reason) });
     }
     const findings = try graph.check(a, rules);
     defer a.free(findings);
@@ -82,23 +89,23 @@ pub fn main(init: std.process.Init) !void {
             owners += 1;
         };
         if (owners > 1) {
-            std.debug.print("imports: {s}: source belongs to multiple layers\n", .{path});
+            try report("imports: {s}: source belongs to multiple layers\n", init.io, .{path});
             return error.AmbiguousSource;
         }
         if (owners == 0) {
-            std.debug.print("imports: {s}: source has no named layer\n", .{path});
+            try report("imports: {s}: source has no named layer\n", init.io, .{path});
             return error.UnnamedSource;
         }
     }
-    for (graph.unread()) |path| std.debug.print("imports: {s}: unread\n", .{path});
+    for (graph.unread()) |path| try report("imports: {s}: unread\n", init.io, .{path});
     for (findings) |finding| {
         if (finding.edge) |edge| {
-            std.debug.print("imports: {s}: {s} -> {s} ({s})\n", .{ finding.rule, edge.from, edge.to, @tagName(finding.reason) });
+            try report("imports: {s}: {s} -> {s} ({s})\n", init.io, .{ finding.rule, edge.from, edge.to, @tagName(finding.reason) });
         } else if (finding.reference) |ref| {
-            std.debug.print("imports: {s}: {s}: @import(\"{s}\")\n", .{ finding.rule, ref.from, ref.name });
+            try report("imports: {s}: {s}: @import(\"{s}\")\n", init.io, .{ finding.rule, ref.from, ref.name });
         } else if (finding.token) |token| {
-            std.debug.print("imports: {s}: {s}:{d}:{d}: {t} \"{f}\"\n", .{ finding.rule, token.path, token.line, token.column, token.kind, std.zig.fmtString(token.text) });
-        } else if (finding.path) |path| std.debug.print("imports: {s}: {s}\n", .{ finding.rule, path });
+            try report("imports: {s}: {s}:{d}:{d}: {t} \"{f}\"\n", init.io, .{ finding.rule, token.path, token.line, token.column, token.kind, std.zig.fmtString(token.text) });
+        } else if (finding.path) |path| try report("imports: {s}: {s}\n", init.io, .{ finding.rule, path });
     }
     if (graph.unread().len != 0 or findings.len != 0 or implementation_findings.len != 0) return error.ImportBoundary;
 }
