@@ -157,6 +157,7 @@ pub const families = [_]Family{
         "transport.httpauth.test",
         "transport.httpclient.test",
         "transport.httpsettings.test",
+        "transport.policy.test",
         "transport.hidden.test",
         "transport.promisors.test",
         "transport.tls.key.test",

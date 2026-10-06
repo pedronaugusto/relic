@@ -104,6 +104,9 @@ pub const Transport = struct {
             .auth_failure = &t.auth_failure,
             .progress = o.progress,
             .check_objects = o.check_objects,
+            // A `.gitmodules` names this URL, not the person, as git's
+            // `GIT_PROTOCOL_FROM_USER=0` says for a submodule.
+            .from_user = false,
         }) catch |err| return t.failed(err);
         repo.deinit(io);
         t.clones += 1;
@@ -130,6 +133,7 @@ pub const Transport = struct {
             .auth_failure = &t.auth_failure,
             .progress = o.progress,
             .check_objects = o.check_objects,
+            .from_user = false,
         });
         outcome.deinit();
         t.fetches += 1;
@@ -281,4 +285,40 @@ test "submodules cloned and fetched from a remote are what git submodule update 
     }
     try testing.expect(t.fetches >= 3);
     try expectSameSubmodules(gpa, io, by_git, by_relic);
+}
+
+test "a submodule URL naming a repository on this machine is refused unless protocol.file.allow says otherwise, as git refuses it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var source = try testremote.historyRepo(gpa, io, 1);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    var scratch = testing.tmpDir(.{ .iterate = true });
+    defer scratch.cleanup();
+
+    // git, told the URL is not the person's, as `git submodule` tells it.
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("GIT_PROTOCOL_FROM_USER", "0");
+    try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, scratch.dir, &env, &.{ "-c", "protocol.file.allow=user", "clone", "-q", source_path, "by-git" }, "", false));
+
+    try scratch.dir.createDirPath(io, "refused");
+    var refused_dir = try scratch.dir.openDir(io, "refused", .{ .iterate = true });
+    defer refused_dir.close(io);
+    var refused: Transport = .init(.{ .who = test_who });
+    defer refused.deinit();
+    try testing.expectError(error.TransportFailed, Transport.cloneFn(gpa, io, &refused, source_path, refused_dir));
+    try testing.expectEqual(@as(?anyerror, error.TransportNotAllowed), refused.failure);
+    try testing.expectEqual(@as(u32, 0), refused.clones);
+
+    var config = try config_mod.Config.parseText(gpa, "[protocol \"file\"]\n\tallow = always\n", .global);
+    defer config.deinit();
+    try scratch.dir.createDirPath(io, "allowed");
+    var allowed_dir = try scratch.dir.openDir(io, "allowed", .{ .iterate = true });
+    defer allowed_dir.close(io);
+    var allowed: Transport = .init(.{ .who = test_who, .config = &config });
+    defer allowed.deinit();
+    try Transport.cloneFn(gpa, io, &allowed, source_path, allowed_dir);
+    try testing.expectEqual(@as(u32, 1), allowed.clones);
 }

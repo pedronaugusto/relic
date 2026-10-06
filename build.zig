@@ -1,5 +1,4 @@
 const std = @import("std");
-const preflight = @import("preflight");
 const test_cases = @import("ci/test_cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -322,7 +321,11 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&example_tests.step);
     }
     test_step.dependOn(examples_step);
-    preflight.addCi(b, .{ .tests = test_step });
+    // The CI gate is the repository's own, never a consumer's: a project
+    // that depends on relic neither fetches preflight nor imports it.
+    if (b.pkg_hash.len == 0) {
+        if (b.lazyImport(@This(), "preflight")) |preflight| preflight.addCi(b, .{ .tests = test_step });
+    }
     namespaceImportChecker(b);
     _ = ciCheck(b, "check-cases", "ci/cases_check.zig");
     _ = ciCheck(b, "check-git-flags", "ci/git_checks.zig");

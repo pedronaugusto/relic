@@ -113,6 +113,8 @@ pub const Fault = struct {
     /// For a download: send the status and the whole length, then only
     /// half the bytes, and close — a connection that breaks off.
     cut: bool = false,
+    /// A `Location` to answer with, for a redirect.
+    location: ?[]const u8 = null,
 
     pub const Route = enum { batch, download, upload, verify, locks };
 };
@@ -138,6 +140,9 @@ pub const Server = struct {
     /// headers a test compares.
     object_log: std.ArrayList(u8) = .empty,
     zstd_window_log: ?u6 = null,
+    /// The path a lock's or an unlock's answer names, in place of the
+    /// lock's own: a server that answers with another file.
+    lock_answer_path: ?[]const u8 = null,
     /// How many download actions still to hand out already expiring, and
     /// how their expiry is written.
     expiring: u32 = 0,
@@ -198,6 +203,14 @@ pub const Server = struct {
         errdefer if (s.git_root) |r| gpa.free(r);
         s.task = io.concurrent(serve, .{s}) catch return error.SkipZigTest;
         return s;
+    }
+
+    /// Answer every lock and unlock as the lock on `path`, or, `null`, as
+    /// the lock it is. `path` must outlive the server's use of it.
+    pub fn answerLocksWith(s: *Server, path: ?[]const u8) void {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        s.lock_answer_path = path;
     }
 
     /// Stop serving and release everything.
@@ -670,7 +683,8 @@ pub const Server = struct {
                 try w.writeAll(",\"message\":\"already created lock\"}");
                 return request.respond(out.written(), .{ .status = .conflict, .keep_alive = false, .extra_headers = json_header });
             }
-            const lock = try s.newLockLocked(want.path, user);
+            var lock = try s.newLockLocked(want.path, user);
+            if (s.lock_answer_path) |p| lock.path = p;
             try w.writeAll("{\"lock\":");
             try writeLock(w, lock);
             try w.writeByte('}');
@@ -713,8 +727,10 @@ pub const Server = struct {
                     try w.writeAll("{\"message\":\"lock is owned by someone else\"}");
                     return request.respond(out.written(), .{ .status = .forbidden, .keep_alive = false, .extra_headers = json_header });
                 }
+                var answered = l;
+                if (s.lock_answer_path) |p| answered.path = p;
                 try w.writeAll("{\"lock\":");
-                try writeLock(w, l);
+                try writeLock(w, answered);
                 try w.writeByte('}');
                 const removed = s.locks.orderedRemove(i);
                 defer freeLock(s.gpa, removed);
@@ -839,12 +855,16 @@ const RequestHeaders = struct {
 };
 
 fn respondFault(request: *http.Server.Request, f: Fault) !void {
-    var headers: [2]http.Header = undefined;
+    var headers: [3]http.Header = undefined;
     var n: usize = 0;
     headers[n] = .{ .name = "Content-Type", .value = "application/vnd.git-lfs+json" };
     n += 1;
     if (f.retry_after) |r| {
         headers[n] = .{ .name = "Retry-After", .value = r };
+        n += 1;
+    }
+    if (f.location) |l| {
+        headers[n] = .{ .name = "Location", .value = l };
         n += 1;
     }
     return request.respond("{\"message\":\"injected fault\"}", .{ .status = @enumFromInt(f.status), .keep_alive = false, .extra_headers = headers[0..n] });

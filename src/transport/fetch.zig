@@ -158,6 +158,12 @@ pub const Options = struct {
     check_objects: ?bool = null,
     /// Where the object behind `error.MissingObject` is written.
     missing: ?*Oid = null,
+    /// Whether the person named this remote themselves:
+    /// `transport.Options.from_user`.
+    /// A submodule's clone and fetch pass false, so a `.gitmodules` cannot
+    /// reach a repository on this machine unless `protocol.file.allow` says
+    /// it may.
+    from_user: ?bool = null,
 };
 
 /// One ref a fetch looked at.
@@ -640,6 +646,7 @@ fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_
         .now = options.who.when_secs,
         .repository = repo,
         .who = options.who,
+        .from_user = options.from_user,
     });
     return session;
 }

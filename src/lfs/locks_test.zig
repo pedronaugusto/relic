@@ -232,6 +232,43 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "x.bin") & 0o222);
 }
 
+test "a lock's file is the one asked about, and a path the server answers with outside the tree is never touched" {
+    // Windows has no POSIX write bits for git-lfs's lockable-file mode check.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var pair = try Pair.init(gpa, io);
+    defer pair.deinit();
+    const fx = pair.fx;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
+    defer repo.deinit(io);
+    const server = try pair.open(&repo);
+    defer server.close();
+    _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
+    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
+
+    // The server says the lock is on y.bin: x.bin, asked for, is the one
+    // made writable, as git-lfs makes the path it asked about writable.
+    fx.server.answerLocksWith("y.bin");
+    const taken = try lfslocks.lock(arena, server, &repo, "x.bin", .{});
+    try testing.expect(try mode(io, pair.ours, "x.bin") & 0o200 != 0);
+    try testing.expectEqual(@as(u32, 0), try mode(io, pair.ours, "y.bin") & 0o222);
+
+    // Given back by id, the server naming a file in the other clone: that
+    // file keeps its bits.
+    try pair.theirs.writeFile(io, .{ .sub_path = "outside.bin", .data = "not ours\n" });
+    const outside_before = try mode(io, pair.theirs, "outside.bin");
+    try testing.expect(outside_before & 0o200 != 0);
+    fx.server.answerLocksWith("../theirs/outside.bin");
+    _ = try lfslocks.unlock(arena, server, &repo, taken.locked.id, false, .{});
+    try testing.expectEqual(outside_before, try mode(io, pair.theirs, "outside.bin"));
+    fx.server.answerLocksWith(null);
+}
+
 test "a server with no locking API is named" {
     const gpa = testing.allocator;
     const io = testing.io;

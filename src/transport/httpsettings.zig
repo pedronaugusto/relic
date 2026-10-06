@@ -64,6 +64,8 @@ pub const Settings = struct {
     proxy_auth_method: []const u8 = "anyauth",
     /// `http.sslCertPasswordProtected`.
     ssl_cert_password_protected: bool = false,
+    /// `http.followRedirects`.
+    follow_redirects: FollowRedirects = .initial,
     /// Where each setting that was not the default came from, for a
     /// message: `http.https://git.example.com.sslcainfo` and the like.
     /// Only the TLS ones are kept.
@@ -116,6 +118,13 @@ pub const Settings = struct {
             settings.user_agent = value;
         } else if (std.mem.eql(u8, name, "proxyauthmethod")) {
             settings.proxy_auth_method = value;
+        } else if (std.mem.eql(u8, name, "followredirects")) {
+            settings.follow_redirects = if (std.mem.eql(u8, value, "initial"))
+                .initial
+            else if (bare or (config_mod.parseBool(value) catch return error.InvalidHttpSetting))
+                .always
+            else
+                .never;
         } else if (std.mem.eql(u8, name, "sslcertpasswordprotected")) {
             settings.ssl_cert_password_protected = if (bare) true else config_mod.parseBool(value) catch return error.InvalidHttpSetting;
         }
@@ -168,6 +177,16 @@ pub const Settings = struct {
             }
         }
     }
+};
+
+/// Which redirects are followed, as git's `http.followRedirects` says.
+pub const FollowRedirects = enum {
+    /// None: a redirect is an error.
+    never,
+    /// Those of the first request of a conversation, git's default.
+    initial,
+    /// Every request's.
+    always,
 };
 
 /// Errors from reading the settings.
@@ -358,6 +377,29 @@ test "the closest http.<url> section wins, and a looser one after it does not" {
     const wild = try resolve(arena, &config, null, try url_mod.Url.parse("https://ci.example.com/repo.git"));
     try testing.expectEqualStrings("http://wild:3128", wild.proxy.?);
     try testing.expectEqual(@as(usize, 1), wild.extra_headers.len);
+}
+
+test "http.followRedirects is read as git reads it: initial, a boolean, scoped by URL" {
+    var config = try config_mod.Config.parseText(testing.allocator,
+        \\[http]
+        \\    followRedirects = true
+        \\[http "https://git.example.com"]
+        \\    followRedirects = false
+        \\[http "https://initial.example.com"]
+        \\    followRedirects = initial
+        \\[http "https://bad.example.com"]
+        \\    followRedirects = sometimes
+        \\
+    , .local);
+    defer config.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqual(FollowRedirects.initial, (try resolve(arena, null, null, try url_mod.Url.parse("https://a.example.com/r"))).follow_redirects);
+    try testing.expectEqual(FollowRedirects.always, (try resolve(arena, &config, null, try url_mod.Url.parse("https://a.example.com/r"))).follow_redirects);
+    try testing.expectEqual(FollowRedirects.never, (try resolve(arena, &config, null, try url_mod.Url.parse("https://git.example.com/r"))).follow_redirects);
+    try testing.expectEqual(FollowRedirects.initial, (try resolve(arena, &config, null, try url_mod.Url.parse("https://initial.example.com/r"))).follow_redirects);
+    try testing.expectError(error.InvalidHttpSetting, resolve(arena, &config, null, try url_mod.Url.parse("https://bad.example.com/r")));
 }
 
 test "the environment overrides the files, and no_proxy names hosts as curl reads it" {

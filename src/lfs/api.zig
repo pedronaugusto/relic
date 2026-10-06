@@ -1513,9 +1513,12 @@ pub const Client = struct {
         defer scratch_state.deinit();
         const scratch = scratch_state.allocator();
         var url = request.url;
+        // The request as it goes now: a redirect to another host leaves its
+        // own `Authorization` behind.
+        var current = request;
         var redirects: u8 = 0;
         var retries_left = request.network_retries;
-        const has_auth = hasHeader(request.headers, "authorization");
+        var has_auth = hasHeader(request.headers, "authorization");
         var refusal: Refusal = .{};
         while (true) {
             const access_url = request.access_url orelse url;
@@ -1525,7 +1528,7 @@ pub const Client = struct {
                 break :blk try c.authorize(scratch, url, access_url, operation, request.authenticated or has_auth, refusal);
             };
 
-            const ex = c.exchangeOnce(request, url, attempt.header) catch |err| switch (err) {
+            const ex = c.exchangeOnce(current, url, attempt.header) catch |err| switch (err) {
                 error.ConnectionFailed => {
                     if (retries_left > 0) {
                         retries_left -= 1;
@@ -1562,12 +1565,35 @@ pub const Client = struct {
                     }
                     redirects += 1;
                     if (redirects >= 3) return error.TooManyRedirects;
+                    if (!sameHost(url, next)) {
+                        // git-lfs's `NewRequestForRetry` copies the
+                        // `Authorization` header only to the same host; the
+                        // next host's credential is its own.
+                        current.headers = try withoutAuthorization(scratch, current.headers);
+                        has_auth = false;
+                    }
                     url = next;
                     continue;
                 },
                 else => return ex,
             }
         }
+    }
+
+    /// Whether a redirect from `from` to `to` stays on the host, as
+    /// git-lfs compares them: `host[:port]` as written.
+    fn sameHost(from: []const u8, to: []const u8) bool {
+        const a = UrlParts.parse(from) orelse return false;
+        const b = UrlParts.parse(to) orelse return false;
+        return std.ascii.eqlIgnoreCase(a.authority, b.authority);
+    }
+
+    fn withoutAuthorization(scratch: Allocator, headers: []const http.Header) Allocator.Error![]const http.Header {
+        var kept: std.ArrayList(http.Header) = .empty;
+        for (headers) |h| {
+            if (!std.ascii.eqlIgnoreCase(h.name, "authorization")) try kept.append(scratch, h);
+        }
+        return kept.items;
     }
 
     /// The last refusal of a request: its challenges and words, for the

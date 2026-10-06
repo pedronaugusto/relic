@@ -136,6 +136,85 @@ test "the first request's redirect is followed, and the requests after it go whe
     try testing.expect(std.mem.find(u8, log, "POST /repo.git/git-upload-pack") != null);
 }
 
+test "a redirect to another server takes no credential with it, an extraHeader's Authorization included, as curl takes none for git" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 1);
+    const other = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer other.stop();
+    const other_base = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}", .{other.port});
+    defer gpa.free(other_base);
+    const away = try testremote.HttpServer.start(gpa, io, root.dir, .{ .redirect = true, .redirect_to = other_base });
+    defer away.stop();
+    const here = try testremote.HttpServer.start(gpa, io, root.dir, .{ .redirect = true });
+    defer here.stop();
+    var config = try config_mod.Config.parseText(gpa, "[http]\n\textraHeader = Authorization: Bearer t0ken\n", .local);
+    defer config.deinit();
+
+    for ([_]*testremote.HttpServer{ here, away }) |server| {
+        const url = try server.url(gpa, "moved/repo.git");
+        defer gpa.free(url);
+        var session = try transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .config = &config });
+        session.close(io);
+    }
+    // The same server: every request with the header.
+    const same = try here.requests(gpa);
+    defer gpa.free(same);
+    try testing.expect(std.mem.find(u8, same, "GET /moved/repo.git/info/refs?service=git-upload-pack auth\n") != null);
+    try testing.expect(std.mem.find(u8, same, "GET /repo.git/info/refs?service=git-upload-pack auth\n") != null);
+    // Another server: the first request with it, none after.
+    const first = try away.requests(gpa);
+    defer gpa.free(first);
+    try testing.expect(std.mem.find(u8, first, "GET /moved/repo.git/info/refs?service=git-upload-pack auth\n") != null);
+    const moved = try other.requests(gpa);
+    defer gpa.free(moved);
+    try testing.expect(std.mem.find(u8, moved, "GET /repo.git/info/refs?service=git-upload-pack -\n") != null);
+    try testing.expect(std.mem.find(u8, moved, " auth") == null);
+
+    // http.followRedirects=false follows none.
+    var never = try config_mod.Config.parseText(gpa, "[http]\n\tfollowRedirects = false\n", .local);
+    defer never.deinit();
+    const url = try here.url(gpa, "moved/repo.git");
+    defer gpa.free(url);
+    try testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .config = &never }));
+}
+
+test "a redirect whose user decodes to a newline is refused before any helper hears of it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 1);
+    const guarded = try testremote.HttpServer.start(gpa, io, root.dir, .{ .basic_auth = .{ .user = "ada", .password = "secret" } });
+    defer guarded.stop();
+    const hostile = try std.fmt.allocPrint(gpa, "http://u%0ahost=github.com@127.0.0.1:{d}", .{guarded.port});
+    defer gpa.free(hostile);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .redirect = true, .redirect_to = hostile });
+    defer server.stop();
+    const url = try server.url(gpa, "moved/repo.git");
+    defer gpa.free(url);
+    // A helper is configured and no programs are granted: one reached
+    // would be `ProgramsNotGranted`.
+    var config = try config_mod.Config.parseText(gpa, "[credential]\n\thelper = store\n", .local);
+    defer config.deinit();
+    try testing.expectError(error.CredentialValueUnsafe, transport.Session.open(gpa, io, url, .upload_pack, .sha1, .{ .config = &config }));
+}
+
+test "a transport the configuration or GIT_ALLOW_PROTOCOL refuses is not opened" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var config = try config_mod.Config.parseText(gpa, "[protocol \"http\"]\n\tallow = never\n", .local);
+    defer config.deinit();
+    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "http://127.0.0.1:1/repo.git", .upload_pack, .sha1, .{ .config = &config }));
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("GIT_ALLOW_PROTOCOL", "https");
+    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .upload_pack, .sha1, .{ .programs = .{ .environ = &env } }));
+    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .upload_pack, .sha1, .{ .from_user = false }));
+}
+
 test "a missing repository, a dumb setting and a header that is not one are refused by name" {
     const gpa = testing.allocator;
     const io = testing.io;

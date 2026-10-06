@@ -16,6 +16,7 @@ const testing = std.testing;
 const repo_mod = @import("../repo.zig");
 const lfs = @import("../lfs.zig");
 const lfsapi = @import("api.zig");
+const http = std.http;
 const lfstransfer = @import("transfer.zig");
 const objectwalk = @import("../transport/objectwalk.zig");
 const fs = @import("../repo/fs.zig");
@@ -2063,4 +2064,51 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
     try testing.expect(std.mem.find(u8, ours, "\"action\":{\"href\":\"http://") != null);
+}
+
+test "a redirect to another host leaves the request's own Authorization behind, as git-lfs's does, and one to the same host keeps it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const tokens: []const testlfs.Token = &.{.{ .token = "t0ken", .user = "ada" }};
+    const fx = try Fixture.init(gpa, io, .{ .tokens = tokens });
+    defer fx.deinit();
+    const other = try testlfs.Server.start(gpa, io, .{ .tokens = tokens });
+    defer other.stop();
+    const oid = testlfs.sha256Hex("moved\n");
+    try fx.server.putObject(&oid, "moved\n");
+    try other.putObject(&oid, "moved\n");
+
+    var work = try fx.workRepo("work", "!false");
+    defer work.close(io);
+    var repo = try repo_mod.Repository.open(gpa, io, work, .{});
+    defer repo.deinit(io);
+    const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs() });
+    defer server.close();
+
+    const route = try std.fmt.allocPrint(gpa, "repo.git/info/lfs/objects/{s}", .{&oid});
+    defer gpa.free(route);
+    const from = try fx.server.url(gpa, route);
+    defer gpa.free(from);
+    const headers: []const http.Header = &.{.{ .name = "Authorization", .value = "RemoteAuth t0ken" }};
+    for ([_]*testlfs.Server{ fx.server, other }) |to| {
+        const location = try to.url(gpa, route);
+        defer gpa.free(location);
+        try fx.server.fail(.{ .route = .download, .status = 307, .location = location });
+        if (server.client.send(.{ .method = .GET, .url = from, .headers = headers, .authenticated = true })) |ex| {
+            ex.close();
+        } else |_| {}
+    }
+    const here = try fx.server.requests(gpa);
+    defer gpa.free(here);
+    const there = try other.requests(gpa);
+    defer gpa.free(there);
+    const line = try std.fmt.allocPrint(gpa, "GET /objects/{s} ", .{&oid});
+    defer gpa.free(line);
+    // The same host: the first request and the one it was sent on to, both
+    // with the token; the other host: no token at all.
+    const with_token = try std.fmt.allocPrint(gpa, "{s}ada\n", .{line});
+    defer gpa.free(with_token);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, here, with_token));
+    try testing.expect(std.mem.find(u8, there, "ada") == null);
+    try testing.expect(std.mem.find(u8, there, line) != null);
 }

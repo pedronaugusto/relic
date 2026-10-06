@@ -58,6 +58,7 @@ pub const bundle = @import("transport/bundle.zig");
 
 pub const progress = @import("transport/progress.zig");
 pub const remotehelper = @import("transport/remotehelper.zig");
+pub const policy = @import("transport/policy.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -85,6 +86,10 @@ pub const Error = error{
     UnsupportedTransport,
     /// A URL that does not parse.
     MalformedUrl,
+    /// `GIT_ALLOW_PROTOCOL`, `protocol.<name>.allow`, `protocol.allow` or
+    /// git's default for the transport does not let it be used: see
+    /// `policy`.
+    TransportNotAllowed,
     /// The transport needs to run a program — `ssh`, a credential helper —
     /// and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
@@ -135,6 +140,11 @@ pub const Options = struct {
     who: ?object.Signature = null,
     /// The repository is a clone's, new: a remote helper is told so.
     cloning: bool = false,
+    /// Whether the person named this remote themselves, which a transport
+    /// git allows only for the person — `file`, a remote helper — needs.
+    /// A submodule's URL was not named by the person: false. `null` takes
+    /// `GIT_PROTOCOL_FROM_USER` from `programs`' environment, as git does.
+    from_user: ?bool = null,
 };
 
 /// Whether `config` leaves protocol v2 on: `protocol.version` unset or 2.
@@ -237,6 +247,9 @@ pub const Session = struct {
     ) Error!Session {
         if (try openHelper(gpa, io, remote_url, service, kind, options)) |session| return session;
         const parsed = try url.Url.parse(remote_url);
+        // Every transport is checked, as git's `transport_get` checks it,
+        // a bundle on this machine as `file`.
+        try checkAllowed(options, policy.nameOf(parsed.scheme));
         if (parsed.scheme == .local and service == .upload_pack) bundled: {
             // `url_is_local_not_ssh && is_file && is_bundle`: a path to a
             // bundle is fetched from as one; a `file://` URL never is.
@@ -304,12 +317,18 @@ pub const Session = struct {
                     .auth_failure = options.auth_failure,
                     .warnings = options.warnings,
                     .now = options.now,
+                    .from_user = options.from_user,
                 });
                 errdefer conn.close(io);
                 return fromConnection(gpa, conn, service, kind);
             },
             .git => return error.UnsupportedTransport,
         }
+    }
+
+    fn checkAllowed(options: Options, name: []const u8) Error!void {
+        const environ = if (options.programs) |p| p.environ else null;
+        if (!policy.allowed(options.config, environ, name, options.from_user)) return error.TransportNotAllowed;
     }
 
     /// A session through the remote helper `remote_url` names, or `null`
@@ -328,8 +347,8 @@ pub const Session = struct {
             break :blk c.get(key);
         } else null else null;
         const spec = remotehelper.Spec.of(remote_url, options.remote_name, vcs) orelse return null;
+        try checkAllowed(options, spec.name);
         const programs = options.programs orelse return error.ProgramsNotGranted;
-        if (!remotehelper.allowed(options.config, programs.environ, spec.name)) return error.TransportNotAllowed;
         const git_dir: ?[:0]u8 = if (options.repository) |r| try r.git_dir.realPathFileAlloc(io, ".", gpa) else null;
         defer if (git_dir) |d| gpa.free(d);
         const h = try remotehelper.Helper.start(gpa, io, spec, .{

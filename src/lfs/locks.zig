@@ -258,7 +258,7 @@ pub fn lock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, path: [
     if (try server.client.sshTransfer(.upload)) |t| {
         const acquired = try sshLock(arena, server, t, path, ref);
         switch (acquired) {
-            .locked => |taken| try tookLock(arena, server, repo, taken, ref),
+            .locked => |taken| try tookLock(arena, server, repo, taken, path, ref),
             .held => {},
         }
         return acquired;
@@ -290,27 +290,33 @@ pub fn lock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, path: [
         return error.LockRefused;
     };
     if (status.class() != .success) return error.LockRefused;
-    try tookLock(arena, server, repo, taken, ref);
+    try tookLock(arena, server, repo, taken, path, ref);
     return .{ .locked = taken };
 }
 
-/// A lock taken: the caches say it is the person's, and the file is made
-/// writable.
-fn tookLock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, taken: Lock, ref: ?[]const u8) Error!void {
+/// A lock taken: the caches say it is the person's, and the file asked
+/// for — `path`, never the path the server answered with — is made
+/// writable, as git-lfs's `LockFile` makes the path it asked about writable.
+fn tookLock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, taken: Lock, path: []const u8, ref: ?[]const u8) Error!void {
     var cache = try Cache.load(arena, server, ref);
     cache.addOurs(arena, taken) catch return error.OutOfMemory;
     try cache.save(arena, server, ref);
-    if (repo.work_dir) |wt| _ = try setWritable(server.io, wt, taken.path, true);
+    if (repo.work_dir) |wt| _ = try setWritable(server.io, wt, path, true);
 }
 
 /// Give back the lock with `id`, or break someone else's with `force`, as
 /// `git lfs unlock --id` does. The file is made read-only again when it is
 /// lockable, and the caches forget the lock.
 pub fn unlock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, id: []const u8, force: bool, options: Options) Self.Error!Lock {
+    return unlockAsked(arena, server, repo, id, null, force, options);
+}
+
+/// `unlock`, for the lock on `asked` when the caller named the path.
+fn unlockAsked(arena: Allocator, server: *lfsapi.Server, repo: *Repository, id: []const u8, asked: ?[]const u8, force: bool, options: Options) Self.Error!Lock {
     const ref = try refFor(arena, server.io, repo, options);
     if (try server.client.sshTransfer(.upload)) |t| {
         const released = try sshUnlock(arena, server, t, id, ref);
-        try gaveBack(arena, server, repo, released, id, ref);
+        try gaveBack(arena, server, repo, released, asked, id, ref);
         return released;
     }
     var body: Io.Writer.Allocating = .init(arena);
@@ -350,21 +356,25 @@ pub fn unlock(arena: Allocator, server: *lfsapi.Server, repo: *Repository, id: [
         }
     }
     const released = answer.lock orelse return error.LockRefused;
-    try gaveBack(arena, server, repo, released, id, ref);
+    try gaveBack(arena, server, repo, released, asked, id, ref);
     return released;
 }
 
 /// A lock given back: the caches forget it, and the file is read-only
-/// again when it is lockable.
-fn gaveBack(arena: Allocator, server: *lfsapi.Server, repo: *Repository, released: Lock, id: []const u8, ref: ?[]const u8) Error!void {
+/// again when it is lockable. The file is the one the caller `asked` about;
+/// for a lock given back by id, the path the server answered with, only
+/// when it is a plain path inside the working tree — a server cannot
+/// reach any other file.
+fn gaveBack(arena: Allocator, server: *lfsapi.Server, repo: *Repository, released: Lock, asked: ?[]const u8, id: []const u8, ref: ?[]const u8) Error!void {
     var cache = try Cache.load(arena, server, ref);
     try cache.remove(arena, id);
     try cache.save(arena, server, ref);
+    const path = asked orelse if (checkPath(released.path)) released.path else |_| return;
     if (repo.work_dir) |wt| {
         if (readOnlyWanted(&server.settings)) {
             var lockables = try Lockables.load(server.io, repo);
             defer lockables.deinit();
-            if (try lockables.isLockable(arena, released.path)) _ = try setWritable(server.io, wt, released.path, false);
+            if (try lockables.isLockable(arena, path)) _ = try setWritable(server.io, wt, path, false);
         }
     }
 }
@@ -381,7 +391,7 @@ pub fn unlockPath(arena: Allocator, server: *lfsapi.Server, repo: *Repository, p
         else => return error.LockAmbiguous,
     }
     const id = try arena.dupe(u8, found.locks[0].id);
-    return unlock(arena, server, repo, id, force, options);
+    return unlockAsked(arena, server, repo, id, path, force, options);
 }
 
 /// What a listing asks for.

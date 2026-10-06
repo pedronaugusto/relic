@@ -156,6 +156,12 @@ pub const Options = struct {
     check_objects: ?bool = null,
     /// What the new repository's object database is opened with.
     odb: odb_mod.Options = .{},
+    /// Whether the person named this remote themselves:
+    /// `transport.Options.from_user`.
+    /// A submodule's clone and fetch pass false, so a `.gitmodules` cannot
+    /// reach a repository on this machine unless `protocol.file.allow` says
+    /// it may.
+    from_user: ?bool = null,
 };
 
 fn hasUserConfig(options: Options) bool {
@@ -458,6 +464,7 @@ fn openSession(
         .repository = repo,
         .who = options.who,
         .cloning = true,
+        .from_user = options.from_user,
     });
     return session;
 }

@@ -49,6 +49,13 @@ pub const Error = error{
     /// A helper, or an askpass program, is configured and the caller handed
     /// in no `program.Programs` to run it with.
     ProgramsNotGranted,
+    /// A value that would be handed to a helper holds a newline — or a
+    /// carriage return, unless `credential.protectProtocol` is false — which
+    /// would let it write a line of its own: a `host=` that asks for another
+    /// host's credential. git dies on it in `credential_write_item`, and
+    /// refuses a URL whose user, password, host or path decodes to a
+    /// newline.
+    CredentialValueUnsafe,
 } || program.Error;
 
 /// What is asked for.
@@ -117,6 +124,8 @@ pub const Session = struct {
     /// override.
     username_from_url: bool = false,
     initialised: bool = false,
+    /// The URL's parts hold a newline: nothing is filled for it.
+    unsafe_url: bool = false,
     /// Where the credential in hand came from.
     source: auth.Failure.Source = .none,
     /// Every helper asked, for a failure's description.
@@ -197,9 +206,19 @@ pub const Session = struct {
         }
     }
 
-    fn fromUrl(s: *Session) Allocator.Error!void {
-        if (s.initialised) return;
+    fn fromUrl(s: *Session) Self.Error!void {
+        if (s.initialised) return if (s.unsafe_url) error.CredentialValueUnsafe;
         s.initialised = true;
+        errdefer |err| if (err == error.CredentialValueUnsafe) {
+            s.unsafe_url = true;
+        };
+        // git's `check_url_component`: a URL whose parts hold a newline
+        // describes no credential, here or in any helper.
+        if (s.cert_path == null) {
+            for ([_][]const u8{ s.url.host, s.url.path }) |part| {
+                if (std.mem.findScalar(u8, part, '\n') != null) return error.CredentialValueUnsafe;
+            }
+        }
         if (s.cert_path != null) {
             // git's `cert_auth` starts with an empty username.
             s.username = try s.gpa.dupe(u8, "");
@@ -209,9 +228,11 @@ pub const Session = struct {
         if (s.url.user) |user| {
             s.username = try percentDecode(s.gpa, user);
             s.username_from_url = true;
+            if (std.mem.findScalar(u8, s.username.?, '\n') != null) return error.CredentialValueUnsafe;
         }
         if (s.url.password) |password| {
             s.password = try percentDecode(s.gpa, password);
+            if (std.mem.findScalar(u8, s.password.?, '\n') != null) return error.CredentialValueUnsafe;
             if (s.username != null) s.source = .url;
         }
     }
@@ -283,7 +304,7 @@ pub const Session = struct {
                 try s.noteAsked(helper, .failed);
                 return error.ProgramsNotGranted;
             };
-            const outcome = try s.runHelper(arena, io, programs, helper, .get, settings.use_http_path);
+            const outcome = try s.runHelper(arena, io, programs, helper, .get, settings);
             s.dropExpired(opts.now);
             const answer: auth.Failure.Answer = switch (outcome) {
                 .failed => .failed,
@@ -339,24 +360,31 @@ pub const Session = struct {
         if (settings.helpers.len == 0) return;
         const programs = opts.programs orelse return error.ProgramsNotGranted;
         for (settings.helpers) |helper| {
-            _ = try s.runHelper(arena_state.allocator(), io, programs, helper, .store, settings.use_http_path);
+            _ = try s.runHelper(arena_state.allocator(), io, programs, helper, .store, settings);
         }
     }
 
     /// The credential was refused: every helper is told to `erase` it, and
     /// it is forgotten here.
+    /// It is forgotten even when a helper could not be told.
     pub fn reject(s: *Session, io: Io, opts: Options) Self.Error!void {
+        defer s.forget();
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const settings = try s.applyConfig(arena_state.allocator(), opts.config);
-        if (settings.helpers.len != 0) {
-            const programs = opts.programs orelse return error.ProgramsNotGranted;
-            for (settings.helpers) |helper| {
-                _ = try s.runHelper(arena_state.allocator(), io, programs, helper, .erase, settings.use_http_path);
-            }
+        if (settings.helpers.len == 0) return;
+        const programs = opts.programs orelse return error.ProgramsNotGranted;
+        for (settings.helpers) |helper| {
+            _ = try s.runHelper(arena_state.allocator(), io, programs, helper, .erase, settings);
         }
+    }
+
+    /// Forget the credential, keeping whose it was for a failure's
+    /// description.
+    fn forget(s: *Session) void {
         if (s.refused_username) |u| s.gpa.free(u);
-        s.refused_username = if (s.username) |u| try s.gpa.dupe(u8, u) else null;
+        // Only the description is lost when this cannot be kept.
+        s.refused_username = if (s.username) |u| s.gpa.dupe(u8, u) catch null else null;
         s.refused_source = s.source;
         s.clear();
     }
@@ -408,43 +436,61 @@ pub const Session = struct {
     };
 
     /// What git's `credential_write` writes for `operation`, in its order.
-    fn writeInput(s: *Session, arena: Allocator, out: *std.ArrayList(u8), operation: Operation, use_http_path: bool) Allocator.Error!void {
+    fn writeInput(s: *Session, arena: Allocator, out: *std.ArrayList(u8), operation: Operation, settings: Settings) Self.Error!void {
+        const w: ItemWriter = .{ .gpa = s.gpa, .out = out, .protect_protocol = settings.protect_protocol };
         // git announces what it can take when it asks, and repeats back only
         // what the helper that answered announced.
         if (s.cert_path) |path| {
             // Asked with no capabilities, as git fills `cert_auth`.
-            try out.print(s.gpa, "protocol=cert\nhost=\npath={s}\n", .{path});
-            if (s.username) |u| try out.print(s.gpa, "username={s}\n", .{u});
+            try w.item("protocol", "cert");
+            try w.item("host", "");
+            try w.item("path", path);
+            if (s.username) |u| try w.item("username", u);
             if (operation != .get) {
-                if (s.password) |p| try out.print(s.gpa, "password={s}\n", .{p});
+                if (s.password) |p| try w.item("password", p);
             }
             return;
         }
         const authtype = operation == .get or s.capa_authtype;
         const state = operation == .get or s.capa_state;
-        if (authtype) try out.appendSlice(s.gpa, "capability[]=authtype\n");
-        if (state) try out.appendSlice(s.gpa, "capability[]=state\n");
+        if (authtype) try w.item("capability[]", "authtype");
+        if (state) try w.item("capability[]", "state");
         if (authtype) {
-            if (s.authtype) |v| try out.print(s.gpa, "authtype={s}\n", .{v});
-            if (s.credential) |v| try out.print(s.gpa, "credential={s}\n", .{v});
-            if (s.ephemeral) try out.appendSlice(s.gpa, "ephemeral=1\n");
+            if (s.authtype) |v| try w.item("authtype", v);
+            if (s.credential) |v| try w.item("credential", v);
+            if (s.ephemeral) try w.item("ephemeral", "1");
         }
-        try out.print(s.gpa, "protocol={s}\nhost={s}\n", .{ @tagName(s.url.scheme), try s.hostField(arena) });
-        if (use_http_path) {
+        try w.item("protocol", @tagName(s.url.scheme));
+        try w.item("host", try s.hostField(arena));
+        if (settings.use_http_path) {
             const path = std.mem.trimStart(u8, s.url.path, "/");
-            if (path.len != 0) try out.print(s.gpa, "path={s}\n", .{path});
+            if (path.len != 0) try w.item("path", path);
         }
-        if (s.username) |u| try out.print(s.gpa, "username={s}\n", .{u});
+        if (s.username) |u| try w.item("username", u);
         if (operation != .get) {
-            if (s.password) |p| try out.print(s.gpa, "password={s}\n", .{p});
+            if (s.password) |p| try w.item("password", p);
         }
-        if (s.oauth_refresh_token) |t| try out.print(s.gpa, "oauth_refresh_token={s}\n", .{t});
-        if (s.password_expiry_utc) |t| try out.print(s.gpa, "password_expiry_utc={d}\n", .{t});
-        for (s.challenges.items) |c| try out.print(s.gpa, "wwwauth[]={s}\n", .{c});
+        if (s.oauth_refresh_token) |t| try w.item("oauth_refresh_token", t);
+        if (s.password_expiry_utc) |t| try w.item("password_expiry_utc", try std.fmt.allocPrint(arena, "{d}", .{t}));
+        for (s.challenges.items) |c| try w.item("wwwauth[]", c);
         if (state) {
-            for (s.state.items) |v| try out.print(s.gpa, "state[]={s}\n", .{v});
+            for (s.state.items) |v| try w.item("state[]", v);
         }
     }
+
+    /// git's `credential_write_item`: `key=value` and a newline, refused
+    /// when the value could end its line early.
+    const ItemWriter = struct {
+        gpa: Allocator,
+        out: *std.ArrayList(u8),
+        protect_protocol: bool,
+
+        fn item(w: ItemWriter, key: []const u8, value: []const u8) Self.Error!void {
+            if (std.mem.findScalar(u8, value, '\n') != null) return error.CredentialValueUnsafe;
+            if (w.protect_protocol and std.mem.findScalar(u8, value, '\r') != null) return error.CredentialValueUnsafe;
+            try w.out.print(w.gpa, "{s}={s}\n", .{ key, value });
+        }
+    };
 
     fn runHelper(
         s: *Session,
@@ -453,7 +499,7 @@ pub const Session = struct {
         programs: program.Programs,
         helper: []const u8,
         operation: Operation,
-        use_http_path: bool,
+        settings: Settings,
     ) Error!Outcome {
         const command = if (helper[0] == '!')
             try std.fmt.allocPrint(arena, "{s} {t}", .{ helper[1..], operation })
@@ -467,7 +513,7 @@ pub const Session = struct {
             std.crypto.secureZero(u8, input.items);
             input.deinit(s.gpa);
         }
-        try s.writeInput(arena, &input, operation, use_http_path);
+        try s.writeInput(arena, &input, operation, settings);
 
         var outcome = try program.run(programs, s.gpa, io, .{
             .argv = &.{command},
@@ -598,6 +644,8 @@ const Settings = struct {
     username: ?[]const u8,
     use_http_path: bool,
     interactive: bool = true,
+    /// `credential.protectProtocol`: a carriage return is refused too.
+    protect_protocol: bool = true,
 };
 
 /// The `credential.*` settings that apply to `url`, in configuration
@@ -630,6 +678,8 @@ fn settingsFor(arena: Allocator, config: ?*const config_mod.Config, url: ?url_mo
             settings.use_http_path = if (entry.value == null) true else config_mod.parseBool(value) catch false;
         } else if (std.ascii.eqlIgnoreCase(entry.name, "interactive")) {
             settings.interactive = if (entry.value == null) true else config_mod.parseBool(value) catch true;
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "protectprotocol")) {
+            settings.protect_protocol = if (entry.value == null) true else config_mod.parseBool(value) catch true;
         }
     }
     settings.helpers = helpers.items;
@@ -757,6 +807,70 @@ test "a helper list follows git's rule that an empty value clears it" {
     try testing.expect(settings.use_http_path);
 }
 
+test "a URL whose user decodes to a newline is refused before any helper is asked, as git refuses it" {
+    var config = try config_mod.Config.parseText(testing.allocator, "[credential]\n\thelper = !cat >asked\n", .local);
+    defer config.deinit();
+    for ([_][]const u8{
+        "https://u%0ahost=github.com@attacker.example/repo.git",
+        "https://u:p%0Ahost=github.com@attacker.example/repo.git",
+    }) |text| {
+        var session: Session = .{ .gpa = testing.allocator, .url = try url_mod.Url.parse(text) };
+        defer session.deinit();
+        // No programs are granted: a helper reached would be
+        // `ProgramsNotGranted`.
+        try testing.expectError(error.CredentialValueUnsafe, session.fill(testing.io, .{ .config = &config }));
+        try testing.expectError(error.CredentialValueUnsafe, session.fill(testing.io, .{ .config = &config }));
+        try testing.expect(session.authorization() == null);
+        try testing.expectEqual(@as(usize, 0), session.asked.items.len);
+    }
+}
+
+test "a value with a newline is never written to a helper, nor one with a carriage return unless credential.protectProtocol is false" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const protect: Settings = .{ .helpers = &.{}, .username = null, .use_http_path = true };
+    var open: Settings = protect;
+    open.protect_protocol = false;
+    var config = try config_mod.Config.parseText(testing.allocator, "[credential]\n\tprotectProtocol = false\n", .local);
+    defer config.deinit();
+    try testing.expect(!(try applyConfig(arena, &config, try url_mod.Url.parse("https://h/r"))).protect_protocol);
+    try testing.expect((try applyConfig(arena, null, try url_mod.Url.parse("https://h/r"))).protect_protocol);
+
+    // Each value as a helper's answer or a URL could leave it.
+    const Case = struct { path: []const u8 = "/r.git", username: ?[]const u8 = null, cr: bool };
+    for ([_]Case{
+        .{ .path = "/a\rhost=github.com", .cr = true },
+        .{ .username = "u\rhost=github.com", .cr = true },
+        .{ .username = "u\nhost=github.com", .cr = false },
+    }) |case| {
+        var session: Session = .{ .gpa = testing.allocator, .url = try url_mod.Url.parse("https://example.com/r.git"), .initialised = true };
+        defer session.deinit();
+        session.url.path = case.path;
+        if (case.username) |u| session.username = try testing.allocator.dupe(u8, u);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(testing.allocator);
+        try testing.expectError(error.CredentialValueUnsafe, session.writeInput(arena, &out, .get, protect));
+        out.clearRetainingCapacity();
+        if (case.cr) {
+            try session.writeInput(arena, &out, .get, open);
+        } else {
+            try testing.expectError(error.CredentialValueUnsafe, session.writeInput(arena, &out, .get, open));
+        }
+    }
+}
+
+test "a refused credential is forgotten even when a helper cannot be told" {
+    var config = try config_mod.Config.parseText(testing.allocator, "[credential]\n\thelper = store\n", .local);
+    defer config.deinit();
+    var session: Session = .{ .gpa = testing.allocator, .url = try url_mod.Url.parse("https://ada:secret@example.com/r.git") };
+    defer session.deinit();
+    try testing.expect(session.hasInitial());
+    try testing.expectError(error.ProgramsNotGranted, session.reject(testing.io, .{ .config = &config }));
+    try testing.expect(session.password == null);
+    try testing.expectEqualStrings("ada", session.refused_username.?);
+}
+
 test "fuzz: a helper's answer is read or ignored, never trusted into a crash" {
     try testing.fuzz({}, fuzzAnswer, .{});
 }
@@ -775,6 +889,10 @@ fn fuzzAnswer(_: void, smith: *testing.Smith) anyerror!void {
     defer arena_state.deinit();
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
-    try session.writeInput(arena_state.allocator(), &out, .store, false);
+    session.writeInput(arena_state.allocator(), &out, .store, .{ .helpers = &.{}, .username = null, .use_http_path = false }) catch |err| switch (err) {
+        // A carriage return inside a value is refused, as git refuses it.
+        error.CredentialValueUnsafe => {},
+        else => |e| return e,
+    };
     _ = session.authorization();
 }

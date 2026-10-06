@@ -187,5 +187,6 @@ test {
     _ = @import("lfs/custom.zig");
     _ = @import("merge/octopus.zig");
     _ = @import("transport/remotehelper.zig");
+    _ = @import("transport/policy.zig");
     _ = @import("worktree/encoding.zig");
 }

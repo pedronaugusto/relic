@@ -11,7 +11,11 @@
 //!
 //! A redirect of the first request is followed, as git's default
 //! `http.followRedirects=initial` follows it, and the requests after it go
-//! where it led; a redirect of a `POST` is not. A server that answers with
+//! where it led; a redirect of a `POST` is not, whatever the setting, and
+//! `false` follows none. A redirect goes only to a transport `policy`
+//! allows, and one to another host or port takes no credential with it:
+//! not the helpers', and not an `Authorization` or `Cookie` among
+//! `http.extraHeader`, which curl does not carry to another host either. A server that answers with
 //! a plain file listing — git's dumb protocol — is refused by name. A
 //! request that fits `http.postBuffer` is sent whole, gzipped when it is an
 //! upload-pack request over a kilobyte, as git sends it; a larger one is
@@ -47,6 +51,7 @@ const connection = @import("connection.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const httpsettings = @import("httpsettings.zig");
+const policy = @import("policy.zig");
 const httpauth = @import("httpauth.zig");
 const httpclient = @import("httpclient.zig");
 const clientcert = @import("clientcert.zig");
@@ -90,6 +95,8 @@ pub const Error = error{
     /// A redirect of the first request led somewhere that is not the same
     /// service, which git refuses too.
     RedirectMismatch,
+    /// A redirect led to a transport `policy` does not allow.
+    TransportNotAllowed,
     /// A proxy the configuration or the environment names that does not
     /// parse.
     InvalidProxy,
@@ -124,6 +131,9 @@ pub const Options = struct {
     now: ?i64 = null,
     /// Filled in when the conversation fails for want of a credential.
     auth_failure: ?*auth.Failure = null,
+    /// Whether the person named the remote: `policy.allowed`'s, for where
+    /// a redirect leads.
+    from_user: ?bool = null,
     /// Where what git would print as a warning goes: certificate checks
     /// turned off.
     warnings: ?*warning.Warnings = null,
@@ -188,6 +198,8 @@ const Http = struct {
     extra_headers: []const http.Header = &.{},
     /// `http.userAgent`, or relic's own.
     user_agent: []const u8 = user_agent,
+    /// `http.followRedirects`.
+    follow_redirects: httpsettings.FollowRedirects = .initial,
     in_flight: ?httpclient.Response = null,
     streaming: ?httpclient.Streaming = null,
     stream_buffer: []u8 = &.{},
@@ -267,6 +279,7 @@ const Http = struct {
         if (h.v2) try extra.append(arena, .{ .name = "Git-Protocol", .value = "version=2" });
         h.extra_headers = extra.items;
         if (settings.user_agent) |agent| h.user_agent = agent;
+        h.follow_redirects = settings.follow_redirects;
 
         if (settings.proxy) |text| try h.configureProxy(text, settings.proxy_auth_method);
         if (h.client.proxy) |*proxy| if (proxy.tls) {
@@ -309,8 +322,7 @@ const Http = struct {
             // place on a local key parse error; its curl backend does not
             // classify that error as a rejected credential.
             if (builtin.os.tag != .windows) {
-                // ziglint-ignore: Z026 git fails nothing over a helper that cannot forget; the load error, returned below, is the outcome
-                if (session_slot.*) |*session| session.reject(h.io, h.credentialOptions()) catch {};
+                if (session_slot.*) |*session| try forgetRefused(h.io, session, h.credentialOptions());
             }
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -432,6 +444,7 @@ const Http = struct {
             error.ProgramsNotGranted => error.ProgramsNotGranted,
             error.CredentialHelperQuit => error.CredentialHelperQuit,
             error.CredentialsUnavailable => error.CredentialsUnavailable,
+            error.CredentialValueUnsafe => error.CredentialValueUnsafe,
             else => h.fail(error.ProxyAuthenticationFailed, @errorName(err)),
         };
     }
@@ -447,12 +460,21 @@ const Http = struct {
 
     /// The proxy refused it: the helpers are told to forget it.
     fn rejectProxy(h: *Http) Error {
-        if (h.proxy_credentials) |*session| {
-            // ziglint-ignore: Z026 git fails nothing over a helper that cannot forget; the refusal, returned below, is the outcome
-            session.reject(h.io, h.credentialOptions()) catch {};
-        }
+        if (h.proxy_credentials) |*session| try forgetRefused(h.io, session, h.credentialOptions());
         var buf: [32]u8 = undefined;
         return h.fail(error.ProxyAuthenticationFailed, std.fmt.bufPrint(&buf, "proxy answered {d}", .{h.diagnostic.proxy_status orelse 407}) catch "proxy answered 407");
+    }
+
+    /// Tell the helpers to forget a refused credential, which is forgotten
+    /// here whatever they say. git fails nothing over a helper that cannot
+    /// forget, so only a cancellation, or memory running out, ends the
+    /// operation.
+    fn forgetRefused(io: Io, session: *credential.Session, options: credential.Options) error{ OutOfMemory, Canceled }!void {
+        session.reject(io, options) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => {},
+        };
     }
 
     /// Give back the request in flight, reading what is left of its body
@@ -552,6 +574,7 @@ const Http = struct {
             const status = @intFromEnum(res.head.status);
             if (status == 407) return h.rejectProxy();
             if (status == 301 or status == 302 or status == 303 or status == 307 or status == 308) {
+                if (h.follow_redirects == .never) return h.fail(error.HttpStatus, "a redirect, and http.followRedirects is false");
                 const location = res.head.location orelse return h.fail(error.HttpStatus, "a redirect with no Location");
                 redirects += 1;
                 if (redirects > 20) return h.fail(error.HttpStatus, "too many redirects");
@@ -593,11 +616,16 @@ const Http = struct {
             const text = try arena.dupe(u8, location);
             const to = url_mod.Url.parse(text) catch return h.fail(error.HttpStatus, "a redirect to a URL that does not parse");
             if (to.scheme != .http and to.scheme != .https) return h.fail(error.HttpStatus, "a redirect to another protocol");
+            const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
+            if (!policy.allowed(h.options.config, environ, policy.nameOf(to.scheme), h.options.from_user)) {
+                return h.fail(error.TransportNotAllowed, policy.nameOf(to.scheme));
+            }
             const moved = targetOf(to);
             // A credential goes only where it was given.
             if (!moved.eql(h.target)) {
                 h.credentials.deinit();
                 h.credentials = .{ .gpa = h.gpa, .url = to };
+                h.extra_headers = try withoutCredentials(arena, h.extra_headers);
             }
             h.target = moved;
             return if (to.path.len == 0) "/" else to.path;
@@ -606,6 +634,17 @@ const Http = struct {
         // Relative to the directory of the request that was redirected.
         const dir_end = (std.mem.findScalarLast(u8, from[0 .. std.mem.findScalar(u8, from, '?') orelse from.len], '/') orelse 0) + 1;
         return std.fmt.allocPrint(arena, "{s}{s}", .{ from[0..dir_end], location });
+    }
+
+    /// `headers` without the ones that carry a credential, which curl drops
+    /// from a custom header list when a redirect leaves the host.
+    fn withoutCredentials(arena: Allocator, headers_in: []const http.Header) Allocator.Error![]const http.Header {
+        var kept: std.ArrayList(http.Header) = .empty;
+        for (headers_in) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "authorization") or std.ascii.eqlIgnoreCase(header.name, "cookie")) continue;
+            try kept.append(arena, header);
+        }
+        return kept.items;
     }
 
     /// Keep the `WWW-Authenticate` values of a refusal for the helpers.
@@ -656,6 +695,7 @@ const Http = struct {
             error.CredentialHelperQuit => error.CredentialHelperQuit,
             error.CredentialsUnavailable => error.CredentialsUnavailable,
             error.CredentialMultistageUnsupported => error.CredentialMultistageUnsupported,
+            error.CredentialValueUnsafe => error.CredentialValueUnsafe,
             error.ProgramsNotGranted => error.ProgramsNotGranted,
             error.AuthenticationFailed => error.AuthenticationFailed,
             else => error.AuthenticationFailed,

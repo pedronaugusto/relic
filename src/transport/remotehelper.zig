@@ -4,7 +4,7 @@
 //! A URL names a helper as git's `transport_get` decides it — a
 //! `<helper>::<address>`, a `<scheme>://` URL whose scheme relic does not
 //! speak, or `remote.<name>.vcs` — and `protocol.<name>.allow` says whether
-//! it may run (`ext` never does by default). The helper is started with the
+//! it may run (`policy.zig`; `ext` never does by default). The helper is started with the
 //! remote and the address, `GIT_DIR` set to the repository's, and asked its
 //! capabilities; its options are set as git sets them. Then:
 //!
@@ -36,7 +36,6 @@ const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const repo_mod = @import("../repo.zig");
 const program = @import("../repo/program.zig");
-const config_mod = @import("../config.zig");
 const cquote = @import("../cquote.zig");
 const fastimport = @import("../fastimport.zig");
 const fastexport = @import("../fastexport.zig");
@@ -57,9 +56,6 @@ pub const Error = error{
     /// No `git-remote-<name>` on `PATH`: git's "unable to find remote
     /// helper".
     HelperNotFound,
-    /// `protocol.<name>.allow` (or `protocol.allow`, or git's default for
-    /// the name) does not let this helper run.
-    TransportNotAllowed,
     /// The helper ended the conversation before its answer was over: git's
     /// "remote helper aborted session". `Connection.message` holds the last
     /// of what it wrote on its standard error.
@@ -113,22 +109,6 @@ pub const Spec = struct {
         return .{ .name = named.name, .remote = remote_name orelse url, .address = named.address };
     }
 };
-
-/// Whether `name` may be run, as git's `is_transport_allowed` decides:
-/// `protocol.<name>.allow`, then `protocol.allow`, then git's default —
-/// `ext` never, any other helper only when the user asked for it, which
-/// `GIT_PROTOCOL_FROM_USER=0` in the environment says they did not.
-pub fn allowed(config: ?*const config_mod.Config, environ: *const Environ.Map, name: []const u8) bool {
-    var key_buf: [128]u8 = undefined;
-    const key = std.fmt.bufPrint(&key_buf, "protocol.{s}.allow", .{name}) catch return false;
-    const policy = if (config) |c| c.get(key) orelse c.get("protocol.allow") else null;
-    const text = policy orelse if (std.mem.eql(u8, name, "ext")) "never" else "user";
-    if (std.ascii.eqlIgnoreCase(text, "always")) return true;
-    if (std.ascii.eqlIgnoreCase(text, "never")) return false;
-    if (!std.ascii.eqlIgnoreCase(text, "user")) return false;
-    const from_user = environ.get("GIT_PROTOCOL_FROM_USER") orelse return true;
-    return !(std.mem.eql(u8, from_user, "0") or std.ascii.eqlIgnoreCase(from_user, "false"));
-}
 
 /// What a helper said it can do.
 pub const Capabilities = struct {
@@ -743,19 +723,6 @@ fn hasAttribute(attrs: []const u8, attr: []const u8) bool {
     var it = std.mem.splitScalar(u8, attrs, ' ');
     while (it.next()) |a| if (std.mem.eql(u8, a, attr)) return true;
     return false;
-}
-
-test "a helper may run as protocol.allow says, ext never by default" {
-    var env: Environ.Map = .init(std.testing.allocator);
-    defer env.deinit();
-    try std.testing.expect(allowed(null, &env, "testgit"));
-    try std.testing.expect(!allowed(null, &env, "ext"));
-    try env.put("GIT_PROTOCOL_FROM_USER", "0");
-    try std.testing.expect(!allowed(null, &env, "testgit"));
-    var config = try config_mod.Config.parseText(std.testing.allocator, "[protocol \"ext\"]\nallow = always\n[protocol]\nallow = never\n", .local);
-    defer config.deinit();
-    try std.testing.expect(allowed(&config, &env, "ext"));
-    try std.testing.expect(!allowed(&config, &env, "testgit"));
 }
 
 test "a helper is named by remote.<name>.vcs, by <helper>::, or by a scheme" {

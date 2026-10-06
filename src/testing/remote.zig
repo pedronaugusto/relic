@@ -195,6 +195,9 @@ pub const HttpServer = struct {
         protocol_v2: bool = true,
         /// Answer a `GET` of `/moved/<rest>` with a redirect to `/<rest>`.
         redirect: bool = false,
+        /// Where that redirect leads instead: `<redirect_to>/<rest>`, a
+        /// whole URL, another server's.
+        redirect_to: ?[]const u8 = null,
     };
 
     /// Listen on an ephemeral port and serve the repositories under `root`.
@@ -362,7 +365,7 @@ pub const HttpServer = struct {
         const query = if (question) |q| target[q + 1 ..] else "";
 
         if (s.options.redirect and method == .GET and std.mem.startsWith(u8, path, "/moved/")) {
-            const location = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ path["/moved".len..], if (query.len != 0) "?" else "", query });
+            const location = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}", .{ s.options.redirect_to orelse "", path["/moved".len..], if (query.len != 0) "?" else "", query });
             return request.respond("", .{ .status = .found, .keep_alive = s.options.keep_alive, .extra_headers = &.{.{ .name = "Location", .value = location }} });
         }
 
