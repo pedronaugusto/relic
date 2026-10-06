@@ -35,15 +35,15 @@
     },
     "src/hash/sha1.zig:compressAarch64": {
       "lines": 142,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+      "reason": "One inline-asm block: ABCD and E stay in v0 and v1, and the message schedule in v4 to v7, across all eighty rounds, so cutting the block would spill them between blocks; its length is the rounds' instructions, one per line."
     },
     "src/hash/sha1.zig:compressX86": {
       "lines": 159,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+      "reason": "One inline-asm block: ABCD stays in xmm0 and the message schedule in xmm3 to xmm6 across all eighty rounds, so cutting the block would spill them between blocks; its length is the rounds' instructions, one per line."
     },
     "src/hash/sha1dc.zig:ubcCheck": {
       "lines": 153,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
+      "reason": "The published unavoidable bit conditions of the thirty-two disturbance vectors (sha1collisiondetection's ubc_check), transcribed one condition per line in their order and run on every block; a table, not steps, with no seam to split along."
     },
     "src/testing/lfs.zig:handle": {
       "lines": 159,
