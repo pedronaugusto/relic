@@ -76,6 +76,23 @@ pub const Graph = struct {
     bloom_data: ?[]const u8 = null,
     bloom_settings: bloom.Settings = .{},
 
+    /// `open`, with a graph that does not read as one -- corrupt, split
+    /// from its base, or of a version or hash this release does not read
+    /// -- taken as no graph, as git's readers take it: the answers are the
+    /// same without it, and a writer replaces it. A refusal to read the
+    /// file is still an error.
+    pub fn openUsable(gpa: Allocator, io: Io, objects_dir: Io.Dir, kind: hash.Kind) Self.Error!?Graph {
+        return open(gpa, io, objects_dir, kind) catch |err| switch (err) {
+            error.NotACommitGraph,
+            error.UnsupportedGraphVersion,
+            error.ObjectFormatMismatch,
+            error.CorruptCommitGraph,
+            error.SplitGraphUnsupported,
+            => null,
+            else => |e| e,
+        };
+    }
+
     /// Read `objects/info/commit-graph`, or `null` when there is none.
     pub fn open(gpa: Allocator, io: Io, objects_dir: Io.Dir, kind: hash.Kind) Self.Error!?Graph {
         // Keep discovery failures distinct from an absent optional accelerator.

@@ -65,8 +65,9 @@ pub const HeaderParseError = error{
 /// Read `"<type> <size>\0"` from the front of `bytes`.
 ///
 /// Returns the header and how many bytes it took, so the content follows at
-/// that offset. A size with a leading zero is refused, because git writes none
-/// and accepting one gives an object two spellings.
+/// that offset. A size with a leading zero, a sign or anything but digits is
+/// refused, because git writes none and accepting one gives an object two
+/// spellings.
 pub fn parseHeader(bytes: []const u8) HeaderParseError!struct { header: Header, len: usize } {
     const nul = std.mem.findScalar(u8, bytes, 0) orelse return error.MissingHeaderTerminator;
     const line = bytes[0..nul];
@@ -75,6 +76,9 @@ pub fn parseHeader(bytes: []const u8) HeaderParseError!struct { header: Header, 
     const digits = line[space + 1 ..];
     if (digits.len == 0) return error.InvalidObjectSize;
     if (digits.len > 1 and digits[0] == '0') return error.InvalidObjectSize;
+    // Digits only, as git reads it: `parseInt` would also take a sign and
+    // `_` separators, and give one object several spellings.
+    for (digits) |c| if (c < '0' or c > '9') return error.InvalidObjectSize;
     const size = std.fmt.parseInt(u64, digits, 10) catch return error.InvalidObjectSize;
     return .{ .header = .{ .type = t, .size = size }, .len = nul + 1 };
 }
@@ -261,6 +265,9 @@ pub const Tree = struct {
         gpa: Allocator,
         kind: Kind,
         entries: std.ArrayList(Owned) = .empty,
+        /// The names added so far, borrowed from `entries`, so a duplicate
+        /// is found without a scan.
+        names: std.StringHashMapUnmanaged(void) = .empty,
 
         const Owned = struct { mode: Mode, name: []u8, oid: Oid };
 
@@ -285,6 +292,7 @@ pub const Tree = struct {
         pub fn deinit(b: *Builder) void {
             for (b.entries.items) |e| b.gpa.free(e.name);
             b.entries.deinit(b.gpa);
+            b.names.deinit(b.gpa);
             b.* = undefined;
         }
 
@@ -295,12 +303,12 @@ pub const Tree = struct {
             if (std.mem.findScalar(u8, name, '/') != null) return error.InvalidEntryName;
             if (std.mem.findScalar(u8, name, 0) != null) return error.InvalidEntryName;
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidEntryName;
-            for (b.entries.items) |e| {
-                if (std.mem.eql(u8, e.name, name)) return error.DuplicateEntry;
-            }
+            if (b.names.contains(name)) return error.DuplicateEntry;
+            try b.entries.ensureUnusedCapacity(b.gpa, 1);
+            try b.names.ensureUnusedCapacity(b.gpa, 1);
             const copy = try b.gpa.dupe(u8, name);
-            errdefer b.gpa.free(copy);
-            try b.entries.append(b.gpa, .{ .mode = mode, .name = copy, .oid = oid });
+            b.names.putAssumeCapacity(copy, {});
+            b.entries.appendAssumeCapacity(.{ .mode = mode, .name = copy, .oid = oid });
         }
 
         /// How many entries have been added.
@@ -504,51 +512,40 @@ pub const Commit = struct {
 
         var parents: std.ArrayList(Oid) = .empty;
         var extra: std.ArrayList(ExtraHeader) = .empty;
-        var tree: ?Oid = null;
         var author: ?Signature = null;
         var committer: ?Signature = null;
         var encoding: ?[]const u8 = null;
 
+        // git reads a commit's tree from the first line and its parents
+        // from the lines straight after it, and nowhere else, so a `tree`
+        // or `parent` further down is an extra header like any other.
         var rest = bytes;
+        const tree_line = takeLine(&rest);
+        if (!std.mem.startsWith(u8, tree_line, "tree ")) return error.MissingHeader;
+        const tree = Oid.parse(kind, tree_line["tree ".len..]) catch return error.InvalidObjectId;
+        while (std.mem.startsWith(u8, rest, "parent ")) {
+            const line = takeLine(&rest);
+            const oid = Oid.parse(kind, line["parent ".len..]) catch return error.InvalidObjectId;
+            try parents.append(arena, oid);
+        }
+
         while (true) {
             if (rest.len == 0) break;
             if (rest[0] == '\n') {
                 rest = rest[1..];
                 break;
             }
-            const nl = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
-            var line = rest[0..nl];
-            rest = if (nl < rest.len) rest[nl + 1 ..] else rest[rest.len..];
-
+            const line = takeLine(&rest);
             const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedObject;
             const key = line[0..space];
-            var value = line[space + 1 ..];
+            const value = try unfold(arena, line[space + 1 ..], &rest);
 
-            // A header's continuation lines begin with a space. Fold them
-            // into one value, dropping that space and keeping the newlines.
-            var folded: ?[]u8 = null;
-            while (rest.len > 0 and rest[0] == ' ') {
-                const cont_nl = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
-                const cont = rest[1..cont_nl];
-                rest = if (cont_nl < rest.len) rest[cont_nl + 1 ..] else rest[rest.len..];
-                const base = folded orelse try arena.dupe(u8, value);
-                folded = try std.mem.concat(arena, u8, &.{ base, "\n", cont });
-            }
-            if (folded) |f| {
-                value = f;
-                line = f;
-            }
-
-            if (std.mem.eql(u8, key, "tree")) {
-                tree = Oid.parse(kind, value) catch return error.InvalidObjectId;
-            } else if (std.mem.eql(u8, key, "parent")) {
-                const oid = Oid.parse(kind, value) catch return error.InvalidObjectId;
-                try parents.append(arena, oid);
-            } else if (std.mem.eql(u8, key, "author")) {
+            // The first of each is the one git reads.
+            if (author == null and std.mem.eql(u8, key, "author")) {
                 author = try Signature.parse(value);
-            } else if (std.mem.eql(u8, key, "committer")) {
+            } else if (committer == null and std.mem.eql(u8, key, "committer")) {
                 committer = try Signature.parse(value);
-            } else if (std.mem.eql(u8, key, "encoding")) {
+            } else if (encoding == null and std.mem.eql(u8, key, "encoding")) {
                 encoding = value;
             } else {
                 try extra.append(arena, .{ .name = key, .value = value });
@@ -557,7 +554,7 @@ pub const Commit = struct {
 
         return .{
             .kind = kind,
-            .tree = tree orelse return error.MissingHeader,
+            .tree = tree,
             .parents = parents.items,
             .author = author orelse return error.MissingHeader,
             .committer = committer orelse return error.MissingHeader,
@@ -632,6 +629,36 @@ pub const Commit = struct {
     }
 };
 
+/// The next line of `rest`, without its newline, and `rest` moved past it.
+fn takeLine(rest: *[]const u8) []const u8 {
+    const text = rest.*;
+    const nl = std.mem.findScalar(u8, text, '\n') orelse text.len;
+    rest.* = if (nl < text.len) text[nl + 1 ..] else text[text.len..];
+    return text[0..nl];
+}
+
+/// A header's value with its continuation lines folded in, and `rest` moved
+/// past them. A continuation line begins with a space, which is dropped;
+/// the newlines are kept. The lines are measured first and copied once, so
+/// a value of many lines costs its length and no more.
+fn unfold(arena: Allocator, value: []const u8, rest: *[]const u8) Allocator.Error![]const u8 {
+    // Each continuation line's space becomes the newline before it.
+    var len = value.len;
+    var scan = rest.*;
+    while (scan.len > 0 and scan[0] == ' ') len += takeLine(&scan).len;
+    if (scan.len == rest.*.len) return value;
+    const out = try arena.alloc(u8, len);
+    @memcpy(out[0..value.len], value);
+    var at = value.len;
+    while (rest.*.len > 0 and rest.*[0] == ' ') {
+        const cont = takeLine(rest)[1..];
+        out[at] = '\n';
+        @memcpy(out[at + 1 ..][0..cont.len], cont);
+        at += 1 + cont.len;
+    }
+    return out;
+}
+
 fn writeFolded(w: *Io.Writer, h: ExtraHeader) Io.Writer.Error!void {
     try w.writeAll(h.name);
     try w.writeByte(' ');
@@ -684,53 +711,47 @@ pub const Tag = struct {
         const arena = arena_instance.allocator();
 
         var extra: std.ArrayList(ExtraHeader) = .empty;
-        var target: ?Oid = null;
-        var target_type: ?Type = null;
-        var name: ?[]const u8 = null;
         var tagger: ?Signature = null;
 
+        // git reads `object`, `type` and `tag` from the first three lines
+        // and `tagger` from the fourth, so the same names further down are
+        // extra headers like any other.
         var rest = bytes;
+        const object_line = takeLine(&rest);
+        if (!std.mem.startsWith(u8, object_line, "object ")) return error.MissingHeader;
+        const target = Oid.parse(kind, object_line["object ".len..]) catch return error.InvalidObjectId;
+        const type_line = takeLine(&rest);
+        if (!std.mem.startsWith(u8, type_line, "type ")) return error.MissingHeader;
+        const target_type = try Type.parse(type_line["type ".len..]);
+        const name_line = takeLine(&rest);
+        if (!std.mem.startsWith(u8, name_line, "tag ")) return error.MissingHeader;
+        const name = name_line["tag ".len..];
+
+        var first = true;
         while (true) {
             if (rest.len == 0) break;
             if (rest[0] == '\n') {
                 rest = rest[1..];
                 break;
             }
-            const nl = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
-            const line = rest[0..nl];
-            rest = if (nl < rest.len) rest[nl + 1 ..] else rest[rest.len..];
+            const line = takeLine(&rest);
             const space = std.mem.findScalar(u8, line, ' ') orelse return error.MalformedObject;
             const key = line[0..space];
-            var value = line[space + 1 ..];
+            const value = try unfold(arena, line[space + 1 ..], &rest);
 
-            var folded: ?[]u8 = null;
-            while (rest.len > 0 and rest[0] == ' ') {
-                const cont_nl = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
-                const cont = rest[1..cont_nl];
-                rest = if (cont_nl < rest.len) rest[cont_nl + 1 ..] else rest[rest.len..];
-                const base = folded orelse try arena.dupe(u8, value);
-                folded = try std.mem.concat(arena, u8, &.{ base, "\n", cont });
-            }
-            if (folded) |f| value = f;
-
-            if (std.mem.eql(u8, key, "object")) {
-                target = Oid.parse(kind, value) catch return error.InvalidObjectId;
-            } else if (std.mem.eql(u8, key, "type")) {
-                target_type = try Type.parse(value);
-            } else if (std.mem.eql(u8, key, "tag")) {
-                name = value;
-            } else if (std.mem.eql(u8, key, "tagger")) {
+            if (first and std.mem.eql(u8, key, "tagger")) {
                 tagger = try Signature.parse(value);
             } else {
                 try extra.append(arena, .{ .name = key, .value = value });
             }
+            first = false;
         }
 
         return .{
             .kind = kind,
-            .target = target orelse return error.MissingHeader,
-            .target_type = target_type orelse return error.MissingHeader,
-            .name = name orelse return error.MissingHeader,
+            .target = target,
+            .target_type = target_type,
+            .name = name,
             .tagger = tagger,
             .extra = extra.items,
             .message = rest,
@@ -813,7 +834,24 @@ test "a duplicate entry is refused" {
     const oid = try Oid.parse(.sha1, "0" ** 40);
     try b.add(.file, "a", oid);
     try std.testing.expectError(error.DuplicateEntry, b.add(.file, "a", oid));
+    try std.testing.expectError(error.DuplicateEntry, b.add(.tree, "a", oid));
     try std.testing.expectError(error.InvalidEntryName, b.add(.file, "a/b", oid));
+}
+
+test "a tree of many entries is built in what sorting them costs, and still refuses a name twice" {
+    const gpa = std.testing.allocator;
+    var b: Tree.Builder = .init(gpa, .sha1);
+    defer b.deinit();
+    const oid = try Oid.parse(.sha1, "0" ** 40);
+    // Each add once scanned every entry before it: four hundred million
+    // comparisons here, and seconds even when optimised.
+    const count = 20_000;
+    var name: [16]u8 = undefined;
+    for (0..count) |i| try b.add(.file, try std.fmt.bufPrint(&name, "f{d}", .{count - i}), oid);
+    try std.testing.expectError(error.DuplicateEntry, b.add(.tree, "f7", oid));
+    const bytes = try b.build();
+    defer gpa.free(bytes);
+    try std.testing.expect(std.mem.startsWith(u8, bytes, "100644 f1\x00"));
 }
 
 test "a tree with one file has the name git gives it" {
@@ -868,6 +906,69 @@ test "commit round trip keeps parent order and header order" {
     try std.testing.expectEqual(@as(i16, -300), c.author.offset_minutes);
 }
 
+test "a commit's tree is its first line and its parents the lines after, as git reads them" {
+    const gpa = std.testing.allocator;
+    const zero = "0" ** 40;
+    const one = "1" ** 40;
+    const two = "2" ** 40;
+    const ident = "A <a@b> 1 +0000";
+    // A second tree, a parent after the identities, and a second author
+    // are all extra headers: git reads the first tree and no parents.
+    var c = try Commit.parse(gpa, .sha1, "tree " ++ zero ++ "\nauthor " ++ ident ++ "\ncommitter " ++ ident ++
+        "\ntree " ++ one ++ "\nparent " ++ two ++ "\nauthor B <b@b> 2 +0000\n\nm\n");
+    defer c.deinit();
+    try std.testing.expect(c.tree.eql(try Oid.parse(.sha1, zero)));
+    try std.testing.expectEqual(@as(usize, 0), c.parents.len);
+    try std.testing.expectEqualStrings("A", c.author.name);
+    try std.testing.expectEqual(@as(usize, 3), c.extra.len);
+    try std.testing.expectEqualStrings("tree", c.extra[0].name);
+    try std.testing.expectEqualStrings("parent", c.extra[1].name);
+    try std.testing.expectEqualStrings("author", c.extra[2].name);
+    // A tree anywhere but the first line is no tree.
+    try std.testing.expectError(error.MissingHeader, Commit.parse(gpa, .sha1, "author " ++ ident ++ "\ntree " ++ zero ++
+        "\ncommitter " ++ ident ++ "\n\nm\n"));
+}
+
+test "a tag's object, type and name are its first three lines" {
+    const gpa = std.testing.allocator;
+    const zero = "0" ** 40;
+    var t = try Tag.parse(gpa, .sha1, "object " ++ zero ++ "\ntype commit\ntag v1\ntagger A <a@b> 1 +0000\n" ++
+        "object " ++ "1" ** 40 ++ "\ntag v2\n\nm\n");
+    defer t.deinit();
+    try std.testing.expect(t.target.eql(try Oid.parse(.sha1, zero)));
+    try std.testing.expectEqualStrings("v1", t.name);
+    try std.testing.expect(t.tagger != null);
+    try std.testing.expectEqual(@as(usize, 2), t.extra.len);
+    try std.testing.expectError(error.MissingHeader, Tag.parse(gpa, .sha1, "type commit\nobject " ++ zero ++ "\ntag v1\n\nm\n"));
+}
+
+test "a header of many continuation lines costs its length to unfold, not its square" {
+    const gpa = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    const ident = "A <a@b> 1 +0000";
+    try bytes.appendSlice(gpa, "tree " ++ "0" ** 40 ++ "\nauthor " ++ ident ++ "\ncommitter " ++ ident ++ "\ngpgsig -----BEGIN-----\n");
+    const lines = 4000;
+    for (0..lines) |_| try bytes.appendSlice(gpa, " " ++ "x" ** 63 ++ "\n");
+    try bytes.appendSlice(gpa, "\nm\n");
+    const tag_bytes = try std.mem.replaceOwned(u8, gpa, bytes.items, "tree " ++ "0" ** 40, "object " ++ "0" ** 40 ++ "\ntype commit\ntag v1");
+    defer gpa.free(tag_bytes);
+    for ([_]bool{ false, true }) |tag| {
+        var counting: std.testing.FailingAllocator = .init(gpa, .{});
+        const value_len = if (tag) blk: {
+            var t = try Tag.parse(counting.allocator(), .sha1, tag_bytes);
+            defer t.deinit();
+            break :blk t.extraHeader("gpgsig").?.len;
+        } else blk: {
+            var c = try Commit.parse(counting.allocator(), .sha1, bytes.items);
+            defer c.deinit();
+            break :blk c.extraHeader("gpgsig").?.len;
+        };
+        try std.testing.expectEqual(@as(usize, "-----BEGIN-----".len + lines * 64), value_len);
+        try std.testing.expect(counting.allocated_bytes < 4 * bytes.items.len);
+    }
+}
+
 test "tag round trip" {
     const gpa = std.testing.allocator;
     const target = try Oid.parse(.sha1, "3" ** 40);
@@ -903,6 +1004,8 @@ test "a loose object header parses and refuses a padded size" {
     try std.testing.expectEqual(@as(u64, 12), parsed.header.size);
     try std.testing.expectEqual(@as(usize, 8), parsed.len);
     try std.testing.expectError(error.InvalidObjectSize, parseHeader("blob 012\x00"));
+    try std.testing.expectError(error.InvalidObjectSize, parseHeader("blob +5\x00hello"));
+    try std.testing.expectError(error.InvalidObjectSize, parseHeader("blob 1_0\x00"));
     try std.testing.expectError(error.UnknownObjectType, parseHeader("blub 1\x00"));
     try std.testing.expectError(error.MissingHeaderTerminator, parseHeader("blob 1"));
 }

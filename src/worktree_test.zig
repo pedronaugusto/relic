@@ -306,8 +306,13 @@ test "a racily clean entry is smudged on the way out only when its file changed,
     defer back.deinit();
     try std.testing.expectEqual(@as(u64, 5), back.find("same.txt").?.stat.size);
     try std.testing.expectEqual(@as(u64, 0), back.find("other.txt").?.stat.size);
+    // The index just written is the cutoff now, as git's write takes it.
+    try std.testing.expectEqual(back.racy_cutoff_sec, h.index.racy_cutoff_sec);
+    try std.testing.expectEqual(back.racy_cutoff_nsec, h.index.racy_cutoff_nsec);
 
     // Without the check every racy entry is smudged.
+    h.index.racy_cutoff_sec = same.mtime_sec;
+    h.index.racy_cutoff_nsec = same.mtime_nsec;
     try h.index.write(io, h.git_dir, "index", .{});
     var all = try index_mod.Index.read(gpa, io, h.git_dir, "index", h.git_dir, .sha1);
     defer all.deinit();

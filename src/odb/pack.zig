@@ -364,6 +364,11 @@ pub const Error = error{
     ObjectNameMismatch,
     /// The compressed entry did not match the CRC the index carries.
     ChecksumMismatch,
+    /// The pack's object count or its trailing checksum is not the one its
+    /// index records: the two files are not a pair, and an offset the index
+    /// gives would read another object. git's "packfile does not match
+    /// index".
+    PackIndexMismatch,
 } || IndexError || delta.Error || Io.File.OpenError ||
     Io.File.ReadPositionalError || Io.File.Reader.Error || Io.File.Reader.SeekError || Io.File.StatError || Io.File.MemoryMap.CreateError;
 
@@ -471,15 +476,17 @@ pub const Pack = struct {
             read_cache_bytes: usize = default_read_cache_bytes,
         },
     ) Self.Error!Pack {
-        var name_buf: [512]u8 = undefined;
-        const idx_name = std.fmt.bufPrint(&name_buf, "{s}.idx", .{base}) catch return error.NameTooLong;
-        var index = try Index.open(gpa, io, dir, idx_name, kind, options.max_index_bytes);
-        errdefer index.deinit();
-
+        // The pack first: an index with no pack beside it is one being
+        // written, or left behind, and is `FileNotFound` whatever it holds.
         var pack_buf: [512]u8 = undefined;
         const pack_name = std.fmt.bufPrint(&pack_buf, "{s}.pack", .{base}) catch return error.NameTooLong;
         const file = try dir.openFile(io, pack_name, .{});
         errdefer file.close(io);
+
+        var name_buf: [512]u8 = undefined;
+        const idx_name = std.fmt.bufPrint(&name_buf, "{s}.idx", .{base}) catch return error.NameTooLong;
+        var index = try Index.open(gpa, io, dir, idx_name, kind, options.max_index_bytes);
+        errdefer index.deinit();
 
         const stat = try file.stat(io);
         const raw_len = kind.rawLen();
@@ -491,6 +498,12 @@ pub const Pack = struct {
         const version = std.mem.readInt(u32, header[4..8], .big);
         if (version != 2 and version != 3) return error.UnsupportedPackVersion;
         const count = std.mem.readInt(u32, header[8..12], .big);
+        // git's `open_packed_git_1`: the pack must be the one the index was
+        // made from, by its count and by the checksum ending both.
+        if (count != index.count) return error.PackIndexMismatch;
+        var trailer: [hash.max_raw_len]u8 = undefined;
+        if (try file.readPositionalAll(io, trailer[0..raw_len], stat.size - raw_len) != raw_len) return error.TruncatedPack;
+        if (!std.mem.eql(u8, trailer[0..raw_len], index.pack_checksum.raw())) return error.PackIndexMismatch;
 
         var mapping: ?Io.File.MemoryMap = null;
         var memory: ?[]const u8 = null;
@@ -1294,8 +1307,9 @@ pub const Cache = struct {
         c.gpa.destroy(entry);
     }
 
-    /// Forget everything. Used when a pack directory is re-scanned, because
-    /// pack ids move.
+    /// Forget everything: what a database does when it closes packs, whose
+    /// entries would otherwise stay until they aged out. The ids a database
+    /// gives its packs are never reused, so a re-scan needs no clear.
     pub fn clear(c: *Cache) void {
         var entry = c.oldest;
         while (entry) |current| {

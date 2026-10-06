@@ -228,7 +228,9 @@ pub fn add(
     dest_path: []const u8,
     options: AddOptions,
 ) Self.Error!Added {
-    if (safepath.checkComponent(name, .stored) != null) return error.InvalidWorktreeName;
+    // The name becomes a directory under `worktrees/`, so it is held to
+    // the rules of a name written to the disk.
+    if (safepath.checkComponent(name, .worktree) != null) return error.InvalidWorktreeName;
     _ = options.create_destination;
 
     const owned_name = try gpa.dupe(u8, name);

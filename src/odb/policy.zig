@@ -44,7 +44,9 @@ pub const Options = struct {
     pack_read_cache_bytes: usize = default_pack_read_cache_bytes,
     /// How deep a delta chain may be before it is refused.
     max_delta_depth: u32 = pack.default_max_depth,
-    /// How many levels of `objects/info/alternates` to follow.
+    /// The deepest `objects/info/alternates` read, the database's own being
+    /// 0: git's 5, which reaches six levels of alternates. A deeper file is
+    /// not read, as git only logs it.
     max_alternate_depth: u8 = 5,
     /// The largest inflated loose object, including its header, this will
     /// read into memory. Exceeding it is `error.StreamTooLong`.
@@ -61,12 +63,13 @@ pub const Options = struct {
     /// for the signature of a collision attack, which is
     /// `error.CollisionAttack`.
     ///
-    /// Off. It costs about five times the hash, and what it guards is git's
-    /// object format rather than a file on the disk: the published colliding
-    /// documents are not colliding objects, because `"blob <size>\0"` goes
-    /// in front of the content and moves every block of the message. A
-    /// SHA-256 repository ignores it.
-    detect_sha1_collisions: bool = false,
+    /// On, as git always builds SHA-1 with this detector: a chosen-prefix
+    /// collision can be computed with the object header inside the prefix,
+    /// so two objects of one name are within an attacker's reach, and a
+    /// pack received from anyone is where they would arrive. It costs
+    /// several times the plain hash on every name taken -- objects written,
+    /// received and verified. A SHA-256 repository ignores it.
+    detect_sha1_collisions: bool = true,
     /// What `core.sharedRepository` asks of the permissions of what is
     /// written: the objects, the packs and their directories.
     shared: fs.Shared = .umask,
@@ -93,9 +96,6 @@ pub const Error = error{
     UnexpectedObjectType,
     /// An object name uses a different hash format from this database.
     ObjectFormatMismatch,
-    /// `objects/info/alternates` pointed at itself, or the chain was deeper
-    /// than `Options.max_alternate_depth`.
-    AlternatesTooDeep,
     /// A path cannot be represented as one alternates-file line.
     InvalidAlternatePath,
     /// Adding a path would pass the supported alternates-file size.

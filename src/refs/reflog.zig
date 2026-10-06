@@ -239,7 +239,9 @@ pub const Log = struct {
     }
 };
 
-/// Read `logs/<ref>`. An absent log is an empty one. In a reftable
+/// Read `logs/<ref>`. An absent log is an empty one. A line that is not an
+/// entry is left out, as git's `show_one_reflog_ent` leaves it out, so one
+/// damaged line does not take the rest of the log with it. In a reftable
 /// repository this is `error.ReftableRepository` rather than an empty log
 /// that is not the truth; `refs.Store.readLog` reads either format.
 pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash.Kind) Self.ReadError!Log {
@@ -256,7 +258,9 @@ pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        try entries.append(gpa, try parseLine(line, kind));
+        // ziglint-ignore: Z026 a line git cannot parse is one it skips, and the log's other entries stand
+        const entry = parseLine(line, kind) catch continue;
+        try entries.append(gpa, entry);
     }
     return .{ .gpa = gpa, .bytes = bytes, .entries = try entries.toOwnedSlice(gpa) };
 }
@@ -314,6 +318,24 @@ test "an appended entry reads back" {
     try std.testing.expect(log.at(1).?.eql(one));
     try std.testing.expect(log.at(2).?.eql(zero));
     try std.testing.expect(log.at(3) == null);
+}
+
+test "a malformed line leaves the other entries readable, as git skips it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "logs/refs/heads");
+    const zero = "0" ** 40;
+    const one = "1" ** 40;
+    const two = "2" ** 40;
+    try tmp.dir.writeFile(io, .{ .sub_path = "logs/refs/heads/main", .data = zero ++ " " ++ one ++ " A <a@b> 1 +0000\tfirst\n" ++
+        "not an entry\n" ++
+        one ++ " " ++ two ++ " A <a@b> 2 +0000\tsecond\n" });
+    var log = try read(gpa, io, tmp.dir, "refs/heads/main", .sha1);
+    defer log.deinit();
+    try std.testing.expectEqual(@as(usize, 2), log.entries.len);
+    try std.testing.expectEqualStrings("second", log.entries[1].message);
 }
 
 test "the policy decides which refs get a log" {

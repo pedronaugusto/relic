@@ -769,7 +769,7 @@ const NameRev = struct {
         if (try nr.repo.configuration().getBool("core.commitgraph", true)) {
             const objects = try nr.repo.common_dir.openDir(io, "objects", .{});
             defer objects.close(io);
-            if (try commitgraph.Graph.open(nr.gpa, io, objects, nr.repo.objectFormat())) |graph_value| {
+            if (try commitgraph.Graph.openUsable(nr.gpa, io, objects, nr.repo.objectFormat())) |graph_value| {
                 var graph = graph_value;
                 defer graph.deinit();
                 if (graph.find(cmit) != null) return;

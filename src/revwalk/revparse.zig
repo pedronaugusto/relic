@@ -381,8 +381,15 @@ const Resolver = struct {
             seen += 1;
             if (seen != n) continue;
             const from = rest[0..to];
+            // The name a checkout left, which is an object name when it
+            // left a detached HEAD, or a ref, and is never read as a
+            // revision: a log line naming `@{-1}` would otherwise name
+            // itself without end. git's `get_oid_basic` reads it so.
+            if (from.len == r.repo.objectFormat().hexLen()) {
+                if (Oid.parse(r.repo.objectFormat(), from)) |oid| return oid else |_| {}
+            }
             if (try r.refMaybe(try std.fmt.allocPrint(r.a, "refs/heads/{s}", .{from}))) |oid| return oid;
-            return r.one(from);
+            return (try r.dwim(from)) orelse error.BadRevision;
         }
         return error.BadRevision;
     }
@@ -627,6 +634,41 @@ test "every expression reads as git rev-parse reads it" {
         const refused = if (resolve(gpa, io, &repo, expr)) |_| false else |_| true;
         try testing.expect(refused);
     }
+}
+
+test "@{-N} reads the branch a checkout left as a name or an object name, never as an expression" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    try r.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try r.exec(io, &.{ "branch", "other" });
+    // Left detached, then left a branch: git names an object, then a ref.
+    try r.exec(io, &.{ "checkout", "-q", "--detach" });
+    try r.exec(io, &.{ "checkout", "-q", "other" });
+    try r.exec(io, &.{ "checkout", "-q", "main" });
+    var repo = try Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    for ([_][]const u8{ "@{-1}", "@{-2}", "@{-3}" }) |expr| {
+        const theirs = try r.line(io, &.{ "rev-parse", expr });
+        defer gpa.free(theirs);
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try testing.expectEqualStrings(theirs, (try resolve(gpa, io, &repo, expr)).hex(&hex));
+    }
+
+    // A log line naming `@{-1}` as where it came from is no name at all.
+    const head_text = try r.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head_text);
+    const line = try std.fmt.allocPrint(gpa, "{s} {s} A <a@b> 1 +0000\tcheckout: moving from @{{-1}} to main\n", .{ head_text, head_text });
+    defer gpa.free(line);
+    const log = try r.readFile(io, ".git/logs/HEAD");
+    defer gpa.free(log);
+    const looped = try std.mem.concat(gpa, u8, &.{ log, line });
+    defer gpa.free(looped);
+    try r.writeFile(io, ".git/logs/HEAD", looped);
+    r.report_failures = false;
+    try testing.expectError(error.GitFailed, r.run(io, &.{ "rev-parse", "--verify", "-q", "@{-1}" }));
+    try testing.expectError(error.BadRevision, resolve(gpa, io, &repo, "@{-1}"));
 }
 
 test "a reflog entry chosen by a date is the one git rev-parse chooses" {

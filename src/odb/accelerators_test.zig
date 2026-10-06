@@ -546,3 +546,164 @@ test "MIDX bitmap discovery preserves filesystem refusals for its packs" {
         try std.testing.expectError(err, bitmap_store.Store.open(gpa, refused_io, objects, .sha1));
     }
 }
+
+const describe_mod = @import("../revwalk/describe.zig");
+
+/// A multi-pack index's bytes with its trailing checksum taken again.
+fn resealMidx(bytes: []u8) void {
+    var hasher: hash.Hasher = .init(.sha1);
+    hasher.update(bytes[0 .. bytes.len - 20]);
+    @memcpy(bytes[bytes.len - 20 ..], hasher.final().raw());
+}
+
+/// The PNAM chunk of a multi-pack index: where its names begin.
+fn packNamesAt(bytes: []const u8) usize {
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        const row = bytes[12 + i * 12 ..][0..12];
+        if (std.mem.eql(u8, row[0..4], "PNAM")) return @intCast(std.mem.readInt(u64, row[4..12], .big));
+    }
+}
+
+test "a MIDX naming a path outside its pack directory is no index, and expire removes nothing by it" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    // Two packs and a third holding everything: the first two are left
+    // with nothing assigned, which is what expire removes.
+    for (0..8) |n| {
+        try linearCommit(&repo, n);
+        if (n % 4 == 3) try repo.exec(io, &.{ "repack", "-q", "-d" });
+    }
+    try repo.exec(io, &.{ "repack", "-q", "-a" });
+    try repo.exec(io, &.{ "multi-pack-index", "write" });
+    const midx_path = ".git/objects/pack/multi-pack-index";
+    const bytes = try repo.readFile(io, midx_path);
+    defer gpa.free(bytes);
+    var index = try midx.Index.parse(gpa, .sha1, try gpa.dupe(u8, bytes));
+    defer index.deinit();
+    const counts = try gpa.alloc(u32, index.pack_count);
+    defer gpa.free(counts);
+    @memset(counts, 0);
+    for (0..index.count) |i| counts[(try index.locate(@intCast(i))).pack] += 1;
+    const empty = std.mem.findScalar(u32, counts, 0).?;
+
+    // That pack's name, of the same length, made a path two levels up.
+    var at = packNamesAt(bytes);
+    for (0..empty) |_| at = std.mem.findScalarPos(u8, bytes, at, 0).? + 1;
+    const len = std.mem.findScalarPos(u8, bytes, at, 0).? - at;
+    const name = "../../" ++ "v" ** 39 ++ ".idx";
+    try std.testing.expectEqual(name.len, len);
+    @memcpy(bytes[at..][0..len], name);
+    resealMidx(bytes);
+    try repo.dir.deleteFile(io, midx_path);
+    try repo.writeFile(io, midx_path, bytes);
+    for ([_][]const u8{ ".pack", ".idx", ".rev", ".bitmap" }) |extension| {
+        const victim = try std.fmt.allocPrint(gpa, ".git/{s}{s}", .{ "v" ** 39, extension });
+        defer gpa.free(victim);
+        try repo.writeFile(io, victim, "keep me");
+    }
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    try std.testing.expectEqual(@as(usize, 0), db.multiPackIndexCount());
+    try std.testing.expectEqual(@as(u32, 0), try ops.expireMidx(gpa, io, &db, .none));
+    for ([_][]const u8{ ".pack", ".idx", ".rev", ".bitmap" }) |extension| {
+        const victim = try std.fmt.allocPrint(gpa, ".git/{s}{s}", .{ "v" ** 39, extension });
+        defer gpa.free(victim);
+        const kept = try repo.readFile(io, victim);
+        defer gpa.free(kept);
+        try std.testing.expectEqualStrings("keep me", kept);
+    }
+}
+
+test "a version 1 MIDX with its pack names out of order is refused as git refuses it, and a version 2 one is read" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..8) |n| {
+        try linearCommit(&repo, n);
+        if (n % 4 == 3) try repo.exec(io, &.{ "repack", "-q", "-d" });
+    }
+    const midx_path = ".git/objects/pack/multi-pack-index";
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    if (try testgit.gitAtLeast(gpa, io, 2, 54)) {
+        try repo.exec(io, &.{ "-c", "midx.version=2", "multi-pack-index", "write" });
+        const written = try repo.readFile(io, midx_path);
+        defer gpa.free(written);
+        try std.testing.expectEqual(@as(u8, 2), written[4]);
+        var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
+        defer db.deinit(io);
+        try std.testing.expectEqual(@as(usize, 1), db.multiPackIndexCount());
+        try repo.dir.deleteFile(io, midx_path);
+    }
+
+    try repo.exec(io, &.{ "multi-pack-index", "write" });
+    const bytes = try repo.readFile(io, midx_path);
+    defer gpa.free(bytes);
+    // The first two names, which are of one length, swapped.
+    const first = packNamesAt(bytes);
+    const len = std.mem.findScalarPos(u8, bytes, first, 0).? - first;
+    var swap: [64]u8 = undefined;
+    @memcpy(swap[0..len], bytes[first..][0..len]);
+    @memcpy(bytes[first..][0..len], bytes[first + len + 1 ..][0..len]);
+    @memcpy(bytes[first + len + 1 ..][0..len], swap[0..len]);
+    resealMidx(bytes);
+    try repo.dir.deleteFile(io, midx_path);
+    try repo.writeFile(io, midx_path, bytes);
+    repo.report_failures = false;
+    try std.testing.expectError(error.GitFailed, repo.run(io, &.{ "multi-pack-index", "verify" }));
+    var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    try std.testing.expectEqual(@as(usize, 0), db.multiPackIndexCount());
+}
+
+test "a repository with replace refs is repacked with a commit graph of the parents its commits carry, as git writes one" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..3) |n| try linearCommit(&repo, n);
+    try repo.exec(io, &.{ "replace", "HEAD~1", "HEAD~2" });
+    var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+    defer native.deinit(io);
+    _ = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1, .sync = .none }, .remove_packs = true });
+    try repo.exec(io, &.{ "commit-graph", "verify" });
+    const ours = try repo.readFile(io, ".git/objects/info/commit-graph");
+    defer gpa.free(ours);
+    try repo.dir.deleteFile(io, ".git/objects/info/commit-graph");
+    try repo.exec(io, &.{ "commit-graph", "write", "--reachable" });
+    try sameFile(&repo, ".git/objects/info/commit-graph", ours);
+}
+
+test "a commit graph or MIDX that does not read is replaced by the writers, and describe --contains reads past it" {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..6) |n| {
+        try linearCommit(&repo, n);
+        if (n % 3 == 2) try repo.exec(io, &.{ "repack", "-q", "-d" });
+    }
+    try repo.exec(io, &.{ "tag", "v1", "HEAD~3" });
+    // git dies on the damaged files below, so its answer is taken first.
+    const expected = try repo.run(io, &.{ "describe", "--contains", "HEAD~4" });
+    defer gpa.free(expected);
+    try repo.exec(io, &.{ "commit-graph", "write", "--reachable" });
+    try repo.exec(io, &.{ "multi-pack-index", "write" });
+    for ([_][]const u8{ ".git/objects/info/commit-graph", ".git/objects/pack/multi-pack-index" }) |path| {
+        const bytes = try repo.readFile(io, path);
+        defer gpa.free(bytes);
+        // The version byte, which no release reads.
+        bytes[4] = 0x7f;
+        try repo.dir.deleteFile(io, path);
+        try repo.writeFile(io, path, bytes);
+    }
+
+    var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+    defer native.deinit(io);
+    const named = try describe_mod.describe(gpa, io, &native, "HEAD~4", .{ .contains = true });
+    defer gpa.free(named);
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, expected, "\n"), named);
+    _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc);
+    _ = try ops.writeMidx(gpa, io, &native.odb, .{});
+    try repo.exec(io, &.{ "commit-graph", "verify" });
+    try repo.exec(io, &.{ "multi-pack-index", "verify" });
+}

@@ -244,11 +244,11 @@ pub const Hasher = struct {
         /// Whether SHA-1 additionally checks every block for the signature
         /// of a collision attack.
         ///
-        /// Off, because it costs about five times the hash and defends
-        /// against something a repository is only exposed to if someone is
-        /// attacking it. It is the caller's decision, so it is the caller's
-        /// option; `Odb.Options` carries it for a whole database. SHA-256
-        /// ignores it, there being no such attack on SHA-256.
+        /// Off for a bare hasher, which also takes checksums no attacker
+        /// chooses; `Odb.Options` turns it on for every object name a
+        /// database takes, as git's SHA-1 always runs it. It costs about
+        /// five times the hash. SHA-256 ignores it, there being no such
+        /// attack on SHA-256.
         detect_collisions: bool = false,
     };
 

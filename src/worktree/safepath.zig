@@ -47,14 +47,20 @@ pub const Reason = enum {
     symlinked_gitmodules,
 };
 
-/// What is being validated, because the rules differ slightly.
+/// What is being validated, because the rules differ.
 pub const Use = enum {
     /// A path that will be created inside a working tree. Every rule
-    /// applies.
+    /// applies, on every platform, so a tree checks out the same anywhere.
     worktree,
-    /// A path stored in a tree or an index but not necessarily written out.
-    /// The `.git` and traversal rules still apply, because such a path is
-    /// one checkout away from being written.
+    /// A path stored in a tree or an index but not necessarily written out:
+    /// what git's `verify_path` refuses everywhere. The traversal rules and
+    /// `.git` in every spelling HFS+ and NTFS open as it still apply,
+    /// because such a path is one checkout away from being written; the
+    /// names only Windows cannot create -- `aux.c`, `t.`, a control
+    /// character -- are refused when a checkout would write them, and not
+    /// in an index or a tree, as git's are not: the Linux kernel's index
+    /// holds `aux.c`. A backslash and a drive letter are refused on
+    /// Windows, where they are separators.
     stored,
 };
 
@@ -62,10 +68,17 @@ pub const Use = enum {
 pub fn checkComponent(name: []const u8, use: Use) ?Reason {
     if (name.len == 0) return .empty;
     if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return .dot_component;
+    const windows_rules = use == .worktree or builtin.os.tag == .windows;
     for (name) |c| {
-        if (c == '/' or c == '\\') return .separator_inside_component;
-        if (c < 0x20 or c == 0x7f) return .control_character;
+        if (c == '/' or (c == '\\' and windows_rules)) return .separator_inside_component;
+        // No git path holds a NUL, whatever the platform.
+        if (c == 0 or (use == .worktree and (c < 0x20 or c == 0x7f))) return .control_character;
     }
+    if (use == .stored) {
+        if (isNtfsDotGit(name) or isHfsDot(name, "git") or isGitName(name)) return .git_directory;
+        return null;
+    }
+    if (isHfsDot(name, "git")) return .git_directory;
 
     // Windows strips trailing dots and spaces when it opens a name, so a
     // name that ends in either is a second spelling of a shorter one.
@@ -140,9 +153,11 @@ pub const Refusal = struct {
 /// decided when it is not.
 pub fn check(path: []const u8, use: Use) ?Refusal {
     if (path.len == 0) return .{ .reason = .empty, .component = path };
-    if (path[0] == '/' or path[0] == '\\') return .{ .reason = .absolute, .component = path[0..1] };
-    // `C:\x` and `C:x` both name something outside the working tree.
-    if (path.len >= 2 and path[1] == ':' and std.ascii.isAlphabetic(path[0])) {
+    // A backslash and `C:\x` or `C:x` name something outside the working
+    // tree where they are separators.
+    const windows_rules = use == .worktree or builtin.os.tag == .windows;
+    if (path[0] == '/' or (path[0] == '\\' and windows_rules)) return .{ .reason = .absolute, .component = path[0..1] };
+    if (windows_rules and path.len >= 2 and path[1] == ':' and std.ascii.isAlphabetic(path[0])) {
         return .{ .reason = .absolute, .component = path[0..2] };
     }
     var it = std.mem.splitScalar(u8, path, '/');
@@ -382,10 +397,29 @@ test "traversal and separators are refused" {
     try std.testing.expectEqual(Reason.dot_component, check("a/../b", .stored).?.reason);
     try std.testing.expectEqual(Reason.dot_component, check("./a", .stored).?.reason);
     try std.testing.expectEqual(Reason.absolute, check("/etc/passwd", .stored).?.reason);
-    try std.testing.expectEqual(Reason.absolute, check("C:/Windows", .stored).?.reason);
-    try std.testing.expectEqual(Reason.separator_inside_component, checkComponent("a\\b", .stored).?);
+    try std.testing.expectEqual(Reason.absolute, check("C:/Windows", .worktree).?.reason);
+    try std.testing.expectEqual(Reason.separator_inside_component, checkComponent("a\\b", .worktree).?);
     try std.testing.expectEqual(Reason.control_character, checkComponent("a\x00b", .stored).?);
     try std.testing.expect(check("a/b/c.txt", .worktree) == null);
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectEqual(Reason.absolute, check("C:/Windows", .stored).?.reason);
+        try std.testing.expectEqual(Reason.separator_inside_component, checkComponent("a\\b", .stored).?);
+    } else {
+        try std.testing.expect(check("C:/Windows", .stored) == null);
+        try std.testing.expect(checkComponent("a\\b", .stored) == null);
+    }
+}
+
+test "a stored path refuses what git's verify_path refuses everywhere, and no more" {
+    // Names only Windows cannot create, which a Linux or macOS index holds.
+    for ([_][]const u8{ "d/aux.c", "a\tb", "t.", "x ", "con", "a:b" }) |path| {
+        try std.testing.expectEqual(null, check(path, .stored));
+        try std.testing.expect(check(path, .worktree) != null);
+    }
+    for ([_][]const u8{ ".git", "a/.GIT/b", ".git.", "git~1", ".git:x", ".g\u{200c}it", "../a", "" }) |path| {
+        try std.testing.expect(check(path, .stored) != null);
+        try std.testing.expect(check(path, .worktree) != null);
+    }
 }
 
 test "trailing dots and spaces are refused" {

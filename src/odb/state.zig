@@ -21,6 +21,9 @@ pub const Data = struct {
     options: odb.Options,
     sources: std.ArrayList(Source) = .empty,
     cache: pack.Cache,
+    /// The id the next pack opened is given: the delta-base cache's key
+    /// for it, which no other pack ever has, however the packs move.
+    next_pack_id: u32 = 0,
     generation: u32 = 0,
     bitmap_checked: bool = false,
     bitmap: ?reachability.Store = null,
@@ -47,6 +50,9 @@ pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!
 pub const NamedPack = struct {
     pack: pack.Pack,
     name: []u8,
+    /// This pack's key in the delta-base cache, given when it was opened:
+    /// a position among the packs moves when a re-scan adds one before it.
+    id: u32,
 
     pub fn deinit(named: *NamedPack, gpa: Allocator, io: Io) void {
         named.pack.deinit(io);
@@ -58,6 +64,9 @@ pub const NamedPack = struct {
 /// One `objects` directory: the repository's own, or an alternate.
 pub const Source = struct {
     dir: Io.Dir,
+    /// Where `dir` is, every link resolved, owned: how an alternate the
+    /// chain names twice, or one naming this database, is known.
+    real_path: []u8,
     pack_dir: ?Io.Dir,
     packs: std.ArrayList(NamedPack),
     /// Whether objects may be written here. Only the first source is.

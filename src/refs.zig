@@ -118,6 +118,9 @@ pub const Store = struct {
         /// What `core.sharedRepository` asks of the permissions of the
         /// refs, logs and directories written.
         shared: fs.Shared = .umask,
+        /// `core.packedRefsTimeout`: how long a writer waits for
+        /// `packed-refs.lock`, with git's backoff. git waits a second.
+        packed_lock: fs.OnContention = .{ .wait_ms = 1000 },
     };
 
     /// Choose the backend and its cache once, before the store is published.
@@ -125,6 +128,7 @@ pub const Store = struct {
     pub fn initWithOptions(gpa: Allocator, kind: Kind, git_dir: Io.Dir, common_dir: Io.Dir, options: Options) Allocator.Error!Store {
         const state = try state_mod.create(gpa, kind, options.format, options.reftable, git_dir, common_dir);
         state_mod.get(state).shared = options.shared;
+        state_mod.get(state).packed_lock = options.packed_lock;
         return .{ ._state = state };
     }
 
@@ -234,15 +238,32 @@ pub const Store = struct {
 
     fn readLoose(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
         const dir = store.dirFor(name);
-        const bytes = (try fs.readFileAlloc(gpa, io, dir, name, 4096)) orelse return null;
-        defer gpa.free(bytes);
-        const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-        if (std.mem.startsWith(u8, trimmed, "ref:")) {
-            const target = std.mem.trim(u8, trimmed[4..], " \t");
+        // A ref is an object name or `ref: <name>`, and git reads no more of
+        // the file than that: `FETCH_HEAD` and a merge's `MERGE_HEAD` carry
+        // further lines, of any length, after the first object name. One
+        // byte past the limit says whether a symbolic ref was cut short.
+        var buffer: [max_loose_ref + 1]u8 = undefined;
+        const bytes = dir.readFile(io, name, &buffer) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.IsDir => return null,
+            else => |e| return e,
+        };
+        const value = try parseLoose(gpa, store.objectFormat(), bytes);
+        return value;
+    }
+
+    /// git's `parse_loose_ref_contents`: `ref:` and a name, or an object
+    /// name followed by whitespace or nothing.
+    fn parseLoose(gpa: Allocator, kind: Kind, bytes: []const u8) ReadError!Ref {
+        if (std.mem.startsWith(u8, bytes, "ref:")) {
+            if (bytes.len > max_loose_ref) return error.MalformedRef;
+            const target = std.mem.trim(u8, bytes[4..], " \t\r\n");
             if (target.len == 0) return error.MalformedRef;
             return .{ .symbolic = try gpa.dupe(u8, target) };
         }
-        const oid = Oid.parse(store.objectFormat(), trimmed) catch return error.MalformedRef;
+        const hex_len = kind.hexLen();
+        if (bytes.len < hex_len) return error.MalformedRef;
+        if (bytes.len > hex_len and !std.ascii.isWhitespace(bytes[hex_len])) return error.MalformedRef;
+        const oid = Oid.parse(kind, bytes[0..hex_len]) catch return error.MalformedRef;
         return .{ .direct = oid };
     }
 
@@ -473,8 +494,23 @@ pub const Store = struct {
     /// already peeled.
     pub fn writePacked(store: *const Store, io: Io, entries: []const PackedEntry) TransactionError!void {
         var buffer: [64 * 1024]u8 = undefined;
-        var lock = try fs.LockFile.open(state_mod.get(store._state).gpa, io, store.commonDir(), "packed-refs", &buffer, .{ .shared = store.sharedPermissions() });
+        var lock = try store.lockPacked(io, &buffer);
         defer lock.deinit(io);
+        try store.writePackedLocked(io, &lock, entries);
+    }
+
+    /// Take `packed-refs.lock`, waiting as `core.packedRefsTimeout` says.
+    fn lockPacked(store: *const Store, io: Io, buffer: []u8) TransactionError!fs.LockFile {
+        const data = state_mod.get(store._state);
+        return fs.LockFile.open(data.gpa, io, store.commonDir(), "packed-refs", buffer, .{
+            .shared = store.sharedPermissions(),
+            .on_contention = data.packed_lock,
+        });
+    }
+
+    /// Write `entries` through a `packed-refs.lock` already held, and
+    /// install it.
+    fn writePackedLocked(store: *const Store, io: Io, lock: *fs.LockFile, entries: []const PackedEntry) TransactionError!void {
         const w = lock.writer();
         w.writeAll(packed_header) catch return error.WriteFailed;
         var hex: [hash.max_hex_len]u8 = undefined;
@@ -529,6 +565,9 @@ pub const Store = struct {
         return reflog.read(gpa, io, store.dirFor(name), name, store.objectFormat());
     }
 };
+
+/// The longest loose ref file read whole: a symbolic one, `ref: <name>`.
+const max_loose_ref = 4096;
 
 /// Capitals, dashes and underscores and nothing else: git's syntax for a
 /// pseudo-ref.
@@ -591,6 +630,13 @@ pub const Transaction = struct {
     peeler: ?Peeler = null,
     /// What `prepare` took in a reftable repository.
     reftable: ?*stack_engine.Pending = null,
+    /// `packed-refs.lock`, held from `prepare` to the end when a deletion
+    /// removes a packed ref, as git holds it, and `packed-refs` as read
+    /// under it: a concurrent `pack-refs` cannot slip a ref in between the
+    /// read and the write.
+    packed_lock: ?fs.LockFile = null,
+    packed_lock_buffer: []u8 = &.{},
+    packed_listing: ?Store.PackedListing = null,
 
     /// One ref's change.
     pub const Edit = value_mod.Edit;
@@ -653,6 +699,14 @@ pub const Transaction = struct {
         }
         const owned = try tx.gpa.dupe(u8, name);
         errdefer tx.gpa.free(owned);
+        if (new) |value| if (value == .symbolic) {
+            // git's `check_refname_format` on the target, and its rule that
+            // `HEAD` names a ref under `refs/`: a repository whose `HEAD`
+            // does not is one git no longer recognises.
+            const target = value.symbolic;
+            if (!safepath.isValidRefName(target)) return error.InvalidRefName;
+            if (std.mem.eql(u8, name, "HEAD") and !std.mem.startsWith(u8, target, "refs/")) return error.InvalidRefName;
+        };
         var stored_new: ?Ref = null;
         if (new) |value| {
             stored_new = switch (value) {
@@ -677,7 +731,13 @@ pub const Transaction = struct {
         }
 
         try tx.splitSymbolic(io);
+        try tx.lockAndCheck(io);
+    }
 
+    /// `prepare` after the edits through symbolic refs are split: nested
+    /// names refused, every lock taken and every expected value checked.
+    fn lockAndCheck(tx: *Transaction, io: Io) TransactionError!void {
+        errdefer tx.abort(io);
         // Two edits whose names nest — `refs/heads/a` and `refs/heads/a/b` —
         // cannot both exist, because one is a file and the other a directory
         // with the same path.
@@ -692,6 +752,7 @@ pub const Transaction = struct {
         if (tx.store.refFormat() == .reftable) {
             // One table under one lock: no `packed-refs` step to announce.
             try stack_engine.prepare(io, tx);
+            try tx.checkSplitUnchanged(io);
             if (tx.hooks != null) try tx.announce(io, .prepared);
             tx.prepared = true;
             return;
@@ -699,6 +760,7 @@ pub const Transaction = struct {
 
         for (tx.edits.items) |*edit| {
             const dir = tx.store.dirFor(edit.name);
+            if (edit.via == null and edit.new != null) try tx.checkAvailable(io, edit.name);
             if (std.fs.path.dirnamePosix(edit.name)) |parent| {
                 fs.makeDirs(io, dir, parent, tx.store.sharedPermissions()) catch |err| switch (err) {
                     error.PathAlreadyExists => {},
@@ -730,12 +792,6 @@ pub const Transaction = struct {
                         }
                     },
                 }
-                const loose = try tx.store.readLoose(tx.gpa, io, edit.name);
-                edit.was_packed = loose == null;
-                if (loose) |loose_value| switch (loose_value) {
-                    .symbolic => |target| tx.gpa.free(target),
-                    .direct => {},
-                };
             }
             edit.old = current_oid;
 
@@ -749,6 +805,8 @@ pub const Transaction = struct {
                 },
             }
         }
+        try tx.checkSplitUnchanged(io);
+        try tx.lockPackedForDeletions(io);
         if (tx.hooks != null) {
             // git's files backend removes deleted refs from `packed-refs` in
             // a transaction of its own, which the hook hears about too: it
@@ -770,6 +828,93 @@ pub const Transaction = struct {
             try tx.announce(io, .prepared);
         }
         tx.prepared = true;
+    }
+
+    /// The symbolic refs `splitSymbolic` went through, read again now that
+    /// their locks are held: each still names the next ref of its chain,
+    /// and the ref at the end is still not symbolic. git reads them under
+    /// their locks; a `HEAD` a concurrent checkout retargeted in between
+    /// would otherwise have the branch it left moved.
+    fn checkSplitUnchanged(tx: *Transaction, io: Io) TransactionError!void {
+        for (tx.edits.items) |e| {
+            const own_new_symbolic = if (e.new) |n| n == .symbolic else false;
+            if (e.via == null and (!e.deref or own_new_symbolic)) continue;
+            const own = try tx.store.readOwnValue(tx.gpa, io, e.name);
+            const target = if (own) |value| switch (value) {
+                .symbolic => |t| t,
+                .direct => null,
+            } else null;
+            defer if (target) |t| tx.gpa.free(t);
+            const at = e.via orelse {
+                if (target != null) return error.ExpectedValueMismatch;
+                continue;
+            };
+            const next = target orelse return error.ExpectedValueMismatch;
+            const in_chain = std.mem.eql(u8, next, tx.edits.items[at].name) or for (tx.edits.items) |other| {
+                if (other.via == at and std.mem.eql(u8, other.name, next)) break true;
+            } else false;
+            if (!in_chain) return error.ExpectedValueMismatch;
+        }
+    }
+
+    /// git's `files_transaction_prepare`: a deletion takes
+    /// `packed-refs.lock` and reads the file under it, and whether each
+    /// deleted ref is in it decides whether the file is rewritten -- a ref
+    /// that is loose and packed at once is deleted from both, or the packed
+    /// value comes back. When no deleted ref is packed the lock is given up.
+    fn lockPackedForDeletions(tx: *Transaction, io: Io) TransactionError!void {
+        if (!tx.hasDeletions()) return;
+        tx.packed_lock_buffer = try tx.gpa.alloc(u8, 64 * 1024);
+        tx.packed_lock = try tx.store.lockPacked(io, tx.packed_lock_buffer);
+        tx.packed_listing = try tx.store.readPacked(tx.gpa, io);
+        var needed = false;
+        for (tx.edits.items) |*edit| {
+            if (edit.via != null or edit.new != null) continue;
+            edit.was_packed = tx.packed_listing.?.find(edit.name) != null;
+            needed = needed or edit.was_packed;
+        }
+        if (!needed) tx.releasePackedLock(io);
+    }
+
+    fn releasePackedLock(tx: *Transaction, io: Io) void {
+        if (tx.packed_lock) |*lock| {
+            lock.deinit(io);
+            tx.packed_lock = null;
+        }
+        if (tx.packed_listing) |*listing| {
+            listing.deinit();
+            tx.packed_listing = null;
+        }
+        if (tx.packed_lock_buffer.len != 0) {
+            tx.gpa.free(tx.packed_lock_buffer);
+            tx.packed_lock_buffer = &.{};
+        }
+    }
+
+    /// git's `refs_verify_refname_available`: `name` cannot be written
+    /// while a ref exists at one of its parents (`refs/heads/a` for
+    /// `refs/heads/a/b`) or below it (`refs/heads/c/d` for
+    /// `refs/heads/c`), loose or packed. A ref this transaction also names
+    /// is no exception: `prepare` has refused the pair already, as git
+    /// refuses to process both at once.
+    fn checkAvailable(tx: *Transaction, io: Io, name: []const u8) TransactionError!void {
+        const dir = tx.store.dirFor(name);
+        var parent = std.fs.path.dirnamePosix(name);
+        while (parent) |p| : (parent = std.fs.path.dirnamePosix(p)) {
+            if (std.mem.findScalar(u8, p, '/') == null) break;
+            if (try isLooseFile(io, dir, p)) return error.RefNameConflict;
+            if (try tx.store.readPackedOne(io, p) != null) return error.RefNameConflict;
+        }
+        if (try hasLooseBelow(tx.gpa, io, dir, name)) return error.RefNameConflict;
+        const listing = try tx.store.acquirePacked(io);
+        defer tx.store.releasePacked(io);
+        var folder_buf: [max_loose_ref + 1]u8 = undefined;
+        if (name.len + 1 > folder_buf.len) return;
+        @memcpy(folder_buf[0..name.len], name);
+        folder_buf[name.len] = '/';
+        const folder = folder_buf[0 .. name.len + 1];
+        const from = std.sort.lowerBound(Store.PackedEntry, listing.entries, folder, Store.orderPrefix);
+        if (from < listing.entries.len and std.mem.startsWith(u8, listing.entries[from].name, folder)) return error.RefNameConflict;
     }
 
     fn hasDeletions(tx: *const Transaction) bool {
@@ -920,50 +1065,47 @@ pub const Transaction = struct {
             return;
         }
 
-        var rewrite_packed = false;
-        for (tx.edits.items) |edit| {
-            if (edit.via == null and edit.new == null and edit.was_packed) rewrite_packed = true;
+        // git's `files_transaction_finish`: updates first, so what they
+        // reference stays referenced; then each deleted ref's log, then its
+        // packed entry, then its loose file, each while its lock is held,
+        // so a writer waiting on a lock never has its ref removed after it.
+        var hex: [hash.max_hex_len]u8 = undefined;
+        for (tx.edits.items) |*edit| {
+            // Its lock is given up with the rest, the file as it was.
+            if (edit.via != null) continue;
+            const new = edit.new orelse continue;
+            const lock = &edit.lock.?;
+            switch (new) {
+                .direct => |oid| {
+                    lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed;
+                },
+                .symbolic => |target| {
+                    lock.writer().print("ref: {s}\n", .{target}) catch return error.WriteFailed;
+                },
+            }
+            try lock.commit(io);
         }
-        if (rewrite_packed) try tx.removeFromPacked(io);
+        for (tx.edits.items) |edit| {
+            if (edit.via != null or edit.new != null) continue;
+            const log_path = try reflog.pathFor(tx.gpa, edit.name);
+            defer tx.gpa.free(log_path);
+            tx.store.dirFor(edit.name).deleteFile(io, log_path) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => {},
+                else => |e| return e,
+            };
+        }
+        if (tx.packed_lock != null) try tx.removeFromPacked(io);
         if (tx.packed_announced) {
             tx.packed_announced = false;
             // ziglint-ignore: Z026 packed-refs is rewritten; as git, a hook failing on "committed" changes nothing
             tx.announceAs(io, .committed, true) catch {};
         }
-
-        var hex: [hash.max_hex_len]u8 = undefined;
-        for (tx.edits.items) |*edit| {
-            // Its lock is given up with the rest, the file as it was.
-            if (edit.via != null) continue;
-            const lock = &edit.lock.?;
-            if (edit.new) |new| {
-                switch (new) {
-                    .direct => |oid| {
-                        lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed;
-                    },
-                    .symbolic => |target| {
-                        lock.writer().print("ref: {s}\n", .{target}) catch return error.WriteFailed;
-                    },
-                }
-                try lock.commit(io);
-            } else {
-                // A deletion gives the lock up and removes the loose file.
-                lock.deinit(io);
-                edit.lock = null;
-                const dir = tx.store.dirFor(edit.name);
-                dir.deleteFile(io, edit.name) catch |err| switch (err) {
-                    error.FileNotFound => {},
-                    else => |e| return e,
-                };
-                removeEmptyParents(io, dir, edit.name);
-                const log_path = try reflog.pathFor(tx.gpa, edit.name);
-                defer tx.gpa.free(log_path);
-                dir.deleteFile(io, log_path) catch |err| switch (err) {
-                    error.FileNotFound, error.NotDir => {},
-                    else => |e| return e,
-                };
-                removeEmptyParents(io, dir, log_path);
-            }
+        for (tx.edits.items) |edit| {
+            if (edit.via != null or edit.new != null) continue;
+            tx.store.dirFor(edit.name).deleteFile(io, edit.name) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            };
         }
 
         if (log) |message| {
@@ -1009,25 +1151,49 @@ pub const Transaction = struct {
 
         tx.finished = true;
         tx.releaseLocks(io);
+        // With the locks gone, the directories the deletions emptied go,
+        // as git's cleanup removes them.
+        for (tx.edits.items) |edit| {
+            if (edit.via != null or edit.new != null) continue;
+            const dir = tx.store.dirFor(edit.name);
+            removeEmptyParents(io, dir, edit.name);
+            const log_path = try reflog.pathFor(tx.gpa, edit.name);
+            defer tx.gpa.free(log_path);
+            removeEmptyParents(io, dir, log_path);
+        }
         // The refs have moved; a hook failing now changes nothing, and its
         // status is not an error of the transaction's.
         // ziglint-ignore: Z026 the refs have moved; as git, a hook failing on "committed" changes nothing
         if (tx.announced) tx.announce(io, .committed) catch {};
     }
 
+    /// Rewrite `packed-refs` without the deleted refs, from the file as it
+    /// was read under the lock `prepare` took, through that lock.
     fn removeFromPacked(tx: *Transaction, io: Io) TransactionError!void {
-        var listing = try tx.store.readPacked(tx.gpa, io);
-        defer listing.deinit();
+        const listing = &tx.packed_listing.?;
+        var deleted: std.ArrayList([]const u8) = .empty;
+        defer deleted.deinit(tx.gpa);
+        for (tx.edits.items) |e| {
+            if (e.via == null and e.new == null) try deleted.append(tx.gpa, e.name);
+        }
+        std.mem.sort([]const u8, deleted.items, {}, lessThanName);
         var kept: std.ArrayList(Store.PackedEntry) = .empty;
         defer kept.deinit(tx.gpa);
+        try kept.ensureTotalCapacity(tx.gpa, listing.entries.len);
         for (listing.entries) |entry| {
-            var removed = false;
-            for (tx.edits.items) |edit| {
-                if (edit.via == null and edit.new == null and std.mem.eql(u8, edit.name, entry.name)) removed = true;
-            }
-            if (!removed) try kept.append(tx.gpa, entry);
+            const at = std.sort.lowerBound([]const u8, deleted.items, entry.name, orderName);
+            if (at < deleted.items.len and std.mem.eql(u8, deleted.items[at], entry.name)) continue;
+            kept.appendAssumeCapacity(entry);
         }
-        try tx.store.writePacked(io, kept.items);
+        try tx.store.writePackedLocked(io, &tx.packed_lock.?, kept.items);
+    }
+
+    fn lessThanName(_: void, a: []const u8, b: []const u8) bool {
+        return std.mem.order(u8, a, b) == .lt;
+    }
+
+    fn orderName(name: []const u8, item: []const u8) std.math.Order {
+        return std.mem.order(u8, name, item);
     }
 
     /// Give up, leaving the repository exactly as it was. A transaction
@@ -1048,6 +1214,7 @@ pub const Transaction = struct {
 
     fn releaseLocks(tx: *Transaction, io: Io) void {
         stack_engine.releasePending(io, tx);
+        tx.releasePackedLock(io);
         for (tx.edits.items) |*edit| {
             if (edit.lock) |*lock| {
                 lock.deinit(io);
@@ -1060,6 +1227,33 @@ pub const Transaction = struct {
         }
     }
 };
+
+/// Whether `path` in `dir` is a file: a loose ref, which no ref below it
+/// can share a path with.
+fn isLooseFile(io: Io, dir: Io.Dir, path: []const u8) TransactionError!bool {
+    const stat = dir.statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return false,
+        else => |e| return e,
+    };
+    return stat.kind != .directory;
+}
+
+/// Whether a file other than a lock is anywhere under the directory `name`
+/// in `dir`: a loose ref that `name` cannot be written over.
+fn hasLooseBelow(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) TransactionError!bool {
+    var sub = dir.openDir(io, name, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return false,
+        else => |e| return e,
+    };
+    defer sub.close(io);
+    var walker = try sub.walk(gpa);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind == .directory or std.mem.endsWith(u8, entry.basename, ".lock")) continue;
+        return true;
+    }
+    return false;
+}
 
 /// Remove the directories above `path` that are left empty, down to but not
 /// including `refs/<kind>/` — or `logs/refs/<kind>/` — which git keeps.
@@ -1336,6 +1530,175 @@ test "deleting a packed ref removes it from the packed file" {
 
     try std.testing.expect((try store.read(gpa, io, "refs/heads/gone")) == null);
     try std.testing.expect((try store.read(gpa, io, "refs/heads/keep")) != null);
+}
+
+test "deleting a ref that is loose and packed at once removes both, as git does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try repo.exec(io, &.{ "branch", "x" });
+    try repo.exec(io, &.{ "pack-refs", "--all" });
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "two" });
+    try repo.exec(io, &.{ "branch", "-f", "x", "HEAD" });
+
+    var git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var store: Store = try .init(gpa, .sha1, git_dir, git_dir);
+    defer store.deinit();
+    var tx = store.begin(gpa);
+    defer tx.deinit(io);
+    try tx.delete("refs/heads/x", .must_exist);
+    try tx.commit(io, null);
+
+    try std.testing.expect((try store.read(gpa, io, "refs/heads/x")) == null);
+    repo.report_failures = false;
+    try std.testing.expectError(error.GitFailed, repo.run(io, &.{ "rev-parse", "--verify", "-q", "refs/heads/x" }));
+}
+
+test "a deletion holds packed-refs.lock from prepare, so git cannot pack a ref in between" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try repo.exec(io, &.{ "branch", "a" });
+    try repo.exec(io, &.{ "pack-refs", "--all" });
+    try repo.exec(io, &.{ "branch", "b" });
+
+    var git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var store: Store = try .initWithOptions(gpa, .sha1, git_dir, git_dir, .{ .packed_lock = .fail });
+    defer store.deinit();
+    var tx = store.begin(gpa);
+    defer tx.deinit(io);
+    try tx.delete("refs/heads/a", .must_exist);
+    try tx.prepare(io);
+    // git's pack-refs waits for the lock this transaction holds, and gives
+    // up rather than write a file the deletion would then overwrite.
+    repo.report_failures = false;
+    try std.testing.expectError(error.GitFailed, repo.run(io, &.{ "-c", "core.packedRefsTimeout=0", "pack-refs", "--all" }));
+    repo.report_failures = true;
+    try tx.commit(io, null);
+    try repo.exec(io, &.{ "pack-refs", "--all" });
+    const listed = try repo.run(io, &.{ "for-each-ref", "--format=%(refname)" });
+    defer gpa.free(listed);
+    try std.testing.expectEqualStrings("refs/heads/b\nrefs/heads/main\n", listed);
+
+    // A lock another writer holds is waited for as long as the store says,
+    // then refused with nothing changed.
+    try git_dir.writeFile(io, .{ .sub_path = "packed-refs.lock", .data = "" });
+    var held = store.begin(gpa);
+    defer held.deinit(io);
+    try held.delete("refs/heads/b", .must_exist);
+    try std.testing.expectError(error.LockHeld, held.commit(io, null));
+    try std.testing.expect((try store.read(gpa, io, "refs/heads/b")) != null);
+}
+
+test "a name that shares a path with an existing ref is refused, loose or packed, as git refuses it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try repo.exec(io, &.{ "branch", "a" });
+    try repo.exec(io, &.{ "branch", "c/d" });
+    try repo.exec(io, &.{ "pack-refs", "--all" });
+    try repo.exec(io, &.{ "branch", "e/f" });
+    const head_text = try repo.run(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head_text);
+    const head = try Oid.parse(.sha1, std.mem.trim(u8, head_text, "\r\n"));
+
+    var git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var store: Store = try .init(gpa, .sha1, git_dir, git_dir);
+    defer store.deinit();
+    repo.report_failures = false;
+    for ([_][]const u8{ "refs/heads/a/b", "refs/heads/c", "refs/heads/e" }) |name| {
+        try std.testing.expectError(error.GitFailed, repo.run(io, &.{ "update-ref", name, "HEAD" }));
+        var tx = store.begin(gpa);
+        defer tx.deinit(io);
+        // The first edit is not installed when the second is refused.
+        try tx.create("refs/heads/first", .{ .direct = head });
+        try tx.create(name, .{ .direct = head });
+        try std.testing.expectError(error.RefNameConflict, tx.commit(io, null));
+        try std.testing.expect((try store.read(gpa, io, "refs/heads/first")) == null);
+    }
+    // A ref beside them, sharing only a prefix of its name, is no conflict.
+    var tx = store.begin(gpa);
+    defer tx.deinit(io);
+    try tx.create("refs/heads/ab", .{ .direct = head });
+    try tx.create("refs/heads/c-d", .{ .direct = head });
+    try tx.commit(io, null);
+}
+
+test "FETCH_HEAD and a merge's MERGE_HEAD read as their first object name, as git reads them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var source = try testgit.Repo.init(gpa, io, &.{});
+    defer source.deinit();
+    try source.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try source.exec(io, &.{ "branch", "other" });
+    const source_path = try source.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(source_path);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.exec(io, &.{ "fetch", "-q", source_path, "main", "other" });
+    try repo.writeFile(io, ".git/MERGE_HEAD", "1" ** 40 ++ "\n" ++ "2" ** 40 ++ "\n");
+
+    var git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var store: Store = try .init(gpa, .sha1, git_dir, git_dir);
+    defer store.deinit();
+    for ([_][]const u8{ "FETCH_HEAD", "MERGE_HEAD" }) |name| {
+        const theirs = try repo.run(io, &.{ "rev-parse", name });
+        defer gpa.free(theirs);
+        const ours = (try store.read(gpa, io, name)).?;
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try std.testing.expectEqualStrings(std.mem.trim(u8, theirs, "\r\n"), ours.direct.hex(&hex));
+    }
+    // An object name run into more text is not one.
+    try repo.writeFile(io, ".git/ORIG_HEAD", "1" ** 41 ++ "\n");
+    try std.testing.expectError(error.MalformedRef, store.read(gpa, io, "ORIG_HEAD"));
+}
+
+test "a symbolic ref's target is checked as git checks it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
+    defer store.deinit();
+    var tx = store.begin(gpa);
+    defer tx.deinit(io);
+    try std.testing.expectError(error.InvalidRefName, tx.update("HEAD", .{ .symbolic = "../x\nfoo" }, .any));
+    try std.testing.expectError(error.InvalidRefName, tx.update("refs/heads/s", .{ .symbolic = "refs/heads/a..b" }, .any));
+    try std.testing.expectError(error.InvalidRefName, tx.update("HEAD", .{ .symbolic = "ORIG_HEAD" }, .any));
+    try tx.update("refs/heads/s", .{ .symbolic = "ORIG_HEAD" }, .any);
+    try tx.update("HEAD", .{ .symbolic = "refs/heads/main" }, .any);
+}
+
+test "an update through HEAD is refused when HEAD moves between the split and the locks" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "refs/heads");
+    try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/main\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = "1" ** 40 ++ "\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/other", .data = "1" ** 40 ++ "\n" });
+    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
+    defer store.deinit();
+    var tx = store.begin(gpa);
+    defer tx.deinit(io);
+    try tx.update("HEAD", .{ .direct = try Oid.parse(.sha1, "2" ** 40) }, .any);
+    try tx.splitSymbolic(io);
+    // A checkout elsewhere moves HEAD to another branch.
+    try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/other\n" });
+    try std.testing.expectError(error.ExpectedValueMismatch, tx.lockAndCheck(io));
+    const main = (try store.read(gpa, io, "refs/heads/main")).?;
+    try std.testing.expect(main.direct.eql(try Oid.parse(.sha1, "1" ** 40)));
 }
 
 test "a ref name ending in .lock is refused" {

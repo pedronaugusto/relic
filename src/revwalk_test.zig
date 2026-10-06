@@ -9,6 +9,7 @@ const testing = std.testing;
 
 const hash = @import("hash.zig");
 const odb_mod = @import("odb.zig");
+const object = @import("object.zig");
 const revwalk = @import("revwalk.zig");
 const commitgraph = @import("odb/commitgraph.zig");
 const testgit = @import("testing/git.zig");
@@ -140,4 +141,56 @@ test "a walk with hidden commits lists what git rev-list lists, for every pair" 
             try testing.expect(found);
         }
     };
+}
+
+test "a commit's tree and parents are read where git reads them, whatever headers follow" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.writeFile(io, "f", "one\n");
+    try repo.exec(io, &.{ "add", "f" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const parent = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(parent);
+    const tree = try repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(tree);
+    try repo.writeFile(io, "empty", "");
+    const empty_tree = try repo.line(io, &.{ "hash-object", "-t", "tree", "-w", "empty" });
+    defer gpa.free(empty_tree);
+    // A second tree and a parent after the identities, which git's fsck
+    // lets through and git's parser does not read.
+    const text = try std.fmt.allocPrint(gpa, "tree {s}\nauthor A <a@b> 1 +0000\ncommitter A <a@b> 1 +0000\ntree {s}\nparent {s}\n\nodd\n", .{ tree, empty_tree, parent });
+    defer gpa.free(text);
+    try repo.writeFile(io, "odd", text);
+    const odd = try repo.line(io, &.{ "hash-object", "-t", "commit", "-w", "--literally", "odd" });
+    defer gpa.free(odd);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    const tree_of = try std.fmt.allocPrint(gpa, "{s}^{{tree}}", .{odd});
+    defer gpa.free(tree_of);
+    const theirs_tree = try repo.line(io, &.{ "rev-parse", "--verify", tree_of });
+    defer gpa.free(theirs_tree);
+    const found = try db.read(io, try Oid.parse(.sha1, odd));
+    defer gpa.free(found.bytes);
+    var parsed = try object.Commit.parse(gpa, .sha1, found.bytes);
+    defer parsed.deinit();
+    var tree_hex: [hash.max_hex_len]u8 = undefined;
+    try testing.expectEqualStrings(theirs_tree, parsed.tree.hex(&tree_hex));
+    const theirs_list = try repo.run(io, &.{ "rev-list", odd });
+    defer gpa.free(theirs_list);
+
+    var walk: revwalk.Walk = .init(gpa, &db);
+    defer walk.deinit();
+    try walk.push(try Oid.parse(.sha1, odd));
+    var listed: std.ArrayList(u8) = .empty;
+    defer listed.deinit(gpa);
+    while (try walk.next(io)) |commit| {
+        var hex: [hash.max_hex_len]u8 = undefined;
+        try listed.print(gpa, "{s}\n", .{commit.oid.hex(&hex)});
+    }
+    try testing.expectEqualStrings(theirs_list, listed.items);
 }

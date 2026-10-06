@@ -530,6 +530,7 @@ pub const Repository = struct {
             .format = read.format.ref_storage,
             .reftable = stack_options,
             .shared = repo.shared,
+            .packed_lock = try lockTimeout(repo.configuration(), "core.packedrefstimeout", 1000),
         });
         repo._refs = @ptrCast(store); // safe: the opaque owner retains this allocated Store.
         return repo;
@@ -681,16 +682,18 @@ pub const Repository = struct {
         options.write.index_objects = try config.getBool("reftable.indexobjects", true);
         const factor = try config.getInt("reftable.geometricfactor", options.geometric_factor);
         if (factor > 0 and factor <= std.math.maxInt(u8)) options.geometric_factor = @intCast(factor);
-        // git's reading: zero means try once, a negative number means wait
-        // for ever, which here is as long as a wait can be written down.
-        const timeout = try config.getInt("reftable.locktimeout", 100);
-        options.lock = if (timeout == 0)
-            .fail
-        else if (timeout < 0)
-            .{ .wait_ms = std.math.maxInt(u32) }
-        else
-            .{ .wait_ms = std.math.cast(u32, timeout) orelse std.math.maxInt(u32) };
+        options.lock = try lockTimeout(config, "reftable.locktimeout", 100);
         return options;
+    }
+
+    /// A lock timeout in milliseconds, as git reads one: zero means try
+    /// once, a negative number means wait for ever, which here is as long
+    /// as a wait can be written down.
+    fn lockTimeout(config: *const config_mod.Config, key: []const u8, default: i64) Error!fs.OnContention {
+        const timeout = try config.getInt(key, default);
+        if (timeout == 0) return .fail;
+        if (timeout < 0) return .{ .wait_ms = std.math.maxInt(u32) };
+        return .{ .wait_ms = std.math.cast(u32, timeout) orelse std.math.maxInt(u32) };
     }
 
     fn refuseSetting(diagnostic: ?*Diagnostic, text: []const u8) Allocator.Error!void {

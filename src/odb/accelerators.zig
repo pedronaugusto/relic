@@ -14,6 +14,7 @@ const diff = @import("../diff.zig");
 const Oid = hash.Oid;
 const revwalk_mod = @import("../revwalk.zig");
 const odb_open = @import("open.zig");
+const storage = @import("state.zig");
 
 /// Failures leave the old accelerator published and release this writer's locks.
 pub const Error = odb.Error || graph_mod.Error || diff.Error || fs.LockError || fs.CommitError ||
@@ -91,7 +92,7 @@ fn collectGraphNodes(arena: Allocator, io: Io, db: *odb.Odb, pending: *std.Array
 pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid, options: CommitGraphOptions) Self.Error!?Oid {
     if (db.shallow.count() != 0) return error.ShallowCommitGraph;
     const dir = db.objectsDirectory();
-    var old = try graph_mod.Graph.open(gpa, io, dir, db.objectFormat());
+    var old = try graph_mod.Graph.openUsable(gpa, io, dir, db.objectFormat());
     defer if (old) |*g| g.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -334,10 +335,9 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
     if (inputs.packs.len == 0) return null;
     // Existing MIDX entries have mtime zero in git's merge. New packs win
     // duplicates even when every filesystem timestamp falls in one second.
-    if (try midx_mod.Index.open(gpa, io, dir, db.objectFormat())) |value| {
+    if (try midx_mod.Index.openUsable(gpa, io, dir, db.objectFormat())) |value| {
         var old = value;
         defer old.deinit();
-        try old.verify();
         const arena = inputs.arena.allocator();
         var unchanged = inputs.packs.len == old.pack_count;
         for (inputs.packs) |p| {
@@ -396,9 +396,10 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
 pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: fs.Sync) Self.MidxError!u32 {
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
-    var index = (try midx_mod.Index.open(gpa, io, dir, db.objectFormat())) orelse return 0;
+    // An index that does not read as one assigns nothing, so it is no
+    // reason to remove a pack.
+    var index = (try midx_mod.Index.openUsable(gpa, io, dir, db.objectFormat())) orelse return 0;
     defer index.deinit();
-    try index.verify();
     const counts = try gpa.alloc(u32, index.pack_count);
     defer gpa.free(counts);
     @memset(counts, 0);
@@ -411,6 +412,10 @@ pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: fs.Sync) Self.Midx
     for (counts, 0..) |count, i| {
         if (count != 0) continue;
         const name = index.packName(@intCast(i)) orelse return error.CorruptMultiPackIndex;
+        // Only a pack this database has open, as git removes only the packs
+        // it loaded: the index's word for a name is not enough to remove
+        // files by.
+        if (!ownsPack(db, name)) continue;
         const keep = try std.fmt.allocPrint(arena, "{s}.keep", .{name});
         const cruft = try std.fmt.allocPrint(arena, "{s}.mtimes", .{name});
         if (try existsFile(io, dir, keep) or try existsFile(io, dir, cruft)) continue;
@@ -422,6 +427,16 @@ pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: fs.Sync) Self.Midx
     }
     if (removed > 0) _ = try writeMidx(gpa, io, db, .{ .sync = sync });
     return removed;
+}
+
+/// Whether the database's own directory has the pack `name` open.
+fn ownsPack(db: *const odb.Odb, name: []const u8) bool {
+    const sources = storage.get(db._state).sources.items;
+    if (sources.len == 0) return false;
+    for (sources[0].packs.items) |named| {
+        if (std.mem.eql(u8, named.name, name)) return true;
+    }
+    return false;
 }
 
 fn existsFile(io: Io, dir: Io.Dir, path: []const u8) Io.Dir.AccessError!bool {
@@ -744,9 +759,8 @@ pub const MidxRepackOptions = struct {
 pub fn repackMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxRepackOptions) Self.MidxError!?pack_mod.WriteReport {
     const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
-    var index = (try midx_mod.Index.open(gpa, io, dir, db.objectFormat())) orelse return null;
+    var index = (try midx_mod.Index.openUsable(gpa, io, dir, db.objectFormat())) orelse return null;
     defer index.deinit();
-    try index.verify();
     var inputs = try readPackInputs(gpa, io, dir, db.objectFormat());
     defer inputs.deinit();
     const arena = inputs.arena.allocator();
@@ -808,7 +822,7 @@ const repo_mod = @import("../repo.zig");
 const config_mod = @import("../config.zig");
 
 /// Failures while applying a repository's accelerator configuration.
-pub const MaintenanceError = BitmapError || repo_mod.Error || config_mod.ValueError || error{ UnsupportedGenerationVersion, ReplacedCommitGraph };
+pub const MaintenanceError = BitmapError || repo_mod.Error || config_mod.ValueError || error{UnsupportedGenerationVersion};
 
 /// The purpose selects Git's writeCommitGraph key and default.
 pub const Maintenance = enum { gc, fetch };
@@ -835,20 +849,19 @@ fn repositoryTips(gpa: Allocator, io: Io, repo: *repo_mod.Repository) repo_mod.E
 
 /// Apply gc.writeCommitGraph (default true) or fetch.writeCommitGraph (default false).
 /// Fetch uses split chains; gc publishes a full graph. A shallow repository is skipped,
-/// as Git skips it, and replace refs are refused by name.
+/// as Git skips it. Replace refs change nothing: the graph records the parents the
+/// commits carry, as git's `commit-graph write` records them with replacement off,
+/// and git's readers leave a graph aside while replace refs are in use.
 pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Repository, purpose: Maintenance) Self.MaintenanceError!?Oid {
     const config = repo.configuration();
     if (!try config.getBool(if (purpose == .gc) "gc.writecommitgraph" else "fetch.writecommitgraph", purpose == .gc)) return null;
     if (repo.odb.shallow.count() != 0) return null;
-    var replaced = try repo.refStore().list(gpa, io, "refs/replace/");
-    defer replaced.deinit();
-    if (replaced.entries.len != 0) return error.ReplacedCommitGraph;
     const generation_version = try config.getInt("commitgraph.generationversion", 2);
     if (generation_version != 1 and generation_version != 2) return error.UnsupportedGenerationVersion;
     const tips = try repositoryTips(gpa, io, repo);
     defer gpa.free(tips);
     var settings: ?graph_mod.bloom.Settings = null;
-    var old = try graph_mod.Graph.open(gpa, io, repo.odb.objectsDirectory(), repo.objectFormat());
+    var old = try graph_mod.Graph.openUsable(gpa, io, repo.odb.objectsDirectory(), repo.objectFormat());
     defer if (old) |*g| g.deinit();
     if (old) |*g| if (g.count > 0) if (try g.changedPaths(g.count - 1)) |filter| {
         settings = filter.settings;

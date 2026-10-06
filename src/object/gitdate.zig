@@ -812,8 +812,11 @@ const long_weekdays = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday",
 
 /// git's `tz` integer, `+0130` as 130, in minutes east of UTC.
 pub fn tzMinutes(tz: i32) i32 {
-    const abs: i32 = @intCast(@abs(tz));
-    const minutes = @divTrunc(abs, 100) * 60 + @rem(abs, 100);
+    // In unsigned arithmetic: the most negative `tz` has no positive i32,
+    // and an object may carry any.
+    const abs: u32 = @abs(tz);
+    // cast: at most 2^31 / 100 * 60 + 99, which an i32 holds
+    const minutes: i32 = @intCast(abs / 100 * 60 + abs % 100);
     return if (tz < 0) -minutes else minutes;
 }
 
@@ -833,9 +836,11 @@ fn printTz(gpa: std.mem.Allocator, out: *std.ArrayList(u8), tz: i32) std.mem.All
 /// git's `show_date_relative`.
 pub fn showRelative(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, now: i64) std.mem.Allocator.Error!void {
     if (now < secs) return out.appendSlice(gpa, "in the future");
-    var diff: i64 = now - secs;
+    // Saturating: a date an object carries may be as far back as an i64
+    // goes, and the difference past it is still "many years ago".
+    var diff: i64 = now -| secs;
     if (diff < 90) return plural(gpa, out, diff, "second", " ago");
-    diff = @divTrunc(diff + 30, 60);
+    diff = @divTrunc(diff +| 30, 60);
     if (diff < 90) return plural(gpa, out, diff, "minute", " ago");
     diff = @divTrunc(diff + 30, 60);
     if (diff < 36) return plural(gpa, out, diff, "hour", " ago");
@@ -860,10 +865,14 @@ fn plural(gpa: std.mem.Allocator, out: *std.ArrayList(u8), n: i64, unit: []const
     try out.print(gpa, "{d} {s}{s}{s}", .{ n, unit, if (n == 1) "" else "s", after });
 }
 
-/// The calendar fields of `secs` shown in zone `tz`, as git's `time_to_tm`.
-fn tmIn(secs: i64, tz: i32) Tm {
+/// The calendar fields of `secs` shown in zone `tz`, as git's `time_to_tm`,
+/// or `null` where its `gmtime_r` has none: a time the zone moves past what
+/// a timestamp holds, or a year past what C's `int` holds.
+fn tmIn(secs: i64, tz: i32) ?Tm {
+    const shifted = std.math.add(i64, secs, @as(i64, tzMinutes(tz)) * 60) catch return null;
     var tm: Tm = .{};
-    gmtime(secs + @as(i64, tzMinutes(tz)) * 60, &tm);
+    gmtime(shifted, &tm);
+    if (tm.year < std.math.minInt(i32) or tm.year > std.math.maxInt(i32)) return null;
     return tm;
 }
 
@@ -878,7 +887,10 @@ pub fn show(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tz_in: i
         const now = clock.now orelse return error.DateNeedsClock;
         const zone = clock.local orelse return error.DateNeedsClock;
         human_tz = tzInt(zone.at(zone.context, now).offset_minutes);
-        human_tm = tmIn(now, human_tz);
+        human_tm = tmIn(now, human_tz) orelse epoch: {
+            human_tz = 0;
+            break :epoch tmIn(0, 0).?;
+        };
     }
     var zone_name: []const u8 = "";
     if (mode.local) {
@@ -892,7 +904,12 @@ pub fn show(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tz_in: i
         return printTz(gpa, out, tz);
     }
     if (mode.kind == .relative) return showRelative(gpa, out, secs, clock.now orelse return error.DateNeedsClock);
-    const tm = tmIn(secs, tz);
+    // A time with no calendar date is shown as the epoch in UTC, as git's
+    // `show_date` shows it.
+    const tm = tmIn(secs, tz) orelse epoch: {
+        tz = 0;
+        break :epoch tmIn(0, 0).?;
+    };
     const year: i64 = tm.year + 1900;
     switch (mode.kind) {
         .short => try out.print(gpa, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) }),
@@ -1073,6 +1090,22 @@ test "locale date year width changes percent x without changing percent D" {
     out.clearRetainingCapacity();
     try show(gpa, &out, secs, 0, mode, .{ .locale_date_full_year = true });
     try std.testing.expectEqualStrings("11/18/2023|11/18/23", out.items);
+}
+
+test "a date with no calendar day is shown as the epoch in UTC, and an extreme zone does not crash" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try show(gpa, &out, std.math.maxInt(i64), 100, .{ .kind = .iso8601 }, .{});
+    try std.testing.expectEqualStrings("1970-01-01 00:00:00 +0000", out.items);
+    for ([_]i32{ std.math.minInt(i32), std.math.maxInt(i32), -1 }) |tz| {
+        for ([_]i64{ std.math.minInt(i64), -1, 0, std.math.maxInt(i64) }) |secs| {
+            inline for (.{ Mode{ .kind = .iso8601 }, Mode{ .kind = .rfc2822 }, Mode{ .kind = .short }, Mode{ .kind = .raw }, Mode{ .kind = .iso8601_strict }, Mode{ .kind = .relative } }) |mode| {
+                out.clearRetainingCapacity();
+                try show(gpa, &out, secs, tz, mode, .{ .now = 1_700_000_000 });
+            }
+        }
+    }
 }
 
 test "approximate dates read as git's t0006 reads them" {

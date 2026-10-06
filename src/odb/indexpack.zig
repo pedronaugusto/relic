@@ -84,6 +84,10 @@ pub const Error = error{
     /// A SHA-1 name taken over bytes carrying the signature of a collision
     /// attack, from a database that asks for the check.
     CollisionAttack,
+    /// An object the pack carries has the name of one the database already
+    /// holds, and other bytes: a hash collision, which git's index-pack
+    /// reports as "SHA1 COLLISION FOUND". `Diagnostic.oid` names it.
+    HashCollision,
     /// A commit git's `fsck` refuses. `Diagnostic` names the object and
     /// the problem.
     MalformedCommit,
@@ -123,6 +127,12 @@ pub const Options = struct {
     max_object_bytes: u64 = 1 << 31,
     /// How deep a delta chain may go.
     max_delta_depth: u32 = pack.default_max_depth,
+    /// `core.deltaBaseCacheLimit`: how many bytes of the bases along a
+    /// delta chain one resolving thread holds. Past it the oldest are let
+    /// go and rebuilt from the pack if another delta needs them, as git's
+    /// index-pack prunes them, so a chain of large objects costs time and
+    /// not its whole length in memory. git's default, 96 MiB.
+    delta_base_cache_limit: u64 = 96 << 20,
     progress: ?Progress = null,
     /// Where the object behind a refusal is named, when the caller wants it.
     diagnostic: ?*Diagnostic = null,
@@ -345,6 +355,7 @@ pub fn receive(
     if (count == 0) return .{ .name = null, .objects = 0, .deltas = 0, .appended = 0 };
     try indexer.findBases();
     try indexer.resolve();
+    try indexer.checkCollisions();
 
     var name = trailer;
     var appended: u32 = 0;
@@ -939,6 +950,34 @@ const Indexer = struct {
         }
     }
 
+    /// git's `sha1_object` check: every object the pack carries that the
+    /// database already holds must have the bytes the database holds, or
+    /// the pack is refused, whatever the hash and however the detector
+    /// above is set. Only names already present cost a read.
+    fn checkCollisions(x: *Indexer) Error!void {
+        var by_name: Oid.Map(u32) = .empty;
+        defer by_name.deinit(x.gpa);
+        var w: ?Worker = null;
+        defer if (w) |*worker| worker.deinit();
+        for (x.entries.items, 0..) |entry, at| {
+            if (!try x.db.exists(x.io, entry.oid)) continue;
+            const header = try x.db.readHeader(x.io, entry.oid);
+            const sized = entry.kind != .whole or header.size == entry.size;
+            if (header.type != entry.type or !sized) return x.fail(error.HashCollision, .{ .oid = entry.oid, .offset = entry.offset });
+            if (header.size > x.options.max_object_bytes) continue;
+            if (w == null) {
+                w = try .init(x);
+                try by_name.ensureTotalCapacity(x.gpa, @intCast(x.entries.items.len));
+                for (x.entries.items, 0..) |e, i| by_name.putAssumeCapacity(e.oid, @intCast(i));
+            }
+            const ours = try x.readBack(&w.?, @intCast(at), by_name);
+            defer x.gpa.free(ours);
+            const theirs = try x.db.read(x.io, entry.oid);
+            defer x.db.allocator().free(theirs.bytes);
+            if (!std.mem.eql(u8, ours, theirs.bytes)) return x.fail(error.HashCollision, .{ .oid = entry.oid, .offset = entry.offset });
+        }
+    }
+
     /// The whole object entry `at` holds, read back from the pack: a
     /// delta's base first, as far down as its chain goes.
     fn readBack(x: *Indexer, w: *Worker, at: u32, by_name: Oid.Map(u32)) Error![]u8 {
@@ -948,7 +987,14 @@ const Indexer = struct {
             .ofs_delta => x.entryAt(entry.base_offset) orelse return error.BadDeltaOffset,
             .ref_delta => blk: {
                 for (x.ref_bases.items) |ref| {
-                    if (ref.child == at) break :blk by_name.get(ref.base) orelse return error.DeltaBaseMissing;
+                    if (ref.child != at) continue;
+                    if (by_name.get(ref.base)) |base_at| break :blk base_at;
+                    // A thin pack's base, which the database holds.
+                    const found = try x.db.read(x.io, ref.base);
+                    defer x.db.allocator().free(found.bytes);
+                    const patch = try w.load(at);
+                    defer x.gpa.free(patch);
+                    return delta.apply(x.gpa, found.bytes, patch);
                 }
                 return error.DeltaBaseMissing;
             },
@@ -1007,10 +1053,14 @@ const Indexer = struct {
         at: ?u32,
         oid: Oid,
         type: object.Type,
+        /// The object, or nothing while `dropped`.
         bytes: []u8,
         depth: u32,
         next_ofs: usize = 0,
         next_ref: usize = 0,
+        /// Whether the bytes were let go to keep within
+        /// `Options.delta_base_cache_limit`, and are rebuilt when wanted.
+        dropped: bool = false,
     };
 
     /// How many threads resolve deltas.
@@ -1311,6 +1361,8 @@ const Worker = struct {
     reader: Io.File.Reader,
     inflater: Inflater,
     stack: std.ArrayList(Indexer.Frame) = .empty,
+    /// The bytes the frames on `stack` hold.
+    held: u64 = 0,
 
     fn init(x: *Indexer) Allocator.Error!Worker {
         const read_buffer = try x.gpa.alloc(u8, 64 * 1024);
@@ -1379,6 +1431,7 @@ const Worker = struct {
             x.gpa.free(root.bytes);
             return err;
         };
+        w.held += root.bytes.len;
         while (stack.items.len != 0) {
             if (x.failed.load(.monotonic)) return;
             const top = &stack.items[stack.items.len - 1];
@@ -1400,11 +1453,13 @@ const Worker = struct {
             }
             const at = child orelse {
                 const done = stack.pop().?;
+                w.held -= done.bytes.len;
                 x.gpa.free(done.bytes);
                 continue;
             };
             const entry = &x.entries.items[at];
             if (top.depth + 1 > x.options.max_delta_depth) return x.fail(error.DeltaChainTooDeep, .{ .offset = entry.offset });
+            try w.rebuild(stack.items.len - 1);
 
             const patch = try w.load(at);
             defer x.gpa.free(patch);
@@ -1432,7 +1487,53 @@ const Worker = struct {
                 const depth = top.depth + 1;
                 try stack.append(x.gpa, .{ .at = at, .oid = named.oid, .type = entry.type, .bytes = bytes, .depth = depth });
                 keep = true;
+                w.held += bytes.len;
+                w.prune(stack.items.len - 1);
             }
+        }
+    }
+
+    /// Let go of the oldest bases on the stack until what it holds is
+    /// within `Options.delta_base_cache_limit`, keeping the frame at
+    /// `keep` and every one a thin pack took from the database, which is
+    /// not rebuilt.
+    fn prune(w: *Worker, keep: usize) void {
+        const x = w.x;
+        for (w.stack.items, 0..) |*frame, i| {
+            if (w.held <= x.options.delta_base_cache_limit) return;
+            if (i == keep or frame.dropped or frame.at == null) continue;
+            w.held -= frame.bytes.len;
+            x.gpa.free(frame.bytes);
+            frame.bytes = &.{};
+            frame.dropped = true;
+        }
+    }
+
+    /// Give the frame at `index` its bytes again if they were let go: from
+    /// the nearest frame below it that still has its own, a delta applied
+    /// at each step, or from the pack for a whole object at the bottom.
+    /// Each step's base is let go behind it while over the limit.
+    fn rebuild(w: *Worker, index: usize) Error!void {
+        const x = w.x;
+        const frames = w.stack.items;
+        if (!frames[index].dropped) return;
+        var from = index;
+        while (from > 0 and frames[from].dropped) from -= 1;
+        if (frames[from].dropped) {
+            // A whole object, read from the pack again.
+            frames[from].bytes = try w.load(frames[from].at.?);
+            frames[from].dropped = false;
+            w.held += frames[from].bytes.len;
+        }
+        var k = from;
+        while (k < index) : (k += 1) {
+            const patch = try w.load(frames[k + 1].at.?);
+            defer x.gpa.free(patch);
+            const bytes = delta.apply(x.gpa, frames[k].bytes, patch) catch |err| return x.fail(err, .{ .offset = x.entries.items[frames[k + 1].at.?].offset });
+            frames[k + 1].bytes = bytes;
+            frames[k + 1].dropped = false;
+            w.held += bytes.len;
+            w.prune(k + 1);
         }
     }
 };
@@ -1562,9 +1663,22 @@ fn appendDelta(gpa: Allocator, base_len: usize, suffix: []const u8) ![]u8 {
         }
     }
     if (base_len != 0) {
-        try out.append(gpa, 0x80 | 0x01 | 0x10);
+        // One copy from offset zero, its size in as many of the three size
+        // bytes as it needs.
+        std.debug.assert(base_len < 1 << 24);
+        var op: u8 = 0x80 | 0x01;
+        var size_bytes: [3]u8 = undefined;
+        var n: usize = 0;
+        for (0..3) |i| {
+            const byte: u8 = @truncate(base_len >> @intCast(8 * i));
+            if (byte == 0) continue;
+            op |= @as(u8, 0x10) << @intCast(i);
+            size_bytes[n] = byte;
+            n += 1;
+        }
+        try out.append(gpa, op);
         try out.append(gpa, 0);
-        try out.append(gpa, @intCast(base_len));
+        try out.appendSlice(gpa, size_bytes[0..n]);
     }
     try out.append(gpa, @intCast(suffix.len));
     try out.appendSlice(gpa, suffix);
@@ -2020,6 +2134,220 @@ test "a damaged stream is a named error and leaves nothing behind" {
     const found = try repo.odb.read(io, hash.Hasher.object(.sha1, "blob", "basemore\n"));
     defer gpa.free(found.bytes);
     try testing.expectEqualStrings("basemore\n", found.bytes);
+}
+
+/// An allocator that remembers the most it ever held at once.
+const Peak = struct {
+    child: Allocator,
+    held: usize = 0,
+    most: usize = 0,
+
+    fn allocator(p: *Peak) Allocator {
+        return .{ .ptr = p, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn note(p: *Peak, grown: usize, shrunk: usize) void {
+        p.held = p.held + grown - shrunk;
+        p.most = @max(p.most, p.held);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // safe: only `allocator` hands this pointer out
+        const out = p.child.rawAlloc(len, alignment, ret) orelse return null;
+        p.note(len, 0);
+        return out;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // safe: only `allocator` hands this pointer out
+        if (!p.child.rawResize(memory, alignment, len, ret)) return false;
+        p.note(len, memory.len);
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // safe: only `allocator` hands this pointer out
+        const out = p.child.rawRemap(memory, alignment, len, ret) orelse return null;
+        p.note(len, memory.len);
+        return out;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // safe: only `allocator` hands this pointer out
+        p.child.rawFree(memory, alignment, ret);
+        p.note(0, memory.len);
+    }
+};
+
+test "a chain of large bases resolves within the base budget, rebuilding the ones let go" {
+    // Four times the chain, and no more held at once: the bases past the
+    // budget are let go, where every one was held to the end of its chain.
+    const short = try receiveChain(10, 0);
+    const long = try receiveChain(40, 1);
+    try testing.expect(long < short + 2 * 64 * 1024);
+}
+
+/// Receive a 64 KiB base and a chain of `chain` deltas each a byte longer,
+/// with a second child hanging from the first delta, under a budget of
+/// 100 KiB; check what it holds, and say the most the receive held at once.
+/// Walking back to the second child needs a base the budget let go.
+fn receiveChain(chain: usize, seed: u8) !usize {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    defer repo.deinit(io);
+    var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+
+    const base_len = 64 * 1024;
+    const base = try gpa.alloc(u8, base_len);
+    defer gpa.free(base);
+    for (base, 0..) |*b, i| b.* = @truncate(i *% 7 +% seed);
+    var entries: std.ArrayList(TestEntry) = .empty;
+    defer entries.deinit(gpa);
+    var patches: std.ArrayList([]u8) = .empty;
+    defer {
+        for (patches.items) |p| gpa.free(p);
+        patches.deinit(gpa);
+    }
+    try entries.append(gpa, .{ .whole = .{ .t = .blob, .bytes = base } });
+    for (0..chain) |i| {
+        const patch = try appendDelta(gpa, base_len + i, "x");
+        try patches.append(gpa, patch);
+        try entries.append(gpa, .{ .ofs_delta = .{ .back = 1, .patch = patch } });
+    }
+    const side = try appendDelta(gpa, base_len + 1, "side");
+    try patches.append(gpa, side);
+    try entries.append(gpa, .{ .ofs_delta = .{ .back = chain, .patch = side } });
+    const bytes = try buildPack(gpa, .sha1, entries.items);
+    defer gpa.free(bytes);
+
+    var in: Io.Reader = .fixed(bytes);
+    var peak: Peak = .{ .child = gpa };
+    const result = try receive(peak.allocator(), io, &repo.odb, pack_dir, &in, .{ .delta_base_cache_limit = 100 * 1024, .threads = 1 });
+    try testing.expectEqual(@as(u32, @intCast(chain + 2)), result.objects);
+    const expected = try gpa.alloc(u8, base_len + chain + "side".len);
+    defer gpa.free(expected);
+    @memcpy(expected[0..base_len], base);
+    @memset(expected[base_len..][0..chain], 'x');
+    const last = try repo.odb.read(io, hash.Hasher.object(.sha1, "blob", expected[0 .. base_len + chain]));
+    defer gpa.free(last.bytes);
+    try testing.expectEqualSlices(u8, expected[0 .. base_len + chain], last.bytes);
+    @memcpy(expected[base_len + 1 ..][0.."side".len], "side");
+    const branched = expected[0 .. base_len + 1 + "side".len];
+    const found = try repo.odb.read(io, hash.Hasher.object(.sha1, "blob", branched));
+    defer gpa.free(found.bytes);
+    try testing.expectEqualSlices(u8, branched, found.bytes);
+    return peak.most;
+}
+
+test "an object the database holds under the same name with other bytes is refused, as git's index-pack refuses it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.init(gpa, io, tmp.dir, .{ .bare = true });
+    defer repo.deinit(io);
+    var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+
+    // The name of `base`, holding other bytes of the same type and size:
+    // what a collision would look like from here, made the way git's own
+    // test makes it.
+    const oid = hash.Hasher.object(.sha1, "blob", "base");
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const text = oid.hex(&hex);
+    const loose_path = try std.fmt.allocPrint(gpa, "objects/{s}/{s}", .{ text[0..2], text[2..] });
+    defer gpa.free(loose_path);
+    try tmp.dir.createDirPath(io, loose_path[0.."objects/xx".len]);
+    {
+        var compressed: Io.Writer.Allocating = try .initCapacity(gpa, 256);
+        defer compressed.deinit();
+        const window = try gpa.alloc(u8, flate.max_window_len);
+        defer gpa.free(window);
+        var compress = try flate.Compress.init(&compressed.writer, window, .zlib, .level_1);
+        try compress.writer.writeAll("blob 4\x00evil");
+        try compress.writer.flush();
+        try compress.finish();
+        try tmp.dir.writeFile(io, .{ .sub_path = loose_path, .data = compressed.written() });
+    }
+
+    const patch = try appendDelta(gpa, 4, "more\n");
+    defer gpa.free(patch);
+    for ([_][]const TestEntry{
+        &.{.{ .whole = .{ .t = .blob, .bytes = "base" } }},
+        // The same object reached through a delta.
+        &.{ .{ .whole = .{ .t = .blob, .bytes = "ba" } }, .{ .ofs_delta = .{ .back = 1, .patch = "\x02\x04\x90\x02\x02se" } } },
+    }) |shape| {
+        const bytes = try buildPack(gpa, .sha1, shape);
+        defer gpa.free(bytes);
+        var diagnostic: Diagnostic = .{};
+        var in: Io.Reader = .fixed(bytes);
+        try testing.expectError(error.HashCollision, receive(gpa, io, &repo.odb, pack_dir, &in, .{ .diagnostic = &diagnostic }));
+        try testing.expect(diagnostic.oid.?.eql(oid));
+        try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
+    }
+
+    // The same bytes under the same name are no collision.
+    const same = try buildPack(gpa, .sha1, &.{.{ .whole = .{ .t = .blob, .bytes = "evil" } }});
+    defer gpa.free(same);
+    var in: Io.Reader = .fixed(same);
+    const evil = hash.Hasher.object(.sha1, "blob", "evil");
+    _ = try repo.odb.write(io, .blob, "evil");
+    _ = try receive(gpa, io, &repo.odb, pack_dir, &in, .{});
+    try testing.expect(try repo.odb.exists(io, evil));
+}
+
+test "a pack added in front of an alternate's never reads that pack's cached delta bases" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "theirs");
+    try tmp.dir.createDirPath(io, "ours");
+    var theirs_dir = try tmp.dir.openDir(io, "theirs", .{ .iterate = true });
+    defer theirs_dir.close(io);
+    var ours_dir = try tmp.dir.openDir(io, "ours", .{ .iterate = true });
+    defer ours_dir.close(io);
+    var theirs = try repo_mod.Repository.init(gpa, io, theirs_dir, .{ .bare = true });
+    defer theirs.deinit(io);
+    var ours = try repo_mod.Repository.init(gpa, io, ours_dir, .{ .bare = true });
+    defer ours.deinit(io);
+
+    // Two packs of one shape: a base at offset 12 and a delta on it, so
+    // their bases are cached under the same offset.
+    const patch = try appendDelta(gpa, 4, "1");
+    defer gpa.free(patch);
+    var packs: [2][]u8 = undefined;
+    for (&packs, [_][]const u8{ "AAAA", "BBBB" }) |*p, base| p.* = try buildPack(gpa, .sha1, &.{
+        .{ .whole = .{ .t = .blob, .bytes = base } },
+        .{ .ofs_delta = .{ .back = 1, .patch = patch } },
+    });
+    defer for (packs) |p| gpa.free(p);
+    {
+        var pack_dir = try theirs_dir.openDir(io, "objects/pack", .{ .iterate = true });
+        defer pack_dir.close(io);
+        var in: Io.Reader = .fixed(packs[0]);
+        _ = try receive(gpa, io, &theirs.odb, pack_dir, &in, .{});
+    }
+    const their_objects = try theirs_dir.realPathFileAlloc(io, "objects", gpa);
+    defer gpa.free(their_objects);
+    try ours.odb.addAlternate(io, their_objects);
+
+    const a = try ours.odb.read(io, hash.Hasher.object(.sha1, "blob", "AAAA1"));
+    defer gpa.free(a.bytes);
+    try testing.expectEqualStrings("AAAA1", a.bytes);
+
+    // Our own pack now comes before the alternate's.
+    var pack_dir = try ours_dir.openDir(io, "objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    var in: Io.Reader = .fixed(packs[1]);
+    _ = try receive(gpa, io, &ours.odb, pack_dir, &in, .{});
+    const b = try ours.odb.read(io, hash.Hasher.object(.sha1, "blob", "BBBB1"));
+    defer gpa.free(b.bytes);
+    try testing.expectEqualStrings("BBBB1", b.bytes);
 }
 
 /// A pack read that, once armed, parks until the task it runs on is

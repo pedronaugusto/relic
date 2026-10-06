@@ -99,12 +99,10 @@ pub const Index = struct {
                 if (previous) |p| if (p >= pos) return error.CorruptReachabilityBitmap;
                 previous = pos;
                 if (xor_row != 0xffff_ffff and xor_row >= entry_count) return error.CorruptReachabilityBitmap;
-                var matching: ?usize = null;
-                for (entries, 0..) |entry, j| if (entry.position == pos and offset == entry.start - 6) {
-                    matching = j;
-                    break;
-                };
-                const j = matching orelse return error.CorruptReachabilityBitmap;
+                // The entries are in file order, so the row's offset finds
+                // its entry by bisection rather than by a scan per row.
+                const j = std.sort.binarySearch(Entry, entries, offset, orderEntryOffset) orelse return error.CorruptReachabilityBitmap;
+                if (entries[j].position != pos) return error.CorruptReachabilityBitmap;
                 if (entries[j].xor_offset == 0) {
                     if (xor_row != 0xffff_ffff) return error.CorruptReachabilityBitmap;
                 } else {
@@ -114,6 +112,10 @@ pub const Index = struct {
             }
         }
         return .{ .gpa = gpa, .kind = kind, .bytes = bytes, .object_count = object_count, .checksum = checksum, .options = options, .types = types, .entries = entries, .hash_cache = cache };
+    }
+
+    fn orderEntryOffset(offset: u64, entry: Entry) std.math.Order {
+        return std.math.order(offset, entry.start - 6);
     }
 
     pub fn deinit(index: *Index) void {

@@ -157,8 +157,9 @@ pub const Edit = struct {
     old: ?Oid = null,
     lock: ?fs.LockFile = null,
     lock_buffer: []u8 = &.{},
-    /// Whether the old value came from `packed-refs` rather than a loose
-    /// file, which decides whether the packed file has to be rewritten.
+    /// Whether a deleted ref is in `packed-refs`, read under its lock,
+    /// whether or not it is loose too: what decides whether the packed
+    /// file has to be rewritten.
     was_packed: bool = false,
     /// Whether to go through the ref to the one it names, when it is
     /// symbolic.

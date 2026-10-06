@@ -368,13 +368,17 @@ pub const Odb = struct {
     }
 
     fn addSource(odb: *Odb, io: Io, dir: Io.Dir, writable: bool, depth: u8) Error!void {
-        if (depth > odb.backendData().options.max_alternate_depth) return error.AlternatesTooDeep;
         try opening.register(io, odb, dir, writable);
         try odb.scanPacks(io, odb.backendData().sources.items.len - 1);
         try odb.readAlternates(io, dir, depth);
     }
 
+    /// Add the alternates `dir` names, as git's `link_alt_odb_entries`
+    /// does: one already in the chain, this database's own directory
+    /// included, is skipped, and a file deeper than
+    /// `Options.max_alternate_depth` is not read, which git only logs.
     fn readAlternates(odb: *Odb, io: Io, dir: Io.Dir, depth: u8) Error!void {
+        if (depth > odb.backendData().options.max_alternate_depth) return;
         const text = (try fs.readFileAlloc(odb.backendData().gpa, io, dir, "info/alternates", 1 << 20)) orelse return;
         defer odb.backendData().gpa.free(text);
         var lines = std.mem.splitScalar(u8, text, '\n');
@@ -382,6 +386,10 @@ pub const Odb = struct {
             const line = (try parseAlternate(odb.backendData().gpa, raw_line)) orelse continue;
             defer odb.backendData().gpa.free(line);
             const alt = (try opening.openDirectory(io, dir, line)) orelse continue;
+            if (try odb.alreadySource(io, alt)) {
+                alt.close(io);
+                continue;
+            }
             const before = odb.backendData().sources.items.len;
             odb.addSource(io, alt, false, depth + 1) catch |err| {
                 if (odb.backendData().sources.items.len == before) {
@@ -396,6 +404,18 @@ pub const Odb = struct {
                 return err;
             };
         }
+    }
+
+    /// Whether `dir` is a directory the chain already reads.
+    fn alreadySource(odb: *Odb, io: Io, dir: Io.Dir) Error!bool {
+        const gpa = odb.backendData().gpa;
+        const path = try opening.realPath(gpa, io, dir);
+        defer gpa.free(path);
+        if (path.len == 0) return false;
+        for (odb.backendData().sources.items) |source| {
+            if (std.mem.eql(u8, source.real_path, path)) return true;
+        }
+        return false;
     }
 
     fn scanPacks(odb: *Odb, io: Io, source_index: usize) Error!void {
@@ -414,20 +434,51 @@ pub const Odb = struct {
                 }
             }
             if (already) continue;
-            var opened = pack.Pack.open(odb.backendData().gpa, io, pack_dir, base, odb.backendData().kind, .{
-                .access = if (odb.backendData().options.map_packs) .map else .read,
-                .max_depth = odb.backendData().options.max_delta_depth,
-                .read_cache_bytes = odb.backendData().options.pack_read_cache_bytes,
-            }) catch |err| switch (err) {
-                error.FileNotFound, error.NotDir => continue,
-                else => return err,
-            };
+            // As git lists packs: by their `.pack`, which a pack being
+            // written has not got yet, and leaving out, as git warns and
+            // leaves out, one whose files do not read as a pack; `verify`
+            // names it. A refusal to read the files is still an error.
+            var opened = (odb.openPack(io, pack_dir, base) catch |err| {
+                if (opening.readRefusal(err)) return err;
+                continue;
+            }) orelse continue;
             errdefer opened.deinit(io);
             const name = try odb.backendData().gpa.dupe(u8, base);
             errdefer odb.backendData().gpa.free(name);
-            try source.packs.append(odb.backendData().gpa, .{ .pack = opened, .name = name });
+            try source.packs.append(odb.backendData().gpa, .{ .pack = opened, .name = name, .id = odb.backendData().next_pack_id });
+            odb.backendData().next_pack_id += 1;
         }
         try odb.loadMidx(io, source_index);
+    }
+
+    /// The pack named `base` in `pack_dir`, or `null` when its `.idx` or
+    /// its `.pack` is not there.
+    fn openPack(odb: *Odb, io: Io, pack_dir: Io.Dir, base: []const u8) pack.Error!?pack.Pack {
+        return pack.Pack.open(odb.backendData().gpa, io, pack_dir, base, odb.backendData().kind, .{
+            .access = if (odb.backendData().options.map_packs) .map else .read,
+            .max_depth = odb.backendData().options.max_delta_depth,
+            .read_cache_bytes = odb.backendData().options.pack_read_cache_bytes,
+        }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => null,
+            else => err,
+        };
+    }
+
+    /// Every pack `scanPacks` left out because it did not read as one,
+    /// opened again for its error.
+    fn verifyUnopened(odb: *Odb, io: Io, source: *Source) Error!void {
+        const pack_dir = source.pack_dir orelse return;
+        var it = pack_dir.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind == .directory or !std.mem.endsWith(u8, entry.name, ".idx")) continue;
+            const base = entry.name[0 .. entry.name.len - 4];
+            const listed = for (source.packs.items) |named| {
+                if (std.mem.eql(u8, named.name, base)) break true;
+            } else false;
+            if (listed) continue;
+            var opened = (try odb.openPack(io, pack_dir, base)) orelse continue;
+            opened.deinit(io);
+        }
     }
 
     /// Read `pack/multi-pack-index` and match its pack names to the packs
@@ -499,6 +550,7 @@ pub const Odb = struct {
         source.midx_packs.deinit(odb.backendData().gpa);
         if (source.pack_dir) |d| d.close(io);
         source.dir.close(io);
+        odb.backendData().gpa.free(source.real_path);
     }
 
     /// The hash every name in this database is written with.
@@ -568,12 +620,10 @@ pub const Odb = struct {
     }
 
     fn tryReadInto(odb: *Odb, io: Io, oid: Oid, buffer: *std.ArrayList(u8)) Error!?Borrowed {
-        var base: u32 = 0;
         for (odb.backendData().sources.items) |*source| {
-            defer base += @intCast(source.packs.items.len);
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
-            const p = &source.packs.items[located.at].pack;
-            const t = try p.readAtInto(io, located.offset, &odb.backendData().cache, base + @as(u32, @intCast(located.at)), buffer);
+            const named = &source.packs.items[located.at];
+            const t = try named.pack.readAtInto(io, located.offset, &odb.backendData().cache, named.id, buffer);
             return .{ .type = t, .bytes = buffer.items };
         }
         const found = (try odb.readLooseFor(io, oid, .{ .list = buffer })) orelse return null;
@@ -585,12 +635,10 @@ pub const Odb = struct {
     /// packed repository a loose lookup first is a failed `open` for every
     /// object.
     fn tryRead(odb: *Odb, io: Io, oid: Oid) Error!?Read {
-        var base: u32 = 0;
         for (odb.backendData().sources.items) |*source| {
-            defer base += @intCast(source.packs.items.len);
             const located = (try source.findPack(oid, &odb.stats)) orelse continue;
-            const p = &source.packs.items[located.at].pack;
-            const obj = try p.readAt(io, located.offset, &odb.backendData().cache, base + @as(u32, @intCast(located.at)));
+            const named = &source.packs.items[located.at];
+            const obj = try named.pack.readAt(io, located.offset, &odb.backendData().cache, named.id);
             return .{ .type = obj.type, .bytes = obj.bytes };
         }
         return odb.readLoose(io, oid);
@@ -625,10 +673,24 @@ pub const Odb = struct {
         var file_reader = file.reader(io, input_buffer);
         var window: [flate.max_window_len]u8 = undefined;
         var decompress: flate.Decompress = .init(&file_reader.interface, .zlib, &window);
-        return decompress.reader.allocRemaining(odb.backendData().gpa, .limited(odb.backendData().options.max_object_bytes)) catch |err| switch (err) {
+        const bytes = decompress.reader.allocRemaining(odb.backendData().gpa, .limited(odb.backendData().options.max_object_bytes)) catch |err| switch (err) {
             error.OutOfMemory, error.StreamTooLong => |e| return e,
             error.ReadFailed => return looseInflateError(&decompress, &file_reader),
         };
+        errdefer odb.backendData().gpa.free(bytes);
+        try looseEnd(&file_reader);
+        return bytes;
+    }
+
+    /// Refuse bytes after a loose object's zlib stream, as git does
+    /// ("garbage at end of loose object"). The inflater reads its input to
+    /// the end of the stream's checksum and no further.
+    fn looseEnd(file_reader: *Io.File.Reader) Error!void {
+        _ = file_reader.interface.peekByte() catch |err| switch (err) {
+            error.EndOfStream => return,
+            error.ReadFailed => return file_reader.err orelse error.ReadFailed,
+        };
+        return error.CorruptLooseObject;
     }
 
     // The inflater's ReadFailed can mean bad zlib or a failed file read.
@@ -851,6 +913,7 @@ pub const Odb = struct {
             if ((decompress.reader.readSliceShort(&extra) catch return looseInflateError(&decompress, &file_reader)) != 0) {
                 return error.CorruptLooseObject;
             }
+            try looseEnd(&file_reader);
             return .{ .header = parsed.header, .bytes = if (want == .cache) body else null };
         }
         return null;
@@ -1197,12 +1260,10 @@ pub const Odb = struct {
                 }
             }
         }
-        var pack_id: u32 = 0;
         for (odb.backendData().sources.items) |*source| {
+            try odb.verifyUnopened(io, source);
             for (source.packs.items) |*named| {
-                const p = &named.pack;
-                defer pack_id += 1;
-                const pack_report = try odb.verifyPack(io, p, pack_id);
+                const pack_report = try odb.verifyPack(io, &named.pack, named.id);
                 report.packs += 1;
                 report.packed_objects += pack_report.objects;
                 report.bytes += pack_report.bytes;
@@ -1344,7 +1405,14 @@ pub const Odb = struct {
         // Sorted as offsets and positions together, which move cheaply.
         const order = try gpa.alloc(u64, n);
         defer gpa.free(order);
-        for (order, 0..) |*o, i| o.* = (try p.index.offsetAt(@intCast(i))) << 32 | i;
+        for (order, 0..) |*o, i| {
+            // An offset past the pack -- a 64-bit one in a pack under 4 GiB
+            // -- would lose its top half to the key, and be checked as
+            // another entry's.
+            const offset = try p.index.offsetAt(@intCast(i));
+            if (offset >= p.bodyEnd()) return error.TruncatedPack;
+            o.* = offset << 32 | i;
+        }
         std.mem.sort(u64, order, {}, std.sort.asc(u64));
         const items = try gpa.alloc(VerifyItem, n);
         errdefer gpa.free(items);
@@ -3998,6 +4066,173 @@ test "git reads an alternate relic wrote and relic reads one git wrote" {
     try std.testing.expectEqualStrings("shared by git and relic\n", from_relic.bytes);
 }
 
+test "alternates are read as git reads them: each once, never the database's own, and no deeper than git goes" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const levels = 9;
+    var repos: [levels]testgit.Repo = undefined;
+    var made: usize = 0;
+    defer for (repos[0..made]) |*r| r.deinit();
+    var paths: [levels][:0]u8 = undefined;
+    defer for (paths[0..made]) |p| gpa.free(p);
+    var names: [levels][hash.max_hex_len]u8 = undefined;
+    while (made < levels) : (made += 1) {
+        repos[made] = try testgit.Repo.init(gpa, io, &.{});
+        paths[made] = repos[made].dir.realPathFileAlloc(io, ".git/objects", gpa) catch |err| {
+            repos[made].deinit();
+            return err;
+        };
+        const content = try std.fmt.allocPrint(gpa, "level {d}\n", .{made});
+        defer gpa.free(content);
+        try repos[made].writeFile(io, "blob", content);
+        const out = try repos[made].run(io, &.{ "hash-object", "-w", "blob" });
+        defer gpa.free(out);
+        @memcpy(names[made][0..40], out[0..40]);
+    }
+    // The first names itself, the second and the third; the second names
+    // the third again; from the third on each names the next.
+    for (0..levels - 1) |i| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(gpa);
+        if (i == 0) try text.print(gpa, "{s}\n{s}\n{s}\n", .{ paths[0], paths[1], paths[2] }) else try text.print(gpa, "{s}\n", .{paths[i + 1]});
+        try repos[i].writeFile(io, ".git/objects/info/alternates", text.items);
+    }
+
+    const git_dir = try repos[0].gitDir(io);
+    defer git_dir.close(io);
+    var db = try Odb.open(gpa, io, git_dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    repos[0].report_failures = false;
+    for (names) |name| {
+        const theirs = if (repos[0].run(io, &.{ "cat-file", "-e", name[0..40] })) |out| blk: {
+            gpa.free(out);
+            break :blk true;
+        } else |_| false;
+        try std.testing.expectEqual(theirs, try db.exists(io, try Oid.parse(.sha1, name[0..40])));
+    }
+    // The deepest are past git's reach, and so past this one's.
+    try std.testing.expect(!try db.exists(io, try Oid.parse(.sha1, names[levels - 1][0..40])));
+}
+
+test "a pack and an index that are not a pair are refused, as git refuses them" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try repo.exec(io, &.{ "repack", "-q", "-a", "-d" });
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "two" });
+    try repo.exec(io, &.{ "repack", "-q", "-a", "-d" });
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "three" });
+    try repo.exec(io, &.{ "repack", "-q", "-d" });
+    var pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    var bases: std.ArrayList([]u8) = .empty;
+    defer {
+        for (bases.items) |b| gpa.free(b);
+        bases.deinit(gpa);
+    }
+    var it = pack_dir.iterate();
+    while (try it.next(io)) |entry| if (std.mem.endsWith(u8, entry.name, ".idx")) {
+        try bases.append(gpa, try gpa.dupe(u8, entry.name[0 .. entry.name.len - 4]));
+    };
+    try std.testing.expectEqual(@as(usize, 2), bases.items.len);
+    // Each index beside the other's pack.
+    for (bases.items, 0..) |base, i| {
+        const other = bases.items[1 - i];
+        const pack_name = try std.fmt.allocPrint(gpa, "{s}.pack", .{other});
+        defer gpa.free(pack_name);
+        const idx_name = try std.fmt.allocPrint(gpa, "{s}.idx", .{base});
+        defer gpa.free(idx_name);
+        try pack_dir.copyFile(pack_name, pack_dir, "mixed.pack", io, .{});
+        defer pack_dir.deleteFile(io, "mixed.pack") catch {};
+        try pack_dir.copyFile(idx_name, pack_dir, "mixed.idx", io, .{});
+        defer pack_dir.deleteFile(io, "mixed.idx") catch {};
+        try std.testing.expectError(error.PackIndexMismatch, pack.Pack.open(gpa, io, pack_dir, "mixed", .sha1, .{}));
+    }
+}
+
+test "an index offset past its pack is refused by verify, not read as another entry" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    for (0..4) |i| {
+        const content = try std.fmt.allocPrint(gpa, "file {d}\n", .{i});
+        defer gpa.free(content);
+        try repo.writeFile(io, "f", content);
+        try repo.exec(io, &.{ "add", "f" });
+        try repo.exec(io, &.{ "commit", "-q", "-m", "c" });
+    }
+    try repo.exec(io, &.{ "repack", "-q", "-a", "-d" });
+    var pack_dir = try repo.dir.openDir(io, ".git/objects/pack", .{ .iterate = true });
+    defer pack_dir.close(io);
+    var base: ?[]u8 = null;
+    defer if (base) |b| gpa.free(b);
+    var it = pack_dir.iterate();
+    while (try it.next(io)) |entry| if (std.mem.endsWith(u8, entry.name, ".idx")) {
+        base = try gpa.dupe(u8, entry.name[0 .. entry.name.len - 4]);
+    };
+    const idx_name = try std.fmt.allocPrint(gpa, "{s}.idx", .{base.?});
+    defer gpa.free(idx_name);
+    const pack_name = try std.fmt.allocPrint(gpa, "{s}.pack", .{base.?});
+    defer gpa.free(pack_name);
+    var index = try pack.Index.open(gpa, io, pack_dir, idx_name, .sha1, 1 << 20);
+    defer index.deinit();
+    const entries = try gpa.alloc(pack.IndexEntry, index.count);
+    defer gpa.free(entries);
+    for (entries, 0..) |*e, i| e.* = .{ .oid = index.nameAt(@intCast(i)), .offset = try index.offsetAt(@intCast(i)), .crc = index.crcAt(@intCast(i)) };
+    // The entry at the pack's first offset, said to be 4 GiB further on:
+    // a 64-bit offset in a pack far smaller.
+    for (entries) |*e| if (e.offset == 12) {
+        e.offset += 1 << 32;
+    };
+    try pack_dir.copyFile(pack_name, pack_dir, "pack-far.pack", io, .{});
+    _ = try pack.writeIndexFile(gpa, io, pack_dir, "pack-far.idx", .sha1, entries, index.pack_checksum, .none);
+    try pack_dir.deleteFile(io, idx_name);
+    try pack_dir.deleteFile(io, pack_name);
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try Odb.open(gpa, io, git_dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    try std.testing.expectEqual(@as(usize, 1), db.packCount());
+    try std.testing.expectError(error.TruncatedPack, db.verify(io));
+}
+
+test "bytes after a loose object's stream are refused, as git refuses them" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    // A commit: git streams a blob without the check, and reads a commit
+    // whole, with it.
+    try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    const out = try repo.run(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(out);
+    const hex = out[0..40];
+    const path = try std.fmt.allocPrint(gpa, ".git/objects/{s}/{s}", .{ hex[0..2], hex[2..] });
+    defer gpa.free(path);
+    const stored = try repo.readFile(io, path);
+    defer gpa.free(stored);
+    const damaged = try std.mem.concat(gpa, u8, &.{ stored, "garbage" });
+    defer gpa.free(damaged);
+    try repo.dir.deleteFile(io, path);
+    try repo.writeFile(io, path, damaged);
+
+    repo.report_failures = false;
+    try std.testing.expectError(error.GitFailed, repo.run(io, &.{ "cat-file", "commit", hex }));
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try Odb.open(gpa, io, git_dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer db.deinit(io);
+    const oid = try Oid.parse(.sha1, hex);
+    try std.testing.expectError(error.CorruptLooseObject, db.read(io, oid));
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(gpa);
+    try std.testing.expectError(error.CorruptLooseObject, db.readInto(io, oid, &list));
+}
+
 test "an abbreviated name resolves, and an ambiguous one is named" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -4324,13 +4559,20 @@ test "object source discovery keeps alternate and pack read refusals" {
         return error.TestUnexpectedResult;
     } else |err| try std.testing.expectEqual(error.ProcessFdQuotaExceeded, err);
     try tmp.dir.deleteFile(base, "objects/info/alternates");
-    // A named pack with a truncated index cannot disappear from discovery.
+    // An index with no pack beside it is one being written, and is not
+    // listed; one beside a pack that does not read as an index is left out
+    // of the database, as git warns and leaves it out, and `verify` names
+    // it.
     try tmp.dir.writeFile(base, .{ .sub_path = "objects/pack/pack-invalid.idx", .data = "x" });
-    if (Odb.open(gpa, base, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false })) |value| {
-        var unexpected = value;
-        unexpected.deinit(base);
-        return error.TestUnexpectedResult;
-    } else |err| try std.testing.expectEqual(error.TruncatedIndex, err);
+    var without_pack = try Odb.open(gpa, base, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer without_pack.deinit(base);
+    try std.testing.expectEqual(@as(usize, 0), without_pack.packCount());
+    _ = try without_pack.verify(base);
+    try tmp.dir.writeFile(base, .{ .sub_path = "objects/pack/pack-invalid.pack", .data = "PACK" });
+    var beside_pack = try Odb.open(gpa, base, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false });
+    defer beside_pack.deinit(base);
+    try std.testing.expectEqual(@as(usize, 0), beside_pack.packCount());
+    try std.testing.expectError(error.TruncatedIndex, beside_pack.verify(base));
 }
 
 test "object discovery preserves optional index and hint read resources" {

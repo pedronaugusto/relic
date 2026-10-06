@@ -56,6 +56,21 @@ pub const Index = struct {
     offsets_at: usize,
     large_offsets_at: ?usize,
 
+    /// `open`, with an index that does not read as one taken as no index:
+    /// it is an accelerator, the database reads the same without it, and a
+    /// writer replaces it. A refusal to read the file is still an error.
+    pub fn openUsable(gpa: Allocator, io: Io, pack_dir: Io.Dir, kind: hash.Kind) Self.Error!?Index {
+        return open(gpa, io, pack_dir, kind) catch |err| switch (err) {
+            error.NotAMultiPackIndex,
+            error.UnsupportedMidxVersion,
+            error.ObjectFormatMismatch,
+            error.CorruptMultiPackIndex,
+            error.ChainUnsupported,
+            => null,
+            else => |e| e,
+        };
+    }
+
     /// Read `pack/multi-pack-index`, or `null` when there is none.
     pub fn open(gpa: Allocator, io: Io, pack_dir: Io.Dir, kind: hash.Kind) Self.Error!?Index {
         const bytes = (try fs.readFileAlloc(gpa, io, pack_dir, "multi-pack-index", 1 << 30)) orelse
@@ -70,7 +85,10 @@ pub const Index = struct {
         errdefer gpa.free(bytes);
         if (bytes.len < 12) return error.NotAMultiPackIndex;
         if (!std.mem.eql(u8, bytes[0..4], magic)) return error.NotAMultiPackIndex;
-        if (bytes[4] != 1) return error.UnsupportedMidxVersion;
+        // Version 2 is version 1 with its pack names in any order, which
+        // git 2.54 writes for a compaction or for `midx.version`.
+        const version = bytes[4];
+        if (version != 1 and version != 2) return error.UnsupportedMidxVersion;
         const midx_kind: hash.Kind = switch (bytes[5]) {
             1 => .sha1,
             2 => .sha256,
@@ -141,6 +159,7 @@ pub const Index = struct {
             .large_offsets_at = large_offsets_at,
         };
         try result.verify();
+        try result.checkNames(version);
         return result;
     }
 
@@ -176,6 +195,24 @@ pub const Index = struct {
         for (0..index.count) |i| if (try index.reverseAt(@intCast(i))) |pos| {
             if ((try seen.getOrPut(index.gpa, pos)).found_existing) return error.CorruptMultiPackIndex;
         };
+    }
+
+    /// Each pack name is one file name in the pack directory, as git
+    /// writes them, and in a version 1 index each is after the one before,
+    /// which git refuses an index without. A name is a path something may
+    /// later be opened or removed at, so one that leaves the directory is
+    /// refused.
+    fn checkNames(index: *const Index, version: u8) Self.Error!void {
+        var previous: ?[]const u8 = null;
+        for (0..index.pack_count) |i| {
+            const name = index.packName(@intCast(i)) orelse return error.CorruptMultiPackIndex;
+            if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.CorruptMultiPackIndex;
+            if (std.mem.findAny(u8, name, "/\\:") != null) return error.CorruptMultiPackIndex;
+            if (version == 1) if (previous) |before| {
+                if (std.mem.order(u8, before, name) != .lt) return error.CorruptMultiPackIndex;
+            };
+            previous = name;
+        }
     }
 
     /// Release the index.

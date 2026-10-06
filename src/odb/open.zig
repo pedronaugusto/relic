@@ -18,16 +18,28 @@ pub fn empty(comptime Odb: type, gpa: Allocator, io: Io, kind: hash.Kind, option
 /// The caller owns `dir` until append succeeds; the database owns it after.
 /// The pack directory is acquired here and follows the same transfer.
 pub fn register(io: Io, db: anytype, dir: Io.Dir, writable: bool) odb.Error!void {
+    const gpa = storage.get(db._state).gpa;
+    const real_path = try realPath(gpa, io, dir);
+    errdefer gpa.free(real_path);
     const pack_dir = try openDirectory(io, dir, "pack");
     errdefer if (pack_dir) |d| d.close(io);
-    try storage.get(db._state).sources.append(storage.get(db._state).gpa, .{
+    try storage.get(db._state).sources.append(gpa, .{
         .dir = dir,
+        .real_path = real_path,
         .pack_dir = pack_dir,
         .packs = .empty,
         .writable = writable,
         .midx = null,
         .midx_packs = .empty,
     });
+}
+
+/// Where `dir` is, with every link resolved, as git compares alternates;
+/// empty, and so equal to no other, where the platform cannot say.
+pub fn realPath(gpa: Allocator, io: Io, dir: Io.Dir) Allocator.Error![]u8 {
+    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const len = dir.realPathFile(io, ".", &buffer) catch return &.{};
+    return gpa.dupe(u8, buffer[0..len]);
 }
 
 pub fn openOwn(comptime Odb: type, gpa: Allocator, io: Io, git_dir: Io.Dir, kind: hash.Kind, options: odb.Options) odb.Error!Odb {

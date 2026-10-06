@@ -23,6 +23,9 @@ pub const Data = struct {
     /// What `core.sharedRepository` asks of the permissions of what is
     /// written.
     shared: fs.Shared = .umask,
+    /// `core.packedRefsTimeout`: how long a writer waits for
+    /// `packed-refs.lock`. git waits a second unless told otherwise.
+    packed_lock: fs.OnContention = .{ .wait_ms = 1000 },
 };
 
 pub fn get(state: *State) *Data {

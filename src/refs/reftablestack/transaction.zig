@@ -377,12 +377,14 @@ fn commitSpecial(io: Io, tx: anytype) refs.TransactionError!void {
             }
             try lock.commit(io);
         } else {
-            lock.deinit(io);
-            edit.lock = null;
+            // Removed while the lock is held, so a writer that takes the
+            // lock next never has its file removed after it.
             tx.store.dirFor(edit.name).deleteFile(io, edit.name) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => |e| return e,
             };
+            lock.deinit(io);
+            edit.lock = null;
         }
     }
 }
@@ -644,10 +646,14 @@ pub const Compaction = enum {
 
 /// Compact the stack in `parent`'s `reftable` directory.
 ///
-/// The stack's lock is held throughout, and each table being merged is
-/// locked as git locks it, by `<table>.lock`; a table another process has
+/// As git's `stack_compact_range`: each table being merged is locked, by
+/// `<table>.lock`, under the stack's lock; a table another process has
 /// locked -- a git compacting it already -- ends the run there, and only
 /// the newer tables past it are merged, as git's best-effort rule does.
+/// The stack's lock is then let go for the merge, so a writer is not kept
+/// waiting past its `reftable.lockTimeout` for it, and taken again to put
+/// the merged table in the place of the ones it replaces, wherever the
+/// stack has them by then.
 pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options, which: Compaction) refs.TransactionError!void {
     var dir = parent.openDir(io, "reftable", .{}) catch |err| switch (err) {
         error.FileNotFound => return,
@@ -655,8 +661,8 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     };
     defer dir.close(io);
     var buffer: [4096]u8 = undefined;
-    var list_lock = try fs.LockFile.open(gpa, io, dir, "tables.list", &buffer, .{ .on_contention = options.lock, .shared = options.shared });
-    defer list_lock.deinit(io);
+    var list_lock: ?fs.LockFile = try fs.LockFile.open(gpa, io, dir, "tables.list", &buffer, .{ .on_contention = options.lock, .shared = options.shared });
+    defer if (list_lock) |*lock| lock.deinit(io);
     var stack = try Stack.load(gpa, io, dir, kind);
     defer stack.deinit();
     if (stack.tables.len < 2) return;
@@ -707,6 +713,9 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     }
     // One table merged with nothing is the same table.
     if (last == first) return;
+    // The tables are locked; the list need not be while they are merged.
+    list_lock.?.deinit(io);
+    list_lock = null;
 
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -728,12 +737,30 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
         try writeTable(gpa, io, dir, name, bytes, options.shared);
         new_name = name;
     }
+    var installed = false;
+    // ziglint-ignore: Z026 a merged table no list names is only left for the next compaction to find
+    defer if (!installed) if (new_name) |name| dir.deleteFile(io, name) catch {};
 
-    const w = list_lock.writer();
-    for (stack.names[0..first]) |name| w.print("{s}\n", .{name}) catch return error.WriteFailed;
+    // The list again, as it is now: writers may have added tables, and the
+    // merged ones are wherever it has them, in the order they were merged.
+    list_lock = try fs.LockFile.open(gpa, io, dir, "tables.list", &buffer, .{ .on_contention = options.lock, .shared = options.shared });
+    const listed = (try fs.readFileAlloc(gpa, io, dir, "tables.list", 1 << 20)) orelse try gpa.alloc(u8, 0);
+    defer gpa.free(listed);
+    var current: std.ArrayList([]const u8) = .empty;
+    defer current.deinit(gpa);
+    var lines = std.mem.tokenizeScalar(u8, listed, '\n');
+    while (lines.next()) |line| try current.append(gpa, line);
+    const merged = stack.names[first .. last + 1];
+    // The tables are locked, so another compaction cannot have taken them;
+    // a list without them is one this does not understand, and is left be.
+    const offset = findRun(current.items, merged) orelse return error.LockHeld;
+
+    const w = list_lock.?.writer();
+    for (current.items[0..offset]) |name| w.print("{s}\n", .{name}) catch return error.WriteFailed;
     if (new_name) |name| w.print("{s}\n", .{name}) catch return error.WriteFailed;
-    for (stack.names[last + 1 ..]) |name| w.print("{s}\n", .{name}) catch return error.WriteFailed;
-    try list_lock.commit(io);
+    for (current.items[offset + merged.len ..]) |name| w.print("{s}\n", .{name}) catch return error.WriteFailed;
+    try list_lock.?.commit(io);
+    installed = true;
 
     // The old tables are out of the list; a reader that read the list
     // before the rename may still be opening one, and goes back to the list
@@ -742,6 +769,18 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     cache.internal.closeUnclaimed(&stack, &.{});
     // ziglint-ignore: Z026 the list no longer names these tables; one a platform will not remove is left for the next compaction
     for (stack.names[first .. last + 1]) |name| dir.deleteFile(io, name) catch {};
+}
+
+/// Where `run` stands in `names`, whole and in order, or `null`.
+fn findRun(names: []const []const u8, run: []const []const u8) ?usize {
+    if (run.len > names.len) return null;
+    for (0..names.len - run.len + 1) |offset| {
+        const same = for (run, names[offset..][0..run.len]) |a, b| {
+            if (!std.mem.eql(u8, a, b)) break false;
+        } else true;
+        if (same) return offset;
+    }
+    return null;
 }
 
 const Segment = struct { start: usize, end: usize };
