@@ -1080,6 +1080,14 @@ pub const Connection = struct {
     }
 
     /// The reader for the top layer.
+    /// The longest response head read, `want` at most: no more than the
+    /// reader's buffer holds, which `std.http.Reader` must keep the whole
+    /// head in. A longer head is `HttpHeadersOversize`, where it tripped
+    /// the reader's assertion -- undefined behaviour in a release build.
+    fn headLimit(conn: *Connection, want: usize) usize {
+        return @min(want, conn.reader().buffer.len);
+    }
+
     pub fn reader(conn: *Connection) *Io.Reader {
         var i: usize = conn.layers.len;
         while (i > 0) {
@@ -1349,7 +1357,7 @@ pub const Connection = struct {
         }
         w.writeAll("\r\n") catch return conn.writeFailed();
         conn.flush() catch return conn.writeFailed();
-        var r: http.Reader = .{ .in = conn.reader(), .interface = undefined, .state = .ready, .max_head_len = 16 * 1024 };
+        var r: http.Reader = .{ .in = conn.reader(), .interface = undefined, .state = .ready, .max_head_len = conn.headLimit(16 * 1024) };
         const bytes = r.receiveHead() catch |err| return switch (err) {
             error.ReadFailed => conn.readFailed(),
             else => error.HttpProtocolError,
@@ -1412,7 +1420,7 @@ pub const Connection = struct {
         const body = try gpa.create(Response.Body);
         errdefer gpa.destroy(body);
         body.* = .{
-            .http_reader = .{ .in = conn.reader(), .interface = undefined, .state = .ready, .max_head_len = 64 * 1024 },
+            .http_reader = .{ .in = conn.reader(), .interface = undefined, .state = .ready, .max_head_len = conn.headLimit(64 * 1024) },
             .transfer_buffer = &.{},
         };
         const r = &body.http_reader;
@@ -1957,6 +1965,17 @@ test "every TLS connection is relic's own client: nothing outside src/tls names 
         };
     }
     try std.testing.expect(files > 50);
+}
+
+test "a response head longer than the connection's buffer is refused by name, never read past it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const answer = "HTTP/1.1 200 OK\r\nX-Pad: " ++ ("a" ** (40 * 1024)) ++ "\r\nContent-Length: 0\r\n\r\n";
+    const server = try TestServer.startAnswer(gpa, io, false, answer);
+    defer server.stop(gpa);
+    var client: Client = .init(gpa, io);
+    defer client.deinit();
+    try std.testing.expectError(error.HttpProtocolError, client.send(.GET, .{ .tls = false, .host = "127.0.0.1", .port = server.port }, "/", &.{}, null, null));
 }
 
 test "a response head is read as HTTP/1.1 says, and one that is not is refused" {
