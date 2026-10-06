@@ -29,6 +29,7 @@ const odb_mod = @import("../odb.zig");
 const index_mod = @import("../index.zig");
 const sparse = @import("../worktree/sparse.zig");
 const fs = @import("../repo/fs.zig");
+const builtin = @import("builtin");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -384,7 +385,7 @@ fn rebuildCacheTree(io: Io, index: *Index, db: *Odb) Error!void {
 // is not compared where git may have refreshed it and this has not.
 //=========================================================================
 
-pub const test_access = if (@import("builtin").is_test) struct {
+pub const test_access = if (builtin.is_test) struct {
     pub const hash = Self.hash;
     pub const object = Self.object;
     pub const odb_mod = Self.odb_mod;

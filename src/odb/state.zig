@@ -10,6 +10,7 @@ const pack = @import("pack.zig");
 const midx = @import("midx.zig");
 const flate = std.compress.flate;
 const odb = @import("policy.zig");
+const reachability = @import("bitmap/reachability.zig");
 const Error = odb.Error;
 const Stats = odb.Stats;
 
@@ -22,7 +23,7 @@ pub const Data = struct {
     cache: pack.Cache,
     generation: u32 = 0,
     bitmap_checked: bool = false,
-    bitmap: ?@import("bitmap/reachability.zig").Store = null,
+    bitmap: ?reachability.Store = null,
     deflate_window: []u8,
     deflate_state: ?DeflateState = null,
 };

@@ -1005,42 +1005,42 @@ fn checkWalkLikeRevList(seed: u64) !void {
 }
 
 test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 0" {
-    if (!@import("testing/case.zig").selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 0")) return error.SkipZigTest;
+    if (!test_case.selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 0")) return error.SkipZigTest;
     try checkWalkLikeRevList(0);
 }
 
 test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 1" {
-    if (!@import("testing/case.zig").selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 1")) return error.SkipZigTest;
+    if (!test_case.selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 1")) return error.SkipZigTest;
     try checkWalkLikeRevList(1);
 }
 
 test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 2" {
-    if (!@import("testing/case.zig").selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 2")) return error.SkipZigTest;
+    if (!test_case.selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 2")) return error.SkipZigTest;
     try checkWalkLikeRevList(2);
 }
 
 test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 3" {
-    if (!@import("testing/case.zig").selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 3")) return error.SkipZigTest;
+    if (!test_case.selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 3")) return error.SkipZigTest;
     try checkWalkLikeRevList(3);
 }
 
 test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 4" {
-    if (!@import("testing/case.zig").selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 4")) return error.SkipZigTest;
+    if (!test_case.selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 4")) return error.SkipZigTest;
     try checkWalkLikeRevList(4);
 }
 
 test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 5" {
-    if (!@import("testing/case.zig").selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 5")) return error.SkipZigTest;
+    if (!test_case.selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 5")) return error.SkipZigTest;
     try checkWalkLikeRevList(5);
 }
 
 test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 6" {
-    if (!@import("testing/case.zig").selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 6")) return error.SkipZigTest;
+    if (!test_case.selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 6")) return error.SkipZigTest;
     try checkWalkLikeRevList(6);
 }
 
 test "a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 7" {
-    if (!@import("testing/case.zig").selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 7")) return error.SkipZigTest;
+    if (!test_case.selected("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed 7")) return error.SkipZigTest;
     try checkWalkLikeRevList(7);
 }
 
@@ -1129,3 +1129,4 @@ fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
 pub const count = @import("transport/objectwalk.zig").countCommits;
 /// Reachable object counts by type, as rev-list --objects --count.
 pub const countObjects = @import("transport/objectwalk.zig").countObjects;
+const test_case = @import("testing/case.zig");

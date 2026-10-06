@@ -26,6 +26,7 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const index_mod = @import("../index.zig");
 
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
@@ -110,7 +111,7 @@ pub const Error = error{
     BareRepository,
 } || Allocator.Error || odb_mod.Error || object.ParseError || refs_mod.ReadError || repo_mod.Error ||
     revparse.Error || worktree.Error || error{ NotACommit, WalkTooLong, TagDepthExceeded } ||
-    @import("../index.zig").ReadError || commitgraph.Error;
+    index_mod.ReadError || commitgraph.Error;
 
 const prio_head: u2 = 0;
 const prio_lightweight: u2 = 1;

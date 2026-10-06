@@ -161,6 +161,8 @@ const midx = @import("midx.zig");
 const bitmaps = @import("bitmap.zig");
 const bitmap_store = @import("bitmap/reachability.zig");
 const objectwalk = @import("../transport/objectwalk.zig");
+const pack_mod = @import("pack.zig");
+const repo_mod = @import("../repo.zig");
 
 fn linearCommit(repo: *testgit.Repo, n: usize) !void {
     var text: [64]u8 = undefined;
@@ -303,7 +305,7 @@ test "MIDX repack and expire retain kept packs and match git's two-step semantic
             defer gpa.free(path);
             try repo.writeFile(io, path, "");
         }
-        try std.testing.expectEqual(@as(?@import("pack.zig").WriteReport, null), try ops.repackMidx(gpa, io, &db, .{ .batch_size = 1 }));
+        try std.testing.expectEqual(@as(?pack_mod.WriteReport, null), try ops.repackMidx(gpa, io, &db, .{ .batch_size = 1 }));
         const report = (try ops.repackMidx(gpa, io, &db, .{ .pack = .{ .threads = 1 } })).?;
         try std.testing.expect(report.objects > 0);
         try repo.exec(io, &.{ "multi-pack-index", "verify" });
@@ -335,7 +337,7 @@ test "configured maintenance writes full and split commit graphs and repack bitm
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     for (0..5) |n| try linearCommit(&repo, n);
-    var native = try @import("../repo.zig").Repository.open(gpa, io, repo.dir, .{});
+    var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
     try std.testing.expectEqual(@as(?Oid, null), try ops.writeConfiguredCommitGraph(gpa, io, &native, .fetch));
     _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc);
@@ -411,7 +413,7 @@ test "accelerator files are deterministic across pack worker counts" {
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     for (0..16) |n| try linearCommit(&repo, n);
-    var native = try @import("../repo.zig").Repository.open(gpa, io, repo.dir, .{});
+    var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
     const first = try ops.repackRepository(gpa, io, &native, .{ .pack = .{ .threads = 1, .sync = .none }, .remove_packs = true });
     const graph_bytes = try repo.readFile(io, ".git/objects/info/commit-graph");

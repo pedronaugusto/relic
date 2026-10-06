@@ -13,6 +13,7 @@ const Io = std.Io;
 const hash = @import("../hash.zig");
 const odb_mod = @import("../odb.zig");
 const config_mod = @import("../config.zig");
+const storage = @import("state.zig");
 
 const Oid = hash.Oid;
 
@@ -44,7 +45,7 @@ pub fn defaultLength(config: *const config_mod.Config, db: *const odb_mod.Odb) u
 /// bits, rounded up, and never fewer than seven.
 pub fn automaticLength(db: *const odb_mod.Odb) usize {
     var count: u64 = 0;
-    for (@import("state.zig").get(db._state).sources.items) |*source| {
+    for (storage.get(db._state).sources.items) |*source| {
         for (source.packs.items) |*p| count += p.pack.index.count;
     }
     // The most significant bit's place, plus one; zero objects is one bit,

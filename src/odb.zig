@@ -10,6 +10,8 @@ pub const bitmap = @import("odb/bitmap.zig");
 pub const commitgraph = @import("odb/commitgraph.zig");
 pub const revindex = @import("odb/revindex.zig");
 pub const indexpack = @import("odb/indexpack.zig");
+const reachability = @import("odb/bitmap/reachability.zig");
+const durability = @import("repo/fs/durability.zig");
 // The modules relic's API puts under this one, as `relic.odb.<name>`.
 pub const pack = @import("odb/pack.zig");
 pub const delta = @import("odb/delta.zig");
@@ -149,6 +151,7 @@ const deflate_output_buffer_len = 64 * 1024;
 /// depends on them; they are how a caller, or a test, sees that an
 /// accelerator is being used and that a batch of writes stayed cheap.
 pub const Stats = @import("odb/policy.zig").Stats;
+const testgit = @import("testing/git.zig");
 
 /// The object database.
 pub const Odb = struct {
@@ -200,12 +203,12 @@ pub const Odb = struct {
 
     /// The optional reachability bitmap, opened on first use and kept until refresh.
     /// Malformed or unsupported optional data falls back to object traversal.
-    pub fn reachabilityBitmap(db: *Odb, io: Io) Error!?*const @import("odb/bitmap/reachability.zig").Store {
+    pub fn reachabilityBitmap(db: *Odb, io: Io) Error!?*const reachability.Store {
         const data = db.backendData();
         if (!data.options.use_bitmaps or db.shallow.count() != 0) return null;
         if (!data.bitmap_checked) {
-            data.bitmap = @import("odb/bitmap/reachability.zig").Store.open(data.gpa, io, db.objectsDirectory(), data.kind) catch |err| blk: {
-                if (@import("odb/open.zig").readRefusal(err)) return @errorCast(err);
+            data.bitmap = reachability.Store.open(data.gpa, io, db.objectsDirectory(), data.kind) catch |err| blk: {
+                if (opening.readRefusal(err)) return @errorCast(err);
                 break :blk null;
             };
             data.bitmap_checked = true;
@@ -1493,7 +1496,6 @@ pub const Odb = struct {
     /// and index, then their directories. The supplied store directory's own
     /// parent entry remains the caller's responsibility.
     pub fn makeDurable(odb: *Odb, io: Io, roots: []const Oid) Error!void {
-        const barrier = @import("repo/fs/durability.zig");
         var seen: Oid.Set = .empty;
         defer seen.deinit(odb.backendData().gpa);
         var pending: std.ArrayList(Oid) = .empty;
@@ -1543,14 +1545,14 @@ pub const Odb = struct {
                 var path_buf: [512]u8 = undefined;
                 // unreachable: the pack opened, so its `.pack` name fits 512 bytes
                 const pack_path = std.fmt.bufPrint(&path_buf, "{s}.pack", .{named.name}) catch unreachable;
-                try barrier.syncPath(io, source.pack_dir.?, pack_path);
+                try durability.syncPath(io, source.pack_dir.?, pack_path);
                 // unreachable: `.idx` is shorter than `.pack`, which fits
                 const idx_path = std.fmt.bufPrint(&path_buf, "{s}.idx", .{named.name}) catch unreachable;
-                try barrier.syncPath(io, source.pack_dir.?, idx_path);
+                try durability.syncPath(io, source.pack_dir.?, idx_path);
             } else {
                 var path_buf: [hash.max_hex_len + 2]u8 = undefined;
                 const path = odb.loosePath(oid.*, &path_buf);
-                try barrier.syncPath(io, source.dir, path);
+                try durability.syncPath(io, source.dir, path);
                 fanouts[oid.raw()[0]] = true;
             }
         }
@@ -1558,10 +1560,10 @@ pub const Odb = struct {
             var path: [2]u8 = undefined;
             // unreachable: a byte is two hex digits
             _ = std.fmt.bufPrint(&path, "{x:0>2}", .{byte}) catch unreachable;
-            try barrier.syncDirectory(io, source.dir, &path);
+            try durability.syncDirectory(io, source.dir, &path);
         };
-        if (packs.count() != 0) try barrier.syncDirectory(io, source.dir, "pack");
-        try barrier.syncDirectory(io, source.dir, ".");
+        if (packs.count() != 0) try durability.syncDirectory(io, source.dir, "pack");
+        try durability.syncDirectory(io, source.dir, ".");
     }
 
     /// Put one durability barrier at the end of a batch of object writes.
@@ -3896,7 +3898,6 @@ test "alternate path quoting round trips comment prefixes and control bytes" {
 }
 
 test "git reads an alternate relic wrote and relic reads one git wrote" {
-    const testgit = @import("testing/git.zig");
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var source = try testgit.Repo.init(gpa, io, &.{});
@@ -3923,7 +3924,7 @@ test "git reads an alternate relic wrote and relic reads one git wrote" {
     try std.testing.expect(!try db.exists(io, oid));
     borrower.report_failures = false;
     try std.testing.expectError(error.GitFailed, borrower.run(io, &.{ "cat-file", "-e", std.mem.trim(u8, oid_text, "\r\n") }));
-    if (@import("builtin").os.tag != .windows) {
+    if (builtin.os.tag != .windows) {
         const quoted_line = try std.fmt.allocPrint(gpa, "\"{s}\"\n", .{source_objects});
         defer gpa.free(quoted_line);
         try borrower.dir.writeFile(io, .{ .sub_path = ".git/objects/info/alternates", .data = quoted_line });
@@ -4148,7 +4149,6 @@ test "a loose object's header is read without inflating its body" {
 }
 
 test "packed source registration owns its files and names when allocation stops" {
-    const testgit = @import("testing/git.zig");
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var source = try testgit.Repo.init(gpa, io, &.{});

@@ -9,6 +9,7 @@ const fs = @import("../../repo/fs.zig");
 const pack = @import("../pack.zig");
 const midx = @import("../midx.zig");
 const bitmap = @import("../bitmap.zig");
+const object = @import("../../object.zig");
 const Oid = hash.Oid;
 
 pub const Error = bitmap.Error || midx.Error || pack.IndexError || Io.Dir.AccessError || Io.Dir.OpenError || Io.Dir.Iterator.Error || Io.Dir.ReadFileAllocError;
@@ -118,8 +119,8 @@ pub const Store = struct {
     pub fn nameAt(store: *const Store, position: u32) Oid {
         return store.names[store.reverse[position]];
     }
-    pub fn typeAt(store: *const Store, position: u32) @import("../../object.zig").Type {
-        const types = [_]@import("../../object.zig").Type{ .commit, .tree, .blob, .tag };
+    pub fn typeAt(store: *const Store, position: u32) object.Type {
+        const types = [_]object.Type{ .commit, .tree, .blob, .tag };
         for (store.bitmap.types, types) |words, kind| if (bitmap.isSet(words, position)) return kind;
         unreachable;
     }

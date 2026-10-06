@@ -8,10 +8,11 @@ const Allocator = std.mem.Allocator;
 const odb = @import("policy.zig");
 const hash = @import("../hash.zig");
 const fs = @import("../repo/fs.zig");
+const storage = @import("state.zig");
 
 pub fn empty(comptime Odb: type, gpa: Allocator, io: Io, kind: hash.Kind, options: odb.Options) odb.Error!Odb {
     _ = io;
-    return .{ ._state = try @import("state.zig").create(gpa, kind, options) };
+    return .{ ._state = try storage.create(gpa, kind, options) };
 }
 
 /// The caller owns `dir` until append succeeds; the database owns it after.
@@ -19,7 +20,7 @@ pub fn empty(comptime Odb: type, gpa: Allocator, io: Io, kind: hash.Kind, option
 pub fn register(db: anytype, io: Io, dir: Io.Dir, writable: bool) odb.Error!void {
     const pack_dir = try openDirectory(io, dir, "pack");
     errdefer if (pack_dir) |d| d.close(io);
-    try @import("state.zig").get(db._state).sources.append(@import("state.zig").get(db._state).gpa, .{
+    try storage.get(db._state).sources.append(storage.get(db._state).gpa, .{
         .dir = dir,
         .pack_dir = pack_dir,
         .packs = .empty,
@@ -33,7 +34,7 @@ pub fn openOwn(comptime Odb: type, gpa: Allocator, io: Io, git_dir: Io.Dir, kind
     var db = try empty(Odb, gpa, io, kind, options);
     errdefer db.deinit(io);
     const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
-    errdefer if (@import("state.zig").get(db._state).sources.items.len == 0) objects.close(io);
+    errdefer if (storage.get(db._state).sources.items.len == 0) objects.close(io);
     try register(&db, io, objects, true);
     try db.refresh(io);
     if (options.probe_timestamp_resolution) db.timestamp_resolution = fs.probeTimestampResolution(io, objects);

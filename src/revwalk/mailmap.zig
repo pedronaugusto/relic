@@ -33,6 +33,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const odb_mod = @import("../odb.zig");
 
 const repo_mod = @import("../repo.zig");
 const revparse = @import("revparse.zig");
@@ -49,7 +50,7 @@ pub const Identity = struct {
 
 /// Errors from loading a repository's mailmap.
 pub const LoadError = Allocator.Error || Io.File.Reader.Error || Io.Dir.ReadFileAllocError ||
-    error{MalformedValue} || @import("../odb.zig").Error;
+    error{MalformedValue} || odb_mod.Error;
 
 /// git's `isspace`: space, tab, newline and carriage return, and not the
 /// vertical tab or form feed C's adds.

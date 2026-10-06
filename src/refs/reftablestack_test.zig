@@ -65,6 +65,8 @@ const headIn = @import("reftablestack.zig").headIn;
 const isReftableRepository = @import("reftablestack.zig").isReftableRepository;
 const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo.zig");
+const state_mod = @import("state.zig");
+const config_mod = @import("../config.zig");
 
 test "the geometric rule merges what git's merges" {
     // git's own examples from its source.
@@ -541,7 +543,7 @@ test "a repository's stack is kept between reads and read again only when it cha
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    const cache = @import("state.zig").get(repo.refStore()._state).cache.?;
+    const cache = state_mod.get(repo.refStore()._state).cache.?;
     for (0..50) |_| {
         const head = (try repo.head(io)).?;
         gpa.free(head.name);
@@ -712,7 +714,7 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
 
     var repo = try repo_mod.Repository.open(gpa, io, twins[1].dir, .{});
     defer repo.deinit(io);
-    var config = try @import("../config.zig").Config.parseText(gpa, "", .local);
+    var config = try config_mod.Config.parseText(gpa, "", .local);
     defer config.deinit();
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,

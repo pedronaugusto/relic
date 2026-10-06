@@ -9,6 +9,7 @@ const fs = @import("../repo/fs.zig");
 const reftable = @import("reftable.zig");
 const reflog = @import("reflog.zig");
 const hooks = @import("../repo/hooks.zig");
+const policy = @import("reftablestack/policy.zig");
 /// The header `packed-refs` carries, with the space before the newline that
 /// is in git's source and in no document.
 pub const packed_header = "# pack-refs with: peeled fully-peeled sorted \n";
@@ -30,7 +31,7 @@ pub const ReadError = error{
     /// without it.
     InvalidRefName,
 } || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
-    @import("reftablestack/policy.zig").Error;
+    policy.Error;
 
 /// Errors from a transaction.
 pub const TransactionError = error{

@@ -14,6 +14,8 @@ const refs = @import("../value.zig");
 const cache = @import("cache.zig");
 pub const Options = @import("policy.zig").Options;
 pub const Error = @import("policy.zig").Error;
+const state_mod = @import("../state.zig");
+const builtin = @import("builtin");
 const Stack = cache.Stack;
 const Cache = cache.Cache;
 const max_reload_attempts = cache.internal.max_reload_attempts;
@@ -37,7 +39,7 @@ const View = struct {
     stacks: *const Stacks,
 
     fn acquire(store: anytype, gpa: Allocator, io: Io, owned: *?Stacks) Error!View {
-        if (@import("../state.zig").get(store._state).cache) |c| {
+        if (state_mod.get(store._state).cache) |c| {
             c.mutex.lock(io) catch return error.Canceled;
             errdefer c.mutex.unlock(io);
             const st = try cache.internal.refresh(c, store, io);
@@ -867,7 +869,7 @@ pub fn isReftableRepository(io: Io, common_dir: Io.Dir) Io.Dir.AccessError!bool 
 // Tests
 //=========================================================================
 
-pub const test_access = if (@import("builtin").is_test) struct {
+pub const test_access = if (builtin.is_test) struct {
     pub const View = Self.View;
     pub const readIn = Self.readIn;
     pub const resolveIn = Self.resolveIn;

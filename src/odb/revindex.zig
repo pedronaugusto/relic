@@ -14,6 +14,7 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const builtin = @import("builtin");
 
 const hash = @import("../hash.zig");
 const pack = @import("pack/entry.zig");
@@ -96,7 +97,7 @@ pub fn write(
 const testing = std.testing;
 const testremote = @import("../testing/remote.zig");
 
-pub const test_access = if (@import("builtin").is_test) struct {
+pub const test_access = if (builtin.is_test) struct {
     pub const hash = fixture_hash;
     pub const pack = fixture_pack;
     pub const fs = fixture_fs;

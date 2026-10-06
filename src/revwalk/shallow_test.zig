@@ -17,6 +17,9 @@ const clone_mod = @import("../transport/clone.zig");
 const fetch_mod = @import("../transport/fetch.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
+const builtin = @import("builtin");
+const warning = @import("../repo/warning.zig");
+const push_mod = @import("../transport/push.zig");
 
 const Oid = hash.Oid;
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -268,7 +271,7 @@ test "a shallow clone over ssh is git's, and one from a path is a whole local cl
     try env.put("GIT_SSH_COMMAND", fake);
     const root_path = try testremote.absolutePath(gpa, io, root.dir);
     defer gpa.free(root_path);
-    const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/repo.git", .{ if (@import("builtin").os.tag == .windows) "/" else "", root_path });
+    const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}/repo.git", .{ if (builtin.os.tag == .windows) "/" else "", root_path });
     defer gpa.free(url);
 
     var twins = try Twins.init(gpa, io);
@@ -287,7 +290,7 @@ test "a shallow clone over ssh is git's, and one from a path is a whole local cl
     defer gpa.free(path);
     const cloned = try testremote.gitInputEnv(gpa, io, local.tmp.dir, &env, &.{ "clone", "-q", "--depth=1", path, local.git_path }, "", true);
     gpa.free(cloned);
-    var warnings: @import("../repo/warning.zig").Warnings = .init(gpa);
+    var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
     var plain = try clone_mod.clone(gpa, io, path, local.by_relic, .{ .who = test_who, .depth = 1, .warnings = &warnings });
     plain.deinit(io);
@@ -330,7 +333,7 @@ test "from a shallow remote a fetch leaves the refs that would move the boundary
         gpa.free(fetched);
         var repo = try repo_mod.Repository.open(gpa, io, twins.by_relic, .{});
         defer repo.deinit(io);
-        var warnings: @import("../repo/warning.zig").Warnings = .init(gpa);
+        var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "s", .{ .who = test_who, .update_shallow = update, .warnings = &warnings, .programs = .{ .environ = &env } });
         defer outcome.deinit();
@@ -412,7 +415,7 @@ test "a push from a shallow repository tells the server its boundary, as git's s
                 const out = try testremote.gitInputEnv(gpa, io, work, &env, args, "", true);
                 gpa.free(out);
             }
-            const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}", .{ if (@import("builtin").os.tag == .windows) "/" else "", target });
+            const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}", .{ if (builtin.os.tag == .windows) "/" else "", target });
             defer gpa.free(url);
             tools.dir.deleteFile(io, "sent") catch |err| if (err != error.FileNotFound) return err;
             if (who == 0) {
@@ -423,7 +426,7 @@ test "a push from a shallow repository tells the server its boundary, as git's s
             } else {
                 var repo = try repo_mod.Repository.open(gpa, io, work, .{});
                 defer repo.deinit(io);
-                var outcome = try @import("../transport/push.zig").push(gpa, io, &repo, url, .{ .who = test_who, .refspecs = &.{"main"}, .programs = .{ .environ = &env } });
+                var outcome = try push_mod.push(gpa, io, &repo, url, .{ .who = test_who, .refspecs = &.{"main"}, .programs = .{ .environ = &env } });
                 defer outcome.deinit();
                 if (!to_origin) {
                     try testing.expectEqualStrings("shallow update not allowed", outcome.refs[0].message.?);

@@ -12,6 +12,8 @@ const odb = @import("../odb.zig");
 const graph_mod = @import("commitgraph.zig");
 const diff = @import("../diff.zig");
 const Oid = hash.Oid;
+const revwalk_mod = @import("../revwalk.zig");
+const odb_open = @import("open.zig");
 
 /// Failures leave the old accelerator published and release this writer's locks.
 pub const Error = odb.Error || graph_mod.Error || diff.Error || fs.LockError || fs.CommitError ||
@@ -427,11 +429,11 @@ pub const BitmapOptions = struct {
     lookup_table: bool = false,
     sync: fs.Sync = .none,
 };
-pub const BitmapError = Error || MidxError || @import("../revwalk.zig").Error || objectwalk.Error || bitmap_mod.Error || bitmap_store.Error || error{ InvalidBitmapInput, BitmapNotClosed };
+pub const BitmapError = Error || MidxError || revwalk_mod.Error || objectwalk.Error || bitmap_mod.Error || bitmap_store.Error || error{ InvalidBitmapInput, BitmapNotClosed };
 
 fn storedBitmap(gpa: Allocator, io: Io, db: *odb.Odb) BitmapError!?bitmap_store.Store {
     return bitmap_store.Store.open(gpa, io, db.objectsDirectory(), db.objectFormat()) catch |err| {
-        if (@import("open.zig").readRefusal(err)) return err;
+        if (odb_open.readRefusal(err)) return err;
         return null;
     };
 }
@@ -523,7 +525,7 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
     }
     var name_positions: Oid.Map(u32) = .empty;
     for (names, 0..) |oid, i| try name_positions.put(arena, oid, @intCast(i));
-    var walk = @import("../revwalk.zig").Walk.init(gpa, db);
+    var walk = revwalk_mod.Walk.init(gpa, db);
     defer walk.deinit();
     for (tips) |tip_oid| {
         var oid = tip_oid;

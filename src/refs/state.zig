@@ -6,6 +6,7 @@ const hash = @import("../hash.zig");
 const refs = @import("value.zig");
 const stack = @import("reftablestack/cache.zig");
 const packed_cache = @import("packed.zig");
+const policy = @import("reftablestack/policy.zig");
 
 pub const State = opaque {};
 
@@ -15,7 +16,7 @@ pub const Data = struct {
     common_dir: std.Io.Dir,
     kind: hash.Kind,
     format: refs.Format,
-    options: @import("reftablestack/policy.zig").Options,
+    options: policy.Options,
     cache: ?*stack.Cache,
     /// `packed-refs` as last read, for the files format.
     packed_refs: ?*packed_cache.Cache,
@@ -28,7 +29,7 @@ pub fn get(state: *State) *Data {
     return @ptrCast(@alignCast(state)); // safe: create allocates every State as an aligned Data.
 }
 
-pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, options: @import("reftablestack/policy.zig").Options, git_dir: std.Io.Dir, common_dir: std.Io.Dir) std.mem.Allocator.Error!*State {
+pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, options: policy.Options, git_dir: std.Io.Dir, common_dir: std.Io.Dir) std.mem.Allocator.Error!*State {
     const data = try gpa.create(Data);
     errdefer gpa.destroy(data);
     const cache = if (format == .reftable) blk: {

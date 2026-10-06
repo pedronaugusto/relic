@@ -33,6 +33,7 @@ const Oid = hash.Oid;
 const Kind = hash.Kind;
 const state_mod = @import("refs/state.zig");
 const packed_cache = @import("refs/packed.zig");
+const value_mod = @import("refs/value.zig");
 
 /// The header `packed-refs` carries, with the space before the newline that
 /// is in git's source and in no document.
@@ -296,7 +297,7 @@ pub const Store = struct {
     }
 
     /// A list of refs, loose entries shadowing packed ones.
-    pub const Listing = @import("refs/value.zig").Listing;
+    pub const Listing = value_mod.Listing;
 
     /// Every ref whose name begins with `prefix`, sorted by name.
     ///
@@ -548,6 +549,7 @@ fn isReadableName(name: []const u8) bool {
 
 /// What a log entry a transaction writes says.
 pub const LogMessage = @import("refs/value.zig").LogMessage;
+const config_mod = @import("config.zig");
 
 /// A set of ref updates applied together.
 ///
@@ -591,7 +593,7 @@ pub const Transaction = struct {
     reftable: ?*stack_engine.Pending = null,
 
     /// One ref's change.
-    pub const Edit = @import("refs/value.zig").Edit;
+    pub const Edit = value_mod.Edit;
 
     /// How one edit treats a symbolic ref.
     pub const EditOptions = struct {
@@ -1450,7 +1452,7 @@ test "reference-transaction hears from a transaction what git's hears" {
 
     var git_dir = try twin.relic.gitDir(io);
     defer git_dir.close(io);
-    var config = try @import("config.zig").Config.parseText(gpa, "", .local);
+    var config = try config_mod.Config.parseText(gpa, "", .local);
     defer config.deinit();
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
@@ -1509,7 +1511,7 @@ test "an update goes through HEAD to its branch, and both logs record it, as git
 
     var git_dir = try twin.relic.gitDir(io);
     defer git_dir.close(io);
-    var config = try @import("config.zig").Config.parseText(gpa, "", .local);
+    var config = try config_mod.Config.parseText(gpa, "", .local);
     defer config.deinit();
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
@@ -1622,7 +1624,7 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
 
         var git_dir = try twin.relic.gitDir(io);
         defer git_dir.close(io);
-        var config = try @import("config.zig").Config.parseText(gpa, "", .local);
+        var config = try config_mod.Config.parseText(gpa, "", .local);
         defer config.deinit();
         var runner = try hooks.Runner.init(gpa, io, .{
             .config = &config,
@@ -1670,7 +1672,7 @@ test "a deletion is announced as git announces it, packed or loose" {
 
     var git_dir = try twin.relic.gitDir(io);
     defer git_dir.close(io);
-    var config = try @import("config.zig").Config.parseText(gpa, "", .local);
+    var config = try config_mod.Config.parseText(gpa, "", .local);
     defer config.deinit();
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
