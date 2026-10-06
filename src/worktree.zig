@@ -1811,10 +1811,11 @@ fn describeTree(index: *Index, tree_oid: Oid) Allocator.Error!void {
 /// Every path out of the tree is checked before it becomes a filesystem
 /// path. A tree is a file format and anyone may write one.
 fn refuseUnsafeTree(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEntry), options: CheckoutOptions) Error!void {
-    var check_it = wanted.keyIterator();
-    while (check_it.next()) |path| {
-        if (safepath.check(path.*, .worktree)) |refused| {
-            if (options.refusal) |out| out.set(refused.reason, path.*);
+    var check_it = wanted.iterator();
+    while (check_it.next()) |entry| {
+        const path = entry.key_ptr.*;
+        if (safepath.checkEntry(path, .worktree, entry.value_ptr.mode == .symlink)) |refused| {
+            if (options.refusal) |out| out.set(refused.reason, path);
             return error.UnsafePath;
         }
     }
@@ -2347,7 +2348,8 @@ pub fn writePaths(
     var outcome: CheckoutOutcome = .{};
     defer if (options.rules.attrs) |attrs| attrs.leave();
     for (writes) |w| {
-        if (safepath.check(w.path, .worktree)) |refused| {
+        const symlink = if (w.blob) |b| b.mode == .symlink else false;
+        if (safepath.checkEntry(w.path, .worktree, symlink)) |refused| {
             if (options.refusal) |out| out.set(refused.reason, w.path);
             return error.UnsafePath;
         }
@@ -2504,7 +2506,7 @@ pub fn writeEntry(
     oid: Oid,
     rules: Rules,
 ) Self.Error!Written {
-    if (safepath.check(path, .worktree) != null) return error.UnsafePath;
+    if (safepath.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
     if (std.fs.path.dirnamePosix(path)) |parent| {
         try makeDirPath(io, wt, parent);
     }
@@ -2549,7 +2551,7 @@ pub fn writeBytes(
     bytes: []const u8,
     rules: Rules,
 ) Self.Error!Written {
-    if (safepath.check(path, .worktree) != null) return error.UnsafePath;
+    if (safepath.checkEntry(path, .worktree, mode == .symlink) != null) return error.UnsafePath;
     if (std.fs.path.dirnamePosix(path)) |parent| {
         try makeDirPath(io, wt, parent);
     }
@@ -3019,8 +3021,8 @@ pub fn applySparse(
             continue;
         }
         if (included and entry.skip_worktree) {
-            if (safepath.check(entry.path, .worktree) != null) {
-                if (options.refusal) |out| out.set(.git_directory, entry.path);
+            if (safepath.checkEntry(entry.path, .worktree, entry.mode == .symlink)) |refused| {
+                if (options.refusal) |out| out.set(refused.reason, entry.path);
                 return error.UnsafePath;
             }
             if (try fs.statAt(io, wt, entry.path)) |_| {

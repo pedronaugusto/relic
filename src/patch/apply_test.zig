@@ -493,6 +493,86 @@ test "mode changes, symlinks and copies apply as git applies them" {
     try compare(&p, io, patch, &.{ "-R", "--index" }, .{ .target = .index, .reverse = true });
 }
 
+/// Apply `patch` on both sides and require both to refuse it, both
+/// repositories to be left alike, and what lies past the link untouched.
+fn expectBothRefuse(p: *Pair, io: Io, patch: []const u8) !void {
+    const gpa = p.gpa;
+    var git_dir = try p.git.gitDir(io);
+    defer git_dir.close(io);
+    try git_dir.writeFile(io, .{ .sub_path = "relic-test.patch", .data = patch });
+    var captured = try p.git.capture(io, &.{ "apply", ".git/relic-test.patch" });
+    defer captured.deinit(gpa);
+    try git_dir.deleteFile(io, "relic-test.patch");
+    if (captured.code == 0) {
+        std.debug.print("git applied a patch it should refuse:\n{s}\n", .{patch});
+        return error.TestUnexpectedResult;
+    }
+    var repo = try Repository.open(gpa, io, p.ours.dir, .{});
+    defer repo.deinit(io);
+    if (apply_mod.apply(gpa, io, &repo, patch, .{})) |outcome_const| {
+        var outcome = outcome_const;
+        outcome.deinit();
+        std.debug.print("relic applied a patch git refuses ({s}):\n{s}\n", .{ captured.stderr, patch });
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {},
+    }
+    const theirs = try snapshot(gpa, io, &p.git);
+    defer gpa.free(theirs);
+    const ours = try snapshot(gpa, io, &p.ours);
+    defer gpa.free(ours);
+    try std.testing.expectEqualStrings(theirs, ours);
+    for ([_]*testgit.Repo{ &p.git, &p.ours }) |r| {
+        const secret = try r.readFile(io, ".git/outside/secret");
+        defer gpa.free(secret);
+        try std.testing.expectEqualStrings("secret\n", secret);
+    }
+}
+
+test "a patch that reads, removes or writes past a symbolic link, or names an invalid path, is refused as git refuses it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var p = try Pair.init(gpa, io);
+    defer p.deinit();
+    // The link points out of the working tree, at a directory git does not
+    // track: what a hostile history would point at `..` or `/`.
+    for ([_]*testgit.Repo{ &p.git, &p.ours }) |r| {
+        try r.writeFile(io, ".git/outside/secret", "secret\n");
+        try r.dir.symLink(io, ".git/outside", "link", .{});
+    }
+    try p.write(io, "b.txt", "one\n");
+    try p.both(io, &.{ "add", "-A" });
+    try p.both(io, &.{ "commit", "-q", "-m", "base" });
+    try p.both(io, &.{ "tag", "base" });
+
+    const patches = [_][]const u8{
+        // Read through the link into a tracked file.
+        "diff --git a/link/secret b/stolen\nsimilarity index 100%\ncopy from link/secret\ncopy to stolen\n",
+        "diff --git a/link/secret b/stolen\nsimilarity index 100%\nrename from link/secret\nrename to stolen\n",
+        // Remove what the link points at.
+        "diff --git a/link/secret b/link/secret\ndeleted file mode 100644\n--- a/link/secret\n+++ /dev/null\n@@ -1 +0,0 @@\n-secret\n",
+        // Write through it.
+        "diff --git a/link/secret b/link/secret\n--- a/link/secret\n+++ b/link/secret\n@@ -1 +1 @@\n-secret\n+changed\n",
+        // A link the patch makes, then a file written through it.
+        "diff --git a/l2 b/l2\nnew file mode 120000\n--- /dev/null\n+++ b/l2\n@@ -0,0 +1 @@\n+.git/outside\n\\ No newline at end of file\n" ++
+            "diff --git a/l2/secret b/l2/secret\n--- a/l2/secret\n+++ b/l2/secret\n@@ -1 +1 @@\n-secret\n+changed\n",
+        // Names no working tree may hold.
+        "diff --git a/../escape b/../escape\nnew file mode 100644\n--- /dev/null\n+++ b/../escape\n@@ -0,0 +1 @@\n+x\n",
+        "diff --git a/.git/config b/.git/config\nnew file mode 100644\n--- /dev/null\n+++ b/.git/config\n@@ -0,0 +1 @@\n+x\n",
+        // A `.gitmodules` that is a link, in two spellings.
+        "diff --git a/.gitmodules b/.gitmodules\nnew file mode 120000\n--- /dev/null\n+++ b/.gitmodules\n@@ -0,0 +1 @@\n+/etc/passwd\n\\ No newline at end of file\n",
+        "diff --git a/sub/.GITMODULES b/sub/.GITMODULES\nnew file mode 120000\n--- /dev/null\n+++ b/sub/.GITMODULES\n@@ -0,0 +1 @@\n+/etc/passwd\n\\ No newline at end of file\n",
+    };
+    for (patches) |patch| {
+        try expectBothRefuse(&p, io, patch);
+        try reset(&p, io);
+    }
+    // A `.gitmodules` that is a file is anyone's to add.
+    try compare(&p, io, "diff --git a/.gitmodules b/.gitmodules\nnew file mode 100644\n--- /dev/null\n+++ b/.gitmodules\n@@ -0,0 +1 @@\n+x\n", &.{}, .{});
+}
+
 test "line endings, the whitespace attribute, intent to add, no-add and include are honoured as git honours them" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

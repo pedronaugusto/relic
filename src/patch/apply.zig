@@ -203,6 +203,10 @@ pub const Reason = enum {
     renamed_or_deleted,
     /// "affected file is beyond a symbolic link".
     beyond_symlink,
+    /// "reading from ... beyond a symbolic link": the old file of a
+    /// change, rename, copy or deletion lies past a symlink in the working
+    /// tree, which would read or remove what is outside it.
+    reading_beyond_symlink,
     /// "invalid path".
     invalid_path,
     /// "new mode does not match old mode": a type change in one patch.
@@ -1341,7 +1345,7 @@ fn readOldData(st: *State, path: []const u8, found: fs.Entry, crlf_in_old: bool,
     }
 }
 
-const Loaded = enum { ok, submodule_without_index };
+const Loaded = enum { ok, submodule_without_index, beyond_symlink };
 
 fn loadPatchTarget(st: *State, out: *std.ArrayList(u8), ce: ?index_mod.Entry, found: ?fs.Entry, entry: *Entry, name: ?[]const u8, expected_mode: Mode) Error!Loaded {
     if (st.cached or st.check_index) {
@@ -1354,6 +1358,9 @@ fn loadPatchTarget(st: *State, out: *std.ArrayList(u8), ce: ?index_mod.Entry, fo
             }
             return .submodule_without_index;
         }
+        // git's `has_symlink_leading_path`: a file past a symlink is not
+        // the working tree's to read, nor, for a deletion, to remove.
+        if (try hasSymlinkLeadingPath(st, n)) return .beyond_symlink;
         try readOldData(st, n, found orelse return error.FileNotFound, entry.p.crlf_in_old, out);
     }
     return .ok;
@@ -1371,6 +1378,7 @@ fn loadPreimage(st: *State, img: *Image, entry: *Entry, found: ?fs.Entry, ce: ?i
         switch (try loadPatchTarget(st, &buf, ce, found, entry, entry.p.old_name, entry.p.old_mode)) {
             .ok => {},
             .submodule_without_index => entry.p.fragments = &.{},
+            .beyond_symlink => return .reading_beyond_symlink,
         }
     }
     try img.prepare(st.gpa, buf.items, !entry.p.is_binary);
@@ -1437,7 +1445,7 @@ fn loadCurrent(st: *State, img: *Image, entry: *Entry) Error!bool {
     defer buf.deinit(st.gpa);
     switch (try loadPatchTarget(st, &buf, ce, found, entry, name, entry.p.new_mode)) {
         .ok => {},
-        .submodule_without_index => return false,
+        .submodule_without_index, .beyond_symlink => return false,
     }
     try img.prepare(st.gpa, buf.items, !entry.p.is_binary);
     return true;
@@ -1683,8 +1691,10 @@ fn checkUnsafePath(p: *const FilePatch) bool {
         old_name = p.old_name;
     } else if (p.is_new != .yes and !p.is_copy) old_name = p.old_name;
     if (p.is_delete != .yes) new_name = p.new_name;
-    if (old_name) |n| if (safepath.check(n, .worktree) != null) return false;
-    if (new_name) |n| if (safepath.check(n, .worktree) != null) return false;
+    // git's `verify_path(name, mode)`: the mode decides whether the name
+    // may be `.gitmodules`.
+    if (old_name) |n| if (safepath.checkEntry(n, .worktree, patchparse.kind(p.old_mode) == patchparse.mode_symlink) != null) return false;
+    if (new_name) |n| if (safepath.checkEntry(n, .worktree, patchparse.kind(p.new_mode) == patchparse.mode_symlink) != null) return false;
     return true;
 }
 

@@ -12,6 +12,7 @@
 //! machine writing it is not harmless on the machine reading it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Why a path was refused. Each is reported by name so a caller can say which
 /// rule decided and show the component.
@@ -40,6 +41,10 @@ pub const Reason = enum {
     absolute,
     /// A name a git ref may not carry.
     invalid_ref_name,
+    /// A symbolic link named `.gitmodules`, in any spelling HFS+ or NTFS
+    /// opens as it: git reads that file, and a link would have it read
+    /// whatever the link points at.
+    symlinked_gitmodules,
 };
 
 /// What is being validated, because the rules differ slightly.
@@ -149,6 +154,21 @@ pub fn check(path: []const u8, use: Use) ?Refusal {
     return null;
 }
 
+/// Whether a whole path is allowed for an entry that is, or is not, a
+/// symbolic link: `check`, and for a link git's `verify_path` rule that no
+/// component spells `.gitmodules`.
+pub fn checkEntry(path: []const u8, use: Use, symlink: bool) ?Refusal {
+    if (check(path, use)) |refused| return refused;
+    if (!symlink) return null;
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |component| {
+        if (isHfsDot(component, "gitmodules") or isNtfsDot(component, "gitmodules", "gi7eba")) {
+            return .{ .reason = .symlinked_gitmodules, .component = component };
+        }
+    }
+    return null;
+}
+
 /// Whether a path may be written into a working tree.
 pub fn isSafeWorktreePath(path: []const u8) bool {
     return check(path, .worktree) == null;
@@ -157,6 +177,147 @@ pub fn isSafeWorktreePath(path: []const u8) bool {
 /// Whether a path may be stored in a tree or an index.
 pub fn isSafeStoredPath(path: []const u8) bool {
     return check(path, .stored) == null;
+}
+
+/// The byte at `i`, or NUL past the end, as git's NUL-terminated buffers
+/// read.
+fn byteAt(bytes: []const u8, i: usize) u8 {
+    return if (i < bytes.len) bytes[i] else 0;
+}
+
+/// The code point at the front of `s`, git's `pick_one_utf8_char`, and how
+/// many bytes it took; `null` for malformed UTF-8 or a NUL.
+fn pickUtf8(s: []const u8) ?struct { cp: u21, len: usize } {
+    const b0 = byteAt(s, 0);
+    if (b0 < 0x80) return .{ .cp = b0, .len = 1 };
+    const b1 = byteAt(s, 1);
+    if (b0 & 0xe0 == 0xc0) {
+        if (b1 & 0xc0 != 0x80 or b0 & 0xfe == 0xc0) return null;
+        return .{ .cp = (@as(u21, b0 & 0x1f) << 6) | (b1 & 0x3f), .len = 2 };
+    }
+    const b2 = byteAt(s, 2);
+    if (b0 & 0xf0 == 0xe0) {
+        if (b1 & 0xc0 != 0x80 or b2 & 0xc0 != 0x80 or
+            (b0 == 0xe0 and b1 & 0xe0 == 0x80) or
+            (b0 == 0xed and b1 & 0xe0 == 0xa0) or
+            (b0 == 0xef and b1 == 0xbf and b2 & 0xfe == 0xbe)) return null;
+        return .{ .cp = (@as(u21, b0 & 0x0f) << 12) | (@as(u21, b1 & 0x3f) << 6) | (b2 & 0x3f), .len = 3 };
+    }
+    const b3 = byteAt(s, 3);
+    if (b0 & 0xf8 == 0xf0) {
+        if (b1 & 0xc0 != 0x80 or b2 & 0xc0 != 0x80 or b3 & 0xc0 != 0x80 or
+            (b0 == 0xf0 and b1 & 0xf0 == 0x80) or
+            (b0 == 0xf4 and b1 > 0x8f) or b0 > 0xf4) return null;
+        return .{ .cp = (@as(u21, b0 & 0x07) << 18) | (@as(u21, b1 & 0x3f) << 12) | (@as(u21, b2 & 0x3f) << 6) | (b3 & 0x3f), .len = 4 };
+    }
+    return null;
+}
+
+/// git's `next_hfs_char`: the next code point HFS+ does not ignore, `0`
+/// at the end or for malformed UTF-8.
+fn nextHfsChar(s: []const u8, at: *usize) u21 {
+    while (true) {
+        if (at.* >= s.len) return 0;
+        const picked = pickUtf8(s[at.*..]) orelse {
+            at.* = s.len;
+            return 0;
+        };
+        at.* += picked.len;
+        switch (picked.cp) {
+            0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x206a, 0x206b, 0x206c, 0x206d, 0x206e, 0x206f, 0xfeff => continue,
+            else => return picked.cp,
+        }
+    }
+}
+
+fn isDirSep(c: u21) bool {
+    return c == '/' or (builtin.os.tag == .windows and c == '\\');
+}
+
+/// git's `is_hfs_dot_generic`: `.<needle>` as HFS+ reads it, ignoring
+/// the code points it ignores and case.
+pub fn isHfsDot(name: []const u8, needle: []const u8) bool {
+    var at: usize = 0;
+    if (nextHfsChar(name, &at) != '.') return false;
+    for (needle) |n| {
+        const c = nextHfsChar(name, &at);
+        if (c > 127) return false;
+        if (std.ascii.toLower(@intCast(c)) != n) return false;
+    }
+    const c = nextHfsChar(name, &at);
+    return c == 0 or isDirSep(c);
+}
+
+/// git's `is_ntfs_dotgit`: `.git` or `git~1`, then only spaces and dots
+/// to a separator, a colon or the end.
+pub fn isNtfsDotGit(name: []const u8) bool {
+    var i: usize = 0;
+    const c0 = byteAt(name, 0);
+    if (c0 == '.') {
+        if (std.ascii.toLower(byteAt(name, 1)) != 'g' or std.ascii.toLower(byteAt(name, 2)) != 'i' or std.ascii.toLower(byteAt(name, 3)) != 't') return false;
+        i = 4;
+    } else if (c0 == 'g' or c0 == 'G') {
+        if (std.ascii.toLower(byteAt(name, 1)) != 'i' or std.ascii.toLower(byteAt(name, 2)) != 't' or byteAt(name, 3) != '~' or byteAt(name, 4) != '1') return false;
+        i = 5;
+    } else return false;
+    while (true) : (i += 1) {
+        const c = byteAt(name, i);
+        if (c == 0 or c == '/' or c == '\\' or c == ':') return true;
+        if (c != '.' and c != ' ') return false;
+    }
+}
+
+/// git's `is_ntfs_dot_generic`: `.<name>`, its 8.3 short name `<first
+/// six>~<1-4>`, or the fall-back short name `<prefix>~<digit>`, then only
+/// spaces and dots to a colon or the end.
+pub fn isNtfsDot(name: []const u8, dotgit_name: []const u8, shortname_prefix: []const u8) bool {
+    const onlySpacesAndPeriods = struct {
+        fn f(n: []const u8, start: usize) bool {
+            var i = start;
+            while (true) : (i += 1) {
+                const c = byteAt(n, i);
+                if (c == 0 or c == ':') return true;
+                if (c != ' ' and c != '.') return false;
+            }
+        }
+    }.f;
+    if (byteAt(name, 0) == '.' and strncasecmp(name[@min(1, name.len)..], dotgit_name, dotgit_name.len)) {
+        return onlySpacesAndPeriods(name, dotgit_name.len + 1);
+    }
+    if (strncasecmp(name, dotgit_name, 6) and byteAt(name, 6) == '~' and byteAt(name, 7) >= '1' and byteAt(name, 7) <= '4') {
+        return onlySpacesAndPeriods(name, 8);
+    }
+    var saw_tilde = false;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        const c = byteAt(name, i);
+        if (c == 0) return false;
+        if (saw_tilde) {
+            if (c < '0' or c > '9') return false;
+        } else if (c == '~') {
+            i += 1;
+            const d = byteAt(name, i);
+            if (d < '1' or d > '9') return false;
+            saw_tilde = true;
+        } else if (i >= 6) {
+            return false;
+        } else if (c & 0x80 != 0) {
+            return false;
+        } else if (std.ascii.toLower(c) != shortname_prefix[i]) return false;
+    }
+    return onlySpacesAndPeriods(name, i);
+}
+
+/// C's `strncasecmp(a, b, n) == 0`, with `a` NUL-terminated at its end.
+fn strncasecmp(a: []const u8, b: []const u8, n: usize) bool {
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const ca = std.ascii.toLower(byteAt(a, i));
+        const cb = std.ascii.toLower(byteAt(b, i));
+        if (ca != cb) return false;
+        if (ca == 0) return true;
+    }
+    return true;
 }
 
 /// Whether a ref name is one git will accept.
@@ -231,6 +392,16 @@ test "trailing dots and spaces are refused" {
     try std.testing.expectEqual(Reason.trailing_dot_or_space, checkComponent("x.", .worktree).?);
     try std.testing.expectEqual(Reason.trailing_dot_or_space, checkComponent("x ", .worktree).?);
     try std.testing.expect(checkComponent(".x", .worktree) == null);
+}
+
+test "a symbolic link may not be .gitmodules in any spelling, and a file may" {
+    for ([_][]const u8{ ".gitmodules", ".GitModules", "sub/.gitmodules", "gitmod~1", "GI7EBA~1", ".git\u{200c}modules" }) |path| {
+        try std.testing.expectEqual(Reason.symlinked_gitmodules, checkEntry(path, .worktree, true).?.reason);
+        try std.testing.expectEqual(null, checkEntry(path, .stored, false));
+    }
+    for ([_][]const u8{ ".gitmodulesx", "gitmodules", ".gitattributes" }) |path| {
+        try std.testing.expectEqual(null, checkEntry(path, .worktree, true));
+    }
 }
 
 test "ref names follow git's rules and refuse a .lock suffix" {

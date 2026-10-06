@@ -24,7 +24,6 @@
 //! path anyway, and an old repository's style warnings stay warnings.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -665,30 +664,30 @@ fn checkTree(gpa: Allocator, r: *Reporter, kind: Kind, bytes: []const u8, found:
         has_empty_name = has_empty_name or name.len == 0;
         has_dot = has_dot or std.mem.eql(u8, name, ".");
         has_dotdot = has_dotdot or std.mem.eql(u8, name, "..");
-        has_dotgit = has_dotgit or isHfsDot(name, "git") or isNtfsDotGit(name);
+        has_dotgit = has_dotgit or safepath.isHfsDot(name, "git") or safepath.isNtfsDotGit(name);
         has_zero_pad = has_zero_pad or rest[0] == '0';
         has_large_name = has_large_name or name.len > r.rules.max_entry_len;
 
         const is_link = entry.mode & s_ifmt == s_iflnk;
-        if (isHfsDot(name, "gitmodules") or isNtfsDot(name, "gitmodules", "gi7eba")) {
+        if (safepath.isHfsDot(name, "gitmodules") or safepath.isNtfsDot(name, "gitmodules", "gi7eba")) {
             if (!is_link) {
                 if (found) |f| try f.modules.put(gpa, entry.oidValue(kind), {});
             } else _ = try r.report(.gitmodules_symlink, "");
         }
-        if (isHfsDot(name, "gitattributes") or isNtfsDot(name, "gitattributes", "gi7d29")) {
+        if (safepath.isHfsDot(name, "gitattributes") or safepath.isNtfsDot(name, "gitattributes", "gi7d29")) {
             if (!is_link) {
                 if (found) |f| try f.attributes.put(gpa, entry.oidValue(kind), {});
             } else _ = try r.report(.gitattributes_symlink, "");
         }
         if (is_link) {
-            if (isHfsDot(name, "gitignore") or isNtfsDot(name, "gitignore", "gi250a")) _ = try r.report(.gitignore_symlink, "");
-            if (isHfsDot(name, "mailmap") or isNtfsDot(name, "mailmap", "maba30")) _ = try r.report(.mailmap_symlink, "");
+            if (safepath.isHfsDot(name, "gitignore") or safepath.isNtfsDot(name, "gitignore", "gi250a")) _ = try r.report(.gitignore_symlink, "");
+            if (safepath.isHfsDot(name, "mailmap") or safepath.isNtfsDot(name, "mailmap", "maba30")) _ = try r.report(.mailmap_symlink, "");
         }
         var backslash = std.mem.findScalar(u8, name, '\\');
         while (backslash) |at| {
             const after = name[at + 1 ..];
-            has_dotgit = has_dotgit or isNtfsDotGit(after);
-            if (isNtfsDot(after, "gitmodules", "gi7eba")) {
+            has_dotgit = has_dotgit or safepath.isNtfsDotGit(after);
+            if (safepath.isNtfsDot(after, "gitmodules", "gi7eba")) {
                 if (!is_link) {
                     if (found) |f| try f.modules.put(gpa, entry.oidValue(kind), {});
                 } else _ = try r.report(.gitmodules_symlink, "");
@@ -1042,141 +1041,6 @@ pub fn checkFoundObject(rules: *const Rules, oid: Oid, as: Special, missing: boo
     };
     _ = try r.report(problem, "");
     return r.first;
-}
-
-/// The code point at the front of `s`, git's `pick_one_utf8_char`, and how
-/// many bytes it took; `null` for malformed UTF-8 or a NUL.
-fn pickUtf8(s: []const u8) ?struct { cp: u21, len: usize } {
-    const b0 = byteAt(s, 0);
-    if (b0 < 0x80) return .{ .cp = b0, .len = 1 };
-    const b1 = byteAt(s, 1);
-    if (b0 & 0xe0 == 0xc0) {
-        if (b1 & 0xc0 != 0x80 or b0 & 0xfe == 0xc0) return null;
-        return .{ .cp = (@as(u21, b0 & 0x1f) << 6) | (b1 & 0x3f), .len = 2 };
-    }
-    const b2 = byteAt(s, 2);
-    if (b0 & 0xf0 == 0xe0) {
-        if (b1 & 0xc0 != 0x80 or b2 & 0xc0 != 0x80 or
-            (b0 == 0xe0 and b1 & 0xe0 == 0x80) or
-            (b0 == 0xed and b1 & 0xe0 == 0xa0) or
-            (b0 == 0xef and b1 == 0xbf and b2 & 0xfe == 0xbe)) return null;
-        return .{ .cp = (@as(u21, b0 & 0x0f) << 12) | (@as(u21, b1 & 0x3f) << 6) | (b2 & 0x3f), .len = 3 };
-    }
-    const b3 = byteAt(s, 3);
-    if (b0 & 0xf8 == 0xf0) {
-        if (b1 & 0xc0 != 0x80 or b2 & 0xc0 != 0x80 or b3 & 0xc0 != 0x80 or
-            (b0 == 0xf0 and b1 & 0xf0 == 0x80) or
-            (b0 == 0xf4 and b1 > 0x8f) or b0 > 0xf4) return null;
-        return .{ .cp = (@as(u21, b0 & 0x07) << 18) | (@as(u21, b1 & 0x3f) << 12) | (@as(u21, b2 & 0x3f) << 6) | (b3 & 0x3f), .len = 4 };
-    }
-    return null;
-}
-
-/// git's `next_hfs_char`: the next code point HFS+ does not ignore, `0`
-/// at the end or for malformed UTF-8.
-fn nextHfsChar(s: []const u8, at: *usize) u21 {
-    while (true) {
-        if (at.* >= s.len) return 0;
-        const picked = pickUtf8(s[at.*..]) orelse {
-            at.* = s.len;
-            return 0;
-        };
-        at.* += picked.len;
-        switch (picked.cp) {
-            0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x206a, 0x206b, 0x206c, 0x206d, 0x206e, 0x206f, 0xfeff => continue,
-            else => return picked.cp,
-        }
-    }
-}
-
-fn isDirSep(c: u21) bool {
-    return c == '/' or (builtin.os.tag == .windows and c == '\\');
-}
-
-/// git's `is_hfs_dot_generic`: `.<needle>` as HFS+ reads it, ignoring
-/// the code points it ignores and case.
-fn isHfsDot(name: []const u8, needle: []const u8) bool {
-    var at: usize = 0;
-    if (nextHfsChar(name, &at) != '.') return false;
-    for (needle) |n| {
-        const c = nextHfsChar(name, &at);
-        if (c > 127) return false;
-        if (std.ascii.toLower(@intCast(c)) != n) return false;
-    }
-    const c = nextHfsChar(name, &at);
-    return c == 0 or isDirSep(c);
-}
-
-/// git's `is_ntfs_dotgit`: `.git` or `git~1`, then only spaces and dots
-/// to a separator, a colon or the end.
-fn isNtfsDotGit(name: []const u8) bool {
-    var i: usize = 0;
-    const c0 = byteAt(name, 0);
-    if (c0 == '.') {
-        if (std.ascii.toLower(byteAt(name, 1)) != 'g' or std.ascii.toLower(byteAt(name, 2)) != 'i' or std.ascii.toLower(byteAt(name, 3)) != 't') return false;
-        i = 4;
-    } else if (c0 == 'g' or c0 == 'G') {
-        if (std.ascii.toLower(byteAt(name, 1)) != 'i' or std.ascii.toLower(byteAt(name, 2)) != 't' or byteAt(name, 3) != '~' or byteAt(name, 4) != '1') return false;
-        i = 5;
-    } else return false;
-    while (true) : (i += 1) {
-        const c = byteAt(name, i);
-        if (c == 0 or c == '/' or c == '\\' or c == ':') return true;
-        if (c != '.' and c != ' ') return false;
-    }
-}
-
-/// git's `is_ntfs_dot_generic`: `.<name>`, its 8.3 short name `<first
-/// six>~<1-4>`, or the fall-back short name `<prefix>~<digit>`, then only
-/// spaces and dots to a colon or the end.
-fn isNtfsDot(name: []const u8, dotgit_name: []const u8, shortname_prefix: []const u8) bool {
-    const onlySpacesAndPeriods = struct {
-        fn f(n: []const u8, start: usize) bool {
-            var i = start;
-            while (true) : (i += 1) {
-                const c = byteAt(n, i);
-                if (c == 0 or c == ':') return true;
-                if (c != ' ' and c != '.') return false;
-            }
-        }
-    }.f;
-    if (byteAt(name, 0) == '.' and strncasecmp(name[@min(1, name.len)..], dotgit_name, dotgit_name.len)) {
-        return onlySpacesAndPeriods(name, dotgit_name.len + 1);
-    }
-    if (strncasecmp(name, dotgit_name, 6) and byteAt(name, 6) == '~' and byteAt(name, 7) >= '1' and byteAt(name, 7) <= '4') {
-        return onlySpacesAndPeriods(name, 8);
-    }
-    var saw_tilde = false;
-    var i: usize = 0;
-    while (i < 8) : (i += 1) {
-        const c = byteAt(name, i);
-        if (c == 0) return false;
-        if (saw_tilde) {
-            if (c < '0' or c > '9') return false;
-        } else if (c == '~') {
-            i += 1;
-            const d = byteAt(name, i);
-            if (d < '1' or d > '9') return false;
-            saw_tilde = true;
-        } else if (i >= 6) {
-            return false;
-        } else if (c & 0x80 != 0) {
-            return false;
-        } else if (std.ascii.toLower(c) != shortname_prefix[i]) return false;
-    }
-    return onlySpacesAndPeriods(name, i);
-}
-
-/// C's `strncasecmp(a, b, n) == 0`, with `a` NUL-terminated at its end.
-fn strncasecmp(a: []const u8, b: []const u8, n: usize) bool {
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const ca = std.ascii.toLower(byteAt(a, i));
-        const cb = std.ascii.toLower(byteAt(b, i));
-        if (ca != cb) return false;
-        if (ca == 0) return true;
-    }
-    return true;
 }
 
 const testing = std.testing;

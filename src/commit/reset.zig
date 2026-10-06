@@ -135,7 +135,7 @@ pub fn toTree(
             if (found.kind == .directory) try wt.deleteTree(io, path);
         }
         // Validate before `enter` consults a directory in the working tree.
-        if (worktree.safepath.check(path, .worktree) != null) return error.UnsafePath;
+        if (worktree.safepath.checkEntry(path, .worktree, want.mode == .symlink) != null) return error.UnsafePath;
         try write_attrs.enter(io, wt, path);
         const written = try worktree.writeEntry(gpa, io, wt, db, &conv, path, want.mode, want.oid, rules);
         try stats.put(arena, path, written.stat);
