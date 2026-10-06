@@ -535,16 +535,7 @@ const Walker = struct {
         }
         try w.markSeen(path);
 
-        const mode: object.Mode = if (found.kind == .sym_link)
-            .symlink
-        else if (w.options.rules.file_mode)
-            (if (found.executable) .exec else .file)
-        else if (tracked) |entry|
-            // Without an executable bit on the filesystem, the index's mode
-            // is preserved rather than invented.
-            (if (entry.mode == .exec) .exec else .file)
-        else
-            .file;
+        const mode = modeOnDisk(found, if (tracked) |entry| entry.mode else null, w.options.rules);
 
         if (tracked) |entry| {
             const racy = w.index.isRacy(entry.*);
@@ -646,6 +637,17 @@ const Walker = struct {
         return oid;
     }
 };
+
+/// The mode a file on the disk is staged with, as git's `ce_mode_from_stat`
+/// gives it: without `core.symlinks` a file where the index has a link is
+/// the link, written as a file; without `core.fileMode` the index's
+/// executable bit is kept, there being none on the disk to read.
+fn modeOnDisk(found: fs.Entry, tracked: ?object.Mode, rules: Rules) object.Mode {
+    if (found.kind == .sym_link) return .symlink;
+    if (!rules.symlinks and tracked == .symlink) return .symlink;
+    if (rules.file_mode) return if (found.executable) .exec else .file;
+    return if (tracked == .exec) .exec else .file;
+}
 
 /// One entry of a directory, kept while the rest of it is read.
 const Found = struct {
@@ -1429,11 +1431,7 @@ const StatusScan = struct {
     }
 
     fn compare(s: *StatusScan, entry: *index_mod.Entry, path: []const u8, found: fs.Entry) Error!Change {
-        const mode: object.Mode = if (found.kind == .sym_link)
-            .symlink
-        else if (s.options.rules.file_mode)
-            (if (found.executable) .exec else .file)
-        else if (entry.mode == .exec) .exec else .file;
+        const mode = modeOnDisk(found, entry.mode, s.options.rules);
 
         if (entry.mode.isBlob() != mode.isBlob() or
             (entry.mode == .symlink) != (mode == .symlink))
@@ -2898,12 +2896,7 @@ pub fn differsFromIndex(
     if (entry.mode == .gitlink) return false;
     const found = (try fs.statAt(io, wt, entry.path)) orelse return false;
     if (found.kind == .directory) return true;
-    const on_disk_mode: object.Mode = if (found.kind == .sym_link)
-        .symlink
-    else if (!rules.file_mode)
-        (if (entry.mode == .exec) .exec else .file)
-    else if (found.executable) .exec else .file;
-    if (on_disk_mode != entry.mode and !(entry.mode == .symlink and !rules.symlinks)) return true;
+    if (modeOnDisk(found, entry.mode, rules) != entry.mode) return true;
     if (!index.isRacy(entry) and entry.stat.matches(found.stat, rules.check_stat, rules.timestamp_resolution)) {
         return false;
     }

@@ -1435,3 +1435,45 @@ test "attributes resolve as git check-attr resolves them: the last assignment of
     }
     for ([_][]const u8{ "f", "sub/f", "val/f", "top/f" }) |path| try expectCheckAttr(gpa, io, &h, path);
 }
+
+test "without core.symlinks a link written as a file stays a link to status and add, as git keeps it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    try h.repo.writeFile(io, "target", "t\n");
+    const link = try h.db.write(io, .blob, "target");
+    const file = try h.db.write(io, .blob, "t\n");
+    var builder: object.Tree.Builder = .init(gpa, .sha1);
+    defer builder.deinit();
+    try builder.add(.symlink, "link", link);
+    try builder.add(.file, "target", file);
+    const bytes = try builder.build();
+    defer gpa.free(bytes);
+    const tree = try h.db.write(io, .tree, bytes);
+
+    var rules = h.worktreeRules();
+    rules.symlinks = false;
+    const out = try worktree.checkout(gpa, io, h.repo.dir, &h.index, &h.db, tree, .{ .rules = rules, .force = true });
+    try std.testing.expectEqual(@as(u32, 1), out.symlinks_as_files);
+    // Every stat stale, so the content is what decides.
+    for (h.index.entries.items) |*entry| entry.stat = .none;
+
+    var st = try worktree.status(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = rules, .head_tree = tree });
+    defer st.deinit();
+    try std.testing.expect(st.isClean());
+    const added = try worktree.addAll(gpa, io, h.repo.dir, &h.index, &h.db, .{ .rules = rules });
+    try std.testing.expectEqual(@as(u32, 0), added.modified);
+    try std.testing.expectEqual(object.Mode.symlink, h.index.find("link").?.mode);
+
+    // git, told the same, calls it clean.
+    try h.index.write(io, h.git_dir, "index", .{});
+    try h.repo.exec(io, &.{ "config", "core.symlinks", "false" });
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const commit = try h.repo.line(io, &.{ "commit-tree", tree.hex(&hex), "-m", "links" });
+    defer gpa.free(commit);
+    try h.repo.exec(io, &.{ "update-ref", "HEAD", commit });
+    const said = try h.repo.run(io, &.{ "status", "--porcelain" });
+    defer gpa.free(said);
+    try std.testing.expectEqualStrings("", said);
+}
