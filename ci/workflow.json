@@ -18,6 +18,6 @@
   "windows_job_timeout": 45,
   "sanitizer_job_timeout": 30,
   "source_job_timeout": 10,
-  "shards": { "windows": 5, "macos": 3 },
+  "shards": { "windows": 5, "macos": 2 },
   "fast_shards": 6
 }
