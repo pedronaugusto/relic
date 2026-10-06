@@ -118,7 +118,8 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
         // Windows does not put a write's time on the file while the handle
         // that made it is still open: without this every sample would be the
         // time the file was created and the answer would be of nothing.
-        if (builtin.os.tag == .windows) file.sync(io) catch {};
+        // A write whose time cannot be put on the file is a sample not taken.
+        if (builtin.os.tag == .windows) file.sync(io) catch break;
         const s = file.stat(io) catch break;
         const nsec: u64 = @intCast(@mod(s.mtime.toNanoseconds(), std.time.ns_per_s));
         divisor = std.math.gcd(divisor, nsec);
@@ -505,6 +506,7 @@ pub const LockFile = struct {
         lock.file.close(io);
         lock.finished = true;
         renameWithRetry(io, lock.dir, lock.lock_name, lock.target) catch |err| {
+            // ziglint-ignore: Z026 the rename's error is the one to report; a lock left behind is what git reports as held, naming the file to remove
             lock.dir.deleteFile(io, lock.lock_name) catch {};
             return err;
         };
@@ -525,6 +527,7 @@ pub const LockFile = struct {
     pub fn deinit(lock: *LockFile, io: Io) void {
         if (!lock.finished) {
             lock.file.close(io);
+            // ziglint-ignore: Z026 giving a lock up cannot fail; a lock left behind is what git reports as held, naming the file to remove
             lock.dir.deleteFile(io, lock.lock_name) catch {};
             lock.finished = true;
         }
@@ -1058,6 +1061,7 @@ pub fn atomicWrite(
     }
     file.close(io);
     renameWithRetry(io, dir, temp, sub_path) catch |err| {
+        // ziglint-ignore: Z026 the rename's error is the one to report; a temporary left behind is what `git gc` prunes
         dir.deleteFile(io, temp) catch {};
         return err;
     };

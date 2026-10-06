@@ -195,6 +195,7 @@ pub const Running = struct {
                 return;
             }
         }
+        // ziglint-ignore: Z026 killing cannot fail its caller; a child already gone has nothing left to reap
         _ = running.child.killWait(io, 0) catch {};
     }
 
@@ -340,6 +341,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
         fn terminate(io: Io, raw: *anyopaque, child: *Child) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.ended = true;
+            // ziglint-ignore: Z026 termination cannot fail its caller; a child already gone has nothing left to reap
             _ = child.killWait(io, 0) catch {};
         }
     };
