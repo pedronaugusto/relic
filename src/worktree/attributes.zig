@@ -12,6 +12,8 @@
 //! a file git leaves alone, which produces a different blob and therefore a
 //! different tree.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -180,7 +182,7 @@ pub const Attrs = struct {
     /// differ from the last call's are read. A directory whose file the
     /// caller loaded itself is not read again. `leave` gives back what this
     /// loaded.
-    pub fn enter(attrs: *Attrs, io: Io, wt: Io.Dir, path: []const u8) Error!void {
+    pub fn enter(attrs: *Attrs, io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
         const dir = std.fs.path.dirnamePosix(path) orelse "";
         if (attrs.entered_any and std.mem.eql(u8, attrs.entered_dir.items, dir)) return;
         // How many leading directories this shares with the last one, and
@@ -262,7 +264,7 @@ pub const Attrs = struct {
         common_dir: Io.Dir,
         attributes_file: ?[]const u8,
         attributes_dir: ?Io.Dir,
-    ) Error!void {
+    ) Self.Error!void {
         if (attributes_file) |path| {
             if (attributes_dir) |dir| {
                 try attrs.addFileIfPresent(io, dir, path, "", path, global_precedence);
@@ -275,7 +277,7 @@ pub const Attrs = struct {
     ///
     /// `depth` is how far `base` is below the root of the working tree;
     /// deeper wins, so the precedence rises with it.
-    pub fn addDirectory(attrs: *Attrs, io: Io, wt: Io.Dir, base: []const u8, depth: u32) Error!void {
+    pub fn addDirectory(attrs: *Attrs, io: Io, wt: Io.Dir, base: []const u8, depth: u32) Self.Error!void {
         var path_buf: [4096]u8 = undefined;
         const path = if (base.len == 0)
             ".gitattributes"
@@ -300,7 +302,7 @@ pub const Attrs = struct {
 
     /// Add a level from text already in memory, which must outlive the
     /// attributes.
-    pub fn addText(attrs: *Attrs, text: []const u8, base: []const u8, source: []const u8, precedence: u32) Error!void {
+    pub fn addText(attrs: *Attrs, text: []const u8, base: []const u8, source: []const u8, precedence: u32) Self.Error!void {
         const a = attrs.arena.allocator();
         var rules: std.ArrayList(Rule) = .empty;
         var line_number: u32 = 0;

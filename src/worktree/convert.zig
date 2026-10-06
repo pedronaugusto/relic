@@ -18,6 +18,8 @@
 //! failures are reported. `worktree.addAll`, `status`, `checkout` and
 //! `applySparse` each run one.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -226,7 +228,7 @@ pub const Session = struct {
         size: u64,
         applied: attributes.Attributes,
         storing: Storing,
-    ) Error!ToGit {
+    ) Self.Error!ToGit {
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
         if (resolved == .native_lfs) {
@@ -245,7 +247,7 @@ pub const Session = struct {
         bytes: []const u8,
         applied: attributes.Attributes,
         storing: Storing,
-    ) Error!ToGit {
+    ) Self.Error!ToGit {
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
         return s.convertToGit(a, path, bytes, applied, resolved, storing);
@@ -312,7 +314,7 @@ pub const Session = struct {
         blob: []const u8,
         applied: attributes.Attributes,
         meta: Meta,
-    ) Error!Smudged {
+    ) Self.Error!Smudged {
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
         const ident = if (identOn(applied)) try identToWorktree(a, s.options.kind, blob) else null;
@@ -334,7 +336,7 @@ pub const Session = struct {
     /// its CRLF endings, which is what renormalizing means. A relic LFS
     /// pointer comes back as its canonical form, which is what the round
     /// trip through the object gives. Nothing is stored.
-    pub fn renormalize(s: *Session, a: Allocator, path: []const u8, bytes: []const u8, applied: attributes.Attributes) Error![]const u8 {
+    pub fn renormalize(s: *Session, a: Allocator, path: []const u8, bytes: []const u8, applied: attributes.Attributes) Self.Error![]const u8 {
         if (attributes.unsupported(applied, &.{}) != null) return error.UnsupportedAttribute;
         const resolved = try s.resolve(path, applied);
         var out: []const u8 = bytes;
@@ -688,7 +690,7 @@ pub const Session = struct {
     /// file it names is asked for again. A delayed file never handed over,
     /// or one handed over that was never delayed, is `error.FilterFailed`
     /// once every other file has been given back.
-    pub fn nextReady(s: *Session, a: Allocator) Error!?Ready {
+    pub fn nextReady(s: *Session, a: Allocator) Self.Error!?Ready {
         if (try s.nextDeferred()) |ready| return ready;
         while (true) {
             if (s.next_available < s.available.items.len) {

@@ -16,6 +16,8 @@
 //! library writes its own order, and big-endian elsewhere, where git uses
 //! libiconv. An empty file is not converted either way.
 
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -109,7 +111,7 @@ fn validate(e: Encoding, src: []const u8) Error!void {
 
 /// `src`, in encoding `e`, as UTF-8 for the repository. Empty content is
 /// returned as it is.
-pub fn toUtf8(a: Allocator, e: Encoding, src: []const u8) Error![]const u8 {
+pub fn toUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u8 {
     if (src.len == 0) return src;
     try validate(e, src);
     // git reads its `-BOM` names as plain `UTF-16`: the mark decides, and
@@ -176,7 +178,7 @@ pub const written_order: std.builtin.Endian = if (builtin.os.tag == .linux) buil
 /// `src`, UTF-8 from the repository, in encoding `e` for the working tree.
 /// Empty content is returned as it is; content that is not UTF-8 is
 /// `error.InvalidContent`, which git leaves unconverted.
-pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Error![]const u8 {
+pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u8 {
     if (src.len == 0) return src;
     const endian: std.builtin.Endian, const bom: []const u8 = switch (e) {
         .utf16le => .{ .little, "" },

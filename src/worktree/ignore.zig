@@ -10,6 +10,8 @@
 //! excluded by `dir/*` that must still be entered so a later negation can
 //! re-include something inside it, and a bare `!` line.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -108,7 +110,7 @@ pub const Rules = struct {
         common_dir: Io.Dir,
         excludes_file: ?[]const u8,
         excludes_dir: ?Io.Dir,
-    ) Error!void {
+    ) Self.Error!void {
         if (excludes_file) |path| {
             if (excludes_dir) |dir| {
                 try rules.addFileIfPresent(io, dir, path, "", path, 0);
@@ -122,7 +124,7 @@ pub const Rules = struct {
     ///
     /// `depth` decides precedence; the walker passes the directory's depth
     /// below the working tree's root, offset past the two global levels.
-    pub fn addDirectory(rules: *Rules, io: Io, wt: Io.Dir, base: []const u8, depth: u32) Error!void {
+    pub fn addDirectory(rules: *Rules, io: Io, wt: Io.Dir, base: []const u8, depth: u32) Self.Error!void {
         var path_buf: [4096]u8 = undefined;
         const path = if (base.len == 0)
             ".gitignore"
@@ -149,7 +151,7 @@ pub const Rules = struct {
     ///
     /// `text`, `base` and `source` must outlive the rules; text read by
     /// `addDirectory` is held in the rules' own arena.
-    pub fn addText(rules: *Rules, text: []const u8, base: []const u8, source: []const u8, depth: u32) Error!void {
+    pub fn addText(rules: *Rules, text: []const u8, base: []const u8, source: []const u8, depth: u32) Self.Error!void {
         const a = rules.arena.allocator();
         var patterns: std.ArrayList(Pattern) = .empty;
         var line_number: u32 = 0;
@@ -289,12 +291,12 @@ pub const Checker = struct {
     /// (`Rules.matchPath`). `path` is `/`-separated and relative to the
     /// working tree's root. A tracked path is the caller's to keep: git
     /// reports it whatever the rules say.
-    pub fn excluded(checker: *Checker, io: Io, path: []const u8, is_dir: bool) Error!bool {
+    pub fn excluded(checker: *Checker, io: Io, path: []const u8, is_dir: bool) Self.Error!bool {
         return (try checker.match(io, path, is_dir)).excluded;
     }
 
     /// What decided `path`, and how, as `excluded` decides it.
-    pub fn match(checker: *Checker, io: Io, path: []const u8, is_dir: bool) Error!Match {
+    pub fn match(checker: *Checker, io: Io, path: []const u8, is_dir: bool) Self.Error!Match {
         try checker.readAbove(io, path);
         return checker.rules.matchPath(path, is_dir);
     }

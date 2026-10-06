@@ -9,6 +9,8 @@
 //! a stack of the worktree's own under `reftable/`, and the `HEAD` file is
 //! the placeholder git leaves there.
 
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -104,7 +106,7 @@ pub const Listing = struct {
 ///
 /// The main working tree is not one of these: it has no administrative
 /// directory, and a caller that wants it in a list adds it.
-pub fn list(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Error!Listing {
+pub fn list(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Error!Listing {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -224,7 +226,7 @@ pub fn add(
     dest_dir: Io.Dir,
     dest_path: []const u8,
     options: AddOptions,
-) Error!Added {
+) Self.Error!Added {
     if (safepath.checkComponent(name, .stored) != null) return error.InvalidWorktreeName;
     _ = options.create_destination;
 
@@ -353,7 +355,7 @@ pub fn remove(
     common_dir: Io.Dir,
     name: []const u8,
     options: RemoveOptions,
-) Error!void {
+) Self.Error!void {
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
         return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
@@ -405,7 +407,7 @@ pub const PruneOutcome = struct {
 ///
 /// A worktree with a `locked` file beside it is skipped whatever its state,
 /// which is what git does and is the whole point of that file.
-pub fn prune(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Error!PruneOutcome {
+pub fn prune(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Error!PruneOutcome {
     var outcome: PruneOutcome = .{};
     var listing = try list(gpa, io, common_dir, kind);
     defer listing.deinit();
@@ -423,7 +425,7 @@ pub fn prune(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Error!
 }
 
 /// Put a `locked` file beside a worktree, with an optional reason.
-pub fn lock(io: Io, common_dir: Io.Dir, name: []const u8, reason: []const u8) Error!void {
+pub fn lock(io: Io, common_dir: Io.Dir, name: []const u8, reason: []const u8) Self.Error!void {
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
         return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
@@ -433,7 +435,7 @@ pub fn lock(io: Io, common_dir: Io.Dir, name: []const u8, reason: []const u8) Er
 }
 
 /// Remove the `locked` file.
-pub fn unlock(io: Io, common_dir: Io.Dir, name: []const u8) Error!void {
+pub fn unlock(io: Io, common_dir: Io.Dir, name: []const u8) Self.Error!void {
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
         return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
@@ -455,7 +457,7 @@ pub fn repair(
     common_dir: Io.Dir,
     name: []const u8,
     dest_dir: Io.Dir,
-) Error!void {
+) Self.Error!void {
     var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
         return error.WorktreeNotFound;
     defer worktrees_dir.close(io);
@@ -489,7 +491,7 @@ pub fn move(
     name: []const u8,
     new_parent: Io.Dir,
     new_name: []const u8,
-) Error!void {
+) Self.Error!void {
     var listing = try list(gpa, io, common_dir, .sha1);
     defer listing.deinit();
     const entry = listing.find(name) orelse return error.WorktreeNotFound;
@@ -507,7 +509,7 @@ pub fn move(
 ///
 /// This is how a linked worktree's directory is found from the worktree
 /// itself, and the reason a `.git` that is a file is not an error.
-pub fn readGitFile(gpa: Allocator, io: Io, dir: Io.Dir) Error!?[]u8 {
+pub fn readGitFile(gpa: Allocator, io: Io, dir: Io.Dir) Self.Error!?[]u8 {
     const text = (try fs.readFileAlloc(gpa, io, dir, ".git", 4096)) orelse return null;
     defer gpa.free(text);
     const trimmed = std.mem.trim(u8, text, " \t\r\n");

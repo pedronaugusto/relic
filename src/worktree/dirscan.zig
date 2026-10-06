@@ -18,6 +18,8 @@
 //! walk uses a directory's stat to decide nothing, and the index holds no
 //! entry for one.
 
+const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -129,7 +131,7 @@ pub const Scan = struct {
     }
 
     /// The next entry, or `null` at the end of the directory.
-    pub fn next(s: *Scan) Error!?Item {
+    pub fn next(s: *Scan) Self.Error!?Item {
         switch (s.arm) {
             .bulk => |*b| {
                 while (true) {

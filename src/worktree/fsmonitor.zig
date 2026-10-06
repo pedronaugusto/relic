@@ -16,6 +16,8 @@
 //! that this package knows of. git's own daemon, `core.fsmonitor=true`, is
 //! not spoken to: `error.FsmonitorDaemonUnsupported`.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -68,7 +70,7 @@ pub const Source = union(enum) {
 
 /// The hook the configuration names, or `null` when there is none:
 /// `core.fsmonitor` unset or false.
-pub fn configured(config: *const config_mod.Config, programs: program.Programs) Error!?Source {
+pub fn configured(config: *const config_mod.Config, programs: program.Programs) Self.Error!?Source {
     const value = config.get("core.fsmonitor") orelse return null;
     if (config_mod.parseBool(value)) |on| {
         if (on) return error.FsmonitorDaemonUnsupported;
@@ -88,7 +90,7 @@ pub fn configured(config: *const config_mod.Config, programs: program.Programs) 
 /// then keep its new token. An index that has no token yet gets one, with
 /// nothing vouched for. Asked once per index read: a second call does
 /// nothing. `wt` is the top of the working tree, where the hook runs.
-pub fn refresh(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, source: Source) Error!void {
+pub fn refresh(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, source: Source) Self.Error!void {
     if (index.fsmonitor_refreshed) return;
     index.fsmonitor_refreshed = true;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);

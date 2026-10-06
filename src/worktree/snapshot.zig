@@ -7,6 +7,8 @@
 //! another repository's commit, and LFS pointers name separate LFS data;
 //! neither is an edge in the Git object closure.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -81,7 +83,7 @@ pub const Store = struct {
 
     /// Open or create a private store in `dir`. Its own handle is retained;
     /// the caller may close the supplied handle. No Git repository is needed.
-    pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, options: OpenOptions) Error!Store {
+    pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, options: OpenOptions) Self.Error!Store {
         const owned = try dir.openDir(io, ".", .{ .iterate = true });
         errdefer owned.close(io);
         try owned.createDirPath(io, "objects/pack");
@@ -104,7 +106,7 @@ pub const Store = struct {
     /// assume-unchanged and skip-worktree entries present on disk.
     /// A failed capture returns no snapshot; objects already copied are
     /// harmless and reusable by the next capture.
-    pub fn capture(store: *Store, io: Io, source: Source, options: CaptureOptions) Error!Captured {
+    pub fn capture(store: *Store, io: Io, source: Source, options: CaptureOptions) Self.Error!Captured {
         const source_repo: ?*repo.Repository = switch (source) {
             .repository => |r| r,
             .folder => null,
@@ -184,7 +186,7 @@ pub const Store = struct {
     /// between the store and source; the source is borrowed for this call.
     /// Migrate retained IDs while their old objects still exist. Gitlinks
     /// and LFS payloads keep their separate owners, as with capture.
-    pub fn adoptTree(store: *Store, io: Io, source: *odb.Odb, tree: hash.Oid) Error!Snapshot {
+    pub fn adoptTree(store: *Store, io: Io, source: *odb.Odb, tree: hash.Oid) Self.Error!Snapshot {
         if (source.objectFormat() != store.db.objectFormat() or tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
         return store.recordTree(io, tree, source);
     }
@@ -239,7 +241,7 @@ pub const Store = struct {
     /// Materialize a snapshot using checkout's path checks and overwrite
     /// policy. Tree attributes apply even in an empty destination; callers
     /// may supply core settings and filter drivers through `checkout.rules`.
-    pub fn restore(store: *Store, io: Io, snapshot: Snapshot, wt: Io.Dir, options: RestoreOptions) Error!worktree.CheckoutOutcome {
+    pub fn restore(store: *Store, io: Io, snapshot: Snapshot, wt: Io.Dir, options: RestoreOptions) Self.Error!worktree.CheckoutOutcome {
         if (snapshot.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
         if (options.from) |before| if (before.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
         var staged: index.Index = .initEmpty(store.gpa, store.db.objectFormat());
@@ -255,7 +257,7 @@ pub const Store = struct {
 
     /// Compare snapshot trees; null names an empty tree. The returned
     /// changes belong to the caller and use the ordinary diff API.
-    pub fn diff(store: *Store, io: Io, before: ?Snapshot, after: ?Snapshot, options: diff_mod.TreeOptions) Error!diff_mod.Changes {
+    pub fn diff(store: *Store, io: Io, before: ?Snapshot, after: ?Snapshot, options: diff_mod.TreeOptions) Self.Error!diff_mod.Changes {
         if (before) |s| if (s.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
         if (after) |s| if (s.tree.kind != store.db.objectFormat()) return error.ObjectFormatMismatch;
         return diff_mod.tree(store.gpa, io, &store.db, if (before) |s| s.tree else null, if (after) |s| s.tree else null, options);

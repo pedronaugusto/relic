@@ -29,6 +29,8 @@
 //! `Drivers.Options.native_lfs` set to false makes `lfs` an ordinary driver
 //! throughout.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -483,7 +485,7 @@ pub const Protocol = struct {
 
     /// The welcome, the version and the capabilities, as git sends them:
     /// `clean`, `smudge` and `delay` all offered.
-    pub fn handshake(p: *Protocol) ProtocolError!void {
+    pub fn handshake(p: *Protocol) Self.ProtocolError!void {
         try p.line("git-filter-client\n");
         try p.line("version=2\n");
         try p.end();
@@ -517,7 +519,7 @@ pub const Protocol = struct {
 
     /// Send one file and read the answer. The content of a reply is
     /// allocated from `a`.
-    pub fn request(p: *Protocol, a: Allocator, req: Request) ProtocolError!Reply {
+    pub fn request(p: *Protocol, a: Allocator, req: Request) Self.ProtocolError!Reply {
         if (req.path.len > pktline.max_data - "pathname=\n".len) return error.FilterPathTooLong;
         try p.print("command={s}\n", .{@tagName(req.command)});
         try p.print("pathname={s}\n", .{req.path});
@@ -559,7 +561,7 @@ pub const Protocol = struct {
 
     /// `command=list_available_blobs`: the paths the filter delayed and can
     /// now hand over. An empty list says it has no more.
-    pub fn listAvailable(p: *Protocol, a: Allocator) ProtocolError!Available {
+    pub fn listAvailable(p: *Protocol, a: Allocator) Self.ProtocolError!Available {
         try p.line("command=list_available_blobs\n");
         try p.end();
         var paths: std.ArrayList([]u8) = .empty;

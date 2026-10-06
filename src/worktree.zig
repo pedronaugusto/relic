@@ -5,6 +5,8 @@
 //! becomes a filesystem path, because a tree entry's name is written by
 //! whoever wrote the tree.
 
+const Self = @This();
+
 pub const wildmatch = @import("worktree/wildmatch.zig");
 pub const sparsecheckout = @import("worktree/sparsecheckout.zig");
 pub const worktrees = @import("worktree/worktrees.zig");
@@ -265,7 +267,7 @@ pub fn addAll(
     index: *Index,
     db: *Odb,
     options: AddOptions,
-) Error!AddOutcome {
+) Self.Error!AddOutcome {
     var outcome: AddOutcome = .{};
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -662,13 +664,13 @@ fn lessThanName(_: void, a: []const u8, b: []const u8) bool {
 /// A cache-tree node that is still valid is used as it stands: no directory
 /// under it is rebuilt and no tree object is written for it. That is the
 /// difference between a warm call and a cold one.
-pub fn writeTree(gpa: Allocator, io: Io, index: *Index, db: *Odb) Error!Oid {
+pub fn writeTree(gpa: Allocator, io: Io, index: *Index, db: *Odb) Self.Error!Oid {
     return writeTreeInto(gpa, io, index, db, null);
 }
 
 /// `writeTree`, with the tree objects it writes going into a pack the
 /// database is filling, when one is given.
-pub fn writeTreeInto(gpa: Allocator, io: Io, index: *Index, db: *Odb, filling: ?Odb.OpenPack) Error!Oid {
+pub fn writeTreeInto(gpa: Allocator, io: Io, index: *Index, db: *Odb, filling: ?Odb.OpenPack) Self.Error!Oid {
     _ = gpa;
     const tree = try index.cacheTree();
     const oid = try tree.rebuildInto(io, index.entries.items, db, filling);
@@ -746,7 +748,7 @@ pub const SubmoduleProbe = struct {
 
     /// What the submodule at `path` holds, against the commit the index
     /// records for it, already filtered by what the settings ignore.
-    pub fn inspect(p: SubmoduleProbe, io: Io, path: []const u8, recorded: Oid) Error!SubmoduleState {
+    pub fn inspect(p: SubmoduleProbe, io: Io, path: []const u8, recorded: Oid) Self.Error!SubmoduleState {
         return p.inspectFn(io, p.context, path, recorded);
     }
 };
@@ -838,7 +840,7 @@ pub fn status(
     index: *Index,
     db: *Odb,
     options: StatusOptions,
-) Error!Status {
+) Self.Error!Status {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -1481,7 +1483,7 @@ pub fn flatten(
     io: Io,
     db: *Odb,
     tree_oid: Oid,
-) Error!std.StringHashMapUnmanaged(TreeEntry) {
+) Self.Error!std.StringHashMapUnmanaged(TreeEntry) {
     var out: std.StringHashMapUnmanaged(TreeEntry) = .empty;
     try flattenTree(arena, io, db, tree_oid, "", &out, 0, null);
     return out;
@@ -1509,7 +1511,7 @@ pub fn resetIndex(
     index: *Index,
     db: *Odb,
     tree_oid: Oid,
-) Error!ResetOutcome {
+) Self.Error!ResetOutcome {
     var outcome: ResetOutcome = .{};
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -1671,7 +1673,7 @@ pub fn checkout(
     db: *Odb,
     tree_oid: Oid,
     options: CheckoutOptions,
-) Error!CheckoutOutcome {
+) Self.Error!CheckoutOutcome {
     var outcome: CheckoutOutcome = .{};
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -2130,7 +2132,7 @@ pub fn addTreeAttributes(
     db: *Odb,
     attrs: *attributes.Attrs,
     wanted: *const std.StringHashMapUnmanaged(TreeEntry),
-) Error!void {
+) Self.Error!void {
     var it = wanted.iterator();
     while (it.next()) |item| {
         const path = item.key_ptr.*;
@@ -2190,7 +2192,7 @@ pub fn writePaths(
     db: *Odb,
     writes: []const PathWrite,
     options: CheckoutOptions,
-) Error!CheckoutOutcome {
+) Self.Error!CheckoutOutcome {
     var outcome: CheckoutOutcome = .{};
     defer if (options.rules.attrs) |attrs| attrs.leave();
     for (writes) |w| {
@@ -2338,7 +2340,7 @@ pub fn writeEntry(
     mode: object.Mode,
     oid: Oid,
     rules: Rules,
-) Error!Written {
+) Self.Error!Written {
     if (safepath.check(path, .worktree) != null) return error.UnsafePath;
     if (std.fs.path.dirnamePosix(path)) |parent| {
         wt.createDirPath(io, parent) catch |err| switch (err) {
@@ -2399,7 +2401,7 @@ pub fn writeBytes(
     mode: object.Mode,
     bytes: []const u8,
     rules: Rules,
-) Error!Written {
+) Self.Error!Written {
     if (safepath.check(path, .worktree) != null) return error.UnsafePath;
     if (std.fs.path.dirnamePosix(path)) |parent| {
         wt.createDirPath(io, parent) catch |err| switch (err) {
@@ -2451,7 +2453,7 @@ pub fn writeBytes(
 
 /// Remove one file from the working tree, and every directory above it that
 /// it leaves empty. A file that is already gone is not an error.
-pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Error!void {
+pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8) Self.Error!void {
     if (safepath.check(path, .worktree) != null) return error.UnsafePath;
     wt.deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {},
@@ -2523,7 +2525,7 @@ pub fn verifyUpdates(
     index: *const Index,
     updates: *const std.StringArrayHashMapUnmanaged(?TreeEntry),
     options: VerifyOptions,
-) Error!void {
+) Self.Error!void {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -2631,7 +2633,7 @@ pub fn differsFromIndex(
     index: *const Index,
     entry: index_mod.Entry,
     rules: Rules,
-) Error!bool {
+) Self.Error!bool {
     if (entry.mode == .gitlink) return false;
     const found = (try fs.statAt(io, wt, entry.path)) orelse return false;
     if (found.kind == .directory) return true;
@@ -2815,7 +2817,7 @@ pub fn applySparse(
     db: *Odb,
     patterns: *const sparse.Patterns,
     options: CheckoutOptions,
-) Error!SparseOutcome {
+) Self.Error!SparseOutcome {
     var outcome: SparseOutcome = .{};
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
@@ -2963,7 +2965,7 @@ pub fn list(
     wt: Io.Dir,
     index: *Index,
     rules: Rules,
-) Error!Listing {
+) Self.Error!Listing {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();

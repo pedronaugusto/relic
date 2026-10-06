@@ -16,6 +16,8 @@
 //! the repository was opened and which these operations change. A caller
 //! that reads the settings itself afterwards reopens the repository.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -93,7 +95,7 @@ pub const Outcome = struct {
 };
 
 /// The settings as the repository's files hold them now.
-pub fn settings(repo: *Repository, io: Io) Error!Settings {
+pub fn settings(repo: *Repository, io: Io) Self.Error!Settings {
     var files = try Files.open(repo, io);
     defer files.deinit();
     return files.settings(repo);
@@ -106,7 +108,7 @@ pub fn settings(repo: *Repository, io: Io) Error!Settings {
 /// under it; with none, only the files at the root are included. Otherwise
 /// each is a line of the pattern file, and with none the file is `/*` and
 /// `!/*/`, which is the same root-only checkout.
-pub fn set(repo: *Repository, io: Io, patterns: []const []const u8, options: Options) Error!Outcome {
+pub fn set(repo: *Repository, io: Io, patterns: []const []const u8, options: Options) Self.Error!Outcome {
     var op = try Op.init(repo, io);
     defer op.deinit();
     try op.updateModes(options);
@@ -136,7 +138,7 @@ pub fn set(repo: *Repository, io: Io, patterns: []const []const u8, options: Opt
 /// In cone mode the directories are added to the cone already there; a
 /// pattern file without the cone's shape is `error.NotACone`. Otherwise the
 /// lines are appended to the file's own.
-pub fn add(repo: *Repository, io: Io, patterns: []const []const u8, options: Options) Error!Outcome {
+pub fn add(repo: *Repository, io: Io, patterns: []const []const u8, options: Options) Self.Error!Outcome {
     var op = try Op.init(repo, io);
     defer op.deinit();
     if (!op.state.enabled) return error.NotSparse;
@@ -179,7 +181,7 @@ pub fn add(repo: *Repository, io: Io, patterns: []const []const u8, options: Opt
 /// `git sparse-checkout reapply`: make the working tree follow the
 /// patterns already there, after a merge or a checkout brought back files
 /// they leave out.
-pub fn reapply(repo: *Repository, io: Io, options: Options) Error!Outcome {
+pub fn reapply(repo: *Repository, io: Io, options: Options) Self.Error!Outcome {
     var op = try Op.init(repo, io);
     defer op.deinit();
     if (!op.state.enabled) return error.NotSparse;
@@ -191,7 +193,7 @@ pub fn reapply(repo: *Repository, io: Io, options: Options) Error!Outcome {
 ///
 /// A pattern file already there is kept and applied. Without one the file
 /// becomes `/*` and `!/*/` -- only the files at the root.
-pub fn init(repo: *Repository, io: Io, options: Options) Error!Outcome {
+pub fn init(repo: *Repository, io: Io, options: Options) Self.Error!Outcome {
     var op = try Op.init(repo, io);
     defer op.deinit();
     try op.updateModes(options);
@@ -201,7 +203,7 @@ pub fn init(repo: *Repository, io: Io, options: Options) Error!Outcome {
 
 /// `git sparse-checkout disable`: put every file back and turn sparse
 /// checkout off. The pattern file is left where it is, as git leaves it.
-pub fn disable(repo: *Repository, io: Io) Error!Outcome {
+pub fn disable(repo: *Repository, io: Io) Self.Error!Outcome {
     var op = try Op.init(repo, io);
     defer op.deinit();
 
@@ -234,7 +236,7 @@ pub const Listing = struct {
 
 /// `git sparse-checkout list`. A worktree whose pattern file is missing
 /// lists nothing, which git reports with a warning rather than an error.
-pub fn list(repo: *Repository, io: Io) Error!Listing {
+pub fn list(repo: *Repository, io: Io) Self.Error!Listing {
     var op = try Op.init(repo, io);
     defer op.deinit();
     if (!op.state.enabled) return error.NotSparse;

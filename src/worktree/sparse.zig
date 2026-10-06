@@ -15,6 +15,8 @@
 //! after warning about it. The sets are also what a sparse index is built
 //! from: a directory the cone leaves out is what collapses into one entry.
 
+const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -54,7 +56,7 @@ pub const Patterns = struct {
 
     /// Read `info/sparse-checkout` from the git directory, or `null` when
     /// there is none.
-    pub fn load(gpa: Allocator, io: Io, git_dir: Io.Dir, case_fold: bool) Error!?Patterns {
+    pub fn load(gpa: Allocator, io: Io, git_dir: Io.Dir, case_fold: bool) Self.Error!?Patterns {
         return loadMode(gpa, io, git_dir, .{ .case_fold = case_fold });
     }
 
@@ -73,7 +75,7 @@ pub const Patterns = struct {
     /// In cone mode a file without the cone's shape is read as plain
     /// patterns, which is git's own fallback; `cone` on the result says
     /// which happened.
-    pub fn loadMode(gpa: Allocator, io: Io, git_dir: Io.Dir, options: LoadOptions) Error!?Patterns {
+    pub fn loadMode(gpa: Allocator, io: Io, git_dir: Io.Dir, options: LoadOptions) Self.Error!?Patterns {
         var patterns = try init(gpa, options.case_fold);
         errdefer patterns.deinit();
         const bytes = (try fs.readFileAlloc(patterns.arena.allocator(), io, git_dir, "info/sparse-checkout", 1 << 24)) orelse {
@@ -184,7 +186,7 @@ pub const Cone = struct {
         fold: bool,
 
         /// The name's hash, folded when the set folds case.
-        pub fn hash(c: DirContext, key: []const u8) u64 {
+        pub fn hash(c: Cone.DirContext, key: []const u8) u64 {
             if (!c.fold) return std.hash.Wyhash.hash(0, key);
             var h: std.hash.Wyhash = .init(0);
             for (key) |byte| h.update(&.{std.ascii.toLower(byte)});
@@ -192,7 +194,7 @@ pub const Cone = struct {
         }
 
         /// Whether two names are the same name.
-        pub fn eql(c: DirContext, a: []const u8, b: []const u8) bool {
+        pub fn eql(c: Cone.DirContext, a: []const u8, b: []const u8) bool {
             return if (c.fold) std.ascii.eqlIgnoreCase(a, b) else std.mem.eql(u8, a, b);
         }
     };
