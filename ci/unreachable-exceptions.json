@@ -191,20 +191,6 @@
   {
     "rule": "catch-unreachable",
     "path": "src/odb.zig",
-    "source": "const pack_path = std.fmt.bufPrint(&path_buf, \"{s}.pack\", .{named.name}) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/odb.zig",
-    "source": "const idx_path = std.fmt.bufPrint(&path_buf, \"{s}.idx\", .{named.name}) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/odb.zig",
     "source": "_ = std.fmt.bufPrint(&path, \"{x:0>2}\", .{byte}) catch unreachable;",
     "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
     "reason": "existing at gate adoption; burned down in the cleanup pass"
@@ -381,13 +367,6 @@
     "rule": "catch-unreachable",
     "path": "src/odb/pack.zig",
     "source": "const rev_name = std.fmt.bufPrint(&rev_name_buf, \"pack-{s}.rev\", .{text}) catch unreachable;",
-    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
-    "reason": "existing at gate adoption; burned down in the cleanup pass"
-  },
-  {
-    "rule": "catch-unreachable",
-    "path": "src/refs.zig",
-    "source": "const folder = if (base.len == 0) scope.sub_path else if (scope.sub_path.len == 0) base else std.fmt.bufPrint(&buf, \"{s}/{s}\", .{ base, scope.sub_path }) catch unreachable;",
     "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
     "reason": "existing at gate adoption; burned down in the cleanup pass"
   },

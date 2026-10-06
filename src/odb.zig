@@ -1527,9 +1527,13 @@ pub const Odb = struct {
                 const slot = try packs.getOrPut(odb.backendData().gpa, hit.at);
                 if (slot.found_existing) continue;
                 const named = &source.packs.items[hit.at];
-                var path_buf: [128]u8 = undefined;
+                // As wide as `Pack.open`'s, which refused a name whose
+                // `.pack` does not fit.
+                var path_buf: [512]u8 = undefined;
+                // unreachable: the pack opened, so its `.pack` name fits 512 bytes
                 const pack_path = std.fmt.bufPrint(&path_buf, "{s}.pack", .{named.name}) catch unreachable;
                 try barrier.syncPath(io, source.pack_dir.?, pack_path);
+                // unreachable: `.idx` is shorter than `.pack`, which fits
                 const idx_path = std.fmt.bufPrint(&path_buf, "{s}.idx", .{named.name}) catch unreachable;
                 try barrier.syncPath(io, source.pack_dir.?, idx_path);
             } else {

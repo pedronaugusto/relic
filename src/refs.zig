@@ -1903,15 +1903,22 @@ fn freeRefFilesSnapshot(gpa: Allocator, snapshot: *std.StringArrayHashMapUnmanag
 /// `git_prefix` is the per-worktree directory's place there.
 fn scopesCover(scopes: []const WatchScope, git_prefix: []const u8, path: []const u8) bool {
     for (scopes) |scope| {
-        var buf: [256]u8 = undefined;
         const base = if (scope.dir == .git) git_prefix else "";
-        const folder = if (base.len == 0) scope.sub_path else if (scope.sub_path.len == 0) base else std.fmt.bufPrint(&buf, "{s}/{s}", .{ base, scope.sub_path }) catch unreachable;
-        const rest = if (folder.len == 0) path else if (std.mem.startsWith(u8, path, folder) and path.len > folder.len and path[folder.len] == '/') path[folder.len + 1 ..] else continue;
+        const in_base = below(path, base) orelse continue;
+        const rest = below(in_base, scope.sub_path) orelse continue;
         if (!scope.recursive and std.mem.indexOfScalar(u8, rest, '/') != null) continue;
         if (scope.names.len == 0) return true;
         for (scope.names) |name| if (std.mem.eql(u8, name, rest)) return true;
     }
     return false;
+}
+
+/// What of `path` lies below `folder`, the whole of it when `folder` is
+/// empty, or null when it lies elsewhere.
+fn below(path: []const u8, folder: []const u8) ?[]const u8 {
+    if (folder.len == 0) return path;
+    if (path.len <= folder.len or path[folder.len] != '/' or !std.mem.startsWith(u8, path, folder)) return null;
+    return path[folder.len + 1 ..];
 }
 
 test "the watch scopes cover every ref and HEAD move, in a linked worktree too" {
