@@ -359,6 +359,7 @@ pub const GnupgHome = struct {
 
     /// Remove the scratch home after its GnuPG daemons have stopped.
     pub fn deinit(home: *GnupgHome, io: Io) void {
+        // ziglint-ignore: Z026 deinit cannot fail; a home left behind is a random name under the fixture root, holding only test keys
         Io.Dir.cwd().deleteTree(io, home.path()) catch {};
         home.gpa.free(home.name);
         home.* = undefined;

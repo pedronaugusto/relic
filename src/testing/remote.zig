@@ -265,6 +265,7 @@ pub const HttpServer = struct {
 
     fn serveConnection(s: *HttpServer, stream: Io.net.Stream) void {
         defer stream.close(s.io);
+        // ziglint-ignore: Z026 a connection that fails is its client's to report; the server goes on to the next
         s.handle(stream) catch {};
     }
 
@@ -948,6 +949,7 @@ pub const Proxy = struct {
             const stream = p.listener.accept(p.io) catch return;
             defer stream.close(p.io);
             if (p.stopping.load(.acquire)) return;
+            // ziglint-ignore: Z026 a connection that fails is its client's to report; the server goes on to the next
             p.handle(stream) catch {};
         }
     }
@@ -1150,6 +1152,7 @@ pub const SocksProxy = struct {
         while (!p.stopping.load(.acquire)) {
             const stream = p.listener.accept(p.io) catch return;
             defer stream.close(p.io);
+            // ziglint-ignore: Z026 a connection that fails is its client's to report; the server goes on to the next
             p.handle(stream) catch {};
         }
     }

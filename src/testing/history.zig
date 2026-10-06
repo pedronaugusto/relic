@@ -2637,7 +2637,7 @@ test "a merge renormalizes when asked and writes its files through their attribu
         defer gpa.free(id);
         try std.testing.expect(std.mem.startsWith(u8, id, "$Id: "));
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
-            gitMayFail(r, io, &.{ "merge", "--abort" }) catch {};
+            try gitMayFail(r, io, &.{ "merge", "--abort" });
             try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
         }
     }
@@ -2877,7 +2877,7 @@ test "a rebase runs git rebase's hooks, stopped, continued and finished, as git'
         }
         try expectSameHooks(&pair, io);
         try expectSameState(&pair, io, &rebase_state, &.{ "HEAD", "refs/heads/topic" });
-        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| gitMayFail(r, io, &.{ "rebase", "--abort" }) catch {};
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(r, io, &.{ "rebase", "--abort" });
     }
 }
 
@@ -3290,7 +3290,7 @@ test "merge.default decides a path the attributes say nothing about, as git's do
             std.debug.print("with merge.default={s}\n", .{driver});
             return err;
         };
-        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| gitMayFail(r, io, &.{ "merge", "--abort" }) catch {};
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(r, io, &.{ "merge", "--abort" });
     }
 }
 
@@ -3406,7 +3406,7 @@ fn renormalizeWithMergedAttributes(script: *const fn (*testgit.Repo, Io) anyerro
     }
     for ([_][]const []const u8{ &.{}, &.{"renormalize"} }) |words| {
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
-            gitMayFail(r, io, &.{ "merge", "--abort" }) catch {};
+            try gitMayFail(r, io, &.{ "merge", "--abort" });
             try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
         }
         var args: std.ArrayList([]const u8) = .empty;
@@ -3572,7 +3572,7 @@ test "merge and cherry-pick with subtree and whitespace options end as git's do"
             std.debug.print("merging with {s}\n", .{words[words.len - 1]});
             return err;
         };
-        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| gitMayFail(r, io, &.{ "merge", "--abort" }) catch {};
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(r, io, &.{ "merge", "--abort" });
 
         // The library's last commit picked onto the project.
         for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "reset", "-q", "--hard", "before" });
@@ -3591,6 +3591,6 @@ test "merge and cherry-pick with subtree and whitespace options end as git's do"
             std.debug.print("picking with {s}\n", .{words[words.len - 1]});
             return err;
         };
-        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| gitMayFail(r, io, &.{ "cherry-pick", "--abort" }) catch {};
+        for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try gitMayFail(r, io, &.{ "cherry-pick", "--abort" });
     }
 }

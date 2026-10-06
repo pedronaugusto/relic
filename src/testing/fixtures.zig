@@ -725,7 +725,7 @@ test "the commit-graph and the multi-pack index read what git wrote" {
         if (i % 4 == 3) try repo.exec(io, &.{ "repack", "-q", "-d" });
     }
     try repo.exec(io, &.{ "commit-graph", "write", "--reachable" });
-    repo.exec(io, &.{ "multi-pack-index", "write" }) catch {};
+    repo.exec(io, &.{ "multi-pack-index", "write" }) catch |err| if (err != error.GitFailed) return err;
 
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
@@ -929,7 +929,7 @@ test "a conflicting three-way merge leaves stages 1, 2 and 3" {
     // back to the same entries.
     try repo.exec(io, &.{ "checkout", "-q", ours_text });
     repo.report_failures = false;
-    _ = repo.run(io, &.{ "merge", "--no-edit", theirs_text }) catch {};
+    try std.testing.expectError(error.GitFailed, repo.run(io, &.{ "merge", "--no-edit", theirs_text }));
     repo.report_failures = true;
     var index = try index_mod.Index.read(gpa, io, git_dir, "index", git_dir, .sha1);
     defer index.deinit();
@@ -1289,6 +1289,7 @@ test "a repository with a multi-pack index looks objects up through it" {
     try repo.exec(io, &.{ "multi-pack-index", "--object-dir=.git/objects", "expire" });
     var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
+    // ziglint-ignore: Z026 the expire may have taken it, and Windows keeps a file the open database holds; the reads below agree either way
     pack_dir.deleteFile(io, "multi-pack-index") catch {};
 
     var plain = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});

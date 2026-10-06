@@ -31,5 +31,6 @@ pub fn main(init: std.process.Init) !void {
 
     var in_buffer: [64]u8 = undefined;
     var in = std.Io.File.stdin().readerStreaming(io, &in_buffer);
+    // ziglint-ignore: Z026 stdin ending, closed or broken, is the signal to let the lock go; the helper exits either way
     _ = in.interface.discardRemaining() catch {};
 }
