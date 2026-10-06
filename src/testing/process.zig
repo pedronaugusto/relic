@@ -99,6 +99,23 @@ pub fn main(init: std.process.Init) !void {
         const answer_path = try std.fmt.allocPrint(arena, ".git/fsmonitor-v{s}", .{args[2]});
         const answer = cwd.readFileAlloc(io, answer_path, arena, .limited(1 << 20)) catch std.process.exit(1);
         try out.interface.writeAll(answer);
+    } else if (std.mem.eql(u8, args[1], "record")) {
+        // What it was handed on its standard input, kept at a path, as a
+        // credential helper or an upload-pack that must not have run
+        // leaves nothing.
+        if (args.len < 3) return error.MissingPath;
+        var input: std.ArrayList(u8) = .empty;
+        var in_buf: [4096]u8 = undefined;
+        var in = Io.File.stdin().readerStreaming(io, &in_buf);
+        try in.interface.appendRemainingUnlimited(init.arena.allocator(), &input);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[2], .data = input.items });
+    } else if (std.mem.eql(u8, args[1], "args")) {
+        // Each argument as it arrived, each ended by a NUL: what a
+        // command line quoted for this platform came back as.
+        for (args[2..]) |arg| {
+            try out.interface.writeAll(arg);
+            try out.interface.writeByte(0);
+        }
     } else if (!std.mem.eql(u8, args[1], "fail") and !std.mem.eql(u8, args[1], "silent")) return error.InvalidMode;
     try out.interface.flush();
     try err.interface.flush();

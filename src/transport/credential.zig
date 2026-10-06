@@ -321,11 +321,11 @@ pub const Session = struct {
         // Ask for what is still missing, as git's `credential_getpass`.
         if (!settings.interactive) return error.CredentialsUnavailable;
         if (s.username == null) {
-            const prompt = try std.fmt.allocPrint(arena, "Username for '{s}': ", .{try s.describe(arena, false)});
+            const prompt = try std.fmt.allocPrint(arena, "Username for '{s}': ", .{try s.describe(arena, false, settings.sanitize_prompt)});
             s.username = try s.ask(io, opts, .username, prompt) orelse return false;
         }
         if (s.password == null) {
-            const prompt = try std.fmt.allocPrint(arena, "Password for '{s}': ", .{try s.describe(arena, true)});
+            const prompt = try std.fmt.allocPrint(arena, "Password for '{s}': ", .{try s.describe(arena, true, settings.sanitize_prompt)});
             s.password = try s.ask(io, opts, .password, prompt) orelse return false;
         }
         s.source = .prompt;
@@ -405,21 +405,33 @@ pub const Session = struct {
         failure.challenges = challenges;
     }
 
-    /// `protocol://[username@]host[/path]`, as git's `credential_describe`
-    /// writes it in a prompt.
+    /// The `credential.*` settings for this session's URL.
     fn applyConfig(s: *const Session, arena: Allocator, config: ?*const config_mod.Config) Allocator.Error!Settings {
         return settingsFor(arena, config, if (s.cert_path == null) s.url else null);
     }
 
-    fn describe(s: *Session, arena: Allocator, with_user: bool) Allocator.Error![]const u8 {
-        // git's `credential_describe`: `cert://`, no host, `/` and the path.
-        if (s.cert_path) |path| return std.fmt.allocPrint(arena, "cert:///{s}", .{path});
+    /// `protocol://[username@]host`, as git's `credential_describe` writes
+    /// it in a prompt, or with `sanitize` as its `credential_format` does:
+    /// every byte that could steer a terminal or pass for another host
+    /// percent-encoded, so that a URL cannot make the prompt name a host it
+    /// is not asking for.
+    fn describe(s: *Session, arena: Allocator, with_user: bool, sanitize: bool) Allocator.Error![]const u8 {
         var out: std.ArrayList(u8) = .empty;
-        try out.print(arena, "{s}://", .{@tagName(s.url.scheme)});
-        if (with_user) {
-            if (s.username) |u| try out.print(arena, "{s}@", .{u});
+        // git's `credential_describe`: `cert://`, no host, `/` and the path.
+        if (s.cert_path) |path| {
+            try out.appendSlice(arena, "cert:///");
+            try appendPart(arena, &out, path, if (sanitize) .path else .raw);
+            return out.items;
         }
-        try out.appendSlice(arena, try s.hostField(arena));
+        try out.print(arena, "{s}://", .{@tagName(s.url.scheme)});
+        if (with_user) if (s.username) |u| if (u.len != 0) {
+            try appendPart(arena, &out, u, if (sanitize) .user else .raw);
+            try out.append(arena, '@');
+        };
+        const host = try s.hostField(arena);
+        if (sanitize) {
+            try appendPart(arena, &out, try percentDecode(arena, host), .host);
+        } else try out.appendSlice(arena, host);
         return out.items;
     }
 
@@ -646,7 +658,29 @@ const Settings = struct {
     interactive: bool = true,
     /// `credential.protectProtocol`: a carriage return is refused too.
     protect_protocol: bool = true,
+    /// `credential.sanitizePrompt`: a prompt names the URL percent-encoded.
+    sanitize_prompt: bool = true,
 };
+
+/// How a part of a URL is spelled in a prompt: as it is, or encoded by
+/// git's `strbuf_add_percentencode` rule for a user, a host and port, or a
+/// path.
+const Part = enum { raw, user, host, path };
+
+fn appendPart(arena: Allocator, out: *std.ArrayList(u8), text: []const u8, part: Part) Allocator.Error!void {
+    if (part == .raw) return out.appendSlice(arena, text);
+    // git's `URL_UNSAFE_CHARS` in `strbuf.c`.
+    const unsafe = " <>\"%{}|\\^`:?#[]@!$&'()*+,;=";
+    for (text) |c| {
+        const encode = c <= 0x1f or c >= 0x7f or switch (part) {
+            .raw => unreachable,
+            .host => !std.ascii.isAlphanumeric(c) and std.mem.indexOfScalar(u8, "-.:[]", c) == null,
+            .user => c == '/' or std.mem.indexOfScalar(u8, unsafe, c) != null,
+            .path => std.mem.indexOfScalar(u8, unsafe, c) != null,
+        };
+        if (encode) try out.print(arena, "%{X:0>2}", .{c}) else try out.append(arena, c);
+    }
+}
 
 /// The `credential.*` settings that apply to `url`, in configuration
 /// order: every helper, the last username, whether the path is sent.
@@ -680,6 +714,8 @@ fn settingsFor(arena: Allocator, config: ?*const config_mod.Config, url: ?url_mo
             settings.interactive = if (entry.value == null) true else config_mod.parseBool(value) catch true;
         } else if (std.ascii.eqlIgnoreCase(entry.name, "protectprotocol")) {
             settings.protect_protocol = if (entry.value == null) true else config_mod.parseBool(value) catch true;
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "sanitizeprompt")) {
+            settings.sanitize_prompt = if (entry.value == null) true else config_mod.parseBool(value) catch true;
         }
     }
     settings.helpers = helpers.items;

@@ -226,6 +226,8 @@ const Scoreboard = struct {
         defer s.db.allocator().free(found.bytes);
         const bytes = try s.arena.dupe(u8, found.bytes);
         const l = try textdiff.splitLines(s.arena, bytes);
+        // A line is numbered with a `u32`, as a diff names it.
+        if (l.len > textdiff.max_lines) return error.OutOfMemory;
         try s.lines.put(s.arena, blob.bytes, l);
         return l;
     }

@@ -72,6 +72,9 @@ pub const Error = error{
     /// `core.whitespace` or a `whitespace` attribute names both
     /// `tab-in-indent` and `indent-with-non-tab`.
     ConflictingWhitespaceRules,
+    /// The patch is `max_patch_size` or longer, which git refuses as "patch
+    /// too large" before reading it, so that no count in it can overflow.
+    PatchTooLarge,
 } || patchparse.Error || worktree.Error || index_mod.ReadError || index_mod.WriteError || odb_mod.Error ||
     convert.Error || attributes.Error || rerere.Error || repo_mod.Error || Io.Dir.ReadFileAllocError ||
     Io.Dir.ReadLinkError || fs.StatError || Io.Dir.DeleteFileError || Io.Dir.CreateDirPathError ||
@@ -493,6 +496,9 @@ const State = struct {
 // The entry point
 //=========================================================================
 
+/// git's `MAX_APPLY_SIZE`: a patch this long or longer is refused.
+pub const max_patch_size: usize = 1023 * 1024 * 1024;
+
 /// Apply `text`, a patch or an email or anything else holding patches, to
 /// `repo` as `options.target` says.
 ///
@@ -501,6 +507,7 @@ const State = struct {
 /// `three_way` says otherwise, in which case `Outcome.clean` says whether
 /// everything went in.
 pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, options: Options) Self.Error!Outcome {
+    if (text.len >= max_patch_size) return error.PatchTooLarge;
     if (options.diagnostic) |d| d.reset();
     if (options.reject and options.three_way) return error.RejectWithThreeWay;
     if (options.favor != .none and !options.three_way) return error.FavorWithoutThreeWay;
@@ -639,6 +646,7 @@ pub const Kept = struct {
 /// files `git apply --build-fake-ancestor` takes, which `git am`'s
 /// three-way fallback builds its base from.
 pub fn keptFiles(gpa: Allocator, text: []const u8, options: Options) Self.Error!Kept {
+    if (text.len >= max_patch_size) return error.PatchTooLarge;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();

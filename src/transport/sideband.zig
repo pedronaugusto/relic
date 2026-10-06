@@ -99,11 +99,10 @@ pub const Demux = struct {
                     }
                     switch (data[0]) {
                         1 => d.pending = data[1..],
-                        2 => progress_mod.Progress.emit(d.progress, .{ .remote = data[1..] }),
+                        2 => if (d.progress) |p| emitRemote(p, data[1..]),
                         3 => {
-                            const text = data[1..];
-                            d.message_len = @min(text.len, d.message_buffer.len);
-                            @memcpy(d.message_buffer[0..d.message_len], text[0..d.message_len]);
+                            const control: progress_mod.Control = if (d.progress) |p| p.remote_control else .color;
+                            d.message_len = progress_mod.sanitize(data[1..], control, &d.message_buffer).written;
                             d.err = error.RemoteError;
                             return error.ReadFailed;
                         },
@@ -117,6 +116,18 @@ pub const Demux = struct {
         }
     }
 };
+
+/// Hand the caller the remote's progress text with its control characters
+/// made visible, in as many events as the shown text takes.
+fn emitRemote(p: progress_mod.Progress, text: []const u8) void {
+    var shown: [1024]u8 = undefined;
+    var rest = text;
+    while (rest.len != 0) {
+        const part = progress_mod.sanitize(rest, p.remote_control, &shown);
+        if (part.written != 0) p.report(p.context, .{ .remote = shown[0..part.written] });
+        rest = rest[part.read..];
+    }
+}
 
 const testing = std.testing;
 

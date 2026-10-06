@@ -339,20 +339,15 @@ pub const Tree = struct {
             return out.toOwnedSlice();
         }
 
+        /// git's `base_name_compare`: a tree sorts as its name and a `/`,
+        /// however long the name is.
         fn lessThan(_: void, a: Owned, b_: Owned) bool {
-            var buf_a: [4096]u8 = undefined;
-            var buf_b: [4096]u8 = undefined;
-            const ka = key(a, &buf_a);
-            const kb = key(b_, &buf_b);
-            return std.mem.order(u8, ka, kb) == .lt;
-        }
-
-        fn key(e: Owned, buf: *[4096]u8) []const u8 {
-            if (e.name.len + 1 > buf.len) return e.name;
-            @memcpy(buf[0..e.name.len], e.name);
-            if (e.mode != .tree) return buf[0..e.name.len];
-            buf[e.name.len] = '/';
-            return buf[0 .. e.name.len + 1];
+            const len = @min(a.name.len, b_.name.len);
+            const order = std.mem.order(u8, a.name[0..len], b_.name[0..len]);
+            if (order != .eq) return order == .lt;
+            const ca: u8 = if (len < a.name.len) a.name[len] else if (a.mode == .tree) '/' else 0;
+            const cb: u8 = if (len < b_.name.len) b_.name[len] else if (b_.mode == .tree) '/' else 0;
+            return ca < cb;
         }
     };
 };

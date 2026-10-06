@@ -295,6 +295,11 @@ pub const Attrs = struct {
     /// as git passes it over with a warning.
     pub const max_file_size = 100 * 1024 * 1024;
 
+    /// git's `ATTR_MAX_LINE_LENGTH`: a line this long or longer is passed
+    /// over whole, as git passes it over with a warning, rather than read
+    /// in part or broken in two.
+    pub const max_line_length = 2048;
+
     fn addFileIfPresent(
         attrs: *Attrs,
         io: Io,
@@ -331,6 +336,7 @@ pub const Attrs = struct {
             line_number += 1;
             var line = raw_line;
             if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+            if (line.len >= max_line_length) continue;
             line = std.mem.trim(u8, line, " \t");
             if (line.len == 0 or line[0] == '#') continue;
 

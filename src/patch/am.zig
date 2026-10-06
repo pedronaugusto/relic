@@ -672,7 +672,7 @@ fn patchFailure(err: anyerror) bool {
         if (err == @field(anyerror, e.name) and err != error.OutOfMemory) return true;
     }
     return switch (err) {
-        error.PatchDoesNotApply, error.NoValidPatches, error.WhitespaceErrors, error.ConflictingWhitespaceRules => true,
+        error.PatchDoesNotApply, error.NoValidPatches, error.WhitespaceErrors, error.ConflictingWhitespaceRules, error.PatchTooLarge => true,
         else => false,
     };
 }

@@ -35,15 +35,21 @@ pub const Reason = enum {
     /// `.git` in any case, including the NTFS 8.3 alias `git~1` and any
     /// alternate-data-stream spelling such as `.git:` or `.git::$DATA`.
     git_directory,
-    /// A DOS device name — `con`, `prn`, `aux`, `nul`, `com1`-`com9`,
-    /// `lpt1`-`lpt9` — with or without an extension. Opening one on Windows
-    /// talks to a device.
+    /// A DOS device name — `con`, `conin$`, `conout$`, `prn`, `aux`,
+    /// `nul`, `com1`-`com9`, `lpt0`-`lpt9` — with or without spaces, an
+    /// extension or a stream after it. Opening one on Windows talks to a
+    /// device.
     device_name,
     /// A component ending in `.` or a space. Windows strips both when
     /// opening, so `.git.` and `.git ` both open `.git`.
     trailing_dot_or_space,
-    /// An absolute path, or one beginning with a drive letter.
+    /// An absolute path, or one beginning with a drive: a letter, or any
+    /// other character `subst` names a drive by, then a colon.
     absolute,
+    /// A character Windows will not put in a name: `<`, `>`, `"`, `|`,
+    /// `?`, `*`, or a colon, which names an alternate data stream of the
+    /// file in front of it.
+    reserved_character,
     /// A name a git ref may not carry.
     invalid_ref_name,
     /// A symbolic link named `.gitmodules`, in any spelling HFS+ or NTFS
@@ -88,27 +94,68 @@ pub fn checkComponent(name: []const u8, use: Use) ?Reason {
         if (c == 0 or (windows and use == .worktree and (c < 0x20 or c == 0x7f))) return .control_character;
     }
     if (isNtfsDotGit(name) or isHfsDot(name, "git") or isGitName(name)) return .git_directory;
+    // What follows a backslash is a component of its own on an NTFS volume,
+    // a Linux one mounted from Windows included, so `.\.GIT\x` is refused
+    // on every platform as git's `verify_path` refuses it.
+    if (afterBackslash(isNtfsDotGit, name)) return .git_directory;
     if (use == .stored or !windows) return null;
+    if (std.mem.findScalar(u8, name, ':')) |colon| {
+        if (isGitName(name[0..colon])) return .git_directory;
+    }
+    return win32Reason(name);
+}
 
+/// Whether `matches` holds for what follows any backslash in `name`.
+fn afterBackslash(comptime matches: fn ([]const u8) bool, name: []const u8) bool {
+    var at: usize = 0;
+    while (std.mem.findScalarPos(u8, name, at, '\\')) |slash| {
+        if (matches(name[slash + 1 ..])) return true;
+        at = slash + 1;
+    }
+    return false;
+}
+
+/// git's `is_valid_win32_path` for one component: why Windows would open
+/// `name` as another file or a device, or refuse to create it; `null` when
+/// it would not. Applied where Windows opens the working tree, and public
+/// so that the rule can be checked on every platform.
+pub fn win32Reason(name: []const u8) ?Reason {
+    if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return null;
+    if (isDeviceName(name)) return .device_name;
+    for (name) |c| switch (c) {
+        // An alternate data stream is written `name:stream` or
+        // `name::$ATTRIBUTE`, a second name for the file in front of the
+        // colon; the rest Windows will not create.
+        ':', '<', '>', '"', '|', '?', '*' => return .reserved_character,
+        0x01...0x1f => return .control_character,
+        else => {},
+    };
     // Windows strips trailing dots and spaces when it opens a name, so a
     // name that ends in either is a second spelling of a shorter one.
     if (name[name.len - 1] == '.' or name[name.len - 1] == ' ') return .trailing_dot_or_space;
-
-    // An alternate data stream is written `name:stream` or
-    // `name::$ATTRIBUTE`; the part before the colon is the file that is
-    // actually opened, so that is what the rules are applied to.
-    const base = if (std.mem.findScalar(u8, name, ':')) |colon| name[0..colon] else name;
-    if (base.len == 0) return .git_directory;
-
-    if (isGitName(base)) return .git_directory;
-    if (isDeviceName(base)) return .device_name;
-
-    // A name carrying a colon is refused outright in a working tree: every
-    // spelling of an alternate data stream is a second name for the file in
-    // front of the colon, and no git repository needs one.
-    if (use == .worktree and std.mem.findScalar(u8, name, ':') != null) return .git_directory;
-
     return null;
+}
+
+/// git's `is_valid_win32_path` for a whole path: the first component that
+/// Windows would not open as itself, after any drive prefix, with `/` and
+/// `\` both separators.
+pub fn win32PathReason(path: []const u8) ?Reason {
+    var it = std.mem.tokenizeAny(u8, path[dosDrivePrefixLen(path)..], "/\\");
+    while (it.next()) |component| {
+        if (win32Reason(component)) |reason| return reason;
+    }
+    return null;
+}
+
+/// git's `win32_has_dos_drive_prefix`: how many bytes a drive prefix takes
+/// at the front of `path`, or 0. Not only `C:`: `subst` names a drive by
+/// any character, `1:` and a non-ASCII one included.
+pub fn dosDrivePrefixLen(path: []const u8) usize {
+    if (path.len < 2) return 0;
+    if (path[0] & 0x80 == 0) return if (path[1] == ':') 2 else 0;
+    var i: usize = 1;
+    while (i < 4 and i < path.len and path[i] & 0x80 != 0) : (i += 1) {}
+    return if (i < path.len and path[i] == ':') i + 1 else 0;
 }
 
 /// Whether the name opens the `.git` directory on some filesystem.
@@ -131,25 +178,27 @@ fn isGitName(base: []const u8) bool {
     return false;
 }
 
-const device_names = [_][]const u8{
-    "con",  "prn",  "aux",  "nul",
-    "com1", "com2", "com3", "com4",
-    "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3",
-    "lpt4", "lpt5", "lpt6", "lpt7",
-    "lpt8", "lpt9",
-};
+/// The DOS devices, longest first so that `conin$` is not taken for `con`.
+const device_names = [_][]const u8{ "conout$", "conin$", "aux", "con", "nul", "prn" };
 
-/// Whether the name is a DOS device, with or without an extension.
-///
-/// `aux.txt` opens the same device `aux` does, which is why the extension is
-/// stripped before the comparison.
-fn isDeviceName(base: []const u8) bool {
-    const stem = if (std.mem.findScalar(u8, base, '.')) |dot| base[0..dot] else base;
+/// Whether the name opens a DOS device: one of `device_names`, `com1` to
+/// `com9` or `lpt0` to `lpt9`, then any spaces, then the end, an extension
+/// or a stream. `aux.txt` and `aux .c` open the same device `aux` does.
+fn isDeviceName(name: []const u8) bool {
+    var len: usize = 0;
     for (device_names) |device| {
-        if (stem.len == device.len and std.ascii.eqlIgnoreCase(stem, device)) return true;
+        if (name.len >= device.len and std.ascii.eqlIgnoreCase(name[0..device.len], device)) {
+            len = device.len;
+            break;
+        }
+    } else if (name.len >= 4) {
+        const head = name[0..3];
+        if (std.ascii.eqlIgnoreCase(head, "com") and name[3] >= '1' and name[3] <= '9') len = 4;
+        if (std.ascii.eqlIgnoreCase(head, "lpt") and std.ascii.isDigit(name[3])) len = 4;
     }
-    return false;
+    if (len == 0) return false;
+    while (len < name.len and name[len] == ' ') len += 1;
+    return len == name.len or name[len] == '.' or name[len] == ':';
 }
 
 /// What `check` found.
@@ -167,8 +216,9 @@ pub fn check(path: []const u8, use: Use) ?Refusal {
     // tree where they are separators.
     const windows = builtin.os.tag == .windows;
     if (path[0] == '/' or (path[0] == '\\' and windows)) return .{ .reason = .absolute, .component = path[0..1] };
-    if (windows and path.len >= 2 and path[1] == ':' and std.ascii.isAlphabetic(path[0])) {
-        return .{ .reason = .absolute, .component = path[0..2] };
+    if (windows) {
+        const drive = dosDrivePrefixLen(path);
+        if (drive != 0) return .{ .reason = .absolute, .component = path[0..drive] };
     }
     var it = std.mem.splitScalar(u8, path, '/');
     while (it.next()) |component| {
@@ -187,7 +237,9 @@ pub fn checkEntry(path: []const u8, use: Use, symlink: bool) ?Refusal {
     if (!symlink) return null;
     var it = std.mem.splitScalar(u8, path, '/');
     while (it.next()) |component| {
-        if (isHfsDot(component, "gitmodules") or isNtfsDot(component, "gitmodules", "gi7eba")) {
+        if (isHfsDot(component, "gitmodules") or isNtfsDotGitmodules(component) or
+            afterBackslash(isNtfsDotGitmodules, component))
+        {
             return .{ .reason = .symlinked_gitmodules, .component = component };
         }
     }
@@ -331,6 +383,11 @@ pub fn isNtfsDot(name: []const u8, dotgit_name: []const u8, shortname_prefix: []
         } else if (std.ascii.toLower(c) != shortname_prefix[i]) return false;
     }
     return onlySpacesAndPeriods(name, i);
+}
+
+/// git's `is_ntfs_dotgitmodules`.
+pub fn isNtfsDotGitmodules(name: []const u8) bool {
+    return isNtfsDot(name, "gitmodules", "gi7eba");
 }
 
 /// C's `strncasecmp(a, b, n) == 0`, with `a` NUL-terminated at its end.

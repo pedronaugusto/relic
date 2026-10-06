@@ -50,6 +50,9 @@ pub const Warning = union(enum) {
     /// `promisor.storeFields` asks: `filter` or `token`, the remote, the
     /// value before and after.
     promisor_stored: struct { field: []const u8, remote: []const u8, old: []const u8, new: []const u8 },
+    /// A remote URL carries a password, and `transfer.credentialsInUrl`
+    /// is `warn`: the URL, its password replaced by `<redacted>`.
+    credentials_in_url: []const u8,
 
     /// The text git prints after `warning: ` for it, where git prints one.
     /// The result is `arena`'s.
@@ -67,6 +70,7 @@ pub const Warning = union(enum) {
             .fsck_unknown_message => |name| std.fmt.allocPrint(arena, "Skipping unknown msg id '{s}'", .{name}),
             .promisor => |text| text,
             .promisor_stored => |s| std.fmt.allocPrint(arena, "Storing new {s} from server for remote '{s}'.\n    '{s}' -> '{s}'", .{ s.field, s.remote, s.old, s.new }),
+            .credentials_in_url => |redacted| std.fmt.allocPrint(arena, "URL '{s}' uses plaintext credentials", .{redacted}),
         };
     }
 };
@@ -103,6 +107,7 @@ pub const Warnings = struct {
             .fsck_unknown_message => |t| .{ .fsck_unknown_message = try a.dupe(u8, t) },
             .promisor => |t| .{ .promisor = try a.dupe(u8, t) },
             .promisor_stored => |s| .{ .promisor_stored = .{ .field = try a.dupe(u8, s.field), .remote = try a.dupe(u8, s.remote), .old = try a.dupe(u8, s.old), .new = try a.dupe(u8, s.new) } },
+            .credentials_in_url => |t| .{ .credentials_in_url = try a.dupe(u8, t) },
         };
         try w.items.append(a, owned);
     }

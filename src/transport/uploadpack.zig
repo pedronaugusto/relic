@@ -332,7 +332,6 @@ pub const Server = struct {
         if (seen_haves) {
             for (haves.items) |oid| {
                 if (!try s.db().exists(s.io, oid)) continue;
-                try n.common.append(arena, oid);
                 _ = try n.gotHave(oid);
             }
             if (done) {
@@ -340,8 +339,8 @@ pub const Server = struct {
             } else {
                 (write: {
                     pktline.write(out, "acknowledgments\n") catch |e| break :write e;
-                    if (n.common.items.len == 0) pktline.write(out, "NAK\n") catch |e| break :write e;
-                    for (n.common.items) |oid| pktline.print("ACK {f}\n", .{oid}, out) catch |e| break :write e;
+                    if (n.have_obj.items.len == 0) pktline.write(out, "NAK\n") catch |e| break :write e;
+                    for (n.have_obj.items) |oid| pktline.print("ACK {f}\n", .{oid}, out) catch |e| break :write e;
                 }) catch |err| return writeError(err);
                 if (!wait_for_done and try n.okToGiveUp()) {
                     pktline.write(out, "ready\n") catch |err| return writeError(err);
@@ -497,10 +496,9 @@ const Negotiation = struct {
     wanted: Oid.Set = .empty,
     /// Commits the client has, and their parents: git's `THEY_HAVE`.
     they_have: Oid.Set = .empty,
-    /// The client's objects this server has too, in the order met.
+    /// The client's objects this server has too, in the order met, each
+    /// once: what v2 acknowledges.
     have_obj: std.ArrayList(Oid) = .empty,
-    /// In v2, this request's common haves, which are acknowledged.
-    common: std.ArrayList(Oid) = .empty,
     oldest_have: i64 = 0,
     ofs_delta: bool = false,
     include_tag: bool = false,
@@ -593,20 +591,19 @@ const Negotiation = struct {
         return null;
     }
 
-    /// A have this server has: git's `do_got_oid`. Whether it was new.
+    /// A have this server has: git's `do_got_oid`. Whether it was new. An
+    /// object said twice, of any type, is kept once, so a client repeating
+    /// one cannot grow the request without end.
     fn gotHave(n: *Negotiation, oid: Oid) Error!bool {
-        var known = false;
         if (try n.commit(oid)) |c| {
-            if (n.they_have.contains(oid)) known = true else try n.they_have.put(n.arena, oid, {});
             const date = c.committer.when_secs;
             if (n.oldest_have == 0 or date < n.oldest_have) n.oldest_have = date;
             for (c.parents) |p| try n.they_have.put(n.arena, p, {});
         }
-        if (!known) {
-            try n.have_obj.append(n.arena, oid);
-            return true;
-        }
-        return false;
+        const seen = try n.they_have.getOrPut(n.arena, oid);
+        if (seen.found_existing) return false;
+        try n.have_obj.append(n.arena, oid);
+        return true;
     }
 
     /// git's `ok_to_give_up`: every want reaches something the client has,

@@ -93,6 +93,8 @@ pub const Error = error{
     /// The transport needs to run a program — `ssh`, a credential helper —
     /// and the caller handed in no `program.Programs`.
     ProgramsNotGranted,
+    /// The URL carries a password and `transfer.credentialsInUrl` is `die`.
+    CredentialsInUrl,
 } || local.Error || fetchpack.Error || protocol.Error || program.Error || ssh.Error || smarthttp.Error || sendpack.Error || bundle.Error ||
     remotehelper.Error;
 
@@ -146,6 +148,22 @@ pub const Options = struct {
     /// `GIT_PROTOCOL_FROM_USER` from `programs`' environment, as git does.
     from_user: ?bool = null,
 };
+
+/// git's `transfer.credentialsInUrl`: a URL that carries a password,
+/// which ends up in configuration files and process listings, is let
+/// through (`allow`, the default), warned of (`warn`) or refused (`die`,
+/// and any value git would die on).
+fn checkCredentialsInUrl(gpa: Allocator, text: []const u8, parsed: url.Url, options: Options) Error!void {
+    const password = parsed.password orelse return;
+    const config = options.config orelse return;
+    const value = config.get("transfer.credentialsinurl") orelse return;
+    if (std.mem.eql(u8, value, "allow")) return;
+    if (!std.mem.eql(u8, value, "warn")) return error.CredentialsInUrl;
+    const at = @intFromPtr(password.ptr) - @intFromPtr(text.ptr); // safe: `Url.parse` sliced `password` out of `text`
+    const redacted = try std.fmt.allocPrint(gpa, "{s}<redacted>{s}", .{ text[0..at], text[at + password.len ..] });
+    defer gpa.free(redacted);
+    try warning.note(options.warnings, .{ .credentials_in_url = redacted });
+}
 
 /// Whether `config` leaves protocol v2 on: `protocol.version` unset or 2.
 pub fn wantsV2(config: ?*const config_mod.Config) bool {
@@ -250,6 +268,7 @@ pub const Session = struct {
         // Every transport is checked, as git's `transport_get` checks it,
         // a bundle on this machine as `file`.
         try checkAllowed(options, policy.nameOf(parsed.scheme));
+        try checkCredentialsInUrl(gpa, remote_url, parsed, options);
         if (parsed.scheme == .local and service == .upload_pack) bundled: {
             // `url_is_local_not_ssh && is_file && is_bundle`: a path to a
             // bundle is fetched from as one; a `file://` URL never is.

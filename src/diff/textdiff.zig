@@ -94,14 +94,22 @@ pub const Options = struct {
     anchors: []const []const u8 = &.{},
 };
 
+/// The most lines the two sides of one diff may hold between them: each
+/// line is named by a `u32`, which more would wrap. git caps its input
+/// for the same reason, at a little under 1 GiB.
+pub const max_lines: usize = std.math.maxInt(u32);
+
 /// The edit script between two line lists: the runs that differ, in order,
-/// with matching lines between them. The result is the caller's.
+/// with matching lines between them. The result is the caller's. Sides
+/// holding more than `max_lines` between them are `error.OutOfMemory`,
+/// which their names alone would come to, before a line is read.
 pub fn diffLines(
     gpa: Allocator,
     old: []const Line,
     new: []const Line,
     options: Options,
 ) Allocator.Error![]Change {
+    if (new.len > max_lines or old.len > max_lines - new.len) return error.OutOfMemory;
     const classified = try classify(gpa, old, new, options);
     defer gpa.free(classified.ids);
     const a = classified.ids[0..old.len];

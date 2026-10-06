@@ -190,3 +190,30 @@ test {
     _ = @import("transport/policy.zig");
     _ = @import("worktree/encoding.zig");
 }
+
+// git's published security fixes, one file per class of hole, each test
+// named for the fix and the git test it mirrors.
+test {
+    _ = @import("testing/security/buffer_overflow.zig");
+    _ = @import("testing/security/config_injection.zig");
+    _ = @import("testing/security/config_quoting.zig");
+    _ = @import("testing/security/credential_injection.zig");
+    _ = @import("testing/security/credential_leak.zig");
+    _ = @import("testing/security/dos_memory.zig");
+    _ = @import("testing/security/file_write.zig");
+    _ = @import("testing/security/hardlink.zig");
+    _ = @import("testing/security/hash_collision.zig");
+    _ = @import("testing/security/hook_write.zig");
+    _ = @import("testing/security/integer_overflow.zig");
+    _ = @import("testing/security/lazy_fetch.zig");
+    _ = @import("testing/security/option_injection.zig");
+    _ = @import("testing/security/path_alias.zig");
+    _ = @import("testing/security/path_search.zig");
+    _ = @import("testing/security/protocol_injection.zig");
+    _ = @import("testing/security/protocol_policy.zig");
+    _ = @import("testing/security/repo_ownership.zig");
+    _ = @import("testing/security/submodule_gitdir.zig");
+    _ = @import("testing/security/submodule_name.zig");
+    _ = @import("testing/security/symlink_traversal.zig");
+    _ = @import("testing/security/terminal_escape.zig");
+}

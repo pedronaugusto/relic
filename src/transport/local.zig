@@ -59,6 +59,15 @@ pub const Remote = struct {
     /// repository — its working tree, its `.git`, or a bare repository —
     /// and is not searched above, as git does not search above a remote's.
     pub fn open(gpa: Allocator, io: Io, location: []const u8) Error!Remote {
+        return openWith(gpa, io, location, .{});
+    }
+
+    /// `open`, the repository opened with `options` -- its ownership
+    /// checked as `options.ownership` says, against the `safe.directory`
+    /// of `options`' configuration, as git checks a local clone's source
+    /// before it reads that repository's configuration. It is never
+    /// searched for, whatever `options.discover` says.
+    pub fn openWith(gpa: Allocator, io: Io, location: []const u8, options: repo_mod.Repository.OpenOptions) Error!Remote {
         var identity = url_mod.Identity.parse(gpa, location) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NotARepository,
@@ -68,10 +77,10 @@ pub const Remote = struct {
         if (!parsed.isLocalRepository()) return error.NotARepository;
         var dir = Io.Dir.cwd().openDir(io, parsed.path, .{ .iterate = true }) catch return error.NotARepository;
         defer dir.close(io);
-        const repo = repo_mod.Repository.open(gpa, io, dir, .{
-            .discover = false,
-            .odb = .{ .probe_timestamp_resolution = false },
-        }) catch |err| switch (err) {
+        var open_options = options;
+        open_options.discover = false;
+        open_options.odb.probe_timestamp_resolution = false;
+        const repo = repo_mod.Repository.open(gpa, io, dir, open_options) catch |err| switch (err) {
             error.NotARepository => return error.NotARepository,
             else => |e| return e,
         };

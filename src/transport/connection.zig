@@ -20,6 +20,7 @@ const Allocator = std.mem.Allocator;
 const program = @import("../repo/program.zig");
 const warning = @import("../repo/warning.zig");
 const pktline = @import("pktline.zig");
+const progress = @import("progress.zig");
 
 /// Which service is asked for.
 pub const Service = enum {
@@ -90,8 +91,9 @@ pub const Connection = struct {
     /// Keep `text` as the failure's message, cut to fit.
     pub fn setMessage(c: *Connection, text: []const u8) void {
         const trimmed = std.mem.trim(u8, text, " \t\r\n");
-        c.message_len = @min(trimmed.len, c.message_buffer.len);
-        @memcpy(c.message_buffer[0..c.message_len], trimmed[0..c.message_len]);
+        // The other side's words, kept for a person to read: none of its
+        // control characters is kept with them.
+        c.message_len = progress.sanitize(trimmed, .none, &c.message_buffer).written;
     }
 
     /// The reader for the server's first message.

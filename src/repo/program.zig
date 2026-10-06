@@ -22,6 +22,7 @@
 const Self = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
@@ -223,8 +224,15 @@ pub fn start(programs: Programs, gpa: Allocator, io: Io, invocation: Invocation)
     for (invocation.unset) |name| try conduit.environ.apply(&environ, &.{.{ .name = name, .value = null }});
     for (invocation.set) |v| try conduit.environ.apply(&environ, &.{.{ .name = v.name, .value = v.value }});
 
-    const line: CommandLine = try .init(gpa, invocation);
+    var line: CommandLine = try .init(gpa, invocation);
     errdefer line.deinit(gpa);
+    // Windows looks for a bare name in this executable's directory and the
+    // current one before `PATH`, where a working tree may have put one;
+    // git for Windows looks in `PATH` alone, and so does this.
+    if (builtin.os.tag == .windows and isBare(line.argv[0])) {
+        line.program = try lookupOnPath(gpa, io, pathOf(&environ), line.argv[0]) orelse return error.FileNotFound;
+        line.argv[0] = line.program;
+    }
 
     var cwd_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const cwd: ?[]const u8 = switch (invocation.cwd) {
@@ -265,6 +273,8 @@ const CommandLine = struct {
     argv: [][]const u8,
     /// The `<line> "$@"` the argv points into, or empty.
     owned: []const u8 = "",
+    /// The program `argv[0]` was found at, when it was looked up here.
+    program: []const u8 = "",
 
     fn init(gpa: Allocator, invocation: Invocation) Allocator.Error!CommandLine {
         const argv = invocation.argv;
@@ -283,8 +293,48 @@ const CommandLine = struct {
     fn deinit(line: CommandLine, gpa: Allocator) void {
         gpa.free(line.argv);
         gpa.free(line.owned);
+        gpa.free(line.program);
     }
 };
+
+/// Whether `name` is a program to be looked for rather than a path: no
+/// separator of either kind and no drive.
+fn isBare(name: []const u8) bool {
+    return std.mem.indexOfAny(u8, name, "/\\:") == null;
+}
+
+/// The `PATH` of an environment, whatever the case of its name, as Windows
+/// spells it either way.
+fn pathOf(environ: *const Environ.Map) ?[]const u8 {
+    if (environ.get("PATH")) |value| return value;
+    for (environ.keys(), environ.values()) |key, value| {
+        if (std.ascii.eqlIgnoreCase(key, "PATH")) return value;
+    }
+    return null;
+}
+
+/// git's `path_lookup`: the first entry of `path` holding `name` -- on
+/// Windows `name.exe`, then `name` -- and nowhere else: not the current
+/// directory, which is often a working tree someone else wrote. An empty
+/// entry is skipped. The result is `gpa`'s; `null` when no entry has it.
+pub fn lookupOnPath(gpa: Allocator, io: Io, path: ?[]const u8, name: []const u8) Allocator.Error!?[]u8 {
+    const list = path orelse return null;
+    const windows = builtin.os.tag == .windows;
+    const has_exe = name.len >= 4 and std.ascii.eqlIgnoreCase(name[name.len - 4 ..], ".exe");
+    var entries = std.mem.splitScalar(u8, list, std.fs.path.delimiter);
+    while (entries.next()) |raw| {
+        const dir = if (windows) std.mem.trim(u8, raw, "\"") else raw;
+        if (dir.len == 0) continue;
+        for ([_]bool{ true, false }) |with_exe| {
+            if (with_exe and (!windows or has_exe)) continue;
+            const candidate = try std.fmt.allocPrint(gpa, "{s}{c}{s}{s}", .{ dir, std.fs.path.sep, name, if (with_exe) ".exe" else "" });
+            const stat = Io.Dir.cwd().statFile(io, candidate, .{}) catch null;
+            if (stat) |found| if (found.kind != .directory) return candidate;
+            gpa.free(candidate);
+        }
+    }
+    return null;
+}
 
 /// The variables that point a git at one particular repository. A program
 /// relic starts for a repository it has open is started without them, from
