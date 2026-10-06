@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -472,10 +473,10 @@ test "checkout makes an empty directory for a gitlink and takes an empty one awa
     var index = try repo.openIndex(io);
     defer index.deinit();
     _ = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, before, .{ .rules = try repo.worktreeRules() });
-    try testing.expect((try @import("repo/fs.zig").statAt(io, repo.work_dir.?, "vendor/lib")) == null);
+    try testing.expect((try repo_mod.fs.statAt(io, repo.work_dir.?, "vendor/lib")) == null);
     const outcome = try worktree.checkout(gpa, io, repo.work_dir.?, &index, &repo.odb, with_lib, .{ .rules = try repo.worktreeRules() });
     try testing.expectEqual(@as(u32, 1), outcome.gitlinks);
-    const found = (try @import("repo/fs.zig").statAt(io, repo.work_dir.?, "vendor/lib")).?;
+    const found = (try repo_mod.fs.statAt(io, repo.work_dir.?, "vendor/lib")).?;
     try testing.expectEqual(Io.File.Kind.directory, found.kind);
     try index.write(io, repo.git_dir, "index", .{});
     try expectPorcelainV2Agrees(gpa, io, &c.git, .{});
@@ -969,7 +970,7 @@ test "a !command update runs only with the permission to run programs" {
     defer lib.dir.close(io);
     try lib.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "moved on" });
 
-    const command = try testgit.fixtureCommand(gpa, @import("build_options").process_fixture_path, "touch ran-");
+    const command = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "touch ran-");
     defer gpa.free(command);
     const update = try std.fmt.allocPrint(gpa, "!{s}", .{command});
     defer gpa.free(update);

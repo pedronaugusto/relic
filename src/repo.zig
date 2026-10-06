@@ -15,6 +15,7 @@ pub const safe = @import("repo/safe.zig");
 pub const ident = @import("repo/ident.zig");
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -596,7 +597,7 @@ pub const Repository = struct {
     fn absoluteGitDir(io: Io, git_dir: Io.Dir, buffer: []u8) Error![]const u8 {
         const len = try git_dir.realPath(io, buffer);
         const path = buffer[0..len];
-        if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
         return path;
     }
 
@@ -1052,7 +1053,7 @@ pub const Repository = struct {
             .check_stat = try repo.coreChoice(@TypeOf(@as(worktree.Rules, .{}).check_stat), "core.checkstat", .full, false),
             .timestamp_resolution = repo.odb.timestamp_resolution,
             .file_mode = try repo.configuration().getBool("core.filemode", Io.File.Permissions.has_executable_bit),
-            .symlinks = try repo.configuration().getBool("core.symlinks", @import("builtin").os.tag != .windows),
+            .symlinks = try repo.configuration().getBool("core.symlinks", builtin.os.tag != .windows),
         };
     }
 
@@ -1189,7 +1190,7 @@ pub const Repository = struct {
             // Windows file timestamps can stay unchanged when a same-size
             // worktree file is rewritten immediately. Re-read that small
             // file rather than handing out stale settings.
-            if (std.meta.eql(cached.key, key) and !(@import("builtin").os.tag == .windows and key.worktree != null)) {
+            if (std.meta.eql(cached.key, key) and !(builtin.os.tag == .windows and key.worktree != null)) {
                 return if (cached.text) |t| try repo.gpa.dupe(u8, t) else null;
             }
         }

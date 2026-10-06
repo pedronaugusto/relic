@@ -15,10 +15,12 @@ pub const userconfig = @import("config/userconfig.zig");
 
 const config_write = @import("config/write.zig");
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const fs = @import("repo/fs.zig");
+const wildmatch = @import("worktree/wildmatch.zig");
 
 /// Errors from reading a configuration file.
 pub const ParseError = error{
@@ -724,7 +726,6 @@ pub const Config = struct {
     /// a path glob; `open` decides it against the URLs of every file it
     /// reads, as git does, wherever in the read the condition stands.
     pub fn conditionHolds(config: *const Config, condition: []const u8) Self.ParseError!bool {
-        const wildmatch = @import("worktree/wildmatch.zig");
         if (std.mem.startsWith(u8, condition, "gitdir:") or std.mem.startsWith(u8, condition, "gitdir/i:")) {
             const case_fold = std.mem.startsWith(u8, condition, "gitdir/i:");
             const pattern_raw = condition[if (case_fold) "gitdir/i:".len else "gitdir:".len..];
@@ -734,7 +735,7 @@ pub const Config = struct {
             // Git matches paths with forward slashes on Windows, including
             // the home directory expanded from `~/`.
             var normalized: [4096]u8 = undefined;
-            const match_pattern = if (@import("builtin").os.tag == .windows) blk: {
+            const match_pattern = if (builtin.os.tag == .windows) blk: {
                 if (pattern.len > normalized.len) return false;
                 @memcpy(normalized[0..pattern.len], pattern);
                 std.mem.replaceScalar(u8, normalized[0..pattern.len], '\\', '/');
@@ -815,7 +816,6 @@ pub const Config = struct {
     }
 
     fn urlMatches(pattern: []const u8, url: []const u8) bool {
-        const wildmatch = @import("worktree/wildmatch.zig");
         return wildmatch.match(pattern, url, .{ .pathname = true }) catch false;
     }
 

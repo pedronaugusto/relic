@@ -317,9 +317,10 @@ pub fn needsShell(line: []const u8) bool {
 
 const testing = std.testing;
 const process_fixture = @import("build_options").process_fixture_path;
+const testgit = @import("../testing/git.zig");
 
 fn testEnviron() !Environ.Map {
-    var map = try @import("../testing/git.zig").programEnviron(testing.allocator);
+    var map = try testgit.programEnviron(testing.allocator);
     errdefer map.deinit();
     try map.put("RELIC_KEPT", "kept");
     try map.put("RELIC_GONE", "gone");
