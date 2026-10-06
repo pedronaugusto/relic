@@ -73,14 +73,6 @@
       "lines": 152,
       "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
     },
-    "src/odb/accelerators.zig:writeCommitGraph": {
-      "lines": 167,
-      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
-    },
-    "src/odb/accelerators.zig:buildBitmap": {
-      "lines": 152,
-      "reason": "Existing main implementation at layout rebase; this exact baseline cannot grow and shrinks when split."
-    },
     "src/pretty.zig:one": {
       "lines": 121,
       "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."

@@ -108,37 +108,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     std.mem.sort(GraphNode, nodes.items, {}, GraphNode.byName);
     var by_name: Oid.Map(usize) = .empty;
     for (nodes.items, 0..) |node, i| try by_name.put(arena, node.oid, i);
-    // Compute both generations without recursion: a long first-parent history
-    // costs a bounded heap stack, not one machine stack frame per commit.
-    var stack: std.ArrayList(usize) = .empty;
-    for (nodes.items, 0..) |_, i| {
-        if (nodes.items[i].level != 0) continue;
-        try stack.append(arena, i);
-        while (stack.items.len != 0) {
-            const at = stack.items[stack.items.len - 1];
-            const node = &nodes.items[at];
-            node.visiting = true;
-            var wait = false;
-            var level: u32 = 1;
-            var generation = @max(node.time, 1);
-            for (node.parents) |parent_name| {
-                const parent = &nodes.items[by_name.get(parent_name) orelse return error.InvalidGraphInput];
-                if (parent.level == 0) {
-                    if (parent.visiting) return error.CommitGraphCycle;
-                    try stack.append(arena, by_name.get(parent_name).?);
-                    wait = true;
-                    break;
-                }
-                level = @max(level, @min(parent.level + 1, 0x3fff_ffff));
-                generation = @max(generation, parent.generation + 1);
-            }
-            if (wait) continue;
-            node.level = level;
-            node.generation = generation;
-            node.visiting = false;
-            _ = stack.pop();
-        }
-    }
+    try computeGenerations(arena, nodes.items, &by_name);
     var retained: ?*const graph_mod.Graph = null;
     if (options.split != .none and options.split != .replace and options.append) {
         if (old) |*g| retained = g;
@@ -213,21 +183,67 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
         fs.readOnlyObject(io, dir, "info/commit-graphs/commit-graph-chain", db.sharedPermissions());
         try removeIfPresent(io, dir, "info/commit-graph");
     }
+    try expireLayers(arena, io, dir, if (old) |*value| value else null, bases.items, checksum, options);
+    return checksum;
+}
+
+/// Both generations of every commit in `nodes`: its topological level and
+/// its corrected commit date, each one more than its parents' greatest,
+/// without recursion: a long first-parent history costs a bounded heap
+/// stack, not one machine stack frame per commit.
+fn computeGenerations(arena: Allocator, nodes: []GraphNode, by_name: *const Oid.Map(usize)) Self.Error!void {
+    var stack: std.ArrayList(usize) = .empty;
+    for (nodes, 0..) |_, i| {
+        if (nodes[i].level != 0) continue;
+        try stack.append(arena, i);
+        while (stack.items.len != 0) {
+            const at = stack.items[stack.items.len - 1];
+            const node = &nodes[at];
+            node.visiting = true;
+            var wait = false;
+            var level: u32 = 1;
+            var generation = @max(node.time, 1);
+            for (node.parents) |parent_name| {
+                const parent = &nodes[by_name.get(parent_name) orelse return error.InvalidGraphInput];
+                if (parent.level == 0) {
+                    if (parent.visiting) return error.CommitGraphCycle;
+                    try stack.append(arena, by_name.get(parent_name).?);
+                    wait = true;
+                    break;
+                }
+                level = @max(level, @min(parent.level + 1, 0x3fff_ffff));
+                generation = @max(generation, parent.generation + 1);
+            }
+            if (wait) continue;
+            std.debug.assert(level >= 1);
+            std.debug.assert(generation >= 1);
+            node.level = level;
+            node.generation = generation;
+            node.visiting = false;
+            _ = stack.pop();
+        }
+    }
+}
+
+/// After a write: mark the layers of `old` the chain no longer names as
+/// merged out now, as git does, and remove every inactive layer no newer
+/// than `options.expire_time`. A future-dated file is kept.
+fn expireLayers(arena: Allocator, io: Io, dir: Io.Dir, old: ?*const graph_mod.Graph, bases: []const Oid, checksum: Oid, options: CommitGraphOptions) Self.Error!void {
     // Git marks merged-out layers at this write's time, then expires
     // inactive layers no newer than expire_time. Keep future-dated files.
     const now = Io.Clock.real.now(io).toSeconds();
     const expiry = options.expire_time orelse now;
     const graph_dir = dir.openDir(io, "info/commit-graphs", .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return checksum,
+        error.FileNotFound => return,
         else => return err,
     };
     defer graph_dir.close(io);
     var hex: [hash.max_hex_len]u8 = undefined;
     if (options.split != .none) {
-        var previous = if (old) |*value| value else null;
+        var previous = old;
         while (previous) |layer| : (previous = layer.base) {
             var kept = false;
-            for (bases.items) |base| if (base.eql(layer.checksum())) {
+            for (bases) |base| if (base.eql(layer.checksum())) {
                 kept = true;
                 break;
             };
@@ -244,7 +260,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
         if (!std.mem.startsWith(u8, entry.name, "graph-") or !std.mem.endsWith(u8, entry.name, ".graph")) continue;
         const name = entry.name[6 .. entry.name.len - 6];
         var active = options.split != .none and std.mem.eql(u8, name, checksum.hex(&hex));
-        for (bases.items) |base| if (options.split != .none and std.mem.eql(u8, name, base.hex(&hex))) {
+        for (bases) |base| if (options.split != .none and std.mem.eql(u8, name, base.hex(&hex))) {
             active = true;
             break;
         };
@@ -253,7 +269,6 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
         const mtime = @divFloor(stat.mtime.nanoseconds, std.time.ns_per_s);
         if (mtime <= expiry) try removeIfPresent(io, graph_dir, entry.name);
     }
-    return checksum;
 }
 
 fn removeIfPresent(io: Io, dir: Io.Dir, path: []const u8) Io.Dir.DeleteFileError!void {
@@ -499,13 +514,7 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
             const pos = positions.get(previous.names[old_name_position]) orelse std.math.maxInt(u32);
             previous_positions.?[old_position] = pos;
             if (pos == std.math.maxInt(u32)) continue;
-            const kind_index: usize = switch (previous.typeAt(@intCast(old_position))) {
-                .commit => 0,
-                .tree => 1,
-                .blob => 2,
-                .tag => 3,
-            };
-            setBit(types[kind_index], pos);
+            setBit(types[typeIndex(previous.typeAt(@intCast(old_position)))], pos);
         }
     }
     var candidates: std.ArrayList(BitmapCommit) = .empty;
@@ -515,13 +524,7 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
         for (types) |words| known = known or bitmap_mod.isSet(words, pos);
         if (known) continue;
         const header = try db.readHeader(io, oid);
-        const kind_index: usize = switch (header.type) {
-            .commit => 0,
-            .tree => 1,
-            .blob => 2,
-            .tag => 3,
-        };
-        setBit(types[kind_index], pos);
+        setBit(types[typeIndex(header.type)], pos);
     }
     var name_positions: Oid.Map(u32) = .empty;
     for (names, 0..) |oid, i| try name_positions.put(arena, oid, @intCast(i));
@@ -568,65 +571,86 @@ fn buildBitmap(gpa: Allocator, io: Io, db: *odb.Odb, checksum: Oid, names: []con
             reused = true;
         };
         if (!reused) try pending.append(arena, candidate.oid);
-        while (pending.pop()) |oid| {
-            const pos = positions.get(oid) orelse return error.BitmapNotClosed;
-            if (bitmap_mod.isSet(words, pos)) continue;
-            if (cache.get(oid)) |previous| {
-                for (words, previous) |*word, base| word.* |= base;
-                continue;
-            }
-            setBit(words, pos);
-            const header = try db.readHeader(io, oid);
-            if (header.type == .blob) continue;
-            const found = try db.read(io, oid);
-            defer db.allocator().free(found.bytes);
-            switch (header.type) {
-                .commit => {
-                    var commit = try object.Commit.parse(gpa, db.objectFormat(), found.bytes);
-                    defer commit.deinit();
-                    // Parents run before trees, so a cached ancestor can
-                    // exclude its unchanged subtrees without reading them.
-                    try pending.append(arena, commit.tree);
-                    try pending.appendSlice(arena, commit.parents);
-                },
-                .tree => {
-                    var iterator = object.Tree.parse(db.objectFormat(), found.bytes).iterate();
-                    while (try iterator.next()) |entry| if (entry.mode != .gitlink) {
-                        try pending.append(arena, entry.oid);
-                    };
-                },
-                .tag => {
-                    var tag = try object.Tag.parse(gpa, db.objectFormat(), found.bytes);
-                    defer tag.deinit();
-                    try pending.append(arena, tag.target);
-                },
-                .blob => unreachable,
-            }
-        }
+        try reachFrom(gpa, arena, io, db, &positions, &cache, &pending, words);
         try cache.put(arena, candidate.oid, words);
         try entries.append(arena, .{ .position = candidate.position, .words = words });
     }
-    var hashes: ?[]u32 = null;
-    if (options.hash_cache) {
-        hashes = try arena.alloc(u32, names.len);
-        @memset(hashes.?, 0);
-        if (midx_bitmap) {
-            // Git carries existing cache entries when mapping an earlier bitmap
-            // into MIDX order; otherwise the MIDX writer has no path strings.
-            if (previous_bitmap) |previous| {
-                for (previous.names, 0..) |oid, i| if (name_positions.get(oid)) |pos| {
-                    hashes.?[pos] = previous.bitmap.nameHashAt(@intCast(i)) orelse 0;
+    const hashes: ?[]u32 = if (options.hash_cache) try nameHashes(gpa, arena, io, db, names.len, &name_positions, tips, midx_bitmap, previous_bitmap) else null;
+    return bitmap_mod.encode(gpa, db.objectFormat(), checksum, .{ types[0], types[1], types[2], types[3] }, entries.items, .{ .hash_cache = hashes, .lookup_table = options.lookup_table });
+}
+
+/// Set in `words` every object `pending` reaches that is not set yet, a
+/// commit's reach taken whole from `cache` when it has one.
+fn reachFrom(gpa: Allocator, arena: Allocator, io: Io, db: *odb.Odb, positions: *const Oid.Map(u32), cache: *const Oid.Map([]const u64), pending: *std.ArrayList(Oid), words: []u64) BitmapError!void {
+    while (pending.pop()) |oid| {
+        const pos = positions.get(oid) orelse return error.BitmapNotClosed;
+        if (bitmap_mod.isSet(words, pos)) continue;
+        if (cache.get(oid)) |previous| {
+            for (words, previous) |*word, base| word.* |= base;
+            continue;
+        }
+        setBit(words, pos);
+        const header = try db.readHeader(io, oid);
+        if (header.type == .blob) continue;
+        const found = try db.read(io, oid);
+        defer db.allocator().free(found.bytes);
+        switch (header.type) {
+            .commit => {
+                var commit = try object.Commit.parse(gpa, db.objectFormat(), found.bytes);
+                defer commit.deinit();
+                // Parents run before trees, so a cached ancestor can
+                // exclude its unchanged subtrees without reading them.
+                try pending.append(arena, commit.tree);
+                try pending.appendSlice(arena, commit.parents);
+            },
+            .tree => {
+                var iterator = object.Tree.parse(db.objectFormat(), found.bytes).iterate();
+                while (try iterator.next()) |entry| if (entry.mode != .gitlink) {
+                    try pending.append(arena, entry.oid);
                 };
-            }
-        } else {
-            var collected = try objectwalk.missingWith(gpa, io, db, tips, &.{}, .{ .use_bitmaps = false });
-            defer collected.deinit();
-            for (collected.entries) |entry| if (name_positions.get(entry.oid)) |pos| {
-                hashes.?[pos] = bitmap_mod.nameHash(entry.hint);
-            };
+            },
+            .tag => {
+                var tag = try object.Tag.parse(gpa, db.objectFormat(), found.bytes);
+                defer tag.deinit();
+                try pending.append(arena, tag.target);
+            },
+            .blob => unreachable,
         }
     }
-    return bitmap_mod.encode(gpa, db.objectFormat(), checksum, .{ types[0], types[1], types[2], types[3] }, entries.items, .{ .hash_cache = hashes, .lookup_table = options.lookup_table });
+}
+
+/// The name-hash cache in bitmap order: carried from `previous_bitmap`
+/// for a multi-pack bitmap, as git maps an earlier bitmap into its order,
+/// and taken from the walk's path hints otherwise.
+fn nameHashes(gpa: Allocator, arena: Allocator, io: Io, db: *odb.Odb, count: usize, name_positions: *const Oid.Map(u32), tips: []const Oid, midx_bitmap: bool, previous_bitmap: ?*const bitmap_store.Store) BitmapError![]u32 {
+    const hashes = try arena.alloc(u32, count);
+    @memset(hashes, 0);
+    if (midx_bitmap) {
+        // Git carries existing cache entries when mapping an earlier bitmap
+        // into MIDX order; otherwise the MIDX writer has no path strings.
+        if (previous_bitmap) |previous| {
+            for (previous.names, 0..) |oid, i| if (name_positions.get(oid)) |pos| {
+                hashes[pos] = previous.bitmap.nameHashAt(@intCast(i)) orelse 0;
+            };
+        }
+    } else {
+        var collected = try objectwalk.missingWith(gpa, io, db, tips, &.{}, .{ .use_bitmaps = false });
+        defer collected.deinit();
+        for (collected.entries) |entry| if (name_positions.get(entry.oid)) |pos| {
+            hashes[pos] = bitmap_mod.nameHash(entry.hint);
+        };
+    }
+    return hashes;
+}
+
+/// Which of a bitmap's four type bitmaps an object of type `t` is in.
+fn typeIndex(t: object.Type) usize {
+    return switch (t) {
+        .commit => 0,
+        .tree => 1,
+        .blob => 2,
+        .tag => 3,
+    };
 }
 
 fn setBit(words: []u64, pos: u32) void {
