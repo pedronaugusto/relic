@@ -229,6 +229,10 @@ pub const Signer = struct {
     format: Format,
     /// The program for `format`.
     program: []const u8,
+    /// The program for each format, which a signature in another format
+    /// than `format` is verified with: `gpg.<format>.program`, as git
+    /// keeps one per format.
+    format_programs: std.EnumArray(Format, []const u8),
     /// `user.signingKey`, with a leading `~/` expanded.
     signing_key: ?[]const u8,
     /// `gpg.ssh.defaultKeyCommand`.
@@ -255,21 +259,24 @@ pub const Signer = struct {
 
         // `gpg.program` and `gpg.openpgp.program` are one setting, and the
         // one the configuration names last wins.
-        var chosen: ?[]const u8 = null;
+        var chosen: std.EnumArray(Format, ?[]const u8) = .initFill(null);
         for (config.entries.items) |entry| {
             if (!std.ascii.eqlIgnoreCase(entry.section, "gpg")) continue;
             if (!std.ascii.eqlIgnoreCase(entry.name, "program")) continue;
-            const this: ?Format = if (entry.subsection.len == 0)
+            const this: Format = if (entry.subsection.len == 0)
                 .openpgp
             else
-                std.meta.stringToEnum(Format, entry.subsection);
-            if (this != format) continue;
-            chosen = entry.value orelse "";
+                std.meta.stringToEnum(Format, entry.subsection) orelse continue;
+            chosen.set(this, entry.value orelse "");
         }
-        const program_name: []const u8 = if (chosen) |raw|
-            try expandPath(arena, config, try unquote(arena, raw))
-        else
-            format.defaultProgram();
+        var format_programs: std.EnumArray(Format, []const u8) = undefined;
+        for (std.enums.values(Format)) |each| {
+            format_programs.set(each, if (chosen.get(each)) |raw|
+                try expandPath(arena, config, try unquote(arena, raw))
+            else
+                each.defaultProgram());
+        }
+        const program_name = format_programs.get(format);
 
         const min_trust: Trust = if (config.get("gpg.mintrustlevel")) |raw|
             Trust.parse(try unquote(arena, raw)) orelse return error.UnknownTrustLevel
@@ -290,6 +297,7 @@ pub const Signer = struct {
             .programs = programs,
             .format = format,
             .program = program_name,
+            .format_programs = format_programs,
             .signing_key = signing_key,
             .default_key_command = default_key_command,
             .allowed_signers = allowed_signers,
@@ -388,7 +396,7 @@ pub const Signer = struct {
         const arena = arena_instance.allocator();
         // The program for the signature's own format, which need not be the
         // one this repository signs with.
-        const program_name = if (format == signer.format) signer.program else format.defaultProgram();
+        const program_name = signer.format_programs.get(format);
         switch (format) {
             .openpgp, .x509 => try signer.verifyGpg(arena, io, program_name, format, payload, signature, &verdict),
             .ssh => try signer.verifySsh(arena, io, program_name, payload, signature, signed_at, &verdict),
@@ -470,7 +478,8 @@ pub const Signer = struct {
                 try check.appendSlice(arena, &.{ program_name, "-Y", "verify", "-n", "git", "-f", allowed, "-I", principal, "-s", sig_file.path });
                 if (time_arg) |t| try check.append(arena, t);
                 if (signer.revocation_file) |revoked| {
-                    if (Io.Dir.accessAbsolute(io, revoked, .{})) |_| {
+                    // Relative to where git runs, as git reads it.
+                    if (Io.Dir.cwd().access(io, revoked, .{})) |_| {
                         try check.appendSlice(arena, &.{ "-r", revoked });
                     } else |_| {}
                 }
@@ -868,7 +877,10 @@ const TempFile = struct {
             (if (builtin.os.tag == .windows) return error.NoTemporaryDirectory else "/tmp");
         var name_buf: [96]u8 = undefined;
         const name = fs.tempName(io, &name_buf, prefix);
-        const path = try std.fs.path.join(arena, &.{ dir_path, name });
+        // A relative `TMPDIR` is taken from where the process runs, made
+        // absolute so the program reading the file finds it from anywhere.
+        const dir_abs = if (std.fs.path.isAbsolute(dir_path)) dir_path else try Io.Dir.cwd().realPathFileAlloc(io, dir_path, arena);
+        const path = try std.fs.path.join(arena, &.{ dir_abs, name });
         const file = try Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
         defer file.close(io);
         errdefer Io.Dir.deleteFileAbsolute(io, path) catch {};

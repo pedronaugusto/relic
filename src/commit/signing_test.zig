@@ -442,6 +442,43 @@ test "a signing program is one path, spaces and all, as git runs it" {
     try testing.expect(std.mem.count(u8, log, "used\n") >= 4);
 }
 
+test "a signature verifies through its own format's program, a relative revocation file and a relative TMPDIR, as git's does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var k = try Keyed.create(gpa, io, .ssh, &.{});
+    defer k.destroy(io);
+    try k.makeKey(io);
+    try testgit.fixtureHook(gpa, io, k.repo.dir, "keys/tools/keygen", "signing_wrapper", "");
+    const wrapper = try std.fs.path.join(gpa, &.{ k.home, "tools", if (builtin.os.tag == .windows) "keygen.exe" else "keygen" });
+    defer gpa.free(wrapper);
+    try k.config(io, "gpg.ssh.program", wrapper);
+    try k.repo.writeFile(io, "a.txt", "a\n");
+    try k.repo.exec(io, &.{ "add", "a.txt" });
+    try k.repo.exec(io, &.{ "-c", "commit.gpgSign=true", "commit", "-q", "-m", "signed by git" });
+
+    // The repository signs with OpenPGP now; the commit's signature is
+    // still ssh's, and is checked through `gpg.ssh.program`.
+    try k.config(io, "gpg.format", "openpgp");
+    // Relative, as git takes it: not found from here, so not passed.
+    try k.config(io, "gpg.ssh.revocationFile", "revoked-keys");
+    try testing.expectEqual(@as(u8, 'G'), try k.letter(io, "HEAD"));
+    // A temporary directory named from where this process runs.
+    if (builtin.os.tag != .windows) {
+        const cwd = try Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(cwd);
+        const relative = try std.fs.path.relative(gpa, cwd, null, cwd, k.home);
+        defer gpa.free(relative);
+        try k.environ.put("TMPDIR", relative);
+    }
+    var verdict = try verifyHere(k, io, "HEAD", false);
+    defer verdict.deinit();
+    try testing.expectEqual(@as(u8, 'G'), verdict.letter());
+    const log = try k.repo.readFile(io, "keys/tools/log");
+    defer gpa.free(log);
+    // git signed, git verified, and relic verified, each through the wrapper.
+    try testing.expect(std.mem.count(u8, log, "used\n") >= 3);
+}
+
 test "history writes leave signing refusals in caller-owned diagnostics" {
     const gpa = testing.allocator;
     const io = testing.io;
