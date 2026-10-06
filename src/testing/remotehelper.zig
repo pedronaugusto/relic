@@ -139,6 +139,7 @@ const Helper = struct {
     /// The lines of a batch that begins with `first`, each without `prefix`;
     /// the line that ends the batch is read and dropped.
     fn batch(h: *Helper, first: []const u8, prefix: []const u8, buf: *std.ArrayList(u8)) ![]const []const u8 {
+        std.debug.assert(std.mem.startsWith(u8, first, prefix));
         var items: std.ArrayList([]const u8) = .empty;
         var current: ?[]const u8 = first;
         while (current) |l| {
@@ -146,6 +147,7 @@ const Helper = struct {
             try items.append(h.gpa, try h.gpa.dupe(u8, l[prefix.len..]));
             current = try h.line(buf);
         }
+        std.debug.assert(items.items.len >= 1);
         return items.items;
     }
 

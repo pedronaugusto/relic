@@ -185,6 +185,7 @@ const Session = struct {
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         var hex: [64]u8 = undefined;
         _ = try std.fmt.bufPrint(&hex, "{x}", .{&digest});
+        comptime std.debug.assert(std.crypto.hash.sha2.Sha256.digest_length * 2 == 64);
         if (!std.mem.eql(u8, &hex, oid)) return status(s.w, 400, &.{}, &.{"the data is not the object"});
         const path = try objectPath(s.gpa, oid);
         try s.repo.createDirPath(s.io, std.fs.path.dirname(path).?);
@@ -201,6 +202,7 @@ const Session = struct {
             if (std.mem.eql(u8, l.path, path)) return status(s.w, 409, try lockArgs(gpa, l), &.{"already locked"});
         }
         const l: Lock = .{ .id = try std.fmt.allocPrint(gpa, "{d}", .{nextId(locks.items)}), .path = path, .owner = s.user };
+        for (locks.items) |held| std.debug.assert(!std.mem.eql(u8, held.id, l.id));
         try locks.append(gpa, l);
         try writeLocks(gpa, s.io, s.repo, locks.items);
         try status(s.w, 201, try lockArgs(gpa, l), null);
@@ -338,7 +340,9 @@ fn authorised(req: Request, oid: []const u8) !bool {
 
 fn objectPath(gpa: Allocator, oid: []const u8) ![]const u8 {
     if (oid.len != 64) return error.BadOid;
-    return std.fmt.allocPrint(gpa, "lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], oid });
+    const path = try std.fmt.allocPrint(gpa, "lfs/objects/{s}/{s}/{s}", .{ oid[0..2], oid[2..4], oid });
+    std.debug.assert(path.len == "lfs/objects/".len + "xx/xx/".len + oid.len);
+    return path;
 }
 
 fn hasObject(gpa: Allocator, io: Io, repo: Io.Dir, oid: []const u8) !bool {
@@ -371,6 +375,11 @@ fn readLocks(gpa: Allocator, io: Io, repo: Io.Dir) !std.ArrayList(Lock) {
 
 fn writeLocks(gpa: Allocator, io: Io, repo: Io.Dir, locks: []const Lock) !void {
     var text: std.ArrayList(u8) = .empty;
+    for (locks) |l| {
+        // One line a lock, its fields split by tabs, as readLocks reads them.
+        for ([_][]const u8{ l.id, l.path, l.owner }) |field| std.debug.assert(std.mem.findAny(u8, field, "\t\n") == null);
+        std.debug.assert(l.id.len != 0);
+    }
     for (locks) |l| try text.print(gpa, "{s}\t{s}\t{s}\n", .{ l.id, l.path, l.owner });
     try repo.writeFile(io, .{ .sub_path = "transfer-locks", .data = text.items });
 }

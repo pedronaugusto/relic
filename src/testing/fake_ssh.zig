@@ -127,6 +127,8 @@ fn commandStart(args: []const []const u8) ?usize {
     if (at >= args.len) return null;
     at += 1; // The host is deliberately ignored.
     if (at >= args.len) return null;
+    std.debug.assert(at >= 2);
+    std.debug.assert(at < args.len);
     return at;
 }
 

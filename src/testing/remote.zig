@@ -973,6 +973,8 @@ pub const Proxy = struct {
         }
         const head = from_client.interface.buffered()[0..head_len];
         const line_end = std.mem.find(u8, head, "\r\n").?;
+        std.debug.assert(head_len >= 4);
+        std.debug.assert(line_end + 4 <= head_len);
         const first = head[0..line_end];
         var words = std.mem.tokenizeScalar(u8, first, ' ');
         const method = words.next() orelse return error.BadRequest;

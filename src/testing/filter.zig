@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const pktline = @import("relic").transport.pktline;
 
 const Mode = struct {
@@ -95,16 +96,10 @@ pub fn main(init: std.process.Init) !void {
         if (!any) continue;
         try log.print(gpa, "{s} {s}{s}\n", .{ command, path, if (can_delay) " can-delay" else "" });
 
+        // Only a filter that offered delay keeps blobs back.
+        std.debug.assert(mode.delay or delayed.count() == 0);
         if (std.mem.eql(u8, command, "list_available_blobs")) {
-            // One at a time, so the caller asks again.
-            if (ready.items.len == 0) {
-                for (delayed.keys()) |key| try ready.append(gpa, key);
-            }
-            if (ready.pop()) |next| try pktline.print("pathname={s}\n", .{next}, w);
-            try pktline.flush(w);
-            try pktline.write(w, "status=success\n");
-            try pktline.flush(w);
-            try w.flush();
+            try listAvailable(gpa, w, &ready, &delayed);
             continue;
         }
 
@@ -201,4 +196,20 @@ fn writeLog(io: Io, dir_path: []const u8, text: []const u8) void {
     defer dir.close(io);
     // ziglint-ignore: Z026 a helper exits with its own status; a test that reads this log fails on its absence
     dir.writeFile(io, .{ .sub_path = name, .data = text }) catch {};
+}
+
+/// Answer `list_available_blobs` with one delayed path at a time, so the
+/// caller asks again; the list of ready paths is refilled from the delayed
+/// ones when it runs out.
+fn listAvailable(gpa: Allocator, w: *Io.Writer, ready: *std.ArrayList([]const u8), delayed: *const std.array_hash_map.String([]u8)) !void {
+    // Only paths still kept back are offered as ready.
+    for (ready.items) |key| std.debug.assert(delayed.contains(key));
+    if (ready.items.len == 0) {
+        for (delayed.keys()) |key| try ready.append(gpa, key);
+    }
+    if (ready.pop()) |next| try pktline.print("pathname={s}\n", .{next}, w);
+    try pktline.flush(w);
+    try pktline.write(w, "status=success\n");
+    try pktline.flush(w);
+    try w.flush();
 }

@@ -516,6 +516,8 @@ pub const Server = struct {
             const last = if (dash + 1 < spec.len) std.fmt.parseInt(usize, spec[dash + 1 ..], 10) catch bytes.len - 1 else bytes.len - 1;
             if (first >= bytes.len or last < first) return request.respond("", .{ .status = .range_not_satisfiable, .keep_alive = false });
             const end = @min(last + 1, bytes.len);
+            std.debug.assert(first < end);
+            std.debug.assert(end <= bytes.len);
             const content_range = try std.fmt.allocPrint(arena, "bytes {d}-{d}/{d}", .{ first, end - 1, bytes.len });
             return request.respond(bytes[first..end], .{ .status = .partial_content, .keep_alive = false, .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "application/octet-stream" },

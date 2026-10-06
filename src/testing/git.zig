@@ -349,6 +349,7 @@ pub const GnupgHome = struct {
         const root = try Io.Dir.cwd().realPathFileAlloc(io, fixture_root, gpa);
         defer gpa.free(root);
         const home_path = try std.fs.path.join(gpa, &.{ root, &suffix });
+        std.debug.assert(std.fs.path.isAbsolute(home_path));
         errdefer gpa.free(home_path);
         try Io.Dir.createDirAbsolute(io, home_path, if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700));
         return .{ .gpa = gpa, .name = home_path };
