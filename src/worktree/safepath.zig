@@ -69,7 +69,7 @@ pub fn checkComponent(name: []const u8, use: Use) ?Reason {
     // An alternate data stream is written `name:stream` or
     // `name::$ATTRIBUTE`; the part before the colon is the file that is
     // actually opened, so that is what the rules are applied to.
-    const base = if (std.mem.indexOfScalar(u8, name, ':')) |colon| name[0..colon] else name;
+    const base = if (std.mem.findScalar(u8, name, ':')) |colon| name[0..colon] else name;
     if (base.len == 0) return .git_directory;
 
     if (isGitName(base)) return .git_directory;
@@ -78,7 +78,7 @@ pub fn checkComponent(name: []const u8, use: Use) ?Reason {
     // A name carrying a colon is refused outright in a working tree: every
     // spelling of an alternate data stream is a second name for the file in
     // front of the colon, and no git repository needs one.
-    if (use == .worktree and std.mem.indexOfScalar(u8, name, ':') != null) return .git_directory;
+    if (use == .worktree and std.mem.findScalar(u8, name, ':') != null) return .git_directory;
 
     return null;
 }
@@ -117,7 +117,7 @@ const device_names = [_][]const u8{
 /// `aux.txt` opens the same device `aux` does, which is why the extension is
 /// stripped before the comparison.
 fn isDeviceName(base: []const u8) bool {
-    const stem = if (std.mem.indexOfScalar(u8, base, '.')) |dot| base[0..dot] else base;
+    const stem = if (std.mem.findScalar(u8, base, '.')) |dot| base[0..dot] else base;
     for (device_names) |device| {
         if (stem.len == device.len and std.ascii.eqlIgnoreCase(stem, device)) return true;
     }
@@ -170,9 +170,9 @@ pub fn checkRefName(name: []const u8) ?Reason {
     if (std.mem.endsWith(u8, name, ".lock")) return .invalid_ref_name;
     if (std.mem.endsWith(u8, name, "/") or std.mem.startsWith(u8, name, "/")) return .invalid_ref_name;
     if (std.mem.endsWith(u8, name, ".")) return .invalid_ref_name;
-    if (std.mem.indexOf(u8, name, "..") != null) return .invalid_ref_name;
-    if (std.mem.indexOf(u8, name, "//") != null) return .invalid_ref_name;
-    if (std.mem.indexOf(u8, name, "@{") != null) return .invalid_ref_name;
+    if (std.mem.find(u8, name, "..") != null) return .invalid_ref_name;
+    if (std.mem.find(u8, name, "//") != null) return .invalid_ref_name;
+    if (std.mem.find(u8, name, "@{") != null) return .invalid_ref_name;
     if (std.mem.eql(u8, name, "@")) return .invalid_ref_name;
     for (name) |c| {
         switch (c) {

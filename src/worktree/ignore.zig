@@ -222,7 +222,7 @@ pub const Rules = struct {
     /// it and a later negation applies.
     pub fn matchPath(rules: *const Rules, path: []const u8, is_dir: bool) Match {
         var at: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| {
+        while (std.mem.findScalarPos(u8, path, at, '/')) |slash| {
             const parent = path[0..slash];
             const parent_match = rules.match(parent, true);
             if (parent_match.excluded) return parent_match;
@@ -317,13 +317,13 @@ pub const Checker = struct {
                 checker.read.putAssumeCapacity(key, {});
             }
             if (end + 1 >= path.len) return;
-            end = std.mem.indexOfScalarPos(u8, path, end + 1, '/') orelse return;
+            end = std.mem.findScalarPos(u8, path, end + 1, '/') orelse return;
         }
     }
 };
 
 fn basename(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| return path[slash + 1 ..];
+    if (std.mem.findScalarLast(u8, path, '/')) |slash| return path[slash + 1 ..];
     return path;
 }
 
@@ -373,7 +373,7 @@ pub fn parseLine(line: []const u8, base: []const u8, source: []const u8, line_nu
         anchored = true;
         text = text[1..];
         if (text.len == 0) return null;
-    } else if (std.mem.indexOfScalar(u8, text, '/') != null) {
+    } else if (std.mem.findScalar(u8, text, '/') != null) {
         // A pattern holding a slash anywhere but at its end is relative to
         // the file's own directory rather than matched against a name.
         anchored = true;

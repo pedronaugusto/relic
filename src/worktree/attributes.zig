@@ -209,7 +209,7 @@ pub const Attrs = struct {
         var at: usize = kept_len;
         while (at < dir.len) {
             if (at != 0 and dir[at] == '/') at += 1;
-            const end = std.mem.indexOfScalarPos(u8, dir, at, '/') orelse dir.len;
+            const end = std.mem.findScalarPos(u8, dir, at, '/') orelse dir.len;
             depth += 1;
             try attrs.enterOne(io, wt, dir[0..end], depth);
             at = end;
@@ -230,7 +230,7 @@ pub const Attrs = struct {
     /// `.gitattributes` there changes what `enter` loaded, so the next
     /// `enter` reads the directories again.
     pub fn written(attrs: *Attrs, path: []const u8) void {
-        const name = if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| path[slash + 1 ..] else path;
+        const name = if (std.mem.findScalarLast(u8, path, '/')) |slash| path[slash + 1 ..] else path;
         if (std.mem.eql(u8, name, ".gitattributes")) attrs.leave();
     }
 
@@ -316,7 +316,7 @@ pub const Attrs = struct {
 
             if (std.mem.startsWith(u8, line, "[attr]")) {
                 const rest = std.mem.trim(u8, line["[attr]".len..], " \t");
-                const space = std.mem.indexOfAny(u8, rest, " \t") orelse continue;
+                const space = std.mem.findAny(u8, rest, " \t") orelse continue;
                 const name = rest[0..space];
                 const assignments = try parseAssignments(a, rest[space + 1 ..]);
                 try attrs.macros.append(attrs.gpa, .{ .name = name, .assignments = assignments });
@@ -441,7 +441,7 @@ pub const Attrs = struct {
 };
 
 fn basename(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| return path[slash + 1 ..];
+    if (std.mem.findScalarLast(u8, path, '/')) |slash| return path[slash + 1 ..];
     return path;
 }
 
@@ -466,11 +466,11 @@ fn parsePattern(line: []const u8) ?ParsedPattern {
         // A quoted pattern carries spaces. The quotes are dropped and the
         // escapes inside are left as they are, which is what the matcher
         // handles anyway.
-        const end = std.mem.indexOfScalarPos(u8, line, 1, '"') orelse return null;
+        const end = std.mem.findScalarPos(u8, line, 1, '"') orelse return null;
         glob = line[1..end];
         i = end + 1;
     } else {
-        const space = std.mem.indexOfAny(u8, line, " \t") orelse return null;
+        const space = std.mem.findAny(u8, line, " \t") orelse return null;
         glob = line[0..space];
         i = space;
     }
@@ -483,7 +483,7 @@ fn parsePattern(line: []const u8) ?ParsedPattern {
     if (glob.len > 0 and glob[0] == '/') {
         anchored = true;
         glob = glob[1..];
-    } else if (std.mem.indexOfScalar(u8, glob, '/') != null) {
+    } else if (std.mem.findScalar(u8, glob, '/') != null) {
         anchored = true;
     }
     if (glob.len == 0) return null;
@@ -500,7 +500,7 @@ fn parseAssignments(a: Allocator, text: []const u8) Allocator.Error![]Assignment
             try out.append(a, .{ .name = word[1..], .state = .unset });
         } else if (word[0] == '!') {
             try out.append(a, .{ .name = word[1..], .state = .unspecified });
-        } else if (std.mem.indexOfScalar(u8, word, '=')) |eq| {
+        } else if (std.mem.findScalar(u8, word, '=')) |eq| {
             try out.append(a, .{ .name = word[0..eq], .state = .{ .value = word[eq + 1 ..] } });
         } else {
             try out.append(a, .{ .name = word, .state = .set });
@@ -585,7 +585,7 @@ pub fn unsupported(a: Attributes, required_filters: []const []const u8) ?Unsuppo
 /// rule that decides whether a file is normalised on check-in.
 pub fn isBinaryForDiff(bytes: []const u8) bool {
     const window = bytes[0..@min(bytes.len, first_few_bytes)];
-    return std.mem.indexOfScalar(u8, window, 0) != null;
+    return std.mem.findScalar(u8, window, 0) != null;
 }
 
 /// How many bytes the diff rule looks at.
@@ -787,7 +787,7 @@ pub const Stored = struct {
 /// Whether a blob is text with at least one CRLF in it, by the check-in
 /// rule: git's `has_crlf_in_index`, asked of the index's version of a path.
 pub fn hasCrlfText(blob: []const u8) bool {
-    if (std.mem.indexOfScalar(u8, blob, '\r') == null) return false;
+    if (std.mem.findScalar(u8, blob, '\r') == null) return false;
     return !isBinaryForCheckIn(blob) and gatherStats(blob).crlf != 0;
 }
 
@@ -806,7 +806,7 @@ pub fn toGitStored(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreS
     if (action == .binary) return .{ .bytes = bytes, .owned = false };
     if (action.isAuto() and isBinaryForCheckIn(bytes)) return .{ .bytes = bytes, .owned = false };
     if (action.isAuto() and stored.has_crlf) return .{ .bytes = bytes, .owned = false };
-    if (std.mem.indexOfScalar(u8, bytes, '\r') == null) return .{ .bytes = bytes, .owned = false };
+    if (std.mem.findScalar(u8, bytes, '\r') == null) return .{ .bytes = bytes, .owned = false };
 
     var out = try std.ArrayList(u8).initCapacity(gpa, bytes.len);
     errdefer out.deinit(gpa);
@@ -839,7 +839,7 @@ pub fn toWorktree(gpa: Allocator, bytes: []const u8, a: Attributes, core: CoreSe
         const stat = gatherStats(bytes);
         if (stat.lonecr != 0 or stat.crlf != 0 or statsAreBinary(stat)) return .{ .bytes = bytes, .owned = false };
     }
-    if (std.mem.indexOfScalar(u8, bytes, '\n') == null) return .{ .bytes = bytes, .owned = false };
+    if (std.mem.findScalar(u8, bytes, '\n') == null) return .{ .bytes = bytes, .owned = false };
 
     var out = try std.ArrayList(u8).initCapacity(gpa, bytes.len + bytes.len / 16 + 8);
     errdefer out.deinit(gpa);

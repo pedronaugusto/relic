@@ -133,7 +133,7 @@ fn backtrack(star: *?Star, text: []const u8, pi: *usize, ti: *usize) bool {
             },
             .whole_components => {
                 const rest = text[pending.text_index..];
-                const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return false;
+                const slash = std.mem.findScalar(u8, rest, '/') orelse return false;
                 pending.text_index += slash + 1;
             },
         }

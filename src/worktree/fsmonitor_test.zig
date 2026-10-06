@@ -149,7 +149,7 @@ fn versionsAsked(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
     errdefer out.deinit(gpa);
     var lines = std.mem.tokenizeScalar(u8, log, '\n');
     while (lines.next()) |line| {
-        const space = std.mem.indexOfScalar(u8, line, ' ') orelse line.len;
+        const space = std.mem.findScalar(u8, line, ' ') orelse line.len;
         const token = if (space < line.len) line[space + 1 ..] else "";
         const timed = token.len != 0 and for (token) |c| {
             if (!std.ascii.isDigit(c)) break false;

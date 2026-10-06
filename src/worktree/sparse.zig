@@ -124,7 +124,7 @@ pub const Patterns = struct {
         var included = false;
         var at: usize = 0;
         while (true) {
-            const slash = std.mem.indexOfScalarPos(u8, path, at, '/');
+            const slash = std.mem.findScalarPos(u8, path, at, '/');
             const end = slash orelse path.len;
             const prefix = path[0..end];
             const level_is_dir = slash != null or is_dir;
@@ -227,7 +227,7 @@ pub const Cone = struct {
         const owned = try arena.dupe(u8, dir);
         try c.recursive.putContext(gpa, owned, {}, c.ctx());
         var end = owned.len;
-        while (std.mem.lastIndexOfScalar(u8, owned[0..end], '/')) |slash| {
+        while (std.mem.findScalarLast(u8, owned[0..end], '/')) |slash| {
             end = slash;
             try c.parents.putContext(gpa, owned[0..end], {}, c.ctx());
         }
@@ -264,7 +264,7 @@ pub const Cone = struct {
                 cone.full = true;
                 continue;
             }
-            if (pattern.len < 2 or pattern[0] != '/' or std.mem.indexOf(u8, pattern, "**") != null) break;
+            if (pattern.len < 2 or pattern[0] != '/' or std.mem.find(u8, pattern, "**") != null) break;
             if (!must_be_dir and !std.mem.eql(u8, pattern, "/*")) break;
             if (!onlyEscapedGlobs(pattern)) break;
 
@@ -297,7 +297,7 @@ pub const Cone = struct {
 
         const parent: []const u8 = if (is_dir)
             path
-        else if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash|
+        else if (std.mem.findScalarLast(u8, path, '/')) |slash|
             path[0..slash]
         else
             return .inside;
@@ -308,7 +308,7 @@ pub const Cone = struct {
         var end = parent.len;
         while (true) {
             if (c.isRecursive(parent[0..end])) return .recursive;
-            end = std.mem.lastIndexOfScalar(u8, parent[0..end], '/') orelse break;
+            end = std.mem.findScalarLast(u8, parent[0..end], '/') orelse break;
         }
         return .outside;
     }
@@ -316,7 +316,7 @@ pub const Cone = struct {
 
 /// A cone name with each escaping backslash taken out, in `arena`.
 fn unescape(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.indexOfScalar(u8, text, '\\') == null) return arena.dupe(u8, text);
+    if (std.mem.findScalar(u8, text, '\\') == null) return arena.dupe(u8, text);
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
@@ -374,7 +374,7 @@ fn onlyEscapedGlobs(pattern: []const u8) bool {
 }
 
 fn basename(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| return path[slash + 1 ..];
+    if (std.mem.findScalarLast(u8, path, '/')) |slash| return path[slash + 1 ..];
     return path;
 }
 

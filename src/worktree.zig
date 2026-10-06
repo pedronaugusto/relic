@@ -845,7 +845,7 @@ pub fn status(
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    var entries: std.StringArrayHashMapUnmanaged(StatusEntry) = .empty;
+    var entries: std.array_hash_map.String(StatusEntry) = .empty;
 
     // HEAD against the index. A sparse directory is a tree: where HEAD has
     // the same tree there, nothing under it differs and neither side is
@@ -1058,7 +1058,7 @@ fn underAny(dirs: *const std.StringHashMapUnmanaged(void), path: []const u8) boo
     if (dirs.count() == 0) return false;
     if (dirs.contains("")) return true;
     var end: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {
+    while (std.mem.findScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {
         if (dirs.contains(path[0..slash])) return true;
     }
     return false;
@@ -1101,7 +1101,7 @@ const StatusScan = struct {
     index: *Index,
     db: *Odb,
     options: StatusOptions,
-    entries: *std.StringArrayHashMapUnmanaged(StatusEntry),
+    entries: *std.array_hash_map.String(StatusEntry),
     seen: std.StringHashMapUnmanaged(void) = .empty,
     /// Whether the file monitor was asked, so `Entry.fsmonitor_valid` holds.
     monitored: bool = false,
@@ -1236,7 +1236,7 @@ const StatusScan = struct {
     /// Whether a directory above `path` is a symlink, a file or missing.
     fn behindNonDirectory(s: *StatusScan, path: []const u8, known: *std.StringHashMapUnmanaged(void)) Error!bool {
         var at: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| : (at = slash + 1) {
+        while (std.mem.findScalarPos(u8, path, at, '/')) |slash| : (at = slash + 1) {
             const dir = path[0..slash];
             if (known.contains(dir)) return true;
             const found = try fs.statAt(s.io, s.wt, dir);
@@ -1718,7 +1718,7 @@ pub fn checkout(
     }
 
     if (!options.force) {
-        var updates: std.StringArrayHashMapUnmanaged(?TreeEntry) = .empty;
+        var updates: std.array_hash_map.String(?TreeEntry) = .empty;
         for (index.entries.items) |entry| {
             if (entry.stage != 0) return error.UnmergedIndex;
             const want = wanted.get(entry.path);
@@ -2524,7 +2524,7 @@ pub fn verifyUpdates(
     io: Io,
     wt: Io.Dir,
     index: *const Index,
-    updates: *const std.StringArrayHashMapUnmanaged(?TreeEntry),
+    updates: *const std.array_hash_map.String(?TreeEntry),
     options: VerifyOptions,
 ) Self.Error!void {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
@@ -2552,7 +2552,7 @@ pub fn verifyUpdates(
         if (want == null) continue;
         var at: usize = 0;
         while (true) {
-            const slash = std.mem.indexOfScalarPos(u8, path, at, '/');
+            const slash = std.mem.findScalarPos(u8, path, at, '/');
             const prefix = if (slash) |s| path[0..s] else path;
             const is_last = slash == null;
             if (try fs.statAt(io, wt, prefix)) |found| {
@@ -2587,7 +2587,7 @@ fn directoryGoes(
     wt: Io.Dir,
     dir_path: []const u8,
     index: *const Index,
-    updates: *const std.StringArrayHashMapUnmanaged(?TreeEntry),
+    updates: *const std.array_hash_map.String(?TreeEntry),
 ) Error!bool {
     var dir = try wt.openDir(io, dir_path, .{ .iterate = true });
     defer dir.close(io);

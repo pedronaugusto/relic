@@ -284,7 +284,7 @@ pub const Session = struct {
             };
         }
         var stored: attributes.Stored = .{};
-        if (attributes.crlfAction(applied, s.options.core).isAuto() and std.mem.indexOf(u8, bytes, "\r\n") != null) {
+        if (attributes.crlfAction(applied, s.options.core).isAuto() and std.mem.find(u8, bytes, "\r\n") != null) {
             stored.has_crlf = try s.storedHasCrlf(path);
         }
         const crlf = try attributes.toGitStored(a, bytes, applied, s.options.core, stored);
@@ -862,12 +862,12 @@ pub fn identToGit(a: Allocator, src: []const u8) Allocator.Error!?[]u8 {
     if (countIdent(src) == 0) return null;
     var out: std.ArrayList(u8) = try .initCapacity(a, src.len);
     var rest = src;
-    while (std.mem.indexOfScalar(u8, rest, '$')) |dollar| {
+    while (std.mem.findScalar(u8, rest, '$')) |dollar| {
         out.appendSliceAssumeCapacity(rest[0 .. dollar + 1]);
         rest = rest[dollar + 1 ..];
         if (rest.len > 3 and std.mem.startsWith(u8, rest, "Id:")) {
-            const close = std.mem.indexOfScalarPos(u8, rest, 3, '$') orelse break;
-            if (std.mem.indexOfScalar(u8, rest[3..close], '\n') != null) continue;
+            const close = std.mem.findScalarPos(u8, rest, 3, '$') orelse break;
+            if (std.mem.findScalar(u8, rest[3..close], '\n') != null) continue;
             out.appendSliceAssumeCapacity("Id$");
             rest = rest[close + 1 ..];
         }
@@ -889,19 +889,19 @@ pub fn identToWorktree(a: Allocator, kind: hash.Kind, src: []const u8) Allocator
 
     var out: std.ArrayList(u8) = try .initCapacity(a, src.len + count * (hex.len + 3));
     var rest = src;
-    while (std.mem.indexOfScalar(u8, rest, '$')) |dollar| {
+    while (std.mem.findScalar(u8, rest, '$')) |dollar| {
         try out.appendSlice(a, rest[0 .. dollar + 1]);
         rest = rest[dollar + 1 ..];
         if (rest.len < 3 or !std.mem.startsWith(u8, rest, "Id")) continue;
         if (rest[2] == '$') {
             rest = rest[3..];
         } else if (rest[2] == ':') {
-            const close = std.mem.indexOfScalarPos(u8, rest, 3, '$') orelse break;
-            if (std.mem.indexOfScalar(u8, rest[3..close], '\n') != null) continue;
+            const close = std.mem.findScalarPos(u8, rest, 3, '$') orelse break;
+            if (std.mem.findScalar(u8, rest[3..close], '\n') != null) continue;
             // A space anywhere but just before the closing dollar is some
             // other system's keyword, and is kept.
             if (close > 4) {
-                if (std.mem.indexOfScalar(u8, rest[4..close], ' ')) |at| {
+                if (std.mem.findScalar(u8, rest[4..close], ' ')) |at| {
                     if (4 + at < close - 1) continue;
                 }
             }

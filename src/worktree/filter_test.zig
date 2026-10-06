@@ -453,7 +453,7 @@ test "a delayed smudge is written after the rest, as git writes it" {
     var checkouts: usize = 0;
     for (logs.items) |l| {
         if (std.mem.count(u8, l, "smudge a.r can-delay") != 1) continue;
-        if (std.mem.indexOf(u8, l, "clean ") != null) continue;
+        if (std.mem.find(u8, l, "clean ") != null) continue;
         checkouts += 1;
         try testing.expect(std.mem.count(u8, l, "list_available_blobs") >= 4);
         try testing.expectEqual(@as(usize, 3), std.mem.count(u8, l, " can-delay"));

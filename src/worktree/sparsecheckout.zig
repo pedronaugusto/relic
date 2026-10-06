@@ -325,7 +325,7 @@ fn levelValue(config: *const Config, name: []const u8, levels: []const config_mo
     const split = config_mod.splitFullName(name) orelse return null;
     var found: ?[]const u8 = null;
     for (config.entries.items) |entry| {
-        if (std.mem.indexOfScalar(config_mod.Level, levels, entry.level) == null) continue;
+        if (std.mem.findScalar(config_mod.Level, levels, entry.level) == null) continue;
         if (!entry.matches(split.section, split.subsection, split.name)) continue;
         found = entry.value orelse "true";
     }
@@ -437,7 +437,7 @@ const Op = struct {
         if (op.state.cone) {
             for (patterns) |p| {
                 if (p.len > 0 and (p[0] == '/' or p[0] == '!')) return error.PatternNotADirectory;
-                if (std.mem.indexOfAny(u8, p, "*?[]") != null) return error.PatternNotADirectory;
+                if (std.mem.findAny(u8, p, "*?[]") != null) return error.PatternNotADirectory;
             }
             var index = try op.repo.openIndex(op.io);
             defer index.deinit();
@@ -569,7 +569,7 @@ const Set = enum { recursive, parents };
 /// `hashmap_contains_parent`.
 fn hasAncestorIn(cone: *const sparse.Cone, dir: []const u8, which: Set) bool {
     var end = dir.len;
-    while (std.mem.lastIndexOfScalar(u8, dir[0..end], '/')) |slash| {
+    while (std.mem.findScalarLast(u8, dir[0..end], '/')) |slash| {
         end = slash;
         const found = switch (which) {
             .recursive => cone.isRecursive(dir[0..end]),

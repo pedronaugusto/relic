@@ -446,7 +446,7 @@ test "both arms describe a directory the same way" {
     try dir.writeFile(io, .{ .sub_path = long, .data = "long\n" });
 
     // What the ordinary arm says, keyed by name.
-    var expected: std.StringArrayHashMapUnmanaged(fs.Entry) = .empty;
+    var expected: std.array_hash_map.String(fs.Entry) = .empty;
     defer {
         for (expected.keys()) |k| gpa.free(k);
         expected.deinit(gpa);

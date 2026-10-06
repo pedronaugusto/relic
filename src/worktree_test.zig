@@ -110,7 +110,7 @@ test "addAll then writeTree equals git add -A and git write-tree" {
     // The ignored file is in neither.
     const listed = try h.repo.run(io, &.{"ls-files"});
     defer gpa.free(listed);
-    try std.testing.expect(std.mem.indexOf(u8, listed, "skip.log") == null);
+    try std.testing.expect(std.mem.find(u8, listed, "skip.log") == null);
     try std.testing.expect(h.index.find("skip.log") == null);
     if (has_link) try std.testing.expect(h.index.find("link.c").?.mode == .symlink);
     if (has_exec_bit) try std.testing.expect(h.index.find("run.sh").?.mode == .exec);
@@ -811,7 +811,7 @@ test "checkout and writePaths apply every .gitattributes on the way down, as git
 fn listedUnder(gpa: std.mem.Allocator, text: []const u8, heading: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    const at = std.mem.indexOf(u8, text, heading) orelse return out.toOwnedSlice(gpa);
+    const at = std.mem.find(u8, text, heading) orelse return out.toOwnedSlice(gpa);
     var lines = std.mem.splitScalar(u8, text[at..], '\n');
     _ = lines.next();
     while (lines.next()) |line| {

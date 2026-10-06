@@ -134,7 +134,7 @@ pub fn refresh(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, source: Source
 fn askHook(arena: Allocator, io: Io, wt: Io.Dir, hook: Hook, since: []const u8, now: []const u8) Error!?Changes {
     if (hook.version != 1) {
         if (try runHook(arena, io, wt, hook, "2", since)) |out| {
-            const end = std.mem.indexOfScalar(u8, out, 0) orelse out.len;
+            const end = std.mem.findScalar(u8, out, 0) orelse out.len;
             // An empty token is no answer, as git warns, and is what git
             // keeps.
             if (end == 0) return .{ .token = "", .paths = null };
