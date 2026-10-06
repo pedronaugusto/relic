@@ -206,10 +206,14 @@ pub const Applied = struct {
     /// Whether `pop` dropped the stash, which it does only when nothing
     /// conflicted.
     dropped: bool = false,
+    /// Whether the merge's rename processing came out clean:
+    /// `merge.Result.renames_clean`.
+    renames_clean: bool = true,
 
-    /// Whether every path merged.
+    /// Whether the merge was clean: every path merged, and no rename
+    /// conflict that leaves none conflicted.
     pub fn isClean(a: *const Applied) bool {
-        return a.conflicts.len == 0;
+        return a.renames_clean and a.conflicts.len == 0;
     }
 
     /// Release the result.
@@ -864,7 +868,7 @@ pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
     const result_alloc = result_arena.allocator();
     var conflicts: std.ArrayList([]const u8) = .empty;
     var applied_index = false;
-    if (result.conflicts.len != 0) {
+    if (!result.isClean()) {
         // The index is the merge's: what reconciled is staged, and every
         // conflict sits at its stages.
         for (result.conflicts) |c| {
@@ -893,6 +897,7 @@ pub fn applyStash(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
         .arena = result_arena.state,
         .conflicts = conflicts.items,
         .index_restored = applied_index,
+        .renames_clean = result.renames_clean,
     };
 }
 

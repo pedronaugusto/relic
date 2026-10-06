@@ -274,10 +274,14 @@ pub const Result = struct {
     /// The blob of the merge's own top-level `.gitattributes` renormalizing
     /// read, when it read that one rather than the working tree's.
     merged_attributes_blob: ?Oid = null,
+    /// Whether rename processing came out clean. A conflict such as a
+    /// directory rename split leaves no conflicted path, and still makes
+    /// the merge unclean, as git's `detect_and_process_renames` does.
+    renames_clean: bool = true,
 
     /// Whether the merge is clean.
     pub fn isClean(r: *const Result) bool {
-        return r.conflicted.len == 0;
+        return r.renames_clean and r.conflicted.len == 0;
     }
 
     /// Release everything.
@@ -429,6 +433,8 @@ const CommitRef = union(enum) {
 
 const Outcome = struct {
     tree: Oid,
+    /// What rename processing returned on the pass that counted.
+    renames_clean: bool,
 };
 
 /// Keys in byte order, as git's `string_list` sorts them.
@@ -2030,14 +2036,15 @@ const Merge = struct {
         }
         m.reset();
         var passes: u32 = 0;
+        var renames_clean: bool = undefined;
         while (true) : (passes += 1) {
             try m.collectMergeInfo(base, side1, side2);
-            _ = try m.detectAndProcessRenames();
+            renames_clean = try m.detectAndProcessRenames();
             if (m.redo_after_renames != 2 or passes > 0) break;
             m.reinit();
         }
         const tree = try m.processEntries();
-        return .{ .tree = tree };
+        return .{ .tree = tree, .renames_clean = renames_clean };
     }
 
     fn fakeOid(m: *Merge, n: usize) Oid {
@@ -2176,6 +2183,7 @@ const Merge = struct {
             .rename_limit_needed = m.needed_limit,
             .renormalize_read_attributes = m.renormalize_read_attributes,
             .merged_attributes_blob = m.merged_attributes_blob,
+            .renames_clean = outcome.renames_clean,
         };
     }
 };

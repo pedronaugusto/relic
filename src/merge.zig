@@ -125,10 +125,13 @@ pub const Result = struct {
     /// What git's merge says about the paths it merged, when content
     /// merging was asked for.
     messages: []const ort.Message = &.{},
+    /// Whether rename processing came out clean: `ort.Result.renames_clean`.
+    renames_clean: bool = true,
 
-    /// Whether every path reconciled.
+    /// Whether the merge is clean: every path reconciled, and no rename
+    /// conflict that leaves none conflicted.
     pub fn isClean(r: *const Result) bool {
-        return r.conflicts.len == 0;
+        return r.renames_clean and r.conflicts.len == 0;
     }
 
     /// Release everything.
@@ -383,6 +386,7 @@ pub fn fromOrt(gpa: Allocator, io: Io, db: *odb_mod.Odb, merged: *const ort.Resu
         .conflicts = conflicts.items,
         .tree = merged.tree,
         .messages = messages,
+        .renames_clean = merged.renames_clean,
     };
 }
 

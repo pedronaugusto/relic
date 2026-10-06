@@ -110,10 +110,13 @@ pub const Outcome = struct {
     removed: u32,
     /// What git's merge says about the paths it merged, grouped by path.
     messages: []const ort.Message = &.{},
+    /// Whether rename processing came out clean: `ort.Result.renames_clean`.
+    renames_clean: bool = true,
 
-    /// Whether every path reconciled.
+    /// Whether the merge is clean: every path reconciled, and no rename
+    /// conflict that leaves none conflicted.
     pub fn isClean(o: *const Outcome) bool {
-        return o.conflicts.len == 0;
+        return o.renames_clean and o.conflicts.len == 0;
     }
 
     /// Release the outcome.
@@ -257,6 +260,7 @@ fn run(
         .messages = merged.messages,
         .renormalize_read_attributes = merged.renormalize_read_attributes,
         .merged_attributes_blob = merged.merged_attributes_blob,
+        .renames_clean = merged.renames_clean,
     }, options);
 }
 
@@ -308,6 +312,7 @@ const Merged = struct {
     messages: []const ort.Message = &.{},
     renormalize_read_attributes: bool = false,
     merged_attributes_blob: ?Oid = null,
+    renames_clean: bool = true,
 };
 
 /// Remove the directory at `path` if it is empty, as git's `rmdir` for a
@@ -413,7 +418,7 @@ fn carry(
     var merged_tree: ?Oid = null;
     const auto_merge: Oid = merged.tree;
     if (conflicts.len == 0) {
-        merged_tree = merged.tree;
+        if (merged.renames_clean) merged_tree = merged.tree;
         cache_tree.root.entry_count = @intCast(index.entries.items.len);
         cache_tree.root.oid = merged.tree;
     }
@@ -431,6 +436,7 @@ fn carry(
         .written = outcome_written,
         .removed = outcome_removed,
         .messages = messages,
+        .renames_clean = merged.renames_clean,
     };
 }
 

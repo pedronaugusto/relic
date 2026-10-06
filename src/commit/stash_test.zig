@@ -299,6 +299,40 @@ test "a conflicting stash leaves git's stages and markers, and pop keeps it" {
     try twin.expectSame(io, &.{ "stash", "list" });
 }
 
+test "a stash whose directory rename splits stays, unclean with nothing conflicted, as git's does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var twin = try Twin.create(gpa, io);
+    defer twin.destroy(gpa);
+    try twin.write(io, "dir/a", "a\n");
+    try twin.write(io, "dir/b", "b\n");
+    try twin.both(io, &.{ "add", "." });
+    try twin.both(io, &.{ "commit", "-q", "-m", "base" });
+    try twin.remove(io, "dir/a");
+    try twin.remove(io, "dir/b");
+    try twin.write(io, "x/a", "a\n");
+    try twin.write(io, "y/b", "b\n");
+    try twin.both(io, &.{ "add", "-A" });
+    try twin.both(io, &.{ "stash", "push", "-q" });
+    try twin.write(io, "dir/c", "c\n");
+    try twin.both(io, &.{ "add", "." });
+    try twin.both(io, &.{ "commit", "-q", "-m", "adds" });
+
+    twin.git.report_failures = false;
+    try testing.expectError(error.GitFailed, twin.git.exec(io, &.{ "stash", "pop", "-q" }));
+    {
+        var repo = try twin.open(gpa, io);
+        defer repo.deinit(io);
+        var popped = try stash.pop(io, &repo, 0, .{});
+        defer popped.deinit();
+        try testing.expect(!popped.dropped);
+        try testing.expect(!popped.isClean());
+        try testing.expectEqual(@as(usize, 0), popped.conflicts.len);
+    }
+    try twin.expectSameState(io, &.{ "dir/a", "dir/b", "dir/c", "x/a", "y/b" });
+    try twin.expectSame(io, &.{ "stash", "list" });
+}
+
 test "a stash that would overwrite local changes or untracked files is refused and nothing moves" {
     const gpa = testing.allocator;
     const io = testing.io;

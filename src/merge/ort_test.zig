@@ -138,6 +138,11 @@ fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8
         defer gpa.free(g);
         std.debug.print("merge of {s} and {s} differs\ngit:  {s}\nours: {s}\n", .{ ours, theirs, e, g });
         return error.TestExpectedEqual;
+    } // git exits 1 on an unclean merge, whether or not a path is left
+    // conflicted: a directory rename split conflicts with none.
+    if ((git.code == 0) != result.isClean()) {
+        std.debug.print("merge of {s} and {s}: git exited {d}, ours clean is {}\n", .{ ours, theirs, git.code, result.isClean() });
+        return error.TestExpectedEqual;
     }
 }
 
@@ -185,6 +190,39 @@ test "renames, exact and edited, merge with the other side's changes as git's do
 
     try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
     try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
+}
+
+test "a directory rename split is unclean with no path conflicted, as git's merge says" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // `merge-tree --write-tree` is git 2.38's.
+    try testgit.requireGitVersion(gpa, io, 2, 38);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+
+    try repo.writeFile(io, "dir/a", "a\n");
+    try repo.writeFile(io, "dir/b", "b\n");
+    try commitAll(io, &repo, "base");
+    try repo.exec(io, &.{ "branch", "topic" });
+    try repo.writeFile(io, "dir/c", "c\n");
+    try commitAll(io, &repo, "main adds");
+    try repo.exec(io, &.{ "checkout", "-q", "topic" });
+    try repo.exec(io, &.{ "rm", "-q", "dir/a", "dir/b" });
+    try repo.writeFile(io, "x/a", "a\n");
+    try repo.writeFile(io, "y/b", "b\n");
+    try commitAll(io, &repo, "topic splits dir");
+
+    try expectSameMerge(gpa, io, &repo, "main", "topic", .{});
+    try expectSameMerge(gpa, io, &repo, "topic", "main", .{});
+
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    var result = try ort.mergeCommits(gpa, io, &db, try revParse(gpa, io, &repo, "main"), try revParse(gpa, io, &repo, "topic"), null, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(0, result.conflicted.len);
+    try std.testing.expect(!result.isClean());
 }
 
 test "rename/rename, rename/delete and rename/add conflicts are git's" {
