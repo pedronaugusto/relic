@@ -1136,15 +1136,13 @@ pub const Pack = struct {
         const order = try p.gpa.alloc(u32, p.index.count);
         defer p.gpa.free(order);
         for (order, 0..) |*slot, i| slot.* = @intCast(i);
-        const Ctx = struct {
-            index: *const Index,
-            fn lessThan(ctx: @This(), a: u32, b: u32) bool {
-                const oa = ctx.index.offsetAt(a) catch 0;
-                const ob = ctx.index.offsetAt(b) catch 0;
+        std.mem.sort(u32, order, &p.index, struct {
+            fn lessThan(index: *const Index, a: u32, b: u32) bool {
+                const oa = index.offsetAt(a) catch 0;
+                const ob = index.offsetAt(b) catch 0;
                 return oa < ob;
             }
-        };
-        std.mem.sort(u32, order, Ctx{ .index = &p.index }, Ctx.lessThan);
+        }.lessThan);
 
         var report: Report = .{};
         for (order, 0..) |position, rank| {
@@ -1504,13 +1502,11 @@ const TestPack = struct {
         const order = try p.gpa.alloc(u32, p.names.items.len);
         defer p.gpa.free(order);
         for (order, 0..) |*slot, i| slot.* = @intCast(i);
-        const Ctx = struct {
-            names: []const Oid,
-            fn lessThan(ctx: @This(), a: u32, b: u32) bool {
-                return ctx.names[a].order(ctx.names[b]) == .lt;
+        std.mem.sort(u32, order, @as([]const Oid, p.names.items), struct {
+            fn lessThan(names: []const Oid, a: u32, b: u32) bool {
+                return names[a].order(names[b]) == .lt;
             }
-        };
-        std.mem.sort(u32, order, Ctx{ .names = p.names.items }, Ctx.lessThan);
+        }.lessThan);
 
         var idx: std.ArrayList(u8) = .empty;
         defer idx.deinit(p.gpa);
@@ -2958,43 +2954,44 @@ test "a pass whose delta-base cache holds more reads no more of the pack" {
     }
 }
 
+/// The bytes a test's allocations hold at once.
+const LiveAllocator = struct {
+    child: Allocator,
+    live: usize = 0,
+    fn allocator(l: *LiveAllocator) Allocator {
+        return .{ .ptr = l, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // safe: ctx is the pointer `allocator` handed out
+        const p = l.child.rawAlloc(len, alignment, ret) orelse return null;
+        l.live += len;
+        return p;
+    }
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // safe: ctx is the pointer `allocator` handed out
+        if (!l.child.rawResize(memory, alignment, new_len, ret)) return false;
+        l.live = l.live - memory.len + new_len;
+        return true;
+    }
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // safe: ctx is the pointer `allocator` handed out
+        const p = l.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
+        l.live = l.live - memory.len + new_len;
+        return p;
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // safe: ctx is the pointer `allocator` handed out
+        l.child.rawFree(memory, alignment, ret);
+        l.live -= memory.len;
+    }
+};
+
 test "a pack the default block cache holds is read once in any order, and holds only the blocks read" {
     const Counter = struct {
         threadlocal var calls: usize = 0;
         fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
             calls += 1;
             return std.testing.io.vtable.fileReadPositional(userdata, file, buffers, offset);
-        }
-    };
-    // The bytes out at once.
-    const Live = struct {
-        child: Allocator,
-        live: usize = 0,
-        fn allocator(l: *@This()) Allocator {
-            return .{ .ptr = l, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
-        }
-        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-            const l: *@This() = @ptrCast(@alignCast(ctx));
-            const p = l.child.rawAlloc(len, alignment, ret) orelse return null;
-            l.live += len;
-            return p;
-        }
-        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-            const l: *@This() = @ptrCast(@alignCast(ctx));
-            if (!l.child.rawResize(memory, alignment, new_len, ret)) return false;
-            l.live = l.live - memory.len + new_len;
-            return true;
-        }
-        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-            const l: *@This() = @ptrCast(@alignCast(ctx));
-            const p = l.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
-            l.live = l.live - memory.len + new_len;
-            return p;
-        }
-        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-            const l: *@This() = @ptrCast(@alignCast(ctx));
-            l.child.rawFree(memory, alignment, ret);
-            l.live -= memory.len;
         }
     };
     const io = std.testing.io;
@@ -3025,7 +3022,7 @@ test "a pack the default block cache holds is read once in any order, and holds 
     var vtable = io.vtable.*;
     vtable.fileReadPositional = Counter.read;
     const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    var live: Live = .{ .child = gpa };
+    var live: LiveAllocator = .{ .child = gpa };
     var p = try Pack.open(live.allocator(), counted, tmp.dir, base, .sha1, .{});
     defer p.deinit(io);
     const blocks = std.math.divCeil(u64, p.size, read_block_bytes) catch unreachable;

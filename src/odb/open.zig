@@ -17,7 +17,7 @@ pub fn empty(comptime Odb: type, gpa: Allocator, io: Io, kind: hash.Kind, option
 
 /// The caller owns `dir` until append succeeds; the database owns it after.
 /// The pack directory is acquired here and follows the same transfer.
-pub fn register(db: anytype, io: Io, dir: Io.Dir, writable: bool) odb.Error!void {
+pub fn register(io: Io, db: anytype, dir: Io.Dir, writable: bool) odb.Error!void {
     const pack_dir = try openDirectory(io, dir, "pack");
     errdefer if (pack_dir) |d| d.close(io);
     try storage.get(db._state).sources.append(storage.get(db._state).gpa, .{
@@ -35,7 +35,7 @@ pub fn openOwn(comptime Odb: type, gpa: Allocator, io: Io, git_dir: Io.Dir, kind
     errdefer db.deinit(io);
     const objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
     errdefer if (storage.get(db._state).sources.items.len == 0) objects.close(io);
-    try register(&db, io, objects, true);
+    try register(io, &db, objects, true);
     try db.refresh(io);
     if (options.probe_timestamp_resolution) db.timestamp_resolution = fs.probeTimestampResolution(io, objects);
     return db;

@@ -65,23 +65,23 @@ pub fn isSpecial(name: []const u8) bool {
 }
 /// `Store.read` over reftable. The returned target of a symbolic ref is
 /// the caller's.
-pub fn read(store: *const refs.Store, gpa: Allocator, io: Io, name: []const u8) refs.ReadError!?refs.Ref {
-    return engine.read(store, gpa, io, name);
+pub fn read(gpa: Allocator, io: Io, store: *const refs.Store, name: []const u8) refs.ReadError!?refs.Ref {
+    return engine.read(gpa, io, store, name);
 }
 /// `Store.list` over reftable.
-pub fn list(store: *const refs.Store, gpa: Allocator, io: Io, prefix: []const u8) refs.ReadError!refs.Store.Listing {
-    return engine.list(store, gpa, io, prefix);
+pub fn list(gpa: Allocator, io: Io, store: *const refs.Store, prefix: []const u8) refs.ReadError!refs.Store.Listing {
+    return engine.list(gpa, io, store, prefix);
 }
 /// `Store.readLog` over reftable: the entries oldest first, as the files
 /// backend's log is. An entry whose old and new names are both zero is the
 /// marker git writes to say a log exists, and is not an entry.
-pub fn readLog(store: *const refs.Store, gpa: Allocator, io: Io, name: []const u8) (refs.ReadError || reflog.ReadError)!reflog.Log {
-    return engine.readLog(store, gpa, io, name);
+pub fn readLog(gpa: Allocator, io: Io, store: *const refs.Store, name: []const u8) (refs.ReadError || reflog.ReadError)!reflog.Log {
+    return engine.readLog(gpa, io, store, name);
 }
 /// Whether a log for `name` exists: any entry at all, the existence marker
 /// included.
-pub fn logExists(store: *const refs.Store, gpa: Allocator, io: Io, name: []const u8) refs.ReadError!bool {
-    return engine.logExists(store, gpa, io, name);
+pub fn logExists(gpa: Allocator, io: Io, store: *const refs.Store, name: []const u8) refs.ReadError!bool {
+    return engine.logExists(gpa, io, store, name);
 }
 /// git's zone number -- `+0130` read as 130 -- as minutes east of UTC.
 pub fn minutesFromZone(zone: i16) i16 {
@@ -97,33 +97,33 @@ pub const Pending = engine.Pending;
 /// `Transaction.prepare` over reftable: take `tables.list.lock` on every
 /// stack the edits touch, read the stacks under it, and check every
 /// expected value and every name against the refs already there.
-pub fn prepare(tx: *refs.Transaction, io: Io) refs.TransactionError!void {
-    return engine.prepare(tx, io);
+pub fn prepare(io: Io, tx: *refs.Transaction) refs.TransactionError!void {
+    return engine.prepare(io, tx);
 }
 /// `Transaction.commit` over reftable: one table per stack the edits touch,
 /// installed by rewriting `tables.list` under the lock `prepare` took, then
 /// the stack compacted if the geometric rule asks for it.
-pub fn commit(tx: *refs.Transaction, io: Io, log: ?refs.LogMessage) refs.TransactionError!void {
-    return engine.commit(tx, io, log);
+pub fn commit(io: Io, tx: *refs.Transaction, log: ?refs.LogMessage) refs.TransactionError!void {
+    return engine.commit(io, tx, log);
 }
 /// `Store.appendLog` over reftable: one entry, written as a table of its
 /// own under the stack's lock, which is how git writes a log that moves no
 /// ref. The message is kept as a transaction's is.
 pub fn appendLog(
-    store: *const refs.Store,
     gpa: Allocator,
     io: Io,
+    store: *const refs.Store,
     name: []const u8,
     old: Oid,
     new: Oid,
     who: object.Signature,
     message: []const u8,
 ) refs.TransactionError!void {
-    return engine.appendLog(store, gpa, io, name, old, new, who, message);
+    return engine.appendLog(gpa, io, store, name, old, new, who, message);
 }
 /// Give up whatever `prepare` took.
-pub fn releasePending(tx: *refs.Transaction, io: Io) void {
-    return engine.releasePending(tx, io);
+pub fn releasePending(io: Io, tx: *refs.Transaction) void {
+    return engine.releasePending(io, tx);
 }
 /// Which tables a compaction merges.
 pub const Compaction = engine.Compaction;

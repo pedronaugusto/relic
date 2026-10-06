@@ -117,7 +117,7 @@ fn forEachRef(gpa: Allocator, listing: *const refs.Store.Listing) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn gitForEachRef(repo: *testgit.Repo, io: Io) ![]u8 {
+fn gitForEachRef(io: Io, repo: *testgit.Repo) ![]u8 {
     return repo.run(io, &.{ "for-each-ref", "--format=%(refname)%(if)%(symref)%(then) -> %(symref)%(else) %(objectname)%(end)" });
 }
 
@@ -136,7 +136,7 @@ fn reflogText(gpa: Allocator, log: *const reflog.Log) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn gitReflog(repo: *testgit.Repo, io: Io, name: []const u8) ![]u8 {
+fn gitReflog(io: Io, repo: *testgit.Repo, name: []const u8) ![]u8 {
     return repo.run(io, &.{ "log", "-g", "--format=%H%x09%gs", name, "--" });
 }
 
@@ -175,7 +175,7 @@ test "a reftable repository git made is read through the refs API" {
     defer listing.deinit();
     const ours = try forEachRef(gpa, &listing);
     defer gpa.free(ours);
-    const theirs = try gitForEachRef(&git, io);
+    const theirs = try gitForEachRef(io, &git);
     defer gpa.free(theirs);
     try std.testing.expectEqualStrings(theirs, ours);
     // git records the annotated tag's target beside it.
@@ -186,7 +186,7 @@ test "a reftable repository git made is read through the refs API" {
         defer log.deinit();
         const text = try reflogText(gpa, &log);
         defer gpa.free(text);
-        const expected = try gitReflog(&git, io, name);
+        const expected = try gitReflog(io, &git, name);
         defer gpa.free(expected);
         try std.testing.expectEqualStrings(expected, text);
         try std.testing.expect(log.entries.len > 0);
@@ -260,7 +260,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
 
     var git: testgit.Repo = .{ .gpa = gpa, .tmp = undefined, .dir = tmp.dir };
     try git.exec(io, &.{ "fsck", "--no-progress" });
-    try refsVerify(&git, io, &.{});
+    try refsVerify(io, &git, &.{});
     const shown = try git.run(io, &.{ "show-ref", "--head", "-d" });
     defer gpa.free(shown);
     var hex: [hash.max_hex_len]u8 = undefined;
@@ -283,10 +283,10 @@ test "what this writes into a reftable repository git reads, logs and all" {
     try std.testing.expectEqual(@as(usize, 12), log.entries.len);
     const ours = try reflogText(gpa, &log);
     defer gpa.free(ours);
-    const theirs = try gitReflog(&git, io, "refs/heads/main");
+    const theirs = try gitReflog(io, &git, "refs/heads/main");
     defer gpa.free(theirs);
     try std.testing.expectEqualStrings(theirs, ours);
-    const head_log = try gitReflog(&git, io, "HEAD");
+    const head_log = try gitReflog(io, &git, "HEAD");
     defer gpa.free(head_log);
     try std.testing.expectEqual(@as(usize, 12), std.mem.count(u8, head_log, "\n"));
     // The deleted branch's log went with it.
@@ -332,7 +332,7 @@ test "a table written for a transaction is the table git writes for it" {
         var base: std.ArrayList(u8) = .empty;
         defer base.deinit(gpa);
         for (0..1500) |i| try base.print(gpa, "create refs/base/b{d:0>4} {s}\n", .{ i, blob_text });
-        try runWithInput(t, io, &.{ "update-ref", "--stdin" }, base.items);
+        try runWithInput(io, t, &.{ "update-ref", "--stdin" }, base.items);
     }
 
     // git: tags in one transaction, some of them the annotated one, and a
@@ -341,7 +341,7 @@ test "a table written for a transaction is the table git writes for it" {
     defer script.deinit(gpa);
     for (0..120) |i| try script.print(gpa, "create refs/tags/t{d:0>3} {s}\n", .{ i, if (i % 7 == 0) tag_text else blob_text });
     try script.print(gpa, "symref-create refs/tags/zz-link refs/heads/main\n", .{});
-    try runWithInput(&twins[0], io, &.{ "update-ref", "--stdin" }, script.items);
+    try runWithInput(io, &twins[0], &.{ "update-ref", "--stdin" }, script.items);
 
     var repo = try repo_mod.Repository.open(gpa, io, twins[1].dir, .{});
     defer repo.deinit(io);
@@ -376,9 +376,9 @@ test "a table written for a transaction is the table git writes for it" {
     try std.testing.expect(std.mem.count(u8, lists[1], "\n") >= 2);
     try std.testing.expectEqualSlices(u8, newest[0], newest[1]);
 
-    const a = try gitForEachRef(&twins[0], io);
+    const a = try gitForEachRef(io, &twins[0]);
     defer gpa.free(a);
-    const b = try gitForEachRef(&twins[1], io);
+    const b = try gitForEachRef(io, &twins[1]);
     defer gpa.free(b);
     try std.testing.expectEqualStrings(a, b);
 }
@@ -494,7 +494,7 @@ test "FETCH_HEAD and MERGE_HEAD are files and the other pseudorefs are in the st
     git.report_failures = false;
     try std.testing.expectError(error.GitFailed, git.exec(io, &.{ "rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD" }));
     git.report_failures = true;
-    try refsVerify(&git, io, &.{});
+    try refsVerify(io, &git, &.{});
 }
 
 test "git waits on the lock a prepared transaction holds, and reads the result" {
@@ -590,7 +590,7 @@ test "a log entry goes into the stack, and the files path refuses to write where
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, ".git/logs/refs/heads/main", .{}));
 
     try repo.refStore().appendLog(gpa, io, "refs/heads/main", tip, tip, fixtureWho(1_700_000_000), "reset: moving to HEAD");
-    const shown = try gitReflog(&git, io, "refs/heads/main");
+    const shown = try gitReflog(io, &git, "refs/heads/main");
     defer gpa.free(shown);
     try std.testing.expect(std.mem.startsWith(u8, shown, tip_text));
     try std.testing.expect(std.mem.find(u8, shown, "\treset: moving to HEAD\n") != null);
@@ -600,7 +600,7 @@ test "a log entry goes into the stack, and the files path refuses to write where
     try std.testing.expectEqualStrings("reset: moving to HEAD", log.entries[log.entries.len - 1].message);
 }
 
-fn createMain(repo: *repo_mod.Repository, io: Io) refs.TransactionError!void {
+fn createMain(io: Io, repo: *repo_mod.Repository) refs.TransactionError!void {
     var tx = repo.beginRefs();
     defer tx.deinit(io);
     try tx.create("refs/heads/main", .{ .direct = Oid.zero(.sha1) });
@@ -638,7 +638,7 @@ test "a writer waits for tables.list.lock as long as reftable.lockTimeout says" 
     // the lock and commits rather than giving up.
     const blocker = try tmp.dir.createFile(io, ".git/reftable/tables.list.lock", .{ .exclusive = true });
     blocker.close(io);
-    var pending = io.concurrent(createMain, .{ &repo, io }) catch {
+    var pending = io.concurrent(createMain, .{ io, &repo }) catch {
         try tmp.dir.deleteFile(io, ".git/reftable/tables.list.lock");
         return error.SkipZigTest;
     };
@@ -649,7 +649,7 @@ test "a writer waits for tables.list.lock as long as reftable.lockTimeout says" 
 }
 
 /// `git refs verify`, where the git has it: 2.47 and later.
-fn refsVerify(repo: *testgit.Repo, io: Io, prefix: []const []const u8) !void {
+fn refsVerify(io: Io, repo: *testgit.Repo, prefix: []const []const u8) !void {
     testgit.requireGitVersion(repo.gpa, io, 2, 47) catch |err| switch (err) {
         error.SkipZigTest => return,
         else => |e| return e,
@@ -750,15 +750,15 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
     for ([_][]const u8{ "HEAD", "refs/heads/main", "refs/heads/topic" }) |name| {
         twins[0].report_failures = false;
         twins[1].report_failures = false;
-        const x = gitReflog(&twins[0], io, name) catch "";
+        const x = gitReflog(io, &twins[0], name) catch "";
         defer if (x.len != 0) gpa.free(x);
-        const y = gitReflog(&twins[1], io, name) catch "";
+        const y = gitReflog(io, &twins[1], name) catch "";
         defer if (y.len != 0) gpa.free(y);
         try std.testing.expectEqualStrings(x, y);
     }
-    const x = try gitForEachRef(&twins[0], io);
+    const x = try gitForEachRef(io, &twins[0]);
     defer gpa.free(x);
-    const y = try gitForEachRef(&twins[1], io);
+    const y = try gitForEachRef(io, &twins[1]);
     defer gpa.free(y);
     try std.testing.expectEqualStrings(x, y);
     const head_a = try twins[0].line(io, &.{ "symbolic-ref", "HEAD" });
@@ -769,7 +769,7 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
 }
 
 /// Run git with `input` on its standard input.
-fn runWithInput(repo: *testgit.Repo, io: Io, args: []const []const u8, input: []const u8) !void {
+fn runWithInput(io: Io, repo: *testgit.Repo, args: []const []const u8, input: []const u8) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(repo.gpa);
     try argv.append(repo.gpa, "git");
@@ -872,5 +872,5 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
     defer own.deinit();
     try std.testing.expect(own.find("refs/bisect/good") != null);
     try std.testing.expect(own.find("refs/heads/ours") != null);
-    try refsVerify(&git, io, &.{ "-C", "trees/ours" });
+    try refsVerify(io, &git, &.{ "-C", "trees/ours" });
 }

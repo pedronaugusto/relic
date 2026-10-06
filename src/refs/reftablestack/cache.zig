@@ -375,7 +375,7 @@ pub const Cache = struct {
     }
 
     /// Bring the stacks up to date with the disk.
-    fn refresh(c: *Cache, store: anytype, io: Io) Error!*const Stacks {
+    fn refresh(c: *Cache, io: Io, store: anytype) Error!*const Stacks {
         const main_now = try Validity.of(io, store.commonDir());
         const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.gitDir()) else null;
         if (c.stacks) |*st| {
@@ -397,7 +397,7 @@ pub const Cache = struct {
                 st.worktree = fresh;
             }
         } else {
-            c.stacks = try Stacks.open(store, c.gpa, io);
+            c.stacks = try Stacks.open(c.gpa, io, store);
         }
         c.main_seen = main_now;
         c.worktree_seen = worktree_now;
@@ -437,7 +437,7 @@ const Stacks = struct {
     main: Stack,
     worktree: ?Stack,
 
-    fn open(store: anytype, gpa: Allocator, io: Io) Error!Stacks {
+    fn open(gpa: Allocator, io: Io, store: anytype) Error!Stacks {
         var main = try loadIn(gpa, io, store.commonDir(), store.objectFormat());
         errdefer main.deinit();
         const worktree: ?Stack = if (isLinked(store)) try loadIn(gpa, io, store.gitDir(), store.objectFormat()) else null;

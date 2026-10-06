@@ -119,7 +119,7 @@ pub fn pathFor(gpa: Allocator, ref: []const u8) Allocator.Error![]u8 {
 }
 
 /// Whether a log already exists for `ref`.
-pub fn exists(io: Io, git_dir: Io.Dir, gpa: Allocator, ref: []const u8) Allocator.Error!bool {
+pub fn exists(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) Allocator.Error!bool {
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
     git_dir.access(io, path, .{}) catch return false;

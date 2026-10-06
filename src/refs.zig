@@ -218,7 +218,7 @@ pub const Store = struct {
         if (!isReadableName(name)) return error.InvalidRefName;
         if (store.refFormat() == .reftable) {
             if (stack_engine.isSpecial(name)) return store.readLoose(gpa, io, name);
-            return stack_engine.read(store, gpa, io, name);
+            return stack_engine.read(gpa, io, store, name);
         }
         if (try store.readLoose(gpa, io, name)) |found| return found;
         if (try store.readPackedOne(io, name)) |oid| return .{ .direct = oid };
@@ -305,7 +305,7 @@ pub const Store = struct {
     /// does and what makes a `pack-refs` that has not yet removed the loose
     /// file harmless.
     pub fn list(store: *const Store, gpa: Allocator, io: Io, prefix: []const u8) ReadError!Listing {
-        if (store.refFormat() == .reftable) return stack_engine.list(store, gpa, io, prefix);
+        if (store.refFormat() == .reftable) return stack_engine.list(gpa, io, store, prefix);
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const arena = arena_instance.allocator();
@@ -496,8 +496,8 @@ pub const Store = struct {
 
     /// Whether `name` has a log, in whichever format the refs are kept.
     pub fn logExists(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!bool {
-        if (store.refFormat() == .reftable) return stack_engine.logExists(store, gpa, io, name);
-        return reflog.exists(io, store.dirFor(name), gpa, name);
+        if (store.refFormat() == .reftable) return stack_engine.logExists(gpa, io, store, name);
+        return reflog.exists(gpa, io, store.dirFor(name), name);
     }
 
     /// Append one entry to a ref's log without moving the ref: a line of
@@ -515,7 +515,7 @@ pub const Store = struct {
         message: []const u8,
     ) TransactionError!void {
         if (!safepath.isValidRefName(name)) return error.InvalidRefName;
-        if (store.refFormat() == .reftable) return stack_engine.appendLog(store, gpa, io, name, old, new, who, message);
+        if (store.refFormat() == .reftable) return stack_engine.appendLog(gpa, io, store, name, old, new, who, message);
         // The message a transaction would write: collapsed as git collapses it.
         const text = try reflog.normalizeMessage(gpa, message);
         defer gpa.free(text);
@@ -525,7 +525,7 @@ pub const Store = struct {
     /// A ref's log, oldest first, from `logs/<ref>` or from the reftable
     /// stack as the format says. An absent log is an empty one.
     pub fn readLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) (ReadError || reflog.ReadError)!reflog.Log {
-        if (store.refFormat() == .reftable) return stack_engine.readLog(store, gpa, io, name);
+        if (store.refFormat() == .reftable) return stack_engine.readLog(gpa, io, store, name);
         return reflog.read(gpa, io, store.dirFor(name), name, store.objectFormat());
     }
 };
@@ -691,7 +691,7 @@ pub const Transaction = struct {
 
         if (tx.store.refFormat() == .reftable) {
             // One table under one lock: no `packed-refs` step to announce.
-            try stack_engine.prepare(tx, io);
+            try stack_engine.prepare(io, tx);
             if (tx.hooks != null) try tx.announce(io, .prepared);
             tx.prepared = true;
             return;
@@ -912,7 +912,7 @@ pub const Transaction = struct {
         std.debug.assert(!tx.finished);
 
         if (tx.store.refFormat() == .reftable) {
-            try stack_engine.commit(tx, io, log);
+            try stack_engine.commit(io, tx, log);
             tx.finished = true;
             tx.releaseLocks(io);
             // ziglint-ignore: Z026 the refs have moved; as git, a hook failing on "committed" changes nothing
@@ -988,7 +988,7 @@ pub const Transaction = struct {
                         break :blk Oid.zero(tx.store.objectFormat());
                     },
                 };
-                const exists = try reflog.exists(io, tx.store.dirFor(edit.name), tx.gpa, edit.name);
+                const exists = try reflog.exists(tx.gpa, io, tx.store.dirFor(edit.name), edit.name);
                 if (!reflog.shouldLog(message.policy, edit.name, exists)) continue;
                 // An edit's own words, or the transaction's.
                 const own = if (source.message) |m| try reflog.normalizeMessage(tx.gpa, m) else null;
@@ -1047,7 +1047,7 @@ pub const Transaction = struct {
     }
 
     fn releaseLocks(tx: *Transaction, io: Io) void {
-        stack_engine.releasePending(tx, io);
+        stack_engine.releasePending(io, tx);
         for (tx.edits.items) |*edit| {
             if (edit.lock) |*lock| {
                 lock.deinit(io);

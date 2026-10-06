@@ -98,7 +98,7 @@ fn symbolEntry(comptime alphabet: Alphabet, sym: usize, bits: u32) Entry {
 /// share their first bits come together, so each subtable is made whole
 /// when its first code arrives.
 /// `counted` is how many of `lens` have each length, `countLengths(lens)`.
-fn build(comptime alphabet: Alphabet, table: []Entry, lens: []const u8, counted: *const [16]u16, comptime table_bits: u6) Error!void {
+fn build(comptime alphabet: Alphabet, comptime table_bits: u6, table: []Entry, lens: []const u8, counted: *const [16]u16) Error!void {
     const sub_bits = 15 - table_bits;
     var count = counted.*;
     count[0] = 0;
@@ -315,10 +315,10 @@ pub const Decoder = struct {
         @memset(lens[256..280], 7);
         @memset(lens[280..288], 8);
         // unreachable: RFC 1951's fixed literal lengths are a complete code
-        build(.litlen, &d.fixed_litlen, &lens, &countLengths(&lens), litlen_table_bits) catch unreachable;
+        build(.litlen, litlen_table_bits, &d.fixed_litlen, &lens, &countLengths(&lens)) catch unreachable;
         var dlens = [_]u8{5} ** 32;
         // unreachable: RFC 1951's fixed distance lengths are a complete code
-        build(.dist, &d.fixed_dist, &dlens, &countLengths(&dlens), dist_table_bits) catch unreachable;
+        build(.dist, dist_table_bits, &d.fixed_dist, &dlens, &countLengths(&dlens)) catch unreachable;
         d.fixed_built = true;
     }
 
@@ -337,7 +337,7 @@ pub const Decoder = struct {
             pre[at] = @truncate(s.bitbuf & 7);
             s.consume(3);
         }
-        try build(.precode, &d.precode, &pre, &countLengths(&pre), precode_table_bits);
+        try build(.precode, precode_table_bits, &d.precode, &pre, &countLengths(&pre));
 
         var lens: [286 + 30]u8 = undefined;
         // Counted as they are read, for `build`.
@@ -388,8 +388,8 @@ pub const Decoder = struct {
             i += repeat;
         }
         if (lens[256] == 0) return error.CorruptStream;
-        try build(.litlen, &d.litlen, lens[0..hlit], &lit_count, litlen_table_bits);
-        try build(.dist, &d.dist, lens[hlit..total], &dist_count, dist_table_bits);
+        try build(.litlen, litlen_table_bits, &d.litlen, lens[0..hlit], &lit_count);
+        try build(.dist, dist_table_bits, &d.dist, lens[hlit..total], &dist_count);
     }
 };
 
@@ -606,7 +606,7 @@ const State = struct {
     /// Decode one symbol near an end of the input or the output. Whether
     /// it ended the block.
     fn slowSymbol(s: *State, litlen: []const Entry, dist: []const Entry) Error!bool {
-        const e = try s.decode(litlen, litlen_table_bits);
+        const e = try s.decode(litlen_table_bits, litlen);
         switch (entryKind(e)) {
             .literal => {
                 if (s.op >= s.out.len) return error.OutputTooLong;
@@ -620,7 +620,7 @@ const State = struct {
                 try s.need(extra);
                 const len = entryValue(e) + @as(u32, @intCast(s.bitbuf & ((@as(u64, 1) << extra) - 1)));
                 s.consume(extra);
-                const de = try s.decode(dist, dist_table_bits);
+                const de = try s.decode(dist_table_bits, dist);
                 if (entryKind(de) != .literal) return error.CorruptStream;
                 const dextra = entryExtra(de);
                 try s.need(dextra);
@@ -638,7 +638,7 @@ const State = struct {
     }
 
     /// The table entry for the next code, its bits consumed.
-    fn decode(s: *State, table: []const Entry, comptime table_bits: u6) Error!Entry {
+    fn decode(s: *State, comptime table_bits: u6, table: []const Entry) Error!Entry {
         try s.fillSome(15);
         var e = table[@intCast(s.bitbuf & ((1 << table_bits) - 1))];
         if (entryKind(e) == .subtable) {

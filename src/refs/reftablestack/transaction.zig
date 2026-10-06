@@ -38,14 +38,14 @@ const View = struct {
     owned: ?Stacks,
     stacks: *const Stacks,
 
-    fn acquire(store: anytype, gpa: Allocator, io: Io, owned: *?Stacks) Error!View {
+    fn acquire(gpa: Allocator, io: Io, store: anytype, owned: *?Stacks) Error!View {
         if (state_mod.get(store._state).cache) |c| {
             c.mutex.lock(io) catch return error.Canceled;
             errdefer c.mutex.unlock(io);
-            const st = try cache.internal.refresh(c, store, io);
+            const st = try cache.internal.refresh(c, io, store);
             return .{ .cache = c, .owned = null, .stacks = st };
         }
-        owned.* = try cache.internal.open(store, gpa, io);
+        owned.* = try cache.internal.open(gpa, io, store);
         return .{ .cache = null, .owned = null, .stacks = &owned.*.? };
     }
 
@@ -64,14 +64,14 @@ pub fn isSpecial(name: []const u8) bool {
 
 /// `Store.read` over reftable. The returned target of a symbolic ref is
 /// the caller's.
-pub fn read(store: anytype, gpa: Allocator, io: Io, name: []const u8) refs.ReadError!?refs.Ref {
+pub fn read(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadError!?refs.Ref {
     var owned: ?Stacks = null;
-    var view = try View.acquire(store, gpa, io, &owned);
+    var view = try View.acquire(gpa, io, store, &owned);
     defer view.release(io, &owned);
-    return readIn(view.stacks, store, gpa, name);
+    return readIn(gpa, view.stacks, store, name);
 }
 
-fn readIn(stacks: *const Stacks, store: anytype, gpa: Allocator, name: []const u8) refs.ReadError!?refs.Ref {
+fn readIn(gpa: Allocator, stacks: *const Stacks, store: anytype, name: []const u8) refs.ReadError!?refs.Ref {
     const record = (try cache.internal.forName(stacks, store, name).lookup(gpa, gpa, name)) orelse return null;
     return switch (record.value) {
         .deletion => null,
@@ -84,7 +84,7 @@ fn readIn(stacks: *const Stacks, store: anytype, gpa: Allocator, name: []const u
 /// Follow symbolic refs through the stacks until an object name, with the
 /// transaction's own new values taking precedence. `null` for a name that
 /// is not there, which is an unborn branch's shape.
-fn resolveIn(stacks: *const Stacks, store: anytype, gpa: Allocator, name: []const u8, pending: anytype) refs.ReadError!?Oid {
+fn resolveIn(gpa: Allocator, stacks: *const Stacks, store: anytype, name: []const u8, pending: anytype) refs.ReadError!?Oid {
     var buf: [1024]u8 = undefined;
     var current: []const u8 = name;
     var depth: u8 = 0;
@@ -103,7 +103,7 @@ fn resolveIn(stacks: *const Stacks, store: anytype, gpa: Allocator, name: []cons
             }
         }
         if (!overridden) {
-            value = try readIn(stacks, store, gpa, current);
+            value = try readIn(gpa, stacks, store, current);
             if (value) |v| switch (v) {
                 .symbolic => |t| owned = t,
                 .direct => {},
@@ -123,9 +123,9 @@ fn resolveIn(stacks: *const Stacks, store: anytype, gpa: Allocator, name: []cons
 }
 
 /// `Store.list` over reftable.
-pub fn list(store: anytype, gpa: Allocator, io: Io, prefix: []const u8) refs.ReadError!refs.Listing {
+pub fn list(gpa: Allocator, io: Io, store: anytype, prefix: []const u8) refs.ReadError!refs.Listing {
     var owned: ?Stacks = null;
-    var view = try View.acquire(store, gpa, io, &owned);
+    var view = try View.acquire(gpa, io, store, &owned);
     defer view.release(io, &owned);
     const stacks = view.stacks;
 
@@ -167,9 +167,9 @@ fn lessThanNamed(_: void, a: refs.Named, b: refs.Named) bool {
 /// `Store.readLog` over reftable: the entries oldest first, as the files
 /// backend's log is. An entry whose old and new names are both zero is the
 /// marker git writes to say a log exists, and is not an entry.
-pub fn readLog(store: anytype, gpa: Allocator, io: Io, name: []const u8) (refs.ReadError || reflog.ReadError)!reflog.Log {
+pub fn readLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) (refs.ReadError || reflog.ReadError)!reflog.Log {
     var owned: ?Stacks = null;
-    var view = try View.acquire(store, gpa, io, &owned);
+    var view = try View.acquire(gpa, io, store, &owned);
     defer view.release(io, &owned);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -224,9 +224,9 @@ fn put(bytes: []u8, at: *usize, text: []const u8) []const u8 {
 
 /// Whether a log for `name` exists: any entry at all, the existence marker
 /// included.
-pub fn logExists(store: anytype, gpa: Allocator, io: Io, name: []const u8) refs.ReadError!bool {
+pub fn logExists(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadError!bool {
     var owned: ?Stacks = null;
-    var view = try View.acquire(store, gpa, io, &owned);
+    var view = try View.acquire(gpa, io, store, &owned);
     defer view.release(io, &owned);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -296,7 +296,7 @@ fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, options: Options) refs.Tran
 /// `Transaction.prepare` over reftable: take `tables.list.lock` on every
 /// stack the edits touch, read the stacks under it, and check every
 /// expected value and every name against the refs already there.
-pub fn prepare(tx: anytype, io: Io) refs.TransactionError!void {
+pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     const store = tx.store;
     const gpa = tx.gpa;
     var needs_worktree = false;
@@ -317,25 +317,25 @@ pub fn prepare(tx: anytype, io: Io) refs.TransactionError!void {
         gpa.free(w.buffer);
         w.dir.close(io);
     };
-    var stacks = try cache.internal.open(store, gpa, io);
+    var stacks = try cache.internal.open(gpa, io, store);
     errdefer cache.internal.deinit(&stacks);
 
     for (tx.edits.items) |*edit| {
         // A ref only logged through is neither read nor checked.
         if (edit.via != null) continue;
         if (isSpecial(edit.name)) {
-            try lockSpecial(tx, io, edit);
+            try lockSpecial(io, tx, edit);
         }
         const current = if (isSpecial(edit.name))
             try store.read(gpa, io, edit.name)
         else
-            try readIn(&stacks, store, gpa, edit.name);
+            try readIn(gpa, &stacks, store, edit.name);
         var current_oid: ?Oid = null;
         if (current) |value| switch (value) {
             .direct => |oid| current_oid = oid,
             .symbolic => |target| {
                 gpa.free(target);
-                current_oid = try resolveIn(&stacks, store, gpa, edit.name, null);
+                current_oid = try resolveIn(gpa, &stacks, store, edit.name, null);
             },
         };
         edit.old = current_oid;
@@ -358,14 +358,14 @@ pub fn prepare(tx: anytype, io: Io) refs.TransactionError!void {
 
 /// Take the file lock a special ref is written through, as the files
 /// backend takes a loose ref's.
-fn lockSpecial(tx: anytype, io: Io, edit: *refs.Edit) refs.TransactionError!void {
+fn lockSpecial(io: Io, tx: anytype, edit: *refs.Edit) refs.TransactionError!void {
     const buffer = try tx.gpa.alloc(u8, 4096);
     edit.lock_buffer = buffer;
     edit.lock = try fs.LockFile.open(tx.gpa, io, tx.store.dirFor(edit.name), edit.name, buffer, .{});
 }
 
 /// Write each special ref's new value into its file, or remove the file.
-fn commitSpecial(tx: anytype, io: Io) refs.TransactionError!void {
+fn commitSpecial(io: Io, tx: anytype) refs.TransactionError!void {
     var hex: [hash.max_hex_len]u8 = undefined;
     for (tx.edits.items) |*edit| {
         if (!isSpecial(edit.name) or edit.via != null) continue;
@@ -425,16 +425,16 @@ fn deletedHere(tx: anytype, name: []const u8) bool {
 /// `Transaction.commit` over reftable: one table per stack the edits touch,
 /// installed by rewriting `tables.list` under the lock `prepare` took, then
 /// the stack compacted if the geometric rule asks for it.
-pub fn commit(tx: anytype, io: Io, log: ?refs.LogMessage) refs.TransactionError!void {
+pub fn commit(io: Io, tx: anytype, log: ?refs.LogMessage) refs.TransactionError!void {
     const pending = tx.reftable.?;
     const store = tx.store;
-    try addTable(tx, io, pending, &pending.main, &pending.stacks.main, false, log);
-    if (pending.worktree) |*w| try addTable(tx, io, pending, w, &pending.stacks.worktree.?, true, log);
-    try commitSpecial(tx, io);
+    try addTable(io, tx, pending, &pending.main, &pending.stacks.main, false, log);
+    if (pending.worktree) |*w| try addTable(io, tx, pending, w, &pending.stacks.worktree.?, true, log);
+    try commitSpecial(io, tx);
 
     const options = store.reftableOptions();
     const compact_worktree = pending.worktree != null;
-    releasePending(tx, io);
+    releasePending(io, tx);
     if (!options.auto_compact) return;
     compactIn(tx.gpa, io, store.commonDir(), store.objectFormat(), options, .auto) catch |err| switch (err) {
         // Compaction is housekeeping: someone else holding a lock, or
@@ -454,9 +454,9 @@ pub fn commit(tx: anytype, io: Io, log: ?refs.LogMessage) refs.TransactionError!
 /// own under the stack's lock, which is how git writes a log that moves no
 /// ref. The message is kept as a transaction's is.
 pub fn appendLog(
-    store: anytype,
     gpa: Allocator,
     io: Io,
+    store: anytype,
     name: []const u8,
     old: Oid,
     new: Oid,
@@ -512,7 +512,7 @@ fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack,
 }
 
 /// Give up whatever `prepare` took.
-pub fn releasePending(tx: anytype, io: Io) void {
+pub fn releasePending(io: Io, tx: anytype) void {
     const pending = tx.reftable orelse return;
     pending.release(tx.gpa, io);
     tx.gpa.destroy(pending);
@@ -520,8 +520,8 @@ pub fn releasePending(tx: anytype, io: Io) void {
 }
 
 fn addTable(
-    tx: anytype,
     io: Io,
+    tx: anytype,
     pending: *Pending,
     locked: *Pending.Locked,
     stack: *const Stack,
@@ -574,7 +574,7 @@ fn addTable(
             .direct => |oid| oid,
             // git writes no entry for a symbolic ref whose target does not
             // resolve yet.
-            .symbolic => (try resolveIn(&pending.stacks, store, gpa, source.name, tx)) orelse continue,
+            .symbolic => (try resolveIn(gpa, &pending.stacks, store, source.name, tx)) orelse continue,
         } else Oid.zero(store.objectFormat());
         if (std.mem.indexOfAny(u8, message.who.name, "<>\n") != null or
             std.mem.indexOfAny(u8, message.who.email, "<>\n") != null) return error.InvalidSignature;

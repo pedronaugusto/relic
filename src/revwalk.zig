@@ -830,7 +830,7 @@ test "first-parent walks and merge bases of many are git's" {
     var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
     const resolve = struct {
-        fn f(r: *testgit.Repo, i: Io, name: []const u8) !Oid {
+        fn f(i: Io, r: *testgit.Repo, name: []const u8) !Oid {
             const text = try r.line(i, &.{ "rev-parse", name });
             defer r.gpa.free(text);
             return Oid.parse(.sha1, text);
@@ -848,7 +848,7 @@ test "first-parent walks and merge bases of many are git's" {
         defer walk.deinit();
         walk.first_parent = true;
         for (revs) |rev| {
-            if (rev[0] == '^') try walk.hide(try resolve(&repo, io, rev[1..])) else try walk.push(try resolve(&repo, io, rev));
+            if (rev[0] == '^') try walk.hide(try resolve(io, &repo, rev[1..])) else try walk.push(try resolve(io, &repo, rev));
         }
         var got: std.ArrayList(u8) = .empty;
         defer got.deinit(gpa);
@@ -864,8 +864,8 @@ test "first-parent walks and merge bases of many are git's" {
         const expected = try repo.run(io, args.items);
         defer gpa.free(expected);
         var twos: [2]Oid = undefined;
-        for (revs[1..], &twos) |rev, *o| o.* = try resolve(&repo, io, rev);
-        const bases = try mergeBasesMany(gpa, io, &db, try resolve(&repo, io, revs[0]), &twos);
+        for (revs[1..], &twos) |rev, *o| o.* = try resolve(io, &repo, rev);
+        const bases = try mergeBasesMany(gpa, io, &db, try resolve(io, &repo, revs[0]), &twos);
         defer gpa.free(bases);
         var got: std.ArrayList(u8) = .empty;
         defer got.deinit(gpa);

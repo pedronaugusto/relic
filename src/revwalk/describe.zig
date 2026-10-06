@@ -225,16 +225,16 @@ pub const Describer = struct {
                     break :blk resolved.oid;
                 },
             };
-            const peeled = entry.peeled orelse peelFully(d.repo, io, oid) catch oid;
+            const peeled = entry.peeled orelse peelFully(io, d.repo, oid) catch oid;
             const annotated = !peeled.eql(oid);
             const prio: u2 = if (annotated) prio_annotated else if (is_tag) prio_lightweight else prio_head;
             const path = if (d.options.all) refname["refs/".len..] else refname["refs/tags/".len..];
-            try d.addKnownName(io, path, peeled, prio, oid, a);
+            try d.addKnownName(a, io, path, peeled, prio, oid);
         }
     }
 
     /// `add_to_known_names` with `replace_name`.
-    fn addKnownName(d: *Describer, io: Io, path: []const u8, peeled: Oid, prio: u2, oid: Oid, a: Allocator) Error!void {
+    fn addKnownName(d: *Describer, a: Allocator, io: Io, path: []const u8, peeled: Oid, prio: u2, oid: Oid) Error!void {
         const slot = try d.names.getOrPut(d.gpa, peeled);
         var tag: ?TagInfo = null;
         if (slot.found_existing) {
@@ -242,9 +242,9 @@ pub const Describer = struct {
             if (e.prio >= prio) {
                 if (!(e.prio == prio_annotated and prio == prio_annotated)) return;
                 // Two annotated tags on one commit: the later tagger date.
-                if (e.tag == null) e.tag = readTag(d.repo, io, a, e.oid) catch null;
+                if (e.tag == null) e.tag = readTag(a, io, d.repo, e.oid) catch null;
                 if (e.tag != null) {
-                    tag = readTag(d.repo, io, a, oid) catch return;
+                    tag = readTag(a, io, d.repo, oid) catch return;
                     if (!(e.tag.?.date < tag.?.date)) return;
                 }
             }
@@ -261,7 +261,7 @@ pub const Describer = struct {
     fn appendName(d: *Describer, io: Io, n: *Name, out: *std.ArrayList(u8)) Error!void {
         const a = d.arena.allocator();
         if (n.prio == prio_annotated and n.tag == null) {
-            n.tag = readTag(d.repo, io, a, n.oid) catch return error.TagUnavailable;
+            n.tag = readTag(a, io, d.repo, n.oid) catch return error.TagUnavailable;
         }
         if (n.tag) |t| {
             if (!n.name_checked) {
@@ -301,7 +301,7 @@ pub const Describer = struct {
     fn describeWithSuffix(d: *Describer, io: Io, oid: Oid, suffix: ?[]const u8) Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(d.gpa);
-        const commit = peelToCommit(d.repo, io, oid) catch |err| switch (err) {
+        const commit = peelToCommit(io, d.repo, oid) catch |err| switch (err) {
             error.NotACommit => null,
             else => |e| return e,
         };
@@ -536,7 +536,7 @@ fn anyMatch(patterns: []const []const u8, text: []const u8) Error!bool {
     return false;
 }
 
-fn peelFully(repo: *Repository, io: Io, oid: Oid) Error!Oid {
+fn peelFully(io: Io, repo: *Repository, oid: Oid) Error!Oid {
     return repo.peel(io, oid) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.TagDepthExceeded,
@@ -544,8 +544,8 @@ fn peelFully(repo: *Repository, io: Io, oid: Oid) Error!Oid {
 }
 
 /// `lookup_commit_reference_gently`: the commit `oid` is, or peels to.
-fn peelToCommit(repo: *Repository, io: Io, oid: Oid) Error!Oid {
-    const peeled = try peelFully(repo, io, oid);
+fn peelToCommit(io: Io, repo: *Repository, oid: Oid) Error!Oid {
+    const peeled = try peelFully(io, repo, oid);
     const header = repo.odb.readHeader(io, peeled) catch |err| switch (err) {
         error.ObjectNotFound => return error.NotACommit,
         else => |e| return e,
@@ -554,7 +554,7 @@ fn peelToCommit(repo: *Repository, io: Io, oid: Oid) Error!Oid {
     return peeled;
 }
 
-fn readTag(repo: *Repository, io: Io, a: Allocator, oid: Oid) Error!TagInfo {
+fn readTag(a: Allocator, io: Io, repo: *Repository, oid: Oid) Error!TagInfo {
     const found = try repo.odb.read(io, oid);
     defer repo.odb.allocator().free(found.bytes);
     if (found.type != .tag) return error.UnexpectedObjectType;
@@ -834,7 +834,7 @@ const NameRev = struct {
                 const header = nr.repo.odb.readHeader(io, current) catch break;
                 kind = header.type;
                 if (header.type != .tag) break;
-                const tag = readTag(nr.repo, io, a, current) catch {
+                const tag = readTag(a, io, nr.repo, current) catch {
                     kind = null;
                     break;
                 };

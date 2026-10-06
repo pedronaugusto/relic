@@ -369,7 +369,7 @@ pub const Odb = struct {
 
     fn addSource(odb: *Odb, io: Io, dir: Io.Dir, writable: bool, depth: u8) Error!void {
         if (depth > odb.backendData().options.max_alternate_depth) return error.AlternatesTooDeep;
-        try opening.register(odb, io, dir, writable);
+        try opening.register(io, odb, dir, writable);
         try odb.scanPacks(io, odb.backendData().sources.items.len - 1);
         try odb.readAlternates(io, dir, depth);
     }
@@ -1112,115 +1112,8 @@ pub const Odb = struct {
         return &odb.backendData().sources.items[0];
     }
 
-    /// A writer for an object too large to hold in memory.
-    ///
-    /// Bytes go through it, `finish` names the object and puts it in the
-    /// database, and `abort` leaves the database as it was. The stated size
-    /// must be right: it goes into the header the name is taken over.
-    pub const Stream = struct {
-        odb: *Odb,
-        dir: Io.Dir,
-        temp: [128]u8,
-        temp_len: usize,
-        file: Io.File,
-        file_writer: Io.File.Writer,
-        compress: flate.Compress,
-        input_writer: Io.Writer,
-        hasher: hash.Hasher,
-        window: []u8,
-        out_buffer: []u8,
-        remaining: u64,
-        file_open: bool = true,
-        finished: bool = false,
-
-        /// Where the object's bytes go.
-        pub fn writer(s: *Stream) *Io.Writer {
-            return &s.input_writer;
-        }
-
-        fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-            const s: *Stream = @alignCast(@fieldParentPtr("input_writer", w)); // safe: this function is installed only on a Stream's input_writer
-            var total: usize = 0;
-            for (data[0 .. data.len - 1]) |slice| {
-                total = std.math.add(usize, total, slice.len) catch return error.WriteFailed;
-            }
-            const pattern = data[data.len - 1];
-            const repeated = std.math.mul(usize, pattern.len, splat) catch return error.WriteFailed;
-            total = std.math.add(usize, total, repeated) catch return error.WriteFailed;
-            if (total > s.remaining) return error.WriteFailed;
-
-            for (data[0 .. data.len - 1]) |slice| s.write(slice) catch return error.WriteFailed;
-            for (0..splat) |_| s.write(pattern) catch return error.WriteFailed;
-            return total;
-        }
-
-        /// Feed bytes, hashing as they go.
-        pub fn write(s: *Stream, bytes: []const u8) Error!void {
-            if (bytes.len > s.remaining) return error.CorruptLooseObject;
-            s.hasher.update(bytes);
-            s.remaining -= bytes.len;
-            try s.compress.writer.writeAll(bytes);
-        }
-
-        /// Close the object and put it in the database. Returns its name.
-        pub fn finish(s: *Stream, io: Io) Error!Oid {
-            if (s.remaining != 0) return error.CorruptLooseObject;
-            try s.compress.writer.flush();
-            try s.compress.finish();
-            try s.file_writer.interface.flush();
-            switch (s.odb.backendData().options.sync) {
-                .none => {},
-                .batch, .per_file => try s.file.sync(io),
-            }
-            s.file.close(io);
-            s.file_open = false;
-
-            const oid = s.hasher.final();
-            if (s.hasher.collisionAttack()) return error.CollisionAttack;
-            var hex: [hash.max_hex_len]u8 = undefined;
-            const text = oid.hex(&hex);
-            if (s.dir.createDir(io, text[0..2], .default_dir)) |_| {
-                fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
-            } else |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => |e| return e,
-            }
-            var final_buf: [hash.max_hex_len + 2]u8 = undefined;
-            // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
-            const final_path = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
-            fs.renameWithRetry(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
-                // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
-                s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
-                return err;
-            };
-            s.finished = true;
-            if (s.odb.backendData().options.sync_directories) try fs.syncDir(io, s.dir);
-            return oid;
-        }
-
-        /// Give up, leaving the database as it was.
-        pub fn abort(s: *Stream, io: Io) void {
-            if (!s.finished) {
-                if (s.file_open) s.file.close(io);
-                // ziglint-ignore: Z026 abandoning cannot fail; a temporary object left behind is what `git gc` prunes
-                s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
-                s.finished = true;
-            }
-            s.odb.backendData().gpa.free(s.window);
-            s.odb.backendData().gpa.free(s.out_buffer);
-        }
-
-        /// Release the stream's buffers after a successful `finish`.
-        pub fn deinit(s: *Stream, io: Io) void {
-            if (!s.finished) {
-                s.abort(io);
-            } else {
-                s.odb.backendData().gpa.free(s.window);
-                s.odb.backendData().gpa.free(s.out_buffer);
-            }
-            s.* = undefined;
-        }
-    };
+    /// `ObjectStream`, which `writeStream` begins.
+    pub const Stream = ObjectStream;
 
     /// Begin writing an object of `size` bytes. The result must be `finish`ed
     /// or `abort`ed, and lives at a stable address until then.
@@ -1331,28 +1224,9 @@ pub const Odb = struct {
         const workers = taskCount(0);
         if (workers == 1 or p.count != p.index.count) return p.verify(io, &odb.backendData().cache, pack_id);
 
-        const Item = struct {
-            position: u32,
-            offset: u64,
-            end: u64,
-            header: pack.EntryHeader = undefined,
-            body: []u8 = &.{},
-        };
-        const n = p.index.count;
-        // Sorted as offsets and positions together, which move cheaply.
         if (p.size >= 1 << 32) return p.verify(io, &odb.backendData().cache, pack_id);
-        const order = try gpa.alloc(u64, n);
-        defer gpa.free(order);
-        for (order, 0..) |*o, i| o.* = (try p.index.offsetAt(@intCast(i))) << 32 | i;
-        std.mem.sort(u64, order, {}, std.sort.asc(u64));
-        const items = try gpa.alloc(Item, n);
+        const items = try verifyItems(gpa, p);
         defer gpa.free(items);
-        for (items, order) |*item, o| item.* = .{ .position = @truncate(o), .offset = o >> 32, .end = 0 };
-        for (items, 0..) |*item, rank| {
-            item.end = if (rank + 1 < items.len) items[rank + 1].offset else p.bodyEnd();
-            if (item.end < item.offset or item.end > p.bodyEnd()) return error.TruncatedPack;
-        }
-        if (n != 0 and items[0].offset != 12) return error.TruncatedPack;
         const readers = try gpa.alloc(pack.Pack.EntryReader, workers);
         defer gpa.free(readers);
         for (readers) |*r| r.* = .{};
@@ -1364,28 +1238,6 @@ pub const Odb = struct {
         var head: [12]u8 = undefined;
         try p.readStored(io, 0, &head);
         checksum.update(&head);
-
-        const Work = struct {
-            p: *const pack.Pack,
-            items: []Item,
-            span: []const u8,
-            span_at: u64,
-            checksum: *hash.Hasher,
-            readers: []pack.Pack.EntryReader,
-            fn work(c: @This(), _: Io, worker: usize, i: usize) Error!void {
-                if (i == c.items.len) return c.checksum.update(c.span);
-                const item = &c.items[i];
-                const stored = c.span[@intCast(item.offset - c.span_at)..@intCast(item.end - c.span_at)];
-                if (crc32.Crc32.hash(stored) != c.p.index.crcAt(item.position)) return error.ChecksumMismatch;
-                if (item.body.len == 0) return;
-                const len: usize = @intCast(item.header.size);
-                var stream: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
-                const got = c.readers[worker].decoder.zlib(&stream, item.body) catch return error.CorruptPackEntry;
-                if (got != len) return error.CorruptPackEntry;
-                const name = hash.Hasher.object(c.p.kind, item.header.kind.object.name(), item.body[0..len]);
-                if (!name.eql(c.p.index.nameAt(item.position))) return error.ObjectNameMismatch;
-            }
-        };
 
         var report: pack.Pack.Report = .{};
         const budget: usize = 64 << 20;
@@ -1422,14 +1274,14 @@ pub const Odb = struct {
             }
             // The batch's entries, and the checksum as the last item.
             try failures.resize(gpa, batch.len + 1);
-            try runTasks(io, workers, failures.items, Work{
+            try runTasks(VerifyBatch, VerifyBatch.work, io, workers, failures.items, .{
                 .p = p,
                 .items = batch,
                 .span = span.items,
                 .span_at = span_at,
                 .checksum = &checksum,
                 .readers = readers,
-            }, Work.work);
+            });
             for (batch) |*item| {
                 if (item.body.len != 0) {
                     report.objects += 1;
@@ -1445,13 +1297,76 @@ pub const Odb = struct {
             }
             start = end;
         }
+        try verifyTrailer(io, p, &checksum);
+        return report;
+    }
+
+    /// One entry of a pack `verifyPack` checks: where its bytes lie, and
+    /// the buffer a whole object's body inflates into.
+    const VerifyItem = struct {
+        position: u32,
+        offset: u64,
+        end: u64,
+        header: pack.EntryHeader = undefined,
+        body: []u8 = &.{},
+    };
+
+    /// The tasks of one `verifyPack` batch: an entry each, and the pack's
+    /// checksum on through the batch as the last.
+    const VerifyBatch = struct {
+        p: *const pack.Pack,
+        items: []VerifyItem,
+        span: []const u8,
+        span_at: u64,
+        checksum: *hash.Hasher,
+        readers: []pack.Pack.EntryReader,
+
+        fn work(_: Io, c: VerifyBatch, worker: usize, i: usize) Error!void {
+            if (i == c.items.len) return c.checksum.update(c.span);
+            const item = &c.items[i];
+            const stored = c.span[@intCast(item.offset - c.span_at)..@intCast(item.end - c.span_at)];
+            if (crc32.Crc32.hash(stored) != c.p.index.crcAt(item.position)) return error.ChecksumMismatch;
+            if (item.body.len == 0) return;
+            const len: usize = @intCast(item.header.size);
+            var stream: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
+            const got = c.readers[worker].decoder.zlib(&stream, item.body) catch return error.CorruptPackEntry;
+            if (got != len) return error.CorruptPackEntry;
+            const name = hash.Hasher.object(c.p.kind, item.header.kind.object.name(), item.body[0..len]);
+            if (!name.eql(c.p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+        }
+    };
+
+    /// The entries of `p` in file order, each running to the next or to the
+    /// trailer, the first right after the header. The caller frees them.
+    fn verifyItems(gpa: Allocator, p: *const pack.Pack) Error![]VerifyItem {
+        std.debug.assert(p.size < 1 << 32);
+        const n = p.index.count;
+        // Sorted as offsets and positions together, which move cheaply.
+        const order = try gpa.alloc(u64, n);
+        defer gpa.free(order);
+        for (order, 0..) |*o, i| o.* = (try p.index.offsetAt(@intCast(i))) << 32 | i;
+        std.mem.sort(u64, order, {}, std.sort.asc(u64));
+        const items = try gpa.alloc(VerifyItem, n);
+        errdefer gpa.free(items);
+        for (items, order) |*item, o| item.* = .{ .position = @truncate(o), .offset = o >> 32, .end = 0 };
+        for (items, 0..) |*item, rank| {
+            item.end = if (rank + 1 < items.len) items[rank + 1].offset else p.bodyEnd();
+            if (item.end < item.offset or item.end > p.bodyEnd()) return error.TruncatedPack;
+        }
+        if (n != 0 and items[0].offset != 12) return error.TruncatedPack;
+        return items;
+    }
+
+    /// The pack's trailer is the checksum `checksum` ran to, and the one
+    /// its index was made for.
+    fn verifyTrailer(io: Io, p: *pack.Pack, checksum: *hash.Hasher) Error!void {
         const computed = checksum.final();
         var trailer: [hash.max_raw_len]u8 = undefined;
         const raw_len = p.kind.rawLen();
         try p.readStored(io, p.bodyEnd(), trailer[0..raw_len]);
-        const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable; // unreachable: the trailer is cut to the format's raw length
+        // unreachable: the trailer is cut to the format's raw length
+        const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable;
         if (!computed.eql(stored) or !stored.eql(p.index.pack_checksum)) return error.ChecksumMismatch;
-        return report;
     }
 
     /// Every object name the database holds, loose and packed, as a set the
@@ -1829,10 +1744,11 @@ pub const Odb = struct {
         defer gpa.free(found);
         @memset(found, false);
         const Context = struct {
+            const Self = @This();
             odb: *const Odb,
             ordered: []Ordered,
             found: []bool,
-            fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
+            fn work(task_io: Io, c: Self, _: usize, i: usize) Error!void {
                 const item = &c.ordered[i];
                 if (item.known) {
                     c.found[i] = true;
@@ -1845,7 +1761,7 @@ pub const Odb = struct {
                 c.found[i] = true;
             }
         };
-        try runTasks(io, readTaskCount(workers), failures, Context{ .odb = odb, .ordered = ordered, .found = found }, Context.work);
+        try runTasks(Context, Context.work, io, readTaskCount(workers), failures, .{ .odb = odb, .ordered = ordered, .found = found });
         for (ordered, found) |*item, loose| {
             if (loose) continue;
             const header = try odb.readHeaderForPack(io, item.oid, 0);
@@ -2081,7 +1997,7 @@ pub const Odb = struct {
                 }
             }
         }
-        try odb.assignHints(io, arena, entries.items, options.threads);
+        try odb.assignHints(arena, io, entries.items, options.threads);
         collected.entries = try arena.dupe(PackEntry, entries.items);
         return collected;
     }
@@ -2093,46 +2009,10 @@ pub const Odb = struct {
     /// of one file sort next to two versions of a different file of the same
     /// length, and the window looks at the wrong base. One read per tree
     /// buys the whole ordering.
-    fn assignHints(odb: *Odb, io: Io, arena: Allocator, entries: []PackEntry, threads: u16) Error!void {
+    fn assignHints(odb: *Odb, arena: Allocator, io: Io, entries: []PackEntry, threads: u16) Error!void {
         const gpa = odb.backendData().gpa;
-        // Every header, which also goes with the entry to `writePack`: the
-        // loose ones on as many tasks as asked, the rest here after them. A
-        // header that does not read leaves its entry without a hint, as
-        // before; only a refusal to read stops the collection.
         const workers = taskCount(threads);
-        if (workers > 1) {
-            const failures = try gpa.alloc(?Error, entries.len);
-            defer gpa.free(failures);
-            const Context = struct {
-                odb: *const Odb,
-                entries: []PackEntry,
-                fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
-                    if (c.entries[i].in_pack) return;
-                    const found = c.odb.readLooseFor(task_io, c.entries[i].oid, .header) catch |err| {
-                        if (opening.readRefusal(err)) return err;
-                        return;
-                    } orelse return;
-                    c.entries[i].header = found.header;
-                }
-            };
-            try runTasks(io, readTaskCount(workers), failures, Context{ .odb = odb, .entries = entries }, Context.work);
-        }
-        for (entries) |*entry| {
-            if (entry.header != null) continue;
-            // Found in a pack, so read there, not looked for loose first.
-            if (entry.in_pack) if (odb.packedHeader(io, entry.oid) catch |err| {
-                if (opening.readRefusal(err)) return err;
-                continue;
-            }) |header| {
-                entry.header = header;
-                continue;
-            };
-            entry.header = odb.readHeader(io, entry.oid) catch |err| {
-                if (opening.readRefusal(err)) return err;
-                continue;
-            };
-            entry.in_pack = false;
-        }
+        try odb.assignHeaders(io, entries, workers);
 
         // The trees, which name everything else. The loose ones are read by
         // the tasks, a batch at a time, into buffers sized here from their
@@ -2141,11 +2021,6 @@ pub const Odb = struct {
         // tasks' timing.
         var hints: std.AutoHashMapUnmanaged(Oid, []const u8) = .empty;
         defer hints.deinit(gpa);
-        const TreeRead = struct {
-            oid: Oid,
-            bytes: ?[]u8 = null,
-            filled: bool = false,
-        };
         var trees: std.ArrayList(TreeRead) = .empty;
         defer trees.deinit(gpa);
         defer for (trees.items) |t| if (t.bytes) |bytes| gpa.free(bytes);
@@ -2172,20 +2047,7 @@ pub const Odb = struct {
             start = end;
             if (workers > 1) {
                 try failures.resize(gpa, trees.items.len);
-                const Trees = struct {
-                    odb: *const Odb,
-                    trees: []TreeRead,
-                    fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
-                        const t = &c.trees[i];
-                        const into = t.bytes orelse return;
-                        const found = c.odb.readLooseFor(task_io, t.oid, .{ .into = into }) catch |err| {
-                            if (opening.readRefusal(err)) return err;
-                            return;
-                        } orelse return;
-                        t.filled = found.header.type == .tree;
-                    }
-                };
-                try runTasks(io, readTaskCount(workers), failures.items, Trees{ .odb = odb, .trees = trees.items }, Trees.work);
+                try runTasks(TreeReads, TreeReads.work, io, readTaskCount(workers), failures.items, .{ .odb = odb, .trees = trees.items });
             }
             for (trees.items) |*t| {
                 const tree_bytes = if (t.filled) t.bytes.? else blk: {
@@ -2213,6 +2075,74 @@ pub const Odb = struct {
             if (hints.get(entry.oid)) |name| entry.hint = name;
         }
     }
+
+    /// Every entry's header, which also goes with the entry to `writePack`:
+    /// the loose ones on `workers` tasks, the rest here after them. A
+    /// header that does not read leaves its entry without a hint, as
+    /// before; only a refusal to read stops the collection.
+    fn assignHeaders(odb: *Odb, io: Io, entries: []PackEntry, workers: usize) Error!void {
+        if (workers > 1) {
+            const gpa = odb.backendData().gpa;
+            const failures = try gpa.alloc(?Error, entries.len);
+            defer gpa.free(failures);
+            try runTasks(HeaderReads, HeaderReads.work, io, readTaskCount(workers), failures, .{ .odb = odb, .entries = entries });
+        }
+        for (entries) |*entry| {
+            if (entry.header != null) continue;
+            // Found in a pack, so read there, not looked for loose first.
+            if (entry.in_pack) if (odb.packedHeader(io, entry.oid) catch |err| {
+                if (opening.readRefusal(err)) return err;
+                continue;
+            }) |header| {
+                entry.header = header;
+                continue;
+            };
+            entry.header = odb.readHeader(io, entry.oid) catch |err| {
+                if (opening.readRefusal(err)) return err;
+                continue;
+            };
+            entry.in_pack = false;
+        }
+    }
+
+    /// The tasks reading loose entries' headers for `assignHeaders`.
+    const HeaderReads = struct {
+        odb: *const Odb,
+        entries: []PackEntry,
+
+        fn work(task_io: Io, c: HeaderReads, _: usize, i: usize) Error!void {
+            if (c.entries[i].in_pack) return;
+            const found = c.odb.readLooseFor(task_io, c.entries[i].oid, .header) catch |err| {
+                if (opening.readRefusal(err)) return err;
+                return;
+            } orelse return;
+            c.entries[i].header = found.header;
+        }
+    };
+
+    /// A tree `assignHints` reads, into a buffer sized from its header when
+    /// it is loose.
+    const TreeRead = struct {
+        oid: Oid,
+        bytes: ?[]u8 = null,
+        filled: bool = false,
+    };
+
+    /// The tasks reading a batch of loose trees for `assignHints`.
+    const TreeReads = struct {
+        odb: *const Odb,
+        trees: []TreeRead,
+
+        fn work(task_io: Io, c: TreeReads, _: usize, i: usize) Error!void {
+            const t = &c.trees[i];
+            const into = t.bytes orelse return;
+            const found = c.odb.readLooseFor(task_io, t.oid, .{ .into = into }) catch |err| {
+                if (opening.readRefusal(err)) return err;
+                return;
+            } orelse return;
+            t.filled = found.header.type == .tree;
+        }
+    };
 
     fn findPackByName(odb: *Odb, base: []const u8) ?*pack.Pack {
         for (odb.backendData().sources.items) |*source| {
@@ -2347,23 +2277,24 @@ pub const Odb = struct {
             defer odb.backendData().gpa.free(failures);
             var removed: std.atomic.Value(u32) = .init(0);
             const Remove = struct {
+                const Self = @This();
                 odb: *const Odb,
                 dir: Io.Dir,
                 doomed: []const Oid,
                 removed: *std.atomic.Value(u32),
-                fn work(c: @This(), task_io: Io, _: usize, i: usize) Error!void {
+                fn work(task_io: Io, c: Self, _: usize, i: usize) Error!void {
                     var path_buf: [hash.max_hex_len + 2]u8 = undefined;
                     const path = c.odb.loosePath(c.doomed[i], &path_buf);
                     c.dir.deleteFile(task_io, path) catch return;
                     _ = c.removed.fetchAdd(1, .monotonic);
                 }
             };
-            try runTasks(io, readTaskCount(taskCount(options.pack.threads)), failures, Remove{
+            try runTasks(Remove, Remove.work, io, readTaskCount(taskCount(options.pack.threads)), failures, .{
                 .odb = odb,
                 .dir = source.dir,
                 .doomed = doomed.items,
                 .removed = &removed,
-            }, Remove.work);
+            });
             report.loose_removed = removed.load(.monotonic);
         }
 
@@ -2503,6 +2434,116 @@ pub const Odb = struct {
     }
 };
 
+/// A writer for an object too large to hold in memory.
+///
+/// Bytes go through it, `finish` names the object and puts it in the
+/// database, and `abort` leaves the database as it was. The stated size
+/// must be right: it goes into the header the name is taken over.
+pub const ObjectStream = struct {
+    odb: *Odb,
+    dir: Io.Dir,
+    temp: [128]u8,
+    temp_len: usize,
+    file: Io.File,
+    file_writer: Io.File.Writer,
+    compress: flate.Compress,
+    input_writer: Io.Writer,
+    hasher: hash.Hasher,
+    window: []u8,
+    out_buffer: []u8,
+    remaining: u64,
+    file_open: bool = true,
+    finished: bool = false,
+
+    /// Where the object's bytes go.
+    pub fn writer(s: *ObjectStream) *Io.Writer {
+        return &s.input_writer;
+    }
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const s: *ObjectStream = @alignCast(@fieldParentPtr("input_writer", w)); // safe: this function is installed only on a Stream's input_writer
+        var total: usize = 0;
+        for (data[0 .. data.len - 1]) |slice| {
+            total = std.math.add(usize, total, slice.len) catch return error.WriteFailed;
+        }
+        const pattern = data[data.len - 1];
+        const repeated = std.math.mul(usize, pattern.len, splat) catch return error.WriteFailed;
+        total = std.math.add(usize, total, repeated) catch return error.WriteFailed;
+        if (total > s.remaining) return error.WriteFailed;
+
+        for (data[0 .. data.len - 1]) |slice| s.write(slice) catch return error.WriteFailed;
+        for (0..splat) |_| s.write(pattern) catch return error.WriteFailed;
+        return total;
+    }
+
+    /// Feed bytes, hashing as they go.
+    pub fn write(s: *ObjectStream, bytes: []const u8) Error!void {
+        if (bytes.len > s.remaining) return error.CorruptLooseObject;
+        s.hasher.update(bytes);
+        s.remaining -= bytes.len;
+        try s.compress.writer.writeAll(bytes);
+    }
+
+    /// Close the object and put it in the database. Returns its name.
+    pub fn finish(s: *ObjectStream, io: Io) Error!Oid {
+        if (s.remaining != 0) return error.CorruptLooseObject;
+        try s.compress.writer.flush();
+        try s.compress.finish();
+        try s.file_writer.interface.flush();
+        switch (s.odb.backendData().options.sync) {
+            .none => {},
+            .batch, .per_file => try s.file.sync(io),
+        }
+        s.file.close(io);
+        s.file_open = false;
+
+        const oid = s.hasher.final();
+        if (s.hasher.collisionAttack()) return error.CollisionAttack;
+        var hex: [hash.max_hex_len]u8 = undefined;
+        const text = oid.hex(&hex);
+        if (s.dir.createDir(io, text[0..2], .default_dir)) |_| {
+            fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
+        } else |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => |e| return e,
+        }
+        var final_buf: [hash.max_hex_len + 2]u8 = undefined;
+        // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
+        const final_path = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
+        fs.renameWithRetry(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
+            // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
+            s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
+            return err;
+        };
+        s.finished = true;
+        if (s.odb.backendData().options.sync_directories) try fs.syncDir(io, s.dir);
+        return oid;
+    }
+
+    /// Give up, leaving the database as it was.
+    pub fn abort(s: *ObjectStream, io: Io) void {
+        if (!s.finished) {
+            if (s.file_open) s.file.close(io);
+            // ziglint-ignore: Z026 abandoning cannot fail; a temporary object left behind is what `git gc` prunes
+            s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
+            s.finished = true;
+        }
+        s.odb.backendData().gpa.free(s.window);
+        s.odb.backendData().gpa.free(s.out_buffer);
+    }
+
+    /// Release the stream's buffers after a successful `finish`.
+    pub fn deinit(s: *ObjectStream, io: Io) void {
+        if (!s.finished) {
+            s.abort(io);
+        } else {
+            s.odb.backendData().gpa.free(s.window);
+            s.odb.backendData().gpa.free(s.out_buffer);
+        }
+        s.* = undefined;
+    }
+};
+
 /// One object to put in a pack.
 pub const PackEntry = struct {
     oid: Oid,
@@ -2639,7 +2680,7 @@ fn readTaskCount(workers: usize) usize {
 /// The items from `limited_from` on open files, and only workers below
 /// `limited_workers` take them, those first: opening files contends in the
 /// kernel (`read_task_limit`). The others are anyone's.
-fn TaskSet(comptime Context: type, comptime work: fn (Context, Io, usize, usize) Error!void) type {
+fn TaskSet(comptime Context: type, comptime work: fn (Io, Context, usize, usize) Error!void) type {
     return struct {
         io: Io,
         failures: []?Error,
@@ -2671,7 +2712,7 @@ fn TaskSet(comptime Context: type, comptime work: fn (Context, Io, usize, usize)
             while (set.take(worker)) |i| {
                 if (i > set.lowest_failed.load(.monotonic)) continue;
                 const outcome: Error!void = if (set.io.checkCancel()) |_|
-                    work(set.context, set.io, worker, i)
+                    work(set.io, set.context, worker, i)
                 else |err|
                     err;
                 outcome catch |err| {
@@ -2714,13 +2755,14 @@ fn TaskSet(comptime Context: type, comptime work: fn (Context, Io, usize, usize)
 /// task one of them, and never more tasks than items: a `TaskSet` whose
 /// items are anyone's, run to its end.
 fn runTasks(
+    comptime Context: type,
+    comptime work: fn (Io, Context, usize, usize) Error!void,
     io: Io,
     workers: usize,
     failures: []?Error,
-    context: anytype,
-    comptime work: fn (@TypeOf(context), Io, usize, usize) Error!void,
+    context: Context,
 ) Error!void {
-    var set: TaskSet(@TypeOf(context), work) = .{
+    var set: TaskSet(Context, work) = .{
         .io = io,
         .failures = failures,
         .context = context,
@@ -3053,53 +3095,6 @@ const Build = struct {
         }
     };
 
-    /// Objects `start..end` of pack order, on their way through the tasks.
-    const Batch = struct {
-        start: usize = 0,
-        end: usize = 0,
-        /// One object too large for a batch's share of the budget: read and
-        /// deflated on the calling task, straight into the pack.
-        alone: bool = false,
-        /// Whether the tasks open files for it, which caps how many read.
-        opens: bool = false,
-        pending: std.ArrayList(Pending) = .empty,
-        /// The batch cut at its search groups' starts, each part searched
-        /// by a task against its own group's window. The first continues
-        /// the window the batch before ended with, unless a group starts
-        /// with the batch.
-        parts: std.ArrayList(Part) = .empty,
-        /// Bodies the windows let go of during this batch's search, which
-        /// this batch or the one before it may still be written from.
-        retired: std.ArrayList([]u8) = .empty,
-
-        fn items(batch: *const Batch) usize {
-            return batch.end - batch.start;
-        }
-
-        /// Free what the batch holds, keeping its lists' room.
-        fn release(batch: *Batch, gpa: Allocator) void {
-            for (batch.pending.items) |*p| {
-                if (!p.choice.kept) if (p.bytes) |bytes| gpa.free(bytes);
-                if (p.choice.delta) |d| gpa.free(d);
-                if (p.room.len != 0) gpa.free(p.room);
-                if (p.stored.len != 0) gpa.free(p.stored);
-            }
-            batch.pending.clearRetainingCapacity();
-            for (batch.parts.items) |*part| part.window.deinit(gpa);
-            batch.parts.clearRetainingCapacity();
-            for (batch.retired.items) |bytes| gpa.free(bytes);
-            batch.retired.clearRetainingCapacity();
-        }
-
-        fn deinit(batch: *Batch, gpa: Allocator) void {
-            batch.release(gpa);
-            batch.pending.deinit(gpa);
-            batch.parts.deinit(gpa);
-            batch.retired.deinit(gpa);
-            batch.* = undefined;
-        }
-    };
-
     /// Objects `start..end` of pack order, all of one search group.
     const Part = struct {
         start: usize,
@@ -3133,7 +3128,7 @@ const Build = struct {
         }
         var failures: std.ArrayList(?Error) = .empty;
         defer failures.deinit(gpa);
-        var slots: [3]Batch = @splat(.{});
+        var slots: [3]PackBatch = @splat(.{});
         defer for (&slots) |*slot| slot.deinit(gpa);
         var locked: LockedAllocator = .{ .child = gpa, .io = io };
         const stage: Stage = .{ .workers = workers, .deflaters = deflaters, .readers = readers, .failures = &failures, .search_gpa = locked.allocator() };
@@ -3141,15 +3136,15 @@ const Build = struct {
         // The first batch read, then each searched while the one before is
         // deflated and the one after read, then the last deflated.
         var turn: usize = 0;
-        var prev: ?*Batch = null;
-        var cur: ?*Batch = &slots[0];
+        var prev: ?*PackBatch = null;
+        var cur: ?*PackBatch = &slots[0];
         b.plan(cur.?, 0);
         try b.prepareReads(io, cur.?);
         try b.overlap(io, stage, null, cur, null);
         try b.finishReads(io, cur.?);
         while (cur) |searching| {
             turn += 1;
-            const next: ?*Batch = if (searching.end < b.ordered.len) &slots[turn % 3] else null;
+            const next: ?*PackBatch = if (searching.end < b.ordered.len) &slots[turn % 3] else null;
             if (next) |n| {
                 b.plan(n, searching.end);
                 try b.prepareReads(io, n);
@@ -3194,7 +3189,7 @@ const Build = struct {
     /// The batch from `start`: objects while their charges fit a third of
     /// the budget, and always one. Each is charged its body, the slack a
     /// packed one is inflated with, and its deflated entry's room.
-    fn plan(b: *Build, batch: *Batch, start: usize) void {
+    fn plan(b: *Build, batch: *PackBatch, start: usize) void {
         const share = b.options.batch_bytes / 3;
         var end = start;
         var charged: usize = 0;
@@ -3219,7 +3214,7 @@ const Build = struct {
     /// Size the bodies the tasks read: the loose ones, and the whole
     /// packed ones, which are looked for here, since looking in the packs
     /// changes them.
-    fn prepareReads(b: *Build, io: Io, batch: *Batch) Error!void {
+    fn prepareReads(b: *Build, io: Io, batch: *PackBatch) Error!void {
         const gpa = b.gpa;
         const items = b.ordered[batch.start..batch.end];
         try batch.pending.ensureTotalCapacity(gpa, items.len);
@@ -3247,7 +3242,7 @@ const Build = struct {
     /// is not loose, and a loose object that went away since its header was
     /// read. An object too large to batch is read just before it is
     /// searched, by `readAlone`.
-    fn finishReads(b: *Build, io: Io, batch: *Batch) Error!void {
+    fn finishReads(b: *Build, io: Io, batch: *PackBatch) Error!void {
         const gpa = b.gpa;
         if (batch.alone) return;
         for (b.ordered[batch.start..batch.end], batch.pending.items) |*item, *p| {
@@ -3266,7 +3261,7 @@ const Build = struct {
 
     /// The body of an object too large to batch, read here while no task
     /// runs, since a read may re-scan the pack directories.
-    fn readAlone(b: *Build, io: Io, batch: *Batch) Error!void {
+    fn readAlone(b: *Build, io: Io, batch: *PackBatch) Error!void {
         const p = &batch.pending.items[0];
         if (b.reusedAt(batch.start)) |r| {
             p.stored = try b.gpa.alloc(u8, r.stored.len);
@@ -3279,7 +3274,7 @@ const Build = struct {
 
     /// Cut `batch` into its search groups' parts, the first taking the
     /// window the batch before it ended with when no group starts here.
-    fn prepareSearch(b: *Build, batch: *Batch) Error!void {
+    fn prepareSearch(b: *Build, batch: *PackBatch) Error!void {
         const gpa = b.gpa;
         var start = batch.start;
         while (start < batch.end) {
@@ -3296,7 +3291,7 @@ const Build = struct {
 
     /// One part's delta search, in pack order, exactly as the serial writer
     /// makes it for its group.
-    fn searchPart(b: *const Build, gpa: Allocator, batch: *Batch, part: *Part) Error!void {
+    fn searchPart(b: *const Build, gpa: Allocator, batch: *PackBatch, part: *Part) Error!void {
         const raw_len = b.odb.backendData().kind.rawLen();
         for (part.start..part.end) |pos| {
             if (b.reusedAt(pos) != null) continue;
@@ -3308,7 +3303,7 @@ const Build = struct {
     /// After the search: the window of a group that goes on past the batch
     /// is carried to the next, and every other part's window let go of. The
     /// bodies they held stay the batch's until it is written.
-    fn finishSearch(b: *Build, batch: *Batch) Error!void {
+    fn finishSearch(b: *Build, batch: *PackBatch) Error!void {
         const gpa = b.gpa;
         const parts = batch.parts.items;
         const continues = batch.end < b.ordered.len and !b.group_starts[batch.end];
@@ -3331,7 +3326,7 @@ const Build = struct {
     }
 
     /// Room for each entry the tasks deflate.
-    fn prepareDeflate(b: *Build, batch: *Batch) Error!void {
+    fn prepareDeflate(b: *Build, batch: *PackBatch) Error!void {
         if (batch.alone) return;
         for (batch.pending.items, batch.start..) |*p, pos| {
             if (p.stored.len != 0) continue;
@@ -3345,16 +3340,17 @@ const Build = struct {
 
     /// The tasks, this one among them, search the parts of `searching`,
     /// deflate `deflating` and read `reading`, any of them absent.
-    fn overlap(b: *Build, io: Io, stage: Stage, deflating: ?*Batch, reading: ?*Batch, searching: ?*Batch) Error!void {
+    fn overlap(b: *Build, io: Io, stage: Stage, deflating: ?*PackBatch, reading: ?*PackBatch, searching: ?*PackBatch) Error!void {
         const deflates: []Pending = if (deflating) |d| (if (d.alone) &.{} else d.pending.items) else &.{};
         const reads: []Pending = if (reading) |r| (if (r.alone) &.{} else r.pending.items) else &.{};
         if (searching) |s| try b.prepareSearch(s);
         const parts: []Part = if (searching) |s| s.parts.items else &.{};
         try stage.failures.resize(b.gpa, parts.len + deflates.len + reads.len);
         const Work = struct {
+            const Self = @This();
             build: *const Build,
             search_gpa: Allocator,
-            searching: ?*Batch,
+            searching: ?*PackBatch,
             parts: []Part,
             odb: *const Odb,
             deflates: []Pending,
@@ -3366,7 +3362,7 @@ const Build = struct {
             readers: []pack.Pack.EntryReader,
             compression: pack.Compression,
 
-            fn work(c: @This(), task_io: Io, worker: usize, i: usize) Error!void {
+            fn work(task_io: Io, c: Self, worker: usize, i: usize) Error!void {
                 // The parts first: they are the longest items.
                 if (i < c.parts.len) return c.build.searchPart(c.search_gpa, c.searching.?, &c.parts[i]);
                 const d = i - c.parts.len;
@@ -3387,7 +3383,7 @@ const Build = struct {
                 return c.read(task_io, worker, c.read_items[at].oid, &c.reads[at]);
             }
 
-            fn deflate(c: @This(), worker: usize, p: *Pending) Error!void {
+            fn deflate(c: Self, worker: usize, p: *Pending) Error!void {
                 if (p.stored.len != 0) return;
                 var out: Io.Writer = .fixed(p.room);
                 c.deflaters[worker].deflate(&out, p.payload(), c.compression) catch |err| switch (err) {
@@ -3397,7 +3393,7 @@ const Build = struct {
                 p.deflated = out.end;
             }
 
-            fn read(c: @This(), task_io: Io, worker: usize, oid: Oid, p: *Pending) Error!void {
+            fn read(c: Self, task_io: Io, worker: usize, oid: Oid, p: *Pending) Error!void {
                 const into = p.bytes orelse return;
                 if (p.packed_at) |at| {
                     at.pack.inflateWith(task_io, &c.readers[worker], at.at, at.size, into) catch |err| switch (err) {
@@ -3452,7 +3448,7 @@ const Build = struct {
     }
 
     /// A batch's entries, in pack order.
-    fn writeBatch(b: *Build, io: Io, batch: *Batch) Error!void {
+    fn writeBatch(b: *Build, io: Io, batch: *PackBatch) Error!void {
         for (batch.pending.items, batch.start..) |*p, pos| {
             if (p.stored.len != 0) {
                 if (b.reusedAt(pos)) |r| {
@@ -3474,6 +3470,53 @@ const Build = struct {
             } else .{ .object = p.type };
             b.offsets[pos] = try b.writer.addDeflated(item.oid, payload, p.payload().len, p.room[0..deflated_len]);
         }
+    }
+};
+
+/// Objects `start..end` of pack order, on their way through the tasks.
+const PackBatch = struct {
+    start: usize = 0,
+    end: usize = 0,
+    /// One object too large for a batch's share of the budget: read and
+    /// deflated on the calling task, straight into the pack.
+    alone: bool = false,
+    /// Whether the tasks open files for it, which caps how many read.
+    opens: bool = false,
+    pending: std.ArrayList(Build.Pending) = .empty,
+    /// The batch cut at its search groups' starts, each part searched
+    /// by a task against its own group's window. The first continues
+    /// the window the batch before ended with, unless a group starts
+    /// with the batch.
+    parts: std.ArrayList(Build.Part) = .empty,
+    /// Bodies the windows let go of during this batch's search, which
+    /// this batch or the one before it may still be written from.
+    retired: std.ArrayList([]u8) = .empty,
+
+    fn items(batch: *const PackBatch) usize {
+        return batch.end - batch.start;
+    }
+
+    /// Free what the batch holds, keeping its lists' room.
+    fn release(batch: *PackBatch, gpa: Allocator) void {
+        for (batch.pending.items) |*p| {
+            if (!p.choice.kept) if (p.bytes) |bytes| gpa.free(bytes);
+            if (p.choice.delta) |d| gpa.free(d);
+            if (p.room.len != 0) gpa.free(p.room);
+            if (p.stored.len != 0) gpa.free(p.stored);
+        }
+        batch.pending.clearRetainingCapacity();
+        for (batch.parts.items) |*part| part.window.deinit(gpa);
+        batch.parts.clearRetainingCapacity();
+        for (batch.retired.items) |bytes| gpa.free(bytes);
+        batch.retired.clearRetainingCapacity();
+    }
+
+    fn deinit(batch: *PackBatch, gpa: Allocator) void {
+        batch.release(gpa);
+        batch.pending.deinit(gpa);
+        batch.parts.deinit(gpa);
+        batch.retired.deinit(gpa);
+        batch.* = undefined;
     }
 };
 
@@ -4351,18 +4394,19 @@ test "a cached loose body fits one buffered read and an end check" {
 test "an object read into a kept buffer is the object read, and borrows the buffer" {
     const io = std.testing.io;
     const Counting = struct {
+        const Self = @This();
         child: Allocator,
         allocations: usize = 0,
-        fn allocator(c: *@This()) Allocator {
+        fn allocator(c: *Self) Allocator {
             return .{ .ptr = c, .vtable = &.{ .alloc = alloc, .resize = Allocator.noResize, .remap = Allocator.noRemap, .free = free } };
         }
         fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-            const c: *@This() = @ptrCast(@alignCast(ctx));
+            const c: *Self = @ptrCast(@alignCast(ctx));
             c.allocations += 1;
             return c.child.rawAlloc(len, alignment, ret);
         }
         fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-            const c: *@This() = @ptrCast(@alignCast(ctx));
+            const c: *Self = @ptrCast(@alignCast(ctx));
             c.child.rawFree(memory, alignment, ret);
         }
     };

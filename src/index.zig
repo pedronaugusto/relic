@@ -140,6 +140,45 @@ pub const RawExtension = struct {
     }
 };
 
+/// One directory of a `CacheTree`.
+pub const CacheTreeNode = struct {
+    /// The directory's own name, without a slash. Empty at the root.
+    name: []const u8,
+    /// How many index entries this subtree covers, or -1 when the node
+    /// is invalid and its tree must be rebuilt.
+    entry_count: i64,
+    /// The tree object, when the node is valid.
+    oid: ?Oid,
+    /// Sorted by name, which is the order the extension stores them in.
+    children: std.ArrayList(CacheTreeNode),
+
+    /// Whether this node's tree object may be used as it is.
+    pub fn isValid(n: *const CacheTreeNode) bool {
+        return n.entry_count >= 0 and n.oid != null;
+    }
+
+    fn deinit(n: *CacheTreeNode, gpa: Allocator) void {
+        for (n.children.items) |*sub| sub.deinit(gpa);
+        n.children.deinit(gpa);
+        gpa.free(n.name);
+        n.* = undefined;
+    }
+
+    /// git's order for the children of a node: by length, then by
+    /// bytes.
+    pub fn lessThan(_: void, a: CacheTree.Node, b: CacheTree.Node) bool {
+        if (a.name.len != b.name.len) return a.name.len < b.name.len;
+        return std.mem.order(u8, a.name, b.name) == .lt;
+    }
+
+    fn child(n: *CacheTreeNode, name: []const u8) ?*CacheTreeNode {
+        for (n.children.items) |*c| {
+            if (std.mem.eql(u8, c.name, name)) return c;
+        }
+        return null;
+    }
+};
+
 /// The `TREE` extension: a tree object name per directory, so `write-tree`
 /// rebuilds only the directories that changed.
 ///
@@ -149,44 +188,8 @@ pub const CacheTree = struct {
     gpa: Allocator,
     root: Node,
 
-    /// One directory.
-    pub const Node = struct {
-        /// The directory's own name, without a slash. Empty at the root.
-        name: []const u8,
-        /// How many index entries this subtree covers, or -1 when the node
-        /// is invalid and its tree must be rebuilt.
-        entry_count: i64,
-        /// The tree object, when the node is valid.
-        oid: ?Oid,
-        /// Sorted by name, which is the order the extension stores them in.
-        children: std.ArrayList(Node),
-
-        /// Whether this node's tree object may be used as it is.
-        pub fn isValid(n: *const Node) bool {
-            return n.entry_count >= 0 and n.oid != null;
-        }
-
-        fn deinit(n: *Node, gpa: Allocator) void {
-            for (n.children.items) |*sub| sub.deinit(gpa);
-            n.children.deinit(gpa);
-            gpa.free(n.name);
-            n.* = undefined;
-        }
-
-        /// git's order for the children of a node: by length, then by
-        /// bytes.
-        pub fn lessThan(_: void, a: CacheTree.Node, b: CacheTree.Node) bool {
-            if (a.name.len != b.name.len) return a.name.len < b.name.len;
-            return std.mem.order(u8, a.name, b.name) == .lt;
-        }
-
-        fn child(n: *Node, name: []const u8) ?*Node {
-            for (n.children.items) |*c| {
-                if (std.mem.eql(u8, c.name, name)) return c;
-            }
-            return null;
-        }
-    };
+    /// One directory: `CacheTreeNode`.
+    pub const Node = CacheTreeNode;
 
     /// An empty, wholly invalid cache tree — the state an index with no
     /// `TREE` extension is in.

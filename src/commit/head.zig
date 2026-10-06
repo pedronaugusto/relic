@@ -134,7 +134,7 @@ pub fn moveBranch(io: Io, repo: *Repository, branch: []const u8, expected: refs_
 }
 
 fn appendHeadLog(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error!void {
-    const exists = try reflog.exists(io, repo.git_dir, repo.gpa, "HEAD");
+    const exists = try reflog.exists(repo.gpa, io, repo.git_dir, "HEAD");
     if (!reflog.shouldLog(repo.reflogPolicy(), "HEAD", exists)) return;
     try repo.refStore().appendLog(repo.gpa, io, "HEAD", old orelse Oid.zero(repo.objectFormat()), new, log.who, log.message);
 }

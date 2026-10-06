@@ -34,7 +34,7 @@ fn requireSparseIndexGit(gpa: Allocator, io: Io) !void {
     try testgit.requireGitVersion(gpa, io, 2, 45);
 }
 
-fn setupTree(repo: *testgit.Repo, io: Io) anyerror!void {
+fn setupTree(io: Io, repo: *testgit.Repo) anyerror!void {
     for ([_][]const u8{
         "top.txt",   "A/a.txt",   "A/B/b.txt",   "A/B/C/c.txt", "A/X/x.txt",
         "D/d.txt",   "D/E/e.txt", "D/E/F/f.txt", "bb/y.txt",    "c/z.txt",
@@ -49,7 +49,7 @@ fn setupTree(repo: *testgit.Repo, io: Io) anyerror!void {
     try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
 }
 
-fn readIndexBytes(repo: *testgit.Repo, io: Io) ![]u8 {
+fn readIndexBytes(io: Io, repo: *testgit.Repo) ![]u8 {
     return repo.readFile(io, ".git/index");
 }
 
@@ -91,10 +91,10 @@ test "an index git wrote sparse is read and written back byte for byte" {
     try requireSparseIndexGit(gpa, io);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
-    try setupTree(&repo, io);
+    try setupTree(io, &repo);
     try repo.exec(io, &.{ "sparse-checkout", "set", "--sparse-index", "A/B" });
 
-    const bytes = try readIndexBytes(&repo, io);
+    const bytes = try readIndexBytes(io, &repo);
     defer gpa.free(bytes);
     var index = try Index.parse(gpa, .sha1, bytes);
     defer index.deinit();
@@ -118,12 +118,12 @@ test "expanding is what git's ensure_full_index writes, and collapsing is what i
     try requireSparseIndexGit(gpa, io);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
-    try setupTree(&repo, io);
+    try setupTree(io, &repo);
     try repo.exec(io, &.{ "sparse-checkout", "set", "--sparse-index", "A/B" });
-    const sparse_bytes = try readIndexBytes(&repo, io);
+    const sparse_bytes = try readIndexBytes(io, &repo);
     defer gpa.free(sparse_bytes);
     try repo.exec(io, &.{ "sparse-checkout", "reapply", "--no-sparse-index" });
-    const full_bytes = try readIndexBytes(&repo, io);
+    const full_bytes = try readIndexBytes(io, &repo);
     defer gpa.free(full_bytes);
 
     var git_dir = try repo.gitDir(io);
@@ -167,7 +167,7 @@ test "patterns that are not a cone, or an unmerged entry, leave the index full" 
     try requireSparseIndexGit(gpa, io);
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
-    try setupTree(&repo, io);
+    try setupTree(io, &repo);
     try repo.exec(io, &.{ "sparse-checkout", "set", "--no-cone", "/A/" });
 
     var git_dir = try repo.gitDir(io);
@@ -243,7 +243,7 @@ test "status, write-tree and add on a sparse index say what they say on the full
     try requireSparseIndexGit(gpa, io);
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
-    try setupTree(&git, io);
+    try setupTree(io, &git);
     // A second commit changes a file the cone will leave out, and the
     // branch is then moved back without touching the index: HEAD and the
     // index differ inside a sparse directory.
@@ -262,7 +262,7 @@ test "status, write-tree and add on a sparse index say what they say on the full
     // Both indexes come from the same bytes: git's status is free to
     // rewrite the file, and does, when it finds files on the disk that the
     // index says are not there.
-    const bytes = try readIndexBytes(&git, io);
+    const bytes = try readIndexBytes(io, &git);
     defer gpa.free(bytes);
     var index = try Index.parse(gpa, .sha1, bytes);
     defer index.deinit();
@@ -322,7 +322,7 @@ test "checkout and reset on a sparse index leave what they leave on the full one
     try requireSparseIndexGit(gpa, io);
     var git = try testgit.Repo.init(gpa, io, &.{});
     defer git.deinit();
-    try setupTree(&git, io);
+    try setupTree(io, &git);
     try git.exec(io, &.{ "sparse-checkout", "set", "--sparse-index", "A/B" });
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});

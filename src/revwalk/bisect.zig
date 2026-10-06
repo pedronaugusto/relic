@@ -761,7 +761,7 @@ fn sqrti(val: i32) i32 {
 }
 
 /// `managed_skipped`: the commit to test when some are skipped.
-fn managedSkipped(revs: *const Revs, list: []const Oid, tried: *std.ArrayList(Oid), a: Allocator) Allocator.Error![]const Oid {
+fn managedSkipped(revs: *const Revs, a: Allocator, list: []const Oid, tried: *std.ArrayList(Oid)) Allocator.Error![]const Oid {
     if (revs.skipped.items.len == 0) return list;
     // `filter_skipped` with `show_all` off.
     var filtered: std.ArrayList(Oid) = .empty;
@@ -829,7 +829,7 @@ fn nextAll(c: *Ctx, t: Terms) Error!Step {
     const listed = try listCommits(c, &revs, first_parent);
     const bisection = try findBisection(c, &listed, first_parent, find_all);
     var tried: std.ArrayList(Oid) = .empty;
-    const left = try managedSkipped(&revs, bisection.list, &tried, c.a);
+    const left = try managedSkipped(&revs, c.a, bisection.list, &tried);
 
     if (left.len == 0) {
         if (tried.items.len != 0) return onlySkipped(c, t, tried.items, null);
@@ -1470,7 +1470,7 @@ const Twin = struct {
             var when: i64 = 1_700_000_000;
             var n: usize = 0;
             const commit = struct {
-                fn f(rr: *testgit.Repo, i: Io, env: *std.process.Environ.Map, w: *i64, k: *usize, extra: []const u8) !void {
+                fn f(i: Io, rr: *testgit.Repo, env: *std.process.Environ.Map, w: *i64, k: *usize, extra: []const u8) !void {
                     w.* += 60;
                     k.* += 1;
                     try testgit.setDate(env, w.*);
@@ -1482,14 +1482,14 @@ const Twin = struct {
                     try rr.exec(i, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&msg, "commit {d}", .{k.*}) });
                 }
             }.f;
-            for (0..6) |_| try commit(r, io, &t.env, &when, &n, "");
+            for (0..6) |_| try commit(io, r, &t.env, &when, &n, "");
             if (shape == 2) {
                 for (0..12) |k| {
                     if (k % 3 == 0) {
                         var buf: [16]u8 = undefined;
                         try r.writeFile(io, "p/x", try std.fmt.bufPrint(&buf, "{d}\n", .{k}));
                     }
-                    try commit(r, io, &t.env, &when, &n, "");
+                    try commit(io, r, &t.env, &when, &n, "");
                 }
             }
             if (shape == 1) {
@@ -1505,12 +1505,12 @@ const Twin = struct {
                     try r.exec(io, &.{ "commit", "-q", "-m", try std.fmt.bufPrint(&buf, "side {d}", .{k}) });
                 }
                 try r.exec(io, &.{ "checkout", "-q", "main" });
-                for (0..3) |_| try commit(r, io, &t.env, &when, &n, "");
+                for (0..3) |_| try commit(io, r, &t.env, &when, &n, "");
                 when += 60;
                 try testgit.setDate(&t.env, when);
                 try r.exec(io, &.{ "merge", "-q", "--no-ff", "-m", "merge side", "side" });
             }
-            for (0..10) |_| try commit(r, io, &t.env, &when, &n, "");
+            for (0..10) |_| try commit(io, r, &t.env, &when, &n, "");
         }
         t.repo = try Repository.open(gpa, io, t.ours.dir, .{});
     }
@@ -1579,9 +1579,9 @@ const Twin = struct {
             &.{ "status", "--porcelain" },
             &.{ "ls-files", "-s" },
         }) |args| {
-            const a = try gitOrFailed(&t.git, io, args);
+            const a = try gitOrFailed(io, &t.git, args);
             defer gpa.free(a);
-            const b = try gitOrFailed(&t.ours, io, args);
+            const b = try gitOrFailed(io, &t.ours, args);
             defer gpa.free(b);
             std.testing.expectEqualStrings(a, b) catch |err| {
                 std.log.err("git {any} differs", .{args});
@@ -1600,7 +1600,7 @@ const Twin = struct {
     }
 };
 
-fn gitOrFailed(r: *testgit.Repo, io: Io, args: []const []const u8) ![]u8 {
+fn gitOrFailed(io: Io, r: *testgit.Repo, args: []const []const u8) ![]u8 {
     r.report_failures = false;
     defer r.report_failures = true;
     return r.run(io, args) catch |err| switch (err) {

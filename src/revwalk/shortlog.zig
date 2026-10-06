@@ -93,6 +93,20 @@ const Record = struct {
     subjects: std.ArrayList([]const u8) = .empty,
 };
 
+/// The order `write` lists records in: by count first under `-n`, then
+/// by name.
+const RecordOrder = struct {
+    keys: []const []const u8,
+    values: []const Record,
+    numbered: bool,
+
+    fn lessThan(ctx: RecordOrder, a: usize, b: usize) bool {
+        if (ctx.numbered and ctx.values[a].count != ctx.values[b].count)
+            return ctx.values[a].count > ctx.values[b].count;
+        return std.mem.order(u8, ctx.keys[a], ctx.keys[b]) == .lt;
+    }
+};
+
 /// Commits being grouped.
 pub const Shortlog = struct {
     gpa: Allocator,
@@ -267,20 +281,10 @@ pub const Shortlog = struct {
 
     /// `shortlog_output`.
     pub fn write(s: *Shortlog, w: *Io.Writer) (Io.Writer.Error || Allocator.Error)!void {
-        const Sort = struct {
-            keys: []const []const u8,
-            values: []const Record,
-            numbered: bool,
-            pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
-                if (ctx.numbered and ctx.values[a].count != ctx.values[b].count)
-                    return ctx.values[a].count > ctx.values[b].count;
-                return std.mem.order(u8, ctx.keys[a], ctx.keys[b]) == .lt;
-            }
-        };
         const order = try s.gpa.alloc(usize, s.records.count());
         defer s.gpa.free(order);
         for (order, 0..) |*o, i| o.* = i;
-        std.sort.pdq(usize, order, Sort{ .keys = s.records.keys(), .values = s.records.values(), .numbered = s.options.numbered }, Sort.lessThan);
+        std.sort.pdq(usize, order, RecordOrder{ .keys = s.records.keys(), .values = s.records.values(), .numbered = s.options.numbered }, RecordOrder.lessThan);
 
         var wrapped: std.ArrayList(u8) = .empty;
         defer wrapped.deinit(s.gpa);
@@ -461,7 +465,7 @@ const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo.zig");
 const revwalk = @import("../revwalk.zig");
 
-fn commitAs(r: *testgit.Repo, io: Io, author: []const u8, committer: []const u8, msg: []const u8) !void {
+fn commitAs(io: Io, r: *testgit.Repo, author: []const u8, committer: []const u8, msg: []const u8) !void {
     const lt = std.mem.findScalar(u8, committer, '<').?;
     const name = try std.fmt.allocPrint(r.gpa, "user.name={s}", .{std.mem.trim(u8, committer[0..lt], " ")});
     defer r.gpa.free(name);
@@ -497,14 +501,14 @@ test "shortlog groups, sorts, counts and folds as git shortlog does" {
     const ann = "Ann Lee <ann@x>";
     const bob = "bob <BOB@x>";
     const cy = "Cy Old <cy@old>";
-    try commitAs(&r, io, ann, bob, "first commit");
-    try commitAs(&r, io, bob, bob, "[PATCH 1/2] fix the thing\n\nbody\n");
-    try commitAs(&r, io, cy, ann, "  leading spaces and\na subject over\ntwo lines\n\nCo-authored-by: Bob <bob@x>\nCo-authored-by: Dee <dee@x>\n");
-    try commitAs(&r, io, ann, cy, "");
-    try commitAs(&r, io, "Zed <z@x>", ann, "Reviewed-by: Ann Lee <ann@x>\n");
-    try commitAs(&r, io, ann, ann, "中文字符 wide characters in a subject long enough to be folded by the wrapping options here");
-    try commitAs(&r, io, bob, cy, "[PATCH] another\n\nReviewed-by: just text\nco-authored-by: Ann Lee <ann@x>\nCo-authored-by: Ann Lee <ann@x>\n");
-    try commitAs(&r, io, cy, bob, "a subject that is long enough that the default width of seventy-six columns has to fold it somewhere");
+    try commitAs(io, &r, ann, bob, "first commit");
+    try commitAs(io, &r, bob, bob, "[PATCH 1/2] fix the thing\n\nbody\n");
+    try commitAs(io, &r, cy, ann, "  leading spaces and\na subject over\ntwo lines\n\nCo-authored-by: Bob <bob@x>\nCo-authored-by: Dee <dee@x>\n");
+    try commitAs(io, &r, ann, cy, "");
+    try commitAs(io, &r, "Zed <z@x>", ann, "Reviewed-by: Ann Lee <ann@x>\n");
+    try commitAs(io, &r, ann, ann, "中文字符 wide characters in a subject long enough to be folded by the wrapping options here");
+    try commitAs(io, &r, bob, cy, "[PATCH] another\n\nReviewed-by: just text\nco-authored-by: Ann Lee <ann@x>\nCo-authored-by: Ann Lee <ann@x>\n");
+    try commitAs(io, &r, cy, bob, "a subject that is long enough that the default width of seventy-six columns has to fold it somewhere");
     try r.writeFile(io, ".mailmap", "Cy New <cy@new> <cy@old>\nBob B <bob@x>\n");
 
     var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});

@@ -885,6 +885,15 @@ const SectionStats = struct {
     index_blocks: u64 = 0,
 };
 
+/// The order of the object index: raw object names, bytewise.
+pub const ObjectKeyOrder = struct {
+    keys: [][hash.max_raw_len]u8,
+
+    pub fn lessThan(c: ObjectKeyOrder, a: usize, b: usize) bool {
+        return std.mem.order(u8, &c.keys[a], &c.keys[b]) == .lt;
+    }
+};
+
 const Writer = struct {
     gpa: Allocator,
     kind: Kind,
@@ -1216,13 +1225,7 @@ const Writer = struct {
     /// shortest prefix that tells them apart, with the ref blocks that name
     /// it.
     fn writeObjectIndex(w: *Writer) Error!void {
-        const SortCtx = struct {
-            keys: [][hash.max_raw_len]u8,
-            pub fn lessThan(c: @This(), a: usize, b: usize) bool {
-                return std.mem.order(u8, &c.keys[a], &c.keys[b]) == .lt;
-            }
-        };
-        w.objects.sort(SortCtx{ .keys = w.objects.keys() });
+        w.objects.sort(ObjectKeyOrder{ .keys = w.objects.keys() });
         const keys = w.objects.keys();
         const raw_len = w.kind.rawLen();
         // Two bytes at the least, and one more than any two neighbours share.
@@ -1625,7 +1628,7 @@ test "a table git wrote is read record for record, and written back byte for byt
     const script_text = try repo.readFile(io, "script");
     defer gpa.free(script_text);
     try repo.exec(io, &.{ "symbolic-ref", "refs/heads/alias", "refs/heads/main" });
-    try runWithInput(&repo, io, &.{ "update-ref", "--stdin", "-m", "bulk" }, script_text);
+    try runWithInput(io, &repo, &.{ "update-ref", "--stdin", "-m", "bulk" }, script_text);
     try repo.exec(io, &.{ "update-ref", "-d", "refs/heads/topic/0005" });
     try repo.exec(io, &.{"pack-refs"});
 
@@ -1748,7 +1751,7 @@ fn expectSameLogBlocks(gpa: Allocator, a: *const Table, b: *const Table) !void {
 }
 
 /// Run git with `input` on its standard input.
-fn runWithInput(repo: *testgit.Repo, io: Io, args: []const []const u8, input: []const u8) !void {
+fn runWithInput(io: Io, repo: *testgit.Repo, args: []const []const u8, input: []const u8) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(repo.gpa);
     try argv.append(repo.gpa, "git");

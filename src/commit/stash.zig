@@ -496,7 +496,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
 
     // A log that is gone with its ref still there is cleared first, as git
     // does, so the new stash starts a list rather than joining a broken one.
-    if (!try reflog.exists(io, repo.common_dir, gpa, ref_name)) {
+    if (!try reflog.exists(gpa, io, repo.common_dir, ref_name)) {
         if (try repo.refStore().read(arena, io, ref_name)) |_| try clear(io, repo, .{ .hooks = options.hooks });
     }
 
