@@ -435,18 +435,22 @@ pub fn receive(
     if (rev_temp) |t| {
         var rev_name_buf: [96]u8 = undefined;
         const rev_name = std.fmt.bufPrint(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
-        fs.renameWithRetry(io, pack_dir, t, rev_name) catch |err| {
-            pack_dir.deleteFile(io, pack_name) catch {};
-            return err;
-        };
+        try renameBesidePack(io, pack_dir, t, rev_name, pack_name);
     }
-    fs.renameWithRetry(io, pack_dir, idx_temp, idx_name) catch |err| {
-        pack_dir.deleteFile(io, pack_name) catch {};
-        return err;
-    };
+    try renameBesidePack(io, pack_dir, idx_temp, idx_name, pack_name);
     if (options.sync == .batch) try fs.syncBarrier(io, pack_dir);
     try db.refresh(io);
     return result;
+}
+
+/// Rename `from` to `to` beside the pack already at `pack_name`. When the
+/// rename fails the pack goes too: a pack with no index is never read.
+fn renameBesidePack(io: Io, pack_dir: Io.Dir, from: []const u8, to: []const u8, pack_name: []const u8) Io.Dir.RenameError!void {
+    fs.renameWithRetry(io, pack_dir, from, to) catch |err| {
+        // ziglint-ignore: Z026 the rename's error is the one to report; a pack with no index is unreachable, and `git gc` prunes it
+        pack_dir.deleteFile(io, pack_name) catch {};
+        return err;
+    };
 }
 
 fn readPackHeader(tee: *Tee) Error!u32 {
@@ -2089,6 +2093,7 @@ test "a receive canceled while it resolves stops every resolving task, even one 
         if (Park.on_caller.load(.acquire)) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     } else {
+        // ziglint-ignore: Z026 the test fails next; a task that will not cancel is reported by the leak check
         _ = future.cancel(io) catch {};
         std.debug.print("the calling task never read after another task parked (beside: {})\n", .{Park.beside.load(.acquire)});
         return error.TestUnexpectedResult;

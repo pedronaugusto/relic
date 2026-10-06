@@ -982,12 +982,14 @@ pub const Pack = struct {
                 out.clearRetainingCapacity();
                 try delta.applyTo(p.gpa, out, base_bytes, delta_bytes);
                 p.gpa.free(base_bytes);
+                // ziglint-ignore: Z026 a base the cache cannot hold is only inflated again; the object is already whole
                 if (cache) |c| c.put(pack_id, delta_offset, base_type, out.items) catch {};
                 return .{ .type = base_type, .bytes = out.items };
             };
             const applied = try delta.apply(p.gpa, base_bytes, delta_bytes);
             p.gpa.free(base_bytes);
             base_bytes = applied;
+            // ziglint-ignore: Z026 a base the cache cannot hold is only inflated again; the object is already whole
             if (cache) |c| c.put(pack_id, delta_offset, base_type, base_bytes) catch {};
         }
 
@@ -1361,7 +1363,9 @@ fn fuzzIndex(_: void, smith: *std.testing.Smith) anyerror!void {
     defer index.deinit();
     var it = index.iterate();
     while (it.next() catch null) |_| {}
+    // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = index.find(Oid.zero(.sha1)) catch {};
+    // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = index.findPrefix("ab") catch {};
 }
 
@@ -2042,6 +2046,7 @@ pub const Writer = struct {
             return;
         }
         w.file.close(io);
+        // ziglint-ignore: Z026 abandoning cannot fail; a temporary pack left behind is what `git gc` prunes
         w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
         w.finished = true;
     }
@@ -2223,7 +2228,9 @@ pub const Writer = struct {
         fs.readOnlyObject(io, w.dir, idx_temp, w.options.shared);
         if (rev_temp) |t| fs.readOnlyObject(io, w.dir, t, w.options.shared);
         fs.renameWithRetry(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
+            // ziglint-ignore: Z026 the rename's error is the one to report; temporary files left behind are what `git gc` prunes
             w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
+            // ziglint-ignore: Z026 the rename's error is the one to report; temporary files left behind are what `git gc` prunes
             w.dir.deleteFile(io, idx_temp) catch {};
             return err;
         };
@@ -2234,6 +2241,7 @@ pub const Writer = struct {
             try fs.renameWithRetry(io, w.dir, t, rev_name);
         }
         fs.renameWithRetry(io, w.dir, idx_temp, idx_name) catch |err| {
+            // ziglint-ignore: Z026 the rename's error is the one to report; a pack without its index is unreachable, and `git gc` prunes it
             w.dir.deleteFile(io, idx_temp) catch {};
             return err;
         };

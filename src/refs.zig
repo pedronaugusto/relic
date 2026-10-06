@@ -761,6 +761,7 @@ pub const Transaction = struct {
                     tx.packed_announced = true;
                     try tx.announceAs(io, .prepared, true);
                 } else {
+                    // ziglint-ignore: Z026 as git's run_transaction_hook for an aborted state: the hook's status changes nothing
                     tx.announceAs(io, .aborted, true) catch {};
                 }
             }
@@ -912,6 +913,7 @@ pub const Transaction = struct {
             try stack_engine.commit(tx, io, log);
             tx.finished = true;
             tx.releaseLocks(io);
+            // ziglint-ignore: Z026 the refs have moved; as git, a hook failing on "committed" changes nothing
             if (tx.announced) tx.announce(io, .committed) catch {};
             return;
         }
@@ -923,6 +925,7 @@ pub const Transaction = struct {
         if (rewrite_packed) try tx.removeFromPacked(io);
         if (tx.packed_announced) {
             tx.packed_announced = false;
+            // ziglint-ignore: Z026 packed-refs is rewritten; as git, a hook failing on "committed" changes nothing
             tx.announceAs(io, .committed, true) catch {};
         }
 
@@ -1006,6 +1009,7 @@ pub const Transaction = struct {
         tx.releaseLocks(io);
         // The refs have moved; a hook failing now changes nothing, and its
         // status is not an error of the transaction's.
+        // ziglint-ignore: Z026 the refs have moved; as git, a hook failing on "committed" changes nothing
         if (tx.announced) tx.announce(io, .committed) catch {};
     }
 
@@ -1032,8 +1036,10 @@ pub const Transaction = struct {
             tx.finished = true;
             if (tx.packed_announced) {
                 tx.packed_announced = false;
+                // ziglint-ignore: Z026 as git's run_transaction_hook for an aborted state: the hook's status changes nothing
                 tx.announceAs(io, .aborted, true) catch {};
             }
+            // ziglint-ignore: Z026 as git's run_transaction_hook for an aborted state: the hook's status changes nothing
             if (tx.announced) tx.announce(io, .aborted) catch {};
         }
     }

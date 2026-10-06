@@ -1043,6 +1043,7 @@ pub const Odb = struct {
         // An object's name is the hash of its content, so a rename over an
         // object that is already there replaces it with the same bytes.
         fs.renameWithRetry(io, source.dir, temp, final) catch |err| {
+            // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
             source.dir.deleteFile(io, temp) catch {};
             return err;
         };
@@ -1175,6 +1176,7 @@ pub const Odb = struct {
             var final_buf: [hash.max_hex_len + 2]u8 = undefined;
             const final_path = std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
             fs.renameWithRetry(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
+                // ziglint-ignore: Z026 the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
                 s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
                 return err;
             };
@@ -1187,6 +1189,7 @@ pub const Odb = struct {
         pub fn abort(s: *Stream, io: Io) void {
             if (!s.finished) {
                 if (s.file_open) s.file.close(io);
+                // ziglint-ignore: Z026 abandoning cannot fail; a temporary object left behind is what `git gc` prunes
                 s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
                 s.finished = true;
             }

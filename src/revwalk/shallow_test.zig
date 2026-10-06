@@ -413,7 +413,7 @@ test "a push from a shallow repository tells the server its boundary, as git's s
             }
             const url = try std.fmt.allocPrint(gpa, "ssh://example.invalid{s}{s}", .{ if (@import("builtin").os.tag == .windows) "/" else "", target });
             defer gpa.free(url);
-            tools.dir.deleteFile(io, "sent") catch {};
+            tools.dir.deleteFile(io, "sent") catch |err| if (err != error.FileNotFound) return err;
             if (who == 0) {
                 const out = testremote.gitInputEnv(gpa, io, work, &env, &.{ "push", "-q", "--porcelain", url, "main" }, "", false) catch try gpa.dupe(u8, "refused");
                 gpa.free(out);

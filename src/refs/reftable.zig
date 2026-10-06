@@ -1558,6 +1558,7 @@ fn readEverything(bytes: []const u8) !void {
     const gpa = std.testing.allocator;
     for ([_]Kind{ .sha1, .sha256 }) |kind| {
         const table = Table.parse(bytes, kind) catch continue;
+        // ziglint-ignore: Z026 refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
         table.verify(gpa) catch {};
         inline for (.{ BlockType.ref, BlockType.log }) |typ| {
             if (table.iterate(gpa, typ)) |it_value| {

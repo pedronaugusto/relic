@@ -681,6 +681,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
         if (dir.createFile(io, lock_name, .{ .exclusive = true })) |file| {
             file.close(io);
             held.append(gpa, lock_name) catch |err| {
+                // ziglint-ignore: Z026 the allocation's error is the one to report; a lock left behind is one git reports by name
                 dir.deleteFile(io, lock_name) catch {};
                 gpa.free(lock_name);
                 return err;
@@ -735,6 +736,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
     // when it finds it gone. A platform that will not remove a file another
     // process has open leaves it for the next compaction to find.
     cache.internal.closeUnclaimed(&stack, &.{});
+    // ziglint-ignore: Z026 the list no longer names these tables; one a platform will not remove is left for the next compaction
     for (stack.names[first .. last + 1]) |name| dir.deleteFile(io, name) catch {};
 }
 
