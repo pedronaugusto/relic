@@ -9,6 +9,8 @@
 //! the other started.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -21,6 +23,8 @@ const rerere = @import("../merge/rerere.zig");
 const worktree = @import("../worktree.zig");
 const threeway = @import("../merge/threeway.zig");
 const ort = @import("../merge/ort.zig");
+const signing = @import("../commit/signing.zig");
+const program = @import("../repo/program.zig");
 
 const Oid = hash.Oid;
 
@@ -51,7 +55,7 @@ pub const Pair = struct {
         errdefer pair.env.deinit();
         // An editor that accepts what it is given, for a `git commit` or a
         // `git rebase --continue` that would open one.
-        const editor = try testgit.fixtureCommand(gpa, @import("build_options").process_fixture_path, "silent");
+        const editor = try testgit.fixtureCommand(gpa, build_options.process_fixture_path, "silent");
         defer gpa.free(editor);
         try pair.env.put("GIT_EDITOR", editor);
         pair.git = try testgit.Repo.init(gpa, io, &.{});
@@ -1088,7 +1092,7 @@ test "a clean rebase, an up-to-date one, and one onto another base land where gi
 fn gitRebaseInteractive(io: Io, repo: *testgit.Repo, sheet: []const u8, args: []const []const u8) !void {
     try repo.writeFile(io, ".git/relic-todo", sheet);
     const env = @constCast(repo.environ.?); // safe: the fixture owns a mutable environment map, borrowed for this synchronous git command.
-    const editor = try testgit.fixtureCommand(repo.gpa, @import("build_options").process_fixture_path, "copy-file .git/relic-todo");
+    const editor = try testgit.fixtureCommand(repo.gpa, build_options.process_fixture_path, "copy-file .git/relic-todo");
     defer repo.gpa.free(editor);
     try env.put("GIT_SEQUENCE_EDITOR", editor);
     defer _ = env.swapRemove("GIT_SEQUENCE_EDITOR");
@@ -1100,7 +1104,7 @@ fn gitRebaseInteractive(io: Io, repo: *testgit.Repo, sheet: []const u8, args: []
 }
 
 fn useFixtureEditor(pair: *Pair, name: []const u8, arguments: []const u8) !void {
-    const command = try testgit.fixtureCommand(pair.gpa, @import("build_options").process_fixture_path, arguments);
+    const command = try testgit.fixtureCommand(pair.gpa, build_options.process_fixture_path, arguments);
     defer pair.gpa.free(command);
     try pair.env.put(name, command);
 }
@@ -1769,7 +1773,7 @@ test "a file meeting a directory, a symlink meeting a file and a double rename s
     const io = std.testing.io;
     try requireOrtGit(io);
     // Git for Windows may check out the symbolic link as a plain file.
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     try testgit.requireGit(gpa, io);
     var pair: Pair = undefined;
     try Pair.init(gpa, io, &pair, shapesScript);
@@ -3013,7 +3017,7 @@ test "a rebase's squash and reword run the hooks of the commits git makes for th
 /// with gpg's home at `gnupg_home` (a `testgit.GnupgHome`) and both copies
 /// of `pair` set to sign with it. `false` when the program that makes it is
 /// not installed.
-fn makeSigningKey(pair: *Pair, io: Io, dir: []const u8, gnupg_home: []const u8, format: @import("../commit/signing.zig").Format) !bool {
+fn makeSigningKey(pair: *Pair, io: Io, dir: []const u8, gnupg_home: []const u8, format: signing.Format) !bool {
     const gpa = pair.gpa;
     try pair.env.put("GNUPGHOME", gnupg_home);
     try pair.env.put("HOME", dir);
@@ -3111,7 +3115,7 @@ fn expectSignedAlike(pair: *Pair, io: Io, rev: []const u8) !void {
     try std.testing.expectEqualStrings(a, b);
 }
 
-fn signedHistory(format: @import("../commit/signing.zig").Format) !void {
+fn signedHistory(format: signing.Format) !void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try testgit.requireGit(gpa, io);
@@ -3135,7 +3139,7 @@ fn signedHistory(format: @import("../commit/signing.zig").Format) !void {
             gpa.free(s.stderr);
         }
     };
-    const programs: @import("../repo/program.zig").Programs = .{ .environ = &pair.env };
+    const programs: program.Programs = .{ .environ = &pair.env };
     for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, &.{ "tag", "before" });
 
     // A merge commit, by commit.gpgSign.
@@ -3257,7 +3261,7 @@ test "merges, picks, reverts and rebases are signed with an ssh key as git signs
 }
 
 test "merges, picks, reverts and rebases are signed with an OpenPGP key as git signs them" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // GnuPG agent is unavailable on the Windows runner.
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // GnuPG agent is unavailable on the Windows runner.
     try signedHistory(.openpgp);
 }
 

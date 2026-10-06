@@ -3,6 +3,7 @@
 //! Unix and Windows.
 
 const std = @import("std");
+const relic = @import("relic");
 const Io = std.Io;
 const testprogram = @import("program.zig");
 
@@ -166,7 +167,7 @@ pub fn main(init: std.process.Init) !void {
                 try entry.appendSlice(arena, " msg=[");
                 try appendTranslated(arena, &entry, message, '|');
             } else {
-                const stripped = try @import("relic").repo.program.run(.{ .environ = init.environ_map }, arena, io, .{ .argv = &.{ "git", "stripspace", "-s" } }, message, .{});
+                const stripped = try relic.repo.program.run(.{ .environ = init.environ_map }, arena, io, .{ .argv = &.{ "git", "stripspace", "-s" } }, message, .{});
                 if (!stripped.succeeded()) return error.GitFailed;
                 try entry.appendSlice(arena, " edited=[");
                 try appendTranslated(arena, &entry, stripped.stdout, '|');

@@ -164,7 +164,7 @@ test "a clone goes where url.<base>.insteadOf sends it and records the URL as gi
     // does not.
     const url_root = try gpa.dupe(u8, root_path);
     defer gpa.free(url_root);
-    if (@import("builtin").os.tag == .windows) std.mem.replaceScalar(u8, url_root, '\\', '/');
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, url_root, '\\', '/');
     const text = try std.fmt.allocPrint(gpa, "[url \"file://{s}/\"]\n\tinsteadOf = here:\n", .{url_root});
     defer gpa.free(text);
     try root.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = text });

@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
@@ -123,7 +124,7 @@ pub fn addCommits(gpa: Allocator, io: Io, repo: *testgit.Repo, first: usize, cou
 /// relic use the same copy.
 pub fn fakeSsh(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
     const name = if (builtin.os.tag == .windows) "fake-ssh.exe" else "fake-ssh";
-    try Io.Dir.cwd().copyFile(@import("build_options").fake_ssh_helper_path, dir, name, io, .{});
+    try Io.Dir.cwd().copyFile(build_options.fake_ssh_helper_path, dir, name, io, .{});
     if (builtin.os.tag != .windows) {
         const file = try dir.openFile(io, name, .{});
         defer file.close(io);

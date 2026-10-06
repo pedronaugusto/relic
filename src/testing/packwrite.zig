@@ -5,6 +5,7 @@ const std = @import("std");
 const Io = std.Io;
 const hash = @import("../hash.zig");
 const odb_mod = @import("../odb.zig");
+const pack_mod = @import("../odb/pack.zig");
 const testgit = @import("git.zig");
 const Tasks = @import("io.zig");
 
@@ -62,7 +63,7 @@ const Corpus = struct {
     }
 
     /// Write the corpus as one pack through `io` and say what was written.
-    fn write(c: *Corpus, gpa: std.mem.Allocator, io: Io, options: odb_mod.PackOptions) !@import("../odb/pack.zig").WriteReport {
+    fn write(c: *Corpus, gpa: std.mem.Allocator, io: Io, options: odb_mod.PackOptions) !pack_mod.WriteReport {
         var db = try odb_mod.Odb.openAt(gpa, io, c.objects, .sha1, .{ .probe_timestamp_resolution = false });
         defer db.deinit(io);
         var pack_dir = try c.objects.openDir(io, "pack", .{ .iterate = true });
@@ -194,7 +195,7 @@ test "the tasks allocate nothing, and a batch holds no more than its budget" {
     }
 
     const workers = 4;
-    const Run = struct { name: @import("../hash.zig").Oid, peak: usize };
+    const Run = struct { name: hash.Oid, peak: usize };
     var runs: [2]Run = undefined;
     for ([_]usize{ 256 * 1024, 64 << 20 }, &runs) |budget, *run| {
         var counting: OneThread = .{ .child = gpa, .owner = std.Thread.getCurrentId() };
@@ -218,7 +219,7 @@ test "the tasks allocate nothing, and a batch holds no more than its budget" {
     // once.
     const deflater = @sizeOf(std.compress.flate.Compress) + std.compress.flate.max_window_len;
     const fixed = (workers + 1) * deflater + 64 * 1024 + 64 * 1024;
-    const one_object = 64 * 1024 + @import("../odb/pack.zig").Deflater.room(64 * 1024);
+    const one_object = 64 * 1024 + pack_mod.Deflater.room(64 * 1024);
     if (runs[0].peak > fixed + 2 * one_object) {
         std.debug.print("small budget: peak {d} bytes, bound {d}\n", .{ runs[0].peak, fixed + 2 * one_object });
         return error.TestUnexpectedResult;
@@ -262,7 +263,7 @@ const Interrupt = struct {
     }
 };
 
-fn writeWith(corpus: *Corpus, gpa: std.mem.Allocator, io: Io, options: odb_mod.PackOptions) anyerror!@import("../odb/pack.zig").WriteReport {
+fn writeWith(corpus: *Corpus, gpa: std.mem.Allocator, io: Io, options: odb_mod.PackOptions) anyerror!pack_mod.WriteReport {
     return corpus.write(gpa, io, options);
 }
 
@@ -344,7 +345,7 @@ test "objects repacked from packs are read by several tasks, and the pack is the
 
     var single: Io.Threaded = .init_single_threaded;
     const Repack = struct {
-        fn write(c: *Corpus, a: std.mem.Allocator, opened: Io, read: Io, threads: u16) !@import("../odb/pack.zig").WriteReport {
+        fn write(c: *Corpus, a: std.mem.Allocator, opened: Io, read: Io, threads: u16) !pack_mod.WriteReport {
             // One block cached, so that reading is reading the file.
             var db = try odb_mod.Odb.openAt(a, opened, c.objects, .sha1, .{ .probe_timestamp_resolution = false, .pack_read_cache_bytes = 0 });
             defer db.deinit(opened);
@@ -574,7 +575,7 @@ test "a pack with several search groups is the same on 1, 2, 7 and 16 tasks, any
         .{ .encoding = .offset, .io = single.io(), .threads = 7, .budget = small },
         .{ .encoding = .reference, .io = io, .threads = 7, .budget = small },
     };
-    var serial: [2]@import("../odb/pack.zig").WriteReport = undefined;
+    var serial: [2]pack_mod.WriteReport = undefined;
     for ([_]odb_mod.DeltaEncoding{ .offset, .reference }, &serial) |encoding, *report| {
         report.* = try corpus.write(gpa, io, .{ .threads = 1, .delta = encoding });
         try std.testing.expect(report.deltas > 0);
@@ -687,8 +688,7 @@ const Entries = struct {
     map: hash.Oid.Map(Entry) = .empty,
 
     fn read(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, base: []const u8) !Entries {
-        const pack = @import("../odb/pack.zig");
-        var p = try pack.Pack.open(gpa, io, dir, base, .sha1, .{});
+        var p = try pack_mod.Pack.open(gpa, io, dir, base, .sha1, .{});
         defer p.deinit(io);
         var name: [128]u8 = undefined;
         var e: Entries = .{ .bytes = try dir.readFileAlloc(io, try std.fmt.bufPrint(&name, "{s}.pack", .{base}), gpa, .unlimited) };
@@ -734,7 +734,7 @@ fn onlyPack(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) ![]u8 {
     return error.FileNotFound;
 }
 
-fn repackInto(gpa: std.mem.Allocator, io: Io, repo: *testgit.Repo, out_name: []const u8, options: odb_mod.PackOptions) !@import("../odb/pack.zig").WriteReport {
+fn repackInto(gpa: std.mem.Allocator, io: Io, repo: *testgit.Repo, out_name: []const u8, options: odb_mod.PackOptions) !pack_mod.WriteReport {
     var git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
     var objects = try git_dir.openDir(io, "objects", .{ .iterate = true });
@@ -876,7 +876,7 @@ test "verifying a database checks its packs' entries on several tasks" {
     defer pack_dir.close(io);
     const base = try onlyPack(gpa, io, pack_dir);
     defer gpa.free(base);
-    var p = try @import("../odb/pack.zig").Pack.open(gpa, io, pack_dir, base, .sha1, .{});
+    var p = try pack_mod.Pack.open(gpa, io, pack_dir, base, .sha1, .{});
     defer p.deinit(io);
     const serial = try p.verify(Tasks.wrap(io), null, 0);
     try Tasks.expect(0, 0);

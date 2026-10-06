@@ -7,6 +7,7 @@ const testgit = @import("git.zig");
 const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const odb_mod = @import("../odb.zig");
+const odb_state = @import("../odb/state.zig");
 const pack = @import("../odb/pack.zig");
 const sha1dc = @import("../hash/sha1dc.zig");
 const fs = @import("../repo/fs.zig");
@@ -99,7 +100,7 @@ test "a pack holds both ofs-delta and ref-delta entries and both resolve" {
     defer db.deinit(io);
 
     var saw_ref_delta = false;
-    for (@import("../odb/state.zig").get(db._state).sources.items) |*source| {
+    for (odb_state.get(db._state).sources.items) |*source| {
         for (source.packs.items) |*named| {
             const p = &named.pack;
             var it = p.index.iterate();
@@ -119,7 +120,7 @@ test "a pack holds both ofs-delta and ref-delta entries and both resolve" {
     var db2 = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db2.deinit(io);
     var saw_ofs_delta = false;
-    for (@import("../odb/state.zig").get(db2._state).sources.items) |*source| {
+    for (odb_state.get(db2._state).sources.items) |*source| {
         for (source.packs.items) |*named| {
             const p = &named.pack;
             var it = p.index.iterate();
@@ -1689,9 +1690,6 @@ test "loose objects move into a pack and the pack is the only copy" {
     try repo.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
 
-const worktree_mod = @import("../worktree.zig");
-const repo_mod2 = @import("../repo.zig");
-
 test "a staging pass that writes a pack stages what one that writes loose objects does" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -1699,7 +1697,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
     // The same tree twice, staged both ways, and the two must come out with
     // the same name -- and git must read either of them.
     var trees: [2]Oid = undefined;
-    for ([_]worktree_mod.NewBlobs{ .loose, .pack }, 0..) |where, pass| {
+    for ([_]worktree.NewBlobs{ .loose, .pack }, 0..) |where, pass| {
         var repo_git = try testgit.Repo.init(gpa, io, &.{});
         defer repo_git.deinit();
         for (0..40) |i| {
@@ -1715,7 +1713,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
         try repo_git.writeFile(io, "same-a.txt", "identical\n");
         try repo_git.writeFile(io, "same-b.txt", "identical\n");
 
-        var repo = try repo_mod2.Repository.open(gpa, io, repo_git.dir, .{});
+        var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
         defer repo.deinit(io);
         var rules = try repo.loadIgnore(io);
         defer rules.deinit();
@@ -1724,7 +1722,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
 
         var index = try repo.openIndex(io);
         defer index.deinit();
-        const outcome = try worktree_mod.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
+        const outcome = try worktree.addAll(gpa, io, repo.work_dir.?, &index, &repo.odb, .{
             .rules = wt_rules,
             .new_blobs = where,
         });
@@ -1739,7 +1737,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
             try std.testing.expect(outcome.pack == null);
         }
 
-        trees[pass] = try worktree_mod.writeTree(gpa, io, &index, &repo.odb);
+        trees[pass] = try worktree.writeTree(gpa, io, &index, &repo.odb);
         try index.write(io, repo.git_dir, "index", .{});
 
         // git reads what was written, whichever way it was written.

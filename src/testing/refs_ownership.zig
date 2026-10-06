@@ -19,6 +19,7 @@ const reftable = @import("../refs.zig").reftable;
 const reftablestack = @import("../refs.zig").reftablestack;
 const testgit = @import("git.zig");
 const hash = @import("../hash.zig");
+const repo_mod = @import("../repo.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
 test "one transaction logs each ref in its own words when its edits say so, as git's atomic fetch does, in files and reftable" {
@@ -34,7 +35,7 @@ test "one transaction logs each ref in its own words when its edits say so, as g
         try r.exec(io, &.{ "commit", "-q", "-m", "one" });
         const head_text = try r.line(io, &.{ "rev-parse", "HEAD" });
         defer gpa.free(head_text);
-        var repo = try @import("../repo.zig").Repository.open(gpa, io, r.dir, .{});
+        var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
         defer repo.deinit(io);
         const oid = try Oid.parse(repo.objectFormat(), head_text);
         {

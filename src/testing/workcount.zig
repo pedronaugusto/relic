@@ -7,6 +7,9 @@ const builtin = @import("builtin");
 const testgit = @import("git.zig");
 const hash = @import("../hash.zig");
 const odb_mod = @import("../odb.zig");
+const odb_state = @import("../odb/state.zig");
+const pack_mod = @import("../odb/pack.zig");
+const fs = @import("../repo/fs.zig");
 const worktree = @import("../worktree.zig");
 const repo_mod = @import("../repo.zig");
 
@@ -35,7 +38,7 @@ test "staging and cache-tree reuse count only the work they need" {
         const path = try std.fmt.bufPrint(&path_buf, "d{d}/f{d}.txt", .{ i % directory_count, i });
         const text = try std.fmt.bufPrint(&content, "file {d}\nsome contents that are not all the same\n", .{i});
         try repo_git.writeFile(io, path, text);
-        try @import("../repo/fs.zig").setTimestamps(io, repo_git.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } } });
+        try fs.setTimestamps(io, repo_git.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 * std.time.ns_per_s } } });
     }
 
     var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
@@ -161,7 +164,7 @@ fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Option
     }
     scan.cold_reads = ReadWork.calls;
     scan.cold_read_bytes = ReadWork.bytes;
-    scan.cold_bases = @import("../odb/state.zig").get(db._state).cache.entries.count();
+    scan.cold_bases = odb_state.get(db._state).cache.entries.count();
 
     // A second pass over the same objects, with the delta base cache warm.
     ReadWork.reset();
@@ -174,7 +177,7 @@ fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Option
     }
     scan.warm_reads = ReadWork.calls;
     scan.warm_read_bytes = ReadWork.bytes;
-    scan.warm_bases = @import("../odb/state.zig").get(db._state).cache.entries.count();
+    scan.warm_bases = odb_state.get(db._state).cache.entries.count();
     return scan;
 }
 
@@ -358,7 +361,7 @@ test "loose and packed staging count object writes and deltas reduce pack bytes"
     // must produce the same tree, and the difference between them is the
     // two filesystem calls a loose object costs.
     var trees: [2]hash.Oid = undefined;
-    var packed_report: ?@import("../odb/pack.zig").WriteReport = null;
+    var packed_report: ?pack_mod.WriteReport = null;
 
     for ([_]worktree.NewBlobs{ .loose, .pack }, 0..) |where, pass| {
         var repo_git = try testgit.Repo.init(gpa, io, &.{});

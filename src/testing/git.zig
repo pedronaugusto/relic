@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
@@ -343,7 +344,7 @@ pub const GnupgHome = struct {
         io.random(&random_bytes);
         var suffix: [16]u8 = undefined;
         _ = std.base64.url_safe_no_pad.Encoder.encode(&suffix, &random_bytes);
-        const fixture_root = @import("build_options").gnupg_fixture_root;
+        const fixture_root = build_options.gnupg_fixture_root;
         try Io.Dir.cwd().createDirPath(io, fixture_root);
         const root = try Io.Dir.cwd().realPathFileAlloc(io, fixture_root, gpa);
         defer gpa.free(root);
@@ -423,7 +424,7 @@ pub fn fixtureHook(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, action
     if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(io, parent);
     const executable = if (builtin.os.tag == .windows) try std.fmt.allocPrint(gpa, "{s}.exe", .{path}) else try gpa.dupe(u8, path);
     defer gpa.free(executable);
-    try Io.Dir.cwd().copyFile(@import("build_options").hook_fixture_path, dir, executable, io, .{});
+    try Io.Dir.cwd().copyFile(build_options.hook_fixture_path, dir, executable, io, .{});
     if (builtin.os.tag != .windows) {
         const file = try dir.openFile(io, executable, .{});
         defer file.close(io);
@@ -636,7 +637,7 @@ test "a repository variable in the environment cannot send the harness's git to 
 test "GnuPG test homes use the selected root and clean up independently" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const root = @import("build_options").gnupg_fixture_root;
+    const root = build_options.gnupg_fixture_root;
     var first = try GnupgHome.init(gpa, io);
     defer first.deinit(io);
     const removed = removed: {

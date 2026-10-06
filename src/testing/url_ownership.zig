@@ -10,12 +10,13 @@ const anonymize = @import("../transport/url.zig").anonymize;
 const isLocal = @import("../transport/url.zig").isLocal;
 const testgit = @import("git.zig");
 const hash = @import("../hash.zig");
+const local = @import("../transport/local.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
 test "encoded file URL paths reach the same repository as Git" {
     const gpa = testing.allocator;
     const io = testing.io;
-    var fixture = try @import("git.zig").Repo.init(gpa, io, &.{});
+    var fixture = try testgit.Repo.init(gpa, io, &.{});
     defer fixture.deinit();
     try fixture.exec(io, &.{ "init", "-q", "--bare", "a b%20" });
     const path = try fixture.dir.realPathFileAlloc(io, "a b%20", gpa);
@@ -27,7 +28,7 @@ test "encoded file URL paths reach the same repository as Git" {
     const text = try std.fmt.allocPrint(gpa, "file://{s}", .{escaped});
     defer gpa.free(text);
     try fixture.exec(io, &.{ "ls-remote", text });
-    var remote = try @import("../transport/local.zig").Remote.open(gpa, io, text);
+    var remote = try local.Remote.open(gpa, io, text);
     defer remote.deinit(io);
     try testing.expect(remote.repo.isBare());
 }

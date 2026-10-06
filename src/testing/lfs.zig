@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
@@ -941,7 +942,7 @@ pub fn installProgram(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, sou
 }
 
 fn installTool(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, kind: []const u8, values: []const []const u8) ![]u8 {
-    const path = try installProgram(gpa, io, dir, name, @import("build_options").lfs_test_tool_path);
+    const path = try installProgram(gpa, io, dir, name, build_options.lfs_test_tool_path);
     errdefer gpa.free(path);
     const sidecar = try std.fmt.allocPrint(gpa, "{s}.fixture", .{path});
     defer gpa.free(sidecar);
@@ -958,7 +959,7 @@ fn installTool(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, kind: []co
 /// each connection was asked into `log_dir`. `extra` goes to it as well:
 /// `--user=<name>`, `--no-version`.
 pub fn transferScript(gpa: Allocator, io: Io, dir: Io.Dir, root: []const u8, log_dir: []const u8, extra: []const u8) ![]u8 {
-    return installTool(gpa, io, dir, "git-lfs-transfer", "transfer", &.{ @import("build_options").lfs_transfer_helper_path, root, log_dir, extra });
+    return installTool(gpa, io, dir, "git-lfs-transfer", "transfer", &.{ build_options.lfs_transfer_helper_path, root, log_dir, extra });
 }
 
 /// What every connection to the stand-in `git-lfs-transfer` was asked,
