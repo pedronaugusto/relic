@@ -102,46 +102,10 @@ fn build(comptime alphabet: Alphabet, comptime table_bits: u6, table: []Entry, l
     const sub_bits = 15 - table_bits;
     var count = counted.*;
     count[0] = 0;
-    var max: usize = 0;
-    for (1..16) |l| {
-        if (count[l] != 0) max = l;
-    }
     const main_len = @as(usize, 1) << table_bits;
-    if (max == 0) {
-        // No codes at all: anything read is an error.
-        @memset(table[0..main_len], entry(.invalid, 1, 0, 0));
-        return;
-    }
-    var left: i32 = 1;
-    for (1..16) |l| {
-        left <<= 1;
-        left -= count[l];
-        if (left < 0) return error.CorruptStream;
-    }
-    if (left > 0) {
-        // Incomplete: only a single one-bit code, and never the precode. It
-        // is code 0; reading a 1 there is an error.
-        if (alphabet == .precode or max != 1) return error.CorruptStream;
-        const sym = std.mem.findScalar(u8, lens, 1).?;
-        const e = symbolEntry(alphabet, sym, 1);
-        var i: usize = 0;
-        while (i < main_len) : (i += 2) {
-            table[i] = e;
-            table[i + 1] = entry(.invalid, 1, 0, 0);
-        }
-        return;
-    }
-
-    // The symbols by length, then by value: canonical order.
-    var offset: [16]u16 = undefined;
-    offset[1] = 0;
-    for (2..16) |l| offset[l] = offset[l - 1] + count[l - 1];
+    if (try buildDegenerate(alphabet, table_bits, table, lens, &count)) return;
     var sorted: [288]u16 = undefined;
-    for (lens, 0..) |l, sym| {
-        if (l == 0) continue;
-        sorted[offset[l]] = @intCast(sym);
-        offset[l] += 1;
-    }
+    canonicalOrder(lens, &count, &sorted);
     const results = comptime symbolEntries(alphabet);
 
     // The code is complete. Its codes are taken in canonical order, held
@@ -221,6 +185,54 @@ fn build(comptime alphabet: Alphabet, comptime table_bits: u6, table: []Entry, l
             len += 1;
             remaining = count[len];
         }
+    }
+}
+
+/// Fill `table` for a code with no codes at all, or with only a single
+/// one-bit code, and say whether it was one of those; refuse a code that
+/// is over-subscribed, or incomplete otherwise.
+fn buildDegenerate(comptime alphabet: Alphabet, comptime table_bits: u6, table: []Entry, lens: []const u8, count: *const [16]u16) Error!bool {
+    std.debug.assert(count[0] == 0);
+    var max: usize = 0;
+    for (1..16) |l| {
+        if (count[l] != 0) max = l;
+    }
+    const main_len = @as(usize, 1) << table_bits;
+    if (max == 0) {
+        // No codes at all: anything read is an error.
+        @memset(table[0..main_len], entry(.invalid, 1, 0, 0));
+        return true;
+    }
+    var left: i32 = 1;
+    for (1..16) |l| {
+        left <<= 1;
+        left -= count[l];
+        if (left < 0) return error.CorruptStream;
+    }
+    if (left == 0) return false;
+    // Incomplete: only a single one-bit code, and never the precode. It is
+    // code 0; reading a 1 there is an error.
+    if (alphabet == .precode or max != 1) return error.CorruptStream;
+    const sym = std.mem.findScalar(u8, lens, 1).?;
+    const e = symbolEntry(alphabet, sym, 1);
+    var i: usize = 0;
+    while (i < main_len) : (i += 2) {
+        table[i] = e;
+        table[i + 1] = entry(.invalid, 1, 0, 0);
+    }
+    return true;
+}
+
+/// The symbols of `lens` by length, then by value: canonical order.
+fn canonicalOrder(lens: []const u8, count: *const [16]u16, sorted: *[288]u16) void {
+    std.debug.assert(lens.len <= sorted.len);
+    var offset: [16]u16 = undefined;
+    offset[1] = 0;
+    for (2..16) |l| offset[l] = offset[l - 1] + count[l - 1];
+    for (lens, 0..) |l, sym| {
+        if (l == 0) continue;
+        sorted[offset[l]] = @intCast(sym);
+        offset[l] += 1;
     }
 }
 

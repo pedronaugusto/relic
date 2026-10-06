@@ -317,7 +317,6 @@ pub fn receive(
     options: Options,
 ) Self.Error!Result {
     const kind = db.objectFormat();
-    const raw_len = kind.rawLen();
 
     var temp_buf: [64]u8 = undefined;
     const temp = fs.tempName(io, &temp_buf, "tmp_pack_");
@@ -339,26 +338,9 @@ pub fn receive(
 
     var indexer: Indexer = try .init(gpa, io, db, file, options);
     defer indexer.deinit();
-    const parsed_end = indexer.parse(&tee, count) catch |err| switch (err) {
-        error.OutOfMemory, error.Canceled, error.ReadFailed, error.PackTooLarge => return err,
-        // A damaged stream is named by its checksum, as when it was read
-        // whole before any entry was looked at.
-        else => {
-            tee.drain() catch return err;
-            const whole = tee.finish();
-            if (whole.size >= 12 + raw_len and !whole.trailerMatches(kind)) return error.PackChecksumMismatch;
-            return err;
-        },
-    };
-    try tee.drain();
-    const copied = tee.finish();
-    if (copied.size < 12 + raw_len) return error.TruncatedPack;
-    if (!copied.trailerMatches(kind)) return error.PackChecksumMismatch;
-    // unreachable: the tail is cut to the format's raw length
-    const trailer = Oid.fromRaw(kind, copied.tail[0..raw_len]) catch unreachable;
-    const body_end = copied.size - raw_len;
-    if (parsed_end > body_end) return error.TruncatedPack;
-    if (parsed_end != body_end) return error.PackTrailingGarbage;
+    const read = try readEntries(&tee, &indexer, count, kind);
+    const trailer = read.trailer;
+    const body_end = read.body_end;
 
     if (count == 0) return .{ .name = null, .objects = 0, .deltas = 0, .appended = 0 };
     try indexer.findBases();
@@ -372,23 +354,8 @@ pub fn receive(
     }
     try indexer.checkFound();
 
-    // Every name once: the index cannot hold one twice.
-    const index_entries = try gpa.alloc(pack.IndexEntry, indexer.entries.items.len);
+    const index_entries = try indexEntries(gpa, &indexer, options);
     defer gpa.free(index_entries);
-    for (indexer.entries.items, index_entries) |entry, *out| {
-        out.* = .{ .oid = entry.oid, .offset = entry.offset, .crc = entry.crc };
-    }
-    std.mem.sort(pack.IndexEntry, index_entries, {}, struct {
-        fn lessThan(_: void, a: pack.IndexEntry, b: pack.IndexEntry) bool {
-            return a.oid.order(b.oid) == .lt;
-        }
-    }.lessThan);
-    for (index_entries[1..], 0..) |entry, i| {
-        if (entry.oid.eql(index_entries[i].oid)) {
-            if (options.diagnostic) |d| d.* = .{ .oid = entry.oid };
-            return error.DuplicateObject;
-        }
-    }
 
     switch (options.sync) {
         .none => {},
@@ -447,6 +414,55 @@ pub fn receive(
     if (options.sync == .batch) try fs.syncBarrier(io, pack_dir);
     try db.refresh(io);
     return result;
+}
+
+/// Read every entry of the stream through `tee` into `indexer`, then the
+/// trailer: the stream's own checksum, which must end the entries exactly.
+fn readEntries(tee: *Tee, indexer: *Indexer, count: u32, kind: Kind) Error!struct { trailer: Oid, body_end: u64 } {
+    const raw_len = kind.rawLen();
+    const parsed_end = indexer.parse(tee, count) catch |err| switch (err) {
+        error.OutOfMemory, error.Canceled, error.ReadFailed, error.PackTooLarge => return err,
+        // A damaged stream is named by its checksum, as when it was read
+        // whole before any entry was looked at.
+        else => {
+            tee.drain() catch return err;
+            const whole = tee.finish();
+            if (whole.size >= 12 + raw_len and !whole.trailerMatches(kind)) return error.PackChecksumMismatch;
+            return err;
+        },
+    };
+    try tee.drain();
+    const copied = tee.finish();
+    if (copied.size < 12 + raw_len) return error.TruncatedPack;
+    if (!copied.trailerMatches(kind)) return error.PackChecksumMismatch;
+    // unreachable: the tail is cut to the format's raw length
+    const trailer = Oid.fromRaw(kind, copied.tail[0..raw_len]) catch unreachable;
+    const body_end = copied.size - raw_len;
+    if (parsed_end > body_end) return error.TruncatedPack;
+    if (parsed_end != body_end) return error.PackTrailingGarbage;
+    return .{ .trailer = trailer, .body_end = body_end };
+}
+
+/// The index's entries, sorted by name. Every name once: the index cannot
+/// hold one twice. The caller frees them.
+fn indexEntries(gpa: Allocator, indexer: *const Indexer, options: Options) Error![]pack.IndexEntry {
+    const index_entries = try gpa.alloc(pack.IndexEntry, indexer.entries.items.len);
+    errdefer gpa.free(index_entries);
+    for (indexer.entries.items, index_entries) |entry, *out| {
+        out.* = .{ .oid = entry.oid, .offset = entry.offset, .crc = entry.crc };
+    }
+    std.mem.sort(pack.IndexEntry, index_entries, {}, struct {
+        fn lessThan(_: void, a: pack.IndexEntry, b: pack.IndexEntry) bool {
+            return a.oid.order(b.oid) == .lt;
+        }
+    }.lessThan);
+    for (index_entries[1..], 0..) |entry, i| {
+        if (entry.oid.eql(index_entries[i].oid)) {
+            if (options.diagnostic) |d| d.* = .{ .oid = entry.oid };
+            return error.DuplicateObject;
+        }
+    }
+    return index_entries;
 }
 
 /// Rename `from` to `to` beside the pack already at `pack_name`. When the

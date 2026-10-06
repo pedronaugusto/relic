@@ -1407,60 +1407,7 @@ pub const Index = struct {
                 block_count = 0;
                 starts_block = true;
             }
-            var fixed: [40 + hash.max_raw_len + 4]u8 = @splat(0);
-
-            // git truncates a racily-clean entry's recorded size to zero, so
-            // that a later stat comparison cannot decide the file is
-            // unchanged on the strength of a size that was never checked.
-            var stat = entry.stat;
-            if (index.isRacy(entry) and entry.stage == 0) {
-                const changed = if (options.racy) |r| r.changed(r.context, index, entry) else true;
-                if (changed) stat.size = 0;
-            }
-
-            std.mem.writeInt(u32, fixed[0..4], stat.ctime_sec, .big);
-            std.mem.writeInt(u32, fixed[4..8], stat.ctime_nsec, .big);
-            std.mem.writeInt(u32, fixed[8..12], stat.mtime_sec, .big);
-            std.mem.writeInt(u32, fixed[12..16], stat.mtime_nsec, .big);
-            std.mem.writeInt(u32, fixed[16..20], stat.dev, .big);
-            std.mem.writeInt(u32, fixed[20..24], stat.ino, .big);
-            std.mem.writeInt(u32, fixed[24..28], entry.mode.raw(), .big);
-            std.mem.writeInt(u32, fixed[28..32], stat.uid, .big);
-            std.mem.writeInt(u32, fixed[32..36], stat.gid, .big);
-            std.mem.writeInt(u32, fixed[36..40], stat.size, .big);
-            @memcpy(fixed[40..][0..raw_len], entry.oid.raw());
-
-            const extended = entry.needsExtendedFlags() and version >= 3;
-            var flags: u16 = @intCast(@min(entry.path.len, 0x0fff));
-            flags |= @as(u16, entry.stage) << 12;
-            if (entry.assume_valid) flags |= 0x8000;
-            if (extended) flags |= 0x4000;
-            std.mem.writeInt(u16, fixed[40 + raw_len ..][0..2], flags, .big);
-            var fixed_len: usize = 40 + raw_len + 2;
-            if (extended) {
-                var extra: u16 = 0;
-                if (entry.skip_worktree) extra |= 0x4000;
-                if (entry.intent_to_add) extra |= 0x2000;
-                std.mem.writeInt(u16, fixed[fixed_len..][0..2], extra, .big);
-                fixed_len += 2;
-            }
-            try out.writeAll(fixed[0..fixed_len]);
-
-            if (version >= 4) {
-                const shared = if (starts_block) 0 else commonPrefixLen(previous_path, entry.path);
-                var varint_buf: [16]u8 = undefined;
-                const strip = varint.writeOffset(&varint_buf, previous_path.len - shared);
-                try out.writeAll(strip);
-                try out.writeAll(entry.path[shared..]);
-                try out.writeByte(0);
-            } else {
-                try out.writeAll(entry.path);
-                // One to eight NULs: enough to pad the entry to a multiple
-                // of eight bytes, and never fewer than the one that
-                // terminates the name.
-                const padded = (fixed_len + entry.path.len + 1 + 7) & ~@as(usize, 7);
-                try out.splatByteAll(0, padded - fixed_len - entry.path.len);
-            }
+            try index.writeEntry(out, entry, version, previous_path, starts_block, options);
             previous_path = entry.path;
             block_count += 1;
         }
@@ -1472,6 +1419,89 @@ pub const Index = struct {
         // number `EOIE` carries.
         const extensions_at: u32 = @intCast(body.written().len);
 
+        try index.writeExtensions(out, table.items, extensions_at, options);
+
+        try w.writeAll(body.written());
+        if (options.skip_hash) {
+            const zeros: [hash.max_raw_len]u8 = @splat(0);
+            try w.writeAll(zeros[0..raw_len]);
+        } else {
+            var hasher: hash.Hasher = .init(index.kind);
+            hasher.update(body.written());
+            const checksum = hasher.final();
+            try w.writeAll(checksum.raw());
+        }
+        try w.flush();
+    }
+
+    /// One entry as `writeTo` lays it down at `version`: the fixed part,
+    /// then the path, prefix-compressed against `previous` from version 4
+    /// on unless the entry starts an `IEOT` block, and NUL-padded to eight
+    /// bytes before it.
+    fn writeEntry(index: *const Index, out: *Io.Writer, entry: Entry, version: u32, previous: []const u8, starts_block: bool, options: WriteOptions) Io.Writer.Error!void {
+        std.debug.assert(entry.path.len <= std.math.maxInt(u16));
+        std.debug.assert(version >= 3 or !entry.needsExtendedFlags());
+        const raw_len = index.kind.rawLen();
+        var fixed: [40 + hash.max_raw_len + 4]u8 = @splat(0);
+
+        // git truncates a racily-clean entry's recorded size to zero, so
+        // that a later stat comparison cannot decide the file is
+        // unchanged on the strength of a size that was never checked.
+        var stat = entry.stat;
+        if (index.isRacy(entry) and entry.stage == 0) {
+            const changed = if (options.racy) |r| r.changed(r.context, index, entry) else true;
+            if (changed) stat.size = 0;
+        }
+
+        std.mem.writeInt(u32, fixed[0..4], stat.ctime_sec, .big);
+        std.mem.writeInt(u32, fixed[4..8], stat.ctime_nsec, .big);
+        std.mem.writeInt(u32, fixed[8..12], stat.mtime_sec, .big);
+        std.mem.writeInt(u32, fixed[12..16], stat.mtime_nsec, .big);
+        std.mem.writeInt(u32, fixed[16..20], stat.dev, .big);
+        std.mem.writeInt(u32, fixed[20..24], stat.ino, .big);
+        std.mem.writeInt(u32, fixed[24..28], entry.mode.raw(), .big);
+        std.mem.writeInt(u32, fixed[28..32], stat.uid, .big);
+        std.mem.writeInt(u32, fixed[32..36], stat.gid, .big);
+        std.mem.writeInt(u32, fixed[36..40], stat.size, .big);
+        @memcpy(fixed[40..][0..raw_len], entry.oid.raw());
+
+        const extended = entry.needsExtendedFlags() and version >= 3;
+        var flags: u16 = @intCast(@min(entry.path.len, 0x0fff));
+        flags |= @as(u16, entry.stage) << 12;
+        if (entry.assume_valid) flags |= 0x8000;
+        if (extended) flags |= 0x4000;
+        std.mem.writeInt(u16, fixed[40 + raw_len ..][0..2], flags, .big);
+        var fixed_len: usize = 40 + raw_len + 2;
+        if (extended) {
+            var extra: u16 = 0;
+            if (entry.skip_worktree) extra |= 0x4000;
+            if (entry.intent_to_add) extra |= 0x2000;
+            std.mem.writeInt(u16, fixed[fixed_len..][0..2], extra, .big);
+            fixed_len += 2;
+        }
+        try out.writeAll(fixed[0..fixed_len]);
+
+        if (version >= 4) {
+            const shared = if (starts_block) 0 else commonPrefixLen(previous, entry.path);
+            var varint_buf: [16]u8 = undefined;
+            const strip = varint.writeOffset(&varint_buf, previous.len - shared);
+            try out.writeAll(strip);
+            try out.writeAll(entry.path[shared..]);
+            try out.writeByte(0);
+        } else {
+            try out.writeAll(entry.path);
+            // One to eight NULs: enough to pad the entry to a multiple
+            // of eight bytes, and never fewer than the one that
+            // terminates the name.
+            const padded = (fixed_len + entry.path.len + 1 + 7) & ~@as(usize, 7);
+            try out.splatByteAll(0, padded - fixed_len - entry.path.len);
+        }
+    }
+
+    /// The extensions after the entries, in git's order, `EOIE` last when
+    /// asked for: it carries `extensions_at`, where the entries end.
+    fn writeExtensions(index: *Index, out: *Io.Writer, table: []const OffsetBlock, extensions_at: u32, options: WriteOptions) (Io.Writer.Error || WriteError)!void {
+        const raw_len = index.kind.rawLen();
         // `EOIE` also carries a hash over the header of every extension
         // written before it -- the four signature bytes and the four size
         // bytes, and none of the contents. It is fed as they go out.
@@ -1479,13 +1509,13 @@ pub const Index = struct {
 
         // `IEOT` goes first, so that a reader looking for it has the least
         // to walk past. It is git's own order.
-        if (table.items.len != 0) {
+        if (table.len != 0) {
             var ieot_body: Io.Writer.Allocating = .init(index.gpa);
             defer ieot_body.deinit();
             var version_bytes: [4]u8 = undefined;
             std.mem.writeInt(u32, &version_bytes, ieot_version, .big);
             try ieot_body.writer.writeAll(&version_bytes);
-            for (table.items) |block| {
+            for (table) |block| {
                 var pair: [8]u8 = undefined;
                 std.mem.writeInt(u32, pair[0..4], block.offset, .big);
                 std.mem.writeInt(u32, pair[4..8], block.count, .big);
@@ -1538,18 +1568,6 @@ pub const Index = struct {
             @memcpy(eoie_body[4..][0..raw_len], digest.raw());
             try writeExtension(out, "EOIE", eoie_body[0 .. 4 + raw_len]);
         }
-
-        try w.writeAll(body.written());
-        if (options.skip_hash) {
-            const zeros: [hash.max_raw_len]u8 = @splat(0);
-            try w.writeAll(zeros[0..raw_len]);
-        } else {
-            var hasher: hash.Hasher = .init(index.kind);
-            hasher.update(body.written());
-            const checksum = hasher.final();
-            try w.writeAll(checksum.raw());
-        }
-        try w.flush();
     }
 
     fn writeFsmonitor(index: *Index, w: *Io.Writer, token: []const u8) (Allocator.Error || Io.Writer.Error)!void {

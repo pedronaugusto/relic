@@ -21,28 +21,12 @@
       "lines": 185,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
-    "src/index.zig:writeTo": {
-      "lines": 198,
-      "reason": "Existing finish implementation before adopting preflight; this exact bound cannot grow and shrinks when split."
-    },
-    "src/odb/indexpack.zig:receive": {
-      "lines": 142,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
-    "src/odb/inflate.zig:build": {
-      "lines": 125,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
     "src/testing/lfs/tool.zig:main": {
       "lines": 122,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
     "src/testing/lfs/transfer.zig:main": {
       "lines": 180,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    },
-    "src/odb.zig:verifyPack": {
-      "lines": 127,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     },
     "src/diff/rename.zig:GitMap": {
