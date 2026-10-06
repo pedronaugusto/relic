@@ -2314,6 +2314,9 @@ pub fn writeIndexFile(
     sync: fs.Sync,
 ) Self.WriteError!u64 {
     std.mem.sort(WrittenEntry, entries, {}, lessThanWritten);
+    // The names rise, each once: what `Index.parse` checks before anything
+    // is looked up.
+    if (entries.len > 1) for (1..entries.len) |i| std.debug.assert(entries[i - 1].oid.order(entries[i].oid) == .lt);
 
     const raw_len = kind.rawLen();
 
@@ -2351,6 +2354,7 @@ pub fn writeIndexFile(
         running += slot.*;
         slot.* = running;
     }
+    std.debug.assert(running == entries.len);
     for (fanout) |value| {
         var bytes: [4]u8 = undefined;
         std.mem.writeInt(u32, &bytes, value, .big);
@@ -2387,6 +2391,9 @@ pub fn writeIndexFile(
     try Emit.go(out, &hasher, &written, pack_checksum.raw()[0..raw_len]);
     const own = hasher.final();
     written += raw_len;
+    // The layout `Index.parse` reads back: header, fanout, names, CRCs,
+    // offsets, large offsets, two checksums.
+    std.debug.assert(written == 8 + 1024 + entries.len * (raw_len + 8) + large.items.len * 8 + 2 * raw_len);
     try out.writeAll(own.raw()[0..raw_len]);
     try out.flush();
     switch (sync) {

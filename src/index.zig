@@ -1355,6 +1355,11 @@ pub const Index = struct {
     /// a test comparing them against git's, for instance.
     pub fn writeTo(index: *Index, w: *Io.Writer, options: WriteOptions) (Io.Writer.Error || WriteError)!void {
         const version = index.versionFor(options);
+        std.debug.assert(version >= 2);
+        std.debug.assert(version <= 4);
+        // The entries rise, each path and stage once: what reading the
+        // index back checks.
+        if (index.entries.items.len > 1) for (1..index.entries.items.len) |i| std.debug.assert(Entry.order(index.entries.items[i - 1], index.entries.items[i]) == .lt);
         if (version == 2) {
             for (index.entries.items) |entry| {
                 if (entry.needsExtendedFlags()) return error.ExtendedFlagsRequireVersion3;

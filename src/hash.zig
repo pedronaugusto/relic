@@ -230,6 +230,15 @@ pub const Hasher = struct {
         sha256: std.crypto.hash.sha2.Sha256,
     };
 
+    // `final` writes each digest straight into an `Oid`'s bytes, its length
+    // the format's raw length.
+    comptime {
+        std.debug.assert(sha1.Sha1.digest_length == Kind.sha1.rawLen());
+        std.debug.assert(sha1dc.Sha1Dc.digest_length == Kind.sha1.rawLen());
+        std.debug.assert(std.crypto.hash.sha2.Sha256.digest_length == Kind.sha256.rawLen());
+        for (std.enums.values(Kind)) |k| std.debug.assert(k.rawLen() <= max_raw_len);
+    }
+
     /// How a name is taken, beyond which hash takes it.
     pub const Options = struct {
         /// Whether SHA-1 additionally checks every block for the signature

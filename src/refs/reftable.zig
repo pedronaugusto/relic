@@ -1280,7 +1280,12 @@ const Writer = struct {
         }
         std.mem.writeInt(u32, footer[at..][0..4], std.hash.Crc32.hash(footer[0..at]), .big);
         at += 4;
+        // The footer `open` reads back from the end: the header again, five
+        // offsets and the CRC, its length fixed by the version.
+        std.debug.assert(at == footerSize(w.version));
         try w.paddedWrite(footer[0..at], 0);
+        std.debug.assert(w.out.items.len >= headerSize(w.version) + footerSize(w.version));
+        std.debug.assert(std.mem.eql(u8, w.out.items[0..4], magic));
         return w.out.toOwnedSlice(w.gpa);
     }
 };

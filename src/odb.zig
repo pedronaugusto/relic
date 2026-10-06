@@ -2478,6 +2478,8 @@ pub const ObjectStream = struct {
 
     /// Feed bytes, hashing as they go.
     pub fn write(s: *ObjectStream, bytes: []const u8) Error!void {
+        std.debug.assert(!s.finished);
+        std.debug.assert(s.file_open);
         if (bytes.len > s.remaining) return error.CorruptLooseObject;
         s.hasher.update(bytes);
         s.remaining -= bytes.len;
@@ -2486,6 +2488,8 @@ pub const ObjectStream = struct {
 
     /// Close the object and put it in the database. Returns its name.
     pub fn finish(s: *ObjectStream, io: Io) Error!Oid {
+        std.debug.assert(!s.finished);
+        std.debug.assert(s.file_open);
         if (s.remaining != 0) return error.CorruptLooseObject;
         try s.compress.writer.flush();
         try s.compress.finish();

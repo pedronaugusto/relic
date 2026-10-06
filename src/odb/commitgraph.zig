@@ -581,6 +581,14 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, commits: []const WriteCommit, opt
         total += n;
         try buffers[0].int(u32, total);
     }
+    // The fixed-width chunks `parse` indexes by position: a name, and a
+    // tree with two parents and a date, per commit; a generation and a
+    // Bloom filter end each when present.
+    std.debug.assert(total == commits.len);
+    std.debug.assert(buffers[1].bytes.items.len == commits.len * kind.rawLen());
+    std.debug.assert(buffers[2].bytes.items.len == commits.len * (kind.rawLen() + 16));
+    std.debug.assert(!options.generations or buffers[3].bytes.items.len == commits.len * 4);
+    std.debug.assert(options.changed_paths == null or buffers[6].bytes.items.len == commits.len * 4);
     for (options.bases) |base| {
         if (base.kind != kind) return error.InvalidGraphInput;
         try buffers[8].add(base.raw());

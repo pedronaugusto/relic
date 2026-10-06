@@ -382,6 +382,14 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, packs: []const WritePack, options
             large_index += 1;
         }
     }
+    // What `parse` and `nameAt` index by position: the names rising, one
+    // fixed-width name and one pack-and-offset pair per object, and the
+    // pack names padded to four bytes.
+    std.debug.assert(total == entries.items.len);
+    if (entries.items.len > 1) for (1..entries.items.len) |i| std.debug.assert(entries.items[i - 1].oid.order(entries.items[i].oid) == .lt);
+    std.debug.assert(buffers[0].bytes.items.len % 4 == 0);
+    std.debug.assert(buffers[2].bytes.items.len == entries.items.len * kind.rawLen());
+    std.debug.assert(buffers[3].bytes.items.len == entries.items.len * 8);
     if (options.reverse_index) {
         const reverse = try arena.alloc(u32, entries.items.len);
         for (reverse, 0..) |*n, i| n.* = @intCast(i);
