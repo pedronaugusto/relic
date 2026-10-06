@@ -718,28 +718,36 @@ pub fn GitMap(comptime V: type) type {
         }
 
         /// A walk in git's order.
-        pub const Iterator = struct {
-            map: *const Self,
-            bucket: usize = 0,
-            at: ?u32 = null,
-
-            /// The next entry, or `null`.
-            pub fn next(it: *Iterator) ?*const Node {
-                while (true) {
-                    if (it.at) |i| {
-                        it.at = it.map.nodes.items[i].next;
-                        return &it.map.nodes.items[i];
-                    }
-                    if (it.bucket >= it.map.table.len) return null;
-                    it.at = it.map.table[it.bucket];
-                    it.bucket += 1;
-                }
-            }
-        };
+        pub const Iterator = GitMapIterator(Self);
 
         /// Every entry, in git's order.
         pub fn iterator(self: *const Self) Iterator {
             return .{ .map = self };
+        }
+    };
+}
+
+/// A walk over a `GitMap` in git's order: bucket by bucket from the first,
+/// each bucket's list newest first.
+pub fn GitMapIterator(comptime Map: type) type {
+    return struct {
+        const Self = @This();
+
+        map: *const Map,
+        bucket: usize = 0,
+        at: ?u32 = null,
+
+        /// The next entry, or `null`.
+        pub fn next(it: *Self) ?*const Map.Node {
+            while (true) {
+                if (it.at) |i| {
+                    it.at = it.map.nodes.items[i].next;
+                    return &it.map.nodes.items[i];
+                }
+                if (it.bucket >= it.map.table.len) return null;
+                it.at = it.map.table[it.bucket];
+                it.bucket += 1;
+            }
         }
     };
 }
