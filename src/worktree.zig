@@ -737,7 +737,7 @@ pub const SubmoduleState = struct {
 /// and runs a status inside, recursively.
 pub const SubmoduleProbe = struct {
     context: *anyopaque,
-    inspectFn: *const fn (context: *anyopaque, io: Io, path: []const u8, recorded: Oid) Error!SubmoduleState,
+    inspectFn: *const fn (io: Io, context: *anyopaque, path: []const u8, recorded: Oid) Error!SubmoduleState,
     /// Whether a gitlink whose index entry differs from `HEAD`'s is left out
     /// too. `--ignore-submodules=all` asks for that and no configured
     /// setting can: git always shows a staged submodule, so that one added
@@ -747,7 +747,7 @@ pub const SubmoduleProbe = struct {
     /// What the submodule at `path` holds, against the commit the index
     /// records for it, already filtered by what the settings ignore.
     pub fn inspect(p: SubmoduleProbe, io: Io, path: []const u8, recorded: Oid) Error!SubmoduleState {
-        return p.inspectFn(p.context, io, path, recorded);
+        return p.inspectFn(io, p.context, path, recorded);
     }
 };
 

@@ -976,11 +976,11 @@ test "repository format and ref cache state have no writable public fields" {
 
 test "rule loaders preserve malformed case policy and allocation failures" {
     const Load = struct {
-        fn ignoreRules(r: *repo_mod.Repository, io: Io) !void {
+        fn ignoreRules(io: Io, r: *repo_mod.Repository) !void {
             var rules = try r.loadIgnore(io);
             defer rules.deinit();
         }
-        fn attributesRules(r: *repo_mod.Repository, io: Io) !void {
+        fn attributesRules(io: Io, r: *repo_mod.Repository) !void {
             var rules = try r.loadAttrs(io);
             defer rules.deinit();
         }
@@ -992,15 +992,15 @@ test "rule loaders preserve malformed case policy and allocation failures" {
     var r = try repo_mod.Repository.init(gpa, io, tmp.dir, .{});
     defer r.deinit(io);
     try r.editConfig(&.{.{ .set = .{ .name = "core.ignorecase", .value = "maybe" } }}, null);
-    try std.testing.expectError(error.NotABoolean, Load.ignoreRules(&r, io));
-    try std.testing.expectError(error.NotABoolean, Load.attributesRules(&r, io));
+    try std.testing.expectError(error.NotABoolean, Load.ignoreRules(io, &r));
+    try std.testing.expectError(error.NotABoolean, Load.attributesRules(io, &r));
     try r.editConfig(&.{.{ .set = .{ .name = "core.ignorecase", .value = "true" } }}, null);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     config_state.get(r._config).gpa = failing.allocator();
     defer config_state.get(r._config).gpa = gpa;
-    try std.testing.expectError(error.OutOfMemory, Load.ignoreRules(&r, io));
+    try std.testing.expectError(error.OutOfMemory, Load.ignoreRules(io, &r));
     failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    try std.testing.expectError(error.OutOfMemory, Load.attributesRules(&r, io));
+    try std.testing.expectError(error.OutOfMemory, Load.attributesRules(io, &r));
 }
 
 test "required filter discovery keeps full names and resource failures" {

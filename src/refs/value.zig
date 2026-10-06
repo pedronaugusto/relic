@@ -69,7 +69,7 @@ pub const Peeler = struct {
     context: *anyopaque,
     /// The object `oid` peels to when it is an annotated tag, or `null`
     /// when it is not one or cannot be read.
-    peel: *const fn (context: *anyopaque, io: Io, oid: Oid) ?Oid,
+    peel: *const fn (io: Io, context: *anyopaque, oid: Oid) ?Oid,
 };
 
 /// What a ref points at.

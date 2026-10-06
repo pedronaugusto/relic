@@ -811,7 +811,7 @@ pub const StatusProbe = struct {
         return .{ .context = p, .inspectFn = inspect, .ignore_staged = p.options.ignore == .all };
     }
 
-    fn inspect(context: *anyopaque, io: Io, path: []const u8, recorded: Oid) worktree.Error!worktree.SubmoduleState {
+    fn inspect(io: Io, context: *anyopaque, path: []const u8, recorded: Oid) worktree.Error!worktree.SubmoduleState {
         const p: *StatusProbe = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a StatusProbe
         return p.inspectPath(io, path, recorded) catch |err| return p.fail(path, err);
     }
@@ -1348,10 +1348,10 @@ pub const Transport = struct {
     /// non-bare repository with its objects, its refs, `HEAD` on the
     /// default branch, and `remote.origin` configured. `update` writes the
     /// `.git` file and `core.worktree` itself, and checks out the commit.
-    cloneFn: *const fn (context: *anyopaque, gpa: Allocator, io: Io, url: []const u8, git_dir: Io.Dir) TransportError!void,
+    cloneFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, url: []const u8, git_dir: Io.Dir) TransportError!void,
     /// Bring `want` into `repo`, a submodule's repository, from `remote`,
     /// its default remote — what git's fetch inside the submodule does.
-    fetchFn: *const fn (context: *anyopaque, gpa: Allocator, io: Io, repo: *Repository, remote: []const u8, want: Oid) TransportError!void,
+    fetchFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: Oid) TransportError!void,
 };
 
 /// Errors a `Transport` may give. Its own detail is its to keep.
@@ -1548,7 +1548,7 @@ fn populate(
         try repo.git_dir.createDirPath(io, target);
         const dir = try repo.git_dir.openDir(io, target, .{ .iterate = true });
         errdefer dir.close(io);
-        transport.cloneFn(transport.context, gpa, io, url, dir) catch |err| switch (err) {
+        transport.cloneFn(gpa, io, transport.context, url, dir) catch |err| switch (err) {
             error.TransportFailed => return refuse(options.refusal, display, url, error.TransportFailed),
             else => |e| return e,
         };
@@ -1590,7 +1590,7 @@ fn ensureCommit(arena: Allocator, gpa: Allocator, io: Io, sub: *Repository, comm
     var hex: [hash.max_hex_len]u8 = undefined;
     const transport = options.transport orelse return refuse(options.refusal, display, commit.hex(&hex), error.CommitMissing);
     const remote = try defaultRemote(arena, io, sub);
-    transport.fetchFn(transport.context, gpa, io, sub, remote, commit) catch |err| switch (err) {
+    transport.fetchFn(gpa, io, transport.context, sub, remote, commit) catch |err| switch (err) {
         error.TransportFailed => return refuse(options.refusal, display, remote, error.TransportFailed),
         else => |e| return e,
     };
@@ -1744,6 +1744,25 @@ pub const WalkOptions = struct {
     refusal: ?*Refusal = null,
 };
 
+/// One repository a `Walk` is inside: its listing and how far through it.
+const WalkFrame = struct {
+    /// `null` for the top superproject, which the caller owns.
+    repo_storage: ?Repository,
+    repo: *Repository,
+    listing: Listing,
+    next: usize = 0,
+    prefix: []const u8,
+    depth: u32,
+    arena: std.heap.ArenaAllocator,
+
+    fn destroy(frame: *WalkFrame, gpa: Allocator, io: Io) void {
+        frame.listing.deinit();
+        if (frame.repo_storage) |*r| r.deinit(io);
+        frame.arena.deinit();
+        gpa.destroy(frame);
+    }
+};
+
 /// Every populated submodule, one at a time, in the order `git submodule
 /// foreach` visits them: a submodule, then — when recursive — its own,
 /// depth first. Nothing is run; the caller does what it likes with each
@@ -1752,27 +1771,9 @@ pub const Walk = struct {
     gpa: Allocator,
     io: Io,
     options: WalkOptions,
-    frames: std.ArrayList(*Frame) = .empty,
+    frames: std.ArrayList(*WalkFrame) = .empty,
     /// The last visit's repository, when it has no frame of its own.
-    loose: ?*Frame = null,
-
-    const Frame = struct {
-        /// `null` for the top superproject, which the caller owns.
-        repo_storage: ?Repository,
-        repo: *Repository,
-        listing: Listing,
-        next: usize = 0,
-        prefix: []const u8,
-        depth: u32,
-        arena: std.heap.ArenaAllocator,
-
-        fn destroy(frame: *Frame, gpa: Allocator, io: Io) void {
-            frame.listing.deinit();
-            if (frame.repo_storage) |*r| r.deinit(io);
-            frame.arena.deinit();
-            gpa.destroy(frame);
-        }
-    };
+    loose: ?*WalkFrame = null,
 
     /// The next populated submodule, or `null` when there are no more. The
     /// visit's slices and repository are valid until the next call.
@@ -1797,7 +1798,7 @@ pub const Walk = struct {
             const module = entry.module orelse return refuse(w.options.refusal, display, "", error.NoSubmoduleMapping);
             if (frame.depth + 1 > max_depth) return refuse(w.options.refusal, display, "", error.NestingTooDeep);
 
-            const child = try w.gpa.create(Frame);
+            const child = try w.gpa.create(WalkFrame);
             errdefer w.gpa.destroy(child);
             child.* = .{
                 .repo_storage = try openSubmodule(w.gpa, w.io, frame.repo, entry.path, w.options.open),
@@ -1849,7 +1850,7 @@ pub const Walk = struct {
 pub fn walk(gpa: Allocator, io: Io, repo: *Repository, options: WalkOptions) Self.Error!Walk {
     var w: Walk = .{ .gpa = gpa, .io = io, .options = options };
     errdefer w.deinit();
-    const top = try gpa.create(Walk.Frame);
+    const top = try gpa.create(WalkFrame);
     errdefer gpa.destroy(top);
     var index = try repo.openIndex(io);
     defer index.deinit();

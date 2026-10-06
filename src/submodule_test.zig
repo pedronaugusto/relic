@@ -289,12 +289,12 @@ fn expectSameFile(gpa: Allocator, io: Io, a: Io.Dir, b: Io.Dir, path: []const u8
 
 /// Open the repository again, for a test that changed its configuration
 /// through git: a `Repository` holds what it read at open.
-fn reopen(repo: *Repository, gpa: Allocator, io: Io, dir: Io.Dir) !void {
+fn reopen(gpa: Allocator, io: Io, repo: *Repository, dir: Io.Dir) !void {
     repo.deinit(io);
     repo.* = try Repository.open(gpa, io, dir, .{ .discover = false });
 }
 
-fn fsck(git: *testgit.Repo, io: Io) !void {
+fn fsck(io: Io, git: *testgit.Repo) !void {
     try git.exec(io, &.{ "fsck", "--no-progress", "--no-dangling" });
 }
 
@@ -795,7 +795,7 @@ test "deinit leaves what git submodule deinit leaves, and refuses local changes 
     const status_theirs = try theirs.git.run(io, &.{ "status", "--porcelain=v2" });
     defer gpa.free(status_theirs);
     try testing.expectEqualStrings(status_theirs, status_ours);
-    try fsck(&ours.git, io);
+    try fsck(io, &ours.git);
 }
 
 test "absorbgitdirs moves nested .git directories where git moves them" {
@@ -887,7 +887,7 @@ test "update brings a deinitialised submodule back without a fetch, as git does"
     var lib = ours.git;
     lib.dir = try ours.git.dir.openDir(io, "vendor/lib", .{});
     defer lib.dir.close(io);
-    try fsck(&lib, io);
+    try fsck(io, &lib);
     const lib_status = try lib.run(io, &.{ "status", "--porcelain" });
     defer gpa.free(lib_status);
     try testing.expectEqualStrings("", lib_status);
@@ -939,18 +939,18 @@ test "update checks out the recorded commit, and refuses what it will not do by 
 
     // merge and rebase are named, not run.
     try c.git.exec(io, &.{ "config", "submodule.vendor/lib.update", "rebase" });
-    try reopen(&repo, gpa, io, c.git.dir);
+    try reopen(gpa, io, &repo, c.git.dir);
     try lib.exec(io, &.{ "checkout", "-q", "moved" });
     try testing.expectError(error.UnsupportedUpdate, submodule.update(gpa, io, &repo, .{ .refusal = &refusal }));
     try testing.expectEqualStrings("rebase", refusal.setting());
     // none skips it.
     try c.git.exec(io, &.{ "config", "submodule.vendor/lib.update", "none" });
-    try reopen(&repo, gpa, io, c.git.dir);
+    try reopen(gpa, io, &repo, c.git.dir);
     try testing.expectEqual(@as(u32, 1), (try submodule.update(gpa, io, &repo, .{})).skipped);
 
     // A commit the submodule does not have needs a fetch.
     try c.git.exec(io, &.{ "config", "--unset", "submodule.vendor/lib.update" });
-    try reopen(&repo, gpa, io, c.git.dir);
+    try reopen(gpa, io, &repo, c.git.dir);
     try c.git.exec(io, &.{ "update-index", "--cacheinfo", "160000," ++ "1" ** 40 ++ ",vendor/lib" });
     try testing.expectError(error.CommitMissing, submodule.update(gpa, io, &repo, .{ .refusal = &refusal }));
     try testing.expectEqualStrings("1" ** 40, refusal.setting());
@@ -975,7 +975,7 @@ test "a !command update runs only with the permission to run programs" {
     const update = try std.fmt.allocPrint(gpa, "!{s}", .{command});
     defer gpa.free(update);
     try c.git.exec(io, &.{ "config", "submodule.vendor/lib.update", update });
-    try reopen(&repo, gpa, io, c.git.dir);
+    try reopen(gpa, io, &repo, c.git.dir);
     // Without the permission, a named refusal carrying the setting.
     var refusal: submodule.Refusal = .{};
     try testing.expectError(error.UpdateCommandRefused, submodule.update(gpa, io, &repo, .{ .refusal = &refusal }));
@@ -1002,7 +1002,7 @@ const GitTransport = struct {
         return .{ .context = t, .cloneFn = clone, .fetchFn = fetch };
     }
 
-    fn clone(context: *anyopaque, gpa: Allocator, io: Io, url: []const u8, git_dir: Io.Dir) submodule.TransportError!void {
+    fn clone(gpa: Allocator, io: Io, context: *anyopaque, url: []const u8, git_dir: Io.Dir) submodule.TransportError!void {
         const t: *GitTransport = @ptrCast(@alignCast(context));
         const target = absolute(gpa, io, git_dir) catch return error.TransportFailed;
         defer gpa.free(target);
@@ -1011,10 +1011,10 @@ const GitTransport = struct {
         t.clones += 1;
     }
 
-    fn fetch(context: *anyopaque, gpa: Allocator, io: Io, repo: *Repository, remote: []const u8, want: Oid) submodule.TransportError!void {
-        _ = context;
+    fn fetch(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: Oid) submodule.TransportError!void {
         _ = gpa;
         _ = io;
+        _ = context;
         _ = repo;
         _ = remote;
         _ = want;

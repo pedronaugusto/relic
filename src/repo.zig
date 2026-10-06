@@ -192,6 +192,38 @@ const IndexStamp = struct {
 const RefState = opaque {};
 const config_owner = @import("config/state.zig");
 
+/// The directories `Repository.open` found, before the repository is read.
+const Discovered = struct {
+    git_dir: Io.Dir,
+    common_dir: Io.Dir,
+    work_dir: ?Io.Dir,
+    common_is_separate: bool,
+
+    fn close(d: *Discovered, io: Io) void {
+        if (d.common_is_separate) d.common_dir.close(io);
+        d.git_dir.close(io);
+        if (d.work_dir) |w| w.close(io);
+    }
+};
+
+/// Where `Repository.loadIgnore` reads its two levels, as absolute paths on
+/// the caller's `gpa`: what a caller watching for a rule to change watches
+/// beside the working tree's own `.gitignore` files. Neither file need
+/// exist.
+pub const IgnoreSources = struct {
+    /// `core.excludesFile`, a relative one taken from the process's
+    /// current directory as `loadIgnore` reads it; `null` when unset.
+    excludes_file: ?[]u8,
+    /// `info/exclude` in the common directory.
+    info_exclude: []u8,
+
+    pub fn deinit(sources: *IgnoreSources, gpa: Allocator) void {
+        if (sources.excludes_file) |path| gpa.free(path);
+        gpa.free(sources.info_exclude);
+        sources.* = undefined;
+    }
+};
+
 pub const Repository = struct {
     gpa: Allocator,
     /// The per-worktree directory: `.git`, or a linked worktree's
@@ -289,19 +321,6 @@ pub const Repository = struct {
         /// `--git-dir` name one: git checks neither `safe.bareRepository`
         /// nor ownership for it.
         explicit: bool = false,
-    };
-
-    const Discovered = struct {
-        git_dir: Io.Dir,
-        common_dir: Io.Dir,
-        work_dir: ?Io.Dir,
-        common_is_separate: bool,
-
-        fn close(d: *Discovered, io: Io) void {
-            if (d.common_is_separate) d.common_dir.close(io);
-            d.git_dir.close(io);
-            if (d.work_dir) |w| w.close(io);
-        }
     };
 
     fn discover(gpa: Allocator, io: Io, start: Io.Dir, options: OpenOptions) Error!Discovered {
@@ -1025,13 +1044,13 @@ pub const Repository = struct {
     /// Invalid settings and allocation failures are returned to the caller.
     pub fn coreSettings(repo: *const Repository) Self.Error!attributes.CoreSettings {
         return .{
-            .autocrlf = try repo.coreChoice(attributes.CoreSettings.AutoCrlf, "core.autocrlf", .false, true),
-            .eol = try repo.coreChoice(attributes.CoreSettings.Eol, "core.eol", .native, false),
-            .safecrlf = try repo.coreChoice(attributes.CoreSettings.SafeCrlf, "core.safecrlf", .false, true),
+            .autocrlf = try repo.coreChoice(attributes.CoreSettings.AutoCrlf, true, "core.autocrlf", .false),
+            .eol = try repo.coreChoice(attributes.CoreSettings.Eol, false, "core.eol", .native),
+            .safecrlf = try repo.coreChoice(attributes.CoreSettings.SafeCrlf, true, "core.safecrlf", .false),
         };
     }
 
-    fn coreChoice(repo: *const Repository, comptime T: type, setting: []const u8, fallback: T, comptime boolean: bool) Error!T {
+    fn coreChoice(repo: *const Repository, comptime T: type, comptime boolean: bool, setting: []const u8, fallback: T) Error!T {
         const raw = repo.configuration().get(setting) orelse return fallback;
         const text = try config_mod.unquote(repo.configuration().gpa, raw);
         defer repo.configuration().gpa.free(text);
@@ -1050,7 +1069,7 @@ pub const Repository = struct {
         return .{
             .core = try repo.coreSettings(),
             .ignore_case = try repo.configuration().getBool("core.ignorecase", false),
-            .check_stat = try repo.coreChoice(@TypeOf(@as(worktree.Rules, .{}).check_stat), "core.checkstat", .full, false),
+            .check_stat = try repo.coreChoice(@TypeOf(@as(worktree.Rules, .{}).check_stat), false, "core.checkstat", .full),
             .timestamp_resolution = repo.odb.timestamp_resolution,
             .file_mode = try repo.configuration().getBool("core.filemode", Io.File.Permissions.has_executable_bit),
             .symlinks = try repo.configuration().getBool("core.symlinks", builtin.os.tag != .windows),
@@ -1070,24 +1089,6 @@ pub const Repository = struct {
         try rules.loadGlobal(io, repo.common_dir, excludes, Io.Dir.cwd());
         return rules;
     }
-
-    /// Where `loadIgnore` reads its two levels, as absolute paths on the
-    /// caller's `gpa`: what a caller watching for a rule to change watches
-    /// beside the working tree's own `.gitignore` files. Neither file need
-    /// exist.
-    pub const IgnoreSources = struct {
-        /// `core.excludesFile`, a relative one taken from the process's
-        /// current directory as `loadIgnore` reads it; `null` when unset.
-        excludes_file: ?[]u8,
-        /// `info/exclude` in the common directory.
-        info_exclude: []u8,
-
-        pub fn deinit(sources: *IgnoreSources, gpa: Allocator) void {
-            if (sources.excludes_file) |path| gpa.free(path);
-            gpa.free(sources.info_exclude);
-            sources.* = undefined;
-        }
-    };
 
     /// Errors from naming one of the repository's files as a path.
     pub const PathError = Allocator.Error || Io.Dir.RealPathFileAllocError ||
@@ -1478,7 +1479,7 @@ pub const Repository = struct {
         return tx;
     }
 
-    fn peelForRefs(context: *anyopaque, io: Io, oid: Oid) ?Oid {
+    fn peelForRefs(io: Io, context: *anyopaque, oid: Oid) ?Oid {
         const repo: *Repository = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Repository
         const header = repo.odb.readHeader(io, oid) catch return null;
         if (header.type != .tag) return null;

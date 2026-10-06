@@ -550,7 +550,7 @@ fn addTable(
         const source = if (edit.via) |at| tx.edits.items[at] else edit;
         if (edit.via == null) {
             const value: reftable.RefValue = if (edit.new) |new| switch (new) {
-                .direct => |oid| if (tx.peeler) |p| (if (p.peel(p.context, io, oid)) |target|
+                .direct => |oid| if (tx.peeler) |p| (if (p.peel(io, p.context, oid)) |target|
                     .{ .peeled = .{ .value = oid, .target = target } }
                 else
                     .{ .direct = oid }) else .{ .direct = oid },
