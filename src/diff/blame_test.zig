@@ -72,7 +72,7 @@ const History = struct {
     repo: *repo_mod.Repository,
     io: Io,
 
-    const Files = std.StringArrayHashMapUnmanaged([]const u8);
+    const Files = std.array_hash_map.String([]const u8);
 
     fn commit(h: *History, files: *const Files, parents: []const Oid, when: i64) !Oid {
         // `dir/name` one level down at most.
@@ -82,7 +82,7 @@ const History = struct {
         defer sub.deinit();
         for (files.keys(), files.values()) |path, bytes| {
             const blob = try h.repo.odb.write(h.io, .blob, bytes);
-            if (std.mem.indexOfScalar(u8, path, '/')) |slash| {
+            if (std.mem.findScalar(u8, path, '/')) |slash| {
                 try sub.add(.file, path[slash + 1 ..], blob);
             } else try top.add(.file, path, blob);
         }

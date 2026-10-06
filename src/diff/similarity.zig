@@ -197,7 +197,7 @@ test "scores are the ones git's rename detection prints" {
         var expected: []const u8 = "none";
         var buf: [16]u8 = undefined;
         if (std.mem.startsWith(u8, status, "R")) {
-            expected = status[1..std.mem.indexOfScalar(u8, status, '\t').?];
+            expected = status[1..std.mem.findScalar(u8, status, '\t').?];
             paired += 1;
         } else apart += 1;
         const shown: []const u8 = if (got >= max_score / 100 and !std.mem.eql(u8, src.items, dst.items))

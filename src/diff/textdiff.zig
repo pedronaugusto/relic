@@ -44,7 +44,7 @@ pub fn splitLines(gpa: Allocator, bytes: []const u8) Allocator.Error![]Line {
     errdefer lines.deinit(gpa);
     var at: usize = 0;
     while (at < bytes.len) {
-        const end = if (std.mem.indexOfScalarPos(u8, bytes, at, '\n')) |nl| nl + 1 else bytes.len;
+        const end = if (std.mem.findScalarPos(u8, bytes, at, '\n')) |nl| nl + 1 else bytes.len;
         try lines.append(gpa, bytes[at..end]);
         at = end;
     }
@@ -292,7 +292,7 @@ pub fn stat(changes: []const Change) Stat {
 /// git's rule: a NUL byte in the first 8000 bytes makes a file binary.
 pub fn isBinary(bytes: []const u8) bool {
     const head = bytes[0..@min(bytes.len, 8000)];
-    return std.mem.indexOfScalar(u8, head, 0) != null;
+    return std.mem.findScalar(u8, head, 0) != null;
 }
 
 //=========================================================================
@@ -2019,7 +2019,7 @@ fn fuzzSameLine(_: void, smith: *std.testing.Smith) anyerror!void {
     // Two lines, each with a newline only at its end, if at all.
     var lines: [2][]u8 = .{ buf[0..split_at], buf[split_at..len] };
     for (&lines) |*l| {
-        if (std.mem.indexOfScalar(u8, l.*, '\n')) |nl| l.* = l.*[0 .. nl + 1];
+        if (std.mem.findScalar(u8, l.*, '\n')) |nl| l.* = l.*[0 .. nl + 1];
     }
     const sets = [_]Whitespace{ .{}, .{ .all = true }, .{ .change = true }, .{ .at_eol = true }, .{ .cr_at_eol = true }, .{ .change = true, .cr_at_eol = true } };
     for (sets) |ws| {

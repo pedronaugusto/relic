@@ -9,6 +9,8 @@ const hash = @import("hash.zig");
 const odb_mod = @import("odb.zig");
 const diff = @import("diff.zig");
 const textdiff = @import("diff/textdiff.zig");
+const object = @import("object.zig");
+const test_case = @import("testing/case.zig");
 
 const Oid = hash.Oid;
 
@@ -21,7 +23,7 @@ const Pair = struct {
     old_text: []u8,
     new_text: []u8,
 
-    fn deinit(p: *Pair, io: Io, gpa: std.mem.Allocator) void {
+    fn deinit(p: *Pair, gpa: std.mem.Allocator, io: Io) void {
         gpa.free(p.old_text);
         gpa.free(p.new_text);
         p.db.deinit(io);
@@ -32,10 +34,10 @@ const Pair = struct {
 };
 
 /// Build a repository with two commits and hand back both trees.
-fn buildPair(gpa: std.mem.Allocator, io: Io, comptime setup: fn (*testgit.Repo, Io) anyerror!void) !Pair {
+fn buildPair(comptime setup: fn (Io, *testgit.Repo) anyerror!void, gpa: std.mem.Allocator, io: Io) !Pair {
     var repo = try testgit.Repo.init(gpa, io, &.{});
     errdefer repo.deinit();
-    try setup(&repo, io);
+    try setup(io, &repo);
     const old_text = try repo.line(io, &.{ "rev-parse", "HEAD~1^{tree}" });
     errdefer gpa.free(old_text);
     const new_text = try repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
@@ -53,7 +55,7 @@ fn buildPair(gpa: std.mem.Allocator, io: Io, comptime setup: fn (*testgit.Repo, 
     };
 }
 
-fn setupMixed(repo: *testgit.Repo, io: Io) anyerror!void {
+fn setupMixed(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "unchanged.txt", "same\n");
     try repo.writeFile(io, "modified.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
     try repo.writeFile(io, "deleted.txt", "gone\n");
@@ -79,8 +81,8 @@ fn setupMixed(repo: *testgit.Repo, io: Io) anyerror!void {
 test "name-status agrees with git diff-tree" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupMixed);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupMixed, gpa, io);
+    defer pair.deinit(gpa, io);
 
     var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
     defer changes.deinit();
@@ -106,7 +108,7 @@ const RandomTree = struct {
     fn build(gpa: std.mem.Allocator, io: Io, db: *odb_mod.Odb, random: std.Random, depth: u32, same: ?Oid) !Oid {
         // A subtree left as it was, as most of a large one is.
         if (same) |oid| if (random.uintLessThan(u8, 3) == 0) return oid;
-        var b: @import("object.zig").Tree.Builder = .init(gpa, .sha1);
+        var b: object.Tree.Builder = .init(gpa, .sha1);
         defer b.deinit();
         for (names) |name| {
             if (random.boolean()) continue;
@@ -175,8 +177,8 @@ test "a walk of two random trees lists what git diff-tree lists, with and withou
 test "numstat agrees with git, including the binary marker" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupMixed);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupMixed, gpa, io);
+    defer pair.deinit(gpa, io);
 
     var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
     defer changes.deinit();
@@ -205,8 +207,8 @@ test "an object's bytes go back to the object database's allocator, whatever the
     // allocator anywhere the two differ.
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupMixed);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupMixed, gpa, io);
+    defer pair.deinit(gpa, io);
     var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
     defer changes.deinit();
 
@@ -223,8 +225,8 @@ test "an object's bytes go back to the object database's allocator, whatever the
 test "the unified patch is byte for byte what git prints" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupMixed);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupMixed, gpa, io);
+    defer pair.deinit(gpa, io);
 
     var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
     defer changes.deinit();
@@ -244,7 +246,7 @@ test "the unified patch is byte for byte what git prints" {
     }
 }
 
-fn setupGitlink(repo: *testgit.Repo, io: Io) anyerror!void {
+fn setupGitlink(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", "160000," ++ "1" ** 40 ++ ",vendor/lib" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
     try repo.exec(io, &.{ "update-index", "--cacheinfo", "160000," ++ "2" ** 40 ++ ",vendor/lib" });
@@ -254,8 +256,8 @@ fn setupGitlink(repo: *testgit.Repo, io: Io) anyerror!void {
 test "gitlink counts and patch text agree with git" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupGitlink);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupGitlink, gpa, io);
+    defer pair.deinit(gpa, io);
     var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
     defer changes.deinit();
     try std.testing.expectEqual(@as(usize, 1), changes.items.len);
@@ -273,7 +275,7 @@ test "gitlink counts and patch text agree with git" {
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
-fn setupSource(repo: *testgit.Repo, io: Io) anyerror!void {
+fn setupSource(io: Io, repo: *testgit.Repo) anyerror!void {
     const before =
         "const std = @import(\"std\");\n" ++
         "\n" ++
@@ -322,8 +324,8 @@ fn setupSource(repo: *testgit.Repo, io: Io) anyerror!void {
 test "the hunk header carries the enclosing line git puts there" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupSource);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupSource, gpa, io);
+    defer pair.deinit(gpa, io);
 
     var changes = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
     defer changes.deinit();
@@ -345,7 +347,7 @@ test "the hunk header carries the enclosing line git puts there" {
     }
 }
 
-fn setupRename(repo: *testgit.Repo, io: Io) anyerror!void {
+fn setupRename(io: Io, repo: *testgit.Repo) anyerror!void {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(repo.gpa);
     for (0..60) |i| try body.print(repo.gpa, "line {d} of a file with real content\n", .{i});
@@ -366,8 +368,8 @@ fn setupRename(repo: *testgit.Repo, io: Io) anyerror!void {
 test "rename detection finds what git -M finds" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupRename);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupRename, gpa, io);
+    defer pair.deinit(gpa, io);
 
     // Without detection, the same thing git shows without -M.
     var plain = try diff.tree(gpa, io, &pair.db, pair.old, pair.new, .{});
@@ -402,15 +404,15 @@ test "rename detection finds what git -M finds" {
     });
     defer gpa.free(expected);
     // git prints `R<score>`; the score is the similarity this computed.
-    try std.testing.expect(std.mem.indexOf(u8, expected, "before.txt\tafter.txt") != null);
-    try std.testing.expect(std.mem.indexOf(u8, expected, "exact.txt\telsewhere.txt") != null);
+    try std.testing.expect(std.mem.find(u8, expected, "before.txt\tafter.txt") != null);
+    try std.testing.expect(std.mem.find(u8, expected, "exact.txt\telsewhere.txt") != null);
 }
 
 test "a diff against the empty tree is every file added" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupMixed);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupMixed, gpa, io);
+    defer pair.deinit(gpa, io);
 
     var changes = try diff.tree(gpa, io, &pair.db, null, pair.new, .{});
     defer changes.deinit();
@@ -498,7 +500,7 @@ const Lcg = struct {
 /// One line of generated text. Most lines come from a handful, so the files
 /// repeat themselves the way source does and the unique lines are few; the
 /// rest are unique, which is what patience anchors on.
-fn generatedLine(l: *Lcg, out: *std.ArrayList(u8), gpa: std.mem.Allocator) !void {
+fn generatedLine(gpa: std.mem.Allocator, l: *Lcg, out: *std.ArrayList(u8)) !void {
     const common = [_][]const u8{ "{\n", "}\n", "\n", "    return x;\n", "    x += 1;\n", "else\n" };
     if (l.next(3) != 0) {
         try out.appendSlice(gpa, common[@intCast(l.next(common.len))]);
@@ -507,7 +509,7 @@ fn generatedLine(l: *Lcg, out: *std.ArrayList(u8), gpa: std.mem.Allocator) !void
     }
 }
 
-fn setupAlgorithms(repo: *testgit.Repo, io: Io) anyerror!void {
+fn setupAlgorithms(io: Io, repo: *testgit.Repo) anyerror!void {
     const gpa = repo.gpa;
     try repo.writeFile(io, "frob.c", frob_before);
     var before: [24]std.ArrayList(u8) = @splat(.empty);
@@ -515,7 +517,7 @@ fn setupAlgorithms(repo: *testgit.Repo, io: Io) anyerror!void {
     for (&before, 0..) |*text, i| {
         var l: Lcg = .{ .state = i + 1 };
         const lines = 10 + l.next(70);
-        for (0..lines) |_| try generatedLine(&l, text, gpa);
+        for (0..lines) |_| try generatedLine(gpa, &l, text);
         var name: [32]u8 = undefined;
         try repo.writeFile(io, try std.fmt.bufPrint(&name, "gen{d:0>2}.txt", .{i}), text.items);
     }
@@ -534,10 +536,10 @@ fn setupAlgorithms(repo: *testgit.Repo, io: Io) anyerror!void {
                 // Dropped.
                 0 => {},
                 // Replaced.
-                1 => try generatedLine(&l, &after, gpa),
+                1 => try generatedLine(gpa, &l, &after),
                 // Something inserted before it.
                 2 => {
-                    try generatedLine(&l, &after, gpa);
+                    try generatedLine(gpa, &l, &after);
                     try after.print(gpa, "{s}\n", .{line});
                 },
                 else => try after.print(gpa, "{s}\n", .{line}),
@@ -584,9 +586,9 @@ fn parseZeroContextHunks(gpa: std.mem.Allocator, text: []const u8) ![]textdiff.C
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "@@ -")) continue;
-        const close = std.mem.indexOfPos(u8, line, 4, " @@") orelse return error.BadHunk;
+        const close = std.mem.findPos(u8, line, 4, " @@") orelse return error.BadHunk;
         const ranges = line[4..close];
-        const plus = std.mem.indexOf(u8, ranges, " +") orelse return error.BadHunk;
+        const plus = std.mem.find(u8, ranges, " +") orelse return error.BadHunk;
         const old = try parseRange(ranges[0..plus]);
         const new = try parseRange(ranges[plus + 2 ..]);
         try out.append(gpa, .{
@@ -600,7 +602,7 @@ fn parseZeroContextHunks(gpa: std.mem.Allocator, text: []const u8) ![]textdiff.C
 }
 
 fn parseRange(text: []const u8) !struct { start: usize, count: usize } {
-    if (std.mem.indexOfScalar(u8, text, ',')) |comma| {
+    if (std.mem.findScalar(u8, text, ',')) |comma| {
         return .{
             .start = try std.fmt.parseInt(usize, text[0..comma], 10),
             .count = try std.fmt.parseInt(usize, text[comma + 1 ..], 10),
@@ -610,7 +612,7 @@ fn parseRange(text: []const u8) !struct { start: usize, count: usize } {
 }
 
 test "the histogram, patience and minimal diffs land on the lines git's do, over a random corpus" {
-    if (!@import("testing/case.zig").selected("the histogram, patience and minimal diffs land on the lines git's do, over a random corpus")) return error.SkipZigTest;
+    if (!test_case.selected("the histogram, patience and minimal diffs land on the lines git's do, over a random corpus")) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var repo = try testgit.Repo.init(gpa, io, &.{});
@@ -690,8 +692,8 @@ fn expectCorpusLikeGit(
 test "the patience patch is byte for byte what git diff --patience prints" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupAlgorithms);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupAlgorithms, gpa, io);
+    defer pair.deinit(gpa, io);
     try expectPatches(&pair, io, .{ .algorithm = .patience }, &.{"--patience"});
 
     // The fixtures are ones where the choice shows: on some of them the
@@ -714,24 +716,24 @@ test "the patience patch is byte for byte what git diff --patience prints" {
 test "plain myers is unchanged beside patience, on the same fixtures" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupAlgorithms);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupAlgorithms, gpa, io);
+    defer pair.deinit(gpa, io);
     try expectPatches(&pair, io, .{}, &.{"--diff-algorithm=myers"});
 }
 
 test "a minimal patch is what git diff --minimal prints" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupAlgorithms);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupAlgorithms, gpa, io);
+    defer pair.deinit(gpa, io);
     try expectPatches(&pair, io, .{ .minimal = true }, &.{"--minimal"});
 }
 
 test "an anchored patience patch is what git diff --anchored prints" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupAlgorithms);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupAlgorithms, gpa, io);
+    defer pair.deinit(gpa, io);
     try expectPatches(
         &pair,
         io,
@@ -743,8 +745,8 @@ test "an anchored patience patch is what git diff --anchored prints" {
 test "diff.algorithm picks the algorithm git picks when none is asked for" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
-    var pair = try buildPair(gpa, io, setupAlgorithms);
-    defer pair.deinit(io, gpa);
+    var pair = try buildPair(setupAlgorithms, gpa, io);
+    defer pair.deinit(gpa, io);
 
     const config_mod = @import("config.zig");
     for ([_][]const u8{ "patience", "Minimal", "Myers", "default" }) |value| {

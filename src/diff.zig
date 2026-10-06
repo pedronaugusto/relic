@@ -6,6 +6,7 @@
 //! patch with git's own headers.
 
 const Self = @This();
+
 pub const blame = @import("diff/blame.zig");
 pub const patchid = @import("diff/patchid.zig");
 // The modules relic's API puts under this one, as `relic.diff.<name>`.
@@ -136,7 +137,7 @@ pub const TreeOptions = struct {
     prefix: []const u8 = "",
 };
 
-const Flat = std.StringArrayHashMapUnmanaged(Entry);
+const Flat = std.array_hash_map.String(Entry);
 
 /// Compare two trees, path by path.
 ///
@@ -166,7 +167,7 @@ pub fn tree(
     std.mem.sort(Change, changes.items, {}, lessThanChange);
 
     if (options.renames) |rename_options| {
-        try detectRenames(arena, io, db, gpa, &changes, &old_entries, rename_options);
+        try detectRenames(arena, gpa, io, db, &changes, &old_entries, rename_options);
         std.mem.sort(Change, changes.items, {}, lessThanChange);
     }
 
@@ -318,9 +319,9 @@ fn flatten(
 
 fn detectRenames(
     arena: Allocator,
+    gpa: Allocator,
     io: Io,
     db: *odb_mod.Odb,
-    gpa: Allocator,
     changes: *std.ArrayList(Change),
     old_entries: *const Flat,
     options: RenameOptions,
@@ -839,7 +840,7 @@ test "a missing final newline is marked" {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try unifiedBody(gpa, &out.writer, "one\n", "one", .{});
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\\ No newline at end of file") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "\\ No newline at end of file") != null);
 }
 
 test "the binary rule is the diff one" {

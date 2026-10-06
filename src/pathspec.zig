@@ -9,6 +9,7 @@
 //! current directory to be relative to. `:(attr:...)` is refused by name.
 
 const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -224,7 +225,7 @@ fn normalize(a: Allocator, path: []const u8) Error![]u8 {
         if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
         if (std.mem.eql(u8, part, "..")) {
             if (out.items.len == 0) return error.PathspecOutsideRepository;
-            const cut = std.mem.lastIndexOfScalar(u8, out.items[0 .. out.items.len - 1], '/');
+            const cut = std.mem.findScalarLast(u8, out.items[0 .. out.items.len - 1], '/');
             out.shrinkRetainingCapacity(if (cut) |c| c + 1 else 0);
             continue;
         }
@@ -255,7 +256,7 @@ pub fn parse(gpa: Allocator, specs: []const []const u8) Self.Error!Pathspec {
         var rest = spec;
         if (rest.len > 0 and rest[0] == ':') {
             if (rest.len > 1 and rest[1] == '(') {
-                const close = std.mem.indexOfScalar(u8, rest, ')') orelse return error.InvalidPathspecMagic;
+                const close = std.mem.findScalar(u8, rest, ')') orelse return error.InvalidPathspecMagic;
                 var words = std.mem.splitScalar(u8, rest[2..close], ',');
                 while (words.next()) |w| {
                     if (w.len == 0) continue;

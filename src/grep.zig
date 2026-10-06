@@ -19,6 +19,7 @@
 //! refused by name, as are submodule recursion and `--no-index`.
 
 const Self = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -28,6 +29,7 @@ const hash = @import("hash.zig");
 const object = @import("object.zig");
 const repo_mod = @import("repo.zig");
 const index_mod = @import("index.zig");
+const odb_mod = @import("odb.zig");
 const attributes = @import("worktree/attributes.zig");
 const ere = @import("ere.zig");
 const pathspec_mod = @import("pathspec.zig");
@@ -63,7 +65,7 @@ pub const Error = error{
     /// The object to search is not a commit or a tree.
     NotATree,
 } || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || attributes.Error || Io.Writer.Error ||
-    @import("odb.zig").Error || object.TreeParseError;
+    odb_mod.Error || object.TreeParseError;
 
 /// How patterns are read: `-G`, `-E`, `-F`, `-P`.
 pub const Syntax = enum { basic, extended, fixed, perl };
@@ -352,7 +354,7 @@ fn compile(a: Allocator, gpa: Allocator, options: Options, syntax: Syntax, colum
             try pats.append(a, .{ .kind = .{ .perl = index } });
             continue;
         }
-        if (std.mem.indexOfScalar(u8, text, 0) != null) return error.NulInPattern;
+        if (std.mem.findScalar(u8, text, 0) != null) return error.NulInPattern;
         var fixed = syntax == .fixed;
         if (!fixed) {
             fixed = true;
@@ -394,10 +396,10 @@ fn compile(a: Allocator, gpa: Allocator, options: Options, syntax: Syntax, colum
 fn findFixed(needle: []const u8, hay: []const u8, icase: bool) ?Match {
     if (needle.len == 0) return .{ .start = 0, .end = 0 };
     if (!icase) {
-        const at = std.mem.indexOf(u8, hay, needle) orelse return null;
+        const at = std.mem.find(u8, hay, needle) orelse return null;
         return .{ .start = at, .end = at + needle.len };
     }
-    const at = std.ascii.indexOfIgnoreCase(hay, needle) orelse return null;
+    const at = std.ascii.findIgnoreCase(hay, needle) orelse return null;
     return .{ .start = at, .end = at + needle.len };
 }
 
@@ -505,7 +507,7 @@ fn collectHits(s: *const Searcher, sc: *Scratch, content: []const u8) MatchError
     @memset(sc.hits, false);
     var bol: usize = 0;
     while (bol < content.len) {
-        const eol = std.mem.indexOfScalarPos(u8, content, bol, '\n') orelse content.len;
+        const eol = std.mem.findScalarPos(u8, content, bol, '\n') orelse content.len;
         for (s.top, sc.hits) |term, *hit| {
             var col: ?usize = null;
             var icol: ?usize = null;
@@ -577,7 +579,7 @@ const FileState = struct {
 
 /// The end of the line starting at `bol`: its newline, or the end.
 fn endOfLine(content: []const u8, bol: usize) usize {
-    return std.mem.indexOfScalarPos(u8, content, bol, '\n') orelse content.len;
+    return std.mem.findScalarPos(u8, content, bol, '\n') orelse content.len;
 }
 
 /// The start of the line before the one starting at `bol`, which is not
@@ -891,13 +893,13 @@ fn peelToTree(io: Io, repo: *Repository, oid: Oid) Error!Oid {
 
 fn isBinaryContent(bytes: []const u8) bool {
     const n = @min(bytes.len, 8000);
-    return std.mem.indexOfScalar(u8, bytes[0..n], 0) != null;
+    return std.mem.findScalar(u8, bytes[0..n], 0) != null;
 }
 
 /// What the attributes say of each item: binary or not by `diff`, and
 /// under `-p` or `-W` the driver `diff` names, whose rules are compiled
 /// once each into `rules`.
-fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs, items: []Item, functions: bool, rules: *std.StringArrayHashMapUnmanaged(*userdiff.Rule)) Error!void {
+fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs, items: []Item, functions: bool, rules: *std.array_hash_map.String(*userdiff.Rule)) Error!void {
     const config = repo.configuration();
     for (items) |*item| {
         var driver: ?[]const u8 = null;
@@ -1024,7 +1026,7 @@ pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.
     defer if (attrs) |*x| x.deinit();
     if (repo.work_dir != null) attrs = try repo.loadAttrs(io);
     defer if (attrs) |*x| x.leave();
-    var rules: std.StringArrayHashMapUnmanaged(*userdiff.Rule) = .empty;
+    var rules: std.array_hash_map.String(*userdiff.Rule) = .empty;
     defer for (rules.values()) |rule| rule.deinit();
     const functions = fmt.funcname or fmt.funcbody;
     try applyAttributes(a, gpa, io, repo, if (attrs) |*x| x else null, items.items, functions, &rules);

@@ -17,6 +17,7 @@
 //! went. Those inputs are optional; a diff leaves them out.
 
 const rename = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -280,7 +281,7 @@ const Run = struct {
     }
 
     fn splitLast(path: []const u8) struct { parent: []const u8, component: []const u8 } {
-        if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| return .{ .parent = path[0..slash], .component = path[slash + 1 ..] };
+        if (std.mem.findScalarLast(u8, path, '/')) |slash| return .{ .parent = path[0..slash], .component = path[slash + 1 ..] };
         return .{ .parent = "", .component = path };
     }
 

@@ -18,6 +18,7 @@
 //! endings, `ident` and filters apply as a checkout applies them.
 
 const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -500,7 +501,7 @@ const Walk = struct {
     /// git loads them.
     fn formatContext(wk: *Walk, format: []const u8) Error!pretty.Context {
         if (wk.mailmap == null and hasPlaceholder(format, "ac", "NEL")) wk.mailmap = try mailmap_mod.Mailmap.load(wk.gpa, wk.io, wk.repo);
-        if (wk.decorations == null and (hasPlaceholder(format, "", "dD") or std.mem.indexOf(u8, format, "%(decorate") != null))
+        if (wk.decorations == null and (hasPlaceholder(format, "", "dD") or std.mem.find(u8, format, "%(decorate") != null))
             wk.decorations = try pretty.Decorations.load(wk.gpa, wk.io, wk.repo);
         if (wk.signer == null and hasPlaceholder(format, "", "G")) if (wk.options.programs) |programs| {
             wk.signer = try signing.Signer.init(wk.gpa, wk.repo.configuration(), programs);
@@ -598,23 +599,23 @@ const Walk = struct {
 
 fn isBinary(bytes: []const u8) bool {
     const n = @min(bytes.len, 8000);
-    return std.mem.indexOfScalar(u8, bytes[0..n], 0) != null;
+    return std.mem.findScalar(u8, bytes[0..n], 0) != null;
 }
 
 /// Whether `format` has a placeholder `%<lead><letter>`, after any `+`,
 /// `-` or ` ` modifier, with `lead` one of `leads` or nothing when empty.
 fn hasPlaceholder(format: []const u8, leads: []const u8, letters: []const u8) bool {
     var i: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, format, i, '%')) |pct| {
+    while (std.mem.findScalarPos(u8, format, i, '%')) |pct| {
         var j = pct + 1;
         i = j + 1;
         if (j < format.len and format[j] == '%') continue;
         if (j < format.len and (format[j] == '+' or format[j] == '-' or format[j] == ' ')) j += 1;
         if (leads.len > 0) {
-            if (j >= format.len or std.mem.indexOfScalar(u8, leads, format[j]) == null) continue;
+            if (j >= format.len or std.mem.findScalar(u8, leads, format[j]) == null) continue;
             j += 1;
         }
-        if (j < format.len and std.mem.indexOfScalar(u8, letters, format[j]) != null) return true;
+        if (j < format.len and std.mem.findScalar(u8, letters, format[j]) != null) return true;
     }
     return false;
 }
@@ -623,8 +624,8 @@ fn formatSubst(wk: *Walk, commit: Oid, src: []const u8) Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var rest = src;
     while (true) {
-        const b = std.mem.indexOf(u8, rest, "$Format:") orelse break;
-        const c = std.mem.indexOfScalarPos(u8, rest, b + 8, '$') orelse break;
+        const b = std.mem.find(u8, rest, "$Format:") orelse break;
+        const c = std.mem.findScalarPos(u8, rest, b + 8, '$') orelse break;
         try out.appendSlice(wk.a, rest[0..b]);
         try pretty.formatCommit(wk.a, wk.io, &wk.repo.odb, commit, rest[b + 8 .. c], try wk.formatContext(rest[b + 8 .. c]), &out);
         rest = rest[c + 1 ..];

@@ -17,6 +17,7 @@
 //! (`Reencode.no`) or refused.
 
 const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -315,10 +316,10 @@ const Exporter = struct {
         const buf = found.bytes;
         const kind = ex.repo.objectFormat();
 
-        const author_at = (std.mem.indexOf(u8, buf, "\nauthor ") orelse return error.MalformedCommit) + 1;
-        const author_end = std.mem.indexOfScalarPos(u8, buf, author_at, '\n') orelse buf.len;
-        const committer_at = (std.mem.indexOfPos(u8, buf, author_end, "\ncommitter ") orelse return error.MalformedCommit) + 1;
-        const committer_end = std.mem.indexOfScalarPos(u8, buf, committer_at, '\n') orelse buf.len;
+        const author_at = (std.mem.find(u8, buf, "\nauthor ") orelse return error.MalformedCommit) + 1;
+        const author_end = std.mem.findScalarPos(u8, buf, author_at, '\n') orelse buf.len;
+        const committer_at = (std.mem.findPos(u8, buf, author_end, "\ncommitter ") orelse return error.MalformedCommit) + 1;
+        const committer_end = std.mem.findScalarPos(u8, buf, committer_at, '\n') orelse buf.len;
         var cursor = committer_end;
 
         var encoding: ?[]const u8 = null;
@@ -339,9 +340,9 @@ const Exporter = struct {
             cursor = @max(after_sha1, after_sha256);
         }
         var message: []const u8 = "";
-        if (std.mem.indexOfPos(u8, buf, cursor, "\n\n")) |m| {
+        if (std.mem.findPos(u8, buf, cursor, "\n\n")) |m| {
             message = buf[m + 2 ..];
-            if (std.mem.indexOfScalar(u8, message, 0)) |nul| message = message[0..nul];
+            if (std.mem.findScalar(u8, message, 0)) |nul| message = message[0..nul];
         }
 
         const tree = try treeOf(kind, buf);
@@ -410,7 +411,7 @@ const Exporter = struct {
             var eol = h.end;
             while (eol + 1 < buf.len and buf[eol] == '\n' and buf[eol + 1] == ' ') {
                 const bol = eol + 2;
-                eol = std.mem.indexOfScalarPos(u8, buf, bol, '\n') orelse buf.len;
+                eol = std.mem.findScalarPos(u8, buf, bol, '\n') orelse buf.len;
                 try text.append(ex.gpa, '\n');
                 try text.appendSlice(ex.gpa, buf[bol..eol]);
             }
@@ -465,7 +466,7 @@ const Exporter = struct {
 
     fn printPath(ex: *Exporter, path: []const u8) Error!void {
         if (cquote.needsQuote(path, ex.quote_path)) return cquote.write(ex.w, path, ex.quote_path);
-        if (std.mem.indexOfScalar(u8, path, ' ') != null) return ex.w.print("\"{s}\"", .{path});
+        if (std.mem.findScalar(u8, path, ' ') != null) return ex.w.print("\"{s}\"", .{path});
         try ex.w.writeAll(path);
     }
 
@@ -509,17 +510,17 @@ const Exporter = struct {
         defer ex.gpa.free(found.bytes);
         const buf = found.bytes;
         var message: ?[]const u8 = null;
-        const message_at = std.mem.indexOf(u8, buf, "\n\n");
+        const message_at = std.mem.find(u8, buf, "\n\n");
         if (message_at) |m| {
             var rest = buf[m + 2 ..];
-            if (std.mem.indexOfScalar(u8, rest, 0)) |nul| rest = rest[0..nul];
+            if (std.mem.findScalar(u8, rest, 0)) |nul| rest = rest[0..nul];
             message = rest;
         }
         const head = buf[0 .. message_at orelse buf.len];
         var tagger: []const u8 = "";
-        if (std.mem.indexOf(u8, head, "\ntagger ")) |t| {
+        if (std.mem.find(u8, head, "\ntagger ")) |t| {
             const start = t + 1;
-            const end = std.mem.indexOfScalarPos(u8, buf, start, '\n') orelse buf.len;
+            const end = std.mem.findScalarPos(u8, buf, start, '\n') orelse buf.len;
             tagger = buf[start..end];
         } else if (ex.options.fake_missing_tagger) {
             tagger = "tagger Unspecified Tagger <unspecified-tagger> 0 +0000";
@@ -650,7 +651,7 @@ const Header = struct { start: usize, end: usize };
 fn findHeader(buf: []const u8, from: usize, key: []const u8) ?Header {
     var line = from;
     while (line < buf.len and buf[line] != '\n') {
-        const eol = std.mem.indexOfScalarPos(u8, buf, line, '\n') orelse buf.len;
+        const eol = std.mem.findScalarPos(u8, buf, line, '\n') orelse buf.len;
         const text = buf[line..eol];
         if (text.len > key.len and std.mem.startsWith(u8, text, key) and text[key.len] == ' ') {
             return .{ .start = line + key.len + 1, .end = eol };

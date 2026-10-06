@@ -4,6 +4,7 @@
 //! letter, `_` or `$`. What `git grep -p` and `-W` look for.
 
 const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 

@@ -20,10 +20,11 @@ pub const archive = @import("archive.zig");
 pub const pretty = @import("pretty.zig");
 pub const clean = @import("clean.zig");
 
+const std = @import("std");
 const builtin = @import("builtin");
+const relic = @import("relic.zig");
 
 test "public wildmatch follows git pathname and case-fold cases" {
-    const std = @import("std");
     try std.testing.expect(try wildmatch.match("a/**/b", "a/x/y/b", .{ .pathname = true }));
     try std.testing.expect(!try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = true }));
     try std.testing.expect(try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = false }));
@@ -31,7 +32,6 @@ test "public wildmatch follows git pathname and case-fold cases" {
 }
 
 test "the plumbing is relic's own: no public name reaches it" {
-    const std = @import("std");
     try std.testing.expect(!@hasDecl(odb, "varint"));
     try std.testing.expect(!@hasDecl(index, "ewah"));
     try std.testing.expect(!@hasDecl(revwalk, "ere"));
@@ -41,12 +41,11 @@ test "the plumbing is relic's own: no public name reaches it" {
 }
 
 test {
-    const std = @import("std");
     // Every module the API reaches, one level down as well as at the top,
     // so that every file under the root is compiled and its tests run.
-    std.testing.refAllDecls(@import("relic.zig"));
-    inline for (@typeInfo(@import("relic.zig")).@"struct".decls) |decl| {
-        std.testing.refAllDecls(@field(@import("relic.zig"), decl.name));
+    std.testing.refAllDecls(relic);
+    inline for (@typeInfo(relic).@"struct".decls) |decl| {
+        std.testing.refAllDecls(@field(relic, decl.name));
     }
     if (builtin.is_test) {
         // the plumbing the API keeps to itself: reached by no public name,

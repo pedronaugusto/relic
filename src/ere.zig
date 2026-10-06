@@ -11,6 +11,7 @@
 //! `error.PatternTooComplex`.
 
 const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -161,9 +162,9 @@ const Parser = struct {
                         p.at += 1;
                     },
                     '{' => {
-                        const close = std.mem.indexOfScalarPos(u8, p.text, p.at, '}') orelse return error.InvalidPattern;
+                        const close = std.mem.findScalarPos(u8, p.text, p.at, '}') orelse return error.InvalidPattern;
                         const inside = p.text[p.at + 1 .. close];
-                        if (std.mem.indexOfScalar(u8, inside, ',')) |comma| {
+                        if (std.mem.findScalar(u8, inside, ',')) |comma| {
                             min = std.fmt.parseUnsigned(u32, inside[0..comma], 10) catch return error.InvalidPattern;
                             max = if (comma + 1 == inside.len) null else std.fmt.parseUnsigned(u32, inside[comma + 1 ..], 10) catch return error.InvalidPattern;
                         } else {
@@ -205,7 +206,7 @@ const Parser = struct {
             }
             first = false;
             if (c == '[' and p.at + 1 < p.text.len and p.text[p.at + 1] == ':') {
-                const close = std.mem.indexOfPos(u8, p.text, p.at + 2, ":]") orelse return error.InvalidPattern;
+                const close = std.mem.findPos(u8, p.text, p.at + 2, ":]") orelse return error.InvalidPattern;
                 const name = p.text[p.at + 2 .. close];
                 for (0..256) |b| {
                     if (inClass(name, @intCast(b)) orelse return error.InvalidPattern) set[b] = true;
@@ -879,11 +880,11 @@ const RParser = struct {
 
     fn parseInterval(p: *RParser) Error!struct { min: u32, max: ?u32 } {
         const close_text: []const u8 = if (p.isBasic()) "\\}" else "}";
-        const close = std.mem.indexOfPos(u8, p.text, p.at, close_text) orelse return error.InvalidPattern;
+        const close = std.mem.findPos(u8, p.text, p.at, close_text) orelse return error.InvalidPattern;
         const inside = p.text[p.at..close];
         var min: u32 = undefined;
         var max: ?u32 = undefined;
-        if (std.mem.indexOfScalar(u8, inside, ',')) |comma| {
+        if (std.mem.findScalar(u8, inside, ',')) |comma| {
             min = if (comma == 0) 0 else std.fmt.parseUnsigned(u32, inside[0..comma], 10) catch return error.InvalidPattern;
             max = if (comma + 1 == inside.len) null else std.fmt.parseUnsigned(u32, inside[comma + 1 ..], 10) catch return error.InvalidPattern;
         } else {
@@ -1055,7 +1056,7 @@ const RParser = struct {
             if (c == '[' and p.at + 1 < p.text.len and (p.text[p.at + 1] == ':' or p.text[p.at + 1] == '=' or p.text[p.at + 1] == '.')) {
                 const kind = p.text[p.at + 1];
                 const closing = [2]u8{ kind, ']' };
-                const close = std.mem.indexOfPos(u8, p.text, p.at + 2, &closing) orelse return error.InvalidPattern;
+                const close = std.mem.findPos(u8, p.text, p.at + 2, &closing) orelse return error.InvalidPattern;
                 const name = p.text[p.at + 2 .. close];
                 if (kind == ':') {
                     for (0..256) |b| {

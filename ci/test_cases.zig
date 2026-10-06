@@ -18,7 +18,7 @@ pub fn filters(b: *std.Build, name: []const u8) []const []const u8 {
         for (names, 0..) |*item, seed| item.* = b.fmt("a walk comes out in git rev-list's order: by date with its ties, hidden commits, topological, reversed: seed {d}", .{seed});
         return names;
     }
-    var selected: std.array_list.Managed([]const u8) = .init(b.allocator);
+    var selected: std.ArrayList([]const u8) = .empty;
     const families = [_]struct { prefix: []const u8, count: usize, title: []const u8 }{
         .{ .prefix = "history-", .count = 8, .title = "random histories merge to git's trees, stages and messages: seed " },
         .{ .prefix = "recursive-", .count = 3, .title = "criss-cross histories merge their bases first, as git's recursive merge does: seed " },
@@ -33,14 +33,14 @@ pub fn filters(b: *std.Build, name: []const u8) []const []const u8 {
             if (std.mem.eql(u8, family.prefix, "history-")) {
                 // Forty seeds in each density, each named independently.
                 if (seed >= 40) continue;
-                for ([_][]const u8{ "sparse", "crowded" }) |density| selected.append(b.fmt("{s}{d}, {s}", .{ family.title, seed, density })) catch @panic("out of memory");
+                for ([_][]const u8{ "sparse", "crowded" }) |density| selected.append(b.allocator, b.fmt("{s}{d}, {s}", .{ family.title, seed, density })) catch @panic("out of memory");
             } else {
                 // Compilation uses substring filters; the test predicate checks
                 // these complete names so seed 1 cannot also run seed 10.
-                selected.append(b.fmt("{s}{d}", .{ family.title, seed })) catch @panic("out of memory");
+                selected.append(b.allocator, b.fmt("{s}{d}", .{ family.title, seed })) catch @panic("out of memory");
             }
         }
-        return selected.toOwnedSlice() catch @panic("out of memory");
+        return selected.toOwnedSlice(b.allocator) catch @panic("out of memory");
     }
     @panic("unknown test case");
 }

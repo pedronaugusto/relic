@@ -142,7 +142,8 @@ test "overlapping usage examples own different scratch directories" {
         lengths: [2]usize = undefined,
         ready: Io.Event = .unset,
         proceed: Io.Event = .unset,
-        threadlocal var state: ?*@This() = null;
+        const Self = @This();
+        threadlocal var state: ?*Self = null;
         threadlocal var intercepted: bool = false;
 
         fn open(context: ?*anyopaque, parent: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
@@ -166,7 +167,7 @@ test "overlapping usage examples own different scratch directories" {
             return dir;
         }
 
-        fn example(control: *@This(), io: Io) !void {
+        fn example(control: *Self, io: Io) !void {
             state = control;
             intercepted = false;
             defer state = null;

@@ -14,6 +14,7 @@
 //! `error.UnsupportedPlaceholder`.
 
 const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -318,7 +319,7 @@ fn person(a: Allocator, ctx: Context, out: *std.ArrayList(u8), sig: object.Signa
         'n', 'N' => try out.appendSlice(a, shown.name),
         'e', 'E' => try out.appendSlice(a, shown.email),
         'l', 'L' => {
-            const at = std.mem.indexOfScalar(u8, shown.email, '@') orelse shown.email.len;
+            const at = std.mem.findScalar(u8, shown.email, '@') orelse shown.email.len;
             try out.appendSlice(a, shown.email[0..at]);
         },
         't' => try writeDate(a, out, sig, .unix),
@@ -596,7 +597,7 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
                     }
                 },
                 'f' => {
-                    const eol = std.mem.indexOfScalar(u8, subject, '\n') orelse subject.len;
+                    const eol = std.mem.findScalar(u8, subject, '\n') orelse subject.len;
                     try sanitizedSubject(a, out, subject[0..eol]);
                 },
                 'b' => try out.appendSlice(a, body),
@@ -609,7 +610,7 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
 }
 
 fn cstr(s: []const u8) []const u8 {
-    return if (std.mem.indexOfScalar(u8, s, 0)) |z| s[0..z] else s;
+    return if (std.mem.findScalar(u8, s, 0)) |z| s[0..z] else s;
 }
 
 /// The commit `oid` formatted by `format`, appended to `out`.
@@ -623,7 +624,7 @@ pub fn formatCommit(a: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, format: []
     defer if (st.verdict) |*v| v.deinit();
     var at: usize = 0;
     while (at < format.len) {
-        const pct = std.mem.indexOfScalarPos(u8, format, at, '%') orelse {
+        const pct = std.mem.findScalarPos(u8, format, at, '%') orelse {
             try out.appendSlice(a, format[at..]);
             break;
         };

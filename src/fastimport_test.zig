@@ -298,7 +298,7 @@ test "a notes ref changes its fanout as git's does, both ways" {
     defer report.deinit();
     const notes = try pair.mine.run(io, &.{ "ls-tree", "-r", "--name-only", "refs/notes/commits~1" });
     defer gpa.free(notes);
-    try std.testing.expect(std.mem.indexOfScalar(u8, notes, '/') != null);
+    try std.testing.expect(std.mem.findScalar(u8, notes, '/') != null);
 }
 
 test "rfc2822 dates, signatures kept or dropped, and signed tags as the mode says" {

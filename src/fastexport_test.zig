@@ -119,14 +119,14 @@ fn fixture(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
 }
 
 /// Every ref, as `--all` gives them to git: in name order.
-fn allTips(gpa: Allocator, io: Io, git: *testgit.Repo, arena: Allocator) ![]fastexport.Tip {
+fn allTips(gpa: Allocator, arena: Allocator, io: Io, git: *testgit.Repo) ![]fastexport.Tip {
     const listed = try git.run(io, &.{ "for-each-ref", "--format=%(refname) %(objectname)" });
     defer gpa.free(listed);
     var tips: std.ArrayList(fastexport.Tip) = .empty;
     var lines = std.mem.splitScalar(u8, listed, '\n');
     while (lines.next()) |l| {
         if (l.len == 0) continue;
-        const space = std.mem.indexOfScalar(u8, l, ' ').?;
+        const space = std.mem.findScalar(u8, l, ' ').?;
         try tips.append(arena, .{ .name = try arena.dupe(u8, l[0..space]), .oid = try Oid.parse(.sha1, l[space + 1 ..]) });
     }
     return tips.items;
@@ -185,7 +185,7 @@ test "every ref exports as git exports it, and imports back to the same objects"
     try fixture(gpa, io, &git);
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    const tips = try allTips(gpa, io, &git, arena_state.allocator());
+    const tips = try allTips(gpa, arena_state.allocator(), io, &git);
 
     const plain = try compare(gpa, io, &git, &.{ "--reencode=no", "--signed-tags=verbatim", "--tag-of-filtered-object=drop", "--all" }, .{
         .tips = tips,

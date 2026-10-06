@@ -21,6 +21,7 @@
 //! are refused by name.
 
 const Self = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -259,7 +260,7 @@ pub const Marks = struct {
         while (lines.next()) |line| {
             if (line.len == 0 and lines.peek() == null) break;
             if (line.len < 2 or line[0] != ':') return error.CorruptMarks;
-            const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.CorruptMarks;
+            const space = std.mem.findScalar(u8, line, ' ') orelse return error.CorruptMarks;
             const mark = std.fmt.parseInt(u64, line[1..space], 10) catch return error.CorruptMarks;
             if (mark == 0) return error.CorruptMarks;
             const oid = Oid.parse(kind, line[space + 1 ..]) catch return error.CorruptMarks;
@@ -734,7 +735,7 @@ const Importer = struct {
         var sig_sha256: ?[]const u8 = null;
         while (afterPrefix(imp.current(), "gpgsig ")) |v| {
             if (imp.signed_commits == .abort) return error.SignedObject;
-            const space = std.mem.indexOfScalar(u8, v, ' ') orelse return error.InvalidSignature;
+            const space = std.mem.findScalar(u8, v, ' ') orelse return error.InvalidSignature;
             const algo = v[0..space];
             const format = v[space + 1 ..];
             if (!std.mem.eql(u8, algo, "sha1") and !std.mem.eql(u8, algo, "sha256")) return error.InvalidSignature;
@@ -960,7 +961,7 @@ const Importer = struct {
 
     fn fileModify(imp: *Importer, b: *Branch, text: []u8) Error!void {
         defer imp.gpa.free(text);
-        const space = std.mem.indexOfScalar(u8, text, ' ') orelse return error.InvalidMode;
+        const space = std.mem.findScalar(u8, text, ' ') orelse return error.InvalidMode;
         var mode = parseOctal(text[0..space]) orelse return error.InvalidMode;
         switch (mode) {
             0o644, 0o755 => mode |= 0o100000,
@@ -1242,13 +1243,13 @@ const Importer = struct {
     fn parsePath(imp: *Importer, text: []const u8, last: bool) Error!Parsed {
         if (text.len > 0 and text[0] == '"') {
             const unquoted = try cquote.unquote(imp.gpa, text) orelse return error.InvalidPath;
-            if (std.mem.indexOfScalar(u8, unquoted.name, 0) != null) {
+            if (std.mem.findScalar(u8, unquoted.name, 0) != null) {
                 imp.gpa.free(unquoted.name);
                 return error.InvalidPath;
             }
             return .{ .path = unquoted.name, .rest = text[unquoted.consumed..] };
         }
-        const end = if (last) text.len else std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
+        const end = if (last) text.len else std.mem.findScalar(u8, text, ' ') orelse text.len;
         return .{ .path = try imp.gpa.dupe(u8, text[0..end]), .rest = text[end..] };
     }
 
@@ -1290,10 +1291,10 @@ const Importer = struct {
         if (text_in.len > 0 and text_in[0] == '<') try owned.append(imp.arena(), ' ');
         try owned.appendSlice(imp.arena(), text_in);
         const text = owned.items;
-        const lt = std.mem.indexOfAny(u8, text, "<>") orelse return error.InvalidIdent;
+        const lt = std.mem.findAny(u8, text, "<>") orelse return error.InvalidIdent;
         if (text[lt] != '<') return error.InvalidIdent;
         if (lt != 0 and text[lt - 1] != ' ') return error.InvalidIdent;
-        const gt = std.mem.indexOfAnyPos(u8, text, lt + 1, "<>") orelse return error.InvalidIdent;
+        const gt = std.mem.findAnyPos(u8, text, lt + 1, "<>") orelse return error.InvalidIdent;
         if (text[gt] != '>') return error.InvalidIdent;
         if (gt + 1 >= text.len or text[gt + 1] != ' ') return error.InvalidIdent;
         const head = text[0 .. gt + 2];
@@ -1359,7 +1360,7 @@ const Importer = struct {
 
     /// git's `tree_content_set`: whether anything changed.
     fn setPath(imp: *Importer, node: *Node, path: []const u8, oid: Oid, mode: u32, subtree: ?*Node) Error!bool {
-        const slash = std.mem.indexOfScalar(u8, path, '/');
+        const slash = std.mem.findScalar(u8, path, '/');
         const name = path[0 .. slash orelse path.len];
         if (name.len == 0) return error.InvalidPath;
         try imp.load(node);
@@ -1413,7 +1414,7 @@ const Importer = struct {
     fn removeIn(imp: *Importer, node: *Node, path: []const u8, backup_in: ?*Entry) Error!bool {
         var backup = backup_in;
         try imp.load(node);
-        const slash = std.mem.indexOfScalar(u8, path, '/');
+        const slash = std.mem.findScalar(u8, path, '/');
         const name = path[0 .. slash orelse path.len];
         for (node.entries.?.items) |*e| {
             if (!imp.nameEql(e.name, name)) continue;
@@ -1441,7 +1442,7 @@ const Importer = struct {
     /// git's `tree_content_get`: the entry at `path`, a held tree copied so
     /// changes to one do not reach the other.
     fn getPath(imp: *Importer, node: *Node, path: []const u8, leaf: *Entry, allow_root: bool) Error!bool {
-        const slash = std.mem.indexOfScalar(u8, path, '/');
+        const slash = std.mem.findScalar(u8, path, '/');
         const name = path[0 .. slash orelse path.len];
         if (name.len == 0 and !allow_root) return error.InvalidPath;
         try imp.load(node);
@@ -1720,7 +1721,7 @@ fn isHex(text: []const u8) bool {
 /// git's `validate_raw_date`: `<seconds> <±zone>`, the zone no more than
 /// 1400 when `strict`.
 fn validRawDate(text: []const u8, strict: bool) bool {
-    const space = std.mem.indexOfScalar(u8, text, ' ') orelse return false;
+    const space = std.mem.findScalar(u8, text, ' ') orelse return false;
     if (space == 0) return false;
     _ = std.fmt.parseInt(u64, text[0..space], 10) catch return false;
     const zone = text[space + 1 ..];
@@ -1757,7 +1758,7 @@ pub fn signedOffset(message: []const u8) usize {
     var at: usize = 0;
     while (at < message.len) {
         if (signing.Format.of(message[at..]) != null) match = at;
-        const nl = std.mem.indexOfScalarPos(u8, message, at, '\n');
+        const nl = std.mem.findScalarPos(u8, message, at, '\n');
         at = if (nl) |n| n + 1 else message.len;
     }
     return match;
