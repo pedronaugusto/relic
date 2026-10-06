@@ -109,21 +109,20 @@ pub fn encode85(w: *Io.Writer, data: []const u8) Io.Writer.Error!void {
 pub const InflateError = error{CorruptBinaryPatch} || Allocator.Error;
 
 /// Inflate a zlib stream that must come to exactly `size` bytes, as git's
-/// `inflate_it` requires.
+/// `inflate_it` requires. The size is the patch's own word, so one past
+/// what a delta may produce is refused before anything is allocated.
 pub fn inflate(gpa: Allocator, data: []const u8, size: usize) Self.InflateError![]u8 {
-    const out = try gpa.alloc(u8, size);
-    errdefer gpa.free(out);
+    if (size > delta.max_result_bytes) return error.CorruptBinaryPatch;
     const decoder = try gpa.create(inflate_mod.Decoder);
     defer gpa.destroy(decoder);
     decoder.* = .{};
     // one byte more than wanted, so a stream that runs long is caught
-    const scratch = try gpa.alloc(u8, size + 1);
-    defer gpa.free(scratch);
+    const out = try gpa.alloc(u8, size + 1);
+    errdefer gpa.free(out);
     var reader: Io.Reader = .fixed(data);
-    const got = decoder.zlib(&reader, scratch) catch return error.CorruptBinaryPatch;
+    const got = decoder.zlib(&reader, out) catch return error.CorruptBinaryPatch;
     if (got != size) return error.CorruptBinaryPatch;
-    @memcpy(out, scratch[0..size]);
-    return out;
+    return gpa.realloc(out, size);
 }
 
 /// Deflate `data` as one zlib stream at zlib's level 1, which is
@@ -213,6 +212,17 @@ test "a binary patch's hunks inflate to both sides" {
     defer out.deinit();
     try write(gpa, &out.writer, old, new);
     try std.testing.expect(std.mem.startsWith(u8, out.written(), "GIT binary patch\n"));
+}
+
+test "a hunk that states a size past what a delta may make is refused before it is allocated" {
+    const gpa = std.testing.allocator;
+    const deflated = try deflate(gpa, "x");
+    defer gpa.free(deflated);
+    try std.testing.expectError(error.CorruptBinaryPatch, inflate(gpa, deflated, 8_000_000_000));
+    try std.testing.expectError(error.CorruptBinaryPatch, inflate(gpa, deflated, std.math.maxInt(usize)));
+    const out = try inflate(gpa, deflated, 1);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("x", out);
 }
 
 test "fuzz: any base 85 line and any deflated hunk decode or are refused by name" {

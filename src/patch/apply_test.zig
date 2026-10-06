@@ -345,6 +345,27 @@ test "a corrupt patch is refused by name and changes nothing" {
     try compare(&p, io, "diff --git a/b.txt b/b.txt\nindex 1111111..2222222 100644\n", &.{}, .{});
 }
 
+test "a hunk placed past what an int holds lands where git's lands it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var p = try Pair.init(gpa, io);
+    defer p.deinit();
+    try setupBase(&p, io);
+    for ([_][]const u8{ "9223372036854775808", "18446744073709551615", "4294967297", "2147483649" }) |at| {
+        const forward = try std.fmt.allocPrint(gpa, "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1,3 +{s},3 @@\n one\n-two\n+TWO\n three\n", .{at});
+        defer gpa.free(forward);
+        try compare(&p, io, forward, &.{}, .{});
+        try reset(&p, io);
+        const backward = try std.fmt.allocPrint(gpa, "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -{s},3 +1,3 @@\n one\n-TWO\n+two\n three\n", .{at});
+        defer gpa.free(backward);
+        try p.write(io, "b.txt", "one\nTWO\nthree\n");
+        try compare(&p, io, backward, &.{"-R"}, .{ .reverse = true });
+        try reset(&p, io);
+    }
+    // A literal stating more than any object may be is refused, not tried.
+    try compare(&p, io, "diff --git a/bin.dat b/bin.dat\nindex 1111111..2222222 100644\nGIT binary patch\nliteral 8000000000\nzcmV?d00001\n\nliteral 0\nHcmV?d00001\n\n", &.{}, .{});
+}
+
 /// A random edit of `lines`: lines changed, removed and added.
 fn randomEdit(gpa: Allocator, random: std.Random, lines: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;

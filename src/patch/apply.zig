@@ -1182,7 +1182,9 @@ fn applyOneFragment(st: *State, img: *Image, frag: patchparse.Fragment, inaccura
     var trailing = frag.trailing;
     var match_beginning = frag.old_pos == 0 or (frag.old_pos == 1 and !st.options.unidiff_zero);
     var match_end = !st.options.unidiff_zero and trailing == 0;
-    var pos: isize = if (frag.new_pos != 0) @as(isize, @intCast(frag.new_pos)) - 1 else 0;
+    // git keeps the position in an `int`: a header past one is cut to its
+    // low 32 bits there, and here, rather than overflowing.
+    var pos: isize = if (frag.new_pos != 0) @as(i32, @bitCast(@as(u32, @truncate(frag.new_pos - 1)))) else 0;
 
     var applied_pos: ?usize = null;
     while (true) {

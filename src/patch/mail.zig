@@ -575,7 +575,8 @@ pub fn patchbreak(line: []const u8) bool {
     if (std.mem.startsWith(u8, line, "Index: ")) return true;
     if (line.len < 4) return false;
     if (std.mem.startsWith(u8, line, "---")) {
-        if (line[3] == ' ' and !isSpace(line[4])) return true;
+        // git reads the NUL past a four-byte line, which is no space.
+        if (line[3] == ' ' and (line.len == 4 or !isSpace(line[4]))) return true;
         var i: usize = 3;
         while (i < line.len) : (i += 1) {
             const c = line[i];
@@ -1044,6 +1045,20 @@ test "a message comes apart into author, subject, date, message and patch" {
     try std.testing.expectEqualStrings("Author: J\xc3\xb6rg\nEmail: jorg@example.com\nSubject: fix the thing\nDate: Tue, 14 Nov 2023 22:13:20 +0000\n\n", got.info);
     try std.testing.expectEqualStrings("Body line.\n", got.message);
     try std.testing.expectEqualStrings("---\n a | 1 +\n\ndiff --git a/a b/a\n", got.patch);
+}
+
+test "a message ending in a bare --- breaks to the patch there, as git's mailinfo does" {
+    const gpa = std.testing.allocator;
+    try std.testing.expect(patchbreak("--- "));
+    try std.testing.expect(!patchbreak("---  x"));
+    const plain = "From: A <a@example.com>\nSubject: s\n\nbody\n--- ";
+    const encoded = "From: A <a@example.com>\nSubject: s\nContent-Transfer-Encoding: base64\n\nYm9keQ0KLS0tIA==\n";
+    for ([_][]const u8{ plain, encoded }, [_][]const u8{ "body\n", "body\r\n" }) |mail, message| {
+        var got = try info(gpa, mail, .{});
+        defer got.deinit();
+        try std.testing.expectEqualStrings(message, got.message);
+        try std.testing.expectEqualStrings("--- ", got.patch);
+    }
 }
 
 test "fuzz: any bytes split and come apart, or are refused by name" {
