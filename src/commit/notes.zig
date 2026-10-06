@@ -308,9 +308,13 @@ pub const Notes = struct {
 
     /// `note_tree_insert`. Takes `entry`.
     fn insert(t: *Notes, io: Io, start: *IntNode, start_n: usize, entry: *Leaf, kind: std.meta.Tag(Ptr), combine: Combine) Error!void {
+        // `entry` is this call's on every path, an error's too.
         var tree = start;
         var n = start_n;
-        const p = try t.search(io, &tree, &n, &entry.key);
+        const p = t.search(io, &tree, &n, &entry.key) catch |err| {
+            t.gpa.destroy(entry);
+            return err;
+        };
         switch (p.*) {
             .empty => {
                 if (entry.val.isZero()) {
@@ -338,7 +342,10 @@ pub const Notes = struct {
             .subtree => |l| if (t.prefixMatches(&entry.key, &l.key)) {
                 p.* = .empty;
                 defer t.gpa.destroy(l);
-                try t.loadSubtree(io, l, tree, n);
+                t.loadSubtree(io, l, tree, n) catch |err| {
+                    t.gpa.destroy(entry);
+                    return err;
+                };
                 return t.insert(io, tree, n, entry, kind, combine);
             },
             .internal => unreachable,
@@ -356,7 +363,10 @@ pub const Notes = struct {
             else => unreachable,
         };
         t.insert(io, node, n + 1, old_leaf, std.meta.activeTag(old), combine) catch |err| {
+            // The failed insert released the old leaf, and this one too.
+            p.* = .empty;
             t.gpa.destroy(node);
+            t.gpa.destroy(entry);
             return err;
         };
         p.* = .{ .internal = node };
@@ -1651,6 +1661,32 @@ test "a notes tree's other entries and unread fanout survive an edit as git keep
     try t.git.exec(io, &.{ "notes", "remove", hexOf(objects[0], &hex) });
     _ = try remove(gpa, io, &repo, &.{objects[0]}, .{ .who = fixture_who });
     try t.expectSameState(io, &.{"refs/notes/commits"});
+}
+
+test "a fanout subtree that cannot be read is a named error, and nothing read before it leaks" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    try r.writeFile(io, "note.txt", "a note\n");
+    const note = try r.line(io, &.{ "hash-object", "-w", "note.txt" });
+    defer gpa.free(note);
+    // A fanout directory whose tree is missing, and a flat note under the
+    // same two digits, which reading has to look for inside it.
+    const listing = try std.fmt.allocPrint(gpa, "040000 tree {s}\tab\n100644 blob {s}\tab{s}\n", .{ "1" ** 40, note, "c" ** 38 });
+    defer gpa.free(listing);
+    const tree = try r.runInput(io, &.{ "mktree", "--missing" }, listing);
+    defer gpa.free(tree);
+    const commit = try r.line(io, &.{ "commit-tree", "-m", "broken fanout", std.mem.trimEnd(u8, tree, "\n") });
+    defer gpa.free(commit);
+    try r.exec(io, &.{ "update-ref", "refs/notes/commits", commit });
+    var repo = try Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    if (Notes.open(gpa, io, &repo, "refs/notes/commits", .concatenate)) |opened| {
+        var notes = opened;
+        defer notes.deinit();
+        try std.testing.expectError(error.ObjectNotFound, notes.get(io, try Oid.parse(.sha1, "ab" ++ "c" ** 38)));
+    } else |err| try std.testing.expectEqual(error.ObjectNotFound, err);
 }
 
 test "notes merge under every strategy leaves what git notes merge leaves, and a manual one finishes the same" {
