@@ -51,7 +51,8 @@ const state_dir = "rebase-apply";
 pub const Error = error{
     /// A session is already in progress.
     AmInProgress,
-    /// `rebase-apply` is there but is not an `am` session: a rebase's.
+    /// `rebase-apply` is there with no session in it: git's "Stray
+    /// rebase-apply directory found", which `abort` and `quit` remove.
     RebaseInProgress,
     /// `proceed`, `skip`, `abort` or `quit` with no session.
     NoAmInProgress,
@@ -708,7 +709,11 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
     defer head.deinit(gpa);
 
     // the fake ancestor: every file the patch changes, at its old blob
-    var parsed = patchparse.parse(gpa, patch, .{ .strip = apply_options.strip }) catch return .failed;
+    // Read as the apply that failed read it, its directory and limits too.
+    var parsed = apply_mod.keptFiles(gpa, patch, apply_options) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .failed,
+    };
     defer parsed.deinit();
     var current = try repo.openIndex(io);
     defer current.deinit();
@@ -959,7 +964,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// `git am --abort`: put `HEAD`, the index and the working tree back where
 /// the session started, unless `HEAD` moved since it stopped, and end it.
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Self.Error!void {
-    if (!inProgress(io, repo)) return error.NoAmInProgress;
+    if (!inProgress(io, repo)) return destroyStray(io, repo);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const a = arena_instance.allocator();
@@ -1001,6 +1006,14 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
 
 /// `git am --quit`: end the session and leave everything as it is.
 pub fn quit(io: Io, repo: *Repository) Self.Error!void {
-    if (!inProgress(io, repo)) return error.NoAmInProgress;
+    if (!inProgress(io, repo)) return destroyStray(io, repo);
+    try destroy(io, repo);
+}
+
+/// With no session, a `rebase-apply` left behind goes, as git's `--abort`
+/// and `--quit` remove a stray one; with none there either, there is
+/// nothing to end.
+fn destroyStray(io: Io, repo: *Repository) Self.Error!void {
+    if (!head_mod.stateExists(io, repo.git_dir, state_dir)) return error.NoAmInProgress;
     try destroy(io, repo);
 }

@@ -84,8 +84,8 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.indexOf(u8, text, selection) == null) return error.MissingExactSelection;
         }
     }
-    if (count != 1423 or comparisons.count() != 180) {
-        try report("Windows coverage: {d} source tests, {d} comparisons; expected 1423 and 180\n", io, .{ count, comparisons.count() });
+    if (count != 1424 or comparisons.count() != 180) {
+        try report("Windows coverage: {d} source tests, {d} comparisons; expected 1424 and 180\n", io, .{ count, comparisons.count() });
         return error.ChangedTestCount;
     }
     var filters = std.StringHashMap(void).init(a);

@@ -303,6 +303,43 @@ test "the three-way fallback leaves git's conflict, and skip and abort put thing
     }
 }
 
+test "the three-way fallback reads the patch under --directory as the apply did, and a stray rebase-apply goes on abort and quit, as git's do" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try requireTodaysSession(gpa, io);
+    const mbox = try makeMailbox(gpa, io, &.{}, threeCommits);
+    defer gpa.free(mbox);
+    var p = try Pair.init(gpa, io);
+    defer p.deinit();
+    try p.write(io, "sub/base.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
+    try p.write(io, "sub/other.txt", "alpha\nbeta\ngamma\n");
+    try p.both(io, &.{ "add", "-A" });
+    try p.both(io, &.{ "commit", "-q", "-m", "base, under sub" });
+    try p.write(io, "sub/other.txt", "alpha\nbeta\nGamma-ours\n");
+    try p.both(io, &.{ "commit", "-q", "-a", "-m", "ours" });
+    try std.testing.expect(try gitAm(gpa, io, &p, &.{ "--3way", "--directory=sub" }, mbox) != 0);
+    const stop = (try oursAm(gpa, io, &p, mbox, .{ .committer = committer, .three_way = true, .apply = .{ .directory = "sub" } })).?;
+    try std.testing.expectEqual(am.StopReason.conflicts, stop.reason);
+    try expectSame(gpa, io, &p);
+    try p.git.exec(io, &.{ "am", "--abort" });
+    {
+        var ours = try Repository.open(gpa, io, p.ours.dir, .{});
+        defer ours.deinit(io);
+        try am.abort(gpa, io, &ours, committer);
+    }
+    try expectSame(gpa, io, &p);
+
+    for ([_][]const u8{ "--abort", "--quit" }) |how| {
+        try p.write(io, ".git/rebase-apply/stray", "left behind\n");
+        try p.git.exec(io, &.{ "am", how });
+        var ours = try Repository.open(gpa, io, p.ours.dir, .{});
+        defer ours.deinit(io);
+        if (std.mem.eql(u8, how, "--abort")) try am.abort(gpa, io, &ours, committer) else try am.quit(io, &ours);
+        try std.testing.expectError(error.FileNotFound, p.ours.dir.statFile(io, ".git/rebase-apply", .{}));
+        try std.testing.expectError(error.NoAmInProgress, am.quit(io, &ours));
+    }
+}
+
 fn mailWith(comptime headers: []const u8, comptime body: []const u8) []const u8 {
     return "From 0123456789abcdef0123456789abcdef01234567 Mon Sep 17 00:00:00 2001\n" ++ headers ++ "\n" ++ body;
 }

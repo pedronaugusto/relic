@@ -618,6 +618,42 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
 
 /// Parse `text` as `options` says, the line of a malformed patch left in
 /// the caller's diagnostic.
+/// The files of a patch as `apply` takes them under `options`: read under
+/// its directory, strip count and reversal, and kept by its limits.
+pub const Kept = struct {
+    gpa: Allocator,
+    arena: std.heap.ArenaAllocator.State,
+    patch: patchparse.Patch,
+    /// The files the limits kept, reversed under `reverse`.
+    files: []const FilePatch,
+
+    pub fn deinit(k: *Kept) void {
+        k.patch.deinit();
+        var arena = k.arena.promote(k.gpa);
+        arena.deinit();
+        k.* = undefined;
+    }
+};
+
+/// Read `text` as `apply` would under `options`, applying nothing: the
+/// files `git apply --build-fake-ancestor` takes, which `git am`'s
+/// three-way fallback builds its base from.
+pub fn keptFiles(gpa: Allocator, text: []const u8, options: Options) Self.Error!Kept {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_instance.deinit();
+    const a = arena_instance.allocator();
+    var parsed = try parsePatches(gpa, a, text, options);
+    errdefer parsed.deinit();
+    var files: std.ArrayList(FilePatch) = .empty;
+    for (parsed.files) |file| {
+        var p = file;
+        if (options.reverse) reversePatch(&p);
+        if (!usePatch(options.limits, &p)) continue;
+        try files.append(a, p);
+    }
+    return .{ .gpa = gpa, .arena = arena_instance.state, .patch = parsed, .files = files.items };
+}
+
 fn parsePatches(gpa: Allocator, a: Allocator, text: []const u8, options: Options) Error!patchparse.Patch {
     var parse_diag: patchparse.Diagnostic = .{};
     return patchparse.parse(gpa, text, .{
@@ -680,7 +716,7 @@ fn keepEntries(st: *State, parsed: []const patchparse.FilePatch, configured_ws: 
         var entry = try a.create(Entry);
         entry.* = .{ .p = file };
         if (st.options.reverse) reversePatch(&entry.p);
-        if (!usePatch(st, &entry.p)) {
+        if (!usePatch(st.options.limits, &entry.p)) {
             skipped += 1;
             continue;
         }
@@ -751,13 +787,13 @@ fn reversePatch(p: *FilePatch) void {
     }
 }
 
-fn usePatch(st: *State, p: *const FilePatch) bool {
+fn usePatch(limits: []const Limit, p: *const FilePatch) bool {
     const pathname = p.new_name orelse p.old_name.?;
     var has_include = false;
-    for (st.options.limits) |limit| {
+    for (limits) |limit| {
         if (limit.include) has_include = true;
     }
-    for (st.options.limits) |limit| {
+    for (limits) |limit| {
         if (wildmatch.match(limit.pattern, pathname, .{ .pathname = false }) catch false) return limit.include;
     }
     return !has_include;
