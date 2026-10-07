@@ -69,7 +69,6 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/worktree/attributes.zig",
         "src/transport/auth.zig",
         "src/odb/commitgraph.zig",
-        "src/config/write.zig",
         "src/transport/connection.zig",
         "src/worktree/dirscan.zig",
         "src/testing/filter.zig",
@@ -109,6 +108,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/repo/ident.zig",
         "src/diff/userdiff.zig",
         "src/config/state.zig",
+        "src/config/write.zig",
         "src/transport/credential.zig",
         "src/repo/hooks.zig",
         "src/transport/httpsettings.zig",
@@ -398,20 +398,30 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "windows declarations", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/repo/fs.zig", "src/testing/fake_ssh.zig" } },
     .{ .name = "reflog files owner", .kind = .string, .tokens = &.{ "logs", "logs/*" }, .owners = &[_][]const u8{ "src/refs.zig", "src/refs/**" } ++ tests },
     .{ .name = "stash ref owner", .kind = .string, .tokens = &.{"refs/stash"}, .owners = &[_][]const u8{"src/commit/stash.zig"} ++ tests },
+    // the published configuration is the repository's to replace
+    .{ .name = "configuration owner", .tokens = &.{"_config"}, .owners = &[_][]const u8{"src/repo.zig"} ++ tests },
 };
 
 /// Modules private to the namespace that owns them: no file outside it
 /// imports one in production, so nothing can go around the owner. The
-/// files backend's logs and `packed-refs` are reached through `refs.Store`.
+/// files backend's logs and `packed-refs` are reached through `refs.Store`,
+/// and a configuration file is written through `Repository.writeConfig`.
 pub const private: []const gantry.rules.EdgeRule = &.{
     .{ .name = "refs internals", .to = "src/refs/reflog.zig", .kind = .import },
     .{ .name = "refs internals", .to = "src/refs/packed.zig", .kind = .import },
+    .{ .name = "configuration writes", .to = "src/config/write.zig", .kind = .import },
+    .{ .name = "configuration owner", .to = "src/config/state.zig", .kind = .import },
 };
 
 /// Who may import each private module: its namespace.
 pub const private_owners: []const gantry.rules.Allow = &.{
     .{ .rule = "refs internals", .from = "src/refs.zig" },
     .{ .rule = "refs internals", .from = "src/refs/**" },
+    .{ .rule = "configuration writes", .from = "src/config.zig" },
+    .{ .rule = "configuration writes", .from = "src/config/**" },
+    .{ .rule = "configuration writes", .from = "src/repo.zig" },
+    .{ .rule = "configuration writes", .from = "src/repo/**" },
+    .{ .rule = "configuration owner", .from = "src/repo.zig" },
 };
 
 /// Namespace reexports added when each facade was folded into its implementation.

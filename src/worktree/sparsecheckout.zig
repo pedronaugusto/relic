@@ -11,10 +11,9 @@
 //! lock is taken, then the index's, the working tree is updated, the index is
 //! written, and only then does the new pattern file replace the old one.
 //!
-//! The settings are read from the repository's files on every call rather
-//! than from `Repository.config`, which is the configuration as it was when
-//! the repository was opened and which these operations change. A caller
-//! that reads the settings itself afterwards reopens the repository.
+//! Every operation reads the configuration again first, as git reads it
+//! when a command starts, and writes through `Repository.writeConfig`, so
+//! `Repository.configuration` says afterwards what the files say.
 
 const Self = @This();
 
@@ -54,7 +53,7 @@ pub const Error = error{
     /// `add` found no pattern file to add to.
     PatternFileMissing,
 } || worktree.Error || sparseindex.Error || Config.SetError || config_mod.ParseError || config_mod.ValueError ||
-    fs.LockError || fs.CommitError || sparse.Error || repo_mod.Error;
+    fs.LockError || fs.CommitError || sparse.Error || repo_mod.Error || repo_mod.Repository.WriteConfigError;
 
 /// How an operation behaves. Each field is one of the command's options.
 pub const Options = struct {
@@ -95,11 +94,19 @@ pub const Outcome = struct {
     index_written: bool = false,
 };
 
-/// The settings as the repository's files hold them now.
+/// The settings as the repository's files hold them now: the
+/// configuration read again when a file changed, and asked.
 pub fn settings(io: Io, repo: *Repository) Self.Error!Settings {
-    var files = try Files.open(io, repo);
-    defer files.deinit();
-    return files.settings(repo);
+    _ = try repo.refreshConfig(io, null);
+    return settingsOf(repo.configuration());
+}
+
+fn settingsOf(config: *const Config) Error!Settings {
+    return .{
+        .enabled = try config.getBool("core.sparsecheckout", false),
+        .cone = try config.getBool("core.sparsecheckoutcone", false),
+        .sparse_index = try config.getBool("index.sparse", false),
+    };
 }
 
 /// `git sparse-checkout set`: replace the patterns with `patterns` and make
@@ -271,62 +278,13 @@ pub fn list(io: Io, repo: *Repository) Self.Error!Listing {
 /// Where the patterns live, under the worktree's own git directory.
 const pattern_file = "info/sparse-checkout";
 
-/// The two configuration files an operation reads and writes, opened
-/// fresh: the shared `config` and this worktree's `config.worktree`.
-const Files = struct {
-    gpa: Allocator,
-    local: Config,
-    worktree: ?Config,
-
-    fn open(io: Io, repo: *Repository) Error!Files {
-        var local = try Config.openFile(repo.gpa, io, .{ .dir = repo.common_dir, .sub_path = "config" }, .local, .{});
-        errdefer local.deinit();
-        const on = try local.getBool("extensions.worktreeconfig", false);
-        const wt: ?Config = if (on)
-            try Config.openFile(repo.gpa, io, .{ .dir = repo.git_dir, .sub_path = "config.worktree" }, .worktree, .{})
-        else
-            null;
-        return .{ .gpa = repo.gpa, .local = local, .worktree = wt };
-    }
-
-    fn deinit(f: *Files) void {
-        f.local.deinit();
-        if (f.worktree) |*w| w.deinit();
-        f.* = undefined;
-    }
-
-    /// A value by git's precedence: a value the caller passed at open beats
-    /// every file, this worktree's file beats the shared one, and the
-    /// shared one beats the user's and the system's.
-    fn get(f: *const Files, repo: *const Repository, name: []const u8) ?[]const u8 {
-        if (levelValue(repo.configuration(), name, &.{.command})) |v| return v;
-        if (f.worktree) |*w| {
-            if (w.find(name)) |entry| return entry.value orelse "true";
-        }
-        if (f.local.find(name)) |entry| return entry.value orelse "true";
-        return levelValue(repo.configuration(), name, &.{ .global, .system });
-    }
-
-    fn getBool(f: *const Files, repo: *const Repository, name: []const u8) Error!bool {
-        const text = f.get(repo, name) orelse return false;
-        return config_mod.parseBool(text);
-    }
-
-    fn settings(f: *const Files, repo: *const Repository) Error!Settings {
-        return .{
-            .enabled = try f.getBool(repo, "core.sparsecheckout"),
-            .cone = try f.getBool(repo, "core.sparsecheckoutcone"),
-            .sparse_index = try f.getBool(repo, "index.sparse"),
-        };
-    }
-};
-
-/// The last value of `name` among the entries at one of `levels`.
-fn levelValue(config: *const Config, name: []const u8, levels: []const config_mod.Level) ?[]const u8 {
+/// The last value of `name` the shared file (and what it includes) gives,
+/// borrowed from `config`.
+fn sharedValue(config: *const Config, name: []const u8) ?[]const u8 {
     const split = config_mod.splitFullName(name) orelse return null;
     var found: ?[]const u8 = null;
     for (config.entries.items) |entry| {
-        if (std.mem.findScalar(config_mod.Level, levels, entry.level) == null) continue;
+        if (entry.level != .local) continue;
         if (!entry.matches(split.section, split.subsection, split.name)) continue;
         found = entry.value orelse "true";
     }
@@ -338,26 +296,21 @@ fn levelValue(config: *const Config, name: []const u8, levels: []const config_mo
 const Op = struct {
     repo: *Repository,
     io: Io,
-    files: Files,
     state: Settings,
     fold: bool,
 
     fn init(io: Io, repo: *Repository) Error!Op {
         if (repo.work_dir == null) return error.NoWorkingTree;
-        var files = try Files.open(io, repo);
-        errdefer files.deinit();
-        const state = try files.settings(repo);
+        _ = try repo.refreshConfig(io, null);
         return .{
             .repo = repo,
             .io = io,
-            .files = files,
-            .state = state,
-            .fold = try files.getBool(repo, "core.ignorecase"),
+            .state = try settingsOf(repo.configuration()),
+            .fold = try repo.configuration().getBool("core.ignorecase", false),
         };
     }
 
     fn deinit(op: *Op) void {
-        op.files.deinit();
         op.* = undefined;
     }
 
@@ -371,7 +324,7 @@ const Op = struct {
         op.state.cone = cone;
         if (record) try op.setConfig(if (cone) .cone else .patterns);
         if (options.sparse_index) |on| {
-            try op.setWorktreeValue("index.sparse", if (on) "true" else "false");
+            try op.setWorktreeValues(&.{.{ .set = .{ .name = "index.sparse", .value = if (on) "true" else "false" } }});
             op.state.sparse_index = on;
         }
     }
@@ -382,13 +335,13 @@ const Op = struct {
     /// and the two settings go into it; turning sparse checkout off also
     /// turns the sparse index off.
     fn setConfig(op: *Op, mode: Mode) Error!void {
-        try op.initWorktreeConfig();
-        try op.setWorktreeValue("core.sparseCheckout", if (mode != .off) "true" else "false");
-        try op.setWorktreeValue("core.sparseCheckoutCone", if (mode == .cone) "true" else "false");
-        if (mode == .off) {
-            try op.setWorktreeValue("index.sparse", "false");
-            op.state.sparse_index = false;
-        }
+        const values: [3]Repository.ConfigEdit = .{
+            .{ .set = .{ .name = "core.sparseCheckout", .value = if (mode != .off) "true" else "false" } },
+            .{ .set = .{ .name = "core.sparseCheckoutCone", .value = if (mode == .cone) "true" else "false" } },
+            .{ .set = .{ .name = "index.sparse", .value = "false" } },
+        };
+        try op.setWorktreeValues(if (mode == .off) &values else values[0..2]);
+        if (mode == .off) op.state.sparse_index = false;
     }
 
     /// git's `init_worktree_config`: turn `extensions.worktreeConfig` on in
@@ -396,39 +349,44 @@ const Op = struct {
     /// of it into the main worktree's own file, where every other worktree
     /// stops seeing them.
     fn initWorktreeConfig(op: *Op) Error!void {
-        if (op.files.worktree != null) return;
         const repo = op.repo;
         const io = op.io;
-        try op.files.local.set("extensions.worktreeConfig", "true");
-        try op.files.local.write(io, repo.common_dir, "config");
-
-        const bare = op.files.local.getBool("core.bare", false) catch false;
-        const core_worktree = if (op.files.local.get("core.worktree")) |v| try repo.gpa.dupe(u8, v) else null;
+        if (repo.configuration().sources.worktree != null) return;
+        // What the shared file says, kept before a write replaces the
+        // configuration it is read from.
+        const bare = if (sharedValue(repo.configuration(), "core.bare")) |v| config_mod.parseBool(v) catch false else false;
+        const core_worktree = if (sharedValue(repo.configuration(), "core.worktree")) |v| try repo.gpa.dupe(u8, v) else null;
         defer if (core_worktree) |v| repo.gpa.free(v);
-        if (bare or core_worktree != null) {
-            var main = try openWritable(repo.gpa, io, repo.common_dir, "config.worktree", .worktree);
-            defer main.deinit();
-            if (bare) try main.set("core.bare", "true");
-            if (core_worktree) |v| try main.set("core.worktree", v);
-            try main.write(io, repo.common_dir, "config.worktree");
-            if (bare) try op.files.local.unset("core.bare");
-            if (core_worktree != null) try op.files.local.unset("core.worktree");
-            try op.files.local.write(io, repo.common_dir, "config");
+
+        _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "extensions.worktreeConfig", .value = "true" } }}, null);
+        if (!bare and core_worktree == null) return;
+        var moved: [2]Repository.ConfigEdit = undefined;
+        var unset: [2]Repository.ConfigEdit = undefined;
+        var n: usize = 0;
+        if (bare) {
+            moved[n] = .{ .set = .{ .name = "core.bare", .value = "true" } };
+            unset[n] = .{ .unset = .{ .name = "core.bare" } };
+            n += 1;
         }
-        op.files.worktree = try openWritable(repo.gpa, io, repo.git_dir, "config.worktree", .worktree);
+        if (core_worktree) |v| {
+            moved[n] = .{ .set = .{ .name = "core.worktree", .value = v } };
+            unset[n] = .{ .unset = .{ .name = "core.worktree" } };
+            n += 1;
+        }
+        // The main worktree's own file is this repository's in the main
+        // worktree, and one beside it from a linked one.
+        if (repo.common_is_separate)
+            _ = try repo.writeConfigFile(io, repo.common_dir, "config.worktree", moved[0..n])
+        else
+            _ = try repo.writeConfig(io, .worktree, moved[0..n], null);
+        _ = try repo.writeConfig(io, .local, unset[0..n], null);
     }
 
-    /// Set one value in this worktree's `config.worktree`, writing it at
+    /// Set values in this worktree's `config.worktree`, writing them at
     /// once as git's `repo_config_set_worktree_gently` does.
-    fn setWorktreeValue(op: *Op, name: []const u8, value: []const u8) Error!void {
+    fn setWorktreeValues(op: *Op, values: []const Repository.ConfigEdit) Error!void {
         try op.initWorktreeConfig();
-        const wt = &op.files.worktree.?;
-        if (wt.files.items.len == 0) {
-            wt.deinit();
-            op.files.worktree = try openWritable(op.repo.gpa, op.io, op.repo.git_dir, "config.worktree", .worktree);
-        }
-        try op.files.worktree.?.set(name, value);
-        try op.files.worktree.?.write(op.io, op.repo.git_dir, "config.worktree");
+        _ = try op.repo.writeConfig(op.io, .worktree, values, null);
     }
 
     /// Refuse, in cone mode, what cannot be a directory: git's
@@ -496,7 +454,7 @@ const Op = struct {
         var index = try repo.openIndex(io);
         defer index.deinit();
         var unmarked: u32 = 0;
-        if (op.state.enabled and !try op.files.getBool(repo, "sparse.expectfilesoutsideofpatterns")) {
+        if (op.state.enabled and !try repo.configuration().getBool("sparse.expectfilesoutsideofpatterns", false)) {
             unmarked = try sparseindex.clearSkipFromPresent(repo.gpa, io, repo.work_dir.?, &index, &repo.odb);
         }
 
@@ -522,18 +480,6 @@ const Op = struct {
         return .{ .update = update, .index_written = true, .unmarked = unmarked };
     }
 };
-
-/// Open a configuration file for writing, making it first if it is not
-/// there: git creates `config.worktree` the first time it writes a value.
-fn openWritable(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, level: config_mod.Level) Error!Config {
-    if (dir.createFile(io, sub_path, .{ .exclusive = true })) |file| {
-        file.close(io);
-    } else |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => |e| return e,
-    }
-    return Config.openFile(gpa, io, .{ .dir = dir, .sub_path = sub_path }, level, .{});
-}
 
 fn makeInfoDir(io: Io, repo: *Repository) Error!void {
     repo.git_dir.createDirPath(io, "info") catch |err| switch (err) {

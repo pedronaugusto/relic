@@ -501,7 +501,7 @@ test "history writes leave signing refusals in caller-owned diagnostics" {
         defer repo.deinit(io);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
-        try repo.editConfig(&.{.{ .set = .{ .name = "commit.gpgSign", .value = "true" } }}, null);
+        try repo.editConfig(io, &.{.{ .name = "commit.gpgSign", .value = "true" }}, null);
         if (comptime std.mem.eql(u8, operation, "commit")) {
             var options: commit_mod.Options = .{ .allow_empty = true };
             options.diagnostic = &diagnostic;
@@ -555,7 +555,7 @@ test "a failed signing program leaves its stderr after the repository closes" {
         {
             var repo = try Repository.init(gpa, io, tmp.dir, .{});
             defer repo.deinit(io);
-            try repo.editConfig(&.{.{ .set = .{ .name = "gpg.program", .value = executable } }}, null);
+            try repo.editConfig(io, &.{.{ .name = "gpg.program", .value = executable }}, null);
             const tree = hash.Hasher.object(.sha1, "tree", "");
             if (comptime std.mem.eql(u8, target, "commit")) {
                 try testing.expectError(error.SigningFailed, repo.writeCommit(io, .{
@@ -596,7 +596,7 @@ test "a history refusal before writing clears an earlier diagnostic" {
         defer tmp.cleanup();
         var repo = try Repository.init(gpa, io, tmp.dir, .{});
         defer repo.deinit(io);
-        try repo.editConfig(&.{.{ .set = .{ .name = "commit.gpgSign", .value = "true" } }}, null);
+        try repo.editConfig(io, &.{.{ .name = "commit.gpgSign", .value = "true" }}, null);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
         try testing.expectError(error.SigningRequiresPrograms, repo.writeCommit(io, .{

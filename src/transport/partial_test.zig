@@ -424,7 +424,45 @@ test "a promised object is fetched from the next promisor remote when one fails,
     // With no promisor remote that has them, the read fails by name.
     const set = try git(gpa, io, twins.by_relic, &.{ "config", "remote.mirror.url", "file:///nowhere/mirror.git" });
     gpa.free(set);
-    try repo.editConfig(&.{.{ .set = .{ .name = "remote.mirror.url", .value = "file:///nowhere/mirror.git" } }}, null);
+    try repo.editConfig(io, &.{.{ .name = "remote.mirror.url", .value = "file:///nowhere/mirror.git" }}, null);
     const missing = try Oid.parse(repo.objectFormat(), "1111111111111111111111111111111111111111");
     try testing.expectError(error.PromisorFetchFailed, repo.odb.read(io, missing));
+}
+
+test "a lazy fetch writes the filter it registers, and leaves another process's settings and none of memory's" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try served(gpa, io, root.dir);
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    const origin = try gpa.print("file://{s}/repo.git", .{root_path});
+    defer gpa.free(origin);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const out = try testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "clone", "-q", "--no-checkout", "--filter=blob:none", origin, "clone" }, "", true);
+    gpa.free(out);
+    var dir = try root.dir.openDir(io, "clone", .{});
+    defer dir.close(io);
+    // A promisor remote with no filter yet: the lazy fetch registers one.
+    gpa.free(try git(gpa, io, dir, &.{ "config", "--unset", "remote.origin.partialclonefilter" }));
+
+    var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+    defer repo.deinit(io);
+    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, null);
+    gpa.free(try git(gpa, io, dir, &.{ "config", "fixture.external", "yes" }));
+    var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
+    defer lazy.deinit();
+    lazy.install();
+    try lazy.prefetchTree(io, (try repo.headTree(io)).?);
+
+    const written = try dir.readFileAlloc(io, ".git/config", gpa, .limited(1 << 16));
+    defer gpa.free(written);
+    try testing.expect(std.mem.find(u8, written, "partialclonefilter = blob:none") != null);
+    try testing.expect(std.mem.find(u8, written, "external = yes") != null);
+    try testing.expect(std.mem.find(u8, written, "memory") == null);
+    // And the repository reads what the file says, memory's value over it.
+    try testing.expectEqualStrings("yes", repo.configuration().get("fixture.external").?);
+    try testing.expectEqualStrings("only", repo.configuration().get("fixture.memory").?);
 }

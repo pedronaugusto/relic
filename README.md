@@ -123,14 +123,17 @@ entry in its parent. Gitlinks and LFS payloads belong to separate stores.
 that original handle in the caller. Odb owns its format, sources and storage
 policy together. Use `objectFormat()`, `settings()` and `allocator()` to
 read them; changing format or storage policy requires a new database.
-Repository configuration is borrowed through `configuration()`. Apply
-in-memory changes with `editConfig(edits, diagnostic)`; a whole batch is
-validated before it replaces the old view and ref policy. Hash and backend
-changes require reopening. Changing worktree configuration sources requires
-a standalone configuration write followed by refresh; a memory-only edit
-returns `WorktreeConfigChanged`. For persisted edits, open the intended file
-with `Config.openFile`, edit and write that configuration, then refresh the
-repository. `Config.write` selects the last writable source.
+Repository configuration is borrowed through `configuration()`, and
+changed through the repository. `writeConfig(io, .local, edits, diagnostic)`
+writes `.git/config` (`.worktree` the worktree's `config.worktree`, or the
+shared file while `extensions.worktreeConfig` is off): the file is read again
+under its lock and only those edits applied, so another process's `git
+config` since open stays; the configuration it would leave is checked whole
+before it lands, and then published. `editConfig(io, values, diagnostic)`
+sets values in memory only, over every file as later `-c` values are, kept
+through `refreshConfig` and every write and never written; the repository's
+format (`core.repositoryFormatVersion`, `extensions.*`) is refused there.
+A change of hash or ref backend requires reopening.
 
 `worktree.snapshot.Store` records a working tree in a private object store.
 A snapshot is a tree ID. Before returning it, capture takes every tree and
@@ -229,7 +232,7 @@ writes beside them, and `relic.refs.reftable` is the table format.
 
 | Path | |
 |---|---|
-| `repo` | `Repository.open`, `init` (templates and `--shared` included), `templateDir`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. The front door. |
+| `repo` | `Repository.open`, `init` (templates and `--shared` included), `templateDir`, `openIndex`, `head`, `headTree`, `writeCommit`, `writeTag`, `peel`, `beginRefs`, `configuration`, `writeConfig`, `editConfig`, `refreshConfig`, `loadIgnore`, `loadAttrs`, `listWorktrees`, `pruneWorktrees`. The front door. |
 | `repo.hooks` | git's hooks with git's arguments, environment and input. |
 | `repo.program` | `Programs`, `SpawnHook`, `Invocation`, `run` — the one place a process starts. `Programs.spawn` supplies creation and termination using conduit children. |
 | `repo.warning` | What git would print as a warning, as a value. |
@@ -251,7 +254,7 @@ writes beside them, and `relic.refs.reftable` is the table format.
 | `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. Logs in either format through the store: `readLog` (`Log.at` for `HEAD@{n}`), `logExists`, `appendLog` under a `LogPolicy` (`core.logAllRefUpdates`), `createLog`, `expireLog` (git's `reflog expire` and `reflog delete`, `--rewrite` and `--updateref`), `deleteLog`. |
 | `refs.reftable`, `refs.reftablestack` | The reftable ref backend, read and written. |
 | `refs.filter` | `Listing`, `listRefs`, `listBranches`, `listTags`, `branchFormat`, `versioncmp` — `git for-each-ref`, `git branch --list` and `git tag --list` byte for byte: every `%(...)` atom git has for refs, `*` peeling, dates in every mode, `align` and `if` blocks, four quoting styles; `--sort` with version sort and `versionsort.suffix`, `--contains`, `--no-contains`, `--merged`, `--no-merged`, `--points-at`, `--exclude`, `--start-after`, `--include-root-refs`, `--count`, `--omit-empty`, `branch.sort`, `tag.sort`. |
-| `config` | `Config.open`, `get`, `all`, `getBool`, `getInt`, `getPath`, `subsections`, `origin`, `set`, `unset`, `write`. Lossless: setting a value rewrites one line. `include.path` and `includeIf` with `gitdir:`, `gitdir/i:`, `onbranch:` and `hasconfig:remote.*.url:`. |
+| `config` | `Config.open`, `get`, `all`, `getBool`, `getInt`, `getPath`, `subsections`, `origin`, `set`, `unset`, `renderWritable`. Lossless: setting a value rewrites one line; a repository's files are written through `Repository.writeConfig`. `include.path` and `includeIf` with `gitdir:`, `gitdir/i:`, `onbranch:` and `hasconfig:remote.*.url:`. |
 | `config.userconfig` | Where the person's git reads its configuration from. |
 | `index` | `Index.read` / `write` / `toBytes`, `Entry`, `CacheTree`, `ResolveUndo`, `RawExtension`. Versions 2, 3 and 4. |
 | `index.sparseindex` | The sparse index. |

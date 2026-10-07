@@ -1062,7 +1062,7 @@ test "requests share one connection and a large upload-pack request is gzipped, 
 fn relicFetchV(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Environ.Map, v2: bool, remote: []const u8) !void {
     var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
-    try repo.editConfig(&.{.{ .set = .{ .name = "protocol.version", .value = if (v2) "2" else "0" } }}, null);
+    try repo.editConfig(io, &.{.{ .name = "protocol.version", .value = if (v2) "2" else "0" }}, null);
     var outcome = try fetch_mod.fetch(gpa, io, &repo, remote, .{ .who = test_who, .programs = .{ .environ = env } });
     outcome.deinit();
 }
@@ -1321,7 +1321,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, with TLS t
             try testing.expect(std.mem.find(u8, our_log, expected_kind) != null);
             var by_git = try git_work.dir.openDir(io, "clone", .{});
             defer by_git.close(io);
-            try repo.editConfig(&.{ .{ .set = .{ .name = "http.proxy", .value = "http://127.0.0.1:9" } }, .{ .set = .{ .name = "remote.origin.proxy", .value = proxy_url } }, .{ .set = .{ .name = "http.sslVerify", .value = "false" } } }, null);
+            try repo.editConfig(io, &.{ .{ .name = "http.proxy", .value = "http://127.0.0.1:9" }, .{ .name = "remote.origin.proxy", .value = proxy_url }, .{ .name = "http.sslVerify", .value = "false" } }, null);
             var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
             defer fetched.deinit();
             const fetched_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "-c", "http.sslVerify=false", "fetch", "-q", "origin" }, "", true);
