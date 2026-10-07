@@ -619,7 +619,7 @@ pub const Notes = struct {
         defer text.deinit(t.gpa);
         try text.appendSlice(t.gpa, msg);
         if (text.items.len != 0 and text.items[text.items.len - 1] != '\n') try text.append(t.gpa, '\n');
-        const parent = try head_mod.readRef(t.gpa, io, t.repo, t.ref);
+        const parent = try t.repo.refStore().readOid(t.gpa, io, t.ref);
         const parents: []const Oid = if (parent) |p| &.{p} else &.{};
         const result = try t.commitWith(io, parents, text.items, who);
         const log = try std.mem.concat(t.gpa, u8, &.{ "notes: ", text.items });
@@ -1167,7 +1167,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     var t = try Notes.open(gpa, io, repo, local_ref, .concatenate);
     defer t.deinit();
 
-    const local = try head_mod.readRef(gpa, io, repo, local_ref);
+    const local = try repo.refStore().readOid(gpa, io, local_ref);
     const remote: ?Oid = revparse.resolve(gpa, io, repo, remote_ref) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => blk: {
@@ -1201,10 +1201,10 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     if (conflicts.items.len == 0) {
         try updateRef(io, repo, local_ref, result, .any, log, options.who);
     } else {
-        try updateRef(io, repo, "NOTES_MERGE_PARTIAL", result, .any, log, options.who);
+        try updateRef(io, repo, ref_names.Root.notes_merge_partial.name(), result, .any, log, options.who);
         var tx = repo.beginRefs();
         defer tx.deinit(io);
-        try tx.change("NOTES_MERGE_REF", .{ .symbolic = local_ref }, .any, .{ .no_deref = true });
+        try tx.change(ref_names.Root.notes_merge_ref.name(), .{ .symbolic = local_ref }, .any, .{ .no_deref = true });
         try tx.commit(io, null);
     }
     return .{ .result = result, .conflicts = try conflicts.toOwnedSlice(gpa), .gpa = gpa };
@@ -1369,7 +1369,7 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
 /// state removed. Returns the commit.
 pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Self.Error!Oid {
     const kind = repo.objectFormat();
-    const partial = (try head_mod.readRef(gpa, io, repo, "NOTES_MERGE_PARTIAL")) orelse return error.NoMergeInProgress;
+    const partial = (try repo.refStore().root().read(gpa, io, .notes_merge_partial)) orelse return error.NoMergeInProgress;
     const found = try repo.odb.read(io, partial);
     defer repo.odb.allocator().free(found.bytes);
     if (found.type != .commit) return error.NotACommit;
@@ -1378,7 +1378,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
     const parent: ?Oid = if (commit.parents.len != 0) commit.parents[0] else null;
 
     const local_ref = blk: {
-        const target = (try repo.refStore().read(gpa, io, "NOTES_MERGE_REF")) orelse return error.NoMergeInProgress;
+        const target = (try repo.refStore().read(gpa, io, ref_names.Root.notes_merge_ref.name())) orelse return error.NoMergeInProgress;
         switch (target) {
             .symbolic => |name| break :blk name,
             .direct => return error.NoMergeInProgress,
@@ -1386,7 +1386,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
     };
     defer gpa.free(local_ref);
 
-    var t = try Notes.open(gpa, io, repo, "NOTES_MERGE_PARTIAL", .overwrite);
+    var t = try Notes.open(gpa, io, repo, ref_names.Root.notes_merge_partial.name(), .overwrite);
     defer t.deinit();
     var dir = repo.git_dir.openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return error.NoMergeInProgress,
@@ -1417,8 +1417,8 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
 /// removed, and the files in `NOTES_MERGE_WORKTREE`; the directory itself
 /// stays, as git leaves it.
 pub fn mergeAbort(io: Io, repo: *Repository) Self.Error!void {
-    try head_mod.deleteRef(io, repo, "NOTES_MERGE_PARTIAL");
-    try head_mod.deleteRef(io, repo, "NOTES_MERGE_REF");
+    try repo.refStore().root().delete(repo.gpa, io, .notes_merge_partial);
+    try repo.refStore().root().delete(repo.gpa, io, .notes_merge_ref);
     var dir = repo.git_dir.openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |e| return e,
@@ -1447,12 +1447,12 @@ const Twin = struct {
     git: testgit.Repo,
     ours: testgit.Repo,
 
-    fn init(gpa: Allocator, io: Io, t: *Twin, objects: usize) !void {
+    fn init(gpa: Allocator, io: Io, t: *Twin, format: testgit.RefFormat, objects: usize) !void {
         t.env = try testgit.datedEnv(gpa, fixture_when);
         errdefer t.env.deinit();
-        t.git = try testgit.Repo.init(gpa, io, &.{});
+        t.git = try testgit.Repo.init(gpa, io, format.initArgs());
         errdefer t.git.deinit();
-        t.ours = try testgit.Repo.init(gpa, io, &.{});
+        t.ours = try testgit.Repo.init(gpa, io, format.initArgs());
         errdefer t.ours.deinit();
         t.git.environ = &t.env;
         t.ours.environ = &t.env;
@@ -1529,132 +1529,140 @@ fn hexOf(oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
 }
 
 test "notes added, appended, copied and removed are git's commits, trees and logs, fanout included" {
-    // `--separator` is git 2.42's.
-    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 42);
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var t: Twin = undefined;
-    try Twin.init(gpa, io, &t, 140);
-    defer t.deinit();
-    var repo = try Repository.open(gpa, io, t.ours.dir, .{});
-    defer repo.deinit(io);
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            // `--separator` is git 2.42's.
+            try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 42);
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var t: Twin = undefined;
+            try Twin.init(gpa, io, &t, format, 140);
+            defer t.deinit();
+            var repo = try Repository.open(gpa, io, t.ours.dir, .{});
+            defer repo.deinit(io);
 
-    var objects: [140]Oid = undefined;
-    for (&objects, 0..) |*o, i| o.* = try t.blob(io, i);
-    try repo.odb.refresh(io);
+            var objects: [140]Oid = undefined;
+            for (&objects, 0..) |*o, i| o.* = try t.blob(io, i);
+            try repo.odb.refresh(io);
 
-    var hex: [hash.max_hex_len]u8 = undefined;
-    var hex2: [hash.max_hex_len]u8 = undefined;
-    // Enough notes that the tree fans out.
-    for (objects, 0..) |o, i| {
-        const msg = try gpa.print("  note {d}  \n\n\n", .{i});
-        defer gpa.free(msg);
-        try t.git.exec(io, &.{ "notes", "add", "-m", msg, hexOf(o, &hex) });
-        _ = try add(gpa, io, &repo, o, .{ .who = fixture_who, .contents = &.{.{ .text = msg }} });
-    }
-    try t.expectSameState(io, &.{"refs/notes/commits"});
+            var hex: [hash.max_hex_len]u8 = undefined;
+            var hex2: [hash.max_hex_len]u8 = undefined;
+            // Enough notes that the tree fans out.
+            for (objects, 0..) |o, i| {
+                const msg = try gpa.print("  note {d}  \n\n\n", .{i});
+                defer gpa.free(msg);
+                try t.git.exec(io, &.{ "notes", "add", "-m", msg, hexOf(o, &hex) });
+                _ = try add(gpa, io, &repo, o, .{ .who = fixture_who, .contents = &.{.{ .text = msg }} });
+            }
+            try t.expectSameState(io, &.{"refs/notes/commits"});
 
-    // Append, with each separator and with -C.
-    try t.git.exec(io, &.{ "notes", "append", "-m", "more", hexOf(objects[3], &hex) });
-    _ = try append(gpa, io, &repo, objects[3], .{ .who = fixture_who, .contents = &.{.{ .text = "more" }} });
-    try t.git.exec(io, &.{ "notes", "append", "--separator=--", "-m", "x", "-m", "y", hexOf(objects[4], &hex) });
-    _ = try append(gpa, io, &repo, objects[4], .{ .who = fixture_who, .separator = "--", .contents = &.{ .{ .text = "x" }, .{ .text = "y" } } });
-    try t.git.exec(io, &.{ "notes", "append", "--no-separator", "-C", hexOf(objects[9], &hex2), hexOf(objects[5], &hex) });
-    _ = try append(gpa, io, &repo, objects[5], .{ .who = fixture_who, .separator = null, .contents = &.{.{ .blob = objects[9] }} });
-    try t.git.exec(io, &.{ "notes", "add", "-f", "--allow-empty", "-m", "", hexOf(objects[6], &hex) });
-    _ = try add(gpa, io, &repo, objects[6], .{ .who = fixture_who, .force = true, .allow_empty = true, .contents = &.{.{ .text = "" }} });
-    try t.git.exec(io, &.{ "notes", "add", "-f", "-m", "  ", hexOf(objects[7], &hex) });
-    _ = try add(gpa, io, &repo, objects[7], .{ .who = fixture_who, .force = true, .contents = &.{.{ .text = "  " }} });
-    try t.expectSameState(io, &.{"refs/notes/commits"});
-    try std.testing.expectError(error.NoteExists, add(gpa, io, &repo, objects[8], .{ .who = fixture_who, .contents = &.{.{ .text = "z" }} }));
+            // Append, with each separator and with -C.
+            try t.git.exec(io, &.{ "notes", "append", "-m", "more", hexOf(objects[3], &hex) });
+            _ = try append(gpa, io, &repo, objects[3], .{ .who = fixture_who, .contents = &.{.{ .text = "more" }} });
+            try t.git.exec(io, &.{ "notes", "append", "--separator=--", "-m", "x", "-m", "y", hexOf(objects[4], &hex) });
+            _ = try append(gpa, io, &repo, objects[4], .{ .who = fixture_who, .separator = "--", .contents = &.{ .{ .text = "x" }, .{ .text = "y" } } });
+            try t.git.exec(io, &.{ "notes", "append", "--no-separator", "-C", hexOf(objects[9], &hex2), hexOf(objects[5], &hex) });
+            _ = try append(gpa, io, &repo, objects[5], .{ .who = fixture_who, .separator = null, .contents = &.{.{ .blob = objects[9] }} });
+            try t.git.exec(io, &.{ "notes", "add", "-f", "--allow-empty", "-m", "", hexOf(objects[6], &hex) });
+            _ = try add(gpa, io, &repo, objects[6], .{ .who = fixture_who, .force = true, .allow_empty = true, .contents = &.{.{ .text = "" }} });
+            try t.git.exec(io, &.{ "notes", "add", "-f", "-m", "  ", hexOf(objects[7], &hex) });
+            _ = try add(gpa, io, &repo, objects[7], .{ .who = fixture_who, .force = true, .contents = &.{.{ .text = "  " }} });
+            try t.expectSameState(io, &.{"refs/notes/commits"});
+            try std.testing.expectError(error.NoteExists, add(gpa, io, &repo, objects[8], .{ .who = fixture_who, .contents = &.{.{ .text = "z" }} }));
 
-    // Copy, onto a note and not.
-    try t.git.exec(io, &.{ "notes", "copy", "-f", hexOf(objects[1], &hex2), hexOf(objects[2], &hex) });
-    try copy(gpa, io, &repo, objects[1], objects[2], .{ .who = fixture_who, .force = true });
-    const commit_hex = try t.git.line(io, &.{ "rev-parse", "HEAD" });
-    defer gpa.free(commit_hex);
-    try t.git.exec(io, &.{ "notes", "copy", hexOf(objects[1], &hex), "HEAD" });
-    try copy(gpa, io, &repo, objects[1], try Oid.parse(.sha1, commit_hex), .{ .who = fixture_who });
-    try t.expectSameState(io, &.{"refs/notes/commits"});
+            // Copy, onto a note and not.
+            try t.git.exec(io, &.{ "notes", "copy", "-f", hexOf(objects[1], &hex2), hexOf(objects[2], &hex) });
+            try copy(gpa, io, &repo, objects[1], objects[2], .{ .who = fixture_who, .force = true });
+            const commit_hex = try t.git.line(io, &.{ "rev-parse", "HEAD" });
+            defer gpa.free(commit_hex);
+            try t.git.exec(io, &.{ "notes", "copy", hexOf(objects[1], &hex), "HEAD" });
+            try copy(gpa, io, &repo, objects[1], try Oid.parse(.sha1, commit_hex), .{ .who = fixture_who });
+            try t.expectSameState(io, &.{"refs/notes/commits"});
 
-    // Remove most of them again, a missing one ignored, so the fanout
-    // comes back in.
-    var args: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (args.items[3..]) |a| gpa.free(a);
-        args.deinit(gpa);
-    }
-    try args.appendSlice(gpa, &.{ "notes", "remove", "--ignore-missing" });
-    var removing: std.ArrayList(Oid) = .empty;
-    defer removing.deinit(gpa);
-    for (objects[0..120]) |o| {
-        try args.append(gpa, try gpa.dupe(u8, hexOf(o, &hex)));
-        try removing.append(gpa, o);
-    }
-    try t.git.exec(io, args.items);
-    _ = try remove(gpa, io, &repo, removing.items, .{ .who = fixture_who, .ignore_missing = true });
-    try t.expectSameState(io, &.{"refs/notes/commits"});
-    try std.testing.expectError(error.NoteNotFound, remove(gpa, io, &repo, &.{objects[0]}, .{ .who = fixture_who }));
+            // Remove most of them again, a missing one ignored, so the fanout
+            // comes back in.
+            var args: std.ArrayList([]const u8) = .empty;
+            defer {
+                for (args.items[3..]) |a| gpa.free(a);
+                args.deinit(gpa);
+            }
+            try args.appendSlice(gpa, &.{ "notes", "remove", "--ignore-missing" });
+            var removing: std.ArrayList(Oid) = .empty;
+            defer removing.deinit(gpa);
+            for (objects[0..120]) |o| {
+                try args.append(gpa, try gpa.dupe(u8, hexOf(o, &hex)));
+                try removing.append(gpa, o);
+            }
+            try t.git.exec(io, args.items);
+            _ = try remove(gpa, io, &repo, removing.items, .{ .who = fixture_who, .ignore_missing = true });
+            try t.expectSameState(io, &.{"refs/notes/commits"});
+            try std.testing.expectError(error.NoteNotFound, remove(gpa, io, &repo, &.{objects[0]}, .{ .who = fixture_who }));
 
-    // Under another ref, and shown as git log shows it.
-    try t.git.exec(io, &.{ "notes", "--ref=other", "add", "-m", "line one\nline two", "HEAD" });
-    _ = try add(gpa, io, &repo, try Oid.parse(.sha1, commit_hex), .{ .who = fixture_who, .ref = "other", .contents = &.{.{ .text = "line one\nline two" }} });
-    try t.expectSameState(io, &.{ "refs/notes/commits", "refs/notes/other" });
-    const shown = try t.git.run(io, &.{ "log", "-1", "--notes", "--notes=other", "--format=medium" });
-    defer gpa.free(shown);
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    for ([_][]const u8{ "refs/notes/commits", "refs/notes/other" }) |ref| {
-        var n = try Notes.open(gpa, io, &repo, ref, .concatenate);
-        defer n.deinit();
-        try formatNote(&n, io, try Oid.parse(.sha1, commit_hex), &out.writer, false);
-    }
-    try std.testing.expect(std.mem.endsWith(u8, shown, out.written()));
+            // Under another ref, and shown as git log shows it.
+            try t.git.exec(io, &.{ "notes", "--ref=other", "add", "-m", "line one\nline two", "HEAD" });
+            _ = try add(gpa, io, &repo, try Oid.parse(.sha1, commit_hex), .{ .who = fixture_who, .ref = "other", .contents = &.{.{ .text = "line one\nline two" }} });
+            try t.expectSameState(io, &.{ "refs/notes/commits", "refs/notes/other" });
+            const shown = try t.git.run(io, &.{ "log", "-1", "--notes", "--notes=other", "--format=medium" });
+            defer gpa.free(shown);
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            for ([_][]const u8{ "refs/notes/commits", "refs/notes/other" }) |ref| {
+                var n = try Notes.open(gpa, io, &repo, ref, .concatenate);
+                defer n.deinit();
+                try formatNote(&n, io, try Oid.parse(.sha1, commit_hex), &out.writer, false);
+            }
+            try std.testing.expect(std.mem.endsWith(u8, shown, out.written()));
+        }
+    }.inFormat);
 }
 
 test "a notes tree's other entries and unread fanout survive an edit as git keeps them" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var t: Twin = undefined;
-    try Twin.init(gpa, io, &t, 40);
-    defer t.deinit();
-    var hex: [hash.max_hex_len]u8 = undefined;
-    var objects: [40]Oid = undefined;
-    for (&objects, 0..) |*o, i| o.* = try t.blob(io, i);
-    // A tree git would not write itself: a README beside the notes, one
-    // note fanned out by hand and one flat, and a directory that is not a
-    // fanout.
-    for ([_]*testgit.Repo{ &t.git, &t.ours }) |r| {
-        const note = try r.line(io, &.{ "hash-object", "-w", "objects.txt" });
-        defer gpa.free(note);
-        const h0 = hexOf(objects[0], &hex);
-        const sub_listing = try gpa.print("100644 blob {s}\t{s}\n", .{ note, h0[2..] });
-        defer gpa.free(sub_listing);
-        const sub = try r.runInput(io, &.{"mktree"}, sub_listing);
-        defer gpa.free(sub);
-        var listing: std.ArrayList(u8) = .empty;
-        defer listing.deinit(gpa);
-        try listing.print(gpa, "100644 blob {s}\tREADME\n", .{note});
-        try listing.print(gpa, "040000 tree {s}\t{s}\n", .{ std.mem.trimEnd(u8, sub, "\n"), h0[0..2] });
-        try listing.print(gpa, "100644 blob {s}\t{s}\n", .{ note, hexOf(objects[1], &hex) });
-        try listing.print(gpa, "040000 tree {s}\tnotes-dir\n", .{std.mem.trimEnd(u8, sub, "\n")});
-        const tree = try r.runInput(io, &.{"mktree"}, listing.items);
-        defer gpa.free(tree);
-        const commit = try r.line(io, &.{ "commit-tree", "-m", "hand made", std.mem.trimEnd(u8, tree, "\n") });
-        defer gpa.free(commit);
-        try r.exec(io, &.{ "update-ref", "refs/notes/commits", commit });
-    }
-    var repo = try Repository.open(gpa, io, t.ours.dir, .{});
-    defer repo.deinit(io);
-    for (objects[2..], 2..) |o, i| {
-        const msg = try gpa.print("n{d}", .{i});
-        defer gpa.free(msg);
-        try t.git.exec(io, &.{ "notes", "add", "-m", msg, hexOf(o, &hex) });
-        _ = try add(gpa, io, &repo, o, .{ .who = fixture_who, .contents = &.{.{ .text = msg }} });
-    }
-    try t.git.exec(io, &.{ "notes", "remove", hexOf(objects[0], &hex) });
-    _ = try remove(gpa, io, &repo, &.{objects[0]}, .{ .who = fixture_who });
-    try t.expectSameState(io, &.{"refs/notes/commits"});
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var t: Twin = undefined;
+            try Twin.init(gpa, io, &t, format, 40);
+            defer t.deinit();
+            var hex: [hash.max_hex_len]u8 = undefined;
+            var objects: [40]Oid = undefined;
+            for (&objects, 0..) |*o, i| o.* = try t.blob(io, i);
+            // A tree git would not write itself: a README beside the notes, one
+            // note fanned out by hand and one flat, and a directory that is not a
+            // fanout.
+            for ([_]*testgit.Repo{ &t.git, &t.ours }) |r| {
+                const note = try r.line(io, &.{ "hash-object", "-w", "objects.txt" });
+                defer gpa.free(note);
+                const h0 = hexOf(objects[0], &hex);
+                const sub_listing = try gpa.print("100644 blob {s}\t{s}\n", .{ note, h0[2..] });
+                defer gpa.free(sub_listing);
+                const sub = try r.runInput(io, &.{"mktree"}, sub_listing);
+                defer gpa.free(sub);
+                var listing: std.ArrayList(u8) = .empty;
+                defer listing.deinit(gpa);
+                try listing.print(gpa, "100644 blob {s}\tREADME\n", .{note});
+                try listing.print(gpa, "040000 tree {s}\t{s}\n", .{ std.mem.trimEnd(u8, sub, "\n"), h0[0..2] });
+                try listing.print(gpa, "100644 blob {s}\t{s}\n", .{ note, hexOf(objects[1], &hex) });
+                try listing.print(gpa, "040000 tree {s}\tnotes-dir\n", .{std.mem.trimEnd(u8, sub, "\n")});
+                const tree = try r.runInput(io, &.{"mktree"}, listing.items);
+                defer gpa.free(tree);
+                const commit = try r.line(io, &.{ "commit-tree", "-m", "hand made", std.mem.trimEnd(u8, tree, "\n") });
+                defer gpa.free(commit);
+                try r.exec(io, &.{ "update-ref", "refs/notes/commits", commit });
+            }
+            var repo = try Repository.open(gpa, io, t.ours.dir, .{});
+            defer repo.deinit(io);
+            for (objects[2..], 2..) |o, i| {
+                const msg = try gpa.print("n{d}", .{i});
+                defer gpa.free(msg);
+                try t.git.exec(io, &.{ "notes", "add", "-m", msg, hexOf(o, &hex) });
+                _ = try add(gpa, io, &repo, o, .{ .who = fixture_who, .contents = &.{.{ .text = msg }} });
+            }
+            try t.git.exec(io, &.{ "notes", "remove", hexOf(objects[0], &hex) });
+            _ = try remove(gpa, io, &repo, &.{objects[0]}, .{ .who = fixture_who });
+            try t.expectSameState(io, &.{"refs/notes/commits"});
+        }
+    }.inFormat);
 }
 
 test "a fanout subtree that cannot be read is a named error, and nothing read before it leaks" {
@@ -1684,66 +1692,70 @@ test "a fanout subtree that cannot be read is a named error, and nothing read be
 }
 
 test "notes merge under every strategy leaves what git notes merge leaves, and a manual one finishes the same" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const strategies = [_]?Strategy{ .ours, .theirs, .@"union", .cat_sort_uniq, .manual, null };
-    for (strategies) |strategy| {
-        var t: Twin = undefined;
-        try Twin.init(gpa, io, &t, 8);
-        defer t.deinit();
-        var hex: [hash.max_hex_len]u8 = undefined;
-        var objects: [8]Oid = undefined;
-        for (&objects, 0..) |*o, i| o.* = try t.blob(io, i);
-        // The same base, then each side changes, adds and deletes notes.
-        for ([_]*testgit.Repo{ &t.git, &t.ours }) |r| {
-            for (objects[0..5], 0..) |o, i| {
-                const msg = try gpa.print("base {d}\nshared", .{i});
-                defer gpa.free(msg);
-                try r.exec(io, &.{ "notes", "add", "-m", msg, hexOf(o, &hex) });
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            const strategies = [_]?Strategy{ .ours, .theirs, .@"union", .cat_sort_uniq, .manual, null };
+            for (strategies) |strategy| {
+                var t: Twin = undefined;
+                try Twin.init(gpa, io, &t, format, 8);
+                defer t.deinit();
+                var hex: [hash.max_hex_len]u8 = undefined;
+                var objects: [8]Oid = undefined;
+                for (&objects, 0..) |*o, i| o.* = try t.blob(io, i);
+                // The same base, then each side changes, adds and deletes notes.
+                for ([_]*testgit.Repo{ &t.git, &t.ours }) |r| {
+                    for (objects[0..5], 0..) |o, i| {
+                        const msg = try gpa.print("base {d}\nshared", .{i});
+                        defer gpa.free(msg);
+                        try r.exec(io, &.{ "notes", "add", "-m", msg, hexOf(o, &hex) });
+                    }
+                    try r.exec(io, &.{ "update-ref", "refs/notes/other", "refs/notes/commits" });
+                    try r.exec(io, &.{ "notes", "add", "-f", "-m", "local 0\nshared", hexOf(objects[0], &hex) });
+                    try r.exec(io, &.{ "notes", "remove", hexOf(objects[1], &hex) });
+                    try r.exec(io, &.{ "notes", "add", "-m", "local new", hexOf(objects[5], &hex) });
+                    try r.exec(io, &.{ "notes", "add", "-f", "-m", "same both", hexOf(objects[3], &hex) });
+                    try r.exec(io, &.{ "notes", "--ref=other", "add", "-f", "-m", "remote 0\nshared", hexOf(objects[0], &hex) });
+                    try r.exec(io, &.{ "notes", "--ref=other", "add", "-f", "-m", "remote 1", hexOf(objects[1], &hex) });
+                    try r.exec(io, &.{ "notes", "--ref=other", "remove", hexOf(objects[2], &hex) });
+                    try r.exec(io, &.{ "notes", "--ref=other", "add", "-f", "-m", "same both", hexOf(objects[3], &hex) });
+                    try r.exec(io, &.{ "notes", "--ref=other", "add", "-m", "remote new", hexOf(objects[6], &hex) });
+                    try r.exec(io, &.{ "notes", "--ref=other", "add", "-m", "remote add", hexOf(objects[5], &hex) });
+                }
+                var repo = try Repository.open(gpa, io, t.ours.dir, .{});
+                defer repo.deinit(io);
+                var args: std.ArrayList([]const u8) = .empty;
+                defer args.deinit(gpa);
+                try args.appendSlice(gpa, &.{ "notes", "merge" });
+                if (strategy) |s| try args.appendSlice(gpa, &.{ "-s", @tagName(s) });
+                try args.append(gpa, "other");
+                gpa.free(try gitOrFailed(io, &t.git, args.items));
+                var outcome = try merge(gpa, io, &repo, "other", .{ .who = fixture_who, .strategy = strategy });
+                defer outcome.deinit();
+                try t.expectSameState(io, &.{ "refs/notes/commits", "refs/notes/other" });
+                try t.expectSame(io, &.{ "rev-parse", "--verify", "-q", ref_names.Root.notes_merge_partial.name() });
+                try t.expectSame(io, &.{ "symbolic-ref", "-q", ref_names.Root.notes_merge_ref.name() });
+                for (outcome.conflicts) |o| {
+                    const path = try gpa.print(".git/NOTES_MERGE_WORKTREE/{s}", .{hexOf(o, &hex)});
+                    defer gpa.free(path);
+                    const a = try t.git.readFile(io, path);
+                    defer gpa.free(a);
+                    const b = try t.ours.readFile(io, path);
+                    defer gpa.free(b);
+                    try std.testing.expectEqualStrings(a, b);
+                    try t.git.writeFile(io, path, "resolved\n");
+                    try t.ours.writeFile(io, path, "resolved\n");
+                }
+                if (outcome.conflicts.len != 0) {
+                    try t.git.exec(io, &.{ "notes", "merge", "--commit" });
+                    _ = try mergeCommit(gpa, io, &repo, fixture_who);
+                    try t.expectSameState(io, &.{ "refs/notes/commits", "refs/notes/other" });
+                    try t.expectSame(io, &.{ "rev-parse", "--verify", "-q", ref_names.Root.notes_merge_partial.name() });
+                }
             }
-            try r.exec(io, &.{ "update-ref", "refs/notes/other", "refs/notes/commits" });
-            try r.exec(io, &.{ "notes", "add", "-f", "-m", "local 0\nshared", hexOf(objects[0], &hex) });
-            try r.exec(io, &.{ "notes", "remove", hexOf(objects[1], &hex) });
-            try r.exec(io, &.{ "notes", "add", "-m", "local new", hexOf(objects[5], &hex) });
-            try r.exec(io, &.{ "notes", "add", "-f", "-m", "same both", hexOf(objects[3], &hex) });
-            try r.exec(io, &.{ "notes", "--ref=other", "add", "-f", "-m", "remote 0\nshared", hexOf(objects[0], &hex) });
-            try r.exec(io, &.{ "notes", "--ref=other", "add", "-f", "-m", "remote 1", hexOf(objects[1], &hex) });
-            try r.exec(io, &.{ "notes", "--ref=other", "remove", hexOf(objects[2], &hex) });
-            try r.exec(io, &.{ "notes", "--ref=other", "add", "-f", "-m", "same both", hexOf(objects[3], &hex) });
-            try r.exec(io, &.{ "notes", "--ref=other", "add", "-m", "remote new", hexOf(objects[6], &hex) });
-            try r.exec(io, &.{ "notes", "--ref=other", "add", "-m", "remote add", hexOf(objects[5], &hex) });
         }
-        var repo = try Repository.open(gpa, io, t.ours.dir, .{});
-        defer repo.deinit(io);
-        var args: std.ArrayList([]const u8) = .empty;
-        defer args.deinit(gpa);
-        try args.appendSlice(gpa, &.{ "notes", "merge" });
-        if (strategy) |s| try args.appendSlice(gpa, &.{ "-s", @tagName(s) });
-        try args.append(gpa, "other");
-        gpa.free(try gitOrFailed(io, &t.git, args.items));
-        var outcome = try merge(gpa, io, &repo, "other", .{ .who = fixture_who, .strategy = strategy });
-        defer outcome.deinit();
-        try t.expectSameState(io, &.{ "refs/notes/commits", "refs/notes/other" });
-        try t.expectSame(io, &.{ "rev-parse", "--verify", "-q", "NOTES_MERGE_PARTIAL" });
-        try t.expectSame(io, &.{ "symbolic-ref", "-q", "NOTES_MERGE_REF" });
-        for (outcome.conflicts) |o| {
-            const path = try gpa.print(".git/NOTES_MERGE_WORKTREE/{s}", .{hexOf(o, &hex)});
-            defer gpa.free(path);
-            const a = try t.git.readFile(io, path);
-            defer gpa.free(a);
-            const b = try t.ours.readFile(io, path);
-            defer gpa.free(b);
-            try std.testing.expectEqualStrings(a, b);
-            try t.git.writeFile(io, path, "resolved\n");
-            try t.ours.writeFile(io, path, "resolved\n");
-        }
-        if (outcome.conflicts.len != 0) {
-            try t.git.exec(io, &.{ "notes", "merge", "--commit" });
-            _ = try mergeCommit(gpa, io, &repo, fixture_who);
-            try t.expectSameState(io, &.{ "refs/notes/commits", "refs/notes/other" });
-            try t.expectSame(io, &.{ "rev-parse", "--verify", "-q", "NOTES_MERGE_PARTIAL" });
-        }
-    }
+    }.inFormat);
 }
 
 test "fuzz: any tree reads as notes or a named error, and edits keep exactly the notes a map keeps" {

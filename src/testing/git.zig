@@ -643,6 +643,39 @@ pub fn requireGitVersion(gpa: Allocator, io: Io, major: u32, minor: u32) !void {
     if (!try gitAtLeast(gpa, io, major, minor)) return error.SkipZigTest;
 }
 
+/// The ref format a fixture's repositories are made with.
+pub const RefFormat = enum {
+    files,
+    reftable,
+
+    /// What `git init` is told: nothing for the files format, which
+    /// every git writes and which no `--ref-format` before 2.45 names.
+    pub fn initArgs(format: RefFormat) []const []const u8 {
+        return switch (format) {
+            .files => &.{},
+            .reftable => &.{"--ref-format=reftable"},
+        };
+    }
+};
+
+/// The ref formats a comparison with git runs on: the files format, and
+/// reftable where the git found writes it (2.45 and newer), so the floor's
+/// git runs the comparison once. `error.SkipZigTest` when there is no git.
+pub fn refFormats(gpa: Allocator, io: Io) ![]const RefFormat {
+    return if (try gitAtLeast(gpa, io, 2, 45)) &.{ .files, .reftable } else &.{.files};
+}
+
+/// Run a comparison once for each ref format the git found writes
+/// (`refFormats`), and say which one a failure was in.
+pub fn eachRefFormat(in_format: *const fn (RefFormat) anyerror!void) !void {
+    for (try refFormats(std.testing.allocator, std.testing.io)) |format| {
+        in_format(format) catch |err| {
+            if (err != error.SkipZigTest) std.debug.print("in the {t} ref format\n", .{format});
+            return err;
+        };
+    }
+}
+
 /// Whether the `git` on the path is at least `major.minor`, for a test
 /// that compares one thing against every git and another only against the
 /// release that has it. `error.SkipZigTest` when there is no git at all.

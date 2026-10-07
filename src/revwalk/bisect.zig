@@ -240,7 +240,7 @@ const Ctx = struct {
     }
 
     fn readRef(c: *Ctx, name: []const u8) Error!?Oid {
-        return head_mod.readRef(c.a, c.io, c.repo, name);
+        return c.repo.refStore().readOid(c.a, c.io, name);
     }
 
     fn updateRef(c: *Ctx, name: []const u8, oid: Oid) Error!void {
@@ -249,6 +249,14 @@ const Ctx = struct {
         tx.hooks = c.options.hooks;
         try tx.update(name, .{ .direct = oid }, .any);
         try tx.commit(c.io, null);
+    }
+
+    /// The root refs, written and removed with the caller's hooks told,
+    /// as each of git's ref updates tells `reference-transaction`.
+    fn roots(c: *Ctx) refs_mod.RootRefs {
+        var r = c.repo.refStore().root();
+        r.hooks = c.options.hooks;
+        return r;
     }
 };
 
@@ -373,8 +381,8 @@ fn cleanState(c: *Ctx) Error!void {
         for (listing.entries) |e| try tx.change(e.name, null, .any, .{ .no_deref = true });
         try tx.commit(c.io, null);
     }
-    try head_mod.deleteRef(c.io, c.repo, "BISECT_HEAD");
-    try head_mod.deleteRef(c.io, c.repo, "BISECT_EXPECTED_REV");
+    try c.roots().delete(c.gpa, c.io, .bisect_head);
+    try c.roots().delete(c.gpa, c.io, .bisect_expected_rev);
     for ([_][]const u8{ "BISECT_ANCESTORS_OK", "BISECT_LOG", "BISECT_NAMES", "BISECT_RUN", "BISECT_TERMS", "BISECT_FIRST_PARENT", "BISECT_RESET_WHEN_FOUND", "BISECT_START" }) |name| {
         try c.removeState(name);
     }
@@ -819,7 +827,7 @@ fn estimateSteps(all: i64) i64 {
 
 /// `bisect_next_all`.
 fn nextAll(c: *Ctx, t: Terms) Error!Step {
-    const no_checkout = try c.readRef("BISECT_HEAD") != null;
+    const no_checkout = try c.roots().read(c.a, c.io, .bisect_head) != null;
     var revs = try readRefs(c, t);
     const first_parent = c.exists("BISECT_FIRST_PARENT");
     const find_all = revs.skipped.items.len != 0;
@@ -899,7 +907,7 @@ fn checkGoodAncestors(c: *Ctx, t: Terms, revs: *const Revs, no_checkout: bool) E
 
 fn badMergeBase(c: *Ctx, t: Terms, revs: *const Revs) Error {
     _ = t;
-    const expected = try c.readRef("BISECT_EXPECTED_REV");
+    const expected = try c.roots().read(c.a, c.io, .bisect_expected_rev);
     if (expected != null and expected.?.eql(revs.bad.?)) return error.BadMergeBase;
     return error.GoodNotAncestorOfBad;
 }
@@ -907,10 +915,10 @@ fn badMergeBase(c: *Ctx, t: Terms, revs: *const Revs) Error {
 /// `bisect_checkout`: `BISECT_EXPECTED_REV`, then the commit checked out
 /// (or `BISECT_HEAD` moved), and its line printed.
 fn checkout(c: *Ctx, rev: Oid, no_checkout: bool) Error!void {
-    try c.updateRef("BISECT_EXPECTED_REV", rev);
+    try c.roots().write(c.gpa, c.io, .bisect_expected_rev, rev);
     const hex = try c.hex(rev);
     if (no_checkout) {
-        try c.updateRef("BISECT_HEAD", rev);
+        try c.roots().write(c.gpa, c.io, .bisect_head, rev);
     } else {
         try switchTo(c, rev, null, hex);
     }
@@ -1113,7 +1121,7 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     if (reset_when_found) |mode| try c.writeState("BISECT_RESET_WHEN_FOUND", try std.mem.concat(c.a, u8, &.{ @tagName(mode), "\n" }));
     if (no_checkout) {
         const oid = revparse.resolve(c.gpa, c.io, c.repo, start_head) catch return error.BadHead;
-        try c.updateRef("BISECT_HEAD", oid);
+        try c.roots().write(c.gpa, c.io, .bisect_head, oid);
     }
     try names.append(c.a, '\n');
     try c.writeState("BISECT_NAMES", names.items);
@@ -1173,18 +1181,18 @@ fn applyState(c: *Ctx, t: *Terms, state: []const u8, revs: []const []const u8) E
     if (revs.len > 1 and std.mem.eql(u8, state, t.bad)) return error.TooManyBadRevisions;
     var oids: std.ArrayList(Oid) = .empty;
     if (revs.len == 0) {
-        const oid = (try c.readRef("BISECT_HEAD")) orelse (try c.commitOf("HEAD"));
+        const oid = (try c.roots().read(c.a, c.io, .bisect_head)) orelse (try c.commitOf("HEAD"));
         try oids.append(c.a, oid);
     }
     for (revs) |rev| try oids.append(c.a, try c.commitOf(rev));
     var verify_expected = true;
-    const expected = try c.readRef("BISECT_EXPECTED_REV");
+    const expected = try c.roots().read(c.a, c.io, .bisect_expected_rev);
     if (expected == null) verify_expected = false;
     for (oids.items) |oid| {
         try bisectWrite(c, state, try c.hex(oid), t.*, false);
         if (verify_expected and !oid.eql(expected.?)) {
             try c.removeState("BISECT_ANCESTORS_OK");
-            try head_mod.deleteRef(c.io, c.repo, "BISECT_EXPECTED_REV");
+            try c.roots().delete(c.gpa, c.io, .bisect_expected_rev);
             verify_expected = false;
         }
     }
@@ -1226,7 +1234,7 @@ fn resetTo(c: *Ctx, commit: ?[]const u8) Error!void {
         if (text.len == 0) try c.print("We are not bisecting.\n", .{});
         branch = std.mem.trimEnd(u8, text, " \t\n\r");
     }
-    if (branch.len != 0 and try c.readRef("BISECT_HEAD") == null) try checkoutName(c, branch);
+    if (branch.len != 0 and try c.roots().read(c.a, c.io, .bisect_head) == null) try checkoutName(c, branch);
     try cleanState(c);
 }
 
@@ -1334,7 +1342,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u
             ResetWhenFound.parse(argv[0]["--reset-when-found=".len..]) orelse return error.InvalidResetWhenFound
         else
             return error.InvalidResetWhenFound;
-        if (try c.readRef("BISECT_HEAD") != null) return error.ResetWhenFoundWithoutCheckout;
+        if (try c.roots().read(c.a, c.io, .bisect_head) != null) return error.ResetWhenFoundWithoutCheckout;
         try c.writeState("BISECT_RESET_WHEN_FOUND", try std.mem.concat(c.a, u8, &.{ @tagName(mode), "\n" }));
         argv = argv[1..];
     }
@@ -1395,7 +1403,7 @@ fn runCommand(c: *Ctx, line: []const u8, run_options: RunOptions) Error!i32 {
 /// `verify_good`: the command run on the first good commit, then the
 /// commit being tested put back.
 fn verifyGood(c: *Ctx, t: Terms, line: []const u8, run_options: RunOptions) Error!i32 {
-    const no_checkout = try c.readRef("BISECT_HEAD") != null;
+    const no_checkout = try c.roots().read(c.a, c.io, .bisect_head) != null;
     const good_prefix = try c.a.print("refs/bisect/{s}-", .{t.good});
     var listing = try c.repo.refStore().list(c.gpa, c.io, "refs/bisect/");
     defer listing.deinit();
@@ -1403,7 +1411,8 @@ fn verifyGood(c: *Ctx, t: Terms, line: []const u8, run_options: RunOptions) Erro
     for (listing.entries) |e| if (std.mem.startsWith(u8, e.name, good_prefix)) {
         if (good == null and e.target == .direct) good = e.target.direct;
     };
-    const current = (try c.readRef(if (no_checkout) "BISECT_HEAD" else "HEAD")) orelse (c.commitOf("HEAD") catch return -1);
+    const at = if (no_checkout) try c.roots().read(c.a, c.io, .bisect_head) else try c.readRef("HEAD");
+    const current = at orelse (c.commitOf("HEAD") catch return -1);
     try checkout(c, good orelse return -1, no_checkout);
     const code = try runCommand(c, line, run_options);
     try checkout(c, current, no_checkout);
@@ -1455,15 +1464,18 @@ const Twin = struct {
     git: testgit.Repo,
     ours: testgit.Repo,
     repo: Repository,
+    format: testgit.RefFormat,
 
     /// `shape` 0 is a line of commits; 1 has merges; 2 is a line in which
-    /// every third commit also changes `p/x`.
-    fn init(gpa: Allocator, io: Io, t: *Twin, shape: u8) !void {
+    /// every third commit also changes `p/x`. Both keep their refs in
+    /// `format`.
+    fn init(gpa: Allocator, io: Io, t: *Twin, format: testgit.RefFormat, shape: u8) !void {
+        t.format = format;
         t.env = try testgit.datedEnv(gpa, 1_700_000_000);
         errdefer t.env.deinit();
-        t.git = try testgit.Repo.init(gpa, io, &.{});
+        t.git = try testgit.Repo.init(gpa, io, format.initArgs());
         errdefer t.git.deinit();
-        t.ours = try testgit.Repo.init(gpa, io, &.{});
+        t.ours = try testgit.Repo.init(gpa, io, format.initArgs());
         errdefer t.ours.deinit();
         for ([_]*testgit.Repo{ &t.git, &t.ours }) |r| {
             r.environ = &t.env;
@@ -1547,7 +1559,20 @@ const Twin = struct {
 
     fn expectSameState(t: *Twin, io: Io) !void {
         const gpa = t.git.gpa;
-        for ([_][]const u8{ "BISECT_START", "BISECT_TERMS", "BISECT_NAMES", "BISECT_LOG", "BISECT_ANCESTORS_OK", "BISECT_FIRST_PARENT", "BISECT_EXPECTED_REV", "BISECT_HEAD", "BISECT_RUN" }) |name| {
+        for ([_][]const u8{ "BISECT_START", "BISECT_TERMS", "BISECT_NAMES", "BISECT_LOG", "BISECT_ANCESTORS_OK", "BISECT_FIRST_PARENT", ref_names.Root.bisect_expected_rev.name(), ref_names.Root.bisect_head.name(), "BISECT_RUN" }) |name| {
+            // A root ref is a record in a reftable, and what git reads of
+            // it is what both must agree on.
+            if (t.format == .reftable and ref_names.isRootRef(name)) {
+                const a = try gitOrFailed(io, &t.git, &.{ "rev-parse", "--verify", "-q", name });
+                defer gpa.free(a);
+                const b = try gitOrFailed(io, &t.ours, &.{ "rev-parse", "--verify", "-q", name });
+                defer gpa.free(b);
+                std.testing.expectEqualStrings(a, b) catch |err| {
+                    std.log.err("{s} differs", .{name});
+                    return err;
+                };
+                continue;
+            }
             const path = try gpa.print(".git/{s}", .{name});
             defer gpa.free(path);
             const a = t.git.readFile(io, path) catch |err| switch (err) {
@@ -1588,6 +1613,14 @@ const Twin = struct {
                 return err;
             };
         }
+    }
+
+    /// Whether git's side is still bisecting: it has a commit it expects
+    /// tested, in either ref format.
+    fn gitExpects(t: *Twin, io: Io) !bool {
+        const seen = try gitOrFailed(io, &t.git, &.{ "rev-parse", "--verify", "-q", ref_names.Root.bisect_expected_rev.name() });
+        defer t.git.gpa.free(seen);
+        return !std.mem.eql(u8, seen, "<failed>");
     }
 
     /// Which word the commit under test earns: bad from `first_bad` on.
@@ -1666,9 +1699,10 @@ fn bisectLikeGit(case: Case) !void {
     // The builtin bisect of git 2.40, whose messages and log are these.
     try testgit.requireGitVersion(gpa, io, 2, 40);
     const newest = try testgit.gitAtLeast(gpa, io, 2, 56);
-    {
+    for (try testgit.refFormats(gpa, io)) |format| {
+        errdefer std.log.err("in the {t} ref format", .{format});
         var t: Twin = undefined;
-        try Twin.init(gpa, io, &t, case.shape);
+        try Twin.init(gpa, io, &t, format, case.shape);
         defer t.deinit(io);
         var start_args: std.ArrayList([]const u8) = .empty;
         defer start_args.deinit(gpa);
@@ -1688,7 +1722,7 @@ fn bisectLikeGit(case: Case) !void {
         const renamed = std.mem.startsWith(u8, case.start[0], "--term");
         var steps: usize = 0;
         while (steps < 20) : (steps += 1) {
-            if (t.git.readFile(io, ".git/BISECT_EXPECTED_REV")) |b| gpa.free(b) else |_| break;
+            if (!try t.gitExpects(io)) break;
             const log_text = try t.git.readFile(io, ".git/BISECT_LOG");
             defer gpa.free(log_text);
             if (std.mem.find(u8, log_text, "first '") != null or std.mem.find(u8, log_text, "only skipped") != null) break;
@@ -1723,45 +1757,57 @@ test "a pathspec bisection through a merge follows the side that changed the pat
 }
 
 test "bisect run tests each commit with the command, as git's does" {
-    // The builtin bisect of git 2.40, whose messages and log are these.
-    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var t: Twin = undefined;
-    try Twin.init(gpa, io, &t, 1);
-    defer t.deinit(io);
-    var env = try testgit.programEnviron(gpa);
-    defer env.deinit();
-    const script = "n=$(cat n); if [ $n -eq 13 ]; then exit 125; fi; [ $n -lt 12 ]";
-    try expectReport(&t, io, &.{ "start", "HEAD", "HEAD~16" }, start(gpa, io, &t.repo, &.{ "HEAD", "HEAD~16" }, .{ .who = test_who }));
-    try expectReport(&t, io, &.{ "run", "sh", "-c", script }, run(gpa, io, &t.repo, &.{ "sh", "-c", script }, .{ .who = test_who }, .{ .programs = .{ .environ = &env } }));
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            // The builtin bisect of git 2.40, whose messages and log are these.
+            try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var t: Twin = undefined;
+            try Twin.init(gpa, io, &t, format, 1);
+            defer t.deinit(io);
+            var env = try testgit.programEnviron(gpa);
+            defer env.deinit();
+            const script = "n=$(cat n); if [ $n -eq 13 ]; then exit 125; fi; [ $n -lt 12 ]";
+            try expectReport(&t, io, &.{ "start", "HEAD", "HEAD~16" }, start(gpa, io, &t.repo, &.{ "HEAD", "HEAD~16" }, .{ .who = test_who }));
+            try expectReport(&t, io, &.{ "run", "sh", "-c", script }, run(gpa, io, &t.repo, &.{ "sh", "-c", script }, .{ .who = test_who }, .{ .programs = .{ .environ = &env } }));
+        }
+    }.inFormat);
 }
 
 test "bisect refuses what git refuses" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var u: Twin = undefined;
-    try Twin.init(gpa, io, &u, 0);
-    defer u.deinit(io);
-    try std.testing.expectError(error.NotBisecting, mark(gpa, io, &u.repo, "good", &.{}, .{ .who = test_who }));
-    try std.testing.expectError(error.UnrecognizedOption, start(gpa, io, &u.repo, &.{"--bogus"}, .{ .who = test_who }));
-    try std.testing.expectError(error.InvalidTerm, start(gpa, io, &u.repo, &.{ "--term-new=skip", "HEAD" }, .{ .who = test_who }));
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var u: Twin = undefined;
+            try Twin.init(gpa, io, &u, format, 0);
+            defer u.deinit(io);
+            try std.testing.expectError(error.NotBisecting, mark(gpa, io, &u.repo, "good", &.{}, .{ .who = test_who }));
+            try std.testing.expectError(error.UnrecognizedOption, start(gpa, io, &u.repo, &.{"--bogus"}, .{ .who = test_who }));
+            try std.testing.expectError(error.InvalidTerm, start(gpa, io, &u.repo, &.{ "--term-new=skip", "HEAD" }, .{ .who = test_who }));
+        }
+    }.inFormat);
 }
 
 test "bisect waits for good and bad commits, and skips a range, as git does" {
-    // The builtin bisect of git 2.40, whose messages and log are these.
-    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var t: Twin = undefined;
-    try Twin.init(gpa, io, &t, 0);
-    defer t.deinit(io);
-    // Waiting for both, then for a good commit.
-    try expectReport(&t, io, &.{"start"}, start(gpa, io, &t.repo, &.{}, .{ .who = test_who }));
-    try expectReport(&t, io, &.{ "bad", "HEAD" }, mark(gpa, io, &t.repo, "bad", &.{"HEAD"}, .{ .who = test_who }));
-    try std.testing.expectError(error.TooManyBadRevisions, mark(gpa, io, &t.repo, "bad", &.{ "HEAD", "HEAD~1" }, .{ .who = test_who }));
-    try expectReport(&t, io, &.{ "good", "HEAD~4", "HEAD~6" }, mark(gpa, io, &t.repo, "good", &.{ "HEAD~4", "HEAD~6" }, .{ .who = test_who }));
-    try expectReport(&t, io, &.{ "skip", "HEAD~3..HEAD~1" }, mark(gpa, io, &t.repo, "skip", &.{"HEAD~3..HEAD~1"}, .{ .who = test_who }));
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            // The builtin bisect of git 2.40, whose messages and log are these.
+            try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 40);
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var t: Twin = undefined;
+            try Twin.init(gpa, io, &t, format, 0);
+            defer t.deinit(io);
+            // Waiting for both, then for a good commit.
+            try expectReport(&t, io, &.{"start"}, start(gpa, io, &t.repo, &.{}, .{ .who = test_who }));
+            try expectReport(&t, io, &.{ "bad", "HEAD" }, mark(gpa, io, &t.repo, "bad", &.{"HEAD"}, .{ .who = test_who }));
+            try std.testing.expectError(error.TooManyBadRevisions, mark(gpa, io, &t.repo, "bad", &.{ "HEAD", "HEAD~1" }, .{ .who = test_who }));
+            try expectReport(&t, io, &.{ "good", "HEAD~4", "HEAD~6" }, mark(gpa, io, &t.repo, "good", &.{ "HEAD~4", "HEAD~6" }, .{ .who = test_who }));
+            try expectReport(&t, io, &.{ "skip", "HEAD~3..HEAD~1" }, mark(gpa, io, &t.repo, "skip", &.{"HEAD~3..HEAD~1"}, .{ .who = test_who }));
+        }
+    }.inFormat);
 }
 
 test "a bisection told to reset when it finds the commit goes back as git 2.56's does" {
@@ -1773,26 +1819,33 @@ test "a bisection told to reset to what it found goes there as git 2.56's does" 
 }
 
 test "a reset when found is refused without a checkout and to nowhere" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var t: Twin = undefined;
-    try Twin.init(gpa, io, &t, 0);
-    defer t.deinit(io);
-    try std.testing.expectError(error.ResetWhenFoundWithoutCheckout, start(gpa, io, &t.repo, &.{ "--reset-when-found", "--no-checkout", "HEAD" }, .{ .who = test_who }));
-    try std.testing.expectError(error.InvalidResetWhenFound, start(gpa, io, &t.repo, &.{"--reset-when-found=elsewhere"}, .{ .who = test_who }));
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var t: Twin = undefined;
+            try Twin.init(gpa, io, &t, format, 0);
+            defer t.deinit(io);
+            try std.testing.expectError(error.ResetWhenFoundWithoutCheckout, start(gpa, io, &t.repo, &.{ "--reset-when-found", "--no-checkout", "HEAD" }, .{ .who = test_who }));
+            try std.testing.expectError(error.InvalidResetWhenFound, start(gpa, io, &t.repo, &.{"--reset-when-found=elsewhere"}, .{ .who = test_who }));
+        }
+    }.inFormat);
 }
 
 fn resetWhenFoundLikeGit(option: []const u8) !void {
     try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    var t: Twin = undefined;
-    try Twin.init(gpa, io, &t, 0);
-    defer t.deinit(io);
-    try expectReport(&t, io, &.{ "start", option, "HEAD", "HEAD~3" }, start(gpa, io, &t.repo, &.{ option, "HEAD", "HEAD~3" }, .{ .who = test_who }));
-    for (0..3) |_| {
-        if (t.git.readFile(io, ".git/BISECT_EXPECTED_REV")) |b| gpa.free(b) else |_| break;
-        const word = try t.verdict(io, 14, &.{}, false);
-        try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));
+    for (try testgit.refFormats(gpa, io)) |format| {
+        errdefer std.log.err("in the {t} ref format", .{format});
+        var t: Twin = undefined;
+        try Twin.init(gpa, io, &t, format, 0);
+        defer t.deinit(io);
+        try expectReport(&t, io, &.{ "start", option, "HEAD", "HEAD~3" }, start(gpa, io, &t.repo, &.{ option, "HEAD", "HEAD~3" }, .{ .who = test_who }));
+        for (0..3) |_| {
+            if (!try t.gitExpects(io)) break;
+            const word = try t.verdict(io, 14, &.{}, false);
+            try expectReport(&t, io, &.{word}, mark(gpa, io, &t.repo, word, &.{}, .{ .who = test_who }));
+        }
     }
 }

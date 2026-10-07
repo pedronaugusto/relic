@@ -3,12 +3,12 @@
 //!
 //! What is on the disk, measured against git rather than read from a
 //! document: `<common>/worktrees/<id>/` holding `HEAD`, `gitdir`,
-//! `commondir`, `index`, `ORIG_HEAD` and `logs/HEAD`, and a `.git` *file* in
+//! `commondir`, `index` and `logs/HEAD`, and a `.git` *file* in
 //! the destination whose only line is `gitdir: <absolute path>`. A worktree
 //! git added with `worktree.useRelativePaths` holds both paths relative: the
 //! `gitdir` file's to the administrative directory, the `.git` file's to
 //! the working tree; both are read either way. In a
-//! repository whose refs are a reftable stack, `HEAD` and `ORIG_HEAD` are in
+//! repository whose refs are a reftable stack, `HEAD` is in
 //! a stack of the worktree's own under `reftable/`, and the `HEAD` file is
 //! the placeholder git leaves there.
 
@@ -334,18 +334,17 @@ pub fn add(
             .sha1;
         var target_buf: [512]u8 = undefined;
         if (options.detach_at) |oid| {
-            try reftablestack.initialize(gpa, io, admin, kind, .{ .direct = oid }, oid, .{});
+            try reftablestack.initialize(gpa, io, admin, kind, .{ .direct = oid }, .{});
         } else if (options.branch) |branch| {
             const target = std.mem.print(&target_buf, "refs/heads/{s}", .{branch}) catch
                 return error.InvalidWorktreeName;
-            try reftablestack.initialize(gpa, io, admin, kind, .{ .symbolic = target }, null, .{});
+            try reftablestack.initialize(gpa, io, admin, kind, .{ .symbolic = target }, .{});
         } else {
             return error.CorruptWorktree;
         }
     } else if (options.detach_at) |oid| {
         var hex: [hash.max_hex_len]u8 = undefined;
         try writeLine(io, admin, "HEAD", oid.hex(&hex));
-        try writeLine(io, admin, "ORIG_HEAD", oid.hex(&hex));
     } else if (options.branch) |branch| {
         var line_buf: [512]u8 = undefined;
         const line = std.mem.print(&line_buf, "ref: refs/heads/{s}", .{branch}) catch

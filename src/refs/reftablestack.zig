@@ -135,9 +135,9 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Op
 /// branch in a new repository, or whatever a new linked worktree starts
 /// on -- a `HEAD` file naming a branch no one can create, so that a reader
 /// of the files format stops rather than misreads, and `refs/heads` as a
-/// file saying why. `orig_head`, when given, is written beside `HEAD`.
-pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: refs.Ref, orig_head: ?Oid, options: Options) refs.TransactionError!void {
-    return engine.initialize(gpa, io, git_dir, kind, head, orig_head, options);
+/// file saying why.
+pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: refs.Ref, options: Options) refs.TransactionError!void {
+    return engine.initialize(gpa, io, git_dir, kind, head, options);
 }
 /// What `HEAD` holds in the stack under `git_dir`, or `null` when there is
 /// no stack there -- the files format -- or no `HEAD` in it. A symbolic

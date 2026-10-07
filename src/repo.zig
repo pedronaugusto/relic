@@ -876,7 +876,7 @@ pub const Repository = struct {
             .reftable => {
                 const target = std.mem.print(&head_buf, "refs/heads/{s}", .{options.default_branch}) catch
                     return error.NotARepository;
-                try reftablestack.initialize(gpa, io, git_dir, options.object_format, .{ .symbolic = target }, null, .{});
+                try reftablestack.initialize(gpa, io, git_dir, options.object_format, .{ .symbolic = target }, .{});
             },
         }
 

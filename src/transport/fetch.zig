@@ -1471,8 +1471,9 @@ fn describe(arena: Allocator, name: []const u8, url: []const u8) Allocator.Error
 fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const FetchHeadEntry, append: bool) Error!void {
     var text: std.Io.Writer.Allocating = .init(gpa);
     defer text.deinit();
+    const fetch_head = repo.refStore().special();
     if (append) {
-        if (try fs.readFileAlloc(gpa, io, repo.git_dir, "FETCH_HEAD", 1 << 26)) |existing| {
+        if (try fetch_head.readAll(gpa, io, .fetch_head)) |existing| {
             defer gpa.free(existing);
             text.writer.writeAll(existing) catch return error.OutOfMemory;
         }
@@ -1484,7 +1485,7 @@ fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const Fe
             entry.description,
         }) catch return error.OutOfMemory;
     }
-    try fs.atomicWrite(io, repo.git_dir, "FETCH_HEAD", text.written(), "FETCH_HEAD.tmp_", .none);
+    try fetch_head.write(gpa, io, .fetch_head, text.written());
 }
 
 /// Remove a deleted ref's log, as git does when it deletes a ref.

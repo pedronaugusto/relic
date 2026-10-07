@@ -5,11 +5,11 @@
 //! git writes the same line to both logs; when it is detached, `HEAD` itself
 //! moves. Getting that wrong is quiet -- the commit is made, and `git reflog`
 //! simply lacks it -- so every history-editing command here moves `HEAD`
-//! through this one file. The pseudo-refs a command in progress writes
-//! (`ORIG_HEAD`, `CHERRY_PICK_HEAD`, `REBASE_HEAD`, `AUTO_MERGE`) go through
-//! a ref transaction without a log, as git's do; the state files (`MERGE_MSG`,
-//! the sequencer's directory) are replaced whole, so a reader never sees half
-//! of one.
+//! through this one file. The root refs a command in progress writes
+//! (`ORIG_HEAD`, `CHERRY_PICK_HEAD`, `REBASE_HEAD`, `AUTO_MERGE`) are the ref
+//! store's (`refs.Store.root`); the state files (`MERGE_MSG`, the
+//! sequencer's directory) are replaced whole, so a reader never sees half of
+//! one.
 
 const Self = @This();
 
@@ -137,49 +137,6 @@ fn appendHeadLog(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error
     const exists = try reflog.exists(repo.gpa, io, repo.git_dir, "HEAD");
     if (!reflog.shouldLog(repo.reflogPolicy(), "HEAD", exists)) return;
     try repo.refStore().appendLog(repo.gpa, io, "HEAD", old orelse Oid.zero(repo.objectFormat()), new, log.who, log.message);
-}
-
-/// Point the pseudo-ref `name` at `oid`, with no log, as git writes
-/// `ORIG_HEAD` and `CHERRY_PICK_HEAD`.
-pub fn writeRef(io: Io, repo: *Repository, name: []const u8, oid: Oid) Self.Error!void {
-    var tx = repo.beginRefs();
-    defer tx.deinit(io);
-    try tx.update(name, .{ .direct = oid }, .any);
-    try tx.commit(io, null);
-}
-
-/// What the pseudo-ref `name` points at, or `null`.
-pub fn readRef(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) refs_mod.ReadError!?Oid {
-    const found = (try repo.refStore().read(gpa, io, name)) orelse return null;
-    switch (found) {
-        .direct => |oid| return oid,
-        .symbolic => |target| {
-            gpa.free(target);
-            return null;
-        },
-    }
-}
-
-/// Remove the pseudo-ref `name`, which need not exist, through the ref
-/// store `writeRef` wrote it to: a reftable repository keeps it in its
-/// tables, not in a file. A symbolic one goes itself, not what it names.
-pub fn deleteRef(io: Io, repo: *Repository, name: []const u8) Self.Error!void {
-    var tx = repo.beginRefs();
-    defer tx.deinit(io);
-    try tx.change(name, null, .any, .{ .no_deref = true });
-    try tx.commit(io, null);
-}
-
-/// Whether the pseudo-ref `name` is there, read through the ref store
-/// rather than as a file, which a reftable repository has none of. As
-/// git's `ref_exists`, one that cannot be read is not there.
-pub fn refExists(io: Io, repo: *Repository, name: []const u8) bool {
-    const found = (repo.refStore().read(repo.gpa, io, name) catch return false) orelse return false;
-    switch (found) {
-        .direct => {},
-        .symbolic => |target| repo.gpa.free(target),
-    }
-    return true;
 }
 
 /// Replace the state file `sub_path` under `dir` with `bytes`, making the

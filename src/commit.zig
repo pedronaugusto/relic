@@ -153,9 +153,11 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     diagnostic.reset(options.diagnostic);
     const gpa = repo.gpa;
     if (repo.work_dir == null) return error.BareRepository;
-    for ([_][]const u8{ "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD" }) |name| {
-        if (repo.git_dir.access(io, name, .{})) |_| return error.OperationInProgress else |_| {}
-    }
+    // Through the ref store: a reftable repository keeps the pick's and
+    // the revert's refs in its tables, where no file says they are there.
+    if (repo.refStore().special().exists(io, .merge_head) or
+        repo.refStore().root().exists(gpa, io, .cherry_pick_head) or
+        repo.refStore().root().exists(gpa, io, .revert_head)) return error.OperationInProgress;
     const cleanup = options.cleanup orelse try configuredCleanup(repo);
 
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);

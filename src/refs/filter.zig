@@ -708,15 +708,19 @@ pub const Listing = struct {
             else => unreachable,
         } else "refs/");
         defer listing.deinit();
-        var roots: std.ArrayList(refs_mod.Named) = .empty;
-        defer roots.deinit(gpa);
-        if (filter.kinds.root_refs) try l.rootRefs(&roots);
+        // `HEAD` and the root refs, from the ref store, which knows where
+        // its format keeps them.
+        var roots: refs_mod.Store.Listing = if (filter.kinds.root_refs)
+            try store.root().list(gpa, io)
+        else
+            .{ .gpa = gpa, .arena = .{}, .entries = &.{} };
+        defer roots.deinit();
         // the root refs sort among the others, by name
         var i: usize = 0;
         var j: usize = 0;
-        while (i < listing.entries.len or j < roots.items.len) {
-            if (j < roots.items.len and (i == listing.entries.len or std.mem.order(u8, roots.items[j].name, listing.entries[i].name) == .lt)) {
-                try candidates.append(gpa, roots.items[j]);
+        while (i < listing.entries.len or j < roots.entries.len) {
+            if (j < roots.entries.len and (i == listing.entries.len or std.mem.order(u8, roots.entries[j].name, listing.entries[i].name) == .lt)) {
+                try candidates.append(gpa, roots.entries[j]);
                 j += 1;
             } else {
                 try candidates.append(gpa, listing.entries[i]);
@@ -745,42 +749,6 @@ pub const Listing = struct {
         }
         try l.reachFilter(filter.merged, true);
         try l.reachFilter(filter.no_merged, false);
-    }
-
-    /// The root refs a files repository keeps beside `HEAD`.
-    fn rootRefs(l: *Listing, out: *std.ArrayList(refs_mod.Named)) Error!void {
-        const gpa = l.gpa;
-        const io = l.io;
-        var names: std.ArrayList([]const u8) = .empty;
-        defer names.deinit(gpa);
-        var it = l.repo.git_dir.iterate();
-        while (it.next(io) catch null) |entry| {
-            if (entry.kind != .file) continue;
-            if (!ref_names.isRootRef(entry.name)) continue;
-            try names.append(gpa, try l.a().dupe(u8, entry.name));
-        }
-        if (l.repo.refStore().refFormat() == .reftable) {
-            var stack_listing = try l.repo.refStore().list(gpa, io, "");
-            defer stack_listing.deinit();
-            for (stack_listing.entries) |entry| {
-                if (std.mem.findScalar(u8, entry.name, '/') != null or !ref_names.isRootRef(entry.name)) continue;
-                for (names.items) |known| {
-                    if (std.mem.eql(u8, known, entry.name)) break;
-                } else try names.append(gpa, try l.a().dupe(u8, entry.name));
-            }
-        }
-        std.mem.sort([]const u8, names.items, {}, lessString);
-        for (names.items) |name| {
-            const value = (l.repo.refStore().read(gpa, io, name) catch continue) orelse continue;
-            const target: refs_mod.Ref = switch (value) {
-                .direct => |oid| .{ .direct = oid },
-                .symbolic => |t| blk: {
-                    defer gpa.free(t);
-                    break :blk .{ .symbolic = try l.a().dupe(u8, t) };
-                },
-            };
-            try out.append(gpa, .{ .name = name, .target = target, .loose = true });
-        }
     }
 
     /// git's `apply_ref_filter` for one ref.

@@ -289,6 +289,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "history and remote operations", .patterns = &.{
         "src/testing/history.zig",
+        "src/refs_test.zig",
         "src/transport/partial.zig",
         "src/transport/push.zig",
         "src/commit/signing_test.zig",
@@ -388,13 +389,22 @@ pub const required = blk: {
 
 /// Tokens only their owners may spell: starting and waiting on processes is
 /// conduit's, this package's Windows declarations live in one file, and
-/// the ref-name rules live in `names/ref.zig` under their own names.
+/// the ref-name rules and the root and special refs' names live in
+/// `names/ref.zig`.
 pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "process owner", .tokens = &.{ "waitpid", "wait4", "execve", "posix_spawn", "setsid", "CreateProcessW" } },
     // the ssh stand-in is another program, holding its handles as ssh does
     .{ .name = "windows declarations", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/repo/fs.zig", "src/testing/fake_ssh.zig" } },
     // what a ref may be named is decided once, in `names/ref.zig`
     .{ .name = "one ref-name rule", .tokens = &.{ "checkRefFormat", "checkRefName", "isValidRefName", "isPseudoRef" } },
+    // the root and special refs are spelled once, and reached through the
+    // ref store as `names.Root` and `names.Special`; tests ask git for them
+    .{
+        .name = "root and special ref names",
+        .kind = .string,
+        .tokens = &.{ "ORIG_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "AUTO_MERGE", "BISECT_HEAD", "BISECT_EXPECTED_REV", "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "FETCH_HEAD", "MERGE_HEAD" },
+        .owners = &.{ "src/names/ref.zig", "src/testing/**", "src/*_test.zig", "src/**/*_test.zig" },
+    },
 };
 
 /// Namespace reexports added when each facade was folded into its implementation.

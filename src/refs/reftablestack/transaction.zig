@@ -15,6 +15,7 @@ const cache = @import("cache.zig");
 pub const Options = @import("policy.zig").Options;
 pub const Error = @import("policy.zig").Error;
 const state_mod = @import("../state.zig");
+const ref_names = @import("../../names/ref.zig");
 const builtin = @import("builtin");
 const Stack = cache.Stack;
 const Cache = cache.Cache;
@@ -65,13 +66,71 @@ pub fn read(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadE
 }
 
 fn readIn(gpa: Allocator, stacks: *const Stacks, store: anytype, name: []const u8) refs.ReadError!?refs.Ref {
-    const record = (try cache.internal.forName(stacks, store, name).lookup(gpa, gpa, name)) orelse return null;
+    return refFrom(gpa, cache.internal.forName(stacks, store, name), name);
+}
+
+/// `name`'s value in one stack, or `null`.
+fn refFrom(gpa: Allocator, stack: *const Stack, name: []const u8) refs.ReadError!?refs.Ref {
+    const record = (try stack.lookup(gpa, gpa, name)) orelse return null;
     return switch (record.value) {
         .deletion => null,
         .direct => |oid| .{ .direct = oid },
         .peeled => |p| .{ .direct = p.value },
         .symbolic => |target| .{ .symbolic = target },
     };
+}
+
+/// A ref another worktree keeps for itself, reached as
+/// `main-worktree/<name>` or `worktrees/<id>/<name>`: the main worktree's
+/// in the shared stack, a linked worktree's in its own, which is read for
+/// this call. The returned target of a symbolic ref is the caller's.
+pub fn readOtherWorktree(gpa: Allocator, io: Io, store: anytype, where: ref_names.WorktreeRef) refs.ReadError!?refs.Ref {
+    switch (where.owner) {
+        .main => {
+            var owned: ?Stacks = null;
+            var view = try View.acquire(gpa, io, store, &owned);
+            defer view.release(io, &owned);
+            return refFrom(gpa, &view.stacks.main, where.bare);
+        },
+        .other => {
+            var stack = (try loadWorktree(gpa, io, store, where.id)) orelse return null;
+            defer stack.deinit();
+            return refFrom(gpa, &stack, where.bare);
+        },
+        // unreachable: the store reads the names of its own worktree, and the shared ones, itself
+        .current, .shared => unreachable,
+    }
+}
+
+/// The stack of the linked worktree `id`, read now, or `null` when there
+/// is no such worktree.
+fn loadWorktree(gpa: Allocator, io: Io, store: anytype, id: []const u8) refs.ReadError!?Stack {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = std.mem.print(&path_buffer, "worktrees/{s}", .{id}) catch return null;
+    var admin = store.commonDir().openDir(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.NameTooLong => return null,
+        else => |e| return e,
+    };
+    defer admin.close(io);
+    const stack = try loadIn(gpa, io, admin, store.objectFormat());
+    return stack;
+}
+
+/// The log records of `name`, newest first, wherever its worktree keeps
+/// them: this worktree's stack, the shared one, or another worktree's.
+fn logRecords(gpa: Allocator, arena: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadError![]reftable.LogRecord {
+    const where = ref_names.parseWorktreeRef(name);
+    if (where.owner == .other) {
+        if (where.bare.len == 0) return &.{};
+        var stack = (try loadWorktree(gpa, io, store, where.id)) orelse return &.{};
+        defer stack.deinit();
+        return stack.logsFor(gpa, arena, where.bare);
+    }
+    var owned: ?Stacks = null;
+    var view = try View.acquire(gpa, io, store, &owned);
+    defer view.release(io, &owned);
+    if (where.owner == .main) return view.stacks.main.logsFor(gpa, arena, where.bare);
+    return cache.internal.forName(view.stacks, store, name).logsFor(gpa, arena, name);
 }
 
 /// Follow symbolic refs through the stacks until an object name, with the
@@ -161,12 +220,9 @@ fn lessThanNamed(_: void, a: refs.Named, b: refs.Named) bool {
 /// backend's log is. An entry whose old and new names are both zero is the
 /// marker git writes to say a log exists, and is not an entry.
 pub fn readLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) (refs.ReadError || reflog.ReadError)!reflog.Log {
-    var owned: ?Stacks = null;
-    var view = try View.acquire(gpa, io, store, &owned);
-    defer view.release(io, &owned);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
-    const records = try cache.internal.forName(view.stacks, store, name).logsFor(gpa, arena_instance.allocator(), name);
+    const records = try logRecords(gpa, arena_instance.allocator(), io, store, name);
 
     var total: usize = 0;
     var count: usize = 0;
@@ -218,13 +274,9 @@ fn put(bytes: []u8, at: *usize, text: []const u8) []const u8 {
 /// Whether a log for `name` exists: any entry at all, the existence marker
 /// included.
 pub fn logExists(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadError!bool {
-    var owned: ?Stacks = null;
-    var view = try View.acquire(gpa, io, store, &owned);
-    defer view.release(io, &owned);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
-    const records = try cache.internal.forName(view.stacks, store, name).logsFor(gpa, arena_instance.allocator(), name);
-    return records.len != 0;
+    return (try logRecords(gpa, arena_instance.allocator(), io, store, name)).len != 0;
 }
 
 /// git's zone number -- `+0130` read as 130 -- as minutes east of UTC.
@@ -789,25 +841,19 @@ fn suggest(sizes: []const u64, factor_in: u8) ?Segment {
 /// branch in a new repository, or whatever a new linked worktree starts
 /// on -- a `HEAD` file naming a branch no one can create, so that a reader
 /// of the files format stops rather than misreads, and `refs/heads` as a
-/// file saying why. `orig_head`, when given, is written beside `HEAD`.
-pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: refs.Ref, orig_head: ?Oid, options: Options) refs.TransactionError!void {
+/// file saying why.
+pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: refs.Ref, options: Options) refs.TransactionError!void {
     git_dir.createDirPath(io, "reftable") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => |e| return e,
     };
     var dir = try git_dir.openDir(io, "reftable", .{});
     defer dir.close(io);
-    var records: [2]reftable.RefRecord = undefined;
-    records[0] = .{ .name = "HEAD", .update_index = 1, .value = switch (head) {
+    const records = [_]reftable.RefRecord{.{ .name = "HEAD", .update_index = 1, .value = switch (head) {
         .direct => |oid| .{ .direct = oid },
         .symbolic => |target| .{ .symbolic = target },
-    } };
-    var n: usize = 1;
-    if (orig_head) |oid| {
-        records[1] = .{ .name = "ORIG_HEAD", .update_index = 1, .value = .{ .direct = oid } };
-        n = 2;
-    }
-    const bytes = try reftable.write(gpa, kind, options.write, 1, 1, records[0..n], &.{});
+    } }};
+    const bytes = try reftable.write(gpa, kind, options.write, 1, 1, &records, &.{});
     defer gpa.free(bytes);
     var name_buf: [64]u8 = undefined;
     const name = tableName(io, &name_buf, 1, 1);

@@ -31,6 +31,7 @@ const program = @import("../repo/program.zig");
 const filter = @import("../worktree/filter.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
+const ref_names = @import("../names/ref.zig");
 const message = @import("message.zig");
 const trailer = @import("trailer.zig");
 const abbrev = @import("../odb/abbrev.zig");
@@ -109,10 +110,10 @@ pub const Action = enum {
         };
     }
 
-    fn headRef(a: Action) []const u8 {
+    fn headRef(a: Action) ref_names.Root {
         return switch (a) {
-            .pick => "CHERRY_PICK_HEAD",
-            .revert => "REVERT_HEAD",
+            .pick => .cherry_pick_head,
+            .revert => .revert_head,
         };
     }
 };
@@ -233,8 +234,8 @@ pub fn revert(gpa: Allocator, io: Io, repo: *Repository, commits: []const Oid, o
 /// `.git/sequencer`, or a single pick's `CHERRY_PICK_HEAD` or `REVERT_HEAD`.
 pub fn inProgress(io: Io, repo: *Repository) ?Action {
     if (lastCommand(repo.gpa, io, repo)) |action| return action;
-    if (head_mod.refExists(io, repo, "CHERRY_PICK_HEAD")) return .pick;
-    if (head_mod.refExists(io, repo, "REVERT_HEAD")) return .revert;
+    if (repo.refStore().root().exists(repo.gpa, io, .cherry_pick_head)) return .pick;
+    if (repo.refStore().root().exists(repo.gpa, io, .revert_head)) return .revert;
     return null;
 }
 
@@ -548,7 +549,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     });
     defer outcome.deinit();
     try repo.writeIndex(io, &index);
-    try head_mod.writeRef(io, repo, "AUTO_MERGE", outcome.auto_merge);
+    try repo.refStore().root().write(repo.gpa, io, .auto_merge, outcome.auto_merge);
 
     if (!outcome.isClean()) try noteConflicts(r, &msg, outcome.conflicts);
     try head_mod.writeState(io, repo.git_dir, "MERGE_MSG", msg.items);
@@ -556,8 +557,8 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     // The pseudo-ref a continuation reads the commit back from.
     const clean = outcome.isClean();
     switch (r.action) {
-        .pick => if (!r.options.no_commit) try head_mod.writeRef(io, repo, "CHERRY_PICK_HEAD", oid),
-        .revert => if ((r.options.no_commit and clean) or !clean) try head_mod.writeRef(io, repo, "REVERT_HEAD", oid),
+        .pick => if (!r.options.no_commit) try repo.refStore().root().write(repo.gpa, io, .cherry_pick_head, oid),
+        .revert => if ((r.options.no_commit and clean) or !clean) try repo.refStore().root().write(repo.gpa, io, .revert_head, oid),
     }
     if (!clean) {
         try updateAbortSafety(gpa, io, repo);
@@ -617,9 +618,9 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
         } else switch (r.options.empty) {
             .keep => allow_empty_commit = true,
             .drop => {
-                try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+                try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
                 try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
-                try head_mod.deleteRef(io, repo, "AUTO_MERGE");
+                try repo.refStore().root().delete(repo.gpa, io, .auto_merge);
                 try updateAbortSafety(gpa, io, repo);
                 return .dropped;
             },
@@ -659,7 +660,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     const log = try arena.print("{s}: {s}", .{ r.action.name(), firstLine(cleaned) });
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try commit_hooks.postCommit(arena, io, null);
-    try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
+    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
     try head_mod.removeState(io, repo.git_dir, "MERGE_MSG");
     try updateAbortSafety(gpa, io, repo);
     try r.made.append(arena, made);
@@ -884,7 +885,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     const tree = try worktree.writeTree(gpa, io, &index, &repo.odb);
     try repo.writeIndex(io, &index);
 
-    const picked = try head_mod.readRef(gpa, io, repo, "CHERRY_PICK_HEAD");
+    const picked = try repo.refStore().root().read(gpa, io, .cherry_pick_head);
     var author = r.options.who;
     if (picked) |oid| author = (try readCommit(r, oid)).commit.author;
     const head_tree = if (head.oid) |h| try repo.commitTree(io, h) else try emptyTree(io, repo);
@@ -908,8 +909,8 @@ fn commitStaged(r: *Replay) Error!Oid {
     else
         try arena.print("commit: {s}", .{firstLine(cleaned)});
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
-    try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
-    try head_mod.deleteRef(io, repo, "REVERT_HEAD");
+    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
+    try repo.refStore().root().delete(repo.gpa, io, .revert_head);
     // The commit is `git commit`'s, which records resolutions as it ends.
     try rerere.afterCommit(gpa, io, repo);
     try commit_hooks.postCommit(arena, io, author);
@@ -935,8 +936,8 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         return finishOutcome(&r, &arena_instance, .committed, null);
     }
     const list = try readTodo(&r);
-    if (head_mod.refExists(io, repo, "CHERRY_PICK_HEAD") or
-        head_mod.refExists(io, repo, "REVERT_HEAD"))
+    if (repo.refStore().root().exists(repo.gpa, io, .cherry_pick_head) or
+        repo.refStore().root().exists(repo.gpa, io, .revert_head))
     {
         _ = try commitStaged(&r);
     }
@@ -976,7 +977,7 @@ fn requireIndexIsHead(r: *Replay) Error!void {
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
-    if (!head_mod.refExists(io, repo, action.headRef())) {
+    if (!repo.refStore().root().exists(repo.gpa, io, action.headRef())) {
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
     }
     try resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), options.who, options.blocked);
@@ -993,8 +994,8 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// is, as git leaves it. The state goes either way.
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*threeway.Blocked) Self.Error!void {
     const text = (try head_mod.readState(gpa, io, repo.git_dir, head_path)) orelse {
-        if (!head_mod.refExists(io, repo, "CHERRY_PICK_HEAD") and
-            !head_mod.refExists(io, repo, "REVERT_HEAD")) return error.NoSequencerInProgress;
+        if (!repo.refStore().root().exists(repo.gpa, io, .cherry_pick_head) and
+            !repo.refStore().root().exists(repo.gpa, io, .revert_head)) return error.NoSequencerInProgress;
         return resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), who, blocked);
     };
     defer gpa.free(text);
@@ -1052,7 +1053,7 @@ pub fn resetMerge(
     defer index.deinit();
     try reset.toTree(gpa, io, repo, &index, try repo.commitTree(io, to), .merge, blocked);
     try repo.writeIndex(io, &index);
-    try head_mod.writeRef(io, repo, "ORIG_HEAD", current);
+    try repo.refStore().root().write(repo.gpa, io, .orig_head, current);
     var buf: ["reset: moving to ".len + hash.max_hex_len]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
     const log = if (target) |oid|
@@ -1067,8 +1068,8 @@ pub fn resetMerge(
 /// `remove_branch_state`: the pseudo-refs and files a command in progress
 /// leaves, all of them.
 fn removeBranchState(io: Io, repo: *Repository) Error!void {
-    try head_mod.deleteRef(io, repo, "CHERRY_PICK_HEAD");
-    try head_mod.deleteRef(io, repo, "REVERT_HEAD");
+    try repo.refStore().root().delete(repo.gpa, io, .cherry_pick_head);
+    try repo.refStore().root().delete(repo.gpa, io, .revert_head);
     try merging.removeMergeState(io, repo);
 }
 
