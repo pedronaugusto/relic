@@ -528,6 +528,7 @@ const Http = struct {
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
             error.ConnectionFailed => h.fail(error.ConnectionFailed, "the connection failed"),
+            error.ConcurrencyUnavailable => h.fail(error.ConnectionFailed, "no task to look the host up with"),
             error.TlsFailed => h.fail(error.TlsFailed, if (h.diagnostic.tls_error) |e| @errorName(e) else "TLS handshake failed"),
             error.ProxyAuthenticationRequired => h.rejectProxy(),
             error.ProxyAuthMethodUnsupported => h.fail(error.ProxyAuthMethodUnsupported, h.diagnostic.proxy_offered orelse "the proxy's scheme"),

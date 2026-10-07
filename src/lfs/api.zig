@@ -1826,6 +1826,7 @@ pub const Client = struct {
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
             error.ConnectionFailed => c.fail("the connection failed: {s}", .{where}, error.ConnectionFailed),
+            error.ConcurrencyUnavailable => c.fail("no task to look the host up with: {s}", .{where}, error.ConnectionFailed),
             error.TimedOut => c.fail("timed out: {s}", .{where}, error.ConnectionFailed),
             error.BodyIncomplete => c.fail("upload cut short: {s}", .{where}, error.ConnectionFailed),
             error.TlsFailed => c.fail("TLS: {s}: {s}", .{ if (diagnostic.tls_error) |e| @errorName(e) else "handshake failed", where }, error.ConnectionFailed),

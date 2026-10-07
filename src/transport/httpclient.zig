@@ -79,6 +79,11 @@ pub const Error = error{
     /// The server asked for a client certificate in signature schemes the
     /// key does not sign with.
     ClientCertificateSchemeUnsupported,
+    /// A host name was to be looked up, and the `Io` has no task to run the
+    /// lookup beside the one reading it, on a target where relic has no
+    /// lookup of its own (Windows, and Linux without libc). An address
+    /// still connects.
+    ConcurrencyUnavailable,
 } || SocksError || Allocator.Error || Io.Cancelable;
 
 /// Caller-owned failure details for one HTTP exchange. Initialize with `init`
@@ -939,6 +944,8 @@ pub const Connection = struct {
         };
     }
 
+    /// Connect to `host`: an address, or a name looked up as `lookupHost`
+    /// does, its addresses tried as `connectAny` tries them.
     fn plainDial(io: Io, host: []const u8, port: u16) Error!Io.net.Stream {
         if (Io.net.IpAddress.parse(host, port)) |address| {
             return address.connect(io, .{ .mode = .stream }) catch |err| return switch (err) {
@@ -947,10 +954,13 @@ pub const Connection = struct {
             };
         } else |_| {}
         const host_name = Io.net.HostName.init(host) catch return error.ConnectionFailed;
-        return host_name.connect(io, port, .{ .mode = .stream }) catch |err| switch (err) {
+        var storage: [max_addresses]Io.net.IpAddress = undefined;
+        const addresses = lookupHost(io, host_name, port, null, &storage) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
-            else => error.ConnectionFailed,
+            error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
+            error.LookupFailed => error.ConnectionFailed,
         };
+        return connectAny(io, addresses);
     }
 
     /// Put the metered functions in front of the stream's own, so the
@@ -1300,35 +1310,20 @@ pub const Connection = struct {
 
     fn resolveSocks(io: Io, host: []const u8, port: u16, ipv4: bool) Error!Io.net.IpAddress {
         const name = Io.net.HostName.init(host) catch return error.ProxyHostUnreachable;
-        var buffer: [32]Io.net.HostName.LookupResult = undefined;
-        var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buffer);
-        const lookup = .{ name, io, &queue, Io.net.HostName.LookupOptions{ .port = port, .family = if (ipv4) .ip4 else null } };
-        // The lookup fills the queue this task drains, so it runs beside it
-        // where it can; without a spare task it runs first, as std's own
-        // `HostName.connect` has it.
-        var future = io.concurrent(Io.net.HostName.lookup, lookup) catch io.async(Io.net.HostName.lookup, lookup);
-        defer future.cancel(io) catch {};
-        var address: ?Io.net.IpAddress = null;
-        while (true) {
-            const result = queue.getOne(io) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                error.Closed => break,
-            };
-            switch (result) {
-                .address => |a| {
-                    // Zig's libc lookup may ignore LookupOptions.family.
-                    // Enforce SOCKS4's IPv4 requirement here, and keep the
-                    // first address in curl's preferred family for SOCKS5.
-                    if (ipv4 and a != .ip4) continue;
-                    if (address == null or (!ipv4 and address.? == .ip4 and a == .ip6)) address = a;
-                },
-                .canonical_name => {},
-            }
-        }
-        future.await(io) catch |err| return switch (err) {
+        var storage: [max_addresses]Io.net.IpAddress = undefined;
+        const addresses = lookupHost(io, name, port, if (ipv4) .ip4 else null, &storage) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
-            else => error.ProxyHostUnreachable,
+            error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
+            error.LookupFailed => error.ProxyHostUnreachable,
         };
+        var address: ?Io.net.IpAddress = null;
+        for (addresses) |a| {
+            // A libc lookup may ignore the family asked for. Enforce SOCKS4's
+            // IPv4 requirement here, and keep the first address in curl's
+            // preferred family for SOCKS5.
+            if (ipv4 and a != .ip4) continue;
+            if (address == null or (!ipv4 and address.? == .ip4 and a == .ip6)) address = a;
+        }
         return address orelse error.ProxyHostUnreachable;
     }
 
@@ -2323,6 +2318,222 @@ test "proxy URLs share SOCKS defaults and preserve IPv6 hosts and decoded creden
     try std.testing.expectEqualStrings("", explicit.credential.?.password);
     var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, Proxy.parse(failing.allocator(), "socks5h://us%65r@proxy", 80));
+}
+
+/// The most addresses one lookup keeps, as std's own connector reads.
+const max_addresses = 32;
+
+const LookupError = error{
+    /// The name has no address, or the resolver failed.
+    LookupFailed,
+    /// No task could run the lookup beside the one reading it, and this
+    /// target has no lookup that runs without one.
+    ConcurrencyUnavailable,
+} || Io.Cancelable;
+
+/// `name`'s addresses, the first `out.len` of them kept in `out`. The
+/// lookup runs as a task of its own while this one drains it as it goes:
+/// std's lookup puts its answers one at a time into a queue, and run
+/// inline it waits forever once a name has more addresses than the queue
+/// holds. Without that task a libc target asks `getaddrinfo` itself,
+/// copying into `out`; another target returns
+/// `error.ConcurrencyUnavailable`. No task here waits on work started
+/// with `io.async`, which Zig 0.17 no longer promises runs beside it.
+fn lookupHost(io: Io, name: Io.net.HostName, port: u16, family: ?Io.net.IpAddress.Family, out: []Io.net.IpAddress) LookupError![]Io.net.IpAddress {
+    var buffer: [max_addresses]Io.net.HostName.LookupResult = undefined;
+    var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buffer);
+    var future = io.concurrent(Io.net.HostName.lookup, .{ name, io, &queue, .{ .port = port, .family = family } }) catch
+        return lookupWithoutTask(name, port, family, out);
+    defer future.cancel(io) catch {};
+    var count: usize = 0;
+    while (queue.getOne(io)) |result| switch (result) {
+        .address => |a| if (count < out.len) {
+            out[count] = a;
+            count += 1;
+        },
+        .canonical_name => {},
+    } else |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.Closed => {},
+    }
+    future.await(io) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => error.LookupFailed,
+    };
+    if (count == 0) return error.LookupFailed;
+    return out[0..count];
+}
+
+const own_lookup = builtin.link_libc and builtin.target.os.tag != .windows;
+
+/// `getaddrinfo`, called on this task: it blocks until it answers, and
+/// cannot be canceled, as std's own libc lookup cannot.
+fn lookupWithoutTask(name: Io.net.HostName, port: u16, family: ?Io.net.IpAddress.Family, out: []Io.net.IpAddress) LookupError![]Io.net.IpAddress {
+    if (!own_lookup) return error.ConcurrencyUnavailable;
+    var name_buffer: [Io.net.HostName.max_len:0]u8 = undefined;
+    @memcpy(name_buffer[0..name.bytes.len], name.bytes);
+    name_buffer[name.bytes.len] = 0;
+    var port_buffer: [8]u8 = undefined;
+    const port_text = std.mem.printSentinel(&port_buffer, "{d}", .{port}, 0) catch unreachable; // unreachable: a u16 is at most five digits
+    const hints: std.c.addrinfo = .{
+        .flags = .{ .NUMERICSERV = true },
+        .family = if (family) |f| switch (f) {
+            .ip4 => std.c.AF.INET,
+            .ip6 => std.c.AF.INET6,
+        } else std.c.AF.UNSPEC,
+        .socktype = std.c.SOCK.STREAM,
+        .protocol = std.c.IPPROTO.TCP,
+        .canonname = null,
+        .addr = null,
+        .addrlen = 0,
+        .next = null,
+    };
+    var list: ?*std.c.addrinfo = null;
+    if (@backingInt(std.c.getaddrinfo(name_buffer[0..name.bytes.len :0].ptr, port_text.ptr, &hints, &list)) != 0) return error.LookupFailed;
+    defer if (list) |first| std.c.freeaddrinfo(first);
+    var count: usize = 0;
+    var entry = list;
+    while (entry) |info| : (entry = info.next) {
+        const addr = info.addr orelse continue;
+        if (addr.family != std.c.AF.INET and addr.family != std.c.AF.INET6) continue;
+        if (count == out.len) break;
+        out[count] = Io.Threaded.addressFromPosix(@alignCast(@fieldParentPtr("any", addr))); // safe: getaddrinfo's INET and INET6 entries point at a whole sockaddr of their family
+        count += 1;
+    }
+    if (count == 0) return error.LookupFailed;
+    return out[0..count];
+}
+
+/// The first of `addresses` to accept a connection. The attempts race,
+/// each a task of its own; those no task could be found for are tried
+/// one after another once the racing ones have failed.
+fn connectAny(io: Io, addresses: []const Io.net.IpAddress) Error!Io.net.Stream {
+    std.debug.assert(addresses.len <= max_addresses);
+    const Attempt = union(enum) { connected: Io.net.IpAddress.ConnectError!Io.net.Stream };
+    var buffer: [max_addresses]Attempt = undefined;
+    var race: Io.Select(Attempt) = .init(io, &buffer);
+    defer while (race.cancel()) |late| switch (late) {
+        .connected => |result| if (result) |stream| stream.close(io) else |_| {},
+    };
+    var started: usize = 0;
+    for (addresses) |address| {
+        race.concurrent(.connected, connectOne, .{ io, address }) catch break;
+        started += 1;
+    }
+    for (0..started) |_| switch (try race.await()) {
+        .connected => |result| if (result) |stream| return stream else |err| if (err == error.Canceled) return error.Canceled,
+    };
+    for (addresses[started..]) |address| {
+        if (connectOne(io, address)) |stream| return stream else |err| if (err == error.Canceled) return error.Canceled;
+    }
+    return error.ConnectionFailed;
+}
+
+fn connectOne(io: Io, address: Io.net.IpAddress) Io.net.IpAddress.ConnectError!Io.net.Stream {
+    return address.connect(io, .{ .mode = .stream });
+}
+
+/// An `Io` with no task to spare: `concurrent` fails and `async` runs its
+/// function there and then, as a single-threaded `Io` may. Its lookup
+/// answers with `many_answers` addresses, one at a time, more than any
+/// lookup queue here holds.
+const SerialIo = struct {
+    const many_answers = 100;
+
+    vtable: Io.VTable,
+
+    fn init() SerialIo {
+        var vtable = std.testing.io.vtable.*;
+        vtable.async = async;
+        vtable.concurrent = concurrent;
+        vtable.groupAsync = groupAsync;
+        vtable.groupConcurrent = groupConcurrent;
+        vtable.netLookup = lookup;
+        return .{ .vtable = vtable };
+    }
+
+    fn io(s: *const SerialIo) Io {
+        return .{ .userdata = std.testing.io.userdata, .vtable = &s.vtable };
+    }
+
+    fn async(_: ?*anyopaque, result: []u8, _: std.mem.Alignment, context: []const u8, _: std.mem.Alignment, start: *const fn (*const anyopaque, *anyopaque) void) ?*Io.AnyFuture {
+        start(context.ptr, result.ptr);
+        return null;
+    }
+
+    fn concurrent(_: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
+        return error.ConcurrencyUnavailable;
+    }
+
+    fn groupAsync(_: ?*anyopaque, _: *Io.Group, context: []const u8, _: std.mem.Alignment, start: *const fn (*const anyopaque) void) void {
+        start(context.ptr);
+    }
+
+    fn groupConcurrent(_: ?*anyopaque, _: *Io.Group, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+        return error.ConcurrencyUnavailable;
+    }
+
+    fn lookup(_: ?*anyopaque, _: Io.net.HostName, results: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
+        return answerMany(results, options);
+    }
+};
+
+/// Put `SerialIo.many_answers` addresses one at a time, as std's libc
+/// lookup puts what `getaddrinfo` answered.
+fn answerMany(results: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
+    const io = std.testing.io;
+    defer results.close(io);
+    for (0..SerialIo.many_answers) |i| {
+        results.putOne(io, .{ .address = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, @intCast(i) }, .port = options.port } } }) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            error.Closed => unreachable, // unreachable: the queue is closed only by this function
+        };
+    }
+}
+
+test "a host name with more addresses than a lookup queue holds is resolved without waiting on itself" {
+    const testing = std.testing;
+    // With a task beside it, the lookup is drained as it answers.
+    var vtable = testing.io.vtable.*;
+    vtable.netLookup = struct {
+        fn lookup(_: ?*anyopaque, _: Io.net.HostName, results: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
+            return answerMany(results, options);
+        }
+    }.lookup;
+    const threaded: Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    var storage: [max_addresses]Io.net.IpAddress = undefined;
+    const kept = lookupHost(threaded, try .init("many.example"), 80, null, &storage) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    try testing.expectEqual(@as(usize, max_addresses), kept.len);
+    try testing.expectEqualSlices(u8, &.{ 10, 0, 0, 0 }, &kept[0].ip4.bytes);
+
+    // Without one, the lookup is libc's on this task, or none at all; std's
+    // lookup run inline would fill its queue and wait forever.
+    const serial: SerialIo = .init();
+    if (own_lookup) {
+        const address = try Connection.resolveSocks(serial.io(), "localhost", 80, false);
+        try testing.expectEqual(@as(u16, 80), address.getPort());
+    } else {
+        try testing.expectError(error.ConcurrencyUnavailable, Connection.resolveSocks(serial.io(), "localhost", 80, false));
+    }
+}
+
+test "a dial with no task to spare tries a name's addresses one after another" {
+    const testing = std.testing;
+    const io = testing.io;
+    const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try address.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const serial: SerialIo = .init();
+    // The connection completes in the listener's backlog, accepted or not.
+    const stream = Connection.plainDial(serial.io(), "localhost", listener.socket.address.getPort()) catch |err| {
+        if (!own_lookup and err == error.ConcurrencyUnavailable) return;
+        return err;
+    };
+    stream.close(io);
+    try testing.expect(own_lookup);
 }
 
 test "SOCKS local DNS enforces IPv4 and keeps the first address of the preferred family" {
