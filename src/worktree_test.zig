@@ -1475,24 +1475,27 @@ test "ignore rules decide every path as git check-ignore decides it" {
     };
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(gpa);
-    for (paths) |p| try input.print(gpa, "{s}\n", .{p[0]});
-    const said = try h.repo.runInput(io, &.{ "check-ignore", "--no-index", "--stdin", "-v", "-n" }, input.items);
+    for (paths) |p| try input.print(gpa, "{s}\x00", .{p[0]});
+    // `-z`: source, line, pattern and path, each ended by a NUL, the first
+    // three empty when nothing matched; nothing is quoted.
+    const said = try h.repo.runInput(io, &.{ "check-ignore", "--no-index", "--stdin", "-z", "-v", "-n" }, input.items);
     defer gpa.free(said);
-    var lines = std.mem.splitScalar(u8, said, '\n');
+    var fields = std.mem.splitScalar(u8, said, 0);
     for (paths) |p| {
-        const line = lines.next().?;
-        const tab = std.mem.findScalar(u8, line, '\t').?;
-        try std.testing.expectEqualStrings(p[0], line[tab + 1 ..]);
-        // `source:line:pattern`, or `::` when nothing matched; a `!`
-        // pattern re-included the path.
-        const fields = line[0..tab];
-        const first = std.mem.findScalar(u8, fields, ':').?;
-        const second = std.mem.findScalarPos(u8, fields, first + 1, ':').?;
-        const decided: ?u32 = if (second == first + 1) null else try std.fmt.parseUnsigned(u32, fields[first + 1 .. second], 10);
-        const theirs = decided != null and fields[second + 1] != '!';
+        _ = fields.next() orelse "";
+        const line_text = fields.next() orelse "";
+        const pattern = fields.next() orelse "";
+        const path = fields.next() orelse "";
+        std.testing.expectEqualStrings(p[0], path) catch |err| {
+            std.debug.print("git check-ignore said:\n{s}\n", .{said});
+            return err;
+        };
+        const decided: ?u32 = if (line_text.len == 0) null else try std.fmt.parseUnsigned(u32, line_text, 10);
+        // A `!` pattern re-included the path.
+        const theirs = decided != null and pattern[0] != '!';
         const ours = rules.matchPath(p[0], p[1]);
         std.testing.expectEqual(theirs, ours.excluded) catch |err| {
-            std.debug.print("{s}: git {s}\n", .{ p[0], fields });
+            std.debug.print("{s}: git line {s}, {s}\n", .{ p[0], line_text, pattern });
             return err;
         };
         try std.testing.expectEqual(decided, if (ours.by) |by| by.line else null);
