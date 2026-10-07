@@ -1566,3 +1566,17 @@ test "init.templateDir names the template git init copies" {
     defer gpa.free(path);
     try std.testing.expectEqualStrings("/home/someone/templates", path);
 }
+
+test "a repository whose HEAD holds no ref still opens, with no branch for onbranch:, as git's does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try git.exec(io, &.{ "config", "includeIf.onbranch:main.path", "never" });
+    try git.writeFile(io, ".git/HEAD", "not a ref\n");
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    try std.testing.expect(repo.configuration().context.branch == null);
+    try std.testing.expect(!try repo.refreshConfig(io, null));
+}

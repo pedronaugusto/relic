@@ -639,7 +639,7 @@ pub const Repository = struct {
     pub fn refreshConfig(repo: *Repository, io: Io, diagnostic: ?*Diagnostic) Self.Error!bool {
         diagnostic_mod.reset(diagnostic);
         // `onbranch:` makes the branch `HEAD` is on part of what was read.
-        const short = try repo.refStore().currentBranch(repo.gpa, io);
+        const short = try branchOf(repo.gpa, io, repo.refStore());
         defer if (short) |b| repo.gpa.free(b);
         const same_branch = if (repo.configuration().context.branch) |was|
             short != null and std.mem.eql(u8, was, short.?)
@@ -673,7 +673,17 @@ pub const Repository = struct {
     fn currentBranch(gpa: Allocator, io: Io, git_dir: Io.Dir, common_dir: Io.Dir, format: RepositoryFormat) Error!?[]u8 {
         var store = try refs_mod.Store.initWithOptions(gpa, format.kind, git_dir, common_dir, .{ .format = format.ref_storage });
         defer store.deinit();
-        return store.currentBranch(gpa, io);
+        return branchOf(gpa, io, &store);
+    }
+
+    /// The branch `HEAD` names in `store`, for `onbranch:`: a `HEAD` that
+    /// cannot be read names none, as git's `include_by_branch` finds none,
+    /// and the repository still opens.
+    fn branchOf(gpa: Allocator, io: Io, store: *const refs_mod.Store) Error!?[]u8 {
+        return store.currentBranch(gpa, io) catch |err| switch (err) {
+            error.MalformedRef, error.SymbolicRefLoop, error.InvalidRefName => null,
+            else => |e| e,
+        };
     }
 
     /// The `reftable.*` settings, for the stack's writes and compactions.
