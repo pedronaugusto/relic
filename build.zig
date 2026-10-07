@@ -312,6 +312,37 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&example_tests.step);
     }
     test_step.dependOn(examples_step);
+
+    //=====================================================================
+    // Benchmarks
+    //
+    // relic's own measurements of its own work, in bench/: `zig build bench
+    // -Doptimize=ReleaseFast` installs them under zig-out/bench, and `zig
+    // build check` compiles them, so they keep up with the API. They run on a
+    // quiet machine, never in CI; bench/README.md says how. Only in relic's
+    // own tree: a package fetched by a consumer has no bench/.
+    //=====================================================================
+
+    if (b.pkg_hash.len == 0) {
+        const bench_step = b.step("bench", "Build the benchmarks into zig-out/bench");
+        const bench_options = b.addOptions();
+        bench_options.addOption(bool, "smoke", b.option(bool, "bench-smoke", "Benchmarks run every point once and read no clock") orelse false);
+        const regressions = b.addTest(.{
+            .name = "relic-regressions",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("bench/regressions.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "relic", .module = module },
+                    .{ .name = "bench_options", .module = bench_options.createModule() },
+                },
+            }),
+            .filters = &.{"benchmark:"},
+        });
+        bench_step.dependOn(&b.addInstallArtifact(regressions, .{ .dest_dir = .{ .override = .{ .custom = "bench" } } }).step);
+        check_step.dependOn(&regressions.step);
+    }
     // The CI gate is the repository's own, never a consumer's: a project
     // that depends on relic neither fetches preflight nor imports it.
     if (b.pkg_hash.len == 0) {

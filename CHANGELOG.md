@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `zig build bench` builds relic's own benchmarks from `bench/`: staging, `write-tree` and `status`, packed reads, SHA-1 and SHA-256, and pack writing. `zig build check` compiles them.
+
 - Requires Zig 0.17.0, and conduit's 0.17 release, whose API relic passes through: `program.readAvailable` takes the `Io` first (`readAvailable(io, file, buffer)`), and a `program.SpawnHook`'s `start` and `terminate` meet conduit's `Child` as it now is, ended with `finish` and `deinit`, `killWait` taking a `std.Io.Duration`. The TLS client copy is std 0.17.0's with the same recorded diff, so it takes std's record-length, empty-plaintext and nonce fixes. `zig build test -Dtest-case=...` is gone with the named Windows comparison groups: the hosted jobs now split the suite test by test.
 
 - Supported git: 2.39 and newer (was 2.30). The floor is the oldest git a supported LTS distribution ships, Debian 12's, and is reviewed yearly. The library's behaviour does not change: nothing in it existed only for git older than 2.39.

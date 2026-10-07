@@ -6,7 +6,8 @@
     "src/tests.zig"
   ],
   "test_support": [
-    "src/testing/**"
+    "src/testing/**",
+    "bench/scratchgit.zig"
   ],
   "function_exceptions": {
     "src/hash/sha1.zig:compressAarch64": {
