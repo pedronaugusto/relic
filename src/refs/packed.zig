@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
+const names = @import("../names/ref.zig");
 const ReadError = @import("value.zig").ReadError;
 
 const Oid = hash.Oid;
@@ -33,6 +34,9 @@ pub const Entry = struct {
     oid: Oid,
     /// The object an annotated tag points at, from a `^` line.
     peeled: ?Oid,
+    /// A name no ref may have (`names.checkFormat` refuses it), decided
+    /// once as the file is read: a listing reports it broken.
+    broken: bool = false,
 };
 
 /// Everything `packed-refs` holds, sorted by name.
@@ -109,7 +113,7 @@ pub fn parse(gpa: Allocator, kind: Kind, bytes: []u8) ReadError!Listing {
         // rewrite of the file keeps it.
         const name = line[hex_len + 1 ..];
         if (entries.items.len != 0 and std.mem.order(u8, entries.items[entries.items.len - 1].name, name) != .lt) sorted = false;
-        try entries.append(gpa, .{ .name = name, .oid = oid, .peeled = null });
+        try entries.append(gpa, .{ .name = name, .oid = oid, .peeled = null, .broken = !names.checkFormat(name, .{ .allow_onelevel = true }) });
     }
     // A stable sort, so that of two lines naming one ref the first stays
     // first, which is the one a lookup finds.

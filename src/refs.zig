@@ -373,7 +373,7 @@ pub const Store = struct {
             const from = std.sort.lowerBound(PackedEntry, packed_listing.entries, prefix, orderPrefix);
             for (packed_listing.entries[from..]) |entry| {
                 if (!std.mem.startsWith(u8, entry.name, prefix)) break;
-                if (!isRefName(entry.name)) {
+                if (entry.broken) {
                     try broken.append(arena, .{ .name = try arena.dupe(u8, entry.name), .why = badName(entry.name) });
                     continue;
                 }
