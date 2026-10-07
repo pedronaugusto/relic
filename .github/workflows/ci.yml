@@ -69,7 +69,8 @@ jobs:
         with:
           version: 0.17.0
       - run: zig build --build-file ci/bootstrap.zig setup -- old
-      - run: zig build --build-file .preflight/build.zig -Drepo-root="${{ github.workspace }}" fetch
+      # Inside the container the workspace is not where github.workspace says.
+      - run: zig build --build-file .preflight/build.zig -Drepo-root="$PWD" fetch
       - run: zig build ci -Dci-lint=false -Doptimize=ReleaseSafe
   git-master:
     needs: skip
