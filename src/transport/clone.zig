@@ -85,6 +85,8 @@ pub const Options = struct {
     /// A repository with no working tree, whose branches are the remote's
     /// branches.
     bare: bool = false,
+    /// Where the new repository keeps its refs: git's `--ref-format`.
+    ref_format: refs_mod.Format = .files,
     /// Check the branch out.
     checkout: bool = true,
     /// Clone into `dir` as the git directory of a working tree that is
@@ -285,8 +287,9 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         .detached = head.detached,
     }, options);
 
-    // The remote's refs, packed and with no logs, as git writes them.
-    try writeRemoteRefs(io, &repo, chosen.packed_entries.items);
+    // The remote's refs, in one step and with no logs, as git's initial
+    // transaction writes them: packed, or one table.
+    try repo.refStore().writeInitial(gpa, io, chosen.first_refs.items);
 
     const display = try url_mod.anonymize(arena, target.recorded);
     const message = try arena.print("clone: from {s}", .{display});
@@ -323,16 +326,6 @@ fn moveHelperHead(arena: Allocator, io: Io, repo: *Repository, remote_format: ha
     defer tx.deinit(io);
     try tx.update("HEAD", .{ .symbolic = try arena.print("refs/heads/{s}", .{initial}) }, .any);
     try tx.commit(io, null);
-}
-
-/// Write `entries`, sorted by name, as the packed refs.
-fn writeRemoteRefs(io: Io, repo: *Repository, entries: []refs_mod.Store.PackedEntry) Error!void {
-    std.mem.sort(refs_mod.Store.PackedEntry, entries, {}, struct {
-        fn lessThan(_: void, a: refs_mod.Store.PackedEntry, b: refs_mod.Store.PackedEntry) bool {
-            return std.mem.order(u8, a.name, b.name) == .lt;
-        }
-    }.lessThan);
-    if (entries.len != 0) try repo.refStore().writePacked(io, entries);
 }
 
 /// What `receiveObjects` asks for, beside the chosen refs.
@@ -521,18 +514,18 @@ fn configureRemote(
 const Chosen = struct {
     wants: std.ArrayList(Oid) = .empty,
     want_names: std.ArrayList([]const u8) = .empty,
-    packed_entries: std.ArrayList(refs_mod.Store.PackedEntry) = .empty,
-    /// The remote ref each packed entry is, for a value a helper learns.
-    packed_sources: std.ArrayList([]const u8) = .empty,
+    first_refs: std.ArrayList(refs_mod.Store.Initial) = .empty,
+    /// The remote ref each of `first_refs` is, for a value a helper learns.
+    first_sources: std.ArrayList([]const u8) = .empty,
 
     /// Take the values a remote helper's import learned.
     fn takeFetchedValues(c: *Chosen, session: *const transport.Session) void {
         assert(c.wants.items.len == c.want_names.items.len);
-        assert(c.packed_entries.items.len == c.packed_sources.items.len);
+        assert(c.first_refs.items.len == c.first_sources.items.len);
         for (c.want_names.items, c.wants.items) |name, *oid| if (session.fetchedValue(name)) |value| {
             oid.* = value;
         };
-        for (c.packed_sources.items, c.packed_entries.items) |name, *entry| if (session.fetchedValue(name)) |value| {
+        for (c.first_sources.items, c.first_refs.items) |name, *entry| if (session.fetchedValue(name)) |value| {
             entry.oid = value;
         };
     }
@@ -544,7 +537,7 @@ const Chosen = struct {
             if (single_tag != null and std.mem.eql(u8, ref.name, single_tag.?)) continue;
             if (!try repo.odb.exists(io, ref.oid)) continue;
             if (!ref_names.checkFormat(ref.name, .{})) continue;
-            try c.packed_entries.append(arena, .{ .name = try arena.dupe(u8, ref.name), .oid = ref.oid, .peeled = ref.peeled });
+            try c.first_refs.append(arena, .{ .name = try arena.dupe(u8, ref.name), .oid = ref.oid, .peeled = ref.peeled });
         }
     }
 };
@@ -572,8 +565,8 @@ fn chooseRefs(arena: Allocator, remote_refs: []const protocol.RemoteRef, head: H
         else
             try arena.dupe(u8, ref.name);
         if (!ref_names.checkFormat(local_name, .{})) continue;
-        try c.packed_entries.append(arena, .{ .name = local_name, .oid = ref.oid, .peeled = ref.peeled });
-        try c.packed_sources.append(arena, ref.name);
+        try c.first_refs.append(arena, .{ .name = local_name, .oid = ref.oid, .peeled = ref.peeled });
+        try c.first_sources.append(arena, ref.name);
     }
     if (head.detached) |oid| if (!containsOid(c.wants.items, oid)) {
         try c.wants.append(arena, oid);
@@ -750,6 +743,7 @@ fn containsOid(list: []const Oid, oid: Oid) bool {
 fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_format: ?hash.Kind, initial: []const u8) Error!Repository {
     var repo = try Repository.init(gpa, io, dir, .{
         .object_format = object_format orelse .sha1,
+        .ref_format = options.ref_format,
         .default_branch = initial,
         .bare = options.bare or options.separate_git_dir,
         .odb = options.odb,
@@ -849,7 +843,8 @@ fn gitOrEmpty(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, dir: 
 fn expectSameClone(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, a: Io.Dir, b: Io.Dir, bare: bool) !void {
     const Query = struct { args: []const []const u8 };
     const queries = [_]Query{
-        .{ .args = &.{ "for-each-ref", "--format=%(refname) %(objectname) %(symref)" } },
+        .{ .args = &.{ "for-each-ref", "--format=%(refname) %(objectname) %(*objectname) %(symref)" } },
+        .{ .args = &.{ "rev-parse", "--show-ref-format" } },
         .{ .args = &.{ "symbolic-ref", "-q", "HEAD" } },
         .{ .args = &.{ "config", "--local", "--get-regexp", "^(remote|branch)\\." } },
     };
@@ -925,8 +920,12 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
         .{ .git_args = &.{ "--branch", "side" }, .options = .{ .who = test_who, .branch = "side" } },
         .{ .git_args = &.{ "--branch", "old" }, .options = .{ .who = test_who, .branch = "old" } },
         .{ .git_args = &.{ "--origin", "upstream", "--no-tags" }, .options = .{ .who = test_who, .origin = "upstream", .tags = false } },
+        .{ .git_args = &.{"--ref-format=reftable"}, .options = .{ .who = test_who, .ref_format = .reftable } },
+        .{ .git_args = &.{ "--ref-format=reftable", "--bare" }, .options = .{ .who = test_who, .ref_format = .reftable, .bare = true } },
     };
     for (cases) |case| {
+        // A reftable repository is git 2.45's to make.
+        if (case.options.ref_format == .reftable and !try testgit.gitAtLeast(gpa, io, 2, 45)) continue;
         var by_git = try Twin.init(gpa, io);
         defer by_git.deinit(gpa, io);
         var by_relic = try Twin.init(gpa, io);

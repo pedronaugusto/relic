@@ -25,8 +25,6 @@ const fs = @import("../repo/fs.zig");
 const safepath = @import("safepath.zig");
 const ref_names = @import("../names/ref.zig");
 const refs_mod = @import("../refs.zig");
-const reftablestack = @import("../refs/reftablestack.zig");
-const config_mod = @import("../config.zig");
 
 const Oid = hash.Oid;
 
@@ -58,7 +56,7 @@ pub const Error = error{
     Io.Dir.DeleteTreeError || Io.Dir.RenameError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
     Io.Dir.Iterator.Error || Io.Dir.RealPathError || refs_mod.ReadError ||
-    refs_mod.TransactionError || config_mod.ParseError;
+    refs_mod.TransactionError || refs_mod.CreateError;
 
 /// One registered worktree.
 pub const Entry = struct {
@@ -113,11 +111,14 @@ pub const Listing = struct {
     }
 };
 
-/// Every worktree registered under `<common_dir>/worktrees`.
+/// Every worktree registered under the repository's `worktrees/`, each
+/// one's `HEAD` read through `refs`, the repository's ref store, as
+/// `worktrees/<name>/HEAD`.
 ///
 /// The main working tree is not one of these: it has no administrative
 /// directory, and a caller that wants it in a list adds it.
-pub fn list(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Error!Listing {
+pub fn list(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!Listing {
+    const common_dir = refs.commonDir();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -150,32 +151,25 @@ pub fn list(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Er
         } else |_| {}
 
         const lock_text = try fs.readFileAlloc(arena, io, admin, "locked", 4096);
-        var head_text = try fs.readFileAlloc(arena, io, admin, "HEAD", 4096);
-        // A reftable worktree's `HEAD` is in its own stack; the file is a
-        // placeholder.
-        if (try reftablestack.headIn(gpa, arena, io, admin, kind)) |value| {
-            head_text = switch (value) {
-                .symbolic => |target| try arena.print("ref: {s}", .{target}),
-                .direct => |oid| blk: {
-                    var hex: [hash.max_hex_len]u8 = undefined;
-                    break :blk try arena.dupe(u8, oid.hex(&hex));
-                },
-            };
-        }
         var branch: ?[]const u8 = null;
         var head: ?Oid = null;
-        if (head_text) |text| {
-            const trimmed = std.mem.trim(u8, text, " \t\r\n");
-            if (std.mem.startsWith(u8, trimmed, "ref:")) {
-                const target = std.mem.trim(u8, trimmed[4..], " \t");
-                branch = if (std.mem.startsWith(u8, target, "refs/heads/"))
-                    target["refs/heads/".len..]
-                else
-                    target;
-            } else {
-                head = Oid.parse(kind, trimmed) catch null;
-            }
-        }
+        const head_name = try arena.print("worktrees/{s}/HEAD", .{dir_entry.name});
+        const value = refs.read(arena, io, head_name) catch |err| switch (err) {
+            // A `HEAD` that is no ref, or a directory whose name no ref can
+            // carry: a worktree with nothing checked out.
+            error.MalformedRef, error.InvalidRefName => null,
+            else => |e| return e,
+        };
+        if (value) |v| switch (v) {
+            .symbolic => |target| {
+                branch = if (std.mem.startsWith(u8, target, "refs/heads/")) target["refs/heads/".len..] else target;
+                head = refs.readOid(arena, io, target) catch |err| switch (err) {
+                    error.MalformedRef, error.SymbolicRefLoop, error.InvalidRefName => null,
+                    else => |e| return e,
+                };
+            },
+            .direct => |oid| head = oid,
+        };
 
         try entries.append(arena, .{
             .name = try arena.dupe(u8, dir_entry.name),
@@ -268,16 +262,24 @@ pub const Added = struct {
 /// must be empty, as git's `worktree add` refuses one that is not, and
 /// write every file git writes, leaving the working tree itself empty.
 ///
+/// The worktree's refs are laid down in the format of `refs`, the
+/// repository's ref store, and its `HEAD` written through a store of its
+/// own: in the files format a file, in a reftable a stack of the
+/// worktree's, behind the placeholder git leaves. No `ORIG_HEAD` is
+/// written: git's comes from the checkout's reset, which
+/// `git worktree add --no-checkout` leaves out.
+///
 /// The checkout is a separate call, because it needs an object database and
 /// an index and this does not: `worktree.checkout` into `Added.work_dir`.
 pub fn add(
     gpa: Allocator,
     io: Io,
-    common_dir: Io.Dir,
+    refs: *const refs_mod.Store,
     name: []const u8,
     dest_dir: Io.Dir,
     options: AddOptions,
 ) Self.Error!Added {
+    const common_dir = refs.commonDir();
     // The name becomes a directory under `worktrees/`, so it is held to
     // the rules of a name written to the disk.
     if (safepath.checkComponent(name, .worktree) != null) return error.InvalidWorktreeName;
@@ -323,41 +325,32 @@ pub fn add(
         return error.InvalidWorktreeName;
     try writeLine(io, admin, "gitdir", gitfile_path);
 
-    if (try reftablestack.isReftableRepository(io, common_dir)) {
-        // `HEAD` goes into a stack of the worktree's own, which is what git
-        // reads there, and the file beside it is the placeholder.
-        var config = try config_mod.Config.openFile(gpa, io, .{ .dir = common_dir, .sub_path = "config" }, .local, .{});
-        defer config.deinit();
-        const kind: hash.Kind = if (config.get("extensions.objectformat")) |text|
-            hash.Kind.parse(text) catch return error.CorruptWorktree
-        else
-            .sha1;
-        var target_buf: [512]u8 = undefined;
+    try refs_mod.create(io, admin, refs.refFormat(), .{ .worktree = true, .shared = refs.sharedPermissions() });
+    {
+        var own = try refs_mod.Store.initWithOptions(gpa, refs.objectFormat(), admin, common_dir, .{
+            .format = refs.refFormat(),
+            .reftable = refs.reftableOptions(),
+            .shared = refs.sharedPermissions(),
+        });
+        defer own.deinit();
+        var tx = own.begin(gpa);
+        defer tx.deinit(io);
         if (options.detach_at) |oid| {
-            try reftablestack.initialize(gpa, io, admin, kind, .{ .direct = oid }, .{});
+            try tx.change("HEAD", .{ .direct = oid }, .any, .{ .no_deref = true });
         } else if (options.branch) |branch| {
-            const target = std.mem.print(&target_buf, "refs/heads/{s}", .{branch}) catch
-                return error.InvalidWorktreeName;
-            try reftablestack.initialize(gpa, io, admin, kind, .{ .symbolic = target }, .{});
+            const target = try std.mem.concat(gpa, u8, &.{ "refs/heads/", branch });
+            defer gpa.free(target);
+            try tx.update("HEAD", .{ .symbolic = target }, .any);
         } else {
             return error.CorruptWorktree;
         }
-    } else if (options.detach_at) |oid| {
-        var hex: [hash.max_hex_len]u8 = undefined;
-        try writeLine(io, admin, "HEAD", oid.hex(&hex));
-    } else if (options.branch) |branch| {
-        var line_buf: [512]u8 = undefined;
-        const line = std.mem.print(&line_buf, "ref: refs/heads/{s}", .{branch}) catch
-            return error.InvalidWorktreeName;
-        try writeLine(io, admin, "HEAD", line);
-    } else {
-        return error.CorruptWorktree;
+        try tx.commit(io, null);
     }
 
     // git creates the log directory and an empty `logs/HEAD` so the first
     // ref update in the new worktree has somewhere to go. A reftable stack
     // keeps its logs in its tables.
-    if (!try reftablestack.isReftableRepository(io, common_dir)) {
+    if (refs.refFormat() == .files) {
         admin.createDirPath(io, "logs") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
@@ -475,9 +468,10 @@ pub const PruneOutcome = struct {
 ///
 /// A worktree with a `locked` file beside it is skipped whatever its state,
 /// which is what git does and is the whole point of that file.
-pub fn prune(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.Error!PruneOutcome {
+pub fn prune(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!PruneOutcome {
+    const common_dir = refs.commonDir();
     var outcome: PruneOutcome = .{};
-    var listing = try list(gpa, io, common_dir, kind);
+    var listing = try list(gpa, io, refs);
     defer listing.deinit();
 
     for (listing.entries) |entry| {

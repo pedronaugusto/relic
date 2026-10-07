@@ -19,7 +19,6 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash.zig");
-const ref_names = @import("../names/ref.zig");
 const ReadError = @import("value.zig").ReadError;
 
 const Oid = hash.Oid;
@@ -104,8 +103,11 @@ pub fn parse(gpa: Allocator, kind: Kind, bytes: []u8) ReadError!Listing {
         if (line.len < hex_len + 2) return error.MalformedPackedRefs;
         const oid = Oid.parse(kind, line[0..hex_len]) catch return error.MalformedPackedRefs;
         if (line[hex_len] != ' ') return error.MalformedPackedRefs;
+        // A name no ref may have stays in the listing, as git's snapshot
+        // keeps it broken: a lookup by a ref's name never finds it, a
+        // listing reports it, a deletion by its name removes it, and a
+        // rewrite of the file keeps it.
         const name = line[hex_len + 1 ..];
-        if (!ref_names.checkFormat(name, .{ .allow_onelevel = true })) return error.InvalidRefName;
         if (entries.items.len != 0 and std.mem.order(u8, entries.items[entries.items.len - 1].name, name) != .lt) sorted = false;
         try entries.append(gpa, .{ .name = name, .oid = oid, .peeled = null });
     }

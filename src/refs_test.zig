@@ -278,3 +278,82 @@ test "a commit is refused while a pick is stopped, in either ref format" {
         }
     }.inFormat);
 }
+
+test "a listing keeps what is no ref apart, as git's marks it broken, and shadows a packed ref with it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var r = try twoCommits(gpa, io, .files);
+    defer r.deinit();
+    const tip = try oidOf(gpa, io, &r, "main");
+    const side = try oidOf(gpa, io, &r, "side");
+    var hex: [2][hash.max_hex_len]u8 = undefined;
+    const tip_hex = tip.hex(&hex[0]);
+    const side_hex = side.hex(&hex[1]);
+    const packed_text = try std.mem.concat(gpa, u8, &.{
+        refs.packed_header,
+        side_hex,
+        " refs/heads/garbage\n",
+        side_hex,
+        " refs/heads/packed\n",
+        side_hex,
+        " refs/heads/p..q\n",
+    });
+    defer gpa.free(packed_text);
+    try r.writeFile(io, ".git/packed-refs", packed_text);
+    const line = try std.mem.concat(gpa, u8, &.{ tip_hex, "\n" });
+    defer gpa.free(line);
+    try r.writeFile(io, ".git/refs/heads/a..b", line);
+    try r.writeFile(io, ".git/refs/heads/garbage", "not a ref\n");
+    try r.writeFile(io, ".git/refs/heads/zero", "0000000000000000000000000000000000000000\n");
+
+    var repo = try Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    var listing = try repo.refStore().list(gpa, io, "refs/");
+    defer listing.deinit();
+
+    var ours: std.ArrayList(u8) = .empty;
+    defer ours.deinit(gpa);
+    for (listing.entries) |entry| try ours.print(gpa, "{s}\n", .{entry.name});
+    var captured = try r.capture(io, &.{ "for-each-ref", "--format=%(refname)" });
+    defer captured.deinit(gpa);
+    try std.testing.expectEqualStrings(captured.stdout, ours.items);
+
+    const expected = [_]struct { name: []const u8, why: refs.Broken.Why }{
+        .{ .name = "refs/heads/a..b", .why = .bad_name },
+        .{ .name = "refs/heads/garbage", .why = .bad_content },
+        .{ .name = "refs/heads/p..q", .why = .bad_name },
+        .{ .name = "refs/heads/zero", .why = .bad_content },
+    };
+    try std.testing.expectEqual(expected.len, listing.broken.len);
+    for (expected, listing.broken) |want, got| {
+        try std.testing.expectEqualStrings(want.name, got.name);
+        try std.testing.expectEqual(want.why, got.why);
+        // git warns of each by name.
+        try std.testing.expect(std.mem.find(u8, captured.stderr, want.name) != null);
+    }
+    // One whose file holds no ref is refused, as git refuses it ("reference
+    // broken"); each of the others is deleted by its name, a packed one
+    // with its line.
+    try std.testing.expectError(error.MalformedRef, repo.refStore().deleteRefs(gpa, io, &.{"refs/heads/garbage"}, null));
+    try repo.refStore().deleteRefs(gpa, io, &.{ "refs/heads/a..b", "refs/heads/p..q", "refs/heads/zero" }, null);
+    var after = try r.capture(io, &.{ "for-each-ref", "--format=%(refname)" });
+    defer after.deinit(gpa);
+    try std.testing.expectEqualStrings("refs/heads/main\nrefs/heads/packed\nrefs/heads/side\n", after.stdout);
+    for ([_][]const u8{ "a..b", "p..q", "zero" }) |gone| try std.testing.expect(std.mem.find(u8, after.stderr, gone) == null);
+    try std.testing.expect(std.mem.find(u8, after.stderr, "refs/heads/garbage") != null);
+}
+
+test "an edit to a symbolic value releases its target when the transaction cannot take it" {
+    const Check = struct {
+        fn run(gpa: Allocator) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var store: refs.Store = try .init(gpa, .sha1, tmp.dir, tmp.dir);
+            defer store.deinit();
+            var tx = store.begin(gpa);
+            defer tx.deinit(std.testing.io);
+            try tx.update("HEAD", .{ .symbolic = "refs/heads/main" }, .any);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}

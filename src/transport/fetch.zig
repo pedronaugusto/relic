@@ -1335,14 +1335,12 @@ fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const
 /// The names are `arena`'s.
 fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository) Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    // The main working tree's `HEAD` is the shared directory's, whichever
-    // worktree this repository was opened from.
+    // The main working tree's `HEAD`, whichever worktree this repository
+    // was opened from.
     if (!repo.isBare() or repo.common_is_separate) {
-        var main_store = try refs_mod.Store.initWithOptions(gpa, repo.objectFormat(), repo.common_dir, repo.common_dir, .{ .format = repo.refStore().refFormat() });
-        defer main_store.deinit();
         const bare = repo.configuration().getBool("core.bare", false) catch false;
         if (!bare) {
-            if (try main_store.read(gpa, io, "HEAD")) |head| switch (head) {
+            if (try repo.refStore().read(gpa, io, "main-worktree/HEAD")) |head| switch (head) {
                 .symbolic => |target| {
                     defer gpa.free(target);
                     try out.append(arena, try arena.dupe(u8, target));

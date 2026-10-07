@@ -248,7 +248,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `odb.commitgraph`, `odb.midx`, `odb.bitmap` | Read, verify and encode git's accelerators: full and split commit-graphs, generation v2 and overflow, changed-path Bloom filters v1/v2; MIDX preferred-pack selection, RIDX and BTMP; pack and MIDX bitmaps, EWAH, XORs, hash caches and lookup tables. |
 | `odb.accelerators` | `writeCommitGraph`, `writeMidx`, `repackMidx`, `expireMidx`, `writePackBitmap`, `writeMidxBitmap`, `writeConfiguredCommitGraph`, `repackRepository`. The format modules own the bytes; these operations gather through the object database, diff and revision walk. Fetch applies `fetch.writeCommitGraph`; configured maintenance applies `gc.writeCommitGraph` and the bitmap settings. |
 | `odb.abbrev` | Short object names as git prints them. |
-| `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. `Store.root` and `Store.special` own the root refs (`ORIG_HEAD`, `CHERRY_PICK_HEAD`, ...) and the special refs (`FETCH_HEAD`, `MERGE_HEAD`) in either ref format; `deleteRefs` removes refs by any safe name; `main-worktree/` and `worktrees/<id>/` read another worktree's refs. |
+| `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. `Store.root` and `Store.special` own the root refs (`ORIG_HEAD`, `CHERRY_PICK_HEAD`, ...) and the special refs (`FETCH_HEAD`, `MERGE_HEAD`) in either ref format; `deleteRefs` removes refs by any safe name; `writeInitial` writes a new repository's first refs; `list` keeps what is no ref apart in `broken`; `main-worktree/` and `worktrees/<id>/` read another worktree's refs; `create` lays down a new ref store. |
 | `refs.reflog` | `append`, `read`, `Log.at` for `HEAD@{n}`, `Policy` for `core.logAllRefUpdates`. |
 | `refs.reftable`, `refs.reftablestack` | The reftable ref backend, read and written. |
 | `refs.names` | What a ref may be named: `checkFormat` (git's `check_refname_format`, with its one-level and pattern flags), `isSafe` (what a deletion may name), the root, special and per-worktree classes, `parseWorktreeRef` for `main-worktree/` and `worktrees/<id>/`, and every root ref by name (`Root`, `Special`). |
@@ -259,7 +259,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `index.sparseindex` | The sparse index. |
 | `worktree.snapshot` | `Store`, `capture`, `adoptTree`, `restore`, `diff`: working trees whose complete Git object closure belongs to a private store. |
 | `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
-| `worktree.worktrees` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`. |
+| `worktree.worktrees` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`, each worktree's refs in the repository's ref format. |
 | `worktree.sparse`, `worktree.sparsecheckout` | `Patterns` for `info/sparse-checkout`, and cone-mode sparse checkout as an operation. |
 | `worktree.ignore` | `Rules.init` / `loadGlobal` / `addDirectory` / `addText` / `popTo` / `match` / `matchPath`, with the pattern that decided. |
 | `worktree.attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
@@ -295,7 +295,7 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `commit.notes` | `Notes`, `add`, `append`, `copy`, `remove`, `prune`, `show`, `merge`, `mergeCommit`, `mergeAbort`, `formatNote`: `refs/notes/*` read and written as `git notes` does, git's fanout and every merge strategy included. |
 | `commit.signing` | Sign and verify commits and tags: OpenPGP, SSH, X.509. |
 | `transport` | `Session`: a remote, open — the one thing a fetch, a clone or a push talks to. |
-| `transport.fetch`, `transport.clone`, `transport.push` | The commands. Protocol v2 and v0, refspecs, `FETCH_HEAD`, atomic updates, `insteadOf`. |
+| `transport.fetch`, `transport.clone`, `transport.push` | The commands. Protocol v2 and v0, refspecs, `FETCH_HEAD`, atomic updates, `insteadOf`; a clone into either ref format. |
 | `transport.remote`, `transport.url`, `transport.refspec` | Remotes as the configuration describes them, what a URL names, and which refs a fetch takes. |
 | `transport.smarthttp`, `transport.ssh`, `transport.local`, `transport.httpclient`, `transport.tls`, `transport.clientcert` | The transports: HTTP(S) through relic's own HTTP/1.1 and TLS clients, HTTP(S) and SOCKS4/4a/5/5h proxies, the person's `ssh`, and `file://` and paths. |
 | `transport.credential`, `transport.auth`, `transport.httpsettings`, `transport.httpauth` | The person's own setup: credential helpers, why a remote refused, git's `http.*`, proxy authentication. |

@@ -347,7 +347,7 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
     const input_name = try gpa.dupe(u8, "one");
     defer gpa.free(input_name);
 
-    var added = try worktrees.add(gpa, io, repo.common_dir, input_name, dest, .{
+    var added = try worktrees.add(gpa, io, repo.refStore(), input_name, dest, .{
         .detach_at = commit,
     });
     defer added.admin_dir.close(io);
@@ -434,7 +434,7 @@ test "worktree remove takes the tree and the admin directory with it" {
 
     try git.dir.createDirPath(io, "trees/two");
     var dest = try git.dir.openDir(io, "trees/two", .{ .iterate = true });
-    var added = try worktrees.add(gpa, io, repo.common_dir, "two", dest, .{
+    var added = try worktrees.add(gpa, io, repo.refStore(), "two", dest, .{
         .detach_at = try Oid.parse(.sha1, commit_text),
     });
     added.admin_dir.close(io);
@@ -504,7 +504,7 @@ test "worktree add refuses a destination with something in it and a branch git w
     try git.writeFile(io, "full/.git", "gitdir: elsewhere\n");
     var full = try git.dir.openDir(io, "full", .{ .iterate = true });
     defer full.close(io);
-    try std.testing.expectError(error.DestinationNotEmpty, worktrees.add(gpa, io, repo.common_dir, "full", full, .{ .branch = "main" }));
+    try std.testing.expectError(error.DestinationNotEmpty, worktrees.add(gpa, io, repo.refStore(), "full", full, .{ .branch = "main" }));
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("gitdir: elsewhere\n", try full.readFile(io, ".git", &buf));
 
@@ -512,7 +512,7 @@ test "worktree add refuses a destination with something in it and a branch git w
     var empty = try git.dir.openDir(io, "empty", .{ .iterate = true });
     defer empty.close(io);
     for ([_][]const u8{ "a\nb", "a..b", "bad.lock" }) |branch| {
-        try std.testing.expectError(error.InvalidBranchName, worktrees.add(gpa, io, repo.common_dir, "empty", empty, .{ .branch = branch }));
+        try std.testing.expectError(error.InvalidBranchName, worktrees.add(gpa, io, repo.refStore(), "empty", empty, .{ .branch = branch }));
     }
 }
 

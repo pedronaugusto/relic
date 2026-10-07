@@ -37,6 +37,8 @@ const filter = @import("worktree/filter.zig");
 const reftablestack = @import("refs/reftablestack.zig");
 const signing = @import("commit/signing.zig");
 const diagnostic_mod = @import("repo/diagnostic.zig");
+const repository_format = @import("discover/format.zig");
+const RepositoryFormat = repository_format.Format;
 
 const Oid = hash.Oid;
 
@@ -568,30 +570,35 @@ pub const Repository = struct {
         // `HEAD` is on, so both are known before the first file is read.
         var path_buffer: [4096]u8 = undefined;
         const git_dir_path = try absoluteGitDir(io, repo.git_dir, &path_buffer);
-        const branch = try currentBranch(gpa, io, repo.git_dir);
+        // The format is the repository's own file's to say, read alone, as
+        // git's `read_repository_format` reads it: no include, no other
+        // file and no `-c` decides which hash a repository's objects are
+        // named with, or where its refs are kept.
+        const format = try repository_format.read(gpa, io, repo.common_dir, options.diagnostic);
+        const branch = try currentBranch(gpa, io, repo.git_dir, repo.common_dir, format);
         defer if (branch) |b| gpa.free(b);
-        const read = try repo.readConfig(io, .{
+        const config = try repo.readConfig(io, .{
             .system = options.system_config,
             .xdg = options.xdg_config,
             .global = options.global_config,
             .local = .{ .dir = repo.common_dir, .sub_path = "config" },
             .command = options.config_overrides,
             .pairs = options.config_pairs,
-        }, .{ .git_dir = git_dir_path, .branch = if (branch) |b| b["refs/heads/".len..] else null, .home = options.home }, options.diagnostic);
-        repo._config = try config_owner.create(read.config);
+        }, .{ .git_dir = git_dir_path, .branch = branch, .home = options.home }, format);
+        repo._config = try config_owner.create(config);
         errdefer config_owner.destroy(repo._config);
         repo.shared = try sharedOf(repo.configuration());
         var odb_options = options.odb;
         odb_options.shared = repo.shared;
-        repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, read.format.kind, odb_options);
+        repo.odb = try odb_mod.Odb.open(gpa, io, repo.common_dir, format.kind, odb_options);
         errdefer repo.odb.deinit(io);
-        repo.odb.shallow = try shallow.read(gpa, io, repo.common_dir, read.format.kind);
+        repo.odb.shallow = try shallow.read(gpa, io, repo.common_dir, format.kind);
         const store = try gpa.create(refs_mod.Store);
         errdefer gpa.destroy(store);
-        var stack_options: reftablestack.Options = if (read.format.ref_storage == .reftable) try reftableOptions(repo.configuration()) else .{};
+        var stack_options: reftablestack.Options = if (format.ref_storage == .reftable) try reftableOptions(repo.configuration()) else .{};
         stack_options.shared = repo.shared;
-        store.* = try refs_mod.Store.initWithOptions(gpa, read.format.kind, repo.git_dir, repo.common_dir, .{
-            .format = read.format.ref_storage,
+        store.* = try refs_mod.Store.initWithOptions(gpa, format.kind, repo.git_dir, repo.common_dir, .{
+            .format = format.ref_storage,
             .reftable = stack_options,
             .shared = repo.shared,
             .packed_lock = try lockTimeout(repo.configuration(), "core.packedrefstimeout", 1000),
@@ -600,75 +607,19 @@ pub const Repository = struct {
         return repo;
     }
 
-    /// Read `sources` — every one but the worktree's — and check the format
-    /// they name; then, when `extensions.worktreeConfig` is on, read them
+    /// Read `sources` — every one but the worktree's; then, when the
+    /// repository's `format` turns `extensions.worktreeConfig` on, read them
     /// again with `config.worktree` after the local file, which exists only
     /// when the extension says so and has no say in the format.
-    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, diagnostic: ?*Diagnostic) Error!struct { config: config_mod.Config, format: RepositoryFormat } {
+    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, format: RepositoryFormat) Error!config_mod.Config {
         var config = try config_mod.Config.open(repo.gpa, io, sources, context);
         errdefer config.deinit();
-        // The format is the repository's own file's to say, read alone, as
-        // git's `read_repository_format` reads it: no include, no other
-        // file and no `-c` decides which hash a repository's objects are
-        // named with.
-        var own = try ownConfig(repo.gpa, io, sources.local);
-        defer own.deinit();
-        const format = try checkFormat(&own, diagnostic);
-        if (!try settingBool(&own, "extensions.worktreeConfig", diagnostic)) return .{ .config = config, .format = format };
+        if (!format.worktree_config) return config;
         var with_worktree = sources;
         with_worktree.worktree = .{ .dir = repo.git_dir, .sub_path = "config.worktree" };
         const both = try config_mod.Config.open(repo.gpa, io, with_worktree, context);
         config.deinit();
-        return .{ .config = both, .format = format };
-    }
-
-    const RepositoryFormat = struct {
-        kind: hash.Kind,
-        ref_storage: refs_mod.Format,
-    };
-
-    /// The repository's own configuration file and nothing it includes.
-    fn ownConfig(gpa: Allocator, io: Io, local: ?config_mod.Sources.Path) Error!config_mod.Config {
-        const path = local orelse return config_mod.Config.initEmpty(gpa);
-        const text = try fs.readFileAlloc(gpa, io, path.dir, path.sub_path, 1 << 24) orelse return config_mod.Config.initEmpty(gpa);
-        defer gpa.free(text);
-        return config_mod.Config.parseText(gpa, text, .local);
-    }
-
-    /// The extensions git takes only from a version 1 repository: one of
-    /// them at version 0 is git's "v1-only extension found" and refused.
-    const v1_only_extensions = [_][]const u8{ "noop-v1", "objectformat", "compatobjectformat", "refstorage", "relativeworktrees" };
-
-    /// Decide the repository's format once, from the configuration shared
-    /// by its worktrees. A worktree's settings have no say in this decision.
-    fn checkFormat(config: *const config_mod.Config, diagnostic: ?*Diagnostic) Error!RepositoryFormat {
-        const version = try config.getInt("core.repositoryformatversion", 0);
-        if (version < 0 or version > 1) {
-            try refuseSetting(diagnostic, "core.repositoryFormatVersion");
-            return error.UnsupportedRepositoryVersion;
-        }
-        if (version == 1) try checkExtensions(config, diagnostic) else {
-            for (config.entries.items) |entry| {
-                if (!std.ascii.eqlIgnoreCase(entry.section, "extensions") or entry.has_subsection) continue;
-                for (v1_only_extensions) |name| {
-                    if (!std.ascii.eqlIgnoreCase(entry.name, name)) continue;
-                    try refuseSetting(diagnostic, entry.name);
-                    return error.UnsupportedExtension;
-                }
-            }
-        }
-        const kind = if (config.get("extensions.objectformat")) |text|
-            hash.Kind.parse(text) catch {
-                try refuseSetting(diagnostic, "extensions.objectFormat");
-                return error.UnknownObjectFormat;
-            }
-        else
-            hash.Kind.sha1;
-        const storage = config.get("extensions.refstorage") orelse "files";
-        return .{
-            .kind = kind,
-            .ref_storage = if (version == 1 and std.ascii.eqlIgnoreCase(storage, "reftable")) .reftable else .files,
-        };
+        return both;
     }
 
     /// Read the configuration again if a file it came from has changed since
@@ -688,9 +639,8 @@ pub const Repository = struct {
     pub fn refreshConfig(repo: *Repository, io: Io, diagnostic: ?*Diagnostic) Self.Error!bool {
         diagnostic_mod.reset(diagnostic);
         // `onbranch:` makes the branch `HEAD` is on part of what was read.
-        const branch = try currentBranch(repo.gpa, io, repo.git_dir);
-        defer if (branch) |b| repo.gpa.free(b);
-        const short = if (branch) |b| b["refs/heads/".len..] else null;
+        const short = try repo.refStore().currentBranch(repo.gpa, io);
+        defer if (short) |b| repo.gpa.free(b);
         const same_branch = if (repo.configuration().context.branch) |was|
             short != null and std.mem.eql(u8, was, short.?)
         else
@@ -700,9 +650,10 @@ pub const Repository = struct {
         sources.worktree = null;
         var context = repo.configuration().context;
         context.branch = short;
-        var fresh = try repo.readConfig(io, sources, context, diagnostic);
-        errdefer fresh.config.deinit();
-        try repo.publishConfig(fresh.config, fresh.format, diagnostic);
+        const format = try repository_format.read(repo.gpa, io, repo.common_dir, diagnostic);
+        var fresh = try repo.readConfig(io, sources, context, format);
+        errdefer fresh.deinit();
+        try repo.publishConfig(fresh, format, diagnostic);
         return true;
     }
 
@@ -715,40 +666,14 @@ pub const Repository = struct {
         return path;
     }
 
-    /// The branch `HEAD` is on, as `refs/heads/<name>` and the caller's, or
-    /// `null` when it is detached. An unborn branch counts, as it does for
-    /// git's `onbranch:`.
-    fn currentBranch(gpa: Allocator, io: Io, git_dir: Io.Dir) Error!?[]u8 {
-        const text = (try fs.readFileAlloc(gpa, io, git_dir, "HEAD", 4096)) orelse return null;
-        defer gpa.free(text);
-        const trimmed = std.mem.trimEnd(u8, text, " \t\r\n");
-        if (!std.mem.startsWith(u8, trimmed, "ref:")) return null;
-        const target = std.mem.trim(u8, trimmed["ref:".len..], " \t");
-        // A reftable repository's `HEAD` file is a placeholder; `HEAD` is
-        // in the stack, read before the configuration says which hash the
-        // tables are written with, so each is tried.
-        if (std.mem.eql(u8, target, "refs/heads/.invalid")) {
-            var arena: std.heap.ArenaAllocator = .init(gpa);
-            defer arena.deinit();
-            for ([_]hash.Kind{ .sha1, .sha256 }) |kind| {
-                const head_value = reftablestack.headIn(gpa, arena.allocator(), io, git_dir, kind) catch |err| switch (err) {
-                    error.HashMismatch => continue,
-                    else => |e| return e,
-                };
-                const value = head_value orelse return null;
-                switch (value) {
-                    .direct => return null,
-                    .symbolic => |name| {
-                        if (!std.mem.startsWith(u8, name, "refs/heads/")) return null;
-                        return try gpa.dupe(u8, name);
-                    },
-                }
-            }
-            return null;
-        }
-        if (!std.mem.startsWith(u8, target, "refs/heads/")) return null;
-        const branch = try gpa.dupe(u8, target);
-        return branch;
+    /// The branch `HEAD` is on, without `refs/heads/` and the caller's, or
+    /// `null` when it is detached: read through a ref store over the
+    /// directories in `format`, before the repository has its own. An
+    /// unborn branch counts, as it does for git's `onbranch:`.
+    fn currentBranch(gpa: Allocator, io: Io, git_dir: Io.Dir, common_dir: Io.Dir, format: RepositoryFormat) Error!?[]u8 {
+        var store = try refs_mod.Store.initWithOptions(gpa, format.kind, git_dir, common_dir, .{ .format = format.ref_storage });
+        defer store.deinit();
+        return store.currentBranch(gpa, io);
     }
 
     /// The `reftable.*` settings, for the stack's writes and compactions.
@@ -784,46 +709,6 @@ pub const Repository = struct {
 
     fn refuseSetting(diagnostic: ?*Diagnostic, text: []const u8) Allocator.Error!void {
         try diagnostic_mod.refuse(diagnostic, text);
-    }
-
-    /// The extensions this release understands at format version 1.
-    ///
-    /// Anything else is refused by name rather than ignored, which is what
-    /// git's own format document requires: an extension exists precisely
-    /// because a reader that does not know it would read the repository
-    /// wrongly.
-    const known_extensions = [_][]const u8{
-        "noop",
-        "noop-v1",
-        "objectformat",
-        "preciousobjects",
-        "worktreeconfig",
-        "relativeworktrees",
-        "refstorage",
-        // A partial clone's promisor remote, as git before 2.44 names it;
-        // the objects it may be asked for are read as any others.
-        "partialclone",
-    };
-
-    fn checkExtensions(config: *const config_mod.Config, diagnostic: ?*Diagnostic) Error!void {
-        for (config.entries.items) |entry| {
-            if (!std.ascii.eqlIgnoreCase(entry.section, "extensions")) continue;
-            var known = false;
-            for (known_extensions) |name| {
-                if (std.ascii.eqlIgnoreCase(entry.name, name)) known = true;
-            }
-            if (!known) {
-                try refuseSetting(diagnostic, entry.name);
-                return error.UnsupportedExtension;
-            }
-            if (std.ascii.eqlIgnoreCase(entry.name, "refstorage")) {
-                const value = entry.value orelse "";
-                if (!std.ascii.eqlIgnoreCase(value, "files") and !std.ascii.eqlIgnoreCase(value, "reftable")) {
-                    try refuseSetting(diagnostic, "extensions.refStorage");
-                    return error.UnsupportedRefStorage;
-                }
-            }
-        }
     }
 
     /// Create a repository at `dir`.
@@ -863,21 +748,23 @@ pub const Repository = struct {
         try fs.makeDirs(io, git_dir, "objects/info", shared);
         try git_dir.createDirPath(io, "info");
 
-        var head_buf: [512]u8 = undefined;
-        switch (options.ref_format) {
-            .files => {
-                try fs.makeDirs(io, git_dir, "refs/heads", shared);
-                try fs.makeDirs(io, git_dir, "refs/tags", shared);
-                const head_line = std.mem.print(&head_buf, "ref: refs/heads/{s}\n", .{options.default_branch}) catch
-                    return error.NotARepository;
-                try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = head_line });
-                fs.adjustShared(io, git_dir, "HEAD", shared);
-            },
-            .reftable => {
-                const target = std.mem.print(&head_buf, "refs/heads/{s}", .{options.default_branch}) catch
-                    return error.NotARepository;
-                try reftablestack.initialize(gpa, io, git_dir, options.object_format, .{ .symbolic = target }, .{});
-            },
+        // The refs as the format lays them down, then `HEAD` on the unborn
+        // branch, written as the first ref and logged nowhere, as git's
+        // `init` writes it.
+        try refs_mod.create(io, git_dir, options.ref_format, .{ .shared = shared });
+        {
+            const target = try std.mem.concat(gpa, u8, &.{ "refs/heads/", options.default_branch });
+            defer gpa.free(target);
+            var store = try refs_mod.Store.initWithOptions(gpa, options.object_format, git_dir, git_dir, .{
+                .format = options.ref_format,
+                .reftable = .{ .shared = shared },
+                .shared = shared,
+            });
+            defer store.deinit();
+            var tx = store.begin(gpa);
+            defer tx.deinit(io);
+            try tx.update("HEAD", .{ .symbolic = target }, .any);
+            try tx.commit(io, null);
         }
 
         const version: u8 = if (options.object_format == .sha1 and options.ref_format == .files) 0 else 1;
@@ -920,7 +807,7 @@ pub const Repository = struct {
             w.print("\tobjectformat = {s}\n", .{options.object_format.name()}) catch return error.OutOfMemory;
         }
         if (options.ref_format == .reftable) {
-            w.print("\trefstorage = reftable\n", .{}) catch return error.OutOfMemory;
+            w.print("\trefstorage = {s}\n", .{options.ref_format.name()}) catch return error.OutOfMemory;
         }
         if (shared != .umask) w.print("[receive]\n\tdenyNonFastforwards = true\n", .{}) catch return error.OutOfMemory;
         try git_dir.writeFile(io, .{ .sub_path = "config", .data = config_text.written() });
@@ -954,7 +841,7 @@ pub const Repository = struct {
             }
         }.one;
         if (options.object_format != .sha1) try set(&config, "extensions.objectformat", options.object_format.name());
-        if (options.ref_format == .reftable) try set(&config, "extensions.refstorage", "reftable");
+        if (options.ref_format != .files) try set(&config, "extensions.refstorage", options.ref_format.name());
         var version_buf: [4]u8 = undefined;
         // unreachable: a u8 is at most three digits
         try set(&config, "core.repositoryformatversion", std.mem.print(&version_buf, "{d}", .{version}) catch unreachable);
@@ -1105,10 +992,8 @@ pub const Repository = struct {
         // or in whether their own source is read, just as during open.
         var shared = config.*;
         shared.entries = entries;
-        return .{
-            .format = try checkFormat(&shared, diagnostic),
-            .worktree_config = try settingBool(&shared, "extensions.worktreeConfig", diagnostic),
-        };
+        const format = try repository_format.decide(&shared, diagnostic);
+        return .{ .format = format, .worktree_config = format.worktree_config };
     }
 
     fn publishConfig(repo: *Repository, next: config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) Error!void {
@@ -1602,12 +1487,12 @@ pub const Repository = struct {
 
     /// Every linked worktree.
     pub fn listWorktrees(repo: *Repository, io: Io) worktrees.Error!worktrees.Listing {
-        return worktrees.list(repo.gpa, io, repo.common_dir, repo.objectFormat());
+        return worktrees.list(repo.gpa, io, repo.refStore());
     }
 
     /// Remove the administrative directories whose working tree is gone,
     /// skipping any with a `locked` file.
     pub fn pruneWorktrees(repo: *Repository, io: Io) worktrees.Error!worktrees.PruneOutcome {
-        return worktrees.prune(repo.gpa, io, repo.common_dir, repo.objectFormat());
+        return worktrees.prune(repo.gpa, io, repo.refStore());
     }
 };

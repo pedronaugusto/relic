@@ -129,6 +129,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/worktree/filter.zig",
         "src/odb/pack.zig",
         "src/refs/value.zig",
+        "src/discover/format.zig",
         "src/refs/packed.zig",
         "src/refs/reftablestack/cache.zig",
         "src/transport/tls.zig",
@@ -404,6 +405,13 @@ pub const owned: []const gantry.rules.TokenRule = &.{
         .kind = .string,
         .tokens = &.{ "ORIG_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "AUTO_MERGE", "BISECT_HEAD", "BISECT_EXPECTED_REV", "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "FETCH_HEAD", "MERGE_HEAD" },
         .owners = &.{ "src/names/ref.zig", "src/testing/**", "src/*_test.zig", "src/**/*_test.zig" },
+    },
+    // where a ref store keeps its refs is the store's to name
+    .{
+        .name = "ref storage names",
+        .kind = .string,
+        .tokens = &.{ "reftable", "tables.list", "packed-refs" },
+        .owners = &.{ "src/refs.zig", "src/refs/**", "src/testing/**", "src/*_test.zig", "src/**/*_test.zig" },
     },
 };
 

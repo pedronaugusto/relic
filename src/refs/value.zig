@@ -57,6 +57,9 @@ pub const TransactionError = error{
 } || ReadError || fs.CommitError || fs.LockError || reflog.AppendError ||
     Io.Dir.DeleteFileError || Io.Dir.CreateDirPathError || hooks.Error || Io.Dir.WriteFileError;
 
+/// Errors from laying down a new ref store's directories.
+pub const CreateError = Io.Dir.CreateDirPathError || Io.Dir.WriteFileError;
+
 /// Where a repository's refs are kept.
 pub const Format = enum {
     /// Loose files under `refs/` and `packed-refs`.
@@ -64,6 +67,22 @@ pub const Format = enum {
     /// A reftable stack under `reftable/`, which `extensions.refStorage`
     /// names.
     reftable,
+
+    /// The format's name in `extensions.refStorage`.
+    pub fn name(format: Format) []const u8 {
+        return switch (format) {
+            .files => "files",
+            .reftable => "reftable",
+        };
+    }
+
+    /// The format `extensions.refStorage` names, in any case, or `null`.
+    pub fn parse(text: []const u8) ?Format {
+        inline for (comptime std.enums.values(Format)) |format| {
+            if (std.ascii.eqlIgnoreCase(text, format.name())) return format;
+        }
+        return null;
+    }
 };
 
 /// Peels an object name for a ref about to be written, so that a reftable

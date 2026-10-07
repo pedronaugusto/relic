@@ -57,9 +57,6 @@ const compactIn = @import("reftablestack.zig").compactIn;
 const Segment = access.Segment;
 const suggestSegment = access.suggestSegment;
 const suggest = access.suggest;
-const initialize = @import("reftablestack.zig").initialize;
-const headIn = @import("reftablestack.zig").headIn;
-const isReftableRepository = @import("reftablestack.zig").isReftableRepository;
 const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo.zig");
 const state_mod = @import("state.zig");
@@ -829,7 +826,7 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
     try git.dir.createDirPath(io, "trees/ours");
     var dest = try git.dir.openDir(io, "trees/ours", .{ .iterate = true });
     defer dest.close(io);
-    var added = try worktrees.add(gpa, io, repo.common_dir, "ours", dest, .{ .branch = "ours" });
+    var added = try worktrees.add(gpa, io, repo.refStore(), "ours", dest, .{ .branch = "ours" });
     defer added.admin_dir.close(io);
     defer gpa.free(added.name);
     defer added.work_dir.close(io);

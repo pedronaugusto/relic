@@ -1868,7 +1868,7 @@ pub const Listing = struct {
             var map: std.StringHashMapUnmanaged([]const u8) = .empty;
             // the main worktree
             if (try l.mainHeadRef()) |head| try map.put(l.a(), head, try l.mainWorktreePath());
-            var listing = try worktrees.list(l.gpa, l.io, l.repo.common_dir, l.repo.objectFormat());
+            var listing = try worktrees.list(l.gpa, l.io, l.repo.refStore());
             defer listing.deinit();
             for (listing.entries) |entry| {
                 const branch = entry.branch orelse continue;
@@ -1884,16 +1884,14 @@ pub const Listing = struct {
     /// symbolic refs whether or not it exists, or `null` when detached.
     fn mainHeadRef(l: *Listing) Error!?[]const u8 {
         const store = l.repo.refStore();
-        var current: []const u8 = "HEAD";
+        // The main worktree's own `HEAD` from any worktree, through the
+        // store: a reftable keeps it in the shared stack, behind a `HEAD`
+        // file that is a placeholder.
+        var current: []const u8 = "main-worktree/HEAD";
         var depth: u8 = 0;
         var symbolic = false;
         while (depth <= refs_mod.max_symbolic_depth) : (depth += 1) {
-            const value: ?refs_mod.Ref = if (depth == 0 and l.repo.common_is_separate) blk: {
-                const bytes = l.repo.common_dir.readFileAlloc(l.io, "HEAD", l.a(), .limited(4096)) catch break :blk null;
-                const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-                if (std.mem.startsWith(u8, trimmed, "ref:")) break :blk .{ .symbolic = std.mem.trim(u8, trimmed[4..], " \t") };
-                break :blk null;
-            } else store.read(l.a(), l.io, current) catch null;
+            const value = store.read(l.a(), l.io, current) catch null;
             switch (value orelse return if (symbolic) current else null) {
                 .direct => return if (symbolic) current else null,
                 .symbolic => |target| {

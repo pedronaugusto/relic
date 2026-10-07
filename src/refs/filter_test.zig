@@ -609,3 +609,39 @@ test "a format git refuses is refused by name" {
     const stray = try l.parseFormat("%(end)", .none);
     try std.testing.expectError(error.UnbalancedBlock, l.formatItem(gpa, 0, stray, &out));
 }
+
+test "for-each-ref from a linked worktree lists what git's lists, in both ref formats" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var main = try testgit.Repo.init(gpa, io, format.initArgs());
+            defer main.deinit();
+            try main.writeFile(io, "f", "1\n");
+            try main.exec(io, &.{ "add", "f" });
+            try main.exec(io, &.{ "commit", "-q", "-m", "one" });
+            try main.writeFile(io, "f", "2\n");
+            try main.exec(io, &.{ "commit", "-q", "-am", "two" });
+            try main.exec(io, &.{ "tag", "-a", "-m", "the tag", "v1" });
+            try main.exec(io, &.{ "worktree", "add", "-q", "-b", "wt", "linked", "HEAD~1" });
+            // Each worktree's own refs: the main worktree's bisection and a
+            // ref of the linked worktree's, which neither lists for the
+            // other.
+            try main.exec(io, &.{ "bisect", "start", "HEAD", "HEAD~1" });
+            var linked_dir = try main.dir.openDir(io, "linked", .{ .iterate = true });
+            defer linked_dir.close(io);
+            var linked: testgit.Repo = .{ .gpa = gpa, .tmp = undefined, .dir = linked_dir };
+            try linked.exec(io, &.{ "update-ref", "refs/worktree/mine", "HEAD" });
+            try linked.exec(io, &.{ "update-ref", "refs/bisect/theirs", "HEAD" });
+
+            for ([_]*testgit.Repo{ &linked, &main }) |r| {
+                try compare(gpa, io, r, .for_each_ref, &.{});
+                try compare(gpa, io, r, .for_each_ref, &.{"--format=%(refname) %(objectname) %(HEAD) %(worktreepath) %(*objectname)"});
+                try compare(gpa, io, r, .for_each_ref, &.{ "--format=%(refname)", "refs/bisect/", "refs/worktree/" });
+                if (try testgit.gitAtLeast(gpa, io, 2, 46)) {
+                    try compare(gpa, io, r, .for_each_ref, &.{ "--include-root-refs", "--format=%(refname) %(objectname) %(symref)" });
+                }
+            }
+        }
+    }.inFormat);
+}

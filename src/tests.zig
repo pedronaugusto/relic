@@ -53,6 +53,7 @@ test {
         _ = @import("varint.zig");
         _ = @import("names/ref.zig");
         _ = @import("refs_test.zig");
+        _ = @import("discover/format.zig");
         _ = @import("crc32.zig");
         _ = @import("ewah.zig");
         _ = @import("ere.zig");

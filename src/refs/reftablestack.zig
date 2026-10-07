@@ -130,23 +130,3 @@ pub const Compaction = engine.Compaction;
 pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options, which: Compaction) refs.TransactionError!void {
     return engine.compactIn(gpa, io, parent, kind, options, which);
 }
-/// Lay down what `git init --ref-format=reftable` lays down in `git_dir`:
-/// a stack whose one table holds `HEAD` -- a symbolic ref to the unborn
-/// branch in a new repository, or whatever a new linked worktree starts
-/// on -- a `HEAD` file naming a branch no one can create, so that a reader
-/// of the files format stops rather than misreads, and `refs/heads` as a
-/// file saying why.
-pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: refs.Ref, options: Options) refs.TransactionError!void {
-    return engine.initialize(gpa, io, git_dir, kind, head, options);
-}
-/// What `HEAD` holds in the stack under `git_dir`, or `null` when there is
-/// no stack there -- the files format -- or no `HEAD` in it. A symbolic
-/// target is in `arena`.
-pub fn headIn(gpa: Allocator, arena: Allocator, io: Io, git_dir: Io.Dir, kind: Kind) Error!?refs.Ref {
-    return engine.headIn(gpa, arena, io, git_dir, kind);
-}
-/// Whether the repository whose shared directory is `common_dir` keeps its
-/// refs in a reftable stack.
-pub fn isReftableRepository(io: Io, common_dir: Io.Dir) Io.Dir.AccessError!bool {
-    return engine.isReftableRepository(io, common_dir);
-}

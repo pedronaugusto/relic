@@ -185,6 +185,7 @@ pub fn list(gpa: Allocator, io: Io, store: anytype, prefix: []const u8) refs.Rea
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var entries: std.ArrayList(refs.Named) = .empty;
+    var broken: std.ArrayList(refs.Broken) = .empty;
 
     const sources = [_]?*const Stack{ &stacks.main, if (stacks.worktree) |*w| w else null };
     for (sources, 0..) |maybe, which| {
@@ -195,6 +196,12 @@ pub fn list(gpa: Allocator, io: Io, store: anytype, prefix: []const u8) refs.Rea
             // the main worktree's, and the worktree's own stack holds only
             // per-worktree refs.
             if (stacks.worktree != null and isPerWorktree(store, record.name) != (which == 1)) continue;
+            // A name no ref may have is listed apart, as git's reftable
+            // backend marks it broken.
+            if (!ref_names.checkFormat(record.name, .{ .allow_onelevel = true })) {
+                try broken.append(arena, .{ .name = record.name, .why = if (ref_names.isSafe(record.name)) .bad_name else .unsafe_name });
+                continue;
+            }
             try entries.append(arena, .{
                 .name = record.name,
                 .target = switch (record.value) {
@@ -209,10 +216,15 @@ pub fn list(gpa: Allocator, io: Io, store: anytype, prefix: []const u8) refs.Rea
         }
     }
     std.mem.sort(refs.Named, entries.items, {}, lessThanNamed);
-    return .{ .gpa = gpa, .arena = arena_instance.state, .entries = entries.items };
+    std.mem.sort(refs.Broken, broken.items, {}, lessThanBroken);
+    return .{ .gpa = gpa, .arena = arena_instance.state, .entries = entries.items, .broken = broken.items };
 }
 
 fn lessThanNamed(_: void, a: refs.Named, b: refs.Named) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
+
+fn lessThanBroken(_: void, a: refs.Broken, b: refs.Broken) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
@@ -836,69 +848,38 @@ fn suggest(sizes: []const u64, factor_in: u8) ?Segment {
 // A new repository
 //=========================================================================
 
-/// Lay down what `git init --ref-format=reftable` lays down in `git_dir`:
-/// a stack whose one table holds `HEAD` -- a symbolic ref to the unborn
-/// branch in a new repository, or whatever a new linked worktree starts
-/// on -- a `HEAD` file naming a branch no one can create, so that a reader
-/// of the files format stops rather than misreads, and `refs/heads` as a
-/// file saying why.
-pub fn initialize(gpa: Allocator, io: Io, git_dir: Io.Dir, kind: Kind, head: refs.Ref, options: Options) refs.TransactionError!void {
-    git_dir.createDirPath(io, "reftable") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => |e| return e,
-    };
-    var dir = try git_dir.openDir(io, "reftable", .{});
-    defer dir.close(io);
-    const records = [_]reftable.RefRecord{.{ .name = "HEAD", .update_index = 1, .value = switch (head) {
-        .direct => |oid| .{ .direct = oid },
-        .symbolic => |target| .{ .symbolic = target },
-    } }};
-    const bytes = try reftable.write(gpa, kind, options.write, 1, 1, &records, &.{});
-    defer gpa.free(bytes);
-    var name_buf: [64]u8 = undefined;
-    const name = tableName(io, &name_buf, 1, 1);
-    try writeTable(gpa, io, dir, name, bytes, options.shared);
-    var list_buf: [96]u8 = undefined;
-    // unreachable: a table name is at most 46 bytes
-    const list_text = std.mem.print(&list_buf, "{s}\n", .{name}) catch unreachable;
-    try dir.writeFile(io, .{ .sub_path = "tables.list", .data = list_text });
-
-    try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/.invalid\n" });
-    git_dir.createDirPath(io, "refs") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => |e| return e,
-    };
-    try git_dir.writeFile(io, .{ .sub_path = "refs/heads", .data = "this repository uses the reftable format\n" });
-}
-
-/// What `HEAD` holds in the stack under `git_dir`, or `null` when there is
-/// no stack there -- the files format -- or no `HEAD` in it. A symbolic
-/// target is in `arena`.
-pub fn headIn(gpa: Allocator, arena: Allocator, io: Io, git_dir: Io.Dir, kind: Kind) Error!?refs.Ref {
-    var dir = git_dir.openDir(io, "reftable", .{}) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return null,
-        else => |e| return e,
-    };
-    defer dir.close(io);
-    var stack = try Stack.load(gpa, io, dir, kind);
+/// `Store.writeInitial` over reftable: `refs`, sorted, none of them in the
+/// shared stack yet, written as one table under its lock, with no logs.
+pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) refs.TransactionError!void {
+    var locked = try lockStack(gpa, io, store.commonDir(), store.reftableOptions());
+    defer {
+        if (!locked.written) locked.lock.deinit(io);
+        gpa.free(locked.buffer);
+        locked.dir.close(io);
+    }
+    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
     defer stack.deinit();
-    const record = (try stack.lookup(gpa, arena, "HEAD")) orelse return null;
-    return switch (record.value) {
-        .deletion => null,
-        .direct => |oid| .{ .direct = oid },
-        .peeled => |p| .{ .direct = p.value },
-        .symbolic => |target| .{ .symbolic = target },
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const update_index = stack.maxUpdateIndex() + 1;
+    const records = try arena.alloc(reftable.RefRecord, refs_in.len);
+    for (refs_in, records) |ref, *record| {
+        if (try stack.lookup(gpa, arena, ref.name)) |found| if (found.value != .deletion) return error.RefAlreadyExists;
+        record.* = .{ .name = ref.name, .update_index = update_index, .value = if (ref.peeled) |target|
+            .{ .peeled = .{ .value = ref.oid, .target = target } }
+        else
+            .{ .direct = ref.oid } };
+    }
+    if (records.len == 0) return;
+    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, records, &.{});
+    defer gpa.free(bytes);
+    try install(gpa, io, &locked, &stack, bytes, update_index);
+    if (!store.reftableOptions().auto_compact) return;
+    compactIn(gpa, io, store.commonDir(), store.objectFormat(), store.reftableOptions(), .auto) catch |err| switch (err) {
+        error.LockHeld => {},
+        else => |e| return e,
     };
-}
-
-/// Whether the repository whose shared directory is `common_dir` keeps its
-/// refs in a reftable stack.
-pub fn isReftableRepository(io: Io, common_dir: Io.Dir) Io.Dir.AccessError!bool {
-    common_dir.access(io, "reftable/tables.list", .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    return true;
 }
 
 //=========================================================================

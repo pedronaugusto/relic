@@ -2152,7 +2152,7 @@ fn checkedOutBranches(r: *Run) Error!std.StringHashMapUnmanaged([]const u8) {
         const main_path = if (std.mem.endsWith(u8, common, "/.git")) common[0 .. common.len - "/.git".len] else common;
         try addWorktreeBranches(r, &map, repo.common_dir, "main-worktree/HEAD", try r.arena.dupe(u8, main_path));
     }
-    var listing = try worktrees.list(r.gpa, io, repo.common_dir, repo.objectFormat());
+    var listing = try worktrees.list(r.gpa, io, repo.refStore());
     defer listing.deinit();
     for (listing.entries) |entry| {
         const sub = try r.arena.print("worktrees/{s}", .{entry.name});

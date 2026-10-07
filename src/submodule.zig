@@ -721,7 +721,7 @@ fn statusInto(
         }
         found.?.close(io);
 
-        const checked_out = try gitlink.head(gpa, io, wt, entry.path, repo.objectFormat());
+        const checked_out = try gitlink.head(gpa, io, wt, entry.path);
         if (checked_out == null or checked_out.?.eql(recorded)) {
             try out.append(arena, .{ .state = .current, .oid = recorded, .path = display, .name = name, .depth = depth });
         } else {
