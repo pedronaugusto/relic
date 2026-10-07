@@ -300,10 +300,8 @@ pub const Store = struct {
         errdefer gpa.free(current);
         var depth: u8 = 0;
         while (true) : (depth += 1) {
-            if (depth > max_symbolic_depth) {
-                gpa.free(current);
-                return error.SymbolicRefLoop;
-            }
+            // `current` is freed on the way out, as on any error.
+            if (depth > max_symbolic_depth) return error.SymbolicRefLoop;
             const found = (try store.readFrom(gpa, io, current)) orelse {
                 gpa.free(current);
                 return null;
@@ -664,6 +662,7 @@ pub const Store = struct {
     /// it. The message is collapsed as a transaction's is.
     pub fn appendLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8, old: Oid, new: Oid, log: LogMessage) TransactionError!void {
         if (!isRefName(name)) return error.InvalidRefName;
+        try ownWorktree(name);
         if (!reflog.shouldLog(log.policy, name, try store.logExists(gpa, io, name))) return;
         if (store.refFormat() == .reftable) return stack_engine.appendLog(gpa, io, store, name, old, new, log.who, log.message);
         // The message a transaction would write: collapsed as git collapses it.
@@ -693,6 +692,7 @@ pub const Store = struct {
     /// say a log exists.
     pub fn createLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) TransactionError!void {
         if (!isRefName(name)) return error.InvalidRefName;
+        try ownWorktree(name);
         if (store.refFormat() == .reftable) return stack_engine.createLog(gpa, io, store, name);
         return reflog.create(gpa, io, store.dirFor(name), name, store.sharedPermissions());
     }
@@ -728,6 +728,7 @@ pub const Store = struct {
         keeper: anytype,
     ) (TransactionError || LogReadError)!void {
         if (!isRefName(name)) return error.InvalidRefName;
+        try ownWorktree(name);
         if (store.refFormat() == .reftable) return stack_engine.expireLog(gpa, io, store, name, options, keeper);
         const dir = store.dirFor(name);
         if (std.Io.Dir.path.dirnamePosix(name)) |parent| {
@@ -761,6 +762,7 @@ pub const Store = struct {
     /// log is left alone.
     pub fn deleteLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) TransactionError!void {
         if (!isRefName(name)) return error.InvalidRefName;
+        try ownWorktree(name);
         if (store.refFormat() == .reftable) return stack_engine.deleteLog(gpa, io, store, name);
         const dir = store.dirFor(name);
         try reflog.delete(gpa, io, dir, name);
@@ -1122,6 +1124,16 @@ fn badName(name: []const u8) Broken.Why {
 
 /// A name a ref can be read or written under: git's
 /// `check_refname_format` with `REFNAME_ALLOW_ONELEVEL`.
+/// Refuse a name that reaches another worktree's own refs,
+/// `main-worktree/<name>` or `worktrees/<id>/<name>`: read from any
+/// worktree, and written, ref or log, by a store opened in that one.
+fn ownWorktree(name: []const u8) error{OtherWorktreeRef}!void {
+    switch (names.parseWorktreeRef(name).owner) {
+        .current, .shared => {},
+        .main, .other => return error.OtherWorktreeRef,
+    }
+}
+
 fn isRefName(name: []const u8) bool {
     return names.checkFormat(name, .{ .allow_onelevel = true });
 }
@@ -1234,10 +1246,7 @@ pub const Transaction = struct {
 
     fn add(tx: *Transaction, name: []const u8, new: ?Ref, expected: Expected) TransactionError!void {
         if (!isChangeableName(name, new == null)) return error.InvalidRefName;
-        switch (names.parseWorktreeRef(name).owner) {
-            .current, .shared => {},
-            .main, .other => return error.OtherWorktreeRef,
-        }
+        try ownWorktree(name);
         for (tx.edits.items) |edit| {
             if (std.mem.eql(u8, edit.name, name)) return error.DuplicateEdit;
         }

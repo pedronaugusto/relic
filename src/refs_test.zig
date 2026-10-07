@@ -267,6 +267,65 @@ test "another worktree's HEAD and logs are read as git reads them, and a transac
     }.inFormat);
 }
 
+/// Keeps every entry of a log `expireLog` walks.
+const KeepAll = struct {
+    pub fn keep(_: *const KeepAll, _: refs.LogEntry, _: usize) bool {
+        return true;
+    }
+};
+
+/// How many entries git reads in `name`'s log.
+fn gitLogCount(gpa: Allocator, io: Io, r: *testgit.Repo, name: []const u8) !usize {
+    const text = try r.run(io, &.{ "rev-list", "--count", "--walk-reflogs", name });
+    defer gpa.free(text);
+    return std.fmt.parseInt(usize, std.mem.trimEnd(u8, text, "\n"), 10);
+}
+
+test "another worktree's log is not written from here, as its refs are not" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var r = try twoCommits(gpa, io, format);
+            defer r.deinit();
+            try r.exec(io, &.{ "worktree", "add", "-q", "-b", "wt", "linked", "side" });
+            var repo = try Repository.open(gpa, io, r.dir, .{});
+            defer repo.deinit(io);
+            const store = repo.refStore();
+            const tip = try oidOf(gpa, io, &r, "main");
+            const keep_all: KeepAll = .{};
+            for ([_][]const u8{ "main-worktree/HEAD", "worktrees/linked/HEAD" }) |name| {
+                const before = try gitLogCount(gpa, io, &r, name);
+                try std.testing.expectError(error.OtherWorktreeRef, store.appendLog(gpa, io, name, tip, tip, .{ .who = who, .message = "from elsewhere" }));
+                try std.testing.expectError(error.OtherWorktreeRef, store.createLog(gpa, io, name));
+                try std.testing.expectError(error.OtherWorktreeRef, store.expireLog(gpa, io, name, .{ .rewrite = true }, &keep_all));
+                try std.testing.expectError(error.OtherWorktreeRef, store.deleteLog(gpa, io, name));
+                try std.testing.expectEqual(before, try gitLogCount(gpa, io, &r, name));
+            }
+            // Nothing was written under the prefix as a shared ref's log.
+            try std.testing.expectError(error.FileNotFound, r.dir.access(io, ".git/logs/main-worktree", .{}));
+            try std.testing.expectError(error.FileNotFound, r.dir.access(io, ".git/logs/worktrees", .{}));
+        }
+    }.inFormat);
+}
+
+test "a symbolic ref that comes back to itself is refused, in either ref format" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var r = try twoCommits(gpa, io, format);
+            defer r.deinit();
+            try r.exec(io, &.{ "symbolic-ref", "refs/heads/a", "refs/heads/b" });
+            try r.exec(io, &.{ "symbolic-ref", "refs/heads/b", "refs/heads/a" });
+            var repo = try Repository.open(gpa, io, r.dir, .{});
+            defer repo.deinit(io);
+            try std.testing.expectError(error.SymbolicRefLoop, repo.refStore().resolve(gpa, io, "refs/heads/a"));
+            try std.testing.expectError(error.SymbolicRefLoop, repo.refStore().readOid(gpa, io, "refs/heads/b"));
+        }
+    }.inFormat);
+}
+
 test "a commit is refused while a pick is stopped, in either ref format" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {
