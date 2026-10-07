@@ -769,11 +769,7 @@ pub const Listing = struct {
                 symref = try l.a().dupe(u8, to);
                 // git's flags are those of every step, the last one's
                 // `packed` among them
-                if (store.refFormat() == .files) {
-                    _ = store.dirFor(resolved.name).statFile(io, resolved.name, .{}) catch {
-                        packed_at_end = true;
-                    };
-                }
+                packed_at_end = resolved.from_packed;
             },
         }
         // a ref naming no object, or the null one, is broken too

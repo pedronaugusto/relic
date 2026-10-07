@@ -17,6 +17,7 @@ pub const Error = @import("policy.zig").Error;
 const state_mod = @import("../state.zig");
 const ref_names = @import("../../names/ref.zig");
 const builtin = @import("builtin");
+const assert = std.debug.assert;
 const Stack = cache.Stack;
 const Cache = cache.Cache;
 const max_reload_attempts = cache.internal.max_reload_attempts;
@@ -33,7 +34,6 @@ const Stacks = cache.internal.Stacks;
 const loadIn = cache.internal.loadIn;
 const reloadIn = cache.internal.reloadIn;
 const isLinked = cache.internal.isLinked;
-const isPerWorktree = cache.internal.isPerWorktree;
 const View = struct {
     cache: ?*Cache,
     owned: ?Stacks,
@@ -62,11 +62,11 @@ pub fn read(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.ReadE
     var owned: ?Stacks = null;
     var view = try View.acquire(gpa, io, store, &owned);
     defer view.release(io, &owned);
-    return readIn(gpa, view.stacks, store, name);
+    return readIn(gpa, view.stacks, name);
 }
 
-fn readIn(gpa: Allocator, stacks: *const Stacks, store: anytype, name: []const u8) refs.ReadError!?refs.Ref {
-    return refFrom(gpa, cache.internal.forName(stacks, store, name), name);
+fn readIn(gpa: Allocator, stacks: *const Stacks, name: []const u8) refs.ReadError!?refs.Ref {
+    return refFrom(gpa, cache.internal.forName(stacks, name), name);
 }
 
 /// `name`'s value in one stack, or `null`.
@@ -130,13 +130,13 @@ fn logRecords(gpa: Allocator, arena: Allocator, io: Io, store: anytype, name: []
     var view = try View.acquire(gpa, io, store, &owned);
     defer view.release(io, &owned);
     if (where.owner == .main) return view.stacks.main.logsFor(gpa, arena, where.bare);
-    return cache.internal.forName(view.stacks, store, name).logsFor(gpa, arena, name);
+    return cache.internal.forName(view.stacks, name).logsFor(gpa, arena, name);
 }
 
 /// Follow symbolic refs through the stacks until an object name, with the
 /// transaction's own new values taking precedence. `null` for a name that
 /// is not there, which is an unborn branch's shape.
-fn resolveIn(gpa: Allocator, stacks: *const Stacks, store: anytype, name: []const u8, pending: anytype) refs.ReadError!?Oid {
+fn resolveIn(gpa: Allocator, stacks: *const Stacks, name: []const u8, pending: anytype) refs.ReadError!?Oid {
     var buf: [1024]u8 = undefined;
     var current: []const u8 = name;
     var depth: u8 = 0;
@@ -155,7 +155,7 @@ fn resolveIn(gpa: Allocator, stacks: *const Stacks, store: anytype, name: []cons
             }
         }
         if (!overridden) {
-            value = try readIn(gpa, stacks, store, current);
+            value = try readIn(gpa, stacks, current);
             if (value) |v| switch (v) {
                 .symbolic => |t| owned = t,
                 .direct => {},
@@ -195,7 +195,7 @@ pub fn list(gpa: Allocator, io: Io, store: anytype, prefix: []const u8) refs.Rea
             // In a linked worktree the shared stack's per-worktree refs are
             // the main worktree's, and the worktree's own stack holds only
             // per-worktree refs.
-            if (stacks.worktree != null and isPerWorktree(store, record.name) != (which == 1)) continue;
+            if (stacks.worktree != null and ref_names.isCurrentWorktree(record.name) != (which == 1)) continue;
             // A name no ref may have is listed apart, as git's reftable
             // backend marks it broken.
             if (!ref_names.checkFormat(record.name, .{ .allow_onelevel = true })) {
@@ -358,7 +358,7 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     const gpa = tx.gpa;
     var needs_worktree = false;
     for (tx.edits.items) |edit| {
-        if (isLinked(store) and isPerWorktree(store, edit.name)) needs_worktree = true;
+        if (isLinked(store) and ref_names.isCurrentWorktree(edit.name)) needs_worktree = true;
     }
 
     var main = try lockStack(gpa, io, store.commonDir(), store.reftableOptions());
@@ -379,13 +379,13 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     for (tx.edits.items) |*edit| {
         // A ref only logged through is neither read nor checked.
         if (edit.via != null) continue;
-        const current = try readIn(gpa, &stacks, store, edit.name);
+        const current = try readIn(gpa, &stacks, edit.name);
         var current_oid: ?Oid = null;
         if (current) |value| switch (value) {
             .direct => |oid| current_oid = oid,
             .symbolic => |target| {
                 gpa.free(target);
-                current_oid = try resolveIn(gpa, &stacks, store, edit.name, null);
+                current_oid = try resolveIn(gpa, &stacks, edit.name, null);
             },
         };
         edit.old = current_oid;
@@ -416,7 +416,7 @@ fn checkNames(tx: anytype, stacks: *const Stacks) refs.TransactionError!void {
     const arena = arena_instance.allocator();
     for (tx.edits.items) |edit| {
         if (edit.new == null or edit.via != null) continue;
-        const stack = cache.internal.forName(stacks, tx.store, edit.name);
+        const stack = cache.internal.forName(stacks, edit.name);
         // A ref where a directory of this one would be.
         var end = edit.name.len;
         while (std.mem.findScalarLast(u8, edit.name[0..end], '/')) |slash| {
@@ -483,13 +483,9 @@ pub fn appendLog(
 ) refs.TransactionError!void {
     if (std.mem.findAny(u8, who.name, "<>\n") != null or
         std.mem.findAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
-    const parent = if (isLinked(store) and isPerWorktree(store, name)) store.gitDir() else store.commonDir();
+    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
     var locked = try lockStack(gpa, io, parent, store.reftableOptions());
-    defer {
-        if (!locked.written) locked.lock.deinit(io);
-        gpa.free(locked.buffer);
-        locked.dir.close(io);
-    }
+    defer releaseLocked(gpa, io, &locked);
     var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
     defer stack.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
@@ -507,8 +503,176 @@ pub fn appendLog(
     const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, &.{}, &.{record});
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index);
-    if (!store.reftableOptions().auto_compact) return;
-    compactIn(gpa, io, parent, store.objectFormat(), store.reftableOptions(), .auto) catch |err| switch (err) {
+    try compactAfter(gpa, io, parent, store);
+}
+
+/// `Store.expireLog` over reftable, as git's `reftable_be_reflog_expire`:
+/// under the stack's lock, one table that tombstones each entry `keeper`
+/// lets go and writes each kept one again, its old value rewritten when
+/// asked; a log left with no entry keeps the marker that says it exists,
+/// and the ref moves to the newest kept entry when asked.
+pub fn expireLog(
+    gpa: Allocator,
+    io: Io,
+    store: anytype,
+    name: []const u8,
+    options: anytype,
+    keeper: anytype,
+) refs.TransactionError!void {
+    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
+    var locked = try lockStack(gpa, io, parent, store.reftableOptions());
+    defer releaseLocked(gpa, io, &locked);
+    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
+    defer stack.deinit();
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    // Newest first, as git's iterator hands them over.
+    const records = try stack.logsFor(gpa, arena, name);
+    if (records.len == 0) return;
+
+    var live: usize = 0;
+    for (records) |r| {
+        if (!isMarker(r)) live += 1;
+    }
+    const rewritten = try arena.dupe(reftable.LogRecord, records);
+    var last_kept: ?usize = null;
+    var newer = live;
+    var i = rewritten.len;
+    while (i > 0) {
+        i -= 1;
+        const dest = &rewritten[i];
+        // The marker goes; it comes back below when no entry is left.
+        if (isMarker(dest.*)) {
+            dest.value = .deletion;
+            continue;
+        }
+        newer -= 1;
+        const entry = entryOf(dest.value.update);
+        if (options.rewrite) if (last_kept) |at| {
+            dest.value.update.old = rewritten[at].value.update.new;
+        };
+        if (keeper.keep(entry, newer)) last_kept = i else dest.value = .deletion;
+    }
+
+    const update_index = stack.maxUpdateIndex() + 1;
+    var logs: std.ArrayList(reftable.LogRecord) = .empty;
+    try logs.appendSlice(arena, rewritten);
+    if (last_kept == null) try logs.append(arena, marker(store.objectFormat(), name, update_index));
+    std.mem.sort(reftable.LogRecord, logs.items, {}, logOrder);
+
+    var ref_records: [1]reftable.RefRecord = undefined;
+    var ref_count: usize = 0;
+    if (options.update_ref) if (last_kept) |at| {
+        // A symbolic ref is left as it is, as git leaves it.
+        const current = try stack.lookup(gpa, arena, name);
+        const direct = if (current) |r| r.value == .direct or r.value == .peeled else false;
+        if (direct) {
+            ref_records[0] = .{ .name = name, .update_index = update_index, .value = .{ .direct = rewritten[at].value.update.new } };
+            ref_count = 1;
+        }
+    };
+
+    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, ref_records[0..ref_count], logs.items);
+    defer gpa.free(bytes);
+    try install(gpa, io, &locked, &stack, bytes, update_index);
+    try compactAfter(gpa, io, parent, store);
+}
+
+/// `Store.createLog` over reftable: the marker git writes to say a log
+/// exists, in a table of its own, unless the log has an entry already.
+pub fn createLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.TransactionError!void {
+    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
+    var locked = try lockStack(gpa, io, parent, store.reftableOptions());
+    defer releaseLocked(gpa, io, &locked);
+    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
+    defer stack.deinit();
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    if ((try stack.logsFor(gpa, arena_instance.allocator(), name)).len != 0) return;
+    const update_index = stack.maxUpdateIndex() + 1;
+    const logs = [_]reftable.LogRecord{marker(store.objectFormat(), name, update_index)};
+    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, &.{}, &logs);
+    defer gpa.free(bytes);
+    try install(gpa, io, &locked, &stack, bytes, update_index);
+    try compactAfter(gpa, io, parent, store);
+}
+
+/// `Store.deleteLog` over reftable, as git's `reftable_be_delete_reflog`:
+/// a tombstone for every entry of the log, the marker among them, in one
+/// table. A log with no entry adds none.
+pub fn deleteLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.TransactionError!void {
+    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
+    var locked = try lockStack(gpa, io, parent, store.reftableOptions());
+    defer releaseLocked(gpa, io, &locked);
+    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
+    defer stack.deinit();
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const records = try stack.logsFor(gpa, arena, name);
+    if (records.len == 0) return;
+    const update_index = stack.maxUpdateIndex() + 1;
+    const logs = try arena.alloc(reftable.LogRecord, records.len);
+    for (records, logs) |r, *out| out.* = .{ .name = name, .update_index = r.update_index, .value = .deletion };
+    std.mem.sort(reftable.LogRecord, logs, {}, logOrder);
+    const bytes = try reftable.write(gpa, store.objectFormat(), store.reftableOptions().write, update_index, update_index, &.{}, logs);
+    defer gpa.free(bytes);
+    try install(gpa, io, &locked, &stack, bytes, update_index);
+    try compactAfter(gpa, io, parent, store);
+}
+
+/// The entry git writes to say a log exists with nothing in it: both
+/// names null, and nothing else.
+fn marker(kind: Kind, name: []const u8, update_index: u64) reftable.LogRecord {
+    return .{ .name = name, .update_index = update_index, .value = .{ .update = .{
+        .old = Oid.zero(kind),
+        .new = Oid.zero(kind),
+        .name = "",
+        .email = "",
+        .time = 0,
+        .tz_offset = 0,
+        .message = "",
+    } } };
+}
+
+fn isMarker(record: reftable.LogRecord) bool {
+    return switch (record.value) {
+        .deletion => false,
+        .update => |u| u.old.isZero() and u.new.isZero(),
+    };
+}
+
+/// A table's log record as `Store.readLog` hands an entry out, borrowing
+/// the record's text.
+fn entryOf(u: reftable.LogUpdate) reflog.Entry {
+    var message = u.message;
+    if (message.len > 0 and message[message.len - 1] == '\n') message = message[0 .. message.len - 1];
+    return .{
+        .old = u.old,
+        .new = u.new,
+        .who = .{
+            .name = u.name,
+            .email = u.email,
+            .when_secs = std.math.cast(i64, u.time) orelse std.math.maxInt(i64),
+            .offset_minutes = minutesFromZone(u.tz_offset),
+        },
+        .message = message,
+    };
+}
+
+fn releaseLocked(gpa: Allocator, io: Io, locked: *Pending.Locked) void {
+    if (!locked.written) locked.lock.deinit(io);
+    gpa.free(locked.buffer);
+    locked.dir.close(io);
+}
+
+/// The compaction git's geometric rule asks for after a table is added;
+/// another process compacting already is not a failure of the addition.
+fn compactAfter(gpa: Allocator, io: Io, parent: Io.Dir, store: anytype) refs.TransactionError!void {
+    const options = store.reftableOptions();
+    if (!options.auto_compact) return;
+    compactIn(gpa, io, parent, store.objectFormat(), options, .auto) catch |err| switch (err) {
         error.LockHeld => {},
         else => |e| return e,
     };
@@ -560,7 +724,7 @@ fn addTable(
         break :blk try logMessage(arena, normal, store.reftableOptions().write.block_size);
     } else null;
     for (tx.edits.items) |edit| {
-        if (isLinked(store) and isPerWorktree(store, edit.name) != worktree_stack) continue;
+        if (isLinked(store) and ref_names.isCurrentWorktree(edit.name) != worktree_stack) continue;
         // A ref an update went through, or `HEAD` when the branch it names
         // moved, keeps its value and gains the log line: git's
         // `REF_LOG_ONLY`.
@@ -576,22 +740,23 @@ fn addTable(
             try records.append(arena, .{ .name = edit.name, .update_index = update_index, .value = value });
         }
 
-        const message = log orelse continue;
         if (edit.via == null and edit.new == null) {
-            // A deleted ref's log goes with it, as it does in git: one
-            // tombstone for each entry it had.
+            // A deleted ref's log goes with it, as it does in git, whether
+            // or not the transaction logs anything: one tombstone for each
+            // entry it had.
             for (try stack.logsFor(gpa, arena, edit.name)) |entry| {
                 try logs.append(arena, .{ .name = edit.name, .update_index = entry.update_index, .value = .deletion });
             }
             continue;
         }
+        const message = log orelse continue;
         const exists = (try stack.logsFor(gpa, arena, edit.name)).len != 0;
         if (!reflog.shouldLog(message.policy, edit.name, exists)) continue;
         const new_oid = if (source.new) |new| switch (new) {
             .direct => |oid| oid,
             // git writes no entry for a symbolic ref whose target does not
             // resolve yet.
-            .symbolic => (try resolveIn(gpa, &pending.stacks, store, source.name, tx)) orelse continue,
+            .symbolic => (try resolveIn(gpa, &pending.stacks, source.name, tx)) orelse continue,
         } else Oid.zero(store.objectFormat());
         if (std.mem.findAny(u8, message.who.name, "<>\n") != null or
             std.mem.findAny(u8, message.who.email, "<>\n") != null) return error.InvalidSignature;

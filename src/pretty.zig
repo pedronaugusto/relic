@@ -29,6 +29,7 @@ const refs_mod = @import("refs.zig");
 const shallow = @import("revwalk/shallow.zig");
 const signing = @import("commit/signing.zig");
 const trailer = @import("commit/trailer.zig");
+const stash = @import("commit/stash.zig");
 const mailmap_mod = @import("revwalk/mailmap.zig");
 
 const Oid = hash.Oid;
@@ -151,7 +152,7 @@ pub const Decorations = struct {
         if (std.mem.startsWith(u8, name, "refs/heads/")) return .local;
         if (std.mem.startsWith(u8, name, "refs/tags/")) return .tag;
         if (std.mem.startsWith(u8, name, "refs/remotes/")) return .remote;
-        if (std.mem.eql(u8, name, "refs/stash")) return .stash;
+        if (std.mem.eql(u8, name, stash.ref_name)) return .stash;
         return .none;
     }
 

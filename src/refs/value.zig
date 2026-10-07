@@ -121,6 +121,9 @@ pub const Resolved = struct {
     /// The last name in the chain. Owned by the caller.
     name: []const u8,
     oid: Oid,
+    /// Whether that last name was read from `packed-refs`, git's
+    /// `REF_ISPACKED`. Never set in a reftable repository.
+    from_packed: bool,
 };
 
 /// What an edit requires the ref's current value to be.

@@ -13,7 +13,6 @@ const Self = @This();
 pub const userconfig = @import("config/userconfig.zig");
 // The modules relic's API puts under this one, as `relic.config.<name>`.
 
-const config_write = @import("config/write.zig");
 const std = @import("std");
 const allocation = @import("testing/allocation.zig");
 const builtin = @import("builtin");
@@ -275,6 +274,10 @@ pub const Sources = struct {
     pub const Path = struct {
         dir: Io.Dir,
         sub_path: []const u8,
+        /// What the file holds, read as its bytes in place of reading it:
+        /// a write about to replace it, checked before it lands. Borrowed
+        /// for the call and never kept; a later read reads the file.
+        contents: ?[]const u8 = null,
     };
 };
 
@@ -566,6 +569,49 @@ pub const Config = struct {
         };
     }
 
+    /// This configuration with its command-line values replaced by
+    /// `command` and `pairs`, every file kept as it was read: no file is
+    /// read again but one a `-c include.path` among them names. The sources
+    /// it keeps name the new values, so reading them again reads these.
+    /// What `Repository.editConfig` publishes.
+    pub fn withCommandValues(config: *const Config, io: Io, command: []const []const u8, pairs: []const Sources.Pair) Self.ParseError!Config {
+        const gpa = config.gpa;
+        var out: Config = .{ .gpa = gpa };
+        errdefer out.deinit();
+        try out.keepContext(config.context);
+        var sources = config.sources;
+        sources.command = command;
+        sources.pairs = pairs;
+        try out.keepSources(sources);
+        for (config.files.items) |file| {
+            if (file.level == .command) continue;
+            const text = try file.render();
+            const path = gpa.dupe(u8, file.path) catch |err| {
+                gpa.free(text);
+                return err;
+            };
+            // `addParsedFile` takes both, and its own errdefer frees them.
+            try out.addParsedFile(path, text, file.level, file.writable);
+            out.files.items[out.files.items.len - 1].conditional = file.conditional;
+        }
+        for (config.read.items) |read| {
+            const sub_path = try gpa.dupe(u8, read.sub_path);
+            errdefer gpa.free(sub_path);
+            try out.read.append(gpa, .{ .dir = read.dir, .sub_path = sub_path, .digest = read.digest });
+        }
+        if (command.len != 0 or pairs.len != 0) {
+            out.plan = .{ .sources = sources };
+            defer {
+                out.plan = null;
+                out.freeRemoteUrls();
+            }
+            const first_entry = out.entries.items.len;
+            try out.addCommandValues(command, pairs);
+            try out.followIncludes(io, Io.Dir.cwd(), .command, first_entry, 0);
+        }
+        return out;
+    }
+
     /// Whether a file this configuration was read from now holds other
     /// bytes than it did, or is there when it was not, or is gone. Includes
     /// count, and so does an include that was not there when it was read.
@@ -590,7 +636,10 @@ pub const Config = struct {
 
     fn addFile(config: *Config, io: Io, path: Sources.Path, level: Level, writable: bool, depth: u8, conditional: bool) ParseError!void {
         if (depth > max_include_depth) return error.IncludeTooDeep;
-        const read = try fs.readFileAlloc(config.gpa, io, path.dir, path.sub_path, 1 << 24);
+        const read = if (path.contents) |bytes|
+            try config.gpa.dupe(u8, bytes)
+        else
+            try fs.readFileAlloc(config.gpa, io, path.dir, path.sub_path, 1 << 24);
         try config.remember(path, read);
         const text = read orelse return;
         const owned_path = config.gpa.dupe(u8, path.sub_path) catch |err| {
@@ -1024,7 +1073,7 @@ pub const Config = struct {
         NoWritableSource,
         /// A name git refuses to write; see `checkKey`.
         InvalidKey,
-    } || Allocator.Error || fs.LockError || fs.CommitError;
+    } || Allocator.Error;
 
     /// Set `full_name` to `value` in the writable file, keeping every
     /// comment and every other line exactly as it was.
@@ -1305,18 +1354,6 @@ pub const Config = struct {
     fn reindex(config: *Config) Allocator.Error!void {
         config.entries.clearRetainingCapacity();
         for (0..config.files.items.len) |file_index| try config.indexFile(@intCast(file_index));
-    }
-
-    /// Write the last writable file through `<path>.lock`.
-    ///
-    /// The bytes are the original file with only the changed lines different.
-    /// With multiple writable sources, open the intended file on its own
-    /// before editing and writing it. The file is given the permissions the
-    /// configuration's own `core.sharedRepository` asks for, as git gives a
-    /// repository's.
-    pub fn write(config: *Config, io: Io, dir: Io.Dir, sub_path: []const u8) SetError!void {
-        const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
-        return config_write.writeFile(io, &config.files.items[file_index], dir, sub_path, config.sharedPermissions());
     }
 
     /// The permissions `core.sharedRepository` asks for here; a value git

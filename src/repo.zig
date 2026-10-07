@@ -25,8 +25,8 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const refs_mod = @import("refs.zig");
-const reflog = @import("refs/reflog.zig");
 const config_mod = @import("config.zig");
+const config_write = @import("config/write.zig");
 const commit_cache = @import("commit/cache.zig");
 const shallow = @import("revwalk/shallow.zig");
 const ignore = @import("worktree/ignore.zig");
@@ -78,9 +78,10 @@ pub const Error = error{
     /// backend. The store and its cache were opened for the old one, so
     /// the repository must be reopened.
     RefStorageChanged,
-    /// An in-memory edit changes which configuration files apply. Write
-    /// that change with a standalone Config and refresh the repository.
-    WorktreeConfigChanged,
+    /// A memory-only edit (`editConfig`) names the repository's format:
+    /// `core.repositoryFormatVersion` or an `extensions.*`, which only the
+    /// repository's own file says. `writeConfig` writes it there.
+    FormatEditInMemory,
     /// The repository discovered belongs to another user and
     /// `safe.directory` does not name it: git's "detected dubious
     /// ownership".
@@ -195,6 +196,16 @@ const IndexStamp = struct {
 const RefState = opaque {};
 const config_owner = @import("config/state.zig");
 
+/// What a test in another file reaches inside a repository.
+pub const test_access = if (builtin.is_test) struct {
+    /// The allocator the published configuration grows and is released
+    /// with, which a test swaps for a failing one to show that a reader
+    /// allocates nothing of the configuration's.
+    pub fn configAllocator(repo: *Repository) *Allocator {
+        return &config_owner.get(repo._config).gpa;
+    }
+} else struct {};
+
 /// The directories `Repository.open` found, before the repository is read.
 const Discovered = struct {
     git_dir: Io.Dir,
@@ -243,14 +254,15 @@ pub const Repository = struct {
     common_is_separate: bool,
     /// Owned ref state. Its format and cache are opaque to callers.
     _refs: *RefState,
-    /// Opaque ownership of what the configuration files held at `open`, or when `refreshConfig`
-    /// last found one changed. Nothing reads them again behind the caller's
-    /// back, so another process's `git config` is seen after a
-    /// `refreshConfig` and not before. The operations that read a file
-    /// fresh from the disk are the ones that write it: a submodule's
-    /// settings are edited in `.git/config` as read at that moment. An
-    /// `includeIf` is decided against this repository's `.git` directory
-    /// and the branch `HEAD` was on when the files were read.
+    /// Opaque ownership of the published configuration: what the files
+    /// held at `open`, or when `refreshConfig` last found one changed, or
+    /// when `writeConfig` last wrote one, with `editConfig`'s values over
+    /// them. Nothing reads the files again behind the caller's back, so
+    /// another process's `git config` is seen after a `refreshConfig` and
+    /// not before; a write reads its own file again under its lock, so
+    /// what another process wrote there stays. An `includeIf` is decided
+    /// against this repository's `.git` directory and the branch `HEAD`
+    /// was on when the files were read.
     _config: *config_owner.State,
     odb: odb_mod.Odb,
     /// What `core.sharedRepository` asked of permissions when the
@@ -584,7 +596,7 @@ pub const Repository = struct {
             .local = .{ .dir = repo.common_dir, .sub_path = "config" },
             .command = options.config_overrides,
             .pairs = options.config_pairs,
-        }, .{ .git_dir = git_dir_path, .branch = branch, .home = options.home }, format);
+        }, .{ .git_dir = git_dir_path, .branch = branch, .home = options.home }, format, null);
         repo._config = try config_owner.create(config);
         errdefer config_owner.destroy(repo._config);
         repo.shared = try sharedOf(repo.configuration());
@@ -607,19 +619,18 @@ pub const Repository = struct {
         return repo;
     }
 
-    /// Read `sources` — every one but the worktree's; then, when the
-    /// repository's `format` turns `extensions.worktreeConfig` on, read them
-    /// again with `config.worktree` after the local file, which exists only
-    /// when the extension says so and has no say in the format.
-    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, format: RepositoryFormat) Error!config_mod.Config {
-        var config = try config_mod.Config.open(repo.gpa, io, sources, context);
-        errdefer config.deinit();
-        if (!format.worktree_config) return config;
-        var with_worktree = sources;
-        with_worktree.worktree = .{ .dir = repo.git_dir, .sub_path = "config.worktree" };
-        const both = try config_mod.Config.open(repo.gpa, io, with_worktree, context);
-        config.deinit();
-        return both;
+    /// Read `sources`, with this worktree's `config.worktree` after the
+    /// local file when the repository's `format` turns
+    /// `extensions.worktreeConfig` on and none otherwise: the file has no
+    /// say in the format. `worktree_contents`, when given, is read as that
+    /// file's bytes: a write about to land there.
+    fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, format: RepositoryFormat, worktree_contents: ?[]const u8) Error!config_mod.Config {
+        var read = sources;
+        read.worktree = if (format.worktree_config)
+            .{ .dir = repo.git_dir, .sub_path = "config.worktree", .contents = worktree_contents }
+        else
+            null;
+        return config_mod.Config.open(repo.gpa, io, read, context);
     }
 
     /// Read the configuration again if a file it came from has changed since
@@ -630,12 +641,12 @@ pub const Repository = struct {
     /// another process's `git config` to count — before an operation, say —
     /// and it costs a read of each file the configuration came from,
     /// includes among them, and of `HEAD`, and a parse only when one
-    /// differs. Edits made
-    /// through `editConfig` in memory and never written are replaced by what the
-    /// files hold. A configuration that no longer passes `open`'s checks is
-    /// that check's error, and the one held before is kept. A changed hash or
-    /// ref backend requires reopening (`ObjectFormatChanged`, `RefStorageChanged`).
-    /// `diagnostic`, when given, names the refusal and is cleared on every call.
+    /// differs. Edits made through `editConfig` stay, read after the files
+    /// as `-c` values are. A configuration that no longer passes `open`'s
+    /// checks is that check's error, and the one held before is kept. A
+    /// changed hash or ref backend requires reopening
+    /// (`ObjectFormatChanged`, `RefStorageChanged`). `diagnostic`, when
+    /// given, names the refusal and is cleared on every call.
     pub fn refreshConfig(repo: *Repository, io: Io, diagnostic: ?*Diagnostic) Self.Error!bool {
         diagnostic_mod.reset(diagnostic);
         // `onbranch:` makes the branch `HEAD` is on part of what was read.
@@ -646,12 +657,10 @@ pub const Repository = struct {
         else
             short == null;
         if (same_branch and !try repo.configuration().isStale(io)) return false;
-        var sources = repo.configuration().sources;
-        sources.worktree = null;
         var context = repo.configuration().context;
         context.branch = short;
         const format = try repository_format.read(repo.gpa, io, repo.common_dir, diagnostic);
-        var fresh = try repo.readConfig(io, sources, context, format);
+        var fresh = try repo.readConfig(io, repo.configuration().sources, context, format, null);
         errdefer fresh.deinit();
         try repo.publishConfig(fresh, format, diagnostic);
         return true;
@@ -741,15 +750,16 @@ pub const Repository = struct {
         // git copies the templates first, and reads the configuration they
         // leave before it writes its own
         var shared: fs.Shared = options.shared orelse .umask;
+        var logs_set = false;
         if (options.template) |template| {
             if (try templateUsable(gpa, io, template)) try copyTemplate(gpa, io, template, git_dir, shared);
-            if (options.shared == null) {
-                if (try fs.readFileAlloc(gpa, io, git_dir, "config", 1 << 20)) |text| {
-                    defer gpa.free(text);
-                    var template_config = try config_mod.Config.parseText(gpa, text, .local);
-                    defer template_config.deinit();
-                    shared = template_config.sharedPermissions();
-                }
+            if (try fs.readFileAlloc(gpa, io, git_dir, "config", 1 << 20)) |text| {
+                defer gpa.free(text);
+                var template_config = try config_mod.Config.parseText(gpa, text, .local);
+                defer template_config.deinit();
+                if (options.shared == null) shared = template_config.sharedPermissions();
+                // a template's own choice stands
+                logs_set = template_config.has("core.logallrefupdates");
             }
         }
         fs.adjustShared(io, git_dir, ".", shared);
@@ -777,10 +787,7 @@ pub const Repository = struct {
             try tx.commit(io, null);
         }
 
-        const version: u8 = if (options.object_format == .sha1 and options.ref_format == .files) 0 else 1;
-        if (git_dir.access(io, "config", .{})) |_| {
-            try initTemplateConfig(gpa, io, git_dir, options, version, shared);
-        } else |_| try initConfig(gpa, io, git_dir, options, version, shared);
+        try initConfig(gpa, io, git_dir, options, shared, logs_set);
 
         const work_dir: ?Io.Dir = if (options.bare) null else try dir.openDir(io, ".", .{ .iterate = true });
         const discovered: Discovered = .{
@@ -792,36 +799,34 @@ pub const Repository = struct {
         return finish(gpa, io, discovered, .{ .discover = false, .odb = options.odb });
     }
 
-    /// The configuration of a new repository with none from a template:
-    /// the lines git's `init` sets, in its order.
-    fn initConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: InitOptions, version: u8, shared: fs.Shared) Error!void {
-        var config_text: std.Io.Writer.Allocating = .init(gpa);
-        defer config_text.deinit();
-        const w = &config_text.writer;
-        w.print("[core]\n", .{}) catch return error.OutOfMemory;
-        w.print("\trepositoryformatversion = {d}\n", .{version}) catch return error.OutOfMemory;
-        w.print("\tfilemode = {s}\n", .{if (options.file_mode) "true" else "false"}) catch return error.OutOfMemory;
-        w.print("\tbare = {s}\n", .{if (options.bare) "true" else "false"}) catch return error.OutOfMemory;
-        if (!options.bare) {
-            w.print("\tlogallrefupdates = true\n", .{}) catch return error.OutOfMemory;
-        }
-        if (!options.symlinks) w.print("\tsymlinks = false\n", .{}) catch return error.OutOfMemory;
-        if (options.ignore_case) w.print("\tignorecase = true\n", .{}) catch return error.OutOfMemory;
-        if (options.precompose_unicode) |p| w.print("\tprecomposeunicode = {s}\n", .{if (p) "true" else "false"}) catch return error.OutOfMemory;
+    /// The configuration of a new repository: the values git's `init` sets
+    /// one by one, as `git config` would, in its order, in the template's
+    /// file when there is one and a new one when not.
+    fn initConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: InitOptions, shared: fs.Shared, logs_set: bool) Error!void {
+        var edits: std.ArrayList(ConfigEdit) = .empty;
+        defer edits.deinit(gpa);
+        const version = if (options.object_format == .sha1 and options.ref_format == .files) "0" else "1";
+        try edits.append(gpa, .{ .set = .{ .name = "core.repositoryformatversion", .value = version } });
+        if (options.object_format != .sha1) try edits.append(gpa, .{ .set = .{ .name = "extensions.objectformat", .value = options.object_format.name() } });
+        if (options.ref_format != .files) try edits.append(gpa, .{ .set = .{ .name = "extensions.refstorage", .value = options.ref_format.name() } });
+        try edits.append(gpa, .{ .set = .{ .name = "core.filemode", .value = if (options.file_mode) "true" else "false" } });
+        try edits.append(gpa, .{ .set = .{ .name = "core.bare", .value = if (options.bare) "true" else "false" } });
+        if (!options.bare and !logs_set) try edits.append(gpa, .{ .set = .{ .name = "core.logallrefupdates", .value = "true" } });
+        if (!options.symlinks) try edits.append(gpa, .{ .set = .{ .name = "core.symlinks", .value = "false" } });
+        if (options.ignore_case) try edits.append(gpa, .{ .set = .{ .name = "core.ignorecase", .value = "true" } });
+        if (options.precompose_unicode) |p| try edits.append(gpa, .{ .set = .{ .name = "core.precomposeunicode", .value = if (p) "true" else "false" } });
         var shared_buf: [8]u8 = undefined;
-        if (sharedSetting(shared, &shared_buf)) |value| w.print("\tsharedrepository = {s}\n", .{value}) catch return error.OutOfMemory;
-        if (options.object_format != .sha1 or options.ref_format == .reftable) {
-            w.print("[extensions]\n", .{}) catch return error.OutOfMemory;
+        if (sharedSetting(shared, &shared_buf)) |value| {
+            try edits.append(gpa, .{ .set = .{ .name = "core.sharedrepository", .value = value } });
+            try edits.append(gpa, .{ .set = .{ .name = "receive.denyNonFastforwards", .value = "true" } });
         }
-        if (options.object_format != .sha1) {
-            w.print("\tobjectformat = {s}\n", .{options.object_format.name()}) catch return error.OutOfMemory;
-        }
-        if (options.ref_format == .reftable) {
-            w.print("\trefstorage = {s}\n", .{options.ref_format.name()}) catch return error.OutOfMemory;
-        }
-        if (shared != .umask) w.print("[receive]\n\tdenyNonFastforwards = true\n", .{}) catch return error.OutOfMemory;
-        try git_dir.writeFile(io, .{ .sub_path = "config", .data = config_text.written() });
-        fs.adjustShared(io, git_dir, "config", shared);
+        _ = config_write.editFile(gpa, io, git_dir, "config", .local, shared, edits.items) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // unreachable: every key is one of git's own, and the one file
+            // read is the one written
+            error.InvalidKey, error.NoWritableSource => unreachable,
+            else => |e| return e,
+        };
     }
 
     /// How `git init` writes a shared mode: `1` and `2` for the old names,
@@ -833,42 +838,6 @@ pub const Repository = struct {
             .everybody => "2",
             // unreachable: a u16 is at most six octal digits after the zero
             .mode => |m| std.mem.print(buf, "0{o}", .{m}) catch unreachable,
-        };
-    }
-
-    /// A template's configuration, carried on: git's `init` sets its own
-    /// values in it one by one, as `git config` would, a template's
-    /// `core.logallrefupdates` kept.
-    fn initTemplateConfig(gpa: Allocator, io: Io, git_dir: Io.Dir, options: InitOptions, version: u8, shared: fs.Shared) Error!void {
-        var config = try config_mod.Config.openFile(gpa, io, .{ .dir = git_dir, .sub_path = "config" }, .local, .{});
-        defer config.deinit();
-        const set = struct {
-            fn one(c: *config_mod.Config, name: []const u8, value: []const u8) Error!void {
-                c.set(name, value) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => return error.MalformedValue,
-                };
-            }
-        }.one;
-        if (options.object_format != .sha1) try set(&config, "extensions.objectformat", options.object_format.name());
-        if (options.ref_format != .files) try set(&config, "extensions.refstorage", options.ref_format.name());
-        var version_buf: [4]u8 = undefined;
-        // unreachable: a u8 is at most three digits
-        try set(&config, "core.repositoryformatversion", std.mem.print(&version_buf, "{d}", .{version}) catch unreachable);
-        try set(&config, "core.filemode", if (options.file_mode) "true" else "false");
-        try set(&config, "core.bare", if (options.bare) "true" else "false");
-        if (!options.bare and !config.has("core.logallrefupdates")) try set(&config, "core.logallrefupdates", "true");
-        if (!options.symlinks) try set(&config, "core.symlinks", "false");
-        if (options.ignore_case) try set(&config, "core.ignorecase", "true");
-        if (options.precompose_unicode) |p| try set(&config, "core.precomposeunicode", if (p) "true" else "false");
-        var shared_buf: [8]u8 = undefined;
-        if (sharedSetting(shared, &shared_buf)) |value| {
-            try set(&config, "core.sharedrepository", value);
-            try set(&config, "receive.denyNonFastforwards", "true");
-        }
-        config.write(io, git_dir, "config") catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.MalformedValue,
         };
     }
 
@@ -954,59 +923,148 @@ pub const Repository = struct {
         return @ptrCast(@alignCast(repo._refs)); // safe: finish allocates _refs as an aligned Store.
     }
 
-    /// The last published configuration, borrowed until an edit, refresh
-    /// or repository close. Edit through the repository to keep its stores
-    /// and configuration policy in agreement.
+    /// The last published configuration, borrowed until an edit, a write,
+    /// a refresh or the repository's close. Change it through the
+    /// repository (`writeConfig`, `editConfig`) to keep its stores and
+    /// configuration policy in agreement.
     pub fn configuration(repo: *const Repository) *const config_mod.Config {
         return config_owner.get(repo._config);
     }
 
-    pub const ConfigEdit = union(enum) {
-        set: struct { name: []const u8, value: []const u8, level: ?config_mod.Level = null },
-        unset: struct { name: []const u8, level: ?config_mod.Level = null },
-        remove_section: struct { section: []const u8, subsection: ?[]const u8 = null, level: config_mod.Level },
+    /// One change `writeConfig` makes to a configuration file.
+    pub const ConfigEdit = config_write.Edit;
+
+    /// Which of the repository's own configuration files `writeConfig`
+    /// writes.
+    pub const ConfigFile = enum {
+        /// `config` in the common directory, which every worktree shares.
+        local,
+        /// This worktree's own `config.worktree`; with
+        /// `extensions.worktreeConfig` off, the shared file, as git's
+        /// `repo_config_set_worktree_gently` falls back.
+        worktree,
     };
 
-    /// Apply a batch in memory, publishing only after every edit and the
-    /// resulting repository policy pass. No file is written. Format or
-    /// backend changes require reopening and retain the previous policy.
-    /// Changes to worktree configuration sources require a standalone
-    /// configuration write followed by refresh (`WorktreeConfigChanged`).
-    pub fn editConfig(repo: *Repository, edits: []const ConfigEdit, diagnostic: ?*Diagnostic) (Error || config_mod.Config.SetError)!void {
+    /// Errors from writing a configuration file.
+    pub const WriteConfigError = Error || config_write.Error;
+
+    /// What a configuration write did beside setting values.
+    pub const WriteOutcome = config_write.Outcome;
+
+    /// Persist `edits` to one of this repository's configuration files, as
+    /// git's `repo_config_set_multivar_in_file_gently` does, and publish
+    /// what the files then say.
+    ///
+    /// The file is read again under its lock and only `edits` are applied
+    /// to it, so what another process wrote since this repository read it
+    /// stays. Before the file is replaced the configuration it would leave
+    /// is read whole and checked as `refreshConfig` checks it: a change of
+    /// hash or ref backend (`ObjectFormatChanged`, `RefStorageChanged`), or
+    /// a setting `open` would refuse, writes nothing. Then the file keeps
+    /// its mode, is put in place, and that configuration is published,
+    /// memory-only edits replayed over it. `diagnostic`, when given, names
+    /// a refusal and is cleared on every call.
+    pub fn writeConfig(repo: *Repository, io: Io, file: ConfigFile, edits: []const ConfigEdit, diagnostic: ?*Diagnostic) WriteConfigError!WriteOutcome {
         diagnostic_mod.reset(diagnostic);
-        var next = try config_owner.copy(repo.gpa, repo.configuration());
-        errdefer next.deinit();
-        for (edits) |edit| switch (edit) {
-            .set => |e| if (e.level) |level| try next.setIn(level, e.name, e.value) else try next.set(e.name, e.value),
-            .unset => |e| if (e.level) |level| try next.unsetIn(level, e.name) else try next.unset(e.name),
-            .remove_section => |e| _ = try next.removeSectionIn(e.level, e.section, e.subsection),
+        const current = repo.configuration();
+        const worktree_file = file == .worktree and current.sources.worktree != null;
+        var pending = if (worktree_file)
+            try config_write.prepare(repo.gpa, io, repo.git_dir, "config.worktree", .worktree, repo.shared, edits)
+        else
+            try config_write.prepare(repo.gpa, io, repo.common_dir, "config", .local, repo.shared, edits);
+        defer pending.deinit(io);
+
+        var sources = current.sources;
+        if (!worktree_file) sources.local.?.contents = pending.contents();
+        // The format is the shared file's to say: the bytes about to land
+        // there, or the file as it is.
+        const format = if (worktree_file)
+            try repository_format.read(repo.gpa, io, repo.common_dir, diagnostic)
+        else
+            try repository_format.parse(repo.gpa, pending.contents(), diagnostic);
+        // `onbranch:` is decided against the branch `HEAD` is on now, as a
+        // refresh decides it.
+        const branch = try branchOf(repo.gpa, io, repo.refStore());
+        defer if (branch) |b| repo.gpa.free(b);
+        var context = current.context;
+        context.branch = branch;
+        var fresh = try repo.readConfig(io, sources, context, format, if (worktree_file) pending.contents() else null);
+        errdefer fresh.deinit();
+        const policy = try repo.checkConfig(&fresh, format, diagnostic);
+        pending.commit(io) catch |err| switch (err) {
+            error.WriteFailed => return error.WriteFailed,
+            else => |e| return e,
         };
-        const policy = try sharedConfigPolicy(&next, diagnostic);
-        // A memory-only edit cannot read or drop the worktree sources.
-        // Refresh owns that filesystem transition after a standalone write.
-        if (policy.worktree_config != (repo.configuration().sources.worktree != null)) {
-            try refuseSetting(diagnostic, "extensions.worktreeConfig");
-            return error.WorktreeConfigChanged;
-        }
-        try repo.publishConfig(next, policy.format, diagnostic);
+        repo.installConfig(fresh, policy);
+        return pending.outcome;
     }
 
-    fn sharedConfigPolicy(config: *const config_mod.Config, diagnostic: ?*Diagnostic) Error!struct { format: RepositoryFormat, worktree_config: bool } {
-        var entries: std.ArrayList(config_mod.Entry) = .empty;
-        defer entries.deinit(config.gpa);
-        for (config.entries.items) |entry| {
-            if (entry.level != .worktree) try entries.append(config.gpa, entry);
-        }
-        // Only the entry array belongs to this view; all file bytes remain
-        // borrowed for the check. Worktree settings have no say in format
-        // or in whether their own source is read, just as during open.
-        var shared = config.*;
-        shared.entries = entries;
-        const format = try repository_format.decide(&shared, diagnostic);
-        return .{ .format = format, .worktree_config = format.worktree_config };
+    /// Persist `edits` to a configuration file that is not this
+    /// repository's own: a submodule's under `modules/`, or the main
+    /// worktree's `config.worktree` seen from a linked one. The file is
+    /// read again under its lock and given this repository's permissions,
+    /// as `writeConfig` does; what this repository publishes is unchanged.
+    pub fn writeConfigFile(repo: *const Repository, io: Io, dir: Io.Dir, sub_path: []const u8, edits: []const ConfigEdit) config_write.Error!WriteOutcome {
+        return config_write.editFile(repo.gpa, io, dir, sub_path, .local, repo.shared, edits);
     }
 
-    fn publishConfig(repo: *Repository, next: config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) Error!void {
+    /// Set `values` in memory, over every file and every `-c` value given
+    /// at open, as later `-c` values are: never written, and kept through
+    /// `refreshConfig` and `writeConfig`, which read them after the files.
+    /// A name set again replaces what memory held for it. No file is read:
+    /// the published configuration takes the values, and the whole batch is
+    /// checked as `open` checks a configuration before it replaces the one
+    /// published. The repository's format is its own file's to say, so a
+    /// value for `core.repositoryFormatVersion` or an `extensions.*` is
+    /// refused (`FormatEditInMemory`); `writeConfig` writes one.
+    pub fn editConfig(repo: *Repository, io: Io, values: []const config_mod.Sources.Pair, diagnostic: ?*Diagnostic) (Error || config_mod.Config.SetError)!void {
+        diagnostic_mod.reset(diagnostic);
+        for (values) |value| {
+            const key = try config_mod.checkKey(value.name);
+            const format_key = (std.ascii.eqlIgnoreCase(key.section, "extensions") and key.subsection == null) or
+                (std.ascii.eqlIgnoreCase(key.section, "core") and key.subsection == null and std.ascii.eqlIgnoreCase(key.name, "repositoryformatversion"));
+            if (format_key) {
+                try refuseSetting(diagnostic, value.name);
+                return error.FormatEditInMemory;
+            }
+        }
+        const current = repo.configuration();
+        var pairs: std.ArrayList(config_mod.Sources.Pair) = .empty;
+        defer pairs.deinit(repo.gpa);
+        for (current.sources.pairs) |pair| {
+            const replaced = for (values) |value| {
+                if (sameKey(pair.name, value.name)) break true;
+            } else false;
+            if (!replaced) try pairs.append(repo.gpa, pair);
+        }
+        try pairs.appendSlice(repo.gpa, values);
+        var next = try current.withCommandValues(io, current.sources.command, pairs.items);
+        errdefer next.deinit();
+        const format: RepositoryFormat = .{ .kind = repo.objectFormat(), .ref_storage = repo.refStore().refFormat() };
+        try repo.publishConfig(next, format, diagnostic);
+    }
+
+    /// Whether two full names are one key: section and name without case,
+    /// the subsection exactly, as git compares them.
+    fn sameKey(a: []const u8, b: []const u8) bool {
+        const x = config_mod.splitFullName(a) orelse return false;
+        const y = config_mod.splitFullName(b) orelse return false;
+        if (!std.ascii.eqlIgnoreCase(x.section, y.section) or !std.ascii.eqlIgnoreCase(x.name, y.name)) return false;
+        const xs = x.subsection orelse return y.subsection == null;
+        const ys = y.subsection orelse return false;
+        return std.mem.eql(u8, xs, ys);
+    }
+
+    /// What publishing a configuration changes beside it: the ref store's
+    /// write policy, checked before anything is replaced.
+    const ConfigPolicy = struct {
+        ref_options: reftablestack.Options,
+    };
+
+    /// Whether `next` may be published, and the policy it sets: the same
+    /// hash and ref backend the repository was opened with, and settings
+    /// the stores can take.
+    fn checkConfig(repo: *const Repository, next: *const config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) Error!ConfigPolicy {
         if (format.kind != repo.objectFormat()) {
             try refuseSetting(diagnostic, "extensions.objectFormat");
             return error.ObjectFormatChanged;
@@ -1015,13 +1073,22 @@ pub const Repository = struct {
             try refuseSetting(diagnostic, "extensions.refStorage");
             return error.RefStorageChanged;
         }
-        const ref_options = if (format.ref_storage == .reftable)
-            try reftableOptions(&next)
+        return .{ .ref_options = if (format.ref_storage == .reftable)
+            try reftableOptions(next)
         else
-            repo.refStore().reftableOptions();
+            repo.refStore().reftableOptions() };
+    }
+
+    /// Replace the published configuration with `next`, which it takes,
+    /// and the policy `checkConfig` gave for it.
+    fn installConfig(repo: *Repository, next: config_mod.Config, policy: ConfigPolicy) void {
         config_owner.get(repo._config).deinit();
         config_owner.get(repo._config).* = next;
-        repo.refStore().configureReftable(ref_options);
+        repo.refStore().configureReftable(policy.ref_options);
+    }
+
+    fn publishConfig(repo: *Repository, next: config_mod.Config, format: RepositoryFormat, diagnostic: ?*Diagnostic) Error!void {
+        repo.installConfig(next, try repo.checkConfig(&next, format, diagnostic));
     }
 
     /// Whether the repository has a working tree.
@@ -1450,8 +1517,8 @@ pub const Repository = struct {
     /// A repository with a working tree defaults to writing logs for
     /// branches; a bare one defaults to writing them only where one already
     /// exists, which is git's rule.
-    pub fn reflogPolicy(repo: *const Repository) reflog.Policy {
-        if (repo.configuration().get("core.logallrefupdates")) |text| return reflog.Policy.parse(text);
+    pub fn reflogPolicy(repo: *const Repository) refs_mod.LogPolicy {
+        if (repo.configuration().get("core.logallrefupdates")) |text| return refs_mod.LogPolicy.parse(text);
         return if (repo.isBare()) .existing_only else .standard;
     }
 
@@ -1474,7 +1541,7 @@ pub const Repository = struct {
     }
 
     /// A ref's log, oldest first, whichever format the refs are kept in.
-    pub fn readLog(repo: *Repository, io: Io, name: []const u8) (refs_mod.ReadError || reflog.ReadError)!reflog.Log {
+    pub fn readLog(repo: *Repository, io: Io, name: []const u8) (refs_mod.ReadError || refs_mod.LogReadError)!refs_mod.Log {
         return repo.refStore().readLog(repo.gpa, io, name);
     }
 

@@ -20,7 +20,6 @@
 //! repository, with the permission to run them. Without one a read of a
 //! promised object is `error.ObjectNotFound`, as in any other repository.
 
-const config_state = @import("../config/state.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -79,13 +78,15 @@ pub fn promisorRemotes(arena: Allocator, config: *const config_mod.Config) Alloc
 /// Write into `repo`'s configuration what a server's `promisor-remote`
 /// was answered with storing (`promisor.storeFields`), saying each as git
 /// says it.
-pub fn storeAdvertised(io: Io, repo: *Repository, stores: []const promisors.Store, warnings: ?*warning.Warnings) (repo_mod.Error || config_mod.Config.SetError)!void {
+pub fn storeAdvertised(io: Io, repo: *Repository, stores: []const promisors.Store, warnings: ?*warning.Warnings) Repository.WriteConfigError!void {
     if (stores.len == 0) return;
     var arena_state: std.heap.ArenaAllocator = .init(repo.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const edits = try arena.alloc(Repository.ConfigEdit, stores.len);
+    for (stores, edits) |store, *edit| edit.* = .{ .set = .{ .name = try store.key(arena), .value = store.new } };
+    _ = try repo.writeConfig(io, .local, edits, null);
     for (stores) |store| {
-        try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = try store.key(arena), .value = store.new } }}, null);
         try warning.note(warnings, .{ .promisor_stored = .{
             .field = switch (store.field) {
                 .partial_clone_filter => "filter",
@@ -96,7 +97,6 @@ pub fn storeAdvertised(io: Io, repo: *Repository, stores: []const promisors.Stor
             .new = store.new,
         } });
     }
-    try config_state.writeLocal(repo._config, io);
 }
 
 /// Whether `name` is a promisor remote of `config`'s repository: one
@@ -266,8 +266,7 @@ pub const Lazy = struct {
             var buf: [256]u8 = undefined;
             const key = try std.mem.print(&buf, "remote.{s}.partialclonefilter", .{name});
             if (repo.configuration().get(key) == null) {
-                try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = key, .value = "blob:none" } }}, null);
-                try config_state.writeLocal(repo._config, io);
+                _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = key, .value = "blob:none" } }}, null);
             }
         }
         var remote = try remote_mod.Remote.get(l.gpa, repo.configuration(), name);

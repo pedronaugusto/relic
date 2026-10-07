@@ -43,7 +43,6 @@ const config_mod = @import("../config.zig");
 const repo_mod = @import("../repo.zig");
 const refs_mod = @import("../refs.zig");
 const diagnostic = @import("../repo/diagnostic.zig");
-const state = @import("../config/state.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -1134,14 +1133,15 @@ test "sequencer signing policy refuses malformed values, and reads one without t
     defer tmp.cleanup();
     var r = try Repository.init(gpa, io, tmp.dir, .{});
     defer r.deinit(io);
-    try r.editConfig(&.{.{ .set = .{ .name = "commit.gpgsign", .value = "maybe" } }}, null);
+    try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "maybe" }}, null);
     try std.testing.expectError(error.NotABoolean, Read.run(&r, .{}));
     try std.testing.expect(try Read.run(&r, .{ .sign = .always }));
     try std.testing.expect(!try Read.run(&r, .{ .sign = .never }));
-    try r.editConfig(&.{.{ .set = .{ .name = "commit.gpgsign", .value = "true" } }}, null);
+    try r.editConfig(io, &.{.{ .name = "commit.gpgsign", .value = "true" }}, null);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    state.get(r._config).gpa = failing.allocator();
-    defer state.get(r._config).gpa = gpa;
+    const config_gpa = repo_mod.test_access.configAllocator(&r);
+    config_gpa.* = failing.allocator();
+    defer config_gpa.* = gpa;
     try std.testing.expect(try Read.run(&r, .{}));
 }
 

@@ -11,7 +11,7 @@ const hash = @import("../hash.zig");
 const fs = @import("../repo/fs.zig");
 const odb_mod = @import("../odb.zig");
 const index_mod = @import("../index.zig");
-const reflog = @import("../refs/reflog.zig");
+const refs_mod = @import("../refs.zig");
 
 const Oid = hash.Oid;
 
@@ -243,14 +243,15 @@ test "concurrent reflog appends preserve every complete line" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "logs/refs/heads");
-    try tmp.dir.writeFile(io, .{ .sub_path = "logs/refs/heads/main", .data = "" });
+    var store = try refs_mod.Store.init(gpa, .sha1, tmp.dir, tmp.dir);
+    defer store.deinit();
+    try store.createLog(gpa, io, "refs/heads/main");
 
     const ThreadContext = struct {
         const Self = @This();
 
         io: Io,
-        dir: Io.Dir,
+        store: *const refs_mod.Store,
         start: *Io.Event,
         failed: *std.atomic.Value(bool),
         old: Oid,
@@ -262,16 +263,11 @@ test "concurrent reflog appends preserve every complete line" {
                 return;
             };
             for (0..100) |_| {
-                reflog.append(
-                    std.heap.page_allocator,
-                    ctx.io,
-                    ctx.dir,
-                    "refs/heads/main",
-                    ctx.old,
-                    ctx.new,
-                    .{ .name = "Writer", .email = "writer@example.com", .when_secs = 1, .offset_minutes = 0 },
-                    "update",
-                ) catch {
+                ctx.store.appendLog(std.heap.page_allocator, ctx.io, "refs/heads/main", ctx.old, ctx.new, .{
+                    .who = .{ .name = "Writer", .email = "writer@example.com", .when_secs = 1, .offset_minutes = 0 },
+                    .message = "update",
+                    .policy = .existing_only,
+                }) catch {
                     ctx.failed.store(true, .release);
                     return;
                 };
@@ -283,14 +279,14 @@ test "concurrent reflog appends preserve every complete line" {
     const new = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
     var start: Io.Event = .unset;
     var failed: std.atomic.Value(bool) = .init(false);
-    var context: ThreadContext = .{ .io = io, .dir = tmp.dir, .start = &start, .failed = &failed, .old = old, .new = new };
+    var context: ThreadContext = .{ .io = io, .store = &store, .start = &start, .failed = &failed, .old = old, .new = new };
     var threads: [8]std.Thread = undefined;
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, ThreadContext.run, .{&context});
     start.set(io);
     for (threads) |thread| thread.join();
     try std.testing.expectEqual(false, failed.load(.acquire));
 
-    var log = try reflog.read(gpa, io, tmp.dir, "refs/heads/main", .sha1);
+    var log = try store.readLog(gpa, io, "refs/heads/main");
     defer log.deinit();
     try std.testing.expectEqual(@as(usize, 800), log.entries.len);
 }

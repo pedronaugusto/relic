@@ -57,6 +57,13 @@ const max_config_bytes = 1 << 24;
 pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, diagnostic: ?*Diagnostic) Self.ReadError!Format {
     const text = (try fs.readFileAlloc(gpa, io, common_dir, "config", max_config_bytes)) orelse return .{};
     defer gpa.free(text);
+    return parse(gpa, text, diagnostic);
+}
+
+/// Decide the format from the text of a repository's own `config`: what
+/// `read` decides once it has the file, and what a write about to replace
+/// the file would leave.
+pub fn parse(gpa: Allocator, text: []const u8, diagnostic: ?*Diagnostic) (Self.Error || config_mod.ParseError)!Format {
     var config = try config_mod.Config.parseText(gpa, text, .local);
     defer config.deinit();
     return decide(&config, diagnostic);

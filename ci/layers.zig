@@ -70,7 +70,6 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/worktree/attributes.zig",
         "src/transport/auth.zig",
         "src/odb/commitgraph.zig",
-        "src/config/write.zig",
         "src/transport/connection.zig",
         "src/worktree/dirscan.zig",
         "src/testing/filter.zig",
@@ -110,6 +109,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/repo/ident.zig",
         "src/diff/userdiff.zig",
         "src/config/state.zig",
+        "src/config/write.zig",
         "src/transport/credential.zig",
         "src/repo/hooks.zig",
         "src/transport/httpsettings.zig",
@@ -388,10 +388,15 @@ pub const required = blk: {
     break :blk paths;
 };
 
+/// Test code, which may spell any file's name to compare it with git's.
+const tests = [_][]const u8{ "src/testing/**", "src/**/*_test.zig" };
+
 /// Tokens only their owners may spell: starting and waiting on processes is
-/// conduit's, this package's Windows declarations live in one file, and
-/// the ref-name rules and the root and special refs' names live in
-/// `names/ref.zig`.
+/// conduit's, this package's Windows declarations live in one file, the
+/// ref-name rules and the root and special refs' names live in
+/// `names/ref.zig`, where a ref store keeps its refs and logs (`logs/`,
+/// `packed-refs`, a reftable stack) is the store's to name, and
+/// `refs/stash` is the stash's.
 pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "process owner", .tokens = &.{ "waitpid", "wait4", "execve", "posix_spawn", "setsid", "CreateProcessW" } },
     // the ssh stand-in is another program, holding its handles as ssh does
@@ -404,15 +409,36 @@ pub const owned: []const gantry.rules.TokenRule = &.{
         .name = "root and special ref names",
         .kind = .string,
         .tokens = &.{ "ORIG_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "AUTO_MERGE", "BISECT_HEAD", "BISECT_EXPECTED_REV", "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "FETCH_HEAD", "MERGE_HEAD" },
-        .owners = &.{ "src/names/ref.zig", "src/testing/**", "src/*_test.zig", "src/**/*_test.zig" },
+        .owners = &[_][]const u8{"src/names/ref.zig"} ++ tests,
     },
-    // where a ref store keeps its refs is the store's to name
-    .{
-        .name = "ref storage names",
-        .kind = .string,
-        .tokens = &.{ "reftable", "tables.list", "packed-refs" },
-        .owners = &.{ "src/refs.zig", "src/refs/**", "src/testing/**", "src/*_test.zig", "src/**/*_test.zig" },
-    },
+    // where a ref store keeps its refs and their logs is the store's to name
+    .{ .name = "ref storage names", .kind = .string, .tokens = &.{ "reftable", "tables.list", "packed-refs" }, .owners = &[_][]const u8{ "src/refs.zig", "src/refs/**" } ++ tests },
+    .{ .name = "reflog files owner", .kind = .string, .tokens = &.{ "logs", "logs/*" }, .owners = &[_][]const u8{ "src/refs.zig", "src/refs/**" } ++ tests },
+    .{ .name = "stash ref owner", .kind = .string, .tokens = &.{"refs/stash"}, .owners = &[_][]const u8{"src/commit/stash.zig"} ++ tests },
+    // the published configuration is the repository's to replace
+    .{ .name = "configuration owner", .tokens = &.{"_config"}, .owners = &[_][]const u8{"src/repo.zig"} ++ tests },
+};
+
+/// Modules private to the namespace that owns them: no file outside it
+/// imports one in production, so nothing can go around the owner. The
+/// files backend's logs and `packed-refs` are reached through `refs.Store`,
+/// and a configuration file is written through `Repository.writeConfig`.
+pub const private: []const gantry.rules.EdgeRule = &.{
+    .{ .name = "refs internals", .to = "src/refs/reflog.zig", .kind = .import },
+    .{ .name = "refs internals", .to = "src/refs/packed.zig", .kind = .import },
+    .{ .name = "configuration writes", .to = "src/config/write.zig", .kind = .import },
+    .{ .name = "configuration owner", .to = "src/config/state.zig", .kind = .import },
+};
+
+/// Who may import each private module: its namespace.
+pub const private_owners: []const gantry.rules.Allow = &.{
+    .{ .rule = "refs internals", .from = "src/refs.zig" },
+    .{ .rule = "refs internals", .from = "src/refs/**" },
+    .{ .rule = "configuration writes", .from = "src/config.zig" },
+    .{ .rule = "configuration writes", .from = "src/config/**" },
+    .{ .rule = "configuration writes", .from = "src/repo.zig" },
+    .{ .rule = "configuration writes", .from = "src/repo/**" },
+    .{ .rule = "configuration owner", .from = "src/repo.zig" },
 };
 
 /// Namespace reexports added when each facade was folded into its implementation.

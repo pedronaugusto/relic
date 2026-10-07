@@ -1,8 +1,8 @@
 //! relic — read and write a git repository from Zig.
 //!
 //! The API is one module per concern, and each of those holds the modules
-//! that belong to it: `relic.refs` is refs and their transactions, and
-//! `relic.refs.reflog` is the log beside them.
+//! that belong to it: `relic.refs` is refs, their transactions and the
+//! logs beside them, and `relic.refs.reftable` is the table format.
 //!
 //! | Module | What it is | Under it |
 //! |---|---|---|
@@ -10,7 +10,7 @@
 //! | `hash` | `Oid`, `Kind`, `Hasher`: object names, SHA-1 or SHA-256. | `sha1`, `sha1dc` |
 //! | `object` | `Commit`, `Tree`, `Tag`, `Signature`: objects as bytes. | `fsck` |
 //! | `odb` | `Odb`: loose objects, packs, alternates. | `pack`, `delta`, `inflate`, `indexpack`, `revindex`, `commitgraph`, `midx`, `bitmap`, `accelerators`, `abbrev` |
-//! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs`, listed, sorted and formatted. | `reflog`, `reftable`, `reftablestack`, `filter`, `names` |
+//! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs` or a reftable stack, their logs, listed, sorted and formatted. | `reftable`, `reftablestack`, `filter`, `names` |
 //! | `config` | `Config`: git's configuration files, lossless. | `userconfig` |
 //! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex` |
 //! | `worktree` | Staging, writing a tree, checking one out, status. | `snapshot`, `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `safepath` |

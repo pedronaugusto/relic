@@ -91,10 +91,10 @@ const lfsssh = @import("ssh.zig");
 const httpclient = @import("../transport/httpclient.zig");
 const clientcert = @import("../transport/clientcert.zig");
 const tls = @import("../transport/tls.zig");
-const config_state = @import("../config/state.zig");
 const refs_mod = @import("../refs.zig");
 
 const Config = config_mod.Config;
+const assert = std.debug.assert;
 
 /// What a request is for. The API has one endpoint for each, and git-lfs's
 /// `lfs.pushurl` and `lfspushurl` apply to `upload` alone.
@@ -1179,18 +1179,22 @@ pub const Client = struct {
 
     /// Write what the server taught to `repo`'s own configuration under
     /// git-lfs's keys, as git-lfs writes them, so the next operation — this
-    /// package's or git-lfs's — starts from it. A value already set is left
-    /// alone.
-    pub fn remember(c: *Client, io: Io, repo: *repo_mod.Repository) config_mod.Config.SetError!void {
-        var changed = false;
+    /// package's or git-lfs's — starts from it: `repo.writeConfig`, which
+    /// writes those keys and nothing else. A value the configuration holds
+    /// already is not written again.
+    pub fn remember(c: *Client, io: Io, repo: *repo_mod.Repository) repo_mod.Repository.WriteConfigError!void {
+        var edits: std.ArrayList(repo_mod.Repository.ConfigEdit) = .empty;
+        defer edits.deinit(c.gpa);
         for (c.learned.items) |l| {
+            // Only git-lfs's own settings are learned: nothing a server
+            // says reaches the repository's format or its other policy.
+            assert(std.mem.startsWith(u8, l.key, "lfs."));
             if (repo.configuration().get(l.key)) |existing| {
                 if (std.mem.eql(u8, existing, l.value)) continue;
             }
-            try config_state.rememberLfs(repo._config, l.key, l.value);
-            changed = true;
+            try edits.append(c.gpa, .{ .set = .{ .name = l.key, .value = l.value } });
         }
-        if (changed) try config_state.writeLocal(repo._config, io);
+        if (edits.items.len != 0) _ = try repo.writeConfig(io, .local, edits.items, null);
     }
 
     /// Describe a request that failed for want of a credential, or that the

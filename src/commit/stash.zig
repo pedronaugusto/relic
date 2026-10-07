@@ -36,7 +36,6 @@ const hash = @import("../hash.zig");
 const object = @import("../object.zig");
 const index_mod = @import("../index.zig");
 const refs_mod = @import("../refs.zig");
-const reflog = @import("../refs/reflog.zig");
 const repo_mod = @import("../repo.zig");
 const worktree = @import("../worktree.zig");
 const merge = @import("../merge.zig");
@@ -89,7 +88,7 @@ pub const Error = error{
     /// would record as a submodule. `Refusal` names it.
     NestedRepository,
 } || repo_mod.Error || refs_mod.TransactionError || worktree.Error || merge.Error ||
-    diff.Error || hooks.Error || reflog.ReadError || fs.LockError || fs.CommitError ||
+    diff.Error || hooks.Error || refs_mod.LogReadError || fs.LockError || fs.CommitError ||
     ignore.Error || attributes.Error || convert.Error || error{NameTooLong};
 
 /// Where a refusal writes the path it is about.
@@ -182,7 +181,7 @@ pub const Entry = struct {
 /// Every stash, newest first: `stash@{0}` is `entries[0]`.
 pub const List = struct {
     gpa: Allocator,
-    log: reflog.Log,
+    log: refs_mod.Log,
     entries: []Entry,
 
     /// Release the list.
@@ -227,7 +226,7 @@ pub const Applied = struct {
 /// Every stash, newest first.
 pub fn list(io: Io, repo: *Repository) Self.Error!List {
     const gpa = repo.gpa;
-    var log = try reflog.read(gpa, io, repo.common_dir, ref_name, repo.objectFormat());
+    var log = try repo.refStore().readLog(gpa, io, ref_name);
     errdefer log.deinit();
     const entries = try gpa.alloc(Entry, log.entries.len);
     for (entries, 0..) |*e, i| {
@@ -500,7 +499,7 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
 
     // A log that is gone with its ref still there is cleared first, as git
     // does, so the new stash starts a list rather than joining a broken one.
-    if (!try reflog.exists(gpa, io, repo.common_dir, ref_name)) {
+    if (!try repo.refStore().logExists(gpa, io, ref_name)) {
         if (try repo.refStore().read(arena, io, ref_name)) |_| try clear(io, repo, .{ .hooks = options.hooks });
     }
 
@@ -1060,57 +1059,42 @@ pub const DropOptions = struct {
     hooks: ?*hooks.Runner = null,
 };
 
-/// `git stash drop stash@{n}`: take the line out of the list, and move
-/// `refs/stash` if the newest one went. The line after it takes the dropped
-/// one's old value, so the log still reads as a chain, which is what git's
-/// `reflog delete --rewrite` does. Returns the commit dropped.
+/// `git stash drop stash@{n}`: take the entry out of the list, and move
+/// `refs/stash` if the newest one went. The entry after it takes the
+/// dropped one's old value, so the log still reads as a chain, which is
+/// git's `reflog delete --updateref --rewrite`; like it, that runs no
+/// `reference-transaction` hook. The last stash dropped takes `refs/stash`
+/// with it, as `clear` does. Returns the commit dropped.
 pub fn drop(io: Io, repo: *Repository, n: usize, options: DropOptions) Self.Error!Oid {
     const gpa = repo.gpa;
-    var ref_buffer: [256]u8 = undefined;
-    var ref_lock = try fs.LockFile.open(gpa, io, repo.common_dir, ref_name, &ref_buffer, .{ .shared = repo.shared });
-    var ref_held = true;
-    defer if (ref_held) ref_lock.deinit(io);
-
-    const log_path = "logs/" ++ ref_name;
-    const bytes = (try fs.readFileAlloc(gpa, io, repo.common_dir, log_path, 1 << 30)) orelse return error.NoSuchStash;
-    defer gpa.free(bytes);
-    var lines: std.ArrayList([]const u8) = .empty;
-    defer lines.deinit(gpa);
-    var split = std.mem.splitScalar(u8, bytes, '\n');
-    while (split.next()) |line| if (line.len != 0) try lines.append(gpa, line);
-    if (n >= lines.items.len) return error.NoSuchStash;
-
-    const hex_len = repo.objectFormat().hexLen();
-    const gone_at = lines.items.len - 1 - n;
-    const gone_line = lines.items[gone_at];
-    if (gone_line.len < 2 * hex_len + 1) return error.MalformedReflogEntry;
-    const dropped = Oid.parse(repo.objectFormat(), gone_line[hex_len + 1 .. 2 * hex_len + 1]) catch return error.MalformedReflogEntry;
-    _ = lines.orderedRemove(gone_at);
-
-    if (lines.items.len == 0) {
-        ref_lock.deinit(io);
-        ref_held = false;
-        try clear(io, repo, .{ .hooks = options.hooks });
-        return dropped;
+    {
+        var l = try list(io, repo);
+        defer l.deinit();
+        if (n >= l.entries.len) return error.NoSuchStash;
     }
-
-    var log_buffer: [4096]u8 = undefined;
-    var log_lock = try fs.LockFile.open(gpa, io, repo.common_dir, log_path, &log_buffer, .{ .shared = repo.shared });
-    defer log_lock.deinit(io);
-    var last_kept = Oid.zero(repo.objectFormat());
-    var hex: [hash.max_hex_len]u8 = undefined;
-    for (lines.items) |line| {
-        if (line.len < 2 * hex_len + 1) return error.MalformedReflogEntry;
-        log_lock.writer().print("{s}{s}\n", .{ last_kept.hex(&hex), line[hex_len..] }) catch return error.WriteFailed;
-        last_kept = Oid.parse(repo.objectFormat(), line[hex_len + 1 .. 2 * hex_len + 1]) catch return error.MalformedReflogEntry;
-    }
-    try log_lock.commit(io);
-    if (n == 0) {
-        ref_lock.writer().print("{s}\n", .{last_kept.hex(&hex)}) catch return error.WriteFailed;
-        try ref_lock.commit(io);
-    }
+    var dropping: Dropping = .{ .n = n };
+    try repo.refStore().expireLog(gpa, io, ref_name, .{ .rewrite = true, .update_ref = true }, &dropping);
+    // Another process may have dropped it first.
+    const dropped = dropping.dropped orelse return error.NoSuchStash;
+    if (dropping.remaining == 0) try clear(io, repo, options);
     return dropped;
 }
+
+/// Which entry of the list `drop` takes out, and what it learns doing so.
+const Dropping = struct {
+    n: usize,
+    dropped: ?Oid = null,
+    remaining: usize = 0,
+
+    pub fn keep(d: *Dropping, entry: refs_mod.LogEntry, nth: usize) bool {
+        if (nth != d.n) {
+            d.remaining += 1;
+            return true;
+        }
+        d.dropped = entry.new;
+        return false;
+    }
+};
 
 /// `git stash clear`: remove `refs/stash` and the list with it.
 pub fn clear(io: Io, repo: *Repository, options: DropOptions) Self.Error!void {

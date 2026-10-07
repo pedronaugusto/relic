@@ -12,6 +12,8 @@ const Io = std.Io;
 
 const testgit = @import("git.zig");
 const repo_mod = @import("../repo.zig");
+const sparsecheckout = @import("../worktree/sparsecheckout.zig");
+const lfsapi = @import("../lfs/api.zig");
 
 const Repository = repo_mod.Repository;
 const testing = std.testing;
@@ -298,4 +300,126 @@ test "includeIf gitdir:, gitdir/i: and onbranch: in ~/.gitconfig hold for a repo
     try testing.expect(try repo.refreshConfig(io, null));
     try expectValue(&repo, "test.feature", null);
     try expectIncludesAgree(gpa, io, proj, home, &repo);
+}
+
+test "a value set in memory stays through a refresh and a write, and never reaches the disk" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
+    defer repo.deinit(io);
+    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, null);
+    try git.exec(io, &.{ "config", "fixture.external", "yes" });
+    try testing.expect(try repo.refreshConfig(io, null));
+    try expectValue(&repo, "fixture.memory", "only");
+    try expectValue(&repo, "fixture.external", "yes");
+    // memory's value beats the files', as a later `-c` would
+    try git.exec(io, &.{ "config", "fixture.memory", "file" });
+    try testing.expect(try repo.refreshConfig(io, null));
+    try expectValue(&repo, "fixture.memory", "only");
+    // set again, it replaces what memory held
+    try repo.editConfig(io, &.{.{ .name = "Fixture.Memory", .value = "again" }}, null);
+    try expectValue(&repo, "fixture.memory", "again");
+    const values = try repo.configuration().all("fixture.memory");
+    defer gpa.free(values);
+    try testing.expectEqual(@as(usize, 2), values.len);
+    try testing.expectEqualStrings("file", values[0]);
+    try testing.expectEqualStrings("again", values[1]);
+    _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.written", .value = "yes" } }}, null);
+    try expectValue(&repo, "fixture.memory", "again");
+    const file = try git.run(io, &.{ "config", "--file", ".git/config", "--get-regexp", "^fixture\\." });
+    defer gpa.free(file);
+    try testing.expectEqualStrings("fixture.external yes\nfixture.memory file\nfixture.written yes\n", file);
+}
+
+test "a write keeps what another process wrote since open, and the repository reads it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
+    defer repo.deinit(io);
+    try git.exec(io, &.{ "config", "fixture.external", "yes" });
+    try git.exec(io, &.{ "config", "--add", "fixture.many", "one" });
+    _ = try repo.writeConfig(io, .local, &.{
+        .{ .set = .{ .name = "fixture.written", .value = "yes" } },
+        .{ .unset = .{ .name = "core.logallrefupdates" } },
+    }, null);
+    const file = try git.run(io, &.{ "config", "--file", ".git/config", "--get-regexp", "^(fixture|core\\.logallrefupdates)" });
+    defer gpa.free(file);
+    try testing.expectEqualStrings("fixture.external yes\nfixture.many one\nfixture.written yes\n", file);
+    try expectValue(&repo, "fixture.external", "yes");
+    try expectValue(&repo, "fixture.written", "yes");
+    try expectValue(&repo, "core.logallrefupdates", null);
+    try testing.expect(!try repo.refreshConfig(io, null));
+}
+
+test "a worktree write falls back to the shared file while extensions.worktreeConfig is off, as git's does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
+    defer repo.deinit(io);
+    _ = try repo.writeConfig(io, .worktree, &.{.{ .set = .{ .name = "fixture.where", .value = "shared" } }}, null);
+    try testing.expectError(error.FileNotFound, git.dir.access(io, ".git/config.worktree", .{}));
+    const shared = try git.run(io, &.{ "config", "--file", ".git/config", "fixture.where" });
+    defer gpa.free(shared);
+    try testing.expectEqualStrings("shared\n", shared);
+
+    // With it on, the worktree's own file, which git reads over the shared one.
+    _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "extensions.worktreeConfig", .value = "true" } }}, null);
+    _ = try repo.writeConfig(io, .worktree, &.{.{ .set = .{ .name = "fixture.where", .value = "worktree" } }}, null);
+    const own = try git.run(io, &.{ "config", "--file", ".git/config.worktree", "fixture.where" });
+    defer gpa.free(own);
+    try testing.expectEqualStrings("worktree\n", own);
+    const seen = try git.run(io, &.{ "config", "fixture.where" });
+    defer gpa.free(seen);
+    try testing.expectEqualStrings("worktree\n", seen);
+    try expectValue(&repo, "fixture.where", "worktree");
+}
+
+test "sparse-checkout leaves the repository's configuration what the files say" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "a/f", "a\n");
+    try git.writeFile(io, "b/f", "b\n");
+    try git.exec(io, &.{ "add", "." });
+    try git.exec(io, &.{ "commit", "-q", "-m", "one" });
+    var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
+    defer repo.deinit(io);
+    try expectValue(&repo, "core.sparsecheckout", null);
+    _ = try sparsecheckout.set(io, &repo, &.{"a"}, .{});
+    try expectValue(&repo, "extensions.worktreeconfig", "true");
+    try expectValue(&repo, "core.sparsecheckout", "true");
+    try expectValue(&repo, "core.sparsecheckoutcone", "true");
+    try testing.expect(repo.configuration().sources.worktree != null);
+    try testing.expect(!try repo.refreshConfig(io, null));
+    _ = try sparsecheckout.disable(io, &repo);
+    try expectValue(&repo, "core.sparsecheckout", "false");
+    try testing.expect(!try repo.refreshConfig(io, null));
+}
+
+test "what an LFS server teaches is written without another process's settings lost or memory's written" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
+    defer repo.deinit(io);
+    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, null);
+    try git.exec(io, &.{ "config", "fixture.external", "yes" });
+    const settings: lfsapi.Settings = .{ .gpa = gpa, .config = repo.configuration() };
+    var client = try lfsapi.Client.init(gpa, io, &settings, "origin", .{}, .{});
+    defer client.deinit();
+    try client.learnLocksVerify("https://example.com/project", false);
+    try client.remember(io, &repo);
+    const file = try git.run(io, &.{ "config", "--file", ".git/config", "--get-regexp", "^(fixture|lfs)\\." });
+    defer gpa.free(file);
+    try testing.expectEqualStrings("fixture.external yes\nlfs.https://example.com/project.locksverify false\n", file);
+    try expectValue(&repo, "lfs.https://example.com/project.locksverify", "false");
+    try expectValue(&repo, "fixture.memory", "only");
 }

@@ -326,13 +326,13 @@ pub fn add(
     try writeLine(io, admin, "gitdir", gitfile_path);
 
     try refs_mod.create(io, admin, refs.refFormat(), .{ .worktree = true, .shared = refs.sharedPermissions() });
+    var own = try refs_mod.Store.initWithOptions(gpa, refs.objectFormat(), admin, common_dir, .{
+        .format = refs.refFormat(),
+        .reftable = refs.reftableOptions(),
+        .shared = refs.sharedPermissions(),
+    });
+    defer own.deinit();
     {
-        var own = try refs_mod.Store.initWithOptions(gpa, refs.objectFormat(), admin, common_dir, .{
-            .format = refs.refFormat(),
-            .reftable = refs.reftableOptions(),
-            .shared = refs.sharedPermissions(),
-        });
-        defer own.deinit();
         var tx = own.begin(gpa);
         defer tx.deinit(io);
         if (options.detach_at) |oid| {
@@ -347,17 +347,10 @@ pub fn add(
         try tx.commit(io, null);
     }
 
-    // git creates the log directory and an empty `logs/HEAD` so the first
-    // ref update in the new worktree has somewhere to go. A reftable stack
-    // keeps its logs in its tables.
-    if (refs.refFormat() == .files) {
-        admin.createDirPath(io, "logs") catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => |e| return e,
-        };
-        const log_file = try admin.createFile(io, "logs/HEAD", .{ .truncate = false });
-        log_file.close(io);
-    }
+    // An empty `logs/HEAD`, as git starts one, so the first ref update in
+    // the new worktree has somewhere to go. A reftable stack keeps its logs
+    // in its tables.
+    if (refs.refFormat() == .files) try own.createLog(gpa, io, "HEAD");
 
     // And the `.git` file in the destination, which is what makes the
     // directory a worktree at all.

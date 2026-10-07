@@ -119,7 +119,7 @@ pub const Error = error{
     /// clone from landing beside files already there.
     DirectoryNotEmpty,
 } || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
-    config_mod.Config.SetError || refs_mod.TransactionError || program.Error || gitlink.Error ||
+    Repository.WriteConfigError || refs_mod.TransactionError || program.Error || gitlink.Error ||
     Io.Dir.RealPathError || Io.Dir.RenameError || Io.Dir.DeleteTreeError;
 
 /// Where a refusal says which submodule and which setting, without
@@ -439,55 +439,29 @@ fn moduleUrl(
     };
 }
 
-/// Edits to the superproject's `.git/config`: read fresh from the disk and
-/// written through its lock, and made in the repository's own copy as
-/// well, so what it reads next is what was written — git forgets its cached
-/// configuration after a write for the same reason.
+/// Settings for the superproject's `.git/config`, written together when
+/// the operation is done: `writeConfig` reads the file again under its lock
+/// and applies only these, so what another process wrote meanwhile stays,
+/// and the repository publishes what the file then says.
 const LocalEdits = struct {
-    file: config_mod.Config,
-    changed: bool = false,
+    arena: Allocator,
+    edits: std.ArrayList(Repository.ConfigEdit) = .empty,
 
-    fn open(gpa: Allocator, io: Io, repo: *Repository) Error!LocalEdits {
-        return .{ .file = try config_mod.Config.openFile(gpa, io, .{ .dir = repo.common_dir, .sub_path = "config" }, .local, .{}) };
-    }
-
-    fn deinit(e: *LocalEdits) void {
-        e.file.deinit();
-        e.* = undefined;
-    }
-
-    fn set(e: *LocalEdits, repo: *Repository, key: []const u8, value: []const u8) Error!void {
-        try e.file.setIn(.local, key, value);
-        try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = key, .value = value } }}, null);
-        e.changed = true;
-    }
-
-    fn removeSubmodule(e: *LocalEdits, repo: *Repository, name: []const u8) Error!bool {
-        const removed = try e.file.removeSectionIn(.local, "submodule", name);
-        _ = try repo.editConfig(&.{.{ .remove_section = .{ .level = .local, .section = "submodule", .subsection = name } }}, null);
-        if (removed) e.changed = true;
-        return removed;
+    fn set(e: *LocalEdits, key: []const u8, value: []const u8) Error!void {
+        try e.edits.append(e.arena, .{ .set = .{ .name = try e.arena.dupe(u8, key), .value = try e.arena.dupe(u8, value) } });
     }
 
     fn commit(e: *LocalEdits, io: Io, repo: *Repository) Error!void {
-        if (e.changed) try e.file.write(io, repo.common_dir, "config");
-        e.changed = false;
+        if (e.edits.items.len != 0) _ = try repo.writeConfig(io, .local, e.edits.items, null);
+        e.edits.clearRetainingCapacity();
     }
 };
 
-/// Set or, with `null`, remove one value in the `config` file in `dir`.
-fn editConfigFile(gpa: Allocator, io: Io, dir: Io.Dir, key: []const u8, value: ?[]const u8) Error!void {
-    var config = try config_mod.Config.openFile(gpa, io, .{ .dir = dir, .sub_path = "config" }, .local, .{});
-    defer config.deinit();
-    if (value) |v| try config.setIn(.local, key, v) else try config.unsetIn(.local, key);
-    try config.write(io, dir, "config");
-}
-
-/// Set one value in a repository's own `config` file, read fresh and
-/// written through its lock, and in the configuration the repository holds.
-fn setInRepository(gpa: Allocator, io: Io, repo: *Repository, key: []const u8, value: []const u8) Error!void {
-    try editConfigFile(gpa, io, repo.common_dir, key, value);
-    try repo.editConfig(&.{.{ .set = .{ .level = .local, .name = key, .value = value } }}, null);
+/// Set or, with `null`, remove `core.worktree` in the `config` of the
+/// submodule repository in `dir`, with `repo`'s permissions.
+fn setCoreWorktree(io: Io, repo: *const Repository, dir: Io.Dir, value: ?[]const u8) Error!void {
+    const edit: Repository.ConfigEdit = if (value) |v| .{ .set = .{ .name = "core.worktree", .value = v } } else .{ .unset = .{ .name = "core.worktree" } };
+    _ = try repo.writeConfigFile(io, dir, "config", &.{edit});
 }
 
 //=========================================================================
@@ -539,8 +513,8 @@ fn relativePath(arena: Allocator, target: []const u8, base: []const u8) Allocato
 /// working tree's `.git` file, and `core.worktree` relative the other way.
 fn connect(
     arena: Allocator,
-    gpa: Allocator,
     io: Io,
+    repo: *const Repository,
     work: Io.Dir,
     work_abs: []const u8,
     git_dir: Io.Dir,
@@ -551,7 +525,7 @@ fn connect(
     assert(to_git_dir.len != 0);
     const line = try arena.print("gitdir: {s}\n", .{to_git_dir});
     try work.writeFile(io, .{ .sub_path = ".git", .data = line });
-    try editConfigFile(gpa, io, git_dir, "core.worktree", try relativePath(arena, work_abs, git_dir_abs));
+    try setCoreWorktree(io, repo, git_dir, try relativePath(arena, work_abs, git_dir_abs));
 }
 
 /// Refuse a path that must never become a filesystem path, and one with a
@@ -974,8 +948,7 @@ pub fn init(gpa: Allocator, io: Io, repo: *Repository, options: InitOptions) Sel
     defer index.deinit();
     var listing = try list(gpa, io, repo, &index, options.paths);
     defer listing.deinit();
-    var edits = try LocalEdits.open(gpa, io, repo);
-    defer edits.deinit();
+    var edits: LocalEdits = .{ .arena = arena };
 
     const only_active = options.paths == null and repo.configuration().has("submodule.active");
     for (listing.entries) |entry| {
@@ -986,18 +959,18 @@ pub fn init(gpa: Allocator, io: Io, repo: *Repository, options: InitOptions) Sel
         const module = entry.module orelse return refuse(options.refusal, entry.path, "", error.NoSubmoduleMapping);
 
         if (!try isActive(arena, repo, module.name, entry.path)) {
-            try edits.set(repo, try configKey(arena, module.name, "active"), "true");
+            try edits.set(try configKey(arena, module.name, "active"), "true");
             outcome.activated += 1;
         }
         const url_key = try configKey(arena, module.name, "url");
         if (repo.configuration().get(url_key) == null) {
             const url = try moduleUrl(arena, io, repo, module, null, entry.path, options.refusal);
-            try edits.set(repo, url_key, url);
+            try edits.set(url_key, url);
             outcome.registered += 1;
         }
         const update_key = try configKey(arena, module.name, "update");
         if (repo.configuration().get(update_key) == null) {
-            if (module.update) |strategy| try edits.set(repo, update_key, strategy.name());
+            if (module.update) |strategy| try edits.set(update_key, strategy.name());
         }
     }
     try edits.commit(io, repo);
@@ -1057,8 +1030,7 @@ fn syncIn(
     defer index.deinit();
     var listing = try list(gpa, io, repo, &index, paths);
     defer listing.deinit();
-    var edits = try LocalEdits.open(gpa, io, repo);
-    defer edits.deinit();
+    var edits: LocalEdits = .{ .arena = arena };
 
     for (listing.entries) |entry| {
         const module = entry.module orelse continue;
@@ -1072,7 +1044,7 @@ fn syncIn(
             for_super = try moduleUrl(arena, io, repo, module, null, display, options.refusal);
             for_sub = try moduleUrl(arena, io, repo, module, try upPath(arena, entry.path), display, options.refusal);
         }
-        try edits.set(repo, try configKey(arena, module.name, "url"), for_super);
+        try edits.set(try configKey(arena, module.name, "url"), for_super);
         outcome.synced += 1;
 
         var found = (try gitlink.open(gpa, io, wt, entry.path)) orelse continue;
@@ -1080,7 +1052,7 @@ fn syncIn(
         var sub = try openSubmodule(gpa, io, repo, entry.path, options.open);
         defer sub.deinit(io);
         const remote = try defaultRemote(arena, io, &sub);
-        try setInRepository(gpa, io, &sub, try arena.print("remote.{s}.url", .{remote}), for_sub);
+        _ = try sub.writeConfig(io, .local, &.{.{ .set = .{ .name = try arena.print("remote.{s}.url", .{remote}), .value = for_sub } }}, null);
         outcome.remotes += 1;
         if (options.recursive) {
             try syncIn(gpa, io, &sub, options, null, try arena.print("{s}/", .{display}), depth + 1, outcome);
@@ -1134,8 +1106,6 @@ pub fn deinitialize(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOp
     defer index.deinit();
     var listing = try list(gpa, io, repo, &index, options.paths);
     defer listing.deinit();
-    var edits = try LocalEdits.open(gpa, io, repo);
-    defer edits.deinit();
     const head_tree = try repo.headTree(io);
 
     for (listing.entries) |entry| {
@@ -1147,7 +1117,7 @@ pub fn deinitialize(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOp
             const dot_git = try arena.print("{s}/.git", .{entry.path});
             if (try fs.statAt(io, wt, dot_git)) |git_entry| {
                 if (git_entry.kind == .directory) {
-                    try relocate(arena, gpa, io, repo, module, entry.path, entry.path, options.refusal);
+                    try relocate(arena, io, repo, module, entry.path, entry.path, options.refusal);
                     outcome.absorbed += 1;
                 }
             }
@@ -1161,16 +1131,16 @@ pub fn deinitialize(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOp
             var module_dir = repo.git_dir.openDir(io, try modulePath(arena, module.name), .{}) catch null;
             if (module_dir) |*dir| {
                 defer dir.close(io);
-                if (gitlink.isGitDirectory(io, dir.*)) try editConfigFile(gpa, io, dir.*, "core.worktree", null);
+                if (gitlink.isGitDirectory(io, dir.*)) try setCoreWorktree(io, repo, dir.*, null);
             }
         }
         wt.createDirPath(io, entry.path) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
         };
-        if (try edits.removeSubmodule(repo, module.name)) outcome.unregistered += 1;
+        const written = try repo.writeConfig(io, .local, &.{.{ .remove_section = .{ .section = "submodule", .subsection = module.name } }}, null);
+        if (written.sections_removed != 0) outcome.unregistered += 1;
     }
-    try edits.commit(io, repo);
     return outcome;
 }
 
@@ -1280,7 +1250,7 @@ fn absorbIn(
 
         if (git_entry.kind == .directory) {
             const module = entry.module orelse return refuse(options.refusal, display, "", error.NoSubmoduleMapping);
-            try relocate(arena, gpa, io, repo, module, entry.path, display, options.refusal);
+            try relocate(arena, io, repo, module, entry.path, display, options.refusal);
             outcome.moved += 1;
         } else if (try gitlink.open(gpa, io, wt, entry.path)) |found_const| {
             var found = found_const;
@@ -1294,7 +1264,7 @@ fn absorbIn(
             if (!gitlink.isGitDirectory(io, module_dir)) continue;
             var work = try wt.openDir(io, entry.path, .{});
             defer work.close(io);
-            try connect(arena, gpa, io, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+            try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
             outcome.reconnected += 1;
         }
 
@@ -1307,7 +1277,6 @@ fn absorbIn(
 /// Move `<path>/.git` to `modules/<name>` and connect the two.
 fn relocate(
     arena: Allocator,
-    gpa: Allocator,
     io: Io,
     repo: *Repository,
     module: *const gitmodules.Submodule,
@@ -1338,7 +1307,7 @@ fn relocate(
     defer work.close(io);
     var module_dir = try repo.git_dir.openDir(io, target, .{});
     defer module_dir.close(io);
-    try connect(arena, gpa, io, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+    try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
 }
 
 //=========================================================================
@@ -1480,7 +1449,7 @@ fn updateIn(
         if (just_cloned) {
             try populate(arena, gpa, io, repo, module, entry.path, url, display, options, outcome);
         } else {
-            try correctCoreWorktree(arena, gpa, io, wt, entry.path);
+            try correctCoreWorktree(arena, gpa, io, repo, wt, entry.path);
         }
 
         var sub = try openSubmodule(gpa, io, repo, entry.path, options.open);
@@ -1571,7 +1540,7 @@ fn populate(
     try wt.createDirPath(io, path);
     var work = try wt.openDir(io, path, .{});
     defer work.close(io);
-    try connect(arena, gpa, io, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+    try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
 }
 
 /// Whether `path` is not there, or is a directory with nothing in it.
@@ -1591,7 +1560,7 @@ fn emptyOrAbsent(io: Io, wt: Io.Dir, path: []const u8) Error!bool {
 /// repository already carries is rewritten to point at where the working
 /// tree is now, which is what keeps a superproject's worktrees sharing one
 /// repository per submodule working.
-fn correctCoreWorktree(arena: Allocator, gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Error!void {
+fn correctCoreWorktree(arena: Allocator, gpa: Allocator, io: Io, repo: *const Repository, wt: Io.Dir, path: []const u8) Error!void {
     var found = (try gitlink.open(gpa, io, wt, path)) orelse return;
     defer found.close(io);
     var config = try config_mod.Config.openFile(gpa, io, .{ .dir = found.common_dir, .sub_path = "config" }, .local, .{});
@@ -1602,8 +1571,7 @@ fn correctCoreWorktree(arena: Allocator, gpa: Allocator, io: Io, wt: Io.Dir, pat
     const wanted = try relativePath(arena, try absolutePath(arena, io, work), try absolutePath(arena, io, found.git_dir));
     const now = try configString(arena, &config, "core.worktree");
     if (now != null and std.mem.eql(u8, now.?, wanted)) return;
-    try config.setIn(.local, "core.worktree", wanted);
-    try config.write(io, found.common_dir, "config");
+    try setCoreWorktree(io, repo, found.common_dir, wanted);
 }
 
 /// Make sure the submodule's repository has `commit`, fetching it through

@@ -127,12 +127,7 @@ fn byRelic(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
     }
     _ = try repo.odb.repack(io, .{ .remove_packs = true });
     _ = try repo.odb.write(io, .blob, "");
-    {
-        var config = try relic.config.Config.openFile(gpa, io, .{ .dir = repo.git_dir, .sub_path = "config" }, .local, .{});
-        defer config.deinit();
-        try config.set("fixture.value", "set");
-        try config.write(io, repo.git_dir, "config");
-    }
+    _ = try repo.writeConfig(io, .local, &.{.{ .set = .{ .name = "fixture.value", .value = "set" } }}, null);
     _ = try relic.odb.accelerators.writeCommitGraph(gpa, io, &repo.odb, &.{commit}, .{});
 }
 

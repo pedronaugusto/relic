@@ -32,11 +32,11 @@ const hash = @import("../hash.zig");
 const ref_names = @import("../names/ref.zig");
 const object = @import("../object.zig");
 const repo_mod = @import("../repo.zig");
+const refs_mod = @import("../refs.zig");
 const revwalk = @import("../revwalk.zig");
 const remote_mod = @import("../transport/remote.zig");
 const ere = @import("../ere.zig");
 const gitdate = @import("../object/gitdate.zig");
-const reflog = @import("../refs/reflog.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -277,7 +277,7 @@ const Resolver = struct {
     /// of all and not made at `time` exactly, it is what the ref holds now;
     /// where every entry is later, it is what the oldest one replaced, or
     /// what it made where it created the ref.
-    fn reflogAt(r: *Resolver, full: []const u8, entries: []const reflog.Entry, time: i64) Error!Oid {
+    fn reflogAt(r: *Resolver, full: []const u8, entries: []const refs_mod.LogEntry, time: i64) Error!Oid {
         var newer_old: ?Oid = null;
         var i = entries.len;
         while (i > 0) {

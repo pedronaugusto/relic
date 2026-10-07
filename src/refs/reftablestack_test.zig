@@ -29,7 +29,6 @@ const Stacks = @import("reftablestack/cache.zig").internal.Stacks;
 const loadIn = @import("reftablestack/cache.zig").internal.loadIn;
 const reloadIn = @import("reftablestack/cache.zig").internal.reloadIn;
 const isLinked = @import("reftablestack/cache.zig").internal.isLinked;
-const isPerWorktree = @import("reftablestack/cache.zig").internal.isPerWorktree;
 const read = @import("reftablestack.zig").read;
 const readIn = access.readIn;
 const resolveIn = access.resolveIn;
@@ -569,7 +568,7 @@ test "a repository's stack is kept between reads and read again only when it cha
     try std.testing.expectEqual(settled, cache.reloads);
 }
 
-test "a log entry goes into the stack, and the files path refuses to write where git will not look" {
+test "a log entry goes into the stack, where git looks for it, and no file is written" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     try requireReftableGit(gpa, io);
@@ -584,14 +583,8 @@ test "a log entry goes into the stack, and the files path refuses to write where
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    try std.testing.expectError(
-        error.ReftableRepository,
-        reflog.append(gpa, io, repo.git_dir, "refs/heads/main", tip, tip, fixtureWho(1), "direct"),
-    );
-    try std.testing.expectError(error.ReftableRepository, reflog.read(gpa, io, repo.git_dir, "HEAD", .sha1));
+    try repo.refStore().appendLog(gpa, io, "refs/heads/main", tip, tip, .{ .who = fixtureWho(1_700_000_000), .message = "reset: moving to HEAD" });
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, ".git/logs/refs/heads/main", .{}));
-
-    try repo.refStore().appendLog(gpa, io, "refs/heads/main", tip, tip, fixtureWho(1_700_000_000), "reset: moving to HEAD");
     const shown = try gitReflog(io, &git, "refs/heads/main");
     defer gpa.free(shown);
     try std.testing.expect(std.mem.startsWith(u8, shown, tip_text));

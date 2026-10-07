@@ -171,8 +171,10 @@ pub fn parseWorktreeRef(name: []const u8) WorktreeRef {
     return .{ .owner = .shared, .bare = name };
 }
 
-/// git's `is_current_worktree_ref`: a name each worktree keeps for itself.
-fn isCurrentWorktree(name: []const u8) bool {
+/// git's `is_current_worktree_ref`: a name each worktree keeps for itself,
+/// `HEAD` and the root refs among them, which a linked worktree's store
+/// finds in its own git directory.
+pub fn isCurrentWorktree(name: []const u8) bool {
     return isRootRefSyntax(name) or isPerWorktree(name);
 }
 

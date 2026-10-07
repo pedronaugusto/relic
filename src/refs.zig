@@ -13,7 +13,6 @@
 
 pub const reftablestack = @import("refs/reftablestack.zig");
 // The modules relic's API puts under this one, as `relic.refs.<name>`.
-pub const reflog = @import("refs/reflog.zig");
 pub const reftable = @import("refs/reftable.zig");
 pub const filter = @import("refs/filter.zig");
 /// What a ref may be named, and the names git treats apart.
@@ -36,6 +35,9 @@ const Kind = hash.Kind;
 const state_mod = @import("refs/state.zig");
 const packed_cache = @import("refs/packed.zig");
 const value_mod = @import("refs/value.zig");
+// The files backend's logs, private to this namespace: every log is read
+// and written through `Store`, which knows where the format keeps it.
+const reflog = @import("refs/reflog.zig");
 
 /// The header `packed-refs` carries, with the space before the newline that
 /// is in git's source and in no document.
@@ -72,6 +74,18 @@ pub const Resolved = @import("refs/value.zig").Resolved;
 
 /// What an edit requires the ref's current value to be.
 pub const Expected = @import("refs/value.zig").Expected;
+
+/// A ref's log, oldest first, as `Store.readLog` returns it.
+pub const Log = reflog.Log;
+
+/// One entry of a log.
+pub const LogEntry = reflog.Entry;
+
+/// When a ref update writes a log entry: `core.logAllRefUpdates`.
+pub const LogPolicy = reflog.Policy;
+
+/// Errors from reading a log, beyond those of reading a ref.
+pub const LogReadError = reflog.ReadError;
 
 /// One folder `Store.watchScopes` names.
 pub const WatchScope = struct {
@@ -202,13 +216,13 @@ pub const Store = struct {
         return scopes;
     }
 
-    /// Which directory a ref lives in.
-    ///
-    /// A name of capitals, dashes and underscores alone -- `HEAD`,
-    /// `ORIG_HEAD`, `AUTO_MERGE`, `REBASE_HEAD` -- is a pseudo-ref, and
-    /// every pseudo-ref belongs to one working tree, which is git's rule.
-    pub fn dirFor(store: *const Store, name: []const u8) Io.Dir {
-        if (names.isRootRefSyntax(name) or names.isPerWorktree(name)) return store.gitDir();
+    /// Which directory a ref lives in: the worktree's own for a name each
+    /// worktree keeps for itself (`names.isCurrentWorktree`: `HEAD`, the
+    /// root refs, `refs/bisect/`, `refs/worktree/`, `refs/rewritten/`), the
+    /// shared one otherwise. Private to the store: a caller reads and
+    /// writes refs and their logs through it, never the files.
+    fn dirFor(store: *const Store, name: []const u8) Io.Dir {
+        if (names.isCurrentWorktree(name)) return store.gitDir();
         return store.commonDir();
     }
 
@@ -218,6 +232,15 @@ pub const Store = struct {
     /// `resolve` for the object. The returned name, when symbolic, is the
     /// caller's.
     pub fn read(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
+        const found = (try store.readFrom(gpa, io, name)) orelse return null;
+        return found.value;
+    }
+
+    /// A ref's value, and whether it came from `packed-refs`.
+    const Found = struct { value: Ref, from_packed: bool };
+
+    /// `read`, saying whether the value came from `packed-refs`.
+    fn readFrom(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Found {
         if (!isRefName(name)) return error.InvalidRefName;
         return store.readUnchecked(gpa, io, name);
     }
@@ -225,7 +248,10 @@ pub const Store = struct {
     /// A ref's own value, symbolic or not, where a symbolic one can be:
     /// the loose file, or the reftable stack.
     fn readOwnValue(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
-        if (store.refFormat() == .reftable) return store.readUnchecked(gpa, io, name);
+        if (store.refFormat() == .reftable) {
+            const found = (try store.readUnchecked(gpa, io, name)) orelse return null;
+            return found.value;
+        }
         return store.readLoose(gpa, io, name);
     }
 
@@ -278,12 +304,12 @@ pub const Store = struct {
                 gpa.free(current);
                 return error.SymbolicRefLoop;
             }
-            const found = (try store.read(gpa, io, current)) orelse {
+            const found = (try store.readFrom(gpa, io, current)) orelse {
                 gpa.free(current);
                 return null;
             };
-            switch (found) {
-                .direct => |oid| return .{ .name = current, .oid = oid },
+            switch (found.value) {
+                .direct => |oid| return .{ .name = current, .oid = oid, .from_packed = found.from_packed },
                 .symbolic => |target| {
                     gpa.free(current);
                     current = target;
@@ -632,31 +658,23 @@ pub const Store = struct {
         };
     }
 
-    /// Append one entry to a ref's log without moving the ref: a line of
-    /// `logs/<ref>`, or in a reftable repository a table of its own, which
-    /// is where git would look for it. The message is collapsed as a
-    /// transaction's is.
-    pub fn appendLog(
-        store: *const Store,
-        gpa: Allocator,
-        io: Io,
-        name: []const u8,
-        old: Oid,
-        new: Oid,
-        who: object.Signature,
-        message: []const u8,
-    ) TransactionError!void {
+    /// Append one entry to a ref's log without moving the ref, where
+    /// `log.policy` asks for one: a line of `logs/<ref>`, or in a reftable
+    /// repository a table of its own, which is where git would look for
+    /// it. The message is collapsed as a transaction's is.
+    pub fn appendLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8, old: Oid, new: Oid, log: LogMessage) TransactionError!void {
         if (!isRefName(name)) return error.InvalidRefName;
-        if (store.refFormat() == .reftable) return stack_engine.appendLog(gpa, io, store, name, old, new, who, message);
+        if (!reflog.shouldLog(log.policy, name, try store.logExists(gpa, io, name))) return;
+        if (store.refFormat() == .reftable) return stack_engine.appendLog(gpa, io, store, name, old, new, log.who, log.message);
         // The message a transaction would write: collapsed as git collapses it.
-        const text = try reflog.normalizeMessage(gpa, message);
+        const text = try reflog.normalizeMessage(gpa, log.message);
         defer gpa.free(text);
-        return reflog.appendShared(gpa, io, store.dirFor(name), name, old, new, who, text, store.sharedPermissions());
+        return reflog.append(gpa, io, store.dirFor(name), name, old, new, log.who, text, store.sharedPermissions());
     }
 
     /// A ref's log, oldest first, from `logs/<ref>` or from the reftable
     /// stack as the format says. An absent log is an empty one.
-    pub fn readLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) (ReadError || reflog.ReadError)!reflog.Log {
+    pub fn readLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) (ReadError || LogReadError)!Log {
         if (store.refFormat() == .reftable) return stack_engine.readLog(gpa, io, store, name);
         const where = names.parseWorktreeRef(name);
         if (where.owner == .other) {
@@ -667,6 +685,88 @@ pub const Store = struct {
             return reflog.read(gpa, io, admin, where.bare, store.objectFormat());
         }
         return reflog.read(gpa, io, store.logDir(name, where), where.bare, store.objectFormat());
+    }
+
+    /// Start a log for `name` where it has none, so that its next update is
+    /// logged under any policy, as git's `refs_create_reflog` does: an
+    /// empty `logs/<ref>`, or in a reftable stack the entry git writes to
+    /// say a log exists.
+    pub fn createLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) TransactionError!void {
+        if (!isRefName(name)) return error.InvalidRefName;
+        if (store.refFormat() == .reftable) return stack_engine.createLog(gpa, io, store, name);
+        return reflog.create(gpa, io, store.dirFor(name), name, store.sharedPermissions());
+    }
+
+    /// How `expireLog` treats the entries it keeps.
+    pub const ExpireOptions = struct {
+        /// git's `--rewrite`: each kept entry's old value becomes the new
+        /// value of the entry kept before it, so the log still reads as a
+        /// chain once entries between them are gone.
+        rewrite: bool = false,
+        /// git's `--updateref`: the ref is set to the newest kept entry's
+        /// new value. A symbolic ref, or a log nothing of which is kept,
+        /// leaves the ref as it is.
+        update_ref: bool = false,
+    };
+
+    /// Keep only the entries of `name`'s log that `keeper.keep(entry, nth)`
+    /// says to, as git's `refs_reflog_expire` does for `git reflog expire`
+    /// and `git reflog delete`; `nth` is how far back the entry is, `0` the
+    /// newest, which is what `<ref>@{n}` counts. `keeper` is a pointer to
+    /// anything with that method, which may keep what it learns. A ref
+    /// without a log is left alone.
+    ///
+    /// The log and the ref move together: under the ref's lock in the files
+    /// format, as one table in a reftable stack. Like git's, it runs no
+    /// `reference-transaction` hook and writes no log entry of its own.
+    pub fn expireLog(
+        store: *const Store,
+        gpa: Allocator,
+        io: Io,
+        name: []const u8,
+        options: ExpireOptions,
+        keeper: anytype,
+    ) (TransactionError || LogReadError)!void {
+        if (!isRefName(name)) return error.InvalidRefName;
+        if (store.refFormat() == .reftable) return stack_engine.expireLog(gpa, io, store, name, options, keeper);
+        const dir = store.dirFor(name);
+        if (std.Io.Dir.path.dirnamePosix(name)) |parent| {
+            fs.makeDirs(io, dir, parent, store.sharedPermissions()) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => |e| return e,
+            };
+        }
+        // git's `files_reflog_expire` takes the ref's lock first, which every
+        // transaction moving the ref or appending to its log also takes.
+        var buffer: [max_loose_ref]u8 = undefined;
+        var lock = try fs.LockFile.open(gpa, io, dir, name, &buffer, .{ .shared = store.sharedPermissions() });
+        defer lock.deinit(io);
+        const newest = try reflog.expire(gpa, io, dir, name, store.objectFormat(), store.sharedPermissions(), options.rewrite, keeper);
+        if (!options.update_ref) return;
+        const oid = newest orelse return;
+        if (try store.readLoose(gpa, io, name)) |own| switch (own) {
+            .direct => {},
+            .symbolic => |target| {
+                gpa.free(target);
+                return;
+            },
+        };
+        var hex: [hash.max_hex_len]u8 = undefined;
+        lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed;
+        try lock.commit(io);
+    }
+
+    /// Remove `name`'s log and every entry in it, as git's
+    /// `refs_delete_reflog` does, without touching the ref. A ref without a
+    /// log is left alone.
+    pub fn deleteLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) TransactionError!void {
+        if (!isRefName(name)) return error.InvalidRefName;
+        if (store.refFormat() == .reftable) return stack_engine.deleteLog(gpa, io, store, name);
+        const dir = store.dirFor(name);
+        try reflog.delete(gpa, io, dir, name);
+        const path = try reflog.pathFor(gpa, name);
+        defer gpa.free(path);
+        removeEmptyParents(io, dir, path);
     }
 
     /// The root refs of the worktree this store was opened in:
@@ -756,30 +856,35 @@ pub const Store = struct {
         return std.mem.order(u8, a.name, b.name) == .lt;
     }
 
-    /// A ref's own value, with no check of its name: what a transaction
-    /// reads of a ref it deletes, whose name need only be safe.
-    fn readUnchecked(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
+    /// A ref's own value and whether it came from `packed-refs`, with no
+    /// check of its name: what a transaction reads of a ref it deletes,
+    /// whose name need only be safe.
+    fn readUnchecked(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Found {
         const where = names.parseWorktreeRef(name);
-        switch (where.owner) {
-            .current, .shared => {},
+        const own = switch (where.owner) {
+            .current, .shared => if (store.refFormat() == .reftable)
+                if (names.isSpecial(name))
+                    try store.readLoose(gpa, io, name)
+                else
+                    try stack_engine.read(gpa, io, store, name)
+            else
+                try store.readLoose(gpa, io, name),
             // What another worktree keeps for itself, which the files
             // format never packs: its `HEAD` and root refs, its
             // per-worktree refs.
-            .main, .other => {
-                if (where.bare.len == 0) return null;
-                if (store.refFormat() == .reftable) return stack_engine.readOtherWorktree(gpa, io, store, where);
+            .main, .other => if (where.bare.len == 0)
+                null
+            else if (store.refFormat() == .reftable)
+                try stack_engine.readOtherWorktree(gpa, io, store, where)
+            else
                 // `worktrees/<id>/<name>` is that worktree's file under the
                 // shared directory, path for path.
-                const path = if (where.owner == .main) where.bare else name;
-                return store.readLooseAt(gpa, io, store.commonDir(), path);
-            },
+                try store.readLooseAt(gpa, io, store.commonDir(), if (where.owner == .main) where.bare else name),
+        };
+        if (own) |value| return .{ .value = value, .from_packed = false };
+        if (store.refFormat() == .files and (where.owner == .current or where.owner == .shared)) {
+            if (try store.readPackedOne(io, name)) |oid| return .{ .value = .{ .direct = oid }, .from_packed = true };
         }
-        if (store.refFormat() == .reftable) {
-            if (names.isSpecial(name)) return store.readLoose(gpa, io, name);
-            return stack_engine.read(gpa, io, store, name);
-        }
-        if (try store.readLoose(gpa, io, name)) |found| return found;
-        if (try store.readPackedOne(io, name)) |oid| return .{ .direct = oid };
         return null;
     }
 };
@@ -1218,7 +1323,7 @@ pub const Transaction = struct {
 
             // Read without a check of the name, which a deletion need only
             // have safe.
-            const current = try tx.store.readUnchecked(tx.gpa, io, edit.name);
+            const current = if (try tx.store.readUnchecked(tx.gpa, io, edit.name)) |found| found.value else null;
             var current_oid: ?Oid = null;
             if (current) |value| {
                 switch (value) {
@@ -1529,12 +1634,7 @@ pub const Transaction = struct {
         }
         for (tx.edits.items) |edit| {
             if (edit.via != null or edit.new != null) continue;
-            const log_path = try reflog.pathFor(tx.gpa, edit.name);
-            defer tx.gpa.free(log_path);
-            tx.store.dirFor(edit.name).deleteFile(io, log_path) catch |err| switch (err) {
-                error.FileNotFound, error.NotDir => {},
-                else => |e| return e,
-            };
+            try reflog.delete(tx.gpa, io, tx.store.dirFor(edit.name), edit.name);
         }
         if (tx.packed_lock != null) try tx.removeFromPacked(io);
         if (tx.packed_announced) {
@@ -1577,7 +1677,7 @@ pub const Transaction = struct {
                 // An edit's own words, or the transaction's.
                 const own = if (source.message) |m| try reflog.normalizeMessage(tx.gpa, m) else null;
                 defer if (own) |t| tx.gpa.free(t);
-                try reflog.appendShared(
+                try reflog.append(
                     tx.gpa,
                     io,
                     tx.store.dirFor(edit.name),

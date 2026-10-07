@@ -55,7 +55,6 @@ const fsck = @import("../object/fsck.zig");
 const promisors = @import("promisors.zig");
 const odb_mod = @import("../odb.zig");
 const ref_names = @import("../names/ref.zig");
-const config_state = @import("../config/state.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -72,7 +71,7 @@ pub const Error = error{
     /// A remote name git would refuse.
     InvalidRemoteName,
 } || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || objectwalk.Error ||
-    worktree.Error || config_mod.Config.SetError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
+    worktree.Error || Repository.WriteConfigError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
     filter.Drivers.LoadError || fsck.LoadError;
 
 /// How a clone runs.
@@ -274,7 +273,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         try arena.print("refs/tags/{s}", .{options.branch.?})
     else
         null;
-    try configureRemote(arena, &repo, target.recorded, filter_spec, single_branch, head.branch, single_tag, options);
+    try configureRemote(arena, io, &repo, target.recorded, filter_spec, single_branch, head.branch, single_tag, options);
 
     var chosen = try chooseRefs(arena, remote_refs.refs, head, single_branch, single_tag, options);
     const detached = try receiveObjects(arena, gpa, io, &repo, &session, &chosen, .{
@@ -300,8 +299,6 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     if (!options.bare) if (remote_refs.find("HEAD")) |remote_head| {
         try followRemoteHead(arena, io, &repo, &remote_refs, remote_head, head.branch, single_branch, log, options.origin);
     };
-    try config_state.writeLocal(repo._config, io);
-
     // The caller's configuration joins the repository's, as git reads
     // every level: the checkout's filters come from there.
     if (hasUserConfig(options) or options.home != null) {
@@ -483,6 +480,7 @@ fn chooseHead(arena: Allocator, remote_refs: *const protocol.RefList, branch: ?[
 /// for what is fetched, and a partial clone's promisor settings.
 fn configureRemote(
     arena: Allocator,
+    io: Io,
     repo: *Repository,
     recorded: []const u8,
     filter_spec: ?[]const u8,
@@ -492,8 +490,9 @@ fn configureRemote(
     options: Options,
 ) Error!void {
     const origin = options.origin;
-    try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.url", .{origin}), .value = recorded } }}, null);
-    if (!options.tags) try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.tagopt", .{origin}), .value = "--no-tags" } }}, null);
+    var edits: std.ArrayList(Repository.ConfigEdit) = .empty;
+    try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.url", .{origin}), .value = recorded } });
+    if (!options.tags) try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.tagopt", .{origin}), .value = "--no-tags" } });
     if (!options.bare) {
         const spec = if (single_branch and head_branch != null)
             try arena.print("+{s}:refs/remotes/{s}/{s}", .{ head_branch.?, origin, head_branch.?["refs/heads/".len..] })
@@ -501,13 +500,14 @@ fn configureRemote(
             try arena.print("+{s}:{s}", .{ tag, tag })
         else
             try remote_mod.defaultFetchRefspec(arena, origin);
-        try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.fetch", .{origin}), .value = spec } }}, null);
+        try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.fetch", .{origin}), .value = spec } });
     }
     if (filter_spec) |spec| {
-        try repo.editConfig(&.{.{ .set = .{ .name = "core.repositoryformatversion", .value = "1" } }}, null);
-        try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.promisor", .{origin}), .value = "true" } }}, null);
-        try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("remote.{s}.partialclonefilter", .{origin}), .value = spec } }}, null);
+        try edits.append(arena, .{ .set = .{ .name = "core.repositoryformatversion", .value = "1" } });
+        try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.promisor", .{origin}), .value = "true" } });
+        try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.partialclonefilter", .{origin}), .value = spec } });
     }
+    _ = try repo.writeConfig(io, .local, edits.items, null);
 }
 
 /// What a clone asks for and the refs it writes, all in the arena.
@@ -636,8 +636,10 @@ fn pointHead(
         try tx.commit(io, log);
         if (!options.bare) {
             const short = branch["refs/heads/".len..];
-            try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("branch.{s}.remote", .{short}), .value = options.origin } }}, null);
-            try repo.editConfig(&.{.{ .set = .{ .name = try arena.print("branch.{s}.merge", .{short}), .value = branch } }}, null);
+            _ = try repo.writeConfig(io, .local, &.{
+                .{ .set = .{ .name = try arena.print("branch.{s}.remote", .{short}), .value = options.origin } },
+                .{ .set = .{ .name = try arena.print("branch.{s}.merge", .{short}), .value = branch } },
+            }, null);
         }
         return value;
     }
@@ -752,8 +754,10 @@ fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_
     // A git directory with its working tree elsewhere is not bare, and
     // logs its refs as `git init` sets a repository with a working tree to.
     if (options.separate_git_dir) {
-        try repo.editConfig(&.{.{ .set = .{ .name = "core.bare", .value = "false" } }}, null);
-        try repo.editConfig(&.{.{ .set = .{ .name = "core.logallrefupdates", .value = "true" } }}, null);
+        _ = try repo.writeConfig(io, .local, &.{
+            .{ .set = .{ .name = "core.bare", .value = "false" } },
+            .{ .set = .{ .name = "core.logallrefupdates", .value = "true" } },
+        }, null);
     }
     return repo;
 }
