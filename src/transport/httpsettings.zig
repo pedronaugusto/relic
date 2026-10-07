@@ -196,8 +196,8 @@ pub const Error = error{
     InvalidHttpSetting,
 } || Allocator.Error;
 
-/// Which proxy an HTTP remote is reached through, as libgit2's proxy
-/// options choose one. Other remotes do not read it.
+/// Which proxy an HTTP remote is reached through, chosen by the caller.
+/// Other remotes do not read it.
 pub const Proxy = union(enum) {
     /// git's choice: `remote.<name>.proxy`, then `http.proxy`, then the
     /// environment's, short of what `no_proxy` names.

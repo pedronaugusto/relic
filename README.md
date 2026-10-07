@@ -482,8 +482,8 @@ resolve the origin locally; SOCKS4a and SOCKS5h send its name to the proxy.
 A URL's `user:password@` supplies SOCKS5 authentication, or the userid for
 SOCKS4. HTTPS starts TLS to the origin inside the SOCKS tunnel. A named
 remote's `remote.<name>.proxy` overrides `http.proxy`; `no_proxy` still applies.
-A fetch, clone or push given a `proxy` (`transport.Proxy`, as libgit2's proxy
-options) goes through that one, or none, whatever these say.
+A fetch, clone or push given a `proxy` (`transport.Proxy`) goes through that
+one, or none, whatever these say.
 
 The HTTP client's `connect`, `send` and `stream` take an optional caller-owned
 `transport.httpclient.Diagnostic` as their last argument. Initialize it with
@@ -751,9 +751,7 @@ having one written over or through the other.
 `zig build check -Dtarget=…` compiles everything, tests included, without
 running it, and CI does that for `x86_64-linux-gnu`, `aarch64-linux-gnu`,
 `x86_64-linux-musl`, `x86_64-windows-gnu`, `aarch64-windows-gnu`,
-`x86_64-macos` and `aarch64-macos`. [`zig build ci-linux --`](zig build ci-linux --) runs the
-suite on Linux in Docker from any machine; it is a local script and no CI job
-calls it.
+`x86_64-macos` and `aarch64-macos`.
 
 ## Testing
 

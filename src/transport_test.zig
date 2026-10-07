@@ -716,7 +716,7 @@ test "a proxy is gone through as git goes through it: the whole URL for http, CO
     }
 }
 
-test "a proxy given to a fetch or a clone stands over the configuration's and no_proxy, as libgit2's proxy options do" {
+test "a proxy given to a fetch or a clone stands over the configuration's and no_proxy" {
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
