@@ -13,8 +13,7 @@
 //! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs`, listed, sorted and formatted. | `reflog`, `reftable`, `reftablestack`, `filter` |
 //! | `config` | `Config`: git's configuration files, lossless. | `userconfig` |
 //! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex` |
-//! | `worktree` | Staging, writing a tree, checking one out, status. | `snapshot`, `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `safepath` |
-//! | `wildmatch` | Match a glob directly with git's pathname and case-fold flags. | |
+//! | `worktree` | Staging, writing a tree, checking one out, status. | `snapshot`, `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `convert`, `filter`, `dirscan`, `safepath` |
 //! | `diff` | Tree against tree, blob against blob, unified text. | `textdiff`, `rename`, `similarity`, `patchid`, `blame` |
 //! | `revwalk` | Walking history, merge bases. | `revparse`, `shallow`, `mailmap`, `shortlog`, `describe`, `bisect` |
 //! | `merge` | Three-way merges of contents and trees. | `blobmerge`, `ort`, `octopus`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
@@ -41,8 +40,6 @@ pub const refs = @import("refs.zig");
 pub const config = @import("config.zig");
 pub const index = @import("index.zig");
 pub const worktree = @import("worktree.zig");
-/// Match a glob with git's pathname and case-fold flags.
-pub const wildmatch = @import("worktree/wildmatch.zig");
 pub const diff = @import("diff.zig");
 pub const revwalk = @import("revwalk.zig");
 pub const merge = @import("merge.zig");

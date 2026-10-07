@@ -20,6 +20,9 @@ held to:
 - staging into loose objects against staging into a pack, and writing a
   pack whole and deltified: objects per second, MiB/s and the bytes the
   deltas save.
+- ignore rules over four levels and attribute rules deciding 100,000 paths,
+  and what reading the rules costs;
+- `status` over a tree with an ignore file in every directory.
 
 A Debug build measures a smaller tree with the same ratios. `-Dbench-smoke`
 builds it to run every measurement once on a tiny tree without reading a

@@ -48,7 +48,8 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/repo/warning.zig",
 
         "src/patch/whitespace.zig",
-        "src/worktree/wildmatch.zig",
+        "src/text/glob.zig",
+        "src/text/glob_test.zig",
     } },
     .{ .name = "binary and process inputs", .patterns = &.{
         "src/patch/binary.zig",
@@ -367,9 +368,11 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         "root",
         "std",
         "std_tls_client",
+        "sweep",
     } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
     .{ .name = "conduit owner", .target = "conduit", .except_from = &.{"src/dependencies.zig"} },
+    .{ .name = "sweep owner", .target = "sweep", .except_from = &.{"src/dependencies.zig"} },
     .{ .name = "std_tls_client owner", .target = "std_tls_client", .except_from = &.{"src/testing/tls_fork.zig"} },
 };
 
@@ -411,7 +414,6 @@ pub const namespace_exports: []const gantry.Edge = &.{
     .{ .from = "src/worktree.zig", .to = "src/worktree/snapshot.zig", .kind = .import },
     .{ .from = "src/worktree.zig", .to = "src/worktree/worktrees.zig", .kind = .import },
     .{ .from = "src/worktree.zig", .to = "src/worktree/sparsecheckout.zig", .kind = .import },
-    .{ .from = "src/worktree.zig", .to = "src/worktree/wildmatch.zig", .kind = .import },
     .{ .from = "src/diff.zig", .to = "src/diff/patchid.zig", .kind = .import },
     .{ .from = "src/diff.zig", .to = "src/diff/blame.zig", .kind = .import },
     .{ .from = "src/revwalk.zig", .to = "src/transport/objectwalk.zig", .kind = .import },

@@ -6,7 +6,6 @@ pub const refs = @import("refs.zig");
 pub const config = @import("config.zig");
 pub const index = @import("index.zig");
 pub const worktree = @import("worktree.zig");
-pub const wildmatch = @import("worktree/wildmatch.zig");
 pub const diff = @import("diff.zig");
 pub const revwalk = @import("revwalk.zig");
 pub const merge = @import("merge.zig");
@@ -23,13 +22,6 @@ pub const clean = @import("clean.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const relic = @import("relic.zig");
-
-test "public wildmatch follows git pathname and case-fold cases" {
-    try std.testing.expect(try wildmatch.match("a/**/b", "a/x/y/b", .{ .pathname = true }));
-    try std.testing.expect(!try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = true }));
-    try std.testing.expect(try wildmatch.match("*.c", "sub/foo.c", .{ .pathname = false }));
-    try std.testing.expect(try wildmatch.match("*.TXT", "readme.txt", .{ .case_fold = true }));
-}
 
 test "the plumbing is relic's own: no public name reaches it" {
     try std.testing.expect(!@hasDecl(odb, "varint"));
@@ -139,6 +131,8 @@ test {
     _ = @import("commit/reset.zig");
     _ = @import("commit/todo.zig");
     _ = @import("cquote.zig");
+    _ = @import("text/glob.zig");
+    _ = @import("text/glob_test.zig");
     _ = @import("diff/patchid.zig");
     _ = @import("diff/similarity.zig");
     _ = @import("diff/textdiff.zig");

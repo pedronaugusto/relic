@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Globs are matched by [sweep](https://github.com/pedronaugusto/sweep), git's wildmatch in time linear in the subject, for ignore and attribute lines, pathspecs, sparse patterns, `includeIf` conditions, ref, branch, tag and `describe` filters, `merge.suppressDest`, `apply --include`/`--exclude`, `submodule.active` and LFS fetch patterns. A pattern of any length is matched as git matches it: one nested past 1024 stars, which the old matcher refused, and an LFS fetch pattern longer than a kilobyte, which named nothing, now match what they name. Ignore, attribute and sparse patterns and pathspecs compile their globs once, when they are read: per path, an ignore decision costs 0.54 of what it did and an attribute lookup 0.56, and reading a file costs about 1.8 µs a line more.
+
+- `describe --match` and `--exclude`, and their `--contains` forms, match without git's `WM_PATHNAME`, as git does, so a `*` crosses the `/` in a tag such as `rel/1.0`, where it stopped at it.
+
+- Breaking: `relic.wildmatch` and `relic.worktree.wildmatch` are gone. Match with `sweep.match`: `.syntax = .git` for git's `pathname` flag and `.git_text` without it, `.case = .ascii_git` for `case_fold`.
+
+- Breaking: `lfs.Settings.fetch_include` and `fetch_exclude` hold `lfs.FetchPattern`s, which `Lfs.load` compiles (or `FetchPattern.compile`); `Settings.case_fold` and `lfs.patternMatches` are gone, the case being compiled into each pattern.
+
+- Breaking: `worktree.ignore.parseLine` takes an allocator and `LineOptions` and compiles the glob; `ignore.Pattern` and `attributes.Rule` carry it as `matcher`. An ignore line is read by git's grammar: a trailing tab stays part of the pattern, where it was trimmed, and a line ending in an escaped backslash and spaces loses every space, where one stayed.
+
 - A host name is looked up with no task waiting on work Zig 0.17 may not run beside it. `httpclient` looks a name up as a task of its own and drains it as it answers; with no task to spare, a libc target asks `getaddrinfo` itself and other targets (Windows, Linux without libc) return `httpclient.Error.ConcurrencyUnavailable`, where a name with more than 32 addresses waited on itself forever. An address still connects anywhere. A name's addresses are tried as tasks that race, and one after another when no task is free, in place of std's `HostName.connect`, which hides the same wait. smart HTTP and LFS report the new error as a failed connection.
 
 - The suite finds a hosted job's git and git-lfs while it runs (`RUNNER_TEMP`, `RELIC_GIT`), where the build set `PATH` and `RELIC_REQUIRE_SIGNERS` on the test run and Zig 0.17 kept them in its cached configuration. The helper programs reach the suite as paths the build tracks, not as installed copies. `ci/linux.Dockerfile` is gone, with `zig build check-git-flags`, which compared it to the hosted installer; `zig build check-ci-setup` tests the installer.

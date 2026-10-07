@@ -35,7 +35,7 @@ const mailmap_mod = @import("../revwalk/mailmap.zig");
 const abbrev_mod = @import("../odb/abbrev.zig");
 const signing = @import("../commit/signing.zig");
 const gitdate = @import("../object/gitdate.zig");
-const wildmatch = @import("../worktree/wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
 const worktrees = @import("../worktree/worktrees.zig");
 const remote_mod = @import("../transport/remote.zig");
 const refspec = @import("../transport/refspec.zig");
@@ -710,6 +710,11 @@ pub const Listing = struct {
     pub fn collect(l: *Listing, filter: Filter) Error!void {
         const gpa = l.gpa;
         const io = l.io;
+        // Every ref is asked of the same globs, so they are compiled once.
+        const patterns: Patterns = .{
+            .include = try .compile(l.a(), filter, filter.patterns),
+            .exclude = try .compile(l.a(), filter, filter.exclude),
+        };
         const store = l.repo.refStore();
         var candidates: std.ArrayList(refs_mod.Named) = .empty;
         defer candidates.deinit(gpa);
@@ -739,7 +744,7 @@ pub const Listing = struct {
             if (filter.start_after) |marker| {
                 if (std.mem.order(u8, entry.name, marker) != .gt) continue;
             }
-            try l.consider(filter, entry.name, entry.target, entry.peeled, !entry.loose, true);
+            try l.consider(filter, &patterns, entry.name, entry.target, entry.peeled, !entry.loose, true);
         }
         if (!filter.kinds.root_refs and filter.kinds.detached_head) {
             if (try store.read(gpa, io, "HEAD")) |head| {
@@ -752,7 +757,7 @@ pub const Listing = struct {
                 };
                 if (filter.start_after == null or std.mem.order(u8, "HEAD", filter.start_after.?) == .gt)
                     // git hands `HEAD` on without the name it points at
-                    try l.consider(filter, "HEAD", target, null, false, false);
+                    try l.consider(filter, &patterns, "HEAD", target, null, false, false);
             }
         }
         try l.reachFilter(filter.merged, true);
@@ -796,7 +801,7 @@ pub const Listing = struct {
     }
 
     /// git's `apply_ref_filter` for one ref.
-    fn consider(l: *Listing, filter: Filter, name: []const u8, target: refs_mod.Ref, peeled: ?Oid, is_packed: bool, show_target: bool) Error!void {
+    fn consider(l: *Listing, filter: Filter, patterns: *const Patterns, name: []const u8, target: refs_mod.Ref, peeled: ?Oid, is_packed: bool, show_target: bool) Error!void {
         const gpa = l.gpa;
         const io = l.io;
         const store = l.repo.refStore();
@@ -832,8 +837,8 @@ pub const Listing = struct {
         if (filter.kinds.root_refs and kind == .detached_head) {
             kind = .root_ref;
         } else if (!kind.in(filter.kinds)) return;
-        if (!matchPatterns(filter, filter.patterns, name, true)) return;
-        if (filter.exclude.len != 0 and matchPatterns(filter, filter.exclude, name, false)) return;
+        if (!patterns.include.matches(filter, name, true)) return;
+        if (patterns.exclude.matches(filter, name, false)) return;
         if (filter.points_at.len != 0 and !try l.pointsAt(filter.points_at, oid)) return;
         var commit: ?Oid = null;
         if (filter.merged.len != 0 or filter.no_merged.len != 0 or filter.contains.len != 0 or
@@ -2361,29 +2366,48 @@ fn rstripComponents(name: []const u8, len: i32) []const u8 {
     return name[0..end];
 }
 
-/// git's `match_pattern` and `match_name_as_path`.
-fn matchPatterns(filter: Filter, patterns: []const []const u8, name_in: []const u8, empty_matches: bool) bool {
-    if (patterns.len == 0) return empty_matches;
-    if (filter.match_as_path) {
-        for (patterns) |p| {
-            if (p.len <= name_in.len and std.mem.eql(u8, name_in[0..p.len], p) and
-                (name_in.len == p.len or name_in[p.len] == '/' or (p.len > 0 and p[p.len - 1] == '/'))) return true;
-            if (wildmatch.match(p, name_in, .{ .pathname = true, .case_fold = filter.ignore_case }) catch false) return true;
+/// A filter's patterns with their globs, compiled once for every ref a
+/// listing asks them of.
+const Globs = struct {
+    texts: []const []const u8,
+    globs: []const glob_mod.Glob,
+
+    /// `texts` as `filter` matches them, compiled in `a`, which holds them.
+    fn compile(a: Allocator, filter: Filter, texts: []const []const u8) Allocator.Error!Globs {
+        const globs = try a.alloc(glob_mod.Glob, texts.len);
+        for (texts, globs) |text, *glob| glob.* = try .compile(a, text, .{ .pathname = filter.match_as_path, .case_fold = filter.ignore_case });
+        return .{ .texts = texts, .globs = globs };
+    }
+
+    /// git's `match_pattern` and `match_name_as_path`: whether `name_in` is
+    /// one the patterns name, and `empty_matches` when there are none.
+    fn matches(g: *const Globs, filter: Filter, name_in: []const u8, empty_matches: bool) bool {
+        if (g.texts.len == 0) return empty_matches;
+        if (filter.match_as_path) {
+            for (g.texts, g.globs) |p, *glob| {
+                if (p.len <= name_in.len and std.mem.eql(u8, name_in[0..p.len], p) and
+                    (name_in.len == p.len or name_in[p.len] == '/' or (p.len > 0 and p[p.len - 1] == '/'))) return true;
+                if (glob.matches(name_in)) return true;
+            }
+            return false;
         }
+        var name = name_in;
+        for ([_][]const u8{ "refs/tags/", "refs/heads/", "refs/remotes/", "refs/" }) |prefix| {
+            if (std.mem.startsWith(u8, name, prefix)) {
+                name = name[prefix.len..];
+                break;
+            }
+        }
+        for (g.globs) |*glob| if (glob.matches(name)) return true;
         return false;
     }
-    var name = name_in;
-    for ([_][]const u8{ "refs/tags/", "refs/heads/", "refs/remotes/", "refs/" }) |prefix| {
-        if (std.mem.startsWith(u8, name, prefix)) {
-            name = name[prefix.len..];
-            break;
-        }
-    }
-    for (patterns) |p| {
-        if (wildmatch.match(p, name, .{ .pathname = false, .case_fold = filter.ignore_case }) catch false) return true;
-    }
-    return false;
-}
+};
+
+/// The globs a listing includes and excludes refs by.
+const Patterns = struct {
+    include: Globs,
+    exclude: Globs,
+};
 
 /// The value of the header `key` in an object's headers.
 fn headerValue(buf: []const u8, key: []const u8) ?[]const u8 {

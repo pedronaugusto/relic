@@ -33,7 +33,7 @@ const rerere = @import("../merge/rerere.zig");
 const reset = @import("reset.zig");
 const head_mod = @import("head.zig");
 const message = @import("message.zig");
-const wildmatch = @import("../worktree/wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
 const worktree = @import("../worktree.zig");
 const repo_mod = @import("../repo.zig");
 const refs_mod = @import("../refs.zig");
@@ -744,7 +744,7 @@ fn title(arena: Allocator, repo: *Repository, targets: []const Target, head: hea
         if (pattern.len == 0) effective.clearRetainingCapacity() else try effective.append(arena, pattern);
     }
     for (effective.items) |pattern| {
-        if (wildmatch.match(pattern, current, .{ .pathname = true }) catch false) suppressed = true;
+        if (try glob_mod.matches(arena, pattern, current, .{})) suppressed = true;
     }
 
     var out: std.ArrayList(u8) = .empty;

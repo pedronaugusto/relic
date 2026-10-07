@@ -2,7 +2,7 @@
 //! or an `add` is about.
 //!
 //! A pathspec is a path prefix (`src` takes `src/main.zig`) or a glob
-//! matched against the whole path with `wildmatch`, a `*` crossing `/`
+//! matched against the whole path with git's wildmatch, a `*` crossing `/`
 //! unless `:(glob)` asks otherwise. Magic is git's, long and short:
 //! `:(top)`/`:/`, `:(exclude)`/`:!`/`:^`, `:(icase)`, `:(literal)`,
 //! `:(glob)`. Paths are from the top of the working tree: there is no
@@ -13,7 +13,7 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const wildmatch = @import("worktree/wildmatch.zig");
+const glob_mod = @import("text/glob.zig");
 
 /// Errors from reading a pathspec.
 pub const Error = error{
@@ -35,6 +35,9 @@ const Item = struct {
     glob: bool,
     literal: bool,
     onestar: bool,
+    /// What follows the literal prefix, compiled, when it holds a wildcard
+    /// a plain comparison cannot answer.
+    matcher: ?glob_mod.Glob,
 };
 
 /// A parsed pathspec.
@@ -186,7 +189,7 @@ fn fnmatchItem(item: Item, name: []const u8) bool {
         const tail = pat[1..];
         return str.len >= tail.len and eqlIcase(tail, str[str.len - tail.len ..], item.icase);
     }
-    return wildmatch.match(pat, str, .{ .pathname = item.glob, .case_fold = item.icase }) catch false;
+    return item.matcher.?.matches(str);
 }
 
 fn eqlIcase(a: []const u8, b: []const u8, icase: bool) bool {
@@ -204,15 +207,6 @@ fn matchItem(item: Item, name: []const u8, is_dir: bool) bool {
         return true;
     }
     return item.nowildcard_len < m.len and fnmatchItem(item, name);
-}
-
-fn isGlobSpecial(c: u8) bool {
-    return c == '*' or c == '?' or c == '[' or c == '\\';
-}
-
-fn simpleLength(s: []const u8) usize {
-    for (s, 0..) |c, i| if (isGlobSpecial(c)) return i;
-    return s.len;
 }
 
 /// The path with `.` and empty components gone and `..` taken back, a
@@ -289,16 +283,23 @@ pub fn parse(gpa: Allocator, specs: []const []const u8) Self.Error!Pathspec {
         if (literal and glob) return error.IncompatiblePathspecMagic;
         if (exclude) has_exclude = true else all_exclude = false;
         const match = try normalize(a, rest);
-        const nowildcard_len = if (literal) match.len else simpleLength(match);
+        const nowildcard_len = if (literal) match.len else glob_mod.literalPrefix(match);
         var onestar = false;
         if (!glob and nowildcard_len < match.len and match[nowildcard_len] == '*') {
             const tail = match[nowildcard_len + 1 ..];
-            onestar = simpleLength(tail) == tail.len;
+            onestar = glob_mod.literalPrefix(tail) == tail.len;
         }
-        try items.append(a, .{ .match = match, .nowildcard_len = nowildcard_len, .exclude = exclude, .icase = icase, .glob = glob, .literal = literal, .onestar = onestar });
+        // git's `git_fnmatch` matches what follows the literal prefix as a
+        // pattern of its own, so a `**` right after a prefix that ends
+        // inside a component starts that pattern and spans components.
+        const matcher: ?glob_mod.Glob = if (nowildcard_len < match.len and !onestar)
+            try .compile(a, match[nowildcard_len..], .{ .pathname = glob, .case_fold = icase })
+        else
+            null;
+        try items.append(a, .{ .match = match, .nowildcard_len = nowildcard_len, .exclude = exclude, .icase = icase, .glob = glob, .literal = literal, .onestar = onestar, .matcher = matcher });
     }
     // only exclusions: everything else is named, as git adds `:/`
-    if (all_exclude) try items.append(a, .{ .match = "", .nowildcard_len = 0, .exclude = false, .icase = false, .glob = false, .literal = false, .onestar = false });
+    if (all_exclude) try items.append(a, .{ .match = "", .nowildcard_len = 0, .exclude = false, .icase = false, .glob = false, .literal = false, .onestar = false, .matcher = null });
     return .{ .arena = arena, .items = items.items, .has_exclude = has_exclude };
 }
 

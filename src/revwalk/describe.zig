@@ -36,7 +36,7 @@ const repo_mod = @import("../repo.zig");
 const revparse = @import("revparse.zig");
 const revwalk = @import("../revwalk.zig");
 const abbrev_mod = @import("../odb/abbrev.zig");
-const wildmatch = @import("../worktree/wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
 const worktree = @import("../worktree.zig");
 const commitgraph = @import("../odb/commitgraph.zig");
 const warning = @import("../repo/warning.zig");
@@ -194,6 +194,8 @@ pub const Describer = struct {
     /// `get_name`, over every ref git's `for_each_ref` would hand it.
     fn loadNames(d: *Describer, io: Io) Error!void {
         const a = d.arena.allocator();
+        const exclude = try compileAll(a, d.options.exclude);
+        const match = try compileAll(a, d.options.match);
         const store = d.repo.refStore();
         var listing = try store.list(d.gpa, io, if (d.options.all) "refs/" else "refs/tags/");
         defer listing.deinit();
@@ -215,8 +217,8 @@ pub const Describer = struct {
             } else continue;
 
             if (path_to_match) |p| {
-                if (try anyMatch(d.options.exclude, p)) continue;
-                if (d.options.match.len != 0 and !try anyMatch(d.options.match, p)) continue;
+                if (anyMatch(exclude, p)) continue;
+                if (match.len != 0 and !anyMatch(match, p)) continue;
             }
 
             const oid = switch (entry.target) {
@@ -531,10 +533,16 @@ fn isDirty(gpa: Allocator, io: Io, repo: *Repository, head_oid: Oid) Error!bool 
     return !status.isClean();
 }
 
-fn anyMatch(patterns: []const []const u8, text: []const u8) Error!bool {
-    for (patterns) |p| {
-        if (wildmatch.match(p, text, .{}) catch false) return true;
-    }
+/// `patterns` compiled in `a`, which holds them: every ref is asked of
+/// them. git matches them without `WM_PATHNAME`, so a `*` crosses `/`.
+fn compileAll(a: Allocator, patterns: []const []const u8) Allocator.Error![]const glob_mod.Glob {
+    const globs = try a.alloc(glob_mod.Glob, patterns.len);
+    for (patterns, globs) |p, *glob| glob.* = try .compile(a, p, .{ .pathname = false });
+    return globs;
+}
+
+fn anyMatch(globs: []const glob_mod.Glob, text: []const u8) bool {
+    for (globs) |*glob| if (glob.matches(text)) return true;
     return false;
 }
 
@@ -791,12 +799,12 @@ const NameRev = struct {
     fn loadTips(nr: *NameRev, io: Io, options: Options) Error!void {
         const a = nr.arena.allocator();
         const tags_only = !options.all;
-        var filters: std.ArrayList([]const u8) = .empty;
-        var excludes: std.ArrayList([]const u8) = .empty;
+        var filters: std.ArrayList(glob_mod.Glob) = .empty;
+        var excludes: std.ArrayList(glob_mod.Glob) = .empty;
         const prefixes: []const []const u8 = if (options.all) &.{ "refs/tags/", "refs/heads/", "refs/remotes/" } else &.{"refs/tags/"};
         for (prefixes) |prefix| {
-            for (options.match) |m| try filters.append(a, try std.mem.concat(a, u8, &.{ prefix, m }));
-            for (options.exclude) |m| try excludes.append(a, try std.mem.concat(a, u8, &.{ prefix, m }));
+            for (options.match) |m| try filters.append(a, try .compile(a, try std.mem.concat(a, u8, &.{ prefix, m }), .{ .pathname = false }));
+            for (options.exclude) |m| try excludes.append(a, try .compile(a, try std.mem.concat(a, u8, &.{ prefix, m }), .{ .pathname = false }));
         }
         const store = nr.repo.refStore();
         var listing = try store.list(nr.gpa, io, "refs/");
@@ -806,13 +814,13 @@ const NameRev = struct {
             var can_abbreviate = tags_only; // and `--name-only`
             if (tags_only and !std.mem.startsWith(u8, refname, "refs/tags/")) continue;
             var excluded = false;
-            for (excludes.items) |f| {
+            for (excludes.items) |*f| {
                 if (subpathMatches(refname, f) != null) excluded = true;
             }
             if (excluded) continue;
             if (filters.items.len != 0) {
                 var matched = false;
-                for (filters.items) |f| {
+                for (filters.items) |*f| {
                     if (subpathMatches(refname, f)) |at| {
                         matched = true;
                         if (at != 0) can_abbreviate = true;
@@ -947,10 +955,10 @@ const NameRev = struct {
 
 /// `subpath_matches`: where in `path` -- at its start or after a `/` --
 /// `filter` matches the rest, or `null`.
-fn subpathMatches(path: []const u8, filter: []const u8) ?usize {
+fn subpathMatches(path: []const u8, filter: *const glob_mod.Glob) ?usize {
     var at: usize = 0;
     while (true) {
-        if (wildmatch.match(filter, path[at..], .{}) catch false) return at;
+        if (filter.matches(path[at..])) return at;
         const slash = std.mem.findScalarPos(u8, path, at, '/') orelse return null;
         at = slash + 1;
     }
@@ -1149,6 +1157,44 @@ test "describe names every commit as git describe does, under every option" {
                 return err;
             };
         }
+    }
+}
+
+test "describe's --match and --exclude cross a slash, as git's wildmatch without WM_PATHNAME does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    try r.writeFile(io, "a", "a");
+    try r.exec(io, &.{ "add", "a" });
+    try r.exec(io, &.{ "commit", "-q", "-m", "a" });
+    try r.exec(io, &.{ "tag", "-a", "-m", "release", "rel/1.0" });
+    try r.writeFile(io, "b", "b");
+    try r.exec(io, &.{ "add", "b" });
+    try r.exec(io, &.{ "commit", "-q", "-m", "b" });
+    try r.exec(io, &.{ "tag", "-a", "-m", "other", "zz" });
+    var repo = try Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    const Case = struct { args: []const []const u8, rev: []const u8, options: Options };
+    for ([_]Case{
+        .{ .args = &.{ "--match", "rel*" }, .rev = "HEAD", .options = .{ .match = &.{"rel*"} } },
+        .{ .args = &.{ "--exclude", "rel*" }, .rev = "HEAD~1", .options = .{ .exclude = &.{"rel*"} } },
+        .{ .args = &.{ "--contains", "--match", "rel*" }, .rev = "HEAD~1", .options = .{ .contains = true, .match = &.{"rel*"} } },
+        .{ .args = &.{ "--contains", "--exclude", "rel*" }, .rev = "HEAD~1", .options = .{ .contains = true, .exclude = &.{"rel*"} } },
+    }) |case| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.append(gpa, "describe");
+        try args.appendSlice(gpa, case.args);
+        try args.append(gpa, case.rev);
+        const expected = try gitSays(gpa, io, &r, args.items);
+        defer gpa.free(expected);
+        const got = try relicSays(gpa, io, &repo, case.rev, case.options);
+        defer gpa.free(got);
+        std.testing.expectEqualStrings(expected, got) catch |err| {
+            std.debug.print("git describe {any} differs\n", .{case.args});
+            return err;
+        };
     }
 }
 

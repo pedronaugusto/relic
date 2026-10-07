@@ -201,7 +201,7 @@ exe.root_module.addImport("relic", relic_dep.module("relic"));
 ```
 
 One module, with [conduit](https://github.com/pedronaugusto/conduit) for
-running programs. Conduit carries its libc linkage on POSIX; Windows needs
+running programs and [sweep](https://github.com/pedronaugusto/sweep) for git's globs. Conduit carries its libc linkage on POSIX; Windows needs
 no C runtime. SHA-256 and the TLS primitives come from `std.crypto`; SHA-1,
 inflate and the TLS client are in the package. There is no build option to
 forward. Every function that allocates takes the allocator as its first argument and every function that
@@ -262,8 +262,6 @@ that belong to it: `relic.refs` is refs and their transactions, and
 | `worktree.sparse`, `worktree.sparsecheckout` | `Patterns` for `info/sparse-checkout`, and cone-mode sparse checkout as an operation. |
 | `worktree.ignore` | `Rules.init` / `loadGlobal` / `addDirectory` / `addText` / `popTo` / `match` / `matchPath`, with the pattern that decided. |
 | `worktree.attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
-| `worktree.wildmatch` | `match` — git's own glob, which is not `fnmatch`. |
-| `wildmatch.match(pattern, text, flags)` | Match a glob with git's `pathname` and `case_fold` flags. |
 | `worktree.filter`, `worktree.convert`, `worktree.encoding` | Clean and smudge filters, the long-running process protocol, `ident`, line endings, `working-tree-encoding`. |
 | `worktree.fsmonitor` | `refresh`, `configured`, `ChangeSource`: the file monitor git asks through `core.fsmonitor` (hook protocol 1 and 2), or a program's own, deciding which files `status` looks at; `FSMN` read and written. |
 | `worktree.dirscan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
@@ -833,11 +831,11 @@ a reader's feet and every one of them still reads back.
 
 git's published security fixes are a regression suite: each of the 49 that apply to relic is a test in `src/testing/security/`, one file per kind of hole, named for its CVE and the git test it mirrors.
 
-Seventy-nine fuzz tests. Most of them take arbitrary bytes and hold a parser to
+Seventy-eight fuzz tests. Most of them take arbitrary bytes and hold a parser to
 one rule — any input either parses to a value or returns a named error — and
 between them they cover every format relic reads: the object formats, packs
 and their indexes, the index file, refs, reftable and reflogs, config and
-attributes, the glob matcher, the accelerators, packet lines and the wire
+attributes, the accelerators, packet lines and the wire
 protocol's answers, credential helper answers, filter specs, LFS batch and
 lock answers, TLS handshake messages and private keys, the merge state
 files, mailmaps, bundle headers, notes trees and the bisect log's quoting.

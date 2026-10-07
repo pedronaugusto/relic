@@ -42,7 +42,7 @@ const convert = @import("../worktree/convert.zig");
 const blobmerge = @import("../merge/blobmerge.zig");
 const fs = @import("../repo/fs.zig");
 const safepath = @import("../worktree/safepath.zig");
-const wildmatch = @import("../worktree/wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
 const rerere = @import("../merge/rerere.zig");
 const program = @import("../repo/program.zig");
 
@@ -656,7 +656,7 @@ pub fn keptFiles(gpa: Allocator, text: []const u8, options: Options) Self.Error!
     for (parsed.files) |file| {
         var p = file;
         if (options.reverse) reversePatch(&p);
-        if (!usePatch(options.limits, &p)) continue;
+        if (!try usePatch(a, options.limits, &p)) continue;
         try files.append(a, p);
     }
     return .{ .gpa = gpa, .arena = arena_instance.state, .patch = parsed, .files = files.items };
@@ -724,7 +724,7 @@ fn keepEntries(st: *State, parsed: []const patchparse.FilePatch, configured_ws: 
         var entry = try a.create(Entry);
         entry.* = .{ .p = file };
         if (st.options.reverse) reversePatch(&entry.p);
-        if (!usePatch(st.options.limits, &entry.p)) {
+        if (!try usePatch(a, st.options.limits, &entry.p)) {
             skipped += 1;
             continue;
         }
@@ -795,14 +795,14 @@ fn reversePatch(p: *FilePatch) void {
     }
 }
 
-fn usePatch(limits: []const Limit, p: *const FilePatch) bool {
+fn usePatch(gpa: Allocator, limits: []const Limit, p: *const FilePatch) Allocator.Error!bool {
     const pathname = p.new_name orelse p.old_name.?;
     var has_include = false;
     for (limits) |limit| {
         if (limit.include) has_include = true;
     }
     for (limits) |limit| {
-        if (wildmatch.match(limit.pattern, pathname, .{ .pathname = false }) catch false) return limit.include;
+        if (try glob_mod.matches(gpa, limit.pattern, pathname, .{ .pathname = false })) return limit.include;
     }
     return !has_include;
 }

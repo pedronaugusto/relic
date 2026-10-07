@@ -40,7 +40,7 @@ const blobmerge = @import("blobmerge.zig");
 const fs = @import("../repo/fs.zig");
 const head_mod = @import("../commit/head.zig");
 const diff_mod = @import("../diff.zig");
-const wildmatch = @import("../worktree/wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
 const config_mod = @import("../config.zig");
 
 const Oid = hash.Oid;
@@ -858,7 +858,7 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
     if (index.resolve_undo) |undo| {
         for (undo.entries.items) |item| {
             if (conflicts.contains(item.path)) continue;
-            if (!try pathspecMatches(pathspec, item.path)) continue;
+            if (!try pathspecMatches(arena, pathspec, item.path)) continue;
             var stages: Stages = .{ null, null, null };
             for (0..3) |i| {
                 if (item.modes[i] != 0) stages[i] = .{ .mode = item.modes[i], .oid = item.oids[i].? };
@@ -875,7 +875,7 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
         const ours = stages[1] orelse continue;
         const theirs = stages[2] orelse continue;
         if (!isRegRaw(ours.mode) or !isRegRaw(theirs.mode)) continue;
-        if (!try pathspecMatches(pathspec, path)) continue;
+        if (!try pathspecMatches(arena, pathspec, path)) continue;
         const owned = try arena.dupe(u8, path);
         switch (try forgetOne(&r, &rr, owned, stages)) {
             .forgotten => try forgotten.append(arena, owned),
@@ -940,13 +940,13 @@ fn handleCache(r: *Run, path: []const u8, stages: Stages, size: u32) Error!Norma
 /// Whether git's plain pathspec `items` names `path`: the path itself, a
 /// directory above it, or a glob matching it, `*` crossing `/`. No items,
 /// or `.`, name every path.
-fn pathspecMatches(items: []const []const u8, path: []const u8) Error!bool {
+fn pathspecMatches(gpa: Allocator, items: []const []const u8, path: []const u8) Error!bool {
     if (items.len == 0) return true;
     for (items) |item_in| {
         var item = item_in;
         if (std.mem.eql(u8, item, ".") or item.len == 0) return true;
         if (std.mem.startsWith(u8, item, "./")) item = item[2..];
-        const literal_len = std.mem.findAny(u8, item, "*?[\\") orelse item.len;
+        const literal_len = glob_mod.literalPrefix(item);
         const literal = item[0..literal_len];
         if (literal_len == item.len) {
             if (std.mem.eql(u8, item, path)) return true;
@@ -954,7 +954,7 @@ fn pathspecMatches(items: []const []const u8, path: []const u8) Error!bool {
             continue;
         }
         if (!std.mem.startsWith(u8, path, literal)) continue;
-        if (wildmatch.match(item, path, .{ .pathname = false }) catch false) return true;
+        if (try glob_mod.matches(gpa, item, path, .{ .pathname = false })) return true;
     }
     return false;
 }
