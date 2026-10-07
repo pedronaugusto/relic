@@ -50,7 +50,7 @@ const refs_mod = @import("refs.zig");
 const repo_mod = @import("repo.zig");
 const worktree = @import("worktree.zig");
 const program = @import("repo/program.zig");
-const wildmatch = @import("worktree/wildmatch.zig");
+const glob_mod = @import("text/glob.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -303,7 +303,7 @@ pub fn isActive(arena: Allocator, repo: *Repository, name: []const u8, path: []c
     if (repo.configuration().find(active_key) != null) return repo.configuration().getBool(active_key, false);
     const specs = try repo.configuration().all("submodule.active");
     defer repo.configuration().gpa.free(specs);
-    if (specs.len > 0) return pathspecMatches(specs, path);
+    if (specs.len > 0) return pathspecMatches(arena, specs, path);
     return repo.configuration().get(try configKey(arena, name, "url")) != null;
 }
 
@@ -311,7 +311,7 @@ pub fn isActive(arena: Allocator, repo: *Repository, name: []const u8, path: []c
 /// it, or a glob; `:(exclude)`, `:!` and `:^` take matches away; `:(top)`,
 /// `:/`, `:(glob)` and `:(literal)` are read, and any other magic is
 /// refused by name.
-fn pathspecMatches(specs: []const []const u8, path: []const u8) Error!bool {
+fn pathspecMatches(gpa: Allocator, specs: []const []const u8, path: []const u8) Error!bool {
     var positive = false;
     var included = false;
     var excluded = false;
@@ -348,7 +348,7 @@ fn pathspecMatches(specs: []const []const u8, path: []const u8) Error!bool {
             };
             spec = spec[i..];
         }
-        const matches = matchOne(spec, path, literal, glob);
+        const matches = try matchOne(gpa, spec, path, literal, glob);
         if (exclude) {
             if (matches) excluded = true;
         } else {
@@ -359,13 +359,13 @@ fn pathspecMatches(specs: []const []const u8, path: []const u8) Error!bool {
     return (included or !positive) and !excluded;
 }
 
-fn matchOne(spec: []const u8, path: []const u8, literal: bool, glob: bool) bool {
+fn matchOne(gpa: Allocator, spec: []const u8, path: []const u8, literal: bool, glob: bool) Allocator.Error!bool {
     const p = std.mem.trimEnd(u8, spec, "/");
     if (p.len == 0 or std.mem.eql(u8, p, ".")) return true;
     if (std.mem.eql(u8, p, path)) return true;
     if (std.mem.startsWith(u8, path, p) and path.len > p.len and path[p.len] == '/') return true;
     if (literal) return false;
-    return wildmatch.match(spec, path, .{ .pathname = glob }) catch false;
+    return glob_mod.matches(gpa, spec, path, .{ .pathname = glob });
 }
 
 /// The remote git resolves a relative url against: the current branch's

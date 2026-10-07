@@ -282,7 +282,7 @@ test "a patch that does not apply falls back to a three-way merge with git's sta
     try reset(&p, io);
     try p.write(io, "a.txt", "alpha\nbeta\ngamma\nDelta-ours\nepsilon\nzeta\neta\ntheta\niota\nkappa\nlambda\nmu\nnu\nxi\nomicron\npi\nrho\nsigma\ntau\nupsilon\n");
     try p.both(io, &.{ "add", "a.txt" });
-    try compare(&p, io, patch, &.{ "--3way", "--theirs" }, .{ .three_way = true, .favor = .theirs });
+    try compare(&p, io, patch, &.{ "--3way", "--theirs" }, .{ .three_way = true, .resolve = .theirs });
 }
 
 test "whitespace errors are warned of, refused or fixed, and changed whitespace in the context is overlooked when asked" {

@@ -1,15 +1,17 @@
 //! Integer overflow: a count or a length an attacker sizes -- lines in a
 //! blob, bytes in a path or a patch, a padding width, an attributes line --
 //! that wraps the integer holding it, and with it a buffer's bounds, which
-//! a release build no longer checks. Each fix has its owner: the diff's
-//! line numbering in `diff/textdiff.zig` (the architecture's `lines/`),
-//! path building in the object walk (`walk/`), `pretty.zig`'s placeholders,
-//! `worktree/attributes.zig` (`patterns/`) and `patch/apply.zig`.
+//! a release build no longer checks. Each fix has its owner: the line
+//! numbering in parallax's line diff, reached through `diff.zig` and
+//! `merge/blobmerge.zig`; path building in the object walk (`walk/`);
+//! `pretty.zig`'s placeholders; `worktree/attributes.zig` (`patterns/`);
+//! and `patch/apply.zig`.
 
 const std = @import("std");
 const Io = std.Io;
 
-const textdiff = @import("../../diff/textdiff.zig");
+const diff = @import("../../diff.zig");
+const blobmerge = @import("../../merge/blobmerge.zig");
 const objectwalk = @import("../../transport/objectwalk.zig");
 const pretty = @import("../../pretty.zig");
 const archive = @import("../../archive.zig");
@@ -27,17 +29,21 @@ fn unread(comptime T: type, n: usize) []const T {
     return many[0..n];
 }
 
-test "git 2.3.10 (MAX_XDIFF_SIZE, no t/ test): a diff whose lines a u32 cannot number is refused before a line is read" {
+test "git 2.3.10 (MAX_XDIFF_SIZE, no t/ test): a text too large for the line diff is refused before a byte of it is read" {
     if (comptime @sizeOf(usize) < 8) return error.SkipZigTest;
     const gpa = std.testing.allocator;
-    const Line = textdiff.Line;
-    try std.testing.expectError(error.OutOfMemory, textdiff.diffLines(gpa, unread(Line, textdiff.max_lines + 1), &.{}, .{}));
-    try std.testing.expectError(error.OutOfMemory, textdiff.diffLines(gpa, &.{}, unread(Line, textdiff.max_lines + 1), .{}));
-    try std.testing.expectError(error.OutOfMemory, textdiff.diffLines(gpa, unread(Line, textdiff.max_lines), unread(Line, 1), .{}));
-    // And an ordinary diff is unchanged by the check.
-    const script = try textdiff.diffLines(gpa, &.{ "a\n", "b\n" }, &.{ "a\n", "c\n" }, .{});
-    defer gpa.free(script);
-    try std.testing.expect(script.len != 0);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    // A line is numbered with a `u32`, so a side of 4 GiB is refused.
+    const huge = unread(u8, @as(usize, std.math.maxInt(u32)) + 1);
+    try std.testing.expectError(error.InputTooLarge, diff.unifiedBody(gpa, &out.writer, huge, "", .{}));
+    try std.testing.expectError(error.InputTooLarge, diff.unifiedBody(gpa, &out.writer, "", huge, .{}));
+    // A merge takes a side larger than MAX_XDIFF_SIZE as binary, as git's
+    // `ll_merge` does.
+    try std.testing.expectError(error.BinaryBlob, blobmerge.blobs(gpa, "a", unread(u8, blobmerge.max_text_size + 1), "", .{}));
+    // And an ordinary diff is unchanged by the checks.
+    try diff.unifiedBody(gpa, &out.writer, "a\nb\n", "a\nc\n", .{});
+    try std.testing.expect(out.written().len != 0);
 }
 
 test "CVE-2016-2324 (with CVE-2016-2315, no t/ test): an object walk names every blob of a deep tree of long names whole" {

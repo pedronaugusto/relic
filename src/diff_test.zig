@@ -8,7 +8,7 @@ const testgit = @import("testing/git.zig");
 const hash = @import("hash.zig");
 const odb_mod = @import("odb.zig");
 const diff = @import("diff.zig");
-const textdiff = @import("diff/textdiff.zig");
+const parallax = @import("dependencies.zig").parallax;
 const object = @import("object.zig");
 
 const Oid = hash.Oid;
@@ -330,7 +330,7 @@ test "the hunk header carries the enclosing line git puts there" {
     defer changes.deinit();
     try std.testing.expectEqual(@as(usize, 1), changes.items.len);
 
-    for ([_]usize{ 0, 1, 3, 5 }) |context| {
+    for ([_]u32{ 0, 1, 3, 5 }) |context| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         try diff.unified(gpa, io, &out.writer, &pair.db, changes.items[0], .{ .context = context });
@@ -579,8 +579,8 @@ fn expectPatches(pair: *Pair, io: Io, options: diff.Options, flags: []const []co
 }
 
 /// The hunks of `git diff -U0` as the changes they stand for.
-fn parseZeroContextHunks(gpa: std.mem.Allocator, text: []const u8) ![]textdiff.Change {
-    var out: std.ArrayList(textdiff.Change) = .empty;
+fn parseZeroContextHunks(gpa: std.mem.Allocator, text: []const u8) ![]parallax.Change {
+    var out: std.ArrayList(parallax.Change) = .empty;
     errdefer out.deinit(gpa);
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -592,22 +592,22 @@ fn parseZeroContextHunks(gpa: std.mem.Allocator, text: []const u8) ![]textdiff.C
         const new = try parseRange(ranges[plus + 2 ..]);
         try out.append(gpa, .{
             .old_start = if (old.count == 0) old.start else old.start - 1,
-            .old_count = old.count,
+            .old_len = old.count,
             .new_start = if (new.count == 0) new.start else new.start - 1,
-            .new_count = new.count,
+            .new_len = new.count,
         });
     }
     return out.toOwnedSlice(gpa);
 }
 
-fn parseRange(text: []const u8) !struct { start: usize, count: usize } {
+fn parseRange(text: []const u8) !struct { start: u32, count: u32 } {
     if (std.mem.findScalar(u8, text, ',')) |comma| {
         return .{
-            .start = try std.fmt.parseInt(usize, text[0..comma], 10),
-            .count = try std.fmt.parseInt(usize, text[comma + 1 ..], 10),
+            .start = try std.fmt.parseInt(u32, text[0..comma], 10),
+            .count = try std.fmt.parseInt(u32, text[comma + 1 ..], 10),
         };
     }
-    return .{ .start = try std.fmt.parseInt(usize, text, 10), .count = 1 };
+    return .{ .start = try std.fmt.parseInt(u32, text, 10), .count = 1 };
 }
 
 test "the histogram, patience and minimal diffs land on the lines git's do, over a random corpus" {
@@ -630,7 +630,7 @@ fn expectCorpusLikeGit(
     io: std.Io,
     repo: *testgit.Repo,
     flag: []const u8,
-    options: textdiff.Options,
+    options: parallax.Options,
     seed: u64,
     cases: usize,
 ) !void {
@@ -674,13 +674,9 @@ fn expectCorpusLikeGit(
         const expected = try parseZeroContextHunks(gpa, output);
         defer gpa.free(expected);
 
-        const old_lines = try textdiff.splitLines(gpa, old.items);
-        defer gpa.free(old_lines);
-        const new_lines = try textdiff.splitLines(gpa, new.items);
-        defer gpa.free(new_lines);
-        const got = try textdiff.diffLines(gpa, old_lines, new_lines, options);
-        defer gpa.free(got);
-        std.testing.expectEqualSlices(textdiff.Change, expected, got) catch |err| {
+        var got = try parallax.diffLines(gpa, old.items, new.items, options);
+        defer got.deinit();
+        std.testing.expectEqualSlices(parallax.Change, expected, got.diff.changes) catch |err| {
             std.debug.print("{s}, case {d}\n", .{ flag, case });
             return err;
         };
@@ -769,4 +765,33 @@ test "diff.algorithm picks the algorithm git picks when none is asked for" {
     var absent = config_mod.Config.initEmpty(gpa);
     defer absent.deinit();
     try std.testing.expectEqual(diff.Algorithm.histogram, (try diff.configured(&absent, .{ .algorithm = .histogram })).algorithm);
+}
+
+test "under a whitespace option a context line is the new side's, \\v and \\f are text, and a heading keeps them, as git diff prints it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    const old = "func()\x0b\n1\n2\n3\n4\n5\n\tindented  line\nkeep\na\x0bb\nc\x0cd\nlast\n";
+    const new = "func()\x0b\n1\n2\n3\n4\n5\n  indented line\nkeep\nab\ncd\nchanged\n";
+    try repo.writeFile(io, "old", old);
+    try repo.writeFile(io, "new", new);
+    const Case = struct { flag: []const u8, options: diff.Options };
+    for ([_]Case{
+        .{ .flag = "-w", .options = .{ .ignore_all_whitespace = true } },
+        .{ .flag = "-b", .options = .{ .ignore_whitespace_change = true } },
+        .{ .flag = "--ignore-space-at-eol", .options = .{ .ignore_trailing_whitespace = true } },
+    }) |case| {
+        // `diff --no-index` exits 1 when the files differ; the output is
+        // what is compared.
+        const said = try repo.runInput(io, &.{ "diff", "--no-index", "--no-color", case.flag, "old", "new" }, "");
+        defer gpa.free(said);
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try diff.unifiedBody(gpa, &out.writer, old, new, case.options);
+        std.testing.expectEqualStrings(said[std.mem.find(u8, said, "@@ ").?..], out.written()) catch |err| {
+            std.debug.print("git diff {s}\n", .{case.flag});
+            return err;
+        };
+    }
 }

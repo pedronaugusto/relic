@@ -16,7 +16,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const textdiff = @import("textdiff.zig");
+const attributes = @import("../worktree/attributes.zig");
 
 /// A perfect score: the whole of the larger blob is shared.
 pub const max_score: u32 = 60000;
@@ -97,7 +97,7 @@ pub fn scoreSpans(src: *const Spans, dst: *const Spans, minimum: u32) u32 {
 pub fn spans(gpa: Allocator, bytes: []const u8) Allocator.Error!Spans {
     var list: std.ArrayList(Span) = .empty;
     defer list.deinit(gpa);
-    const is_text = !textdiff.isBinary(bytes);
+    const is_text = !attributes.isBinaryForDiff(bytes);
     var n: u64 = 0;
     var accum1: u32 = 0;
     var accum2: u32 = 0;

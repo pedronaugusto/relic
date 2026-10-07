@@ -1342,7 +1342,7 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
         const base = try read(io, repo, p.base, &held[0]);
         const ours = try read(io, repo, p.local, &held[1]);
         const theirs = try read(io, repo, p.remote, &held[2]);
-        const style = if (repo.configuration().get("merge.conflictstyle")) |s| blobmerge.ConflictStyle.parse(s) orelse .merge else .merge;
+        const style = if (repo.configuration().get("merge.conflictstyle")) |s| blobmerge.parseConflictStyle(s) orelse .merge else .merge;
         if (blobmerge.blobs(gpa, base, ours, theirs, .{
             .conflict_style = style,
             .labels = .{ .ours = local_ref, .theirs = remote_ref, .base = "" },

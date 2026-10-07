@@ -11,6 +11,7 @@ const hash = @import("../hash.zig");
 const repo_mod = @import("../repo.zig");
 const gitdate = @import("../object/gitdate.zig");
 const testgit = @import("../testing/git.zig");
+const testbytes = @import("../testing/bytes.zig");
 
 const Repository = repo_mod.Repository;
 const Oid = hash.Oid;
@@ -489,6 +490,13 @@ test "patterns, exclusions and reachability choose refs as git chooses them" {
         &.{"refs/heads/fix"},
         &.{ "refs/tags/v1*", "refs/remotes" },
         &.{"refs/*/main"},
+        // git's wildmatch: a `**` that is not a whole component is a `*`,
+        // and a pattern too long for one call on the stack is compiled.
+        &.{"refs/remo**/main"},
+        &.{"refs/heads/[f]*"},
+        &.{"refs/*/f?x*"},
+        &.{"refs/heads/" ++ testbytes.repeat("*", 1100)},
+        &.{ "--ignore-case", "refs/tags/[U]pper" },
         &.{ "--ignore-case", "refs/tags/upper" },
         &.{"--points-at=main"},
         &.{"--points-at=v1.0"},

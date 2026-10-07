@@ -19,7 +19,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const wildmatch = @import("wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
 const encoding = @import("encoding.zig");
 const fs = @import("../repo/fs.zig");
 
@@ -57,6 +57,9 @@ pub const Assignment = struct {
 pub const Rule = struct {
     /// The glob, with a leading `/` removed.
     glob: []const u8,
+    /// The glob compiled: against the whole path below `base` when
+    /// `anchored`, else against the name. Held by the attributes.
+    matcher: glob_mod.Glob,
     /// The directory the rule is relative to, `/`-separated, empty at the
     /// root.
     base: []const u8,
@@ -358,6 +361,7 @@ pub const Attrs = struct {
             if (assignments.len == 0) continue;
             try rules.append(a, .{
                 .glob = parsed.glob,
+                .matcher = try .compile(a, parsed.glob, .{ .pathname = parsed.anchored, .case_fold = attrs.case_fold }),
                 .base = base,
                 .anchored = parsed.anchored,
                 .dir_only = parsed.dir_only,
@@ -417,14 +421,9 @@ pub const Attrs = struct {
             var i = level.rules.len;
             while (i > 0) {
                 i -= 1;
-                const rule = level.rules[i];
+                const rule = &level.rules[i];
                 if (rule.dir_only and !is_dir) continue;
-                const subject = if (rule.anchored) relative else name;
-                const matched = wildmatch.match(rule.glob, subject, .{
-                    .pathname = rule.anchored,
-                    .case_fold = attrs.case_fold,
-                }) catch false;
-                if (!matched) continue;
+                if (!rule.matcher.matches(if (rule.anchored) relative else name)) continue;
                 try attrs.fill(a, &out, rule.assignments);
             }
         }

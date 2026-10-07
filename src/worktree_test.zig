@@ -17,6 +17,7 @@ const ignore = @import("worktree/ignore.zig");
 const attributes = @import("worktree/attributes.zig");
 const fs = @import("repo/fs.zig");
 const sparse = @import("worktree/sparse.zig");
+const pathspec = @import("pathspec.zig");
 
 const Oid = hash.Oid;
 
@@ -1439,6 +1440,126 @@ test "attributes resolve as git check-attr resolves them: the last assignment of
         try expectCheckAttr(gpa, io, &h, "link/f");
     }
     for ([_][]const u8{ "f", "sub/f", "val/f", "top/f" }) |path| try expectCheckAttr(gpa, io, &h, path);
+}
+
+/// The ignore lines the glob differentials below share: git's line grammar
+/// at its edges, the probes the glob design names, and a pattern far longer
+/// than one match takes on the stack.
+const glob_lines = "tabbed\t\nspaced   \nkept\\ \n\\#hash\n\\!bang\n*.log\n!keep.log\nbuild/\n/root-only\n" ++
+    "doc/*.txt\nsr**/wild.zig\na/**/z\n[[:upper:]]*.c\nx[abc\n" ++ "long/" ++ testbytes.repeat("*", 1100) ++ "z\n";
+
+test "ignore rules decide every path as git check-ignore decides it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    try h.repo.writeFile(io, ".gitignore", glob_lines);
+    try h.repo.dir.createDirPath(io, "build");
+    // git init sets core.ignoreCase where the filesystem folds case, and
+    // git folds the patterns then.
+    const fold = try h.repo.line(io, &.{ "config", "--bool", "--default", "false", "core.ignorecase" });
+    defer gpa.free(fold);
+    var rules: ignore.Rules = try .init(gpa, std.mem.eql(u8, fold, "true"));
+    defer rules.deinit();
+    try rules.addText(glob_lines, "", ".gitignore", 2);
+
+    const paths = [_]struct { []const u8, bool }{
+        .{ "tabbed", false },    .{ "spaced", false },          .{ "kept ", false },
+        .{ "#hash", false },     .{ "!bang", false },           .{ "a.log", false },
+        .{ "keep.log", false },  .{ "sub/keep.log", false },    .{ "build", true },
+        .{ "build/x.o", false }, .{ "root-only", false },       .{ "sub/root-only", false },
+        .{ "doc/a.txt", false }, .{ "other/doc/a.txt", false }, .{ "src/worktree/wild.zig", false },
+        .{ "a/b/c/z", false },   .{ "a/z", false },             .{ "Upper.c", false },
+        .{ "lower.c", false },   .{ "x[abc", false },           .{ "long/xyz", false },
+        .{ "long/x/z", false },  .{ "long/xy", false },
+    };
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(gpa);
+    for (paths) |p| try input.print(gpa, "{s}\x00", .{p[0]});
+    // `-z`: source, line, pattern and path, each ended by a NUL, the first
+    // three empty when nothing matched; nothing is quoted.
+    const said = try h.repo.runInput(io, &.{ "check-ignore", "--no-index", "--stdin", "-z", "-v", "-n" }, input.items);
+    defer gpa.free(said);
+    var fields = std.mem.splitScalar(u8, said, 0);
+    for (paths) |p| {
+        _ = fields.next() orelse "";
+        const line_text = fields.next() orelse "";
+        const pattern = fields.next() orelse "";
+        const path = fields.next() orelse "";
+        std.testing.expectEqualStrings(p[0], path) catch |err| {
+            std.debug.print("git check-ignore said:\n{s}\n", .{said});
+            return err;
+        };
+        const decided: ?u32 = if (line_text.len == 0) null else try std.fmt.parseUnsigned(u32, line_text, 10);
+        // A `!` pattern re-included the path.
+        const theirs = decided != null and pattern[0] != '!';
+        const ours = rules.matchPath(p[0], p[1]);
+        std.testing.expectEqual(theirs, ours.excluded) catch |err| {
+            std.debug.print("{s}: git line {s}, {s}\n", .{ p[0], line_text, pattern });
+            return err;
+        };
+        try std.testing.expectEqual(decided, if (ours.by) |by| by.line else null);
+    }
+}
+
+test "attributes match globs as git check-attr matches them" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    // Sixty-five brackets: more than one match holds on the stack.
+    // git folds the patterns where git init found a folding filesystem.
+    const fold = try h.repo.line(io, &.{ "config", "--bool", "--default", "false", "core.ignorecase" });
+    defer gpa.free(fold);
+    const folded: attributes.Attrs = try .init(gpa, std.mem.eql(u8, fold, "true"));
+    h.attrs.deinit();
+    h.attrs = folded;
+    const many = testbytes.repeat("[ab]", 65);
+    try h.repo.writeFile(io, ".gitattributes", "*.txt t1\nsr**/wild.zig probe\n[[:upper:]]*.c upper\n" ++
+        many ++ " many\nx[abc broken\na/**/z deep\n*.C\tfolded\n");
+    for ([_][]const u8{
+        "f.txt",   "src/worktree/wild.zig",   "Upper.c",
+        "lower.c", testbytes.repeat("a", 65), testbytes.repeat("a", 64) ++ "c",
+        "x[abc",   "a/b/c/z",                 "a/z",
+        "UPPER.C",
+    }) |path| try expectCheckAttr(gpa, io, &h, path);
+}
+
+test "pathspecs choose the files git ls-files lists" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    const files = [_][]const u8{ "src/worktree/wild.zig", "src/a.zig", "srcx/b.zig", "docs/README.md", "Upper.c", "top.zig" };
+    for (files) |path| try h.repo.writeFile(io, path, "x\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    const long = "src/" ++ testbytes.repeat("*", 1100) ++ ".zig";
+    for ([_][]const u8{
+        // git_fnmatch matches what follows the literal prefix as a pattern
+        // of its own: `**` after `sr` spans components.
+        ":(glob)sr**/wild.zig", ":(glob)src**/wild.zig", ":(glob)src/*.zig",
+        "*.zig",                "src/*.zig",             ":(icase)SRC/*",
+        ":(exclude)*.md",       long,                    ":(glob)" ++ long,
+        "[[:upper:]]*",
+    }) |spec| {
+        const said = try h.repo.run(io, &.{ "ls-files", "--", spec });
+        defer gpa.free(said);
+        var p = try pathspec.parse(gpa, &.{spec});
+        defer p.deinit();
+        var ours: std.ArrayList(u8) = .empty;
+        defer ours.deinit(gpa);
+        var sorted = files;
+        std.mem.sort([]const u8, &sorted, {}, struct {
+            fn f(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.order(u8, x, y) == .lt;
+            }
+        }.f);
+        for (sorted) |path| if (p.matches(path)) try ours.print(gpa, "{s}\n", .{path});
+        std.testing.expectEqualStrings(said, ours.items) catch |err| {
+            std.debug.print("pathspec {s}\n", .{spec});
+            return err;
+        };
+    }
 }
 
 test "without core.symlinks a link written as a file stays a link to status and add, as git keeps it" {

@@ -22,7 +22,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const ignore = @import("ignore.zig");
-const wildmatch = @import("wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
 const fs = @import("../repo/fs.zig");
 
 /// Errors from loading sparse patterns.
@@ -106,7 +106,11 @@ pub const Patterns = struct {
             line_number += 1;
             var line = raw;
             if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-            const pattern = ignore.parseLine(line, "", "info/sparse-checkout", line_number) orelse continue;
+            const pattern = try ignore.parseLine(p.arena.allocator(), line, .{
+                .source = "info/sparse-checkout",
+                .line = line_number,
+                .case_fold = p.case_fold,
+            }) orelse continue;
             try p.items.append(p.gpa, pattern);
         }
     }
@@ -138,14 +142,9 @@ pub const Patterns = struct {
     /// when none does.
     fn decide(p: *const Patterns, path: []const u8, is_dir: bool) ?bool {
         var decision: ?bool = null;
-        for (p.items.items) |pattern| {
+        for (p.items.items) |*pattern| {
             if (pattern.dir_only and !is_dir) continue;
-            const subject = if (pattern.anchored) path else basename(path);
-            const matched = wildmatch.match(pattern.glob, subject, .{
-                .pathname = pattern.anchored,
-                .case_fold = p.case_fold,
-            }) catch false;
-            if (!matched) continue;
+            if (!pattern.matcher.matches(if (pattern.anchored) path else basename(path))) continue;
             decision = !pattern.negated;
         }
         return decision;
@@ -350,11 +349,6 @@ pub fn trimPattern(line: []const u8) []const u8 {
     return line[0 .. last_space orelse line.len];
 }
 
-/// Whether `c` is one of the characters a glob gives meaning to.
-fn isGlobSpecial(c: u8) bool {
-    return c == '*' or c == '?' or c == '[' or c == '\\';
-}
-
 /// git's test that a cone pattern names a directory rather than a glob:
 /// every special character is escaped, except a `*` that ends the pattern
 /// after a slash.
@@ -364,9 +358,9 @@ fn onlyEscapedGlobs(pattern: []const u8) bool {
         const cur = pattern[i];
         const prev = pattern[i - 1];
         const next: u8 = if (i + 1 < pattern.len) pattern[i + 1] else 0;
-        if (!isGlobSpecial(cur)) continue;
+        if (!glob_mod.isSpecial(cur)) continue;
         if (prev == '\\') continue;
-        if (cur == '\\' and isGlobSpecial(next)) continue;
+        if (cur == '\\' and glob_mod.isSpecial(next)) continue;
         if (prev == '/' and cur == '*' and next == 0) continue;
         return false;
     }

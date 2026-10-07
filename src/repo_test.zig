@@ -647,6 +647,72 @@ test "an includeIf gitdir:./ starts from the including file's directory, and -c 
     try std.testing.expectEqualStrings("fromcmd", repo.configuration().get("probe.w").?);
 }
 
+test "includeIf gitdir: and onbranch: globs hold where git's wildmatch says they do" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var home = std.testing.tmpDir(.{ .iterate = true });
+    defer home.cleanup();
+    const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(home_path);
+    try home.dir.createDirPath(io, "work/repo");
+    const conditions = [_][]const u8{
+        "gitdir:**/wo*k/repo/",
+        "gitdir:**/w?rk/r[e]po/.git",
+        "gitdir/i:**/WORK/REPO/",
+        "gitdir:**/wo**rk/",
+        "gitdir:**/w[!x]rk/repo/",
+        "gitdir:**/no*match/",
+        // WM_CASEFOLD compares a bracket member unfolded: git holds this
+        // condition false.
+        "gitdir/i:**/[W]ORK/repo/",
+        "onbranch:ma*",
+        "onbranch:**/x",
+    };
+    var config: std.ArrayList(u8) = .empty;
+    defer config.deinit(gpa);
+    for (conditions, 0..) |condition, i| {
+        try config.print(gpa, "[includeIf \"{s}\"]\n\tpath = inc{d}\n", .{ condition, i });
+        var name_buf: [16]u8 = undefined;
+        var text_buf: [64]u8 = undefined;
+        try home.dir.writeFile(io, .{
+            .sub_path = try std.mem.print(&name_buf, "inc{d}", .{i}),
+            .data = try std.mem.print(&text_buf, "[probe]\n\tc{d} = yes\n", .{i}),
+        });
+    }
+    try home.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = config.items });
+    var work = try home.dir.openDir(io, "work/repo", .{});
+    defer work.close(io);
+    {
+        var init = try repo_mod.Repository.init(gpa, io, work, .{});
+        init.deinit(io);
+    }
+    var environ = try testgit.isolatedEnviron(gpa, home_path);
+    defer environ.deinit();
+    const said = try std.process.run(gpa, io, .{
+        .argv = &.{ testgit.program(), "config", "--get-regexp", "^probe\\." },
+        .cwd = .{ .dir = work },
+        .environ_map = &environ,
+    });
+    defer gpa.free(said.stdout);
+    defer gpa.free(said.stderr);
+
+    var repo = try repo_mod.Repository.open(gpa, io, work, .{
+        .global_config = .{ .dir = home.dir, .sub_path = ".gitconfig" },
+        .home = home_path,
+        .ownership = .trust,
+    });
+    defer repo.deinit(io);
+    var ours: std.ArrayList(u8) = .empty;
+    defer ours.deinit(gpa);
+    for (0..conditions.len) |i| {
+        var key_buf: [16]u8 = undefined;
+        const key = try std.mem.print(&key_buf, "probe.c{d}", .{i});
+        if (repo.configuration().get(key)) |v| try ours.print(gpa, "{s} {s}\n", .{ key, v });
+    }
+    try std.testing.expectEqualStrings(said.stdout, ours.items);
+    try std.testing.expectEqualStrings("probe.c0 yes\nprobe.c1 yes\nprobe.c2 yes\nprobe.c3 yes\nprobe.c4 yes\nprobe.c7 yes\n", ours.items);
+}
+
 test "a config refresh keeps only its own refused setting" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

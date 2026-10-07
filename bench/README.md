@@ -19,7 +19,13 @@ held to:
   SHA-256, in GiB/s;
 - staging into loose objects against staging into a pack, and writing a
   pack whole and deltified: objects per second, MiB/s and the bytes the
-  deltas save.
+  deltas save;
+- ignore rules over four levels and attribute rules deciding 100,000 paths,
+  and what reading the rules costs;
+- `status` over a tree with an ignore file in every directory;
+- `for-each-ref` choosing among 20,000 packed refs by pattern;
+- unified bodies, line counts and content merges of 400 files, and a blame
+  through 200 commits.
 
 A Debug build measures a smaller tree with the same ratios. `-Dbench-smoke`
 builds it to run every measurement once on a tiny tree without reading a

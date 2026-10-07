@@ -40,7 +40,7 @@ const blobmerge = @import("blobmerge.zig");
 const fs = @import("../repo/fs.zig");
 const head_mod = @import("../commit/head.zig");
 const diff_mod = @import("../diff.zig");
-const wildmatch = @import("../worktree/wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
 const config_mod = @import("../config.zig");
 
 const Oid = hash.Oid;
@@ -64,7 +64,7 @@ pub const Error = error{
     /// `diff` could not read a conflict's preimage or the file it is
     /// compared with, where git stops with "unable to generate diff".
     UnreadableForDiff,
-} || Allocator.Error || head_mod.Error || odb_errors || worktree.Error || repo_mod.Error || index_mod.WriteError || index_mod.ReadError;
+} || diff_mod.TextError || head_mod.Error || odb_errors || worktree.Error || repo_mod.Error || index_mod.WriteError || index_mod.ReadError;
 
 const odb_errors = @import("../odb.zig").Error;
 
@@ -583,20 +583,20 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
             .unspecified => {},
         };
     }
-    var favor: blobmerge.Favor = .none;
+    var resolve: blobmerge.Resolve = .markers;
     if (name) |driver| {
         if (r.repo.configuration().get(try r.arena.print("merge.{s}.driver", .{driver})) != null) {
             return error.UnsupportedMergeDriver;
         } else if (std.mem.eql(u8, driver, "binary")) {
             return .{ .bytes = ours, .clean = false };
-        } else if (std.mem.eql(u8, driver, "union")) favor = .union_;
+        } else if (std.mem.eql(u8, driver, "union")) resolve = .both;
     }
     const style_text = r.repo.configuration().get("merge.conflictstyle");
-    const style = if (style_text) |text| blobmerge.ConflictStyle.parse(text) orelse .merge else .merge;
+    const style = if (style_text) |text| blobmerge.parseConflictStyle(text) orelse .merge else .merge;
     var merged = blobmerge.blobs(r.arena, base, ours, theirs, .{
         .labels = labels,
         .marker_size = size,
-        .favor = favor,
+        .resolve = resolve,
         .conflict_style = style,
     }) catch |err| switch (err) {
         // `ll_xdl_merge` hands a binary file to the binary driver.
@@ -792,7 +792,10 @@ pub fn diff(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
         diff_mod.unifiedBody(arena, &out.writer, minus, plus, .{
             .indent_heuristic = false,
             .function_context_names = false,
-        }) catch return error.OutOfMemory;
+        }) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |e| return e,
+        };
     }
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
@@ -859,7 +862,7 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
     if (index.resolve_undo) |undo| {
         for (undo.entries.items) |item| {
             if (conflicts.contains(item.path)) continue;
-            if (!try pathspecMatches(pathspec, item.path)) continue;
+            if (!try pathspecMatches(arena, pathspec, item.path)) continue;
             var stages: Stages = .{ null, null, null };
             for (0..3) |i| {
                 if (item.modes[i] != 0) stages[i] = .{ .mode = item.modes[i], .oid = item.oids[i].? };
@@ -876,7 +879,7 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
         const ours = stages[1] orelse continue;
         const theirs = stages[2] orelse continue;
         if (!isRegRaw(ours.mode) or !isRegRaw(theirs.mode)) continue;
-        if (!try pathspecMatches(pathspec, path)) continue;
+        if (!try pathspecMatches(arena, pathspec, path)) continue;
         const owned = try arena.dupe(u8, path);
         switch (try forgetOne(&r, &rr, owned, stages)) {
             .forgotten => try forgotten.append(arena, owned),
@@ -941,13 +944,13 @@ fn handleCache(r: *Run, path: []const u8, stages: Stages, size: u32) Error!Norma
 /// Whether git's plain pathspec `items` names `path`: the path itself, a
 /// directory above it, or a glob matching it, `*` crossing `/`. No items,
 /// or `.`, name every path.
-fn pathspecMatches(items: []const []const u8, path: []const u8) Error!bool {
+fn pathspecMatches(gpa: Allocator, items: []const []const u8, path: []const u8) Error!bool {
     if (items.len == 0) return true;
     for (items) |item_in| {
         var item = item_in;
         if (std.mem.eql(u8, item, ".") or item.len == 0) return true;
         if (std.mem.startsWith(u8, item, "./")) item = item[2..];
-        const literal_len = std.mem.findAny(u8, item, "*?[\\") orelse item.len;
+        const literal_len = glob_mod.literalPrefix(item);
         const literal = item[0..literal_len];
         if (literal_len == item.len) {
             if (std.mem.eql(u8, item, path)) return true;
@@ -955,7 +958,7 @@ fn pathspecMatches(items: []const []const u8, path: []const u8) Error!bool {
             continue;
         }
         if (!std.mem.startsWith(u8, path, literal)) continue;
-        if (wildmatch.match(item, path, .{ .pathname = false }) catch false) return true;
+        if (try glob_mod.matches(gpa, item, path, .{ .pathname = false })) return true;
     }
     return false;
 }

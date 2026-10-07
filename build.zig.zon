@@ -11,6 +11,14 @@
             .url = "git+https://github.com/pedronaugusto/conduit#43751a5cf7bd9359e1016508dbce8120483853b0",
             .hash = "conduit-0.5.1-4rIA71luEwDzl3f1NGpLRpmpSvwEBuUaw6b7FmnLySCQ",
         },
+        .sweep = .{
+            .url = "git+https://github.com/pedronaugusto/sweep#c6b0c6dba020178772adddd8d77b1cc25c52bb5c",
+            .hash = "sweep-0.1.0-6ErwaQWIBAA3793zVtx4LOcrmeMPWLeMp6Zhbv3ZcAig",
+        },
+        .parallax = .{
+            .url = "git+https://github.com/pedronaugusto/parallax#60a6ec23b99510b395147a9e04dc1ae240fd08e5",
+            .hash = "parallax-0.1.0-lz9Br3dbBgCSiKRNsOV-z6psvWh0dOVjNMY3O-n_b-Qf",
+        },
     },
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x688191cb6037a69f,

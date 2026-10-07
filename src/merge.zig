@@ -1,6 +1,6 @@
 //! Three-way merges of blob contents and trees.
 //!
-//! The blob merge is `blobmerge.zig`'s, xdiff's decision for decision. The
+//! The blob merge is git's `ll_merge` on parallax's, xdiff's decision for decision. The
 //! tree merge here is stage-only by default: every path both sides changed
 //! differently is left at stages 1, 2 and 3, which is not what any git
 //! command does, and is for a caller that wants to decide every path
@@ -14,7 +14,6 @@ pub const threeway = @import("merge/threeway.zig");
 pub const subtreeshift = @import("merge/subtreeshift.zig");
 pub const strategy = @import("merge/strategy.zig");
 // The modules relic's API puts under this one, as `relic.merge.<name>`.
-pub const blobmerge = @import("merge/blobmerge.zig");
 pub const ort = @import("merge/ort.zig");
 pub const octopus = @import("merge/octopus.zig");
 
@@ -28,6 +27,7 @@ const object = @import("object.zig");
 const odb_mod = @import("odb.zig");
 const index_mod = @import("index.zig");
 const attributes = @import("worktree/attributes.zig");
+const blobmerge = @import("merge/blobmerge.zig");
 
 const Oid = hash.Oid;
 
@@ -42,20 +42,24 @@ pub const Error = error{
 
 /// A content merge refuses data git classifies as binary.
 pub const BlobError = blobmerge.BlobError;
-/// Which conflict body to write: `merge.conflictStyle`.
+/// Which conflict body to write: `merge.conflictStyle`, parallax's.
 pub const ConflictStyle = blobmerge.ConflictStyle;
-/// Which side a conflict resolves to without markers.
-pub const Favor = blobmerge.Favor;
+/// The style a `merge.conflictStyle` value names.
+pub const parseConflictStyle = blobmerge.parseConflictStyle;
+/// What a conflict becomes: markers, one side, or both, parallax's.
+pub const Resolve = blobmerge.Resolve;
+/// How far conflicts are narrowed, parallax's.
+pub const Level = blobmerge.Level;
 /// The words after the markers.
 pub const Labels = blobmerge.Labels;
 /// Options for a blob merge.
 pub const BlobOptions = blobmerge.BlobOptions;
 /// The owned bytes produced by a blob merge.
 pub const BlobResult = blobmerge.BlobResult;
-/// Merge `ours` and `theirs` against `ancestor`: `blobmerge.blobs`.
+/// Merge `ours` and `theirs` against `ancestor`, as git's `ll_merge` does.
 pub const blobs = blobmerge.blobs;
 /// Where a refusal writes the path that caused it.
-pub const Blocked = blobmerge.Blocked;
+pub const Blocked = ort.Blocked;
 
 /// One side's view of a path.
 pub const Side = struct {
@@ -330,7 +334,7 @@ fn contentMerge(
     var ort_options = options.ort;
     ort_options.labels = options.blob.labels;
     ort_options.conflict_style = options.blob.conflict_style;
-    ort_options.favor = options.blob.favor;
+    ort_options.resolve = options.blob.resolve;
     ort_options.algorithm = options.blob.algorithm;
     ort_options.minimal = options.blob.minimal;
     ort_options.whitespace = options.blob.whitespace;
@@ -563,11 +567,11 @@ fn gitMergeFile(
         .patience => try argv.append(gpa, "--diff-algorithm=patience"),
         .histogram => try argv.append(gpa, "--diff-algorithm=histogram"),
     }
-    switch (options.favor) {
-        .none => {},
+    switch (options.resolve) {
+        .markers => {},
         .ours => try argv.append(gpa, "--ours"),
         .theirs => try argv.append(gpa, "--theirs"),
-        .union_ => try argv.append(gpa, "--union"),
+        .both => try argv.append(gpa, "--union"),
     }
     var size_buf: [32]u8 = undefined;
     if (options.marker_size != 7) {
@@ -643,7 +647,7 @@ test "conflicts with only punctuation between them join as git merge-file joins 
     const theirs = "P\n}\n}\n}\n}\nQ\n";
     const expected = try gitMergeFileFixture(gpa, io, ancestor, ours, theirs, .merge);
     defer gpa.free(expected);
-    var got = try blobs(gpa, ancestor, ours, theirs, .{ .join_without_alnum = true });
+    var got = try blobs(gpa, ancestor, ours, theirs, .{ .level = .zealous_alnum });
     defer got.deinit();
     try std.testing.expectEqualSlices(u8, expected, got.bytes);
     // The merge machinery keeps them apart.
@@ -733,10 +737,10 @@ test "a random corpus of three-way merges matches git merge-file in every style 
         }
         for ([_]ConflictStyle{ .merge, .diff3, .zdiff3 }) |style| {
             for ([_]BlobOptions{
-                .{ .algorithm = .myers },
-                .{ .algorithm = .myers, .minimal = true },
-                .{ .algorithm = .patience },
-                .{ .algorithm = .histogram },
+                .{ .algorithm = .myers, .level = .zealous_alnum },
+                .{ .algorithm = .myers, .minimal = true, .level = .zealous_alnum },
+                .{ .algorithm = .patience, .level = .zealous_alnum },
+                .{ .algorithm = .histogram, .level = .zealous_alnum },
             }) |variant| {
                 var options = variant;
                 options.conflict_style = style;
@@ -754,7 +758,7 @@ test "a random corpus of three-way merges matches git merge-file in every style 
     }
 }
 
-test "labels, marker size and a favoured side are written as git merge-file writes them" {
+test "labels, marker size and a resolved side are written as git merge-file writes them" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});
@@ -766,16 +770,16 @@ test "labels, marker size and a favoured side are written as git merge-file writ
     for ([_]BlobOptions{
         .{ .labels = labels, .conflict_style = .diff3 },
         .{ .labels = labels, .marker_size = 10 },
-        .{ .labels = labels, .favor = .ours },
-        .{ .labels = labels, .favor = .theirs },
-        .{ .labels = labels, .favor = .union_ },
+        .{ .labels = labels, .resolve = .ours },
+        .{ .labels = labels, .resolve = .theirs },
+        .{ .labels = labels, .resolve = .both },
     }) |options| {
         const expected = try gitMergeFile(gpa, io, &repo, ancestor, ours, theirs, options);
         defer gpa.free(expected);
         var got = try blobs(gpa, ancestor, ours, theirs, options);
         defer got.deinit();
         try std.testing.expectEqualStrings(expected, got.bytes);
-        try std.testing.expectEqual(options.favor == .none, !got.isClean());
+        try std.testing.expectEqual(options.resolve == .markers, !got.isClean());
     }
 }
 

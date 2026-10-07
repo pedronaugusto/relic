@@ -51,7 +51,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const config_mod = @import("config.zig");
 const fs = @import("repo/fs.zig");
-const wildmatch = @import("worktree/wildmatch.zig");
+const glob_mod = @import("text/glob.zig");
 
 /// The version line every pointer written carries.
 pub const spec_version = "https://git-lfs.github.com/spec/v1";
@@ -458,16 +458,14 @@ fn copyHashing(source: *Io.Reader, sink: ?*Io.Writer) (Io.Reader.ShortError || I
 pub const Settings = struct {
     /// `lfs.fetchinclude`: when there are any, only a path one of them names
     /// is fetched.
-    fetch_include: []const []const u8 = &.{},
+    fetch_include: []const FetchPattern = &.{},
     /// `lfs.fetchexclude`: a path one of these names is not fetched.
-    fetch_exclude: []const []const u8 = &.{},
+    fetch_exclude: []const FetchPattern = &.{},
     /// Leave every pointer as it is on checkout, fetching nothing: what
     /// `GIT_LFS_SKIP_SMUDGE` and `git-lfs smudge --skip` ask for.
     skip_smudge: bool = false,
     /// `lfs.url`, for whoever fetches.
     url: ?[]const u8 = null,
-    /// `core.ignoreCase`, which the patterns follow.
-    case_fold: bool = false,
 
     /// Whether a checkout may ask for the object behind `path`. An object
     /// already in the store is used whatever this says; these settings only
@@ -475,61 +473,62 @@ pub const Settings = struct {
     pub fn fetchAllowed(s: *const Settings, path: []const u8) bool {
         if (s.skip_smudge) return false;
         if (s.fetch_include.len > 0) {
-            for (s.fetch_include) |pattern| {
-                if (patternMatches(pattern, path, s.case_fold)) break;
+            for (s.fetch_include) |*pattern| {
+                if (pattern.matches(path)) break;
             } else return false;
         }
-        for (s.fetch_exclude) |pattern| {
-            if (patternMatches(pattern, path, s.case_fold)) return false;
+        for (s.fetch_exclude) |*pattern| {
+            if (pattern.matches(path)) return false;
         }
         return true;
     }
 };
 
-/// One `lfs.fetchinclude` or `lfs.fetchexclude` pattern against a path, as
-/// git-lfs reads it: a pattern names a path or a directory the path is under.
-/// Without a slash it names any one component at any depth; with one, or
-/// with a leading one, it is matched from the top. A trailing slash changes
+/// One `lfs.fetchinclude` or `lfs.fetchexclude` pattern, as git-lfs reads
+/// it: a pattern names a path or a directory the path is under. Without a
+/// slash it names any one component at any depth; with one, or with a
+/// leading one, it is matched from the top. A trailing slash changes
 /// nothing, and a backslash that escapes nothing is a slash.
-pub fn patternMatches(raw_pattern: []const u8, path: []const u8, case_fold: bool) bool {
-    var buf: [1024]u8 = undefined;
-    if (raw_pattern.len > buf.len) return false;
-    var len: usize = 0;
-    var i: usize = 0;
-    while (i < raw_pattern.len) : (i += 1) {
-        const c = raw_pattern[i];
-        if (c == '\\') {
-            if (i + 1 < raw_pattern.len and std.mem.findScalar(u8, "\\[]*?#", raw_pattern[i + 1]) != null) {
-                buf[len] = c;
-                buf[len + 1] = raw_pattern[i + 1];
-                len += 2;
-                i += 1;
-                continue;
-            }
-            buf[len] = '/';
-        } else buf[len] = c;
-        len += 1;
-    }
-    var pattern: []const u8 = buf[0..len];
-    while (pattern.len > 1 and pattern[pattern.len - 1] == '/') pattern = pattern[0 .. pattern.len - 1];
-    if (pattern.len == 0) return false;
-    const options: wildmatch.Options = .{ .pathname = true, .case_fold = case_fold };
+pub const FetchPattern = struct {
+    /// The pattern as configured.
+    text: []const u8,
+    /// Private: the pattern compiled.
+    matcher: glob_mod.Glob,
 
-    const anchored = pattern[0] == '/' or std.mem.findScalar(u8, pattern, '/') != null;
-    if (!anchored) {
-        var components = std.mem.splitScalar(u8, path, '/');
-        while (components.next()) |component| {
-            if (wildmatch.match(pattern, component, options) catch false) return true;
+    /// `text`, which is borrowed, compiled in `a`, which holds the result.
+    /// `case_fold` is `core.ignoreCase`.
+    pub fn compile(a: Allocator, text: []const u8, case_fold: bool) Allocator.Error!FetchPattern {
+        var glob: std.ArrayList(u8) = try .initCapacity(a, text.len);
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            const c = text[i];
+            if (c != '\\') {
+                glob.appendAssumeCapacity(c);
+            } else if (i + 1 < text.len and std.mem.findScalar(u8, "\\[]*?#", text[i + 1]) != null) {
+                glob.appendSliceAssumeCapacity(text[i .. i + 2]);
+                i += 1;
+            } else glob.appendAssumeCapacity('/');
         }
-        return false;
+        var pattern = glob.items;
+        while (pattern.len > 1 and pattern[pattern.len - 1] == '/') pattern = pattern[0 .. pattern.len - 1];
+        if (pattern.len == 0) return .{ .text = text, .matcher = .never };
+        const anchored = std.mem.findScalar(u8, pattern, '/') != null;
+        if (pattern[0] == '/') pattern = pattern[1..];
+        return .{ .text = text, .matcher = try .compile(a, pattern, .{ .case_fold = case_fold, .anywhere = !anchored }) };
     }
-    if (pattern[0] == '/') pattern = pattern[1..];
-    var end: usize = 0;
-    while (end <= path.len) : (end += 1) {
-        if (end != path.len and path[end] != '/') continue;
-        if (wildmatch.match(pattern, path[0..end], options) catch false) return true;
+
+    /// Whether the pattern names `path` or a directory above it.
+    pub fn matches(p: *const FetchPattern, path: []const u8) bool {
+        return p.matcher.ancestor(path) != null;
     }
-    return false;
+};
+
+/// Every pattern of a comma-separated list, compiled in `a`.
+fn compilePatterns(a: Allocator, value: []const u8, case_fold: bool) Allocator.Error![]const FetchPattern {
+    const texts = try splitPatterns(a, value);
+    const patterns = try a.alloc(FetchPattern, texts.len);
+    for (texts, patterns) |text, *pattern| pattern.* = try .compile(a, text, case_fold);
+    return patterns;
 }
 
 /// Split a comma-separated pattern list as git-lfs does: each part trimmed,
@@ -643,8 +642,8 @@ pub const Lfs = struct {
             }
         }
 
-        const fetch_include: []const []const u8 = if (include) |v| try splitPatterns(a, v) else &.{};
-        const fetch_exclude: []const []const u8 = if (exclude) |v| try splitPatterns(a, v) else &.{};
+        const fetch_include: []const FetchPattern = if (include) |v| try compilePatterns(a, v, case_fold) else &.{};
+        const fetch_exclude: []const FetchPattern = if (exclude) |v| try compilePatterns(a, v, case_fold) else &.{};
 
         // The arena's state is taken after its last allocation: a copy taken
         // earlier would not hold the blocks allocated after it.
@@ -658,7 +657,6 @@ pub const Lfs = struct {
                 .fetch_exclude = fetch_exclude,
                 .skip_smudge = options.skip_smudge,
                 .url = url,
-                .case_fold = case_fold,
             },
         };
     }
@@ -827,24 +825,48 @@ test "the store names an object by its SHA-256 and gives it back at the right si
     try testing.expect(!try store.contains(io, &short));
 }
 
-test "fetch patterns name a path, a directory above it, or a component anywhere" {
-    try testing.expect(patternMatches("images", "images/a.png", false));
-    try testing.expect(patternMatches("images", "assets/images/a.png", false));
-    try testing.expect(patternMatches("images/", "assets/images/a.png", false));
-    try testing.expect(!patternMatches("/images", "assets/images/a.png", false));
-    try testing.expect(patternMatches("/images", "images/a.png", false));
-    try testing.expect(patternMatches("*.psd", "art/deep/x.psd", false));
-    try testing.expect(!patternMatches("*.psd", "art/deep/x.png", false));
-    try testing.expect(patternMatches("art/deep", "art/deep/x.png", false));
-    try testing.expect(!patternMatches("deep/x.png", "art/deep/x.png", false));
-    try testing.expect(patternMatches("art/**/x.png", "art/a/b/x.png", false));
-    try testing.expect(patternMatches("art\\deep", "art/deep/x.png", false));
-    try testing.expect(patternMatches("IMAGES", "images/a.png", true));
+/// Whether `text`, read as one fetch pattern, names `path`.
+fn fetchPatternMatches(text: []const u8, path: []const u8, case_fold: bool) !bool {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const pattern: FetchPattern = try .compile(arena.allocator(), text, case_fold);
+    return pattern.matches(path);
+}
 
-    const settings: Settings = .{ .fetch_include = &.{"images"}, .fetch_exclude = &.{"*.psd"} };
+test "fetch patterns name a path, a directory above it, or a component anywhere" {
+    try testing.expect(try fetchPatternMatches("images", "images/a.png", false));
+    try testing.expect(try fetchPatternMatches("images", "assets/images/a.png", false));
+    try testing.expect(try fetchPatternMatches("images/", "assets/images/a.png", false));
+    try testing.expect(!try fetchPatternMatches("/images", "assets/images/a.png", false));
+    try testing.expect(try fetchPatternMatches("/images", "images/a.png", false));
+    try testing.expect(try fetchPatternMatches("*.psd", "art/deep/x.psd", false));
+    try testing.expect(!try fetchPatternMatches("*.psd", "art/deep/x.png", false));
+    try testing.expect(try fetchPatternMatches("art/deep", "art/deep/x.png", false));
+    try testing.expect(!try fetchPatternMatches("deep/x.png", "art/deep/x.png", false));
+    try testing.expect(try fetchPatternMatches("art/**/x.png", "art/a/b/x.png", false));
+    try testing.expect(try fetchPatternMatches("art\\deep", "art/deep/x.png", false));
+    try testing.expect(try fetchPatternMatches("IMAGES", "images/a.png", true));
+    try testing.expect(!try fetchPatternMatches("/", "a.png", false));
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const settings: Settings = .{
+        .fetch_include = &.{try .compile(a, "images", false)},
+        .fetch_exclude = &.{try .compile(a, "*.psd", false)},
+    };
     try testing.expect(settings.fetchAllowed("images/a.png"));
     try testing.expect(!settings.fetchAllowed("images/a.psd"));
     try testing.expect(!settings.fetchAllowed("docs/a.png"));
+}
+
+test "a fetch pattern longer than a kilobyte names what it names" {
+    // git-lfs reads a pattern of any length; one past the buffer the old
+    // matcher copied it into named nothing at all.
+    const long = testbytes.repeat("d", 1500);
+    try testing.expect(try fetchPatternMatches(long, "art/" ++ long ++ "/x.bin", false));
+    try testing.expect(try fetchPatternMatches("/" ++ long, long ++ "/x.bin", false));
+    try testing.expect(!try fetchPatternMatches(long, "art/" ++ long ++ "e/x.bin", false));
 }
 
 test "settings come from the configuration first and .lfsconfig second" {
@@ -861,9 +883,9 @@ test "settings come from the configuration first and .lfsconfig second" {
     var l = try Lfs.load(gpa, io, &config, tmp.dir, tmp.dir, .{});
     defer l.deinit();
     try testing.expectEqual(@as(usize, 2), l.settings.fetch_include.len);
-    try testing.expectEqualStrings("b/c", l.settings.fetch_include[1]);
+    try testing.expectEqualStrings("b/c", l.settings.fetch_include[1].text);
     try testing.expectEqual(@as(usize, 2), l.settings.fetch_exclude.len);
-    try testing.expectEqualStrings("y", l.settings.fetch_exclude[0]);
+    try testing.expectEqualStrings("y", l.settings.fetch_exclude[0].text);
     try testing.expectEqualStrings("/elsewhere/lfs", l.store.root);
     try testing.expectEqualStrings("https://lfs.example/", l.settings.url.?);
 }

@@ -21,7 +21,7 @@ const object = @import("../object.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const repo_mod = @import("../repo.zig");
 const diff = @import("../diff.zig");
-const textdiff = @import("../diff/textdiff.zig");
+const parallax = @import("../dependencies.zig").parallax;
 const revwalk = @import("../revwalk.zig");
 const pretty = @import("../pretty.zig");
 const notes_mod = @import("../commit/notes.zig");
@@ -45,7 +45,7 @@ pub const Error = error{
     /// Latin-1.
     UnsupportedEncoding,
     NotACommit,
-} || diff.Error || diff.ConfigError || revwalk.Error || pretty.Error || notes_mod.Error ||
+} || diff.Error || diff.TextError || diff.ConfigError || revwalk.Error || pretty.Error || notes_mod.Error ||
     mailmap_mod.LoadError || repo_mod.Error || attributes.Error || Io.Writer.Error;
 
 /// `<base>..<tip>`: the commits `tip` reaches and `base` does not, merges
@@ -304,7 +304,10 @@ const Reader = struct {
             return;
         }
         var body: Io.Writer.Allocating = .init(a);
-        diff.unifiedBody(r.gpa, &body.writer, one, two, r.diff_options) catch return error.OutOfMemory;
+        diff.unifiedBody(r.gpa, &body.writer, one, two, r.diff_options) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |e| return e,
+        };
         var lines = std.mem.splitScalar(u8, body.written(), '\n');
         while (lines.next()) |line| {
             if (line.len == 0) continue;
@@ -462,13 +465,17 @@ fn getCorrespondences(gpa: Allocator, old: []Patch, new: []Patch, options: Optio
     const b2a = try gpa.alloc(i32, n);
     defer gpa.free(b2a);
     const factor: u64 = options.creation_factor;
+    // Every pair is diffed in one workspace, which stops allocating once it
+    // has room for the largest.
+    var differ: parallax.Differ = .init(gpa);
+    defer differ.deinit();
 
     for (old, 0..) |*a, i| {
         for (new, 0..) |*b, j| {
             const c: i32 = if (a.matching == j)
                 0
             else if (a.matching == null and b.matching == null)
-                try diffSize(gpa, a.diffText(), b.diffText())
+                try diffSize(&differ, a.diffText(), b.diffText())
             else
                 cost_max;
             cost[i + n * j] = c;
@@ -497,21 +504,14 @@ fn getCorrespondences(gpa: Allocator, old: []Patch, new: []Patch, options: Optio
 
 /// `diffsize`: the hunks and their lines in a diff of two patches with
 /// three lines of context and none of the heuristics.
-fn diffSize(gpa: Allocator, a: []const u8, b: []const u8) Allocator.Error!i32 {
-    const options: textdiff.Options = .{ .context = 3, .indent_heuristic = false };
-    const a_lines = try textdiff.splitLines(gpa, a);
-    defer gpa.free(a_lines);
-    const b_lines = try textdiff.splitLines(gpa, b);
-    defer gpa.free(b_lines);
-    const script = try textdiff.diffLines(gpa, a_lines, b_lines, options);
-    defer gpa.free(script);
-    const groups = try textdiff.hunks(gpa, script, a_lines.len, b_lines.len, options);
-    defer gpa.free(groups);
+fn diffSize(differ: *parallax.Differ, a: []const u8, b: []const u8) diff.TextError!i32 {
+    const d = try differ.lines(a, b, .{ .indent_heuristic = false });
     var count: usize = 0;
-    for (groups) |hunk| {
+    var hunks = d.hunks(.{ .context = 3 });
+    while (hunks.next()) |hunk| {
         var added: usize = 0;
-        for (hunk.changes) |change| added += change.new_count;
-        count += 1 + hunk.old_count + added;
+        for (hunk.changes) |change| added += change.new_len;
+        count += 1 + hunk.old_len + added;
     }
     return @intCast(@min(count, std.math.maxInt(i32)));
 }
@@ -841,7 +841,10 @@ const Writer = struct {
     fn patchDiff(s: *Writer, old: *const Patch, new: *const Patch, options: diff.Options) Error!void {
         var body: Io.Writer.Allocating = .init(s.gpa);
         defer body.deinit();
-        diff.unifiedBody(s.gpa, &body.writer, old.text, new.text, options) catch return error.OutOfMemory;
+        diff.unifiedBody(s.gpa, &body.writer, old.text, new.text, options) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |e| return e,
+        };
         var lines = std.mem.splitScalar(u8, body.written(), '\n');
         while (lines.next()) |line| {
             if (line.len == 0) continue;

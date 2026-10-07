@@ -21,7 +21,7 @@ const assert = std.debug.assert;
 const Io = std.Io;
 
 const fs = @import("repo/fs.zig");
-const wildmatch = @import("worktree/wildmatch.zig");
+const glob_mod = @import("text/glob.zig");
 
 /// Errors from reading a configuration file.
 pub const ParseError = error{
@@ -850,7 +850,7 @@ pub const Config = struct {
                     std.mem.print(&rest_buf, "{s}**", .{rest}) catch return false
                 else
                     rest;
-                return wildmatch.match(rest_pattern, git_dir[base.len + 1 ..], .{ .pathname = true, .case_fold = case_fold }) catch false;
+                return glob_mod.matches(config.gpa, rest_pattern, git_dir[base.len + 1 ..], .{ .case_fold = case_fold });
             }
             var buf: [4096]u8 = undefined;
             const pattern = config.expandCondition(pattern_raw, &buf) orelse return false;
@@ -863,7 +863,7 @@ pub const Config = struct {
                 std.mem.replaceScalar(u8, normalized[0..pattern.len], '\\', '/');
                 break :blk normalized[0..pattern.len];
             } else pattern;
-            return wildmatch.match(match_pattern, git_dir, .{ .pathname = true, .case_fold = case_fold }) catch false;
+            return glob_mod.matches(config.gpa, match_pattern, git_dir, .{ .case_fold = case_fold });
         }
         if (std.mem.startsWith(u8, condition, "onbranch:")) {
             const pattern_raw = condition["onbranch:".len..];
@@ -873,13 +873,13 @@ pub const Config = struct {
                 std.mem.print(&buf, "{s}**", .{pattern_raw}) catch return false
             else
                 pattern_raw;
-            return wildmatch.match(pattern, branch, .{ .pathname = true }) catch false;
+            return glob_mod.matches(config.gpa, pattern, branch, .{});
         }
         if (std.mem.startsWith(u8, condition, hasconfig_url)) {
             const pattern = condition[hasconfig_url.len..];
             for (config.entries.items) |entry| {
                 if (!isRemoteUrl(entry) or config.files.items[entry.file_index].conditional) continue;
-                if (urlMatches(pattern, entry.value.?)) return true;
+                if (try config.urlMatches(pattern, entry.value.?)) return true;
             }
             return false;
         }
@@ -901,7 +901,7 @@ pub const Config = struct {
         if (config.remote_urls == null) config.remote_urls = try config.gatherRemoteUrls(io, plan);
         const pattern = condition[hasconfig_url.len..];
         for (config.remote_urls.?) |url| {
-            if (urlMatches(pattern, url)) return true;
+            if (try config.urlMatches(pattern, url)) return true;
         }
         return false;
     }
@@ -929,8 +929,8 @@ pub const Config = struct {
         return urls.toOwnedSlice(config.gpa);
     }
 
-    fn urlMatches(pattern: []const u8, url: []const u8) bool {
-        return wildmatch.match(pattern, url, .{ .pathname = true }) catch false;
+    fn urlMatches(config: *const Config, pattern: []const u8, url: []const u8) Allocator.Error!bool {
+        return glob_mod.matches(config.gpa, pattern, url, .{});
     }
 
     fn expandCondition(config: *const Config, pattern: []const u8, buf: []u8) ?[]const u8 {

@@ -500,6 +500,360 @@ test "benchmark: a staging pass into a pack, and writing one" {
     if (!smoke) std.debug.print("speed condition whole_ms < budget_ms: {s}\n", .{if (whole_ms < budget_ms) "within" else "over"});
 }
 
+/// Lines of the shape real ignore files hold: names, extensions, anchored
+/// directories, globstars, brackets and negations.
+const ignore_lines = [_][]const u8{
+    "*.o",             "*.a",          "*.so",                "*.so.*",        "*.ko",
+    "*.py[cod]",       "__pycache__/", "*.class",             "*.log",         "!keep.log",
+    "/build/",         "/dist",        "out/",                "node_modules/", "**/vendor/*.tmp",
+    "doc/**/*.html",   "*.sw[op]",     ".DS_Store",           "Thumbs.db",     "*~",
+    "/coverage",       "*.gcda",       "*.gcno",              "tmp*/",         "[Bb]in/",
+    "**/generated/**", "*.min.js",     "!vendor/keep.min.js", "cache-*",       "*.bak",
+};
+
+/// Lines of the shape real attribute files hold.
+const attribute_lines = [_][]const u8{
+    "* text=auto",                "*.c diff=cpp",         "*.h diff=cpp",                  "*.png binary",    "*.jpg binary",
+    "*.sh eol=lf",                "*.bat eol=crlf",       "doc/** linguist-documentation", "vendor/** -diff", "*.min.js -diff",
+    "[Mm]akefile whitespace=tab", "**/fixtures/** -text",
+};
+
+/// Paths of a tree several directories deep, of every kind the lines name.
+fn rulePaths(gpa: std.mem.Allocator, count: usize) ![][]const u8 {
+    const dirs = [_][]const u8{ "src", "src/net", "lib/core", "doc/api/v1", "vendor/pkg", "build", "test/fixtures/a", "tools" };
+    const names = [_][]const u8{ "main.c", "util.h", "app.py", "x.pyc", "README.md", "logo.png", "keep.log", "run.log", "Makefile", "page.html", "lib.min.js", "a.o", "mod.ko", "data.json" };
+    const paths = try gpa.alloc([]const u8, count);
+    for (paths, 0..) |*p, i| p.* = try std.fmt.allocPrint(gpa, "{s}/d{d}/{s}", .{ dirs[i % dirs.len], i % 97, names[(i / dirs.len) % names.len] });
+    return paths;
+}
+
+test "benchmark: ignore and attribute rules decide paths" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+    const path_count: usize = if (smoke) 50 else switch (builtin.optimize) {
+        .Debug => 5_000,
+        else => 100_000,
+    };
+    const paths = try rulePaths(gpa, path_count);
+    defer {
+        for (paths) |p| gpa.free(p);
+        gpa.free(paths);
+    }
+    var ignore_text: std.ArrayList(u8) = .empty;
+    defer ignore_text.deinit(gpa);
+    for (ignore_lines) |line| try ignore_text.print(gpa, "{s}\n", .{line});
+    var attribute_text: std.ArrayList(u8) = .empty;
+    defer attribute_text.deinit(gpa);
+    for (attribute_lines) |line| try attribute_text.print(gpa, "{s}\n", .{line});
+    // The root's file and one in every directory a walk enters, as a tree
+    // with a `.gitignore` per package holds them.
+    const levels = [_][]const u8{ "", "src", "lib/core", "vendor/pkg" };
+
+    const Load = struct {
+        text: []const u8,
+        fn ignoreRules(l: @This()) void {
+            var rules = worktree.ignore.Rules.init(std.heap.smp_allocator, false) catch unreachable;
+            defer rules.deinit();
+            for (levels, 0..) |base, depth| rules.addText(l.text, base, ".gitignore", @intCast(depth + 2)) catch unreachable;
+        }
+    };
+    const load_ms = bestMs(io, 20, Load{ .text = ignore_text.items }, Load.ignoreRules);
+
+    var rules = try worktree.ignore.Rules.init(gpa, false);
+    defer rules.deinit();
+    for (levels, 0..) |base, depth| try rules.addText(ignore_text.items, base, ".gitignore", @intCast(depth + 2));
+    const Ask = struct {
+        rules: *const worktree.ignore.Rules,
+        paths: []const []const u8,
+        fn all(a: @This()) void {
+            var excluded: usize = 0;
+            for (a.paths) |p| {
+                if (a.rules.matchPath(p, false).excluded) excluded += 1;
+            }
+            std.mem.doNotOptimizeAway(excluded);
+        }
+    };
+    const match_ms = bestMs(io, 5, Ask{ .rules = &rules, .paths = paths }, Ask.all);
+
+    var attrs = try worktree.attributes.Attrs.init(gpa, false);
+    defer attrs.deinit();
+    try attrs.addText(attribute_text.items, "", ".gitattributes", 1);
+    const Lookup = struct {
+        attrs: *const worktree.attributes.Attrs,
+        paths: []const []const u8,
+        fn all(l: @This()) void {
+            var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
+            defer arena.deinit();
+            var found: usize = 0;
+            for (l.paths) |p| {
+                found += (l.attrs.lookup(arena.allocator(), p, false) catch unreachable).items.len;
+                _ = arena.reset(.retain_capacity);
+            }
+            std.mem.doNotOptimizeAway(found);
+        }
+    };
+    const lookup_ms = bestMs(io, 5, Lookup{ .attrs = &attrs, .paths = paths }, Lookup.all);
+
+    if (!smoke) std.debug.print(
+        \\
+        \\  relic benchmark ({s}, {d} ignore lines over {d} levels, {d} attribute lines, {d} paths)
+        \\    ignore load  {d: >8.3} ms
+        \\    ignore match {d: >8.1} ms   {d: >6.0} ns/path
+        \\    attr lookup  {d: >8.1} ms   {d: >6.0} ns/path
+        \\
+    , .{
+        @tagName(builtin.optimize), ignore_lines.len, levels.len,                                                          attribute_lines.len, path_count,
+        load_ms,                    match_ms,         match_ms * std.time.ns_per_ms / @as(f64, @floatFromInt(path_count)), lookup_ms,           lookup_ms * std.time.ns_per_ms / @as(f64, @floatFromInt(path_count)),
+    });
+    try std.testing.expect(rules.matchPath("src/d1/a.o", false).excluded);
+    try std.testing.expect(!rules.matchPath("src/d1/keep.log", false).excluded);
+}
+
+test "benchmark: status walks a tree with an ignore file in every directory" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+    var repo_git = try testgit.Repo.init(gpa, io);
+    defer repo_git.deinit();
+
+    // A package tree: a root ignore file of the usual size, and one of a few
+    // lines in every directory, over files tracked, untracked and ignored.
+    const dirs: usize = if (smoke) 3 else 120;
+    const files_per_dir: usize = if (smoke) 4 else 25;
+    var root: std.ArrayList(u8) = .empty;
+    defer root.deinit(gpa);
+    for (ignore_lines) |line| try root.print(gpa, "{s}\n", .{line});
+    try repo_git.writeFile(io, ".gitignore", root.items);
+    const exts = [_][]const u8{ "c", "h", "o", "log", "py", "pyc", "tmp", "md" };
+    for (0..dirs) |d| {
+        var path_buf: [64]u8 = undefined;
+        try repo_git.writeFile(io, try std.mem.print(&path_buf, "pkg{d}/.gitignore", .{d}), "*.tmp\n/local-*\n!keep.tmp\nscratch/\n[Gg]en*.c\n");
+        for (0..files_per_dir) |f| {
+            const path = try std.mem.print(&path_buf, "pkg{d}/sub{d}/f{d}.{s}", .{ d, f % 3, f, exts[f % exts.len] });
+            try repo_git.writeFile(io, path, "x\n");
+        }
+    }
+    try repo_git.exec(io, &.{ "add", "-A" });
+    // Untracked files beside the tracked ones.
+    for (0..dirs) |d| {
+        var path_buf: [64]u8 = undefined;
+        try repo_git.writeFile(io, try std.mem.print(&path_buf, "pkg{d}/new{d}.c", .{ d, d }), "y\n");
+    }
+
+    var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
+    defer repo.deinit(io);
+    var index = try repo.openIndex(io);
+    defer index.deinit();
+
+    const Pass = struct {
+        repo: *repo_mod.Repository,
+        index: *relic.index.Index,
+        fn status(p: @This()) void {
+            var rules = p.repo.loadIgnore(std.testing.io) catch unreachable;
+            defer rules.deinit();
+            var attrs = p.repo.loadAttrs(std.testing.io) catch unreachable;
+            defer attrs.deinit();
+            var wt_rules = p.repo.worktreeRules() catch unreachable;
+            wt_rules.ignore = &rules;
+            wt_rules.attrs = &attrs;
+            var result = worktree.status(std.heap.smp_allocator, std.testing.io, p.repo.work_dir.?, p.index, &p.repo.odb, .{
+                .rules = wt_rules,
+                .head_tree = null,
+            }) catch unreachable;
+            defer result.deinit();
+            std.mem.doNotOptimizeAway(result.entries.len);
+        }
+    };
+    const status_ms = bestMs(io, if (smoke) 1 else 10, Pass{ .repo = &repo, .index = &index }, Pass.status);
+    if (!smoke) std.debug.print(
+        \\
+        \\  relic benchmark ({s}, status over {d} directories with an ignore file each, {d} files)
+        \\    status       {d: >8.2} ms
+        \\
+    , .{ @tagName(builtin.optimize), dirs, dirs * files_per_dir, status_ms });
+}
+
+test "benchmark: for-each-ref chooses among many refs by pattern" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+    var repo_git = try testgit.Repo.init(gpa, io);
+    defer repo_git.deinit();
+    try repo_git.writeFile(io, "a", "a\n");
+    try repo_git.exec(io, &.{ "add", "a" });
+    try repo_git.exec(io, &.{ "commit", "-q", "-m", "a" });
+    var hex_buf: [hash.max_hex_len]u8 = undefined;
+    const head = blk: {
+        var first = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
+        defer first.deinit(io);
+        const h = (try first.head(io)).?;
+        gpa.free(h.name);
+        break :blk h.oid.hex(&hex_buf);
+    };
+
+    // Branches and tags as a large project keeps them, packed.
+    const ref_count: usize = if (smoke) 20 else 20_000;
+    var packed_refs: std.ArrayList(u8) = .empty;
+    defer packed_refs.deinit(gpa);
+    try packed_refs.appendSlice(gpa, "# pack-refs with: peeled fully-peeled sorted \n");
+    var names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (names.items) |n| gpa.free(n);
+        names.deinit(gpa);
+    }
+    const kinds = [_][]const u8{ "refs/heads/feature/", "refs/heads/fix/", "refs/remotes/origin/", "refs/tags/v" };
+    for (0..ref_count) |i| try names.append(gpa, try std.fmt.allocPrint(gpa, "{s}{d}.{d}", .{ kinds[i % kinds.len], i / 100, i % 100 }));
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn f(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.order(u8, x, y) == .lt;
+        }
+    }.f);
+    for (names.items) |name| try packed_refs.print(gpa, "{s} {s}\n", .{ head, name });
+    const git_dir = try repo_git.gitDir(io);
+    defer git_dir.close(io);
+    try git_dir.writeFile(io, .{ .sub_path = "packed-refs", .data = packed_refs.items });
+
+    var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
+    defer repo.deinit(io);
+    const List = struct {
+        repo: *repo_mod.Repository,
+        fn pass(l: @This()) void {
+            var sink: std.Io.Writer.Discarding = .init(&.{});
+            relic.refs.filter.listRefs(std.heap.smp_allocator, std.testing.io, l.repo, .{
+                .filter = .{ .patterns = &.{ "refs/heads/f*/1[0-9].*", "refs/tags/v*" }, .exclude = &.{"refs/tags/v1?.*"} },
+                .format = "%(refname)",
+            }, &sink.writer) catch unreachable;
+            std.mem.doNotOptimizeAway(sink.count);
+        }
+    };
+    const list_ms = bestMs(io, if (smoke) 1 else 10, List{ .repo = &repo }, List.pass);
+    if (!smoke) std.debug.print(
+        \\
+        \\  relic benchmark ({s}, for-each-ref over {d} packed refs, two patterns and an exclusion)
+        \\    list         {d: >8.2} ms
+        \\
+    , .{ @tagName(builtin.optimize), ref_count, list_ms });
+}
+
+/// A source file of `lines` lines, with every `stride`-th line changed by
+/// `round`: the shape of a file a history edits a little at a time.
+fn editedText(gpa: std.mem.Allocator, lines: usize, stride: usize, round: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (0..lines) |i| {
+        if (i % 40 == 0) try out.print(gpa, "fn section_{d}() void {{\n", .{i / 40});
+        if (stride != 0 and (i + round) % stride == 0) {
+            try out.print(gpa, "    value_{d} = compute({d}, {d});\n", .{ i, i, round });
+        } else {
+            try out.print(gpa, "    value_{d} = compute({d});\n", .{ i, i });
+        }
+        if (i % 40 == 39) try out.appendSlice(gpa, "}\n");
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "benchmark: unified bodies, line counts and content merges of many files" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+    const files: usize = if (smoke) 4 else switch (builtin.optimize) {
+        .Debug => 40,
+        else => 400,
+    };
+    const Pair = struct { old: []u8, new: []u8, theirs: []u8 };
+    const pairs = try gpa.alloc(Pair, files);
+    defer {
+        for (pairs) |p| {
+            gpa.free(p.old);
+            gpa.free(p.new);
+            gpa.free(p.theirs);
+        }
+        gpa.free(pairs);
+    }
+    for (pairs, 0..) |*p, i| p.* = .{
+        .old = try editedText(gpa, 300 + i % 200, 0, 0),
+        .new = try editedText(gpa, 300 + i % 200, 17 + i % 5, 1),
+        .theirs = try editedText(gpa, 300 + i % 200, 23 + i % 7, 2),
+    };
+
+    const Work = struct {
+        pairs: []const Pair,
+        fn bodies(w: @This()) void {
+            var out: std.Io.Writer.Allocating = .init(std.heap.smp_allocator);
+            defer out.deinit();
+            for (w.pairs) |p| {
+                relic.diff.unifiedBody(std.heap.smp_allocator, &out.writer, p.old, p.new, .{}) catch unreachable;
+                out.clearRetainingCapacity();
+            }
+        }
+        fn counts(w: @This()) void {
+            var lines: usize = 0;
+            for (w.pairs) |p| {
+                const n = relic.diff.blobNumStat(std.heap.smp_allocator, p.old, p.new, .{}) catch unreachable;
+                lines += n.plus + n.minus;
+            }
+            std.mem.doNotOptimizeAway(lines);
+        }
+        fn merges(w: @This()) void {
+            var conflicts: usize = 0;
+            for (w.pairs) |p| {
+                var r = relic.merge.blobs(std.heap.smp_allocator, p.old, p.new, p.theirs, .{ .algorithm = .histogram }) catch unreachable;
+                if (!r.isClean()) conflicts += 1;
+                r.deinit();
+            }
+            std.mem.doNotOptimizeAway(conflicts);
+        }
+    };
+    const work: Work = .{ .pairs = pairs };
+    const passes: usize = if (smoke) 1 else 7;
+    const bodies_ms = bestMs(io, passes, work, Work.bodies);
+    const counts_ms = bestMs(io, passes, work, Work.counts);
+    const merges_ms = bestMs(io, passes, work, Work.merges);
+    if (!smoke) std.debug.print(
+        \\
+        \\  relic benchmark ({s}, {d} files of 300 to 500 lines, a few lines changed on each side)
+        \\    unified      {d: >8.2} ms
+        \\    numstat      {d: >8.2} ms
+        \\    merge        {d: >8.2} ms
+        \\
+    , .{ @tagName(builtin.optimize), files, bodies_ms, counts_ms, merges_ms });
+}
+
+test "benchmark: blame follows a file through a long history" {
+    const io = std.testing.io;
+    const gpa = std.heap.smp_allocator;
+    var repo_git = try testgit.Repo.init(gpa, io);
+    defer repo_git.deinit();
+    const rounds: usize = if (smoke) 3 else switch (builtin.optimize) {
+        .Debug => 40,
+        else => 200,
+    };
+    for (0..rounds) |round| {
+        const text = try editedText(gpa, 2000, 97, round);
+        defer gpa.free(text);
+        try repo_git.writeFile(io, "file.zig", text);
+        try repo_git.exec(io, &.{ "add", "file.zig" });
+        var msg: [32]u8 = undefined;
+        try repo_git.exec(io, &.{ "commit", "-q", "-m", try std.mem.print(&msg, "r{d}", .{round}) });
+    }
+    var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
+    defer repo.deinit(io);
+    const head = (try repo.head(io)).?;
+    defer gpa.free(head.name);
+    const Pass = struct {
+        repo: *repo_mod.Repository,
+        commit: hash.Oid,
+        fn blame(p: @This()) void {
+            var b = relic.diff.blame.file(std.heap.smp_allocator, std.testing.io, &p.repo.odb, p.commit, "file.zig", .{}) catch unreachable;
+            std.mem.doNotOptimizeAway(b.hunks.len);
+            b.deinit();
+        }
+    };
+    const blame_ms = bestMs(io, if (smoke) 1 else 5, Pass{ .repo = &repo, .commit = head.oid }, Pass.blame);
+    if (!smoke) std.debug.print(
+        \\
+        \\  relic benchmark ({s}, blame of a 2,000-line file through {d} commits)
+        \\    blame        {d: >8.2} ms
+        \\
+    , .{ @tagName(builtin.optimize), rounds, blame_ms });
+}
+
 // Smoke exercises correctness without sampling a benchmark clock.
 var smoke_ticks = std.atomic.Value(i64).init(0);
 fn benchmarkNow(io: std.Io) std.Io.Timestamp {

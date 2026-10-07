@@ -44,9 +44,9 @@ const hooks = @import("../repo/hooks.zig");
 const fs = @import("../repo/fs.zig");
 const ignore = @import("../worktree/ignore.zig");
 const attributes = @import("../worktree/attributes.zig");
-const wildmatch = @import("../worktree/wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
 const odb_mod = @import("../odb.zig");
-const textdiff = @import("../diff/textdiff.zig");
+const parallax = @import("../dependencies.zig").parallax;
 const convert = @import("../worktree/convert.zig");
 const filter = @import("../worktree/filter.zig");
 const program = @import("../repo/program.zig");
@@ -87,7 +87,7 @@ pub const Error = error{
     /// An untracked directory holding a repository of its own, which a stash
     /// would record as a submodule. `Refusal` names it.
     NestedRepository,
-} || repo_mod.Error || refs_mod.TransactionError || worktree.Error || merge.Error ||
+} || repo_mod.Error || refs_mod.TransactionError || worktree.Error || merge.Error || diff.TextError ||
     diff.Error || hooks.Error || refs_mod.LogReadError || fs.LockError || fs.CommitError ||
     ignore.Error || attributes.Error || convert.Error || error{NameTooLong};
 
@@ -424,7 +424,7 @@ const TreeEntry = worktree.TreeEntry;
 
 /// Whether a pathspec matches `path`: the path itself, a directory above
 /// it, or a glob over the whole path in which `*` crosses `/`.
-fn matchesAny(specs: []const []const u8, path: []const u8) bool {
+fn matchesAny(gpa: Allocator, specs: []const []const u8, path: []const u8) Allocator.Error!bool {
     if (specs.len == 0) return true;
     for (specs) |raw| {
         const spec = std.mem.trimEnd(u8, raw, "/");
@@ -432,7 +432,7 @@ fn matchesAny(specs: []const []const u8, path: []const u8) bool {
         if (std.mem.eql(u8, spec, path)) return true;
         if (std.mem.startsWith(u8, path, spec) and path.len > spec.len and path[spec.len] == '/') return true;
         if (std.mem.findAny(u8, spec, "*?[") != null) {
-            if (wildmatch.match(spec, path, .{ .pathname = false }) catch false) return true;
+            if (try glob_mod.matches(gpa, spec, path, .{ .pathname = false })) return true;
         }
     }
     return false;
@@ -460,17 +460,17 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
     const head_commit = try object.Commit.parse(arena, repo.objectFormat(), try arena.dupe(u8, head_bytes.bytes));
     var head_map = try worktree.flatten(arena, io, &repo.odb, head_commit.tree);
 
-    if (options.untracked == .none) try requireTracked(&ctx.index, options.paths, options.refusal);
+    if (options.untracked == .none) try requireTracked(arena, &ctx.index, options.paths, options.refusal);
 
     // What differs, and what the working-tree commit takes from the disk:
     // every tracked path whose file is not what `HEAD` has.
     var candidates: std.array_hash_map.String(void) = .empty;
     var head_it = head_map.keyIterator();
     while (head_it.next()) |key| {
-        if (matchesAny(options.paths, key.*)) try candidates.put(arena, key.*, {});
+        if (try matchesAny(arena, options.paths, key.*)) try candidates.put(arena, key.*, {});
     }
     for (ctx.index.entries.items) |e| {
-        if (matchesAny(options.paths, e.path)) try candidates.put(arena, e.path, {});
+        if (try matchesAny(arena, options.paths, e.path)) try candidates.put(arena, e.path, {});
     }
     var updates: std.ArrayList(Update) = .empty;
     var changed = false;
@@ -555,10 +555,10 @@ pub fn push(io: Io, repo: *Repository, options: PushOptions) Self.Error!?Oid {
 const Update = struct { path: []const u8, side: ?merge.Side };
 
 /// Refuse a pathspec that names nothing the index tracks.
-fn requireTracked(index: *const Index, paths: []const []const u8, refusal: ?*Refusal) Error!void {
+fn requireTracked(arena: Allocator, index: *const Index, paths: []const []const u8, refusal: ?*Refusal) Error!void {
     for (paths) |spec| {
         const hit = for (index.entries.items) |e| {
-            if (matchesAny(&.{spec}, e.path)) break true;
+            if (try matchesAny(arena, &.{spec}, e.path)) break true;
         } else false;
         if (!hit) {
             if (refusal) |r| r.set(spec);
@@ -617,7 +617,7 @@ fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const
             try walkFiles(ctx, e.path, options.paths, out, 0);
             continue;
         }
-        if (matchesAny(options.paths, e.path)) try out.append(ctx.arena, try ctx.arena.dupe(u8, e.path));
+        if (try matchesAny(ctx.arena, options.paths, e.path)) try out.append(ctx.arena, try ctx.arena.dupe(u8, e.path));
     }
     std.mem.sort([]const u8, out.items, {}, lessThanPath);
 }
@@ -631,7 +631,7 @@ fn walkFiles(ctx: *Ctx, dir_path: []const u8, specs: []const []const u8, out: *s
         const path = try ctx.arena.print("{s}/{s}", .{ dir_path, item.name });
         if (item.kind == .directory) {
             try walkFiles(ctx, path, specs, out, depth + 1);
-        } else if (matchesAny(specs, path)) {
+        } else if (try matchesAny(ctx.arena, specs, path)) {
             try out.append(ctx.arena, path);
         }
     }
@@ -678,8 +678,8 @@ fn resetAfterPush(
     // Only the named paths go back to `HEAD`.
     var paths: std.array_hash_map.String(void) = .empty;
     var head_it = head_map.keyIterator();
-    while (head_it.next()) |key| if (matchesAny(options.paths, key.*)) try paths.put(ctx.arena, key.*, {});
-    for (ctx.index.entries.items) |e| if (matchesAny(options.paths, e.path)) try paths.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
+    while (head_it.next()) |key| if (try matchesAny(ctx.arena, options.paths, key.*)) try paths.put(ctx.arena, key.*, {});
+    for (ctx.index.entries.items) |e| if (try matchesAny(ctx.arena, options.paths, e.path)) try paths.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
     for (untracked) |path| try paths.put(ctx.arena, path, {});
     var writes: std.ArrayList(worktree.PathWrite) = .empty;
     for (paths.keys()) |path| {
@@ -695,8 +695,8 @@ fn resetAfterPush(
         var index_map = try worktree.flatten(ctx.arena, io, db, index_tree);
         var keep: std.array_hash_map.String(void) = .empty;
         var it = index_map.keyIterator();
-        while (it.next()) |key| if (matchesAny(options.paths, key.*)) try keep.put(ctx.arena, key.*, {});
-        for (ctx.index.entries.items) |e| if (matchesAny(options.paths, e.path)) try keep.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
+        while (it.next()) |key| if (try matchesAny(ctx.arena, options.paths, key.*)) try keep.put(ctx.arena, key.*, {});
+        for (ctx.index.entries.items) |e| if (try matchesAny(ctx.arena, options.paths, e.path)) try keep.put(ctx.arena, try ctx.arena.dupe(u8, e.path), {});
         writes.clearRetainingCapacity();
         for (keep.keys()) |path| {
             const want = mapSide(&index_map, path);
@@ -982,20 +982,20 @@ fn patchApplies(gpa: Allocator, io: Io, db: *odb_mod.Odb, base: Oid, current: Oi
         defer gpa.free(new_blob.bytes);
         const now_blob = try db.read(io, now.oid);
         defer gpa.free(now_blob.bytes);
-        if (textdiff.isBinary(old_blob.bytes) or textdiff.isBinary(new_blob.bytes) or textdiff.isBinary(now_blob.bytes)) return false;
+        if (attributes.isBinaryForDiff(old_blob.bytes) or attributes.isBinaryForDiff(new_blob.bytes) or attributes.isBinaryForDiff(now_blob.bytes)) return false;
 
-        const old_lines = try textdiff.splitLines(arena, old_blob.bytes);
-        const new_lines = try textdiff.splitLines(arena, new_blob.bytes);
-        const now_lines = try textdiff.splitLines(arena, now_blob.bytes);
-        const patch = try textdiff.diffLines(arena, old_lines, new_lines, .{});
-        const hunks = try textdiff.hunks(arena, patch, old_lines.len, new_lines.len, .{});
-        const moved = try textdiff.diffLines(arena, old_lines, now_lines, .{});
-        for (hunks) |h| {
+        var patch = try parallax.diffLines(arena, old_blob.bytes, new_blob.bytes, .{});
+        defer patch.deinit();
+        var moved = try parallax.diffLines(arena, old_blob.bytes, now_blob.bytes, .{});
+        defer moved.deinit();
+        const old_len = patch.diff.old.len();
+        var hunks = patch.diff.hunks(.{});
+        while (hunks.next()) |h| {
             const start = h.old_start;
-            const end = h.old_start + h.old_count;
-            for (moved) |m| {
-                if (m.old_count > 0) {
-                    if (m.old_start < end and m.old_start + m.old_count > start) return false;
+            const end = h.old_start + h.old_len;
+            for (moved.diff.changes) |m| {
+                if (m.old_len > 0) {
+                    if (m.old_start < end and m.old_start + m.old_len > start) return false;
                     continue;
                 }
                 // An insertion breaks the run of lines the hunk needs when it
@@ -1004,7 +1004,7 @@ fn patchApplies(gpa: Allocator, io: Io, db: *odb_mod.Odb, base: Oid, current: Oi
                 const at = m.old_start;
                 if (at > start and at < end) return false;
                 if (at == start and start == 0) return false;
-                if (at == end and end == old_lines.len) return false;
+                if (at == end and end == old_len) return false;
             }
         }
     }

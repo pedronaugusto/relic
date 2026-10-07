@@ -16,7 +16,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const wildmatch = @import("wildmatch.zig");
+const glob_mod = @import("../text/glob.zig");
+const sweep = @import("../dependencies.zig").sweep;
 const fs = @import("../repo/fs.zig");
 
 /// Errors from loading ignore rules.
@@ -29,6 +30,9 @@ pub const Pattern = struct {
     /// The glob the line reduces to, with `!`, a leading `/` and a trailing
     /// `/` removed.
     glob: []const u8,
+    /// The glob compiled: against the whole path below `base` when
+    /// `anchored`, else against the name. Held by the rules.
+    matcher: glob_mod.Glob,
     /// The directory the pattern is relative to, `/`-separated and without a
     /// trailing slash. Empty at the root of the working tree.
     base: []const u8,
@@ -160,7 +164,12 @@ pub const Rules = struct {
             line_number += 1;
             var line = raw_line;
             if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-            const pattern = parseLine(line, base, source, line_number) orelse continue;
+            const pattern = try parseLine(a, line, .{
+                .base = base,
+                .source = source,
+                .line = line_number,
+                .case_fold = rules.case_fold,
+            }) orelse continue;
             try patterns.append(a, pattern);
         }
         if (patterns.items.len == 0) return;
@@ -188,27 +197,19 @@ pub const Rules = struct {
     /// descend into an excluded directory, so the parents have already been
     /// decided. `matchPath` is the call that considers them.
     pub fn match(rules: *const Rules, path: []const u8, is_dir: bool) Match {
-        var result: Match = .{ .excluded = false, .by = null };
+        var by: ?*const Pattern = null;
         for (rules.levels.items) |level| {
             const relative = relativeTo(level.base, path) orelse continue;
             const name = basename(relative);
             // Within one file the last matching line wins, which is the
             // whole mechanism a negation depends on.
-            for (level.patterns) |pattern| {
+            for (level.patterns) |*pattern| {
                 if (pattern.dir_only and !is_dir) continue;
-                const subject = if (pattern.anchored) relative else name;
-                // git matches a name pattern with `WM_PATHNAME` off and an
-                // anchored one with it on, which is what decides whether a
-                // `*` in the pattern may cross a slash.
-                const matched = wildmatch.match(pattern.glob, subject, .{
-                    .pathname = pattern.anchored,
-                    .case_fold = rules.case_fold,
-                }) catch false;
-                if (!matched) continue;
-                result = .{ .excluded = !pattern.negated, .by = pattern };
+                if (pattern.matcher.matches(if (pattern.anchored) relative else name)) by = pattern;
             }
         }
-        return result;
+        const decided = by orelse return .{ .excluded = false, .by = null };
+        return .{ .excluded = !decided.negated, .by = decided.* };
     }
 
     /// Whether `path` is excluded, considering its parent directories.
@@ -334,59 +335,37 @@ fn relativeTo(base: []const u8, path: []const u8) ?[]const u8 {
     return path[base.len + 1 ..];
 }
 
-/// Read one line of an ignore file, or `null` when it is blank or a comment.
-pub fn parseLine(line: []const u8, base: []const u8, source: []const u8, line_number: u32) ?Pattern {
-    if (line.len == 0) return null;
-    if (line[0] == '#') return null;
+/// Where a line was read, and how its glob compares letters.
+pub const LineOptions = struct {
+    /// The directory the line is relative to, `/`-separated, empty at the
+    /// root.
+    base: []const u8 = "",
+    source: []const u8 = "",
+    /// One-based.
+    line: u32 = 0,
+    /// `core.ignoreCase`.
+    case_fold: bool = false,
+};
 
-    var text = line;
-    // Trailing spaces are not part of a pattern unless the last one is
-    // escaped.
-    var end = text.len;
-    while (end > 0 and (text[end - 1] == ' ' or text[end - 1] == '\t')) {
-        if (end >= 2 and text[end - 2] == '\\') break;
-        end -= 1;
-    }
-    text = text[0..end];
-    if (text.len == 0) return null;
-
-    var negated = false;
-    if (text[0] == '!') {
-        negated = true;
-        text = text[1..];
-        // A bare `!` is not a pattern. git skips it rather than treating it
-        // as a negation of everything.
-        if (text.len == 0) return null;
-    } else if (text.len >= 2 and text[0] == '\\' and (text[1] == '!' or text[1] == '#')) {
-        text = text[1..];
-    }
-
-    var dir_only = false;
-    if (text.len > 0 and text[text.len - 1] == '/') {
-        dir_only = true;
-        text = text[0 .. text.len - 1];
-        if (text.len == 0) return null;
-    }
-
-    var anchored = false;
-    if (text.len > 0 and text[0] == '/') {
-        anchored = true;
-        text = text[1..];
-        if (text.len == 0) return null;
-    } else if (std.mem.findScalar(u8, text, '/') != null) {
-        // A pattern holding a slash anywhere but at its end is relative to
-        // the file's own directory rather than matched against a name.
-        anchored = true;
-    }
-
+/// Read one line of an ignore file, without its line feed, by git's line
+/// grammar (`sweep.gitignore.parseLine`): `null` for a blank line, a
+/// comment, or a line that leaves no pattern. The glob is compiled in `a`;
+/// `line`, `base` and `source` are borrowed.
+pub fn parseLine(a: Allocator, line: []const u8, options: LineOptions) Allocator.Error!?Pattern {
+    const parsed = sweep.gitignore.parseLine(line) orelse return null;
+    // A glob holding a `/` anywhere but at its end is matched against the
+    // whole path below the file's directory, with `WM_PATHNAME`; any other
+    // against the name alone, without it, as git's `match_basename` does.
+    const anchored = !parsed.entry.options.anywhere;
     return .{
         .text = line,
-        .glob = text,
-        .base = base,
-        .source = source,
-        .line = line_number,
-        .negated = negated,
-        .dir_only = dir_only,
+        .glob = parsed.pattern,
+        .matcher = try .compile(a, parsed.pattern, .{ .pathname = anchored, .case_fold = options.case_fold }),
+        .base = options.base,
+        .source = options.source,
+        .line = options.line,
+        .negated = parsed.negated,
+        .dir_only = parsed.entry.dir_only,
         .anchored = anchored,
     };
 }
@@ -435,12 +414,29 @@ test "a directory excluded by its contents is still entered" {
 }
 
 test "a bare negation line is not a pattern" {
-    try std.testing.expect(parseLine("!", "", "x", 1) == null);
-    try std.testing.expect(parseLine("#comment", "", "x", 1) == null);
-    try std.testing.expect(parseLine("", "", "x", 1) == null);
-    try std.testing.expect(parseLine("   ", "", "x", 1) == null);
-    const escaped = parseLine("\\#notacomment", "", "x", 1).?;
-    try std.testing.expectEqualStrings("#notacomment", escaped.glob);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect(try parseLine(a, "!", .{}) == null);
+    try std.testing.expect(try parseLine(a, "#comment", .{}) == null);
+    try std.testing.expect(try parseLine(a, "", .{}) == null);
+    try std.testing.expect(try parseLine(a, "   ", .{}) == null);
+    const escaped = (try parseLine(a, "\\#notacomment", .{})).?;
+    try std.testing.expect(escaped.matcher.matches("#notacomment"));
+    try std.testing.expect(!escaped.negated);
+}
+
+test "trailing spaces go and trailing tabs stay, as git trims a line" {
+    const gpa = std.testing.allocator;
+    var rules: Rules = try .init(gpa, false);
+    defer rules.deinit();
+    try rules.addText("tabbed\t\nspaced  \nkept\\ \nesc\\\\  \n", "", ".gitignore", 2);
+    try std.testing.expect(rules.match("tabbed\t", false).excluded);
+    try std.testing.expect(!rules.match("tabbed", false).excluded);
+    try std.testing.expect(rules.match("spaced", false).excluded);
+    try std.testing.expect(rules.match("kept ", false).excluded);
+    try std.testing.expect(rules.match("esc\\", false).excluded);
+    try std.testing.expect(!rules.match("esc\\ ", false).excluded);
 }
 
 test "anchoring, directory-only and name matching" {

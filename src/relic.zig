@@ -13,11 +13,10 @@
 //! | `refs` | `Store`, `Transaction`: loose refs and `packed-refs` or a reftable stack, their logs, listed, sorted and formatted. | `reftable`, `reftablestack`, `filter`, `names` |
 //! | `config` | `Config`: git's configuration files, lossless. | `userconfig` |
 //! | `index` | `Index`: the `DIRC` file, versions 2 to 4. | `sparseindex` |
-//! | `worktree` | Staging, writing a tree, checking one out, status. | `snapshot`, `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `wildmatch`, `convert`, `filter`, `dirscan`, `safepath` |
-//! | `wildmatch` | Match a glob directly with git's pathname and case-fold flags. | |
-//! | `diff` | Tree against tree, blob against blob, unified text. | `textdiff`, `rename`, `similarity`, `patchid`, `blame` |
+//! | `worktree` | Staging, writing a tree, checking one out, status. | `snapshot`, `worktrees`, `sparse`, `sparsecheckout`, `ignore`, `attributes`, `convert`, `filter`, `dirscan`, `safepath` |
+//! | `diff` | Tree against tree, blob against blob, unified text. | `rename`, `similarity`, `patchid`, `blame` |
 //! | `revwalk` | Walking history, merge bases. | `revparse`, `shallow`, `mailmap`, `shortlog`, `describe`, `bisect` |
-//! | `merge` | Three-way merges of contents and trees. | `blobmerge`, `ort`, `octopus`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
+//! | `merge` | Three-way merges of contents and trees. | `ort`, `octopus`, `strategy`, `subtreeshift`, `threeway`, `rerere` |
 //! | `commit` | Making a commit as `git commit` does. | `message`, `head`, `reset`, `stash`, `signing`, `commithooks`, `merging`, `sequencer`, `rebase`, `todo`, `notes` |
 //! | `transport` | `Session`: a remote, open. | `remote`, `url`, `refspec`, `fetch`, `fetchpack`, `clone`, `push`, `sendpack`, `local`, `ssh`, `smarthttp`, `httpclient`, `tls`, `clientcert`, `httpauth`, `httpsettings`, `credential`, `auth`, `protocol`, `connection`, `pktline`, `sideband`, `uploadpack`, `objectwalk`, `objectfilter`, `partial`, `filterspec`, `progress`, `bundle`, `remotehelper` |
 //! | `submodule` | Submodules: status, init, update, sync, absorb. | `gitmodules`, `gitlink`, `submoduletransport` |
@@ -41,8 +40,6 @@ pub const refs = @import("refs.zig");
 pub const config = @import("config.zig");
 pub const index = @import("index.zig");
 pub const worktree = @import("worktree.zig");
-/// Match a glob with git's pathname and case-fold flags.
-pub const wildmatch = @import("worktree/wildmatch.zig");
 pub const diff = @import("diff.zig");
 pub const revwalk = @import("revwalk.zig");
 pub const merge = @import("merge.zig");

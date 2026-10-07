@@ -7,7 +7,6 @@
 
 const Self = @This();
 
-pub const wildmatch = @import("worktree/wildmatch.zig");
 pub const sparsecheckout = @import("worktree/sparsecheckout.zig");
 pub const worktrees = @import("worktree/worktrees.zig");
 pub const snapshot = @import("worktree/snapshot.zig");
