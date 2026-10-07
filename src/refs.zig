@@ -880,14 +880,7 @@ pub const SpecialRefs = struct {
     /// The first object `ref` names, which is what reading it as a ref
     /// gives (git's `refs_read_special_head`), or `null`.
     pub fn read(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special) ReadError!?Oid {
-        const found = (try s.store.readLoose(gpa, io, ref.name())) orelse return null;
-        switch (found) {
-            .direct => |oid| return oid,
-            .symbolic => |target| {
-                gpa.free(target);
-                return error.MalformedRef;
-            },
-        }
+        return s.store.readOid(gpa, io, ref.name());
     }
 
     /// Everything `ref` holds, every line, or `null` when it is not
