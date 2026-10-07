@@ -1446,7 +1446,7 @@ test "attributes resolve as git check-attr resolves them: the last assignment of
 /// at its edges, the probes the glob design names, and a pattern far longer
 /// than one match takes on the stack.
 const glob_lines = "tabbed\t\nspaced   \nkept\\ \n\\#hash\n\\!bang\n*.log\n!keep.log\nbuild/\n/root-only\n" ++
-    "doc/*.txt\nsr**/wild.zig\na/**/z\n[[:upper:]]*.c\nx[abc\n" ++ testbytes.repeat("a/", 600) ++ "*z\n";
+    "doc/*.txt\nsr**/wild.zig\na/**/z\n[[:upper:]]*.c\nx[abc\n" ++ "long/" ++ testbytes.repeat("*", 1100) ++ "z\n";
 
 test "ignore rules decide every path as git check-ignore decides it" {
     const io = std.testing.io;
@@ -1462,16 +1462,16 @@ test "ignore rules decide every path as git check-ignore decides it" {
     var rules: ignore.Rules = try .init(gpa, std.mem.eql(u8, fold, "true"));
     defer rules.deinit();
     try rules.addText(glob_lines, "", ".gitignore", 2);
-    const deep = testbytes.repeat("a/", 600) ++ "z";
+
     const paths = [_]struct { []const u8, bool }{
-        .{ "tabbed", false },                       .{ "spaced", false },          .{ "kept ", false },
-        .{ "#hash", false },                        .{ "!bang", false },           .{ "a.log", false },
-        .{ "keep.log", false },                     .{ "sub/keep.log", false },    .{ "build", true },
-        .{ "build/x.o", false },                    .{ "root-only", false },       .{ "sub/root-only", false },
-        .{ "doc/a.txt", false },                    .{ "other/doc/a.txt", false }, .{ "src/worktree/wild.zig", false },
-        .{ "a/b/c/z", false },                      .{ "a/z", false },             .{ "Upper.c", false },
-        .{ "lower.c", false },                      .{ "x[abc", false },           .{ deep, false },
-        .{ deep[0 .. deep.len - 1] ++ "y", false },
+        .{ "tabbed", false },    .{ "spaced", false },          .{ "kept ", false },
+        .{ "#hash", false },     .{ "!bang", false },           .{ "a.log", false },
+        .{ "keep.log", false },  .{ "sub/keep.log", false },    .{ "build", true },
+        .{ "build/x.o", false }, .{ "root-only", false },       .{ "sub/root-only", false },
+        .{ "doc/a.txt", false }, .{ "other/doc/a.txt", false }, .{ "src/worktree/wild.zig", false },
+        .{ "a/b/c/z", false },   .{ "a/z", false },             .{ "Upper.c", false },
+        .{ "lower.c", false },   .{ "x[abc", false },           .{ "long/xyz", false },
+        .{ "long/x/z", false },  .{ "long/xy", false },
     };
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(gpa);

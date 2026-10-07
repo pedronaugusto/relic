@@ -116,7 +116,7 @@ pub fn blobs(
         .resolve = options.resolve,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        // unreachable: every side is at most max_text_size, which a u32 indexes
+        // unreachable: three sides of max_text_size at most hold fewer bytes and lines than a u32 counts
         error.InputTooLarge => unreachable,
     };
     return .{ .gpa = gpa, .bytes = merged.bytes, .status = if (merged.conflicts == 0) .clean else .conflicted };
