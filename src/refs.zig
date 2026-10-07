@@ -897,13 +897,37 @@ pub const SpecialRefs = struct {
 
     /// Replace `ref` with `bytes` whole, through `<ref>.lock`, so a reader
     /// sees the old file or the new one; with the permissions
-    /// `core.sharedRepository` asks for.
+    /// `core.sharedRepository` asks for, and no sync, as git writes it.
     pub fn write(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, bytes: []const u8) TransactionError!void {
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(gpa, io, s.store.gitDir(), ref.name(), &buffer, .{ .shared = s.store.sharedPermissions() });
+        var lock = try s.takeLock(gpa, io, ref, &buffer);
         defer lock.deinit(io);
         lock.writer().writeAll(bytes) catch return error.WriteFailed;
         try lock.commit(io);
+    }
+
+    /// Add `bytes` after what `ref` holds, read under the same lock the
+    /// whole is then replaced through, so two writers appending at once
+    /// each keep the other's lines: `git fetch --append`.
+    pub fn append(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, bytes: []const u8) TransactionError!void {
+        var buffer: [4096]u8 = undefined;
+        var lock = try s.takeLock(gpa, io, ref, &buffer);
+        defer lock.deinit(io);
+        if (try s.readAll(gpa, io, ref)) |existing| {
+            defer gpa.free(existing);
+            lock.writer().writeAll(existing) catch return error.WriteFailed;
+        }
+        lock.writer().writeAll(bytes) catch return error.WriteFailed;
+        try lock.commit(io);
+    }
+
+    /// `<ref>.lock`, waiting as long as git waits on a ref's lock.
+    fn takeLock(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, buffer: []u8) TransactionError!fs.LockFile {
+        return fs.LockFile.open(gpa, io, s.store.gitDir(), ref.name(), buffer, .{
+            .on_contention = .{ .wait_ms = 100 },
+            .sync = .none,
+            .shared = s.store.sharedPermissions(),
+        });
     }
 
     /// Remove `ref`, which need not be there.

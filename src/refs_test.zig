@@ -150,6 +150,18 @@ test "the special refs are files the store reads and replaces whole, and no tran
                     try std.testing.expectError(error.InvalidRefName, tx.delete(special.name(), .any));
                 }
             }
+            // Appended to under its lock, as `git fetch --append` adds lines.
+            try specials.write(gpa, io, .fetch_head, "first\n");
+            try specials.append(gpa, io, .fetch_head, "second\n");
+            const appended = (try specials.readAll(gpa, io, .fetch_head)).?;
+            defer gpa.free(appended);
+            try std.testing.expectEqualStrings("first\nsecond\n", appended);
+            try specials.delete(io, .fetch_head);
+            try specials.append(gpa, io, .fetch_head, "only\n");
+            const fresh = (try specials.readAll(gpa, io, .fetch_head)).?;
+            defer gpa.free(fresh);
+            try std.testing.expectEqualStrings("only\n", fresh);
+
             try specials.delete(io, .merge_head);
             try specials.delete(io, .merge_head);
             try std.testing.expect(!specials.exists(io, .merge_head));

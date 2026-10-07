@@ -1469,13 +1469,6 @@ fn describe(arena: Allocator, name: []const u8, url: []const u8) Allocator.Error
 fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const FetchHeadEntry, append: bool) Error!void {
     var text: std.Io.Writer.Allocating = .init(gpa);
     defer text.deinit();
-    const fetch_head = repo.refStore().special();
-    if (append) {
-        if (try fetch_head.readAll(gpa, io, .fetch_head)) |existing| {
-            defer gpa.free(existing);
-            text.writer.writeAll(existing) catch return error.OutOfMemory;
-        }
-    }
     for (entries) |entry| {
         text.writer.print("{f}\t{s}\t{s}\n", .{
             entry.oid,
@@ -1483,6 +1476,8 @@ fn writeFetchHead(gpa: Allocator, io: Io, repo: *Repository, entries: []const Fe
             entry.description,
         }) catch return error.OutOfMemory;
     }
+    const fetch_head = repo.refStore().special();
+    if (append) return fetch_head.append(gpa, io, .fetch_head, text.written());
     try fetch_head.write(gpa, io, .fetch_head, text.written());
 }
 
